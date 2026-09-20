@@ -586,14 +586,57 @@ async fn diff_driver_binary_flags(repo_path: &str) -> std::collections::HashMap<
     .unwrap_or_default()
 }
 
+/// Parses `git config -z --name-only --get-regexp` output: NUL-separated KEYS with no
+/// values. A `filter.<driver>.clean`/`.process` key is what makes a `filter` attribute
+/// value name a real driver; `<driver>` is everything between the prefix and the
+/// suffix, so a dotted driver name survives intact.
+fn parse_configured_filters(text: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for key in text.split('\0').filter(|k| !k.is_empty()) {
+        let Some(rest) = key.strip_prefix("filter.") else {
+            continue;
+        };
+        let Some(name) = rest
+            .strip_suffix(".clean")
+            .or_else(|| rest.strip_suffix(".process"))
+        else {
+            continue;
+        };
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// The filter drivers the repo actually configures. Non-fatal like its siblings, and a
+/// non-zero exit is the NORMAL answer here — `--get-regexp` reports "no match" that way
+/// — so any failure leaves the set empty and no `filter` attribute resolves.
+async fn configured_filter_drivers(repo_path: &str) -> std::collections::HashSet<String> {
+    run_git(
+        Some(repo_path),
+        &[
+            "config",
+            "-z",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .map(|out| parse_configured_filters(&out.stdout_lossy()))
+    .unwrap_or_default()
+}
+
 /// What `.gitattributes` says about one untracked path. The default — no `diff`
 /// verdict, no conversion — is what a path no rule names carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct PathAttrs {
     diff: Option<DiffAttr>,
-    /// `filter` or `working-tree-encoding` carries a value, so what git stores is a
-    /// CONVERSION of the worktree bytes and any count taken from them is another
-    /// file's.
+    /// What git stores is a CONVERSION of the worktree bytes, so any count taken from
+    /// them is another file's: a `working-tree-encoding`, or a `filter` naming a driver
+    /// the repo configures.
     converts: bool,
 }
 
@@ -605,11 +648,12 @@ const REQUESTED_ATTRS: [&str; 3] = ["diff", "working-tree-encoding", "filter"];
 /// requested attribute per path. A stream that does not divide into whole triples
 /// yields an EMPTY map, so a shape this does not understand degrades every path to the
 /// sniff rather than mis-verdicting. `drivers` resolves a value that names a custom
-/// diff driver; one the repo does not configure stays unresolved, since only git knows
-/// what running it would decide.
+/// diff driver and `filters` a value that names a content filter; one the repo does not
+/// configure stays unresolved, since only git knows what running it would decide.
 fn parse_path_attrs(
     text: &str,
     drivers: &std::collections::HashMap<String, bool>,
+    filters: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<String, PathAttrs> {
     let mut tokens: Vec<&str> = text.split('\0').collect();
     // `-z` terminates every token, so the split's last element is empty.
@@ -636,12 +680,16 @@ fn parse_path_attrs(
                 };
                 attrs.entry(path.to_string()).or_default().diff = Some(verdict);
             }
-            // A set-but-valueless `filter` reads `set` and still converts; only
-            // `-filter` / `-working-tree-encoding` (`unset`) leave content alone.
-            "working-tree-encoding" | "filter" => {
-                if value != "unspecified" && value != "unset" {
-                    attrs.entry(path.to_string()).or_default().converts = true;
-                }
+            // git dies on a valueless `working-tree-encoding`, so blanking the row is
+            // strictly gentler than what it does; any value at all converts.
+            "working-tree-encoding" if value != "unspecified" && value != "unset" => {
+                attrs.entry(path.to_string()).or_default().converts = true;
+            }
+            // A `filter` converts only when it names a driver the repo CONFIGURES: git
+            // resolves the name to `filter.<name>.clean`/`.process`, and an unknown one
+            // (or a valueless `set`, which names nothing) stores the bytes verbatim.
+            "filter" if filters.contains(value) => {
+                attrs.entry(path.to_string()).or_default().converts = true;
             }
             _ => {}
         }
@@ -780,7 +828,9 @@ fn counted(lines: u32, last: Option<u8>) -> ReadOutcome {
 /// `budget` is the bytes this call may still read; only a file whose size fits what
 /// is left is opened, so no count is ever truncated, and a file too big for the
 /// remainder is skipped ALONE — later, smaller files still get their counts.
-/// `attrs` carries the `.gitattributes` diff verdicts, which outrank the sniff, and
+/// `attrs` carries the `.gitattributes` verdicts: the diff attribute, which outranks
+/// the sniff once a driver name has resolved through its config, and the conversion
+/// flag, which keeps a path git would re-encode or filter at the blank slot.
 /// `big_file_bytes` is the repo's effective `core.bigFileThreshold`.
 fn untracked_line_stats(
     repo_path: &str,
@@ -870,8 +920,11 @@ fn untracked_line_stats(
 /// can ride the same 5s poll. Untracked paths join the unstaged side with every
 /// line counted as an addition, read from the worktree because numstat reports
 /// tracked changes alone; their text-or-binary verdict comes from the path's
-/// `.gitattributes` diff attribute, falling back to a content sniff when none
-/// applies, so a row agrees with the diff pane git renders for the same file.
+/// `.gitattributes` diff attribute, with a custom driver name resolved through its
+/// `diff.<name>.binary` config and a content sniff as the fallback, so a row agrees
+/// with the diff pane git renders for the same file. A path git converts on the way in
+/// (`working-tree-encoding`, or a `filter` naming a configured driver) keeps the blank
+/// slot, since counting the unconverted bytes would report a different file's lines.
 #[tauri::command]
 pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineStats> {
     let (staged, unstaged, untracked) = tokio::try_join!(
@@ -909,12 +962,16 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     let (attrs, big_file_bytes) = if paths.is_empty() {
         (std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT)
     } else {
-        let (attr_output, big_file_bytes, drivers) = tokio::join!(
+        let (attr_output, big_file_bytes, drivers, filters) = tokio::join!(
             untracked_attr_output(&repo_path, &paths),
             untracked_big_file_threshold(&repo_path),
-            diff_driver_binary_flags(&repo_path)
+            diff_driver_binary_flags(&repo_path),
+            configured_filter_drivers(&repo_path)
         );
-        (parse_path_attrs(&attr_output, &drivers), big_file_bytes)
+        (
+            parse_path_attrs(&attr_output, &drivers, &filters),
+            big_file_bytes,
+        )
     };
     // Counting lines is blocking file I/O, kept off the async workers this poll
     // shares with every other repo operation.
@@ -1297,7 +1354,7 @@ mod tests {
 
         std::fs::write(dir.join("blob.bin"), b"PNG\x00\x01\x02rest\nof it\n").unwrap();
 
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let entry = stats
             .unstaged
             .iter()
@@ -1305,6 +1362,8 @@ mod tests {
             .expect("the binary file still gets an entry");
         assert_eq!((entry.added, entry.deleted), (0, 0));
         assert!(entry.is_binary);
+
+        assert_untracked_matches_staged(&repo, &stats.unstaged, &["blob.bin"]).await;
     }
 
     /// numstat counts a final unterminated line, so a file with no trailing
@@ -1317,7 +1376,7 @@ mod tests {
         std::fs::write(dir.join("unterminated.txt"), "x\ny").unwrap();
         std::fs::write(dir.join("empty.txt"), "").unwrap();
 
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let unterminated = stats
             .unstaged
             .iter()
@@ -1331,6 +1390,9 @@ mod tests {
             .expect("an empty file gets an entry of its own");
         assert_eq!((empty.added, empty.deleted), (0, 0));
         assert!(!empty.is_binary);
+
+        assert_untracked_matches_staged(&repo, &stats.unstaged, &["unterminated.txt", "empty.txt"])
+            .await;
     }
 
     /// The entry's path is the repo-relative, forward-slashed string `status
@@ -1467,8 +1529,19 @@ mod tests {
 
         std::fs::write(
             dir.join(".gitattributes"),
-            "*.u16 working-tree-encoding=UTF-16\n*.lfs filter=fake\nboth.dat -diff filter=fake\n",
+            "*.u16 working-tree-encoding=UTF-16\n*.lfs filter=fake\n*.lfs2 filter=ghost\n\
+             both.dat -diff filter=fake\n",
         )
+        .unwrap();
+        // `fake` is configured, so git would resolve and run it; `ghost` is named by an
+        // attribute but configured nowhere, which is why its path still counts. The
+        // clean command never runs here — the blanked paths are never staged.
+        run_git(
+            Some(&repo),
+            &["config", "filter.fake.clean", "cat"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
         .unwrap();
         run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
             .await
@@ -1490,10 +1563,11 @@ mod tests {
         }
         std::fs::write(dir.join("doc.u16"), &utf16).unwrap();
         std::fs::write(dir.join("data.lfs"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("loose.lfs2"), "one\ntwo\n").unwrap();
         std::fs::write(dir.join("both.dat"), "one\ntwo\n").unwrap();
         std::fs::write(dir.join("plain.txt"), "one\ntwo\n").unwrap();
 
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let found = |name: &str| stats.unstaged.iter().find(|e| e.path == name);
         assert!(
             found("doc.u16").is_none(),
@@ -1511,8 +1585,14 @@ mod tests {
             (0, 0, true),
             "`-diff` outranks the conversion blank"
         );
+        let loose = found("loose.lfs2").expect("an unconfigured filter name converts nothing");
+        assert_eq!((loose.added, loose.deleted, loose.is_binary), (2, 0, false));
         let plain = found("plain.txt").expect("the control file is still counted");
         assert_eq!((plain.added, plain.deleted), (2, 0));
+
+        // Staging `loose.lfs2` succeeds and stores the bytes verbatim precisely because
+        // no driver answers to `ghost`; the blanked paths stay out of this call.
+        assert_untracked_matches_staged(&repo, &stats.unstaged, &["loose.lfs2", "plain.txt"]).await;
     }
 
     /// The reader's hard cap. A file bigger than the cap stops at exactly the cap and
@@ -1550,6 +1630,7 @@ mod tests {
     #[test]
     fn parses_check_attr_triples_and_refuses_a_malformed_stream() {
         let none = std::collections::HashMap::new();
+        let no_filters = std::collections::HashSet::new();
         let binary = PathAttrs {
             diff: Some(DiffAttr::Binary),
             converts: false,
@@ -1560,7 +1641,7 @@ mod tests {
         };
 
         let valid = "a.dat\0diff\0unset\0b.forced\0diff\0set\0c.txt\0diff\0unspecified\0";
-        let attrs = parse_path_attrs(valid, &none);
+        let attrs = parse_path_attrs(valid, &none, &no_filters);
         assert_eq!(attrs.get("a.dat"), Some(&binary));
         assert_eq!(attrs.get("b.forced"), Some(&forced));
         assert_eq!(attrs.get("c.txt"), None, "`unspecified` carries no verdict");
@@ -1575,30 +1656,33 @@ mod tests {
         let resolved = parse_path_attrs(
             "a.byes\0diff\0binyes\0b.bno\0diff\0binno\0c.png\0diff\0exif\0",
             &drivers,
+            &no_filters,
         );
         assert_eq!(resolved.get("a.byes"), Some(&binary));
         assert_eq!(resolved.get("b.bno"), Some(&forced));
         assert_eq!(resolved.get("c.png"), None, "an unconfigured driver sniffs");
-        assert!(parse_path_attrs("d.png\0diff\0exif\0", &none).is_empty());
+        assert!(parse_path_attrs("d.png\0diff\0exif\0", &none, &no_filters).is_empty());
 
-        let malformed = parse_path_attrs("a.dat\0diff\0", &none);
+        let malformed = parse_path_attrs("a.dat\0diff\0", &none, &no_filters);
         assert!(malformed.is_empty(), "a partial triple maps nothing");
-        assert!(parse_path_attrs("", &none).is_empty());
+        assert!(parse_path_attrs("", &none, &no_filters).is_empty());
     }
 
     /// All three requested attributes come back per path, so one path's triples are
-    /// folded into one verdict. `filter` and `working-tree-encoding` mark a path as
-    /// converting on ANY value — including a valueless `set` — while `unspecified`
-    /// and an explicit `unset` leave the content alone.
+    /// folded into one verdict. A `working-tree-encoding` converts on any value, while
+    /// a `filter` converts only when it names a CONFIGURED driver — an unknown name, a
+    /// valueless `set`, an `unset` or an `unspecified` all leave the content alone.
     #[test]
     fn folds_multi_attribute_check_attr_rows_per_path() {
         let none = std::collections::HashMap::new();
+        let filters = std::collections::HashSet::from(["fake".to_string()]);
         let folded = parse_path_attrs(
             "doc.u16\0diff\0unspecified\0doc.u16\0working-tree-encoding\0UTF-16\0\
              doc.u16\0filter\0unspecified\0\
              both.dat\0diff\0unset\0both.dat\0working-tree-encoding\0unspecified\0\
              both.dat\0filter\0fake\0",
             &none,
+            &filters,
         );
         assert_eq!(
             folded.get("doc.u16"),
@@ -1618,21 +1702,51 @@ mod tests {
         );
         assert_eq!(folded.len(), 2);
 
-        let valueless = parse_path_attrs("a.lfs\0filter\0set\0", &none);
-        assert_eq!(
-            valueless.get("a.lfs").map(|a| a.converts),
-            Some(true),
-            "a set-but-valueless filter still converts"
+        let unresolved = parse_path_attrs(
+            "a.lfs\0filter\0set\0b.lfs\0filter\0ghost\0",
+            &none,
+            &filters,
+        );
+        assert!(
+            unresolved.is_empty(),
+            "a valueless filter names nothing and an unconfigured one runs nothing"
         );
 
         let inert = parse_path_attrs(
             "b.txt\0filter\0unset\0b.txt\0working-tree-encoding\0unspecified\0",
             &none,
+            &filters,
         );
         assert!(
             inert.is_empty(),
             "`-filter` and an unspecified encoding convert nothing"
         );
+    }
+
+    /// The `--name-only` key stream that says which filter drivers the repo really
+    /// configures: either half of the pair counts, a dotted driver name survives whole,
+    /// and a `filter.*` key that is neither half names no driver.
+    #[test]
+    fn parses_configured_filter_driver_names() {
+        let names = parse_configured_filters(
+            "filter.fake.clean\0filter.streamed.process\0filter.my.lfs.clean\0\
+             filter.fake.smudge\0filter.fake.required\0core.autocrlf\0",
+        );
+        assert!(names.contains("fake"));
+        assert!(
+            names.contains("streamed"),
+            "`.process` configures a driver too"
+        );
+        assert!(
+            names.contains("my.lfs"),
+            "a dotted driver name is the whole middle"
+        );
+        assert_eq!(
+            names.len(),
+            3,
+            "smudge/required/unrelated keys name no driver"
+        );
+        assert!(parse_configured_filters("").is_empty());
     }
 
     /// The `git config -z --get-regexp` grammar: NUL between entries, a newline
