@@ -532,7 +532,7 @@ fn parse_diff_attrs(text: &str) -> std::collections::HashMap<String, DiffAttr> {
     if !tokens.len().is_multiple_of(3) {
         return attrs;
     }
-    for record in tokens.chunks_exact(3) {
+    for record in tokens.as_chunks::<3>().0 {
         if record[1] != "diff" {
             continue;
         }
@@ -800,7 +800,7 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     )?;
     let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
     let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
-    // Both probes describe the untracked set, so neither is worth a spawn without one.
+    // Neither probe matters without untracked paths, so an empty set spawns neither.
     let (attrs, big_file_bytes) = if paths.is_empty() {
         (std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT)
     } else {
@@ -1091,6 +1091,44 @@ mod tests {
         (tmp, dir, repo)
     }
 
+    /// The feature's real contract: an untracked row must already say what numstat
+    /// will say about the same file once it is staged. Stages everything, then
+    /// compares each named path's staged row with the entry captured while it was
+    /// untracked. `core.autocrlf` is pinned in the fixture, so staging shifts nothing.
+    async fn assert_untracked_matches_staged(
+        repo: &str,
+        untracked: &[DiffStatEntry],
+        names: &[&str],
+    ) {
+        run_git(Some(repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let staged = run_git(
+            Some(repo),
+            &["diff", "--cached", "--numstat", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        let rows = parse_numstat_z(&staged);
+        for name in names {
+            let row = rows
+                .iter()
+                .find(|e| e.path == *name)
+                .unwrap_or_else(|| panic!("{name} has a staged numstat row"));
+            let entry = untracked
+                .iter()
+                .find(|e| e.path == *name)
+                .unwrap_or_else(|| panic!("{name} was counted while untracked"));
+            assert_eq!(
+                (entry.added, entry.deleted, entry.is_binary),
+                (row.added, row.deleted, row.is_binary),
+                "{name}: the untracked row must match staged numstat"
+            );
+        }
+    }
+
     /// The panel's core invariant: a file that is staged AND re-edited reports
     /// DIFFERENT counts per side — staged is index vs HEAD, unstaged is working
     /// tree vs index. An untracked file rides the unstaged side alone, every
@@ -1234,7 +1272,7 @@ mod tests {
         std::fs::write(dir.join("plain.txt"), "a\nb\nc\n").unwrap();
         std::fs::write(dir.join("plain.bin"), b"a\0b\nc\n").unwrap();
 
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let seen = |name: &str| {
             let e = stats
                 .unstaged
@@ -1252,6 +1290,19 @@ mod tests {
         );
         assert_eq!(seen("plain.txt"), (3, 0, false));
         assert_eq!(seen("plain.bin"), (0, 0, true));
+
+        assert_untracked_matches_staged(
+            &repo,
+            &stats.unstaged,
+            &[
+                "text.dat",
+                "empty.dat",
+                "bin.forced",
+                "plain.txt",
+                "plain.bin",
+            ],
+        )
+        .await;
     }
 
     /// The reader's hard cap. A file bigger than the cap stops at exactly the cap and
@@ -1337,8 +1388,8 @@ mod tests {
             BIG_FILE_BYTES_DEFAULT,
             &Default::default(),
         );
-        let counted: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.added)).collect();
-        assert_eq!(counted, vec![("a-first.txt", 1), ("c-fits.txt", 2)]);
+        let by_path: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.added)).collect();
+        assert_eq!(by_path, vec![("a-first.txt", 1), ("c-fits.txt", 2)]);
     }
 
     /// The repo's own `core.bigFileThreshold` decides, not a hardcoded default: an
@@ -1378,7 +1429,7 @@ mod tests {
         std::fs::write(dir.join("big.forced"), &big).unwrap();
         std::fs::write(dir.join("small.txt"), "a\nb\n").unwrap();
 
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let seen = |name: &str| {
             let e = stats
                 .unstaged
@@ -1398,6 +1449,13 @@ mod tests {
             "a forced `diff` beats the threshold"
         );
         assert_eq!(seen("small.txt"), (2, 0, false));
+
+        assert_untracked_matches_staged(
+            &repo,
+            &stats.unstaged,
+            &["big.txt", "big.forced", "small.txt"],
+        )
+        .await;
     }
 
     /// A nested repo is a directory to `ls-files`, and the counter skips anything that
