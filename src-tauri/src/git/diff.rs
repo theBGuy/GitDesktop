@@ -495,9 +495,10 @@ pub struct WorkingLineStats {
 /// NUL among a file's first 8000 bytes is what makes git report `-` counts, so an
 /// untracked file falls back to the same test.
 const BINARY_SNIFF_BYTES: usize = 8000;
-/// git's `core.bigFileThreshold` default, past which git itself treats a file as
-/// binary in diffs — one this large is reported binary instead of being read.
-const BIG_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// git's DEFAULT `core.bigFileThreshold`, past which git diffs a file as binary. The
+/// repo's effective value is resolved per call, since a repo may override it; this is
+/// the fallback whenever that resolution cannot produce a number.
+const BIG_FILE_BYTES_DEFAULT: u64 = 512 * 1024 * 1024;
 /// Ceiling on bytes one call may read across untracked files, spent in `ls-files`
 /// order — it bounds the 5s poll's I/O on a tree full of not-yet-ignored files. A
 /// hard ceiling, not an accounting one: the reader carries what is left of it as its
@@ -572,13 +573,37 @@ async fn untracked_diff_attrs(
 /// What one untracked file's read produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadOutcome {
-    Counted {
-        added: u32,
-        is_binary: bool,
-    },
+    /// Every line of a text file, all of them additions.
+    Counted { added: u32 },
+    /// A NUL inside the sniff window: the zero-count shape a `-` numstat row takes.
+    Binary,
     /// The byte cap was reached with the file unfinished; the count would be partial,
     /// so the caller emits nothing.
     Incomplete,
+}
+
+/// The repo's effective `core.bigFileThreshold`. `--type=int` normalizes the `k`/`m`/`g`
+/// suffixes a user may have written and `--default` answers for an unset key; any
+/// failure or unreadable value falls back to git's own default rather than leaving the
+/// verdict resting on a half-read config.
+async fn untracked_big_file_threshold(repo_path: &str) -> u64 {
+    let default = BIG_FILE_BYTES_DEFAULT.to_string();
+    run_git(
+        Some(repo_path),
+        &[
+            "config",
+            "--get",
+            "--type=int",
+            "--default",
+            &default,
+            "core.bigFileThreshold",
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .and_then(|out| out.stdout_lossy().trim().parse::<u64>().ok())
+    .unwrap_or(BIG_FILE_BYTES_DEFAULT)
 }
 
 /// Counts `\n` bytes through a bounded buffer, plus the final unterminated line.
@@ -620,13 +645,7 @@ fn count_untracked_lines(
         if sniff_left > 0 {
             let window = &chunk[..read.min(sniff_left)];
             if window.contains(&0) {
-                return (
-                    Ok(ReadOutcome::Counted {
-                        added: 0,
-                        is_binary: true,
-                    }),
-                    consumed,
-                );
+                return (Ok(ReadOutcome::Binary), consumed);
             }
             sniff_left -= window.len();
         }
@@ -652,7 +671,6 @@ fn counted(lines: u32, last: Option<u8>) -> ReadOutcome {
         } else {
             lines
         },
-        is_binary: false,
     }
 }
 
@@ -667,11 +685,13 @@ fn counted(lines: u32, last: Option<u8>) -> ReadOutcome {
 /// `budget` is the bytes this call may still read; only a file whose size fits what
 /// is left is opened, so no count is ever truncated, and a file too big for the
 /// remainder is skipped ALONE — later, smaller files still get their counts.
-/// `attrs` carries the `.gitattributes` diff verdicts, which outrank the sniff.
+/// `attrs` carries the `.gitattributes` diff verdicts, which outrank the sniff, and
+/// `big_file_bytes` is the repo's effective `core.bigFileThreshold`.
 fn untracked_line_stats(
     repo_path: &str,
     ls_files_z: &str,
     mut budget: u64,
+    big_file_bytes: u64,
     attrs: &std::collections::HashMap<String, DiffAttr>,
 ) -> Vec<DiffStatEntry> {
     let root = std::path::Path::new(repo_path);
@@ -697,7 +717,7 @@ fn untracked_line_stats(
         }
         // `-diff` is the first content decision: numstat answers `-  -` from the
         // attribute alone, even for an empty file, so neither a read nor a budget
-        // charge happens and the size checks below govern the other two verdicts.
+        // charge happens.
         let sniff = match attrs.get(rel) {
             Some(DiffAttr::Binary) => {
                 entries.push(entry(0, true));
@@ -712,7 +732,10 @@ fn untracked_line_stats(
             entries.push(entry(0, false));
             continue;
         }
-        if len > BIG_FILE_BYTES {
+        // The threshold governs UNSPECIFIED paths only: numstat counts a forced-text
+        // file's lines however big it is, and only an unmarked file past the threshold
+        // reports `-  -`. An oversized forced-text file is bounded by the read budget.
+        if sniff && len > big_file_bytes {
             entries.push(entry(0, true));
             continue;
         }
@@ -726,7 +749,8 @@ fn untracked_line_stats(
         // Charged whatever the outcome: a refused or failed read still spent the I/O.
         budget = budget.saturating_sub(consumed);
         match outcome {
-            Ok(ReadOutcome::Counted { added, is_binary }) => entries.push(entry(added, is_binary)),
+            Ok(ReadOutcome::Counted { added }) => entries.push(entry(added, false)),
+            Ok(ReadOutcome::Binary) => entries.push(entry(0, true)),
             // A partial read and a failed one both leave the row blank rather than
             // report a count the file does not have.
             Ok(ReadOutcome::Incomplete) | Err(_) => {}
@@ -776,15 +800,29 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     )?;
     let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
     let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
-    let attrs = untracked_diff_attrs(&repo_path, &paths).await;
+    // Both probes describe the untracked set, so neither is worth a spawn without one.
+    let (attrs, big_file_bytes) = if paths.is_empty() {
+        (std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT)
+    } else {
+        tokio::join!(
+            untracked_diff_attrs(&repo_path, &paths),
+            untracked_big_file_threshold(&repo_path)
+        )
+    };
     // Counting lines is blocking file I/O, kept off the async workers this poll
     // shares with every other repo operation.
-    let counted = tauri::async_runtime::spawn_blocking(move || {
-        untracked_line_stats(&repo_path, &untracked, UNTRACKED_READ_BUDGET, &attrs)
+    let untracked_entries = tauri::async_runtime::spawn_blocking(move || {
+        untracked_line_stats(
+            &repo_path,
+            &untracked,
+            UNTRACKED_READ_BUDGET,
+            big_file_bytes,
+            &attrs,
+        )
     })
     .await
     .unwrap_or_default();
-    unstaged_entries.extend(counted);
+    unstaged_entries.extend(untracked_entries);
     Ok(WorkingLineStats {
         staged: parse_numstat_z(&staged.stdout_lossy()),
         unstaged: unstaged_entries,
@@ -1021,10 +1059,10 @@ mod tests {
         assert_eq!(noop.excluded_files, 0);
     }
 
-    /// Sets up a temp git repo with a deterministic identity. `core.autocrlf` is
-    /// pinned because these tests count LINES — an inherited global setting must
-    /// not reshape the fixture — and `core.excludesFile` is emptied so
-    /// `--exclude-standard` cannot consult the developer's global ignore file.
+    /// Sets up a temp git repo with a deterministic identity. These tests count LINES
+    /// and read ignore/attribute verdicts, so every source outside the fixture is shut
+    /// off: `core.autocrlf` pinned, `core.excludesFile` and `core.attributesFile`
+    /// emptied, and `.git/info/exclude` + `.git/info/attributes` truncated.
     async fn init_line_stats_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
         let tmp = tempfile::Builder::new()
             .prefix(prefix)
@@ -1038,9 +1076,18 @@ mod tests {
             vec!["config", "user.name", "T"],
             vec!["config", "core.autocrlf", "false"],
             vec!["config", "core.excludesFile", ""],
+            vec!["config", "core.attributesFile", ""],
         ] {
             run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
         }
+        // An `init.templateDir` can seed both of these into every `git init`: rules in
+        // `info/exclude` would join `--exclude-standard`, and `info/attributes`
+        // OUTRANKS the in-tree `.gitattributes` this fixture writes, so a developer's
+        // template would decide these tests. Truncating leaves the fixture's own rules.
+        let info = dir.join(".git").join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), "").unwrap();
+        std::fs::write(info.join("attributes"), "").unwrap();
         (tmp, dir, repo)
     }
 
@@ -1231,13 +1278,7 @@ mod tests {
             let mut file = std::fs::File::open(&path).unwrap();
             let (outcome, consumed) = count_untracked_lines(&mut file, &mut buf, true, cap);
             assert_eq!(consumed, 8, "cap {cap} reads the whole 8-byte file");
-            assert_eq!(
-                outcome.unwrap(),
-                ReadOutcome::Counted {
-                    added: 4,
-                    is_binary: false
-                }
-            );
+            assert_eq!(outcome.unwrap(), ReadOutcome::Counted { added: 4 });
         }
     }
 
@@ -1289,9 +1330,120 @@ mod tests {
 
         // 6 bytes: a-first spends 2, b-oversized (100) cannot fit the remaining 4,
         // c-fits spends the last 4, and d-after is never opened.
-        let entries = untracked_line_stats(&repo, &listed, 6, &Default::default());
+        let entries = untracked_line_stats(
+            &repo,
+            &listed,
+            6,
+            BIG_FILE_BYTES_DEFAULT,
+            &Default::default(),
+        );
         let counted: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.added)).collect();
         assert_eq!(counted, vec![("a-first.txt", 1), ("c-fits.txt", 2)]);
+    }
+
+    /// The repo's own `core.bigFileThreshold` decides, not a hardcoded default: an
+    /// oversized UNSPECIFIED path reads `bin` like numstat's `-  -`, while a forced
+    /// `diff` attribute counts every line however big the file is. The small plain
+    /// file is the control that keeps the threshold from swallowing everything.
+    #[tokio::test]
+    async fn working_line_stats_honors_configured_big_file_threshold() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-threshold-test-").await;
+        run_git(
+            Some(&repo),
+            &["config", "core.bigFileThreshold", "1k"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(dir.join(".gitattributes"), "*.forced diff\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "attributes"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        let big: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        assert!(
+            big.len() > 1024,
+            "the fixture must exceed the 1k threshold, got {}",
+            big.len()
+        );
+        std::fs::write(dir.join("big.txt"), &big).unwrap();
+        std::fs::write(dir.join("big.forced"), &big).unwrap();
+        std::fs::write(dir.join("small.txt"), "a\nb\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let seen = |name: &str| {
+            let e = stats
+                .unstaged
+                .iter()
+                .find(|e| e.path == name)
+                .unwrap_or_else(|| panic!("{name} is counted"));
+            (e.added, e.deleted, e.is_binary)
+        };
+        assert_eq!(
+            seen("big.txt"),
+            (0, 0, true),
+            "the configured threshold governs an unspecified path"
+        );
+        assert_eq!(
+            seen("big.forced"),
+            (200, 0, false),
+            "a forced `diff` beats the threshold"
+        );
+        assert_eq!(seen("small.txt"), (2, 0, false));
+    }
+
+    /// A nested repo is a directory to `ls-files`, and the counter skips anything that
+    /// is not a regular file rather than descending into it — that row keeps the blank
+    /// slot it had before, whichever way git spells the name.
+    #[tokio::test]
+    async fn working_line_stats_skips_a_nested_repository() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-nested-repo-test-").await;
+
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(
+            Some(&nested.to_string_lossy().into_owned()),
+            &["init", "-q"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::write(nested.join("inner.txt"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("outer.txt"), "a\n").unwrap();
+
+        // Pinned so the assertion below can't pass because enumeration never named it:
+        // `ls-files` does report the nested repo, and the skip arm is what drops it.
+        let listed = run_git(
+            Some(&repo),
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        assert!(
+            listed.split('\0').any(|p| p.starts_with("nested")),
+            "enumeration must name the nested repo, got {listed:?}"
+        );
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        assert!(
+            !stats.unstaged.iter().any(|e| e.path.starts_with("nested")),
+            "a nested repo is never counted, got {:?}",
+            stats.unstaged.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        assert!(
+            stats.unstaged.iter().any(|e| e.path == "outer.txt"),
+            "the control file beside it is still counted"
+        );
     }
 
     /// `--exclude-standard` keeps ignored files out of the count entirely: they
