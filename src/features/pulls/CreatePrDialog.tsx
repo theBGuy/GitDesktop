@@ -417,10 +417,7 @@ export function CreatePrDialog({
         toast.error(refusal);
         return;
       }
-      // The claim's OWN stamp, read with no await between: the pulls panel can
-      // delete the entry the moment its list contains the PR, and a re-claim in
-      // that window would hand the `finally` below the SECOND create's stamp —
-      // a watcher licensed to delete a hold it never armed for.
+      // Captured before any await, so the `finally` arms exactly this claim.
       const claimedAt = prCreateStartedAt(repoPath, value.head);
       let outcome: "success" | "error" = "error";
       // Hoisted so the `finally` can arm the hand-off for a PR that exists even

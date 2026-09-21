@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { PrInfo, RemoteLens } from "@/lib/git/types";
+import type { PrDetails, PrInfo, RemoteLens } from "@/lib/git/types";
 // Relative and extensioned, not the `@/` alias: `scripts/pr-create-lane.test.mjs`
 // imports this module directly under Node's type stripping, which resolves no
 // path aliases and no extensionless specifiers.
@@ -65,6 +65,29 @@ function pageVerdict(
   return key[4] === "open" ? "release" : "none";
 }
 
+/** `usePrDetails`' key — lens at index 3, number at index 4, and NOTHING after:
+ *  the PR diff extends the same prefix with `"diff"` and its payload is not a
+ *  {@link PrDetails}. The held row opens the PR, so closing or merging it from
+ *  the detail view is evidence no list page can carry — the open list will never
+ *  contain it, and a closed-list observer may not exist. Any later detail read
+ *  covers a web close the same way. */
+function matchesPrDetail(
+  key: readonly unknown[],
+  repoPath: string,
+  lens: RemoteLens,
+  number: number,
+): boolean {
+  return (
+    key.length === 5 &&
+    key[0] === "repo" &&
+    key[2] === "pr" &&
+    typeof key[1] === "string" &&
+    normPath(key[1]) === normPath(repoPath) &&
+    key[3] === lens &&
+    key[4] === number
+  );
+}
+
 /**
  * Arms ONE create's hand-off, on two clocks for the lane's two jobs, and holds
  * the invariants both halves are named for:
@@ -72,7 +95,8 @@ function pageVerdict(
  *   exactly what `laneBlocks` answers — ends at list containment or
  *   {@link GUARD_RELEASE_TIMEOUT_MS}, whichever comes first.
  * - The ENTRY, i.e. the list's held spot, lives until THE PANEL's own page shows
- *   the row, closed-or-merged evidence arrives, or {@link HOLD_LONGSTOP_MS}
+ *   the row, closed-or-merged evidence arrives — from a list page or from the
+ *   PR's own detail, which the held row can open — or {@link HOLD_LONGSTOP_MS}
  *   expires. A search-backed filtered list routinely lags well past the guard
  *   timeout, and a spot released before the real row exists leaves nothing on
  *   screen.
@@ -143,6 +167,18 @@ export function armPrCreateHandOff(
       cleanup();
       return;
     }
+    if (
+      matchesPrDetail(
+        event.query.queryKey,
+        create.repoPath,
+        create.lens,
+        create.number,
+      )
+    ) {
+      const detail = event.query.state.data as PrDetails | undefined;
+      if (detail !== undefined && detail.state !== "OPEN") settle();
+      return;
+    }
     if (!matchesPrList(event.query.queryKey, create.repoPath, create.lens))
       return;
     const verdict = pageVerdict(
@@ -169,4 +205,18 @@ export function armPrCreateHandOff(
   );
   if (verdicts.includes("settle")) settle();
   else if (verdicts.includes("release")) releaseGuard();
+
+  // The detail evidence's arm-time half, symmetric with the cached-pages check
+  // above: the held row is clickable BEFORE this runs, so the PR can already
+  // have been closed or merged from the detail view during the create's
+  // continuation. That detail sits cached with no cache event left to fire, so
+  // the subscription alone would never see it.
+  const detail = queryClient.getQueryData<PrDetails>([
+    "repo",
+    create.repoPath,
+    "pr",
+    create.lens,
+    create.number,
+  ]);
+  if (detail !== undefined && detail.state !== "OPEN") settle();
 }

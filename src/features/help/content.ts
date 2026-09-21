@@ -1467,8 +1467,8 @@ view names the branch until the new pull request has settled into the list. The 
 headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
 branches and draft state; the number appears there as the PR opens, and the real row takes
 over once the list catches up. From the moment that number appears the entry is a real row:
-click it, or walk to it with **↑ / ↓** and press Enter, and the pull request opens without
-waiting for the list. Reopening the dialog while it runs keeps everything you had
+click it, or move to it with **↑ / ↓**, and the pull request opens without waiting for
+the list. Reopening the dialog while it runs keeps everything you had
 typed, and a second create for the same branch is refused while the first is still in
 flight.
 Press {{key:mod+enter}} from any field to submit either the

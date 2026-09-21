@@ -29,13 +29,15 @@ try {
   };
 } catch (e) {
   // The rethrow is what keeps the skip honest: without it, a real import
-  // breakage in the INSTALLED run would silently skip all 11 tests instead of
+  // breakage in the INSTALLED run would silently skip every test here instead of
   // failing. That run sets GD_EXPECT_DEPS; the no-install job does not.
   if (process.env.GD_EXPECT_DEPS) throw e;
 }
 const {
   QueryClient,
   armPrCreateHandOff,
+  containedHolds,
+  containedHoldsKey,
   consumeLastFailed,
   laneBlocks,
   markPrCreateArmed,
@@ -110,8 +112,8 @@ test("the entry outlives its guard, and a fresh claim replaces it", async (t) =>
   await sleep(60);
 
   const held = entryFor(head);
-  // NEGATIVE CONTROL: this assertion FAILS against the pre-change code, which
-  // deleted the entry at the timeout — it is the revert detector for this file.
+  // NEGATIVE CONTROL: this assertion fails if the guard timeout deletes the
+  // entry — it is the revert detector for this file.
   assert.ok(held, "the held entry survives its guard timeout");
   assert.equal(held.phase, "created");
   assert.equal(held.guardReleased, true);
@@ -209,6 +211,78 @@ test("settlePrCreateIfCurrent settles only the claim it names", (t) => {
   assert.equal(entryFor(head), undefined);
   settlePrCreateIfCurrent(REPO, head, startedAt);
   assert.equal(entryFor(head), undefined, "and it is idempotent");
+});
+
+test("a placeholder page never counts as containment", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // Deleting on a previous permutation's placeholder strands the entry when the
+  // real page lands without the row — the vanish this whole lane exists to stop.
+  const head = "feature-placeholder";
+  startPrCreate(REPO, head, "main", display("Placeholder"));
+  markPrCreated(REPO, head, { number: 333, url: "https://x/333" });
+  const creates = [entryFor(head)];
+
+  assert.deepEqual(
+    containedHolds(creates, [row(333)], {
+      open: true,
+      lens: LENS,
+      isPlaceholder: true,
+    }),
+    [],
+  );
+  assert.equal(
+    containedHolds(creates, [row(333)], {
+      open: false,
+      lens: LENS,
+      isPlaceholder: false,
+    }).length,
+    0,
+    "and the closed tab holds nothing either",
+  );
+  settlePrCreate(REPO, head, "release");
+});
+
+test("another lens's page is not this list's containment", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const head = "feature-otherlens";
+  startPrCreate(REPO, head, "main", display("Upstream lens"));
+  markPrCreated(REPO, head, { number: 444, url: "https://x/444" });
+  const creates = [entryFor(head)];
+
+  assert.deepEqual(
+    containedHolds(creates, [row(444)], {
+      open: true,
+      lens: "upstream",
+      isPlaceholder: false,
+    }),
+    [],
+  );
+  settlePrCreate(REPO, head, "release");
+});
+
+test("the containment key carries the armed bit", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // Containment can land while the create is still finishing; without the bit
+  // the settle effect would never re-run for that entry once it arms.
+  const head = "feature-keyed";
+  startPrCreate(REPO, head, "main", display("Keyed"));
+  markPrCreated(REPO, head, { number: 555, url: "https://x/555" });
+  const startedAt = entryFor(head).startedAt;
+  const opts = { open: true, lens: LENS, isPlaceholder: false };
+  const rows = [row(555)];
+
+  const unarmed = containedHolds([entryFor(head)], rows, opts);
+  assert.equal(unarmed.length, 1, "a real page does contain it");
+  const unarmedKey = containedHoldsKey(unarmed);
+  assert.equal(unarmedKey, `${head} ${startedAt} 0`);
+
+  markPrCreateArmed(REPO, head, startedAt);
+  const armedKey = containedHoldsKey(
+    containedHolds([entryFor(head)], rows, opts),
+  );
+  assert.equal(armedKey, `${head} ${startedAt} 1`);
+  assert.notEqual(armedKey, unarmedKey, "so the effect re-fires on the arm");
+  settlePrCreate(REPO, head, "release");
 });
 
 test("a deferred settle cannot preempt a create that is still finishing", (t) => {
@@ -339,6 +413,83 @@ test("a closed-axis OPEN row and another lens's page hold nothing back", async (
   assert.equal(entryFor(head), undefined, "closed evidence still deletes");
 });
 
+test("a detail already closed at arm time settles the hold", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // The held row is clickable before the flow arms, so the PR can be closed from
+  // the detail view during the continuation — no cache event is left to fire.
+  const armOpts = { guardTimeoutMs: 10_000, longStopMs: 10_000 };
+  const armFor = (head, number) => ({
+    repoPath: REPO,
+    head,
+    lens: LENS,
+    number,
+    startedAt: entryFor(head).startedAt,
+  });
+
+  const openQc = new QueryClient();
+  const openHead = "feature-arm-open";
+  startPrCreate(REPO, openHead, "main", display("Open at arm time"));
+  markPrCreated(REPO, openHead, { number: 777, url: "https://x/777" });
+  openQc.setQueryData(["repo", REPO, "pr", LENS, 777], {
+    number: 777,
+    state: "OPEN",
+  });
+  armPrCreateHandOff(openQc, armFor(openHead, 777), armOpts);
+  assert.ok(entryFor(openHead), "an open cached detail is not evidence");
+
+  // Its own client and head, so nothing is subscribed when the arm reads: the
+  // settle below can only have come from the arm-time cache read.
+  const closedQc = new QueryClient();
+  const closedHead = "feature-arm-closed";
+  startPrCreate(REPO, closedHead, "main", display("Closed at arm time"));
+  markPrCreated(REPO, closedHead, { number: 778, url: "https://x/778" });
+  closedQc.setQueryData(["repo", REPO, "pr", LENS, 778], {
+    number: 778,
+    state: "CLOSED",
+  });
+  armPrCreateHandOff(closedQc, armFor(closedHead, 778), armOpts);
+  assert.equal(entryFor(closedHead), undefined);
+
+  // Tear the open watcher down through its own subscription.
+  await publish(openQc, ["repo", REPO, "pr", LENS, 777], {
+    number: 777,
+    state: "CLOSED",
+  });
+  assert.equal(entryFor(openHead), undefined);
+});
+
+test("a closed pull request's own detail settles the hold", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // Reachable because the held row opens the PR: closed or merged from the
+  // detail view, no open-list page can ever carry it.
+  const qc = new QueryClient();
+  const head = "feature-detail";
+  startPrCreate(REPO, head, "main", display("Closed from the held row"));
+  markPrCreated(REPO, head, { number: 666, url: "https://x/666" });
+  armPrCreateHandOff(
+    qc,
+    {
+      repoPath: REPO,
+      head,
+      lens: LENS,
+      number: 666,
+      startedAt: entryFor(head).startedAt,
+    },
+    { guardTimeoutMs: 10_000, longStopMs: 10_000 },
+  );
+
+  // `usePrDetails`' key; the payload carries only the field the watcher reads.
+  const detailKey = ["repo", REPO, "pr", LENS, 666];
+  await publish(qc, detailKey, { number: 666, state: "OPEN" });
+  assert.ok(entryFor(head), "an open detail is not evidence");
+  // The diff extends the same prefix and carries no `state` — reading it as a
+  // detail would settle on every PR the user opens from the strip.
+  await publish(qc, [...detailKey, "diff"], "@@ -1 +1 @@");
+  assert.ok(entryFor(head), "the diff key is not the detail key");
+  await publish(qc, detailKey, { number: 666, state: "MERGED" });
+  assert.equal(entryFor(head), undefined);
+});
+
 test("the long stop removes an entry no list ever shows", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
@@ -440,7 +591,7 @@ test("two heads in one repo are held independently", async (t) => {
   assert.equal(usePrCreateStore.getState().byRepo[REPO], undefined);
 });
 
-test("settlePrCreate's delete and failed-create latch are unchanged", (t) => {
+test("settlePrCreate deletes the entry and latches only on error", (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const head = "feature-settle";
   const other = "feature-sibling";

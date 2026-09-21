@@ -90,8 +90,12 @@ export function usePrList(
  *  repos. CALLER CONTRACT: idle this hook while the list serves placeholder rows
  *  (`enabled: … && !list.isPlaceholderData`) — the comparator below leaves `state` free,
  *  so an ungated intermediate fetch would build a map from the outgoing rows and cache it
- *  under the incoming key. The numbers digest in the key is the remaining defense: it
- *  keeps such a result from ever caching under another page's key. */
+ *  under the incoming key. The number+headSha digest in the key is the remaining defense:
+ *  it keeps such a result from ever caching under another page's key, and — because
+ *  Bitbucket's rollup is addressed by `headSha` — a pushed head re-keys the query, so a
+ *  refetch concurrent with the list's cannot leave a map built from the outgoing SHAs
+ *  sitting fresh-stamped. GitHub/GitLab leave `headSha` empty (their CI reads by number),
+ *  so their digests only gain a colon per row. */
 export function usePrListCi(
   repo: string,
   enabled: boolean,
@@ -108,7 +112,7 @@ export function usePrListCi(
       lens,
       state,
       limit ?? null,
-      prs?.map((p) => p.number).join(",") ?? "",
+      prs?.map((p) => `${p.number}:${p.headSha}`).join(",") ?? "",
     ] as const,
     queryFn: async () => {
       // `enabled` requires a non-empty `prs`, so the cast and `list[0]` below are safe.

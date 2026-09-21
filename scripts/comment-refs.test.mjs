@@ -9,8 +9,11 @@
 // `comment-branding.ts` must stay dependency-free and erasable-syntax-only. A
 // runtime import added there fails this file, which is the point.
 //
-// Node's stdlib test runner and node: imports only, no dev dependency, so the
-// CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
+// Node's stdlib test runner and node: imports, so the CI `guards` job runs
+// `node --test "scripts/*.test.mjs"` with no install step. The render-oracle
+// tests below are the one exception — they need `marked` from node_modules and
+// skip when it is absent, which is why frontend.yml runs this file installed
+// with GD_EXPECT_DEPS set.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -1789,7 +1792,10 @@ test("a wrapped ref never renders more exposed than it started", async (t) => {
   let Marked;
   try {
     ({ Marked } = await import("marked"));
-  } catch {
+  } catch (e) {
+    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
+    // rather than skip; the no-install guards job leaves it unset and skips.
+    if (process.env.GD_EXPECT_DEPS) throw e;
     t.skip(
       "marked is not installed — the guards job runs with no install step",
     );
@@ -1837,7 +1843,10 @@ test("a reference link still renders as a link afterwards", async (t) => {
   let Marked;
   try {
     ({ Marked } = await import("marked"));
-  } catch {
+  } catch (e) {
+    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
+    // rather than skip; the no-install guards job leaves it unset and skips.
+    if (process.env.GD_EXPECT_DEPS) throw e;
     t.skip(
       "marked is not installed — the guards job runs with no install step",
     );
@@ -1861,7 +1870,10 @@ test("the renderer agrees about the CRLF corpus too", async (t) => {
   let Marked;
   try {
     ({ Marked } = await import("marked"));
-  } catch {
+  } catch (e) {
+    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
+    // rather than skip; the no-install guards job leaves it unset and skips.
+    if (process.env.GD_EXPECT_DEPS) throw e;
     t.skip(
       "marked is not installed — the guards job runs with no install step",
     );
@@ -1898,7 +1910,10 @@ test("an escaped reference stops rendering live once wrapped", async (t) => {
   let Marked;
   try {
     ({ Marked } = await import("marked"));
-  } catch {
+  } catch (e) {
+    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
+    // rather than skip; the no-install guards job leaves it unset and skips.
+    if (process.env.GD_EXPECT_DEPS) throw e;
     t.skip(
       "marked is not installed — the guards job runs with no install step",
     );

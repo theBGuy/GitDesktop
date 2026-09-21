@@ -4,10 +4,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { PrCreate } from "@/lib/stores/pr-create";
 
-/** The one spelling of "this hold is a settled fact": the PR is open and only
- *  this view lags. Deliberately NOT `!laneBlocks(create)` — the two coincide
- *  today, but this asks a presentation question about the entry's own state, and
- *  a change to the admission predicate must not silently repaint the row. */
+/** The one spelling of "this hold is a settled fact": the forge answered the
+ *  create, so the pull request exists and is presumed open until evidence says
+ *  otherwise. Deliberately NOT `!laneBlocks(create)` — the two coincide today,
+ *  but this asks a presentation question about the entry's own state, and a
+ *  change to the admission predicate must not silently repaint the row. */
 function isHeldOpen(create: PrCreate): boolean {
   return create.phase === "created" && create.guardReleased;
 }
@@ -16,7 +17,7 @@ function isHeldOpen(create: PrCreate): boolean {
  *  a glyph alone carries no state under reduced motion. `creating` borrows the
  *  banner's verb so one screen never reads two words for one operation; the
  *  `created` arm splits on the guard, which is what separates a forge call still
- *  finishing from a pull request that is open and merely absent from this view. */
+ *  finishing from a pull request the forge opened and this view has yet to show. */
 const PHASE_META: {
   [P in PrCreate["phase"]]: (create: Extract<PrCreate, { phase: P }>) => string;
 } = {

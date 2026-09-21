@@ -49,6 +49,45 @@ export type PrCreate =
       armed: boolean;
     });
 
+/**
+ * The held entries a list has caught up to: created, matching that list's lens,
+ * and carried by the page it is painting. Empty off the open tab, and empty
+ * while the page is PLACEHOLDER data — the deliberate opposite of the strip's
+ * hide predicate, which follows whatever is painted. Hiding a strip early costs
+ * a frame's cosmetics; DELETING on a previous permutation's placeholder strands
+ * the entry when the real page lands without the row.
+ */
+export function containedHolds(
+  creates: PrCreate[],
+  rows: { number: number }[] | undefined,
+  opts: { open: boolean; lens: RemoteLens; isPlaceholder: boolean },
+): PrCreate[] {
+  if (!opts.open || opts.isPlaceholder) return [];
+  return creates.filter(
+    (c) =>
+      c.phase === "created" &&
+      c.lens === opts.lens &&
+      (rows?.some((p) => p.number === c.number) ?? false),
+  );
+}
+
+/**
+ * The settle effect's dependency: membership plus identity plus the ARMED bit,
+ * so it fires on a real hand-off rather than on every render, and RE-fires when
+ * a contained entry arms — containment can land while the create is still
+ * finishing, and the settle no-ops until then. The SPACE is what makes each
+ * record injective: a refname cannot contain one and the stamp is digits, so
+ * the join cannot alias.
+ */
+export function containedHoldsKey(holds: PrCreate[]): string {
+  return holds
+    .map(
+      (c) =>
+        `${c.head} ${c.startedAt} ${c.phase === "created" && c.armed ? 1 : 0}`,
+    )
+    .join("|");
+}
+
 /** Whether this lane entry still refuses a second create and keeps the
  *  repo-view banner up. A created entry whose guard has been released no
  *  longer blocks — it only holds the list spot. The ONE spelling of that
@@ -317,7 +356,7 @@ export function settlePrCreateIfCurrent(
 ): void {
   const entry = usePrCreateStore.getState().byRepo[normPath(repoPath)]?.[head];
   if (!entry || entry.startedAt !== startedAt) return;
-  if (entry.phase === "created" && !entry.armed) return;
+  if (entry.phase !== "created" || !entry.armed) return;
   settlePrCreate(repoPath, head, "success");
 }
 

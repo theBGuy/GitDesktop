@@ -56,7 +56,12 @@ import {
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
 import { useLensState, useRemoteSlug } from "@/lib/repo-lens/queries";
-import { settlePrCreateIfCurrent, usePrCreates } from "@/lib/stores/pr-create";
+import {
+  containedHolds,
+  containedHoldsKey,
+  settlePrCreateIfCurrent,
+  usePrCreates,
+} from "@/lib/stores/pr-create";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -170,12 +175,6 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     canGroupByReview,
     tabActive: onPullsTab,
   });
-  // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
-  // once under a DIFFERENT scope and again under the saved one — unfiltered before
-  // the prefs land, or whole-repo before a saved team choice validates. The wait is
-  // covered by the same skeletons a cold load already shows (a held query reports
-  // `isPending`, which is what `listPending` below renders), and the gate always
-  // opens — see the hook's note on why neither leg can wedge.
   // Bounded self-heal for a held row the forge's list hasn't caught up to. The
   // interval is decided below, once containment is known — that read comes from
   // this query, so it is one render behind by construction. Rungs live in a ref
@@ -183,13 +182,19 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // state goes stale under the compiler; `holdPollMs` is the render-visible
   // mirror the query's options read.
   const [holdPollMs, setHoldPollMs] = useState<number | false>(false);
-  // Scope for the row-focus rescue below: every query it makes runs inside this
-  // panel, never the document.
-  const panelRef = useRef<HTMLDivElement>(null);
   const holdPolls = useRef(0);
   const holdLadderFor = useRef("");
   const holdSeen = useRef({ ok: 0, failed: 0 });
   const holdRefreshed = useRef(false);
+  // Scope for the row-focus rescue below: every query it makes runs inside this
+  // panel, never the document.
+  const panelRef = useRef<HTMLDivElement>(null);
+  // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
+  // once under a DIFFERENT scope and again under the saved one — unfiltered before
+  // the prefs land, or whole-repo before a saved team choice validates. The wait is
+  // covered by the same skeletons a cold load already shows (a held query reports
+  // `isPending`, which is what `listPending` below renders), and the gate always
+  // opens — see the hook's note on why neither leg can wedge.
   const prList = usePrList(
     repoPath,
     ghReady && listFilter.scopeReady,
@@ -340,6 +345,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     // completion so the user gets a whole ladder instead of one read.
     holdPolls.current = 0;
     holdRefreshed.current = true;
+    // The four families go out CONCURRENTLY: each hydrator's key carries a digest
+    // of the row set its map describes, so a refetch that raced the list caches
+    // under the outgoing key rather than stamping a stale map fresh.
     for (const queryKey of [
       ["repo", repoPath, "pr-list"],
       ["repo", repoPath, "pr-ci"],
@@ -663,33 +671,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // Deleting a held entry is THIS panel's call, because only it knows which page
   // the strip sits in: sibling surfaces fetch UNFILTERED pages under the same
   // lens, and a watcher settling on one of those would drop the strip while this
-  // panel's own filtered page still lacks the row. Gated on
-  // `!isPlaceholderData`, the deliberate opposite of the hide predicate above:
-  // hiding follows whatever is being painted, while DELETING on a previous
-  // permutation's placeholder strands the entry when the real page lands without
-  // the row.
-  const containedCreates =
-    stateFilter === "open" && !prList.isPlaceholderData
-      ? creates.filter(
-          (c) =>
-            c.phase === "created" &&
-            c.lens === lens &&
-            (prList.data?.some((p) => p.number === c.number) ?? false),
-        )
-      : [];
-  // Membership plus identity plus the ARMED bit, so the effect fires on a real
-  // hand-off rather than on every render — and re-fires when a contained entry
-  // arms, since containment can land while the create is still finishing and
-  // the settle below no-ops until then. Pre-arm the UX is the old behavior:
-  // strip hidden by containment, entry retained, banner up until the flow ends.
-  // The SPACE is what makes each record injective — a refname cannot contain
-  // one and the stamp is digits — so the join cannot alias.
-  const containedKey = containedCreates
-    .map(
-      (c) =>
-        `${c.head} ${c.startedAt} ${c.phase === "created" && c.armed ? 1 : 0}`,
-    )
-    .join("|");
+  // panel's own filtered page still lacks the row. Pre-arm, containment only
+  // hides the strip; the entry and banner stay until the flow ends. Both derives
+  // are pure store functions, where their own tests reach them.
+  const containedCreates = containedHolds(creates, prList.data, {
+    open: stateFilter === "open",
+    lens,
+    isPlaceholder: prList.isPlaceholderData,
+  });
+  const containedKey = containedHoldsKey(containedCreates);
   // Where the user last stood in THIS panel's rows, captured while the row
   // still exists: an unmount fires no event that can report its own `data-row`.
   // Scoped to the panel, not the document: `remote:<n>` is the shared list
@@ -727,7 +717,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     // Containment tests the RAW page, so the replacement row may not RENDER —
     // a collapsed review group unmounts its rows, and the client-side text
     // filter hides them — and then the first rendered row keeps the keyboard
-    // position inside the list rather than on <body>. Both queries stay inside
+    // position inside the list rather than on <body>. When the panel renders NO
+    // row at all (every group collapsed, or the filter excludes all of them),
+    // the search input is the terminal landing: always rendered, and where
+    // `focus-filter` already puts the keyboard. Both row queries stay inside
     // this panel: the `remote:<n>` namespace is shared with the issues panel.
     const selector = `[data-row="${CSS.escape(stood)}"]`;
     requestAnimationFrame(() => {
@@ -735,7 +728,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       const row =
         root?.querySelector<HTMLElement>(selector) ??
         root?.querySelector<HTMLElement>("[data-row]");
-      row?.focus();
+      (row ?? filterRef.current)?.focus();
     });
   });
   // Deferred while this panel's tab is hidden, since it lives under <Activity> —
@@ -965,6 +958,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             variant="outline"
             size="icon-sm"
             aria-label="Refresh pull requests"
+            title="Refresh pull requests"
             aria-busy={prList.isFetching}
             onClick={refreshPrList}
           >

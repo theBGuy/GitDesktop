@@ -102,10 +102,7 @@ export function PromoteLocalPrDialog({
       toast.error(refusal);
       return;
     }
-    // The claim's OWN stamp, read with no await between: the pulls panel can
-    // delete the entry the moment its list contains the PR, and a re-claim in
-    // that window would hand the `finally` below the SECOND create's stamp — a
-    // watcher licensed to delete a hold it never armed for.
+    // Captured before any await, so the `finally` arms exactly this claim.
     const claimedAt = prCreateStartedAt(repoPath, pr.head);
     // "release", not "error": a failed promote produced no draft, so it frees
     // the lane without latching over a real create failure for this branch.
