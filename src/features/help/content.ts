@@ -1770,8 +1770,9 @@ duplicates, and same-project mentions.
   only so much at a time, and a muted note says when a list is partial rather than letting
   it read as complete: *Some projects aren't shown* under the picker's rows means the
   boards on offer are cut short, while *Some of this item's projects aren't shown* means
-  the item sits on more boards than came back, so one of its chips, rows or field lines may
-  be missing. GitHub only, and changing anything needs the \`project\`
+  the item sits on more boards than came back: some of its chips and field lines are
+  missing, and a board it's already on can even show unchecked in the picker. GitHub
+  only, and changing anything needs the \`project\`
   scope: with just \`read:project\` the boards still show but every row is locked, and with
   neither the picker says so and helps you get it — when your sign-in's scopes are readable,
   that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\` command

@@ -415,10 +415,8 @@ export function ProjectFieldsEditor({
           className="isolate z-50"
         >
           <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            {/* The caption IS the popup's accessible name: Popover.Popup takes its
-                `aria-labelledby` from whatever Title registers, and a bare element
-                leaves the dialog unnamed. `render` keeps the <p> it has always been
-                — Title's own default element is an <h2>. */}
+            {/* Title names the popup via aria-labelledby — a bare caption leaves the
+                dialog unnamed; render keeps the <p> off Title's default <h2>. */}
             <Popover.Title
               render={<p />}
               className="px-1 pb-1.5 text-xs font-medium"

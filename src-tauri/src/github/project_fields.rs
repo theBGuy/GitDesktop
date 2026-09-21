@@ -7,7 +7,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
-use crate::github::project::{project_ref, ProjectV2Ref, PROJECT_FIELDS};
+use crate::github::project::{item_projects_truncated, project_ref, ProjectV2Ref, PROJECT_FIELDS};
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize)]
@@ -549,12 +549,7 @@ fn parse_item_field_values(value: &Value, field: &str) -> ItemFieldValues {
         .collect();
     ItemFieldValues {
         items,
-        truncated: value
-            .pointer(&format!(
-                "/data/repository/{field}/projectItems/pageInfo/hasNextPage"
-            ))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        truncated: item_projects_truncated(value, field),
     }
 }
 
@@ -717,42 +712,6 @@ pub async fn gh_project_fields(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn item_field_values_truncation_follows_the_selected_entity_page_info() {
-        for field in ["issue", "pullRequest"] {
-            let other = if field == "issue" {
-                "pullRequest"
-            } else {
-                "issue"
-            };
-            for (connection, expected) in [
-                (
-                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":true}}),
-                    true,
-                ),
-                (
-                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":false}}),
-                    false,
-                ),
-                (serde_json::json!({"nodes":[]}), false),
-                (serde_json::json!({"nodes":[], "pageInfo":null}), false),
-                (
-                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":"true"}}),
-                    false,
-                ),
-                (Value::Null, false),
-            ] {
-                let response = serde_json::json!({"data":{"repository":{
-                    field:{"projectItems":connection},
-                    other:{"projectItems":{"pageInfo":{"hasNextPage":!expected}}}
-                }}});
-                let out = parse_item_field_values(&response, field);
-                assert!(out.items.is_empty());
-                assert_eq!(out.truncated, expected, "{field}: {response}");
-            }
-        }
-    }
 
     #[test]
     fn item_field_values_envelope_serializes_with_camel_case_keys() {

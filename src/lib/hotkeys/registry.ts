@@ -376,8 +376,8 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
-  // Registered by the issue view and the PR one alike — the two Projects popups
-  // are the same controls on both surfaces, and the dispatcher runs whichever
+  // Registered by ProjectsPopover and ProjectFieldsEditor themselves — they mount
+  // on the issue rail and the PR header alike, and the dispatcher runs whichever
   // registrant is enabled. Filed here rather than under Pull requests because
   // `matchesActionText` searches the category too, so the PR-only spelling would
   // make an issue-flavoured query miss.

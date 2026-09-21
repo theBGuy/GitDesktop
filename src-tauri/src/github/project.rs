@@ -236,6 +236,17 @@ fn item_projects_query(field: &str) -> String {
     )
 }
 
+/// The two per-item reads must derive truncation identically because the frontend
+/// intersects their results.
+pub(super) fn item_projects_truncated(value: &Value, field: &str) -> bool {
+    value
+        .pointer(&format!(
+            "/data/repository/{field}/projectItems/pageInfo/hasNextPage"
+        ))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Archived items are read as ordinary memberships — GitHub still shows the item
 /// on the issue, and unlinking it is the same `deleteProjectV2Item` call.
 fn parse_item_projects(value: &Value, field: &str) -> ItemProjects {
@@ -255,12 +266,7 @@ fn parse_item_projects(value: &Value, field: &str) -> ItemProjects {
         .unwrap_or_default();
     ItemProjects {
         items,
-        truncated: value
-            .pointer(&format!(
-                "/data/repository/{field}/projectItems/pageInfo/hasNextPage"
-            ))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        truncated: item_projects_truncated(value, field),
     }
 }
 

@@ -225,8 +225,9 @@ export function ProjectsPopover({
   const showApplyNote = rows.length > 0 && rowLockedReason === undefined;
   const showTruncated = available.data?.truncated === true;
   // A separate claim from the catalog's: the CATALOG cap hides boards the item
-  // could join, this one hides boards it is already on — so an unlink the user
-  // came for may not have a row at all.
+  // could join, this one hides boards it is already on — a hidden membership shows
+  // UNCHECKED when its board is in the catalog (the draft reseeds from the capped
+  // memberships alone), and has no row at all only when it is outside it too.
   const showMembershipsTruncated = memberships.data?.truncated === true;
   // Both scope gaps ask for the same scope, so both remedy blocks fire the same
   // reconnect.
@@ -343,10 +344,8 @@ export function ProjectsPopover({
           className="isolate z-50"
         >
           <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            {/* The caption IS the popup's accessible name: Popover.Popup takes its
-                `aria-labelledby` from whatever Title registers, and a bare element
-                leaves the dialog unnamed. `render` keeps the <p> it has always been
-                — Title's own default element is an <h2>. */}
+            {/* Title names the popup via aria-labelledby — a bare caption leaves the
+                dialog unnamed; render keeps the <p> off Title's default <h2>. */}
             <Popover.Title
               render={<p />}
               className="px-1 pb-1.5 text-xs font-medium"

@@ -635,13 +635,6 @@ export function RemotePrView({
   // The composer/thread-create side of the forge detection: a strict provider key
   // (default "github" — gh is the authoritative default for an unrecognized host).
   const providerKey: ForgeProvider = provider ?? "github";
-  // Whether the header carries the GitHub Projects picker and its field-values row.
-  // ELIMINATION, never a provider equality check: a not-yet-identified provider may
-  // mount them for one contained read. Closed and merged pull requests keep them —
-  // boards hold closed items in their Done columns, as the issue side's rows do.
-  const showProjectCells =
-    providerKey !== "gitlab" && providerKey !== "bitbucket";
-
   // Palette-only PR actions — mounted here so they live only while a remote PR is
   // open. Every one whose enablement reads `details.data` also gates on
   // `!details.isPlaceholderData`: during a switch that data is the previous PR's,
@@ -2461,8 +2454,10 @@ export function RemotePrView({
     );
   }
   // GitHub Projects membership. Unlike labels/assignees there is no read-only
-  // fallback: the picker is the whole field, on any PR state (`showProjectCells`).
-  if (showProjectCells) {
+  // fallback: the picker is the whole field, on any PR state — closed and merged
+  // PRs deliberately keep it (boards hold closed items in their Done columns, as
+  // the issue side's rows do). `canWrite` is provider availability, not permission.
+  if (canWrite) {
     metaCells.push(
       <ProjectsPopover
         key={`projects-${entityKey}`}

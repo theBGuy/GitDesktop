@@ -378,7 +378,9 @@ export function ProjectFieldValues({
   // Stands alone after the lines, as the editor's own field-cap note does: a board
   // past the read's cap has no line here at all, so the lines above would read as
   // the whole story. The picker's wording verbatim — it is the same claim about the
-  // same capped connection.
+  // same capped connection. It renders only on paths the early return below admits,
+  // all of which pass `canRead` (entries and heading are both gated) — a cached
+  // flag cannot outlive the scope gate.
   const truncatedNote =
     values.data?.truncated === true ? (
       <p className="text-[11px] text-muted-foreground">
