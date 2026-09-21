@@ -1601,7 +1601,16 @@ export function ProjectsBoardPanel({
     // on every render until the tab went away.
     const leaves = action === "remove" || !showArchived;
     setRetired(at === null || !leaves ? null : { itemId: item.itemId, ...at });
-    const vars = { repo: repoPath, projectId, itemId: item.itemId };
+    // `wasArchived` rides the write because it is a COUNT axis the cache key can't
+    // supply: a removal takes nothing from a live-only lens's total when the card had
+    // already left that count at archive time. Read off the card the menu recorded,
+    // like every other value here.
+    const vars = {
+      repo: repoPath,
+      projectId,
+      itemId: item.itemId,
+      wasArchived: item.isArchived,
+    };
     try {
       if (action === "archive") await archiveItem.mutateAsync(vars);
       else await removeItem.mutateAsync(vars);

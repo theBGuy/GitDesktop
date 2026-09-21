@@ -1954,11 +1954,13 @@ The switch is for this visit only (nothing is saved), and the command palette ca
 **Restore card** on an archived card's own menu puts it back on the board, in place and
 with no prompt, since archiving was the step that asked. The card stops being archived as
 you click, and stays that way: GitHub's own read of it can lag by a few seconds, so
-GitDesktop keeps the answer the write gave rather than asking again. **Remove from
-project…** is still there too, and still confirms. Four rows would change what the card IS:
-**Move to**, **Position**, **Edit draft…** and **Convert to issue…**. Each of them says
-**Restore this card to change it** instead, because an archived card holds no column and no
-place in the project's order, so there's nothing for those writes to address.
+GitDesktop keeps the answer the write gave rather than asking again. Under a saved view
+the card is back straight away too, and the next refresh settles whether that view's
+filter keeps it. **Remove from project…** is still there too, and still confirms. Four
+rows would change what the card IS: **Move to**, **Position**, **Edit draft…** and
+**Convert to issue…**. Each of them says **Restore this card to change it** instead,
+because an archived card holds no column and no place in the project's order, so there's
+nothing for those writes to address.
 
 While archived cards are shown, **no** card can be repositioned: GitHub refuses an archived
 item as the anchor a position write needs, so the card below the one you're on isn't
