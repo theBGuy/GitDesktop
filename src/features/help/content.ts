@@ -2124,7 +2124,7 @@ ask first, and each prompt says where the card goes:
   project and nowhere else, and the prompt says so.
 
 When a card leaves the columns (any removal, or an archive while archived cards are
-hidden) your keyboard place lands on the card that took its slot, or on the board's first
+hidden), your keyboard place lands on the card that took its slot, or on the board's first
 card when that column emptied. When nothing is left to stand on (an emptied board, or one
 this view's filter leaves empty), focus moves to **Add item** in the toolbar. Archiving
 with **Show archived cards** on moves nothing: the card keeps its slot under its new badge,

@@ -1718,9 +1718,11 @@ export function useArchiveBoardItem() {
  * either.
  *
  * The optimistic flip lands on the lenses that draw the card; only archived-showing
- * ones do. The settle REJOINS it to every populated lens — flip where the lens holds
- * it, insert at the end of the loaded pages where it doesn't — moving `totalCount`
- * on the unfiltered live-only key alone ({@link keyIsUnfiltered}).
+ * ones do. The settle REJOINS it to every populated lens: a flip where the lens holds
+ * it, and on a live-only lens that lacks it, an insert at the end of the loaded
+ * pages, moving `totalCount` on the unfiltered live-only key alone
+ * ({@link keyIsUnfiltered}). An archived-showing lens that lacks it holds it
+ * UNLOADED, so it takes the flip alone.
  *
  * It settles through {@link writeThroughBoards} rather than
  * {@link invalidateProjectBoards} because the payload is transactionally fresh where
