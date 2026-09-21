@@ -422,7 +422,8 @@ export function RunDetailView({
   const [runRerunLatch, setRunRerunLatch] = useState<string | null>(null);
   // The re-run family's synchronous edge: `isPending` is render state behind
   // batched notifications, so two activations inside one pre-render window both
-  // pass it. (The rollup gets the same edge from its `rerunningJob` useState.)
+  // pass it. (The rollup gets the same edge from its `rerunning`/`rerunningJob`
+  // state, set before its first await.)
   const rerunLockRef = useRef(false);
   // Where a job action's focus goes when its own button dies with the offer.
   // The header's "View on <remote>" is the one control that renders for every
