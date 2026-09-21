@@ -194,8 +194,15 @@ const MOVING_REASON = "Moving your last card…";
  *  things — and a removal says a THIRD thing for a draft, which lives on this
  *  project alone and has nowhere to survive. Every one names where the card goes
  *  rather than asking the user to infer it. */
-const ARCHIVE_BODY =
-  "The card leaves the board. Bring it back any time from View options → Show archived cards.";
+/** Keyed on whether archived cards are being SHOWN, because the two states make
+ *  different promises: with the toggle off the card leaves the columns, with it on
+ *  the card stays put under an Archived badge. */
+const ARCHIVE_BODY: Record<"shown" | "hidden", string> = {
+  hidden:
+    "The card leaves the board. Bring it back any time from View options → Show archived cards.",
+  shown:
+    "The card stays in place, marked Archived, and leaves the board when you turn Show archived cards off. Restore card brings it back.",
+};
 const REMOVE_BODY: Record<BoardItemContent["kind"], string> = {
   draft:
     "This deletes the draft permanently — drafts live on this project and nowhere else.",
@@ -1122,13 +1129,15 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   }
-  /** Why archive-or-restore and remove are held. Ranked like the move rows, and the
-   *  first two arms are the SAME permission flags — but the grouping arms are
-   *  absent: these address the membership's item id alone, so an ungrouped board and
-   *  a GitHub-owned grouping field hold neither of them. So does a lens still
-   *  loading: the card under the pointer was recorded off the cards on screen, and
-   *  its item id is its item id whichever view drew it. Archiving is not here for the
-   *  same reason: the restore row is the ONE thing an archived card is opened for. */
+  /** Why the menu's whole write block is held — the draft rows as well as
+   *  archive-or-restore and remove. Ranked like the move rows, and the first two arms
+   *  are the SAME permission flags — but the grouping arms are absent: these address
+   *  the membership's item id alone, so an ungrouped board and a GitHub-owned
+   *  grouping field hold neither of them. So does a lens still loading: the card
+   *  under the pointer was recorded off the cards on screen, and its item id is its
+   *  item id whichever view drew it. The ARCHIVED arm is absent too, and lives in
+   *  {@link cardEditHeldFor} instead: it must hold the draft rows while leaving the
+   *  restore live, which is the one thing an archived card's menu is opened for. */
   const cardActionHeldReason = (() => {
     switch (true) {
       case projectScopeReadOnly(scopes.data):
@@ -1577,7 +1586,7 @@ export function ProjectsBoardPanel({
     const prompt = {
       archive: {
         title: "Archive this card?",
-        body: ARCHIVE_BODY,
+        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"],
         confirmLabel: "Archive",
       },
       remove: {

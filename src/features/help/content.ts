@@ -2123,13 +2123,15 @@ ask first, and each prompt says where the card goes:
   add it back from **Add item**. For a **draft** it's a deletion: a draft lives on this
   project and nowhere else, and the prompt says so.
 
-After an archive or a removal your keyboard place lands on the card that took its slot, or
-on the board's first card when that column emptied. When nothing is left to stand on (an
-emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
-toolbar. A card whose contents you don't have access to still carries **Archive card…**
-and **Remove from project…**, since both reach it by its place on the board rather than
-by what's inside it; **Show details**, **Edit draft…** and **Convert to issue…** aren't
-offered there.
+When a card leaves the columns — any removal, and an archive while archived cards are
+hidden — your keyboard place lands on the card that took its slot, or on the board's first
+card when that column emptied. When nothing is left to stand on (an emptied board, or one
+this view's filter leaves empty), focus moves to **Add item** in the toolbar. Archiving
+with **Show archived cards** on moves nothing: the card keeps its slot under its new badge,
+and so do you. A card whose contents you don't have access to still carries **Remove from
+project…**, and **Archive card…** or **Restore card** according to which state it's in,
+since all of them reach it by its place on the board rather than by what's inside it;
+**Show details**, **Edit draft…** and **Convert to issue…** aren't offered there.
 
 **Edit draft…**, **Convert to issue…**, **Archive card…**, **Restore card** and **Remove
 from project…** are each held with their reason on them when your GitHub sign-in can read

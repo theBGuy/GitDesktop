@@ -56,8 +56,8 @@ const SEARCH_QUERY: &str = "query($q:String!){ search(query:$q, type: ISSUE_ADVA
 const REPOSITORY_QUERY: &str =
     "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ id } }";
 const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ id } } }";
-// Conversion, archive, and removal address PVTI_ item ids; updates take DI_ content ids.
-// Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_ ids.
+// Conversion, archive, unarchive, and removal address PVTI_ item ids; updates take DI_
+// content ids. Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_.
 const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const UNARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ unarchiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_and_remove_require_mutation_payloads() {
+    fn archive_unarchive_and_remove_require_mutation_payloads() {
         let value = json!({"data":{
             "archiveProjectV2Item":{"item":{"id":"PVTI_one"}},
             "unarchiveProjectV2Item":{"item":{"id":"PVTI_one"}},

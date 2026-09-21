@@ -110,10 +110,10 @@ export function BoardCardMenuItems({
   openLabel: string | null;
   /** Why every move is held, or undefined when they're live. */
   heldReason: string | undefined;
-  /** Why archive-or-restore and remove are held, or undefined when they're live.
-   *  Apart from {@link heldReason} because a move can be held by something that
-   *  leaves these fine — an ungrouped board, or a grouping GitHub owns on the issue
-   *  itself. */
+  /** Why the whole write block below the peek is held — the draft rows as well as
+   *  archive-or-restore and remove — or undefined when it's live. Apart from
+   *  {@link heldReason} because a move can be held by something that leaves these
+   *  fine: an ungrouped board, or a grouping GitHub owns on the issue itself. */
   actionHeldReason: string | undefined;
   /** Why the DRAFT rows — edit and convert — are held, or undefined when they're
    *  live. Apart from {@link actionHeldReason} because an ARCHIVED card holds these
