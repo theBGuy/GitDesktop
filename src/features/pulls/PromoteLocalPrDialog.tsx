@@ -68,10 +68,11 @@ export function PromoteLocalPrDialog({
   const pending = createPr.isPending || update.isPending || posting;
   // Shares the PR-create lane with CreatePrDialog: both push the same head and
   // open a PR for it, so either one holding the lane blocks the other (and
-  // paints the same strip above the panels). The lane is held through the whole
+  // paints the same strip above the panels). The lane guards through the whole
   // catch-up window after the forge answers, not just while the call runs, so
-  // the hint reads the PHASE — a non-null one IS the lane. `!pending` narrows
-  // to the RE-ENTRY case: promote claims the lane synchronously, so a phase is
+  // the hint reads the PHASE — non-null exactly while the lane still blocks,
+  // which a guard-released hold does not. `!pending` narrows to the RE-ENTRY
+  // case: promote claims the lane synchronously, so a phase is
   // also present during this dialog's own run, where `pending` is what to show —
   // up to a cross-repo navigation that re-renders this view in place, which
   // detaches the pinned create mutation: `pending` goes idle there while the
@@ -101,6 +102,11 @@ export function PromoteLocalPrDialog({
       toast.error(refusal);
       return;
     }
+    // The claim's OWN stamp, read with no await between: the pulls panel can
+    // delete the entry the moment its list contains the PR, and a re-claim in
+    // that window would hand the `finally` below the SECOND create's stamp — a
+    // watcher licensed to delete a hold it never armed for.
+    const claimedAt = prCreateStartedAt(repoPath, pr.head);
     // "release", not "error": a failed promote produced no draft, so it frees
     // the lane without latching over a real create failure for this branch.
     let outcome: "success" | "release" = "release";
@@ -204,20 +210,18 @@ export function PromoteLocalPrDialog({
       // arms only once this flow's last step is done — armed at the forge's
       // answer, a fast list refetch could settle it mid-carry-over and a
       // remounted dialog would re-arm Publish over a PR that already exists.
-      // Armed with the entry's OWN startedAt: a fresh clock read would let this
-      // watcher settle a later create that re-claimed the head.
+      // Armed with the stamp captured at claim time: a stale one only yields a
+      // watcher that no-ops and reaps itself, which is the designed outcome.
       if (outcome === "release") {
         settlePrCreate(repoPath, pr.head, "release");
-      } else if (created) {
-        const startedAt = prCreateStartedAt(repoPath, pr.head);
-        if (startedAt !== null)
-          armPrCreateHandOff(queryClient, {
-            repoPath,
-            head: pr.head,
-            lens: "origin",
-            number: created.number,
-            startedAt,
-          });
+      } else if (created && claimedAt !== null) {
+        armPrCreateHandOff(queryClient, {
+          repoPath,
+          head: pr.head,
+          lens: "origin",
+          number: created.number,
+          startedAt: claimedAt,
+        });
       }
     }
   }

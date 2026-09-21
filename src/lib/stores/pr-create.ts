@@ -1,6 +1,10 @@
 import { create } from "zustand";
-import { normPath } from "@/lib/git/path";
 import type { RemoteLens } from "@/lib/git/types";
+// Relative and extensioned, not the `@/` alias: `scripts/pr-create-lane.test.mjs`
+// imports this module directly under Node's type stripping, which resolves no
+// path aliases and no extensionless specifiers. Type-only imports are erased,
+// so they may stay aliased.
+import { normPath } from "../git/path.ts";
 
 /** What every lane entry carries, whatever phase it is in. */
 interface PrCreateBase {
@@ -26,10 +30,29 @@ interface PrCreateBase {
  * `phase`: the lane deliberately outlives the forge's answer, and `"created"`
  * — the window where the list has yet to show the PR — is the only phase that
  * HAS a number, so no reader has to defend against a missing one.
+ *
+ * Two jobs on two clocks: a created entry stops guarding once `guardReleased`
+ * flips, and lives on past it purely to hold the list's spot.
  */
 export type PrCreate =
   | (PrCreateBase & { phase: "creating" })
-  | (PrCreateBase & { phase: "created"; number: number; url: string });
+  | (PrCreateBase & {
+      phase: "created";
+      number: number;
+      url: string;
+      /** The guard half of the lane is done — list containment or the guard
+       *  timeout released it. The entry persists only to hold the list spot. */
+      guardReleased: boolean;
+    });
+
+/** Whether this lane entry still refuses a second create and keeps the
+ *  repo-view banner up. A created entry whose guard has been released no
+ *  longer blocks — it only holds the list spot. The ONE spelling of that
+ *  question: admission, the dialogs' held-submit hints and the banner all
+ *  route through it, so none of them can drift from the others. */
+export function laneBlocks(entry: PrCreate): boolean {
+  return !(entry.phase === "created" && entry.guardReleased);
+}
 
 interface PrCreateState {
   /** repoPath → head branch → the create in flight. The repo key is ALWAYS a
@@ -90,6 +113,10 @@ export const LANE_BLOCKED_HINT: Record<
  * plus `gh pr create` runs for minutes behind a closed dialog, and a second
  * attempt on the same head would only queue on the repo lock and then open a
  * duplicate PR.
+ *
+ * Only a BLOCKING entry refuses. A guard-released one is REPLACED by the fresh
+ * claim, deliberately: it was holding nothing but the previous PR's list spot,
+ * and that spot belongs to the create the user just started.
  */
 export function startPrCreate(
   repoPath: string,
@@ -104,7 +131,8 @@ export function startPrCreate(
 ): string | null {
   const repo = normPath(repoPath);
   const blocking = usePrCreateStore.getState().byRepo[repo]?.[head];
-  if (blocking) return LANE_BLOCKED_HINT[blocking.phase](blocking.noun);
+  if (blocking && laneBlocks(blocking))
+    return LANE_BLOCKED_HINT[blocking.phase](blocking.noun);
   usePrCreateStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,
@@ -150,7 +178,48 @@ export function markPrCreated(
             phase: "created",
             number: result.number,
             url: result.url,
+            guardReleased: false,
           },
+        },
+      },
+    };
+  });
+}
+
+/**
+ * Ends the GUARD half of one lane: the entry stops refusing a second create and
+ * stops the repo-view banner, while staying in the store to hold the list's
+ * spot until the list contains the PR (or the hand-off's long-stop fires).
+ * Identity-guarded on `startedAt`, so a watcher armed for an earlier create
+ * cannot release the one that re-claimed its head. Leaves the
+ * {@link consumeLastFailed} latch alone — {@link markPrCreated} already cleared
+ * it at the phase flip.
+ *
+ * REPEAT CALLS ARE EXPECTED: the hand-off fires this on every matching list page
+ * for as long as the hold lasts. The already-released arm returning `s` itself
+ * is what keeps them render-free — zustand skips the notify on an `Object.is`
+ * match, so this is a render-stability invariant rather than an optimization.
+ */
+export function releasePrCreateGuard(
+  repoPath: string,
+  head: string,
+  startedAt: number,
+): void {
+  const repo = normPath(repoPath);
+  usePrCreateStore.setState((s) => {
+    const entry = s.byRepo[repo]?.[head];
+    if (
+      entry?.phase !== "created" ||
+      entry.startedAt !== startedAt ||
+      entry.guardReleased
+    )
+      return s;
+    return {
+      byRepo: {
+        ...s.byRepo,
+        [repo]: {
+          ...s.byRepo[repo],
+          [head]: { ...entry, guardReleased: true },
         },
       },
     };
@@ -165,11 +234,13 @@ export function markPrCreated(
  *   makes it the caller's job to have one: it settles a failure as `"error"`
  *   only while its form still holds the draft it submitted, and as `"release"`
  *   otherwise — a latch minted over a destroyed draft is one nothing consumes.
- * - `"success"` belongs to the hand-off watcher alone (`pr-create-handoff`, or
- *   its timeout): the lane ends when the list contains the PR, not when the
- *   forge answers. It clears the latch, as {@link markPrCreated} already did at
- *   the phase flip, so the outcome stays meaningful for any caller that could
- *   reach it without one.
+ * - `"success"` belongs to the deferred settlers — the pulls panel, whose page
+ *   is the one the strip sits in, and `pr-create-handoff` for closed evidence
+ *   and the long stop — and reaches them only through
+ *   {@link settlePrCreateIfCurrent}: the lane ends when the list contains the
+ *   PR, not when the forge answers. It clears the latch, as
+ *   {@link markPrCreated} already did at the phase flip, so the outcome stays
+ *   meaningful for any caller that could reach it without one.
  * - `"release"` is for a lane holder with no draft to protect —
  *   PromoteLocalPrDialog's failed-before-create path, and CreatePrDialog's own
  *   failure once a seed has taken its draft. It only frees the entry, leaving
@@ -197,9 +268,24 @@ export function settlePrCreate(
   });
 }
 
+/** Settles a lane as `"success"`, but only while the entry is still the one the
+ *  caller claimed. Every DEFERRED settle goes through here — a hand-off watcher,
+ *  a panel effect — since a bare {@link settlePrCreate} from one of those deletes
+ *  whatever create re-claimed the head in the meantime. */
+export function settlePrCreateIfCurrent(
+  repoPath: string,
+  head: string,
+  startedAt: number,
+): void {
+  if (prCreateStartedAt(repoPath, head) !== startedAt) return;
+  settlePrCreate(repoPath, head, "success");
+}
+
 /** The lane's phase for this exact head, null when there is none. A FIRE-TIME
  *  read: call it where a decision is made, never to decide what a component
- *  paints — use {@link usePrCreatePhase} or {@link usePrCreates} for render. */
+ *  paints — use {@link usePrCreatePhase} or {@link usePrCreates} for render.
+ *  Unlike those, it reports an ENTRY's phase whether or not it still blocks; an
+ *  admission decision reads {@link laneBlocks}, not this. */
 export function prCreatePhase(
   repoPath: string,
   head: string,
@@ -232,20 +318,24 @@ export function consumeLastFailed(repoPath: string, head: string): boolean {
   return lastFailed.delete(failKey(repoPath, head));
 }
 
-/** The creates in flight for one repo, oldest first. */
+/** Every lane entry for one repo, oldest first — guard-released holds included,
+ *  since the list strip is what they exist for. A surface that speaks for the
+ *  GUARD filters on {@link laneBlocks}. */
 export function usePrCreates(repoPath: string): PrCreate[] {
   const entries = usePrCreateStore((s) => s.byRepo[normPath(repoPath)]);
   if (!entries) return NO_CREATES;
   return Object.values(entries).sort((a, b) => a.startedAt - b.startedAt);
 }
 
-/** Render twin of {@link prCreatePhase}. A non-null phase IS the lane's
- *  existence, so this is also the render-time "a create owns this head" read. */
+/** Render twin of the ADMISSION read, not of entry existence: a non-null phase
+ *  means a create still OWNS this head, so a guard-released entry reads null
+ *  here even though it is still in the store holding the list's spot. */
 export function usePrCreatePhase(
   repoPath: string,
   head: string | undefined,
 ): "creating" | "created" | null {
-  return usePrCreateStore(
-    (s) => (head ? s.byRepo[normPath(repoPath)]?.[head]?.phase : null) ?? null,
-  );
+  return usePrCreateStore((s) => {
+    const entry = head ? s.byRepo[normPath(repoPath)]?.[head] : undefined;
+    return entry && laneBlocks(entry) ? entry.phase : null;
+  });
 }

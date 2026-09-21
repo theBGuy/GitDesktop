@@ -1092,7 +1092,12 @@ list says so rather than guessing. Type any author or label name and the funnel 
 filter by exactly that, whether or not the list has shown it. Several picks within one
 group widen the list (any of them matches), while picks in different groups narrow it.
 The **Mine** rows are remembered per repository; author and label picks last for the
-session.
+session. **Refresh pull requests**, beside the search box, re-reads the list you're looking
+at along with its checks, conflict chips, review-state grouping and your local pull
+requests; it spins while the read is in flight. *Refresh pull requests* in the command
+palette does the same (palette-only by default — bind a key in **Settings → Keyboard**).
+While a newly created pull request is still holding its place in the list, the list chases
+the forge on its own for a short spell, so the real row usually arrives without a press.
 
 **Group by my review**, the funnel's last row and what **Needs review** turns on, splits
 the open list into **Not reviewed yet**, **Updated since my review**, and **Reviewed**,
@@ -1461,9 +1466,11 @@ can run for a while: close the dialog and it carries on — a line at the top of
 view names the branch until the new pull request has settled into the list. The PR list it's
 headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
 branches and draft state; the number appears there as the PR opens, and the real row takes
-over once the list catches up. Reopening the dialog while it runs keeps everything you had
-typed, and a second create for the same branch is refused until the first one has settled
-into the list.
+over once the list catches up. From the moment that number appears the entry is a real row:
+click it, or walk to it with **↑ / ↓** and press Enter, and the pull request opens without
+waiting for the list. Reopening the dialog while it runs keeps everything you had
+typed, and a second create for the same branch is refused while the first is still in
+flight.
 Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —

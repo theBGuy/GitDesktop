@@ -1,5 +1,5 @@
 import { Spinner } from "@/components/ui/spinner";
-import { usePrCreates } from "@/lib/stores/pr-create";
+import { laneBlocks, usePrCreates } from "@/lib/stores/pr-create";
 
 /**
  * Keeps a running pull-request creation visible after its dialog is dismissed.
@@ -9,13 +9,16 @@ import { usePrCreates } from "@/lib/stores/pr-create";
  * the header. There is nothing to press: `git push` has no clean mid-flight
  * cancel, so a create can only be waited out.
  *
- * The line is phase-STATIC by design: a lane lives on past the forge's answer
- * until the list shows the PR, and rewriting this region's text there would
- * re-announce it on top of the success toast. The list's own pending strip
- * carries the number instead.
+ * The line is phase-STATIC by design: rewriting this region's text when the
+ * forge answers would re-announce it on top of the success toast. The list's
+ * own pending strip carries the number instead.
+ *
+ * Only BLOCKING lanes are listed, so the line clears when the guard releases —
+ * list containment or the guard timeout. The entry itself may outlive it,
+ * holding the list's spot, and this region must stay quiet for that.
  */
 export function PrCreateBanner({ repoPath }: { repoPath: string }) {
-  const creates = usePrCreates(repoPath);
+  const creates = usePrCreates(repoPath).filter(laneBlocks);
 
   return (
     // Mounted unconditionally: a live region created together with its text

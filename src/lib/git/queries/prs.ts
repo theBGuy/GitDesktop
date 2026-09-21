@@ -50,6 +50,10 @@ export function usePrList(
   limit: number | undefined,
   lens: RemoteLens,
   filter: RemoteListFilter | null = null,
+  /** Poll this list while the CALLER has something it is waiting for the forge
+   *  to show. Caller-owned and bounded — this hook counts no rungs, so an
+   *  unbounded value polls forever; default false is every other call site. */
+  refetchIntervalMs: number | false = false,
 ) {
   return useQuery({
     // The filter key is APPENDED (index 6) so the existing axis indices — and the
@@ -76,6 +80,8 @@ export function usePrList(
     // match: a fork numbers PRs independently of its parent, so another lens's rows
     // misdescribe the list and a click on one navigates by number to a different PR.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
+    refetchInterval: refetchIntervalMs,
+    refetchIntervalInBackground: false,
   });
 }
 

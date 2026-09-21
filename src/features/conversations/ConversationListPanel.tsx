@@ -35,9 +35,9 @@ export interface NewMenuConfig {
   onJira?: () => void;
 }
 
-/** The list row's box. Exported so a pinned non-row (a pending strip) wears the
- *  same box and swaps slot-for-slot with the real row it stands in for. */
-export const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
+/** The list row's box — worn by real rows and pinned strips alike, so a strip
+ *  standing in for a row swaps slot-for-slot with it. */
+const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
 function rowClass(active: boolean) {
   return cn(
     ROW_CLASS,
@@ -100,7 +100,7 @@ function SectionHeader(props: {
  * (and thus the `data-row` keys arrow-key nav depends on) is baked in here; each
  * panel supplies only the inner row content via render props.
  */
-export function ConversationListPanel<L, R, J = never>(props: {
+export function ConversationListPanel<L, R, J = never, P = never>(props: {
   repoPath: string;
   /** ForgeNotReady's `feature` (e.g. "pull requests"). */
   feature: string;
@@ -109,6 +109,10 @@ export function ConversationListPanel<L, R, J = never>(props: {
   onStateFilter: (s: "open" | "closed") => void;
   newMenu: NewMenuConfig;
   filterSlot: ReactNode;
+  /** Extra list controls, rendered at the right of the SEARCH row rather than
+   *  the state-filter row above it, which is already full at the sidebar's width
+   *  and wraps. Omit (the default) and nothing renders. */
+  toolbarActions?: ReactNode;
   /** Optional All | Mine | … scope switch, rendered in the toolbar between the
    *  state filter and the lens switch. Omit (the default) and nothing renders,
    *  so a provider without server-side scope filters keeps the old toolbar. */
@@ -178,16 +182,26 @@ export function ConversationListPanel<L, R, J = never>(props: {
   /** A muted line under the remote header, above its rows — e.g. why a requested
    *  grouping couldn't be applied. Omit (the default) and nothing renders. */
   remoteNote?: ReactNode;
-  /** Content pinned at the TOP of the remote section, above every ladder branch
+  /** Rows pinned at the TOP of the remote section, above every ladder branch
    *  (rows, groups, skeletons, the error slot, the empty copy) and hidden with
-   *  the section — e.g. a strip holding a running create's place. CONTRACT: the
-   *  content is presentational, carrying no `data-row` keys and nothing
-   *  focusable, so the caller's arrow-key registry and the tab order are the
-   *  same with and without it. While it is present the bare "No open X." empty
-   *  copy is suppressed (a section can't report none directly under a strip
-   *  making one); the "match the filter" variant still renders, being true
-   *  beside it. Omit (the default) and nothing changes. */
-  remotePinnedSlot?: ReactNode;
+   *  the section — a strip holding running creates' places. Each item wears the
+   *  same row box as a remote row and `rowId` decides its semantics: a string
+   *  makes it a REAL row, selectable and carrying that `data-row` key, so the
+   *  caller MUST register the same ids in this array's order ahead of its remote
+   *  rows; null keeps the item presentational, with no key and nothing
+   *  focusable. While any pinned row is present the bare "No open X." empty copy
+   *  is suppressed (a section can't report none directly under a strip making
+   *  one); the "match the filter" variant still renders, being true beside it.
+   *  Omit (the default) and nothing changes. */
+  remotePinned?: {
+    items: P[];
+    key: (item: P) => string;
+    rowId: (item: P) => string | null;
+    isActive: (item: P) => boolean;
+    onSelect: (item: P) => void;
+    onHover: (item: P) => void;
+    render: (item: P) => ReactNode;
+  };
   /** Splits the remote rows into collapsible subsections, rendered in array order
    *  in place of the flat list. Omit (the default) and the flat list renders
    *  exactly as before. Every row keeps its `data-row` key, so the caller's
@@ -246,6 +260,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     onStateFilter,
     newMenu,
     filterSlot,
+    toolbarActions,
     presetControl,
     lensControl,
     filterRef,
@@ -285,7 +300,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     remoteError,
     remoteErrorSlot,
     remoteNote,
-    remotePinnedSlot,
+    remotePinned,
     remoteGroups,
     localNoun,
     remoteNoun,
@@ -309,6 +324,30 @@ export function ConversationListPanel<L, R, J = never>(props: {
       {renderRemoteRow(item)}
     </button>
   );
+
+  // Pinned rows share the remote rows' box and `data-row` namespace, so a strip
+  // standing in for a real row hands its selection and focus straight over when
+  // the real one arrives. The presentational arm is the same box with no button
+  // semantics at all — never a lookalike with a dead handler.
+  const pinnedBody = remotePinned?.items.map((item) => {
+    const id = remotePinned.rowId(item);
+    return id === null ? (
+      <div key={remotePinned.key(item)} className={ROW_CLASS}>
+        {remotePinned.render(item)}
+      </div>
+    ) : (
+      <button
+        type="button"
+        key={remotePinned.key(item)}
+        data-row={`remote:${id}`}
+        className={rowClass(remotePinned.isActive(item))}
+        onClick={() => remotePinned.onSelect(item)}
+        onMouseEnter={() => remotePinned.onHover(item)}
+      >
+        {remotePinned.render(item)}
+      </button>
+    );
+  });
 
   // Subsection headers indent one step under the provider header; the rows keep
   // the flat list's chrome so a grouped and an ungrouped list read the same.
@@ -335,7 +374,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
   // "none match the filter" stays true beside a status strip.
   const remoteEmptyCopy = (() => {
     if (stateRemote.length > 0) return `No ${remoteNoun} match the filter.`;
-    if (remotePinnedSlot != null) return null;
+    if (pinnedBody != null && pinnedBody.length > 0) return null;
     return `No ${stateFilter} ${remoteNoun}.`;
   })();
 
@@ -385,15 +424,19 @@ export function ConversationListPanel<L, R, J = never>(props: {
         </DropdownMenu>
         {filterSlot}
       </div>
-      <div className="border-b p-2">
+      {/* The search row hosts the extra controls: the state-filter row above is
+          already full at the sidebar's width, so anything added there wraps to
+          an orphan line. The input flexes, so this row cannot. */}
+      <div className="flex items-center gap-1 border-b p-2">
         <Input
           ref={filterRef}
           value={filterText}
           onChange={(e) => onFilterText(e.target.value)}
           placeholder="Search by title, #, author, or label"
-          className="h-7"
+          className="h-7 min-w-0 flex-1"
           autoComplete="off"
         />
+        {toolbarActions}
       </div>
       {/* overflow-hidden: the vendored ScrollArea Root is upstream-faithful
           (`relative` only), so without containment the list's natural height
@@ -473,7 +516,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
               {remoteNote}
             </p>
           )}
-          {!remoteCollapsed && remotePinnedSlot != null && remotePinnedSlot}
+          {!remoteCollapsed && pinnedBody}
           {!remoteCollapsed &&
             (ghPending ? (
               <ListRowSkeletons

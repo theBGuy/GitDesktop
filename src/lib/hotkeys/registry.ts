@@ -884,6 +884,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "refresh-pr-list",
+    label: "Refresh pull requests",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
     id: "pr-archive",
     label: "Archive pull request",
     category: "Pull requests",
