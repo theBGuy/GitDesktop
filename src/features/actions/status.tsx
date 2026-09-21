@@ -48,7 +48,7 @@ export type RerunOffer = {
 
 /** What each re-run offer is called. Both offer builders below read these, so
  *  the run views and the PR checks rollup can't spell one operation two ways. */
-export const RERUN_LABELS: Record<RerunOffer["kind"], string> = {
+const RERUN_LABELS: Record<RerunOffer["kind"], string> = {
   all: "Re-run all jobs",
   failed: "Re-run failed jobs",
   retry: "Retry pipeline",

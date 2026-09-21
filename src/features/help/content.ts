@@ -1137,14 +1137,14 @@ jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
 commit build statuses, but those **link out only** (name, state, and URL —
 Bitbucket exposes no fetchable job logs).
 
-A red build restarts from the rollup itself: when a run behind a failing check has
-finished, a button appears beside the summary line. On **GitHub** it reads **Re-run
-failed jobs** and restarts the failed jobs of every finished run behind a failing
-check; on **GitLab** it reads **Retry pipeline** and retries the pipeline's failed
-and canceled jobs. The command palette carries it as **Re-run failed jobs / Retry
-pipeline**, palette-only by default — bind a key in Settings. If your sign-in
-can't push, the button stays visible and disabled with the reason. **Bitbucket**
-has no pull-request-scoped re-run, so no button appears there.
+A red build restarts from the rollup itself: a button beside the summary line. On
+**GitHub** it reads **Re-run failed jobs**, appears once a run behind a failing
+check has finished, and restarts that run's failed jobs; on **GitLab** it reads
+**Retry pipeline**, appears as soon as a job fails, and retries the pipeline's
+failed and canceled jobs. The command palette carries it as **Re-run failed jobs /
+Retry pipeline**, palette-only by default — bind a key in Settings. If your
+sign-in can't push, the button stays visible and disabled with the reason.
+**Bitbucket** has no pull-request-scoped re-run, so no button appears there.
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
