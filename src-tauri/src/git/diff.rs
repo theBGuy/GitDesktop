@@ -524,10 +524,11 @@ enum DiffAttr {
 }
 
 /// git's config-bool alphabet, case-insensitive: the named spellings, a VALUELESS key
-/// (`None`) as true, an empty value as false, and any INTEGER, where non-zero is true.
-/// A value outside it is not a bool git can parse either — git FATALS the diff rather
-/// than choosing — so dropping the entry and letting the content sniff decide is
-/// strictly more graceful than what git itself does.
+/// (`None`) as true, an empty value as false, and any DECIMAL integer, where non-zero
+/// is true (git also reads `0x` hex via strtoimax base 0; that spelling drops to the
+/// sniff here). A junk value is not a bool git can parse either — git FATALS the diff
+/// rather than choosing — so dropping the entry and letting the content sniff decide
+/// is strictly more graceful than what git itself does.
 fn git_config_bool(value: Option<&str>) -> Option<bool> {
     let Some(value) = value else {
         return Some(true);
@@ -551,11 +552,11 @@ fn git_config_bool(value: Option<&str>) -> Option<bool> {
 /// `<driver>` is everything between the prefix and the suffix, so a dotted driver name
 /// survives intact. `None` = the stream is not the shape this asked git for (a key
 /// outside the queried pattern), which is a probe FAILURE rather than an empty answer.
-/// Three cases skip their own entry instead: `auto`, the attribute's third tristate
-/// value, which asks for a content decision and so CLEARS any verdict an earlier scope
-/// set; any OTHER non-bool value, since git fatals on those and per-entry degrading is
-/// the gentler read; and an EMPTY driver name, since `[diff ""]` is legal config whose
-/// key is in-pattern.
+/// Three cases skip their own entry instead: `auto`, the key's third value (the key is
+/// a tristate, not a bool), which asks for a content decision and so CLEARS any verdict
+/// an earlier scope set; any OTHER non-bool value, since git fatals on those and
+/// per-entry degrading is the gentler read; and an EMPTY driver name, since `[diff ""]`
+/// is legal config whose key is in-pattern.
 fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<String, bool>> {
     let mut flags = std::collections::HashMap::new();
     for entry in text.split('\0').filter(|e| !e.is_empty()) {
@@ -572,8 +573,8 @@ fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<Stri
         if name.is_empty() {
             continue;
         }
-        // The attribute is a TRISTATE: `auto` means decide by content, which is what
-        // the sniff already does, and as a later match it CLEARS an earlier scope's
+        // The key is a TRISTATE: `auto` means decide by content, which is what the
+        // sniff already does, and as a later match it CLEARS an earlier scope's
         // verdict rather than leaving it standing.
         if value.is_some_and(|value| value.eq_ignore_ascii_case("auto")) {
             flags.remove(name);
@@ -1929,9 +1930,9 @@ mod tests {
             "a key this query cannot return means the stream is unreadable"
         );
 
-        // `auto` is the attribute's third tristate value: decide by content, which is
-        // the sniff. As a LATER match it clears what an earlier scope set; an earlier
-        // one is simply overwritten by the later verdict.
+        // `auto` is the key's third value (the key is a tristate): decide by content,
+        // which is the sniff. As a LATER match it clears what an earlier scope set; an
+        // earlier one is simply overwritten by the later verdict.
         assert_eq!(
             read("diff.dauto.binary\nauto\0").get("dauto"),
             None,

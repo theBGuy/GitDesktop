@@ -87,8 +87,8 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
     (lineStats.data?.staged ?? []).map((e) => [e.path, e]),
   );
   // numstat emits duplicate noise rows for conflicted paths, so those render a
-  // blank slot — the Changes panel's rule. Untracked files are counted
-  // backend-side onto the unstaged side.
+  // blank slot — the Changes panel's rule, kept as belt-and-braces here even
+  // though a staged row never carries that kind.
   function statFor(entry: FileEntry) {
     if (entry.staged === "conflicted") return undefined;
     return stagedStats.get(entry.path);
