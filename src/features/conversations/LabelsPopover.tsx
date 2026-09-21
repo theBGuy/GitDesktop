@@ -8,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 import { LabelChip } from "./Thread";
 
@@ -52,21 +52,15 @@ export function LabelsPopover({
   const editLabels = useEditPrLabels(repoPath, lens);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
-  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
 
   const rows = repoLabels.data ?? [];
-  const navIndexByName = new Map(rows.map((label, i) => [label.name, i]));
-  const activeIndex =
-    activeId === null ? -1 : (navIndexByName.get(activeId) ?? -1);
-  // Nothing active yet (or the active row vanished on a refetch) parks the single
-  // tab stop on the first row.
-  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
-  const onRowKeyDown = listKeyboardNav({
+  // Tab cycles the rows: nothing else in this popup is focusable, so one-handed
+  // Tab+Space multi-select is worth its native Tab exit (Esc still closes).
+  const nav = useRovingRows({
     items: rows,
-    activeIndex,
-    onActivate: (label) => setActiveId(label.name),
     rowKey: (label) => label.name,
+    tabAdvances: true,
   });
 
   function toggleDraft(name: string, on: boolean) {
@@ -156,25 +150,20 @@ export function LabelsPopover({
                   : "This repository has no labels."}
               </p>
             )}
-            {/* Unstyled but NOT removable: it hosts the key handler, and
-                `listKeyboardNav` finds the row to focus by querying within it. */}
-            <div onKeyDown={onRowKeyDown}>
+            {/* Unstyled but NOT removable — see `useRovingRows`. */}
+            <div onKeyDown={nav.onRowKeyDown}>
               {rows.map((label) => (
                 <label
                   key={label.name}
                   className={cn(
                     "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
-                    activeId === label.name && "bg-muted/60",
+                    nav.isActive(label) && "bg-muted/60",
                   )}
                 >
                   <Checkbox
-                    data-row={label.name}
-                    tabIndex={
-                      navIndexByName.get(label.name) === focusIndex ? 0 : -1
-                    }
+                    {...nav.rowProps(label)}
                     checked={draft.has(label.name)}
                     onCheckedChange={(v) => toggleDraft(label.name, v === true)}
-                    onFocus={() => setActiveId(label.name)}
                   />
                   <span
                     aria-hidden
@@ -189,7 +178,7 @@ export function LabelsPopover({
             </div>
             {rows.length > 0 && (
               <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
-                Changes apply when this closes.
+                Changes apply when this closes. Tab cycles the rows; Esc closes.
               </p>
             )}
           </Popover.Popup>

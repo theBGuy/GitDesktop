@@ -29,7 +29,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 
@@ -143,7 +143,6 @@ export function ProjectsPopover({
   // lose a toggle: every row is locked for the whole pre-settle window.
   const [seeded, setSeeded] = useState<Set<string>>(new Set());
   const [seededSettled, setSeededSettled] = useState(false);
-  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
 
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
@@ -206,16 +205,10 @@ export function ProjectsPopover({
   const navRows = rowLockedReason
     ? []
     : rows.filter((project) => project.viewerCanUpdate);
-  const navIndexById = new Map(navRows.map((project, i) => [project.id, i]));
-  const activeIndex =
-    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
-  // Nothing active yet (or the active row vanished on a refetch) parks the single
-  // tab stop on the first navigable row.
-  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
-  const onRowKeyDown = listKeyboardNav({
+  // No `tabAdvances`: Tab must keep reaching this popup's other focusable
+  // elements, the Reconnect and Retry buttons.
+  const nav = useRovingRows({
     items: navRows,
-    activeIndex,
-    onActivate: (project) => setActiveId(project.id),
     rowKey: (project) => project.id,
   });
   // The apply promise is only true while the rows can actually be toggled: a
@@ -405,24 +398,29 @@ export function ProjectsPopover({
                       No open projects in this repository or its owner.
                     </p>
                   )}
+                {/* py-2 contains the Checkbox touch-target's 8px vertical bleed
+                    (after:-inset-y-2) — without it the pseudo adds scrollable
+                    overflow and Windows draws a scrollbar for even one row. */}
                 <div
-                  className="max-h-64 overflow-y-auto"
-                  onKeyDown={onRowKeyDown}
+                  className="max-h-64 overflow-y-auto py-2"
+                  onKeyDown={nav.onRowKeyDown}
                 >
-                  {rows.map((project) => (
-                    <ProjectRow
-                      key={project.id}
-                      project={project}
-                      checked={draft.has(project.id)}
-                      active={activeId === project.id}
-                      rovingTab={
-                        navIndexById.get(project.id) === focusIndex ? 0 : -1
-                      }
-                      lockedReason={rowLockedReason}
-                      onToggle={(on) => toggleDraft(project.id, on)}
-                      onFocus={() => setActiveId(project.id)}
-                    />
-                  ))}
+                  {rows.map((project) => {
+                    const row = nav.rowProps(project);
+                    return (
+                      <ProjectRow
+                        key={project.id}
+                        project={project}
+                        checked={draft.has(project.id)}
+                        active={nav.isActive(project)}
+                        rowKey={row["data-row"]}
+                        rovingTab={row.tabIndex}
+                        lockedReason={rowLockedReason}
+                        onToggle={(on) => toggleDraft(project.id, on)}
+                        onFocus={row.onFocus}
+                      />
+                    );
+                  })}
                 </div>
                 {/* The truncation note stands alone: a 50-cap catalog of only
                       CLOSED boards renders zero rows, where a bare "no projects"
@@ -505,6 +503,7 @@ function ProjectRow({
   project,
   checked,
   active,
+  rowKey,
   rovingTab,
   lockedReason,
   onToggle,
@@ -513,6 +512,8 @@ function ProjectRow({
   project: ProjectV2Ref;
   checked: boolean;
   active: boolean;
+  /** The row's `data-row` key, as the nav hook spells it — the key it queries by. */
+  rowKey: string;
   /** Roving tabindex: one tab stop for the whole list, on the active row. */
   rovingTab: number;
   lockedReason?: string;
@@ -551,7 +552,7 @@ function ProjectRow({
       )}
     >
       <Checkbox
-        data-row={project.id}
+        data-row={rowKey}
         tabIndex={rovingTab}
         checked={checked}
         onCheckedChange={(v) => onToggle(v === true)}

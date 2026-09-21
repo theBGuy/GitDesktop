@@ -957,6 +957,9 @@ export const CHECKS = [
       "src/features/pulls/ReviewThreads.tsx",
       "src/features/repository/FileRow.tsx",
       "src/features/research/ResearchView.tsx",
+      // tabAdvances excludes every modified Tab symmetrically — not a
+      // platform-modifier read, so isMac derivation would be wrong here.
+      "src/lib/list-keyboard-nav.ts",
     ],
     message:
       "derive the platform modifier via the hotkeys helpers (formatBinding/isMac) — new hand-rolled ctrl/meta checks need an allowlist entry with rationale",

@@ -789,8 +789,11 @@ export function CleanupBranchesDialog({
                   : null}
               </p>
             ) : (
+              // py-2 contains the Checkbox touch-target's 8px vertical bleed
+              // (after:-inset-y-2) — without it the pseudo adds scrollable
+              // overflow and Windows draws a scrollbar for even one row.
               <div
-                className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1"
+                className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1 py-2"
                 onKeyDown={onKeyDown}
               >
                 {candidates.map((c, idx) => {

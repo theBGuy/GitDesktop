@@ -24,7 +24,7 @@ import {
   useMilestones,
 } from "@/lib/git/queries";
 import type { ForgeUserRef, IssueType, RemoteLens } from "@/lib/git/types";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
 /** GitHub issue-type color NAMES → a swatch hex (matches GitHub's palette). */
@@ -95,7 +95,6 @@ export function AssigneesPopover({
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
-  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
   // Per-toggle mode reads `value`; commit-on-close mode reads the local draft
   // (seeded from `value` on open). Compare by the provider's stable id.
@@ -140,17 +139,12 @@ export function AssigneesPopover({
   }
 
   const loaded = users.data ?? [];
-  const navIndexById = new Map(loaded.map((user, i) => [user.id, i]));
-  const activeIndex =
-    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
-  // Nothing active yet (or the active row vanished on a refetch) parks the single
-  // tab stop on the first row.
-  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
-  const onRowKeyDown = listKeyboardNav({
+  // Tab cycles the rows: nothing else in this popup is focusable, so one-handed
+  // Tab+Space multi-select is worth its native Tab exit (Esc still closes).
+  const nav = useRovingRows({
     items: loaded,
-    activeIndex,
-    onActivate: (user) => setActiveId(user.id),
     rowKey: (user) => user.id,
+    tabAdvances: true,
   });
 
   const trigger = (
@@ -189,23 +183,20 @@ export function AssigneesPopover({
                 {users.isPending ? "Loading…" : "No assignable users."}
               </p>
             )}
-            {/* Unstyled but NOT removable: it hosts the key handler, and
-                `listKeyboardNav` finds the row to focus by querying within it. */}
-            <div onKeyDown={onRowKeyDown}>
+            {/* Unstyled but NOT removable — see `useRovingRows`. */}
+            <div onKeyDown={nav.onRowKeyDown}>
               {loaded.map((user) => (
                 <label
                   key={user.id}
                   className={cn(
                     "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
-                    activeId === user.id && "bg-muted/60",
+                    nav.isActive(user) && "bg-muted/60",
                   )}
                 >
                   <Checkbox
-                    data-row={user.id}
-                    tabIndex={navIndexById.get(user.id) === focusIndex ? 0 : -1}
+                    {...nav.rowProps(user)}
                     checked={checkedIds.has(user.id)}
                     onCheckedChange={(v) => toggle(user, v === true)}
-                    onFocus={() => setActiveId(user.id)}
                   />
                   <ForgeUserAvatar user={user} ghHost={ghHost} />
                   <span className="flex-1 truncate" title={user.label}>
@@ -214,6 +205,13 @@ export function AssigneesPopover({
                 </label>
               ))}
             </div>
+            {/* Tab is trapped in both directions while rows exist, so the
+                remaining keyboard exit has to be on screen. */}
+            {loaded.length > 0 && (
+              <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
+                Tab cycles the rows; Esc closes.
+              </p>
+            )}
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

@@ -27,7 +27,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { DATE_ONLY, IterationRange, OptionValue } from "./ProjectFieldValues";
@@ -446,8 +446,11 @@ export function ProjectFieldsEditor({
                 row below renders at natural height, so nothing nests a second
                 scrollbar inside this one. Capped against the WINDOW rather than at a
                 fixed height — a full field spread is taller than any cap that also
-                fits a short window, and `max-h` only bites once content exceeds it. */}
-            <div className="max-h-[70vh] space-y-3 overflow-y-auto px-1">
+                fits a short window, and `max-h` only bites once content exceeds it.
+                py-2 contains the Checkbox touch-target's 8px vertical bleed
+                (after:-inset-y-2) — without it the pseudo adds scrollable overflow
+                and Windows draws a scrollbar for even one row. */}
+            <div className="max-h-[70vh] space-y-3 overflow-y-auto px-1 py-2">
               {boards.map((board) => (
                 <BoardSection
                   key={board.itemId}
@@ -885,22 +888,16 @@ function MultiSelectRows({
   lockedReason?: string;
   onChange: (entry: FieldDraft) => void;
 }) {
-  const [activeId, setActiveId] = useState<string | null>(null);
   const chosen =
     current !== null && current.kind === "multiSelect" ? current.options : [];
   const chosenIds = new Set(chosen.map((option) => option.id));
   // Locked rows are skipped by the arrows rather than made focus black holes: a
   // natively-disabled checkbox can't take focus.
   const navRows = lockedReason ? [] : def.options;
-  const navIndexById = new Map(navRows.map((option, i) => [option.id, i]));
-  const activeIndex =
-    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
-  // Nothing active yet parks the single tab stop on the first row.
-  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
-  const onKeyDown = listKeyboardNav({
+  // No `tabAdvances`: these rows sit among the popup's other field editors, so
+  // Tab has to keep walking out of this list.
+  const nav = useRovingRows({
     items: navRows,
-    activeIndex,
-    onActivate: (option) => setActiveId(option.id),
     rowKey: (option) => option.id,
   });
 
@@ -931,28 +928,25 @@ function MultiSelectRows({
   }
 
   return (
-    // Unstyled but NOT removable: it hosts the key handler, and `listKeyboardNav`
-    // finds the row to focus by querying within this element. The popup body owns
-    // the scrolling, so this list renders at natural height.
-    <div onKeyDown={onKeyDown}>
+    // Unstyled but NOT removable — see `useRovingRows`. The popup body owns the
+    // scrolling, so this list renders at natural height.
+    <div onKeyDown={nav.onRowKeyDown}>
       {def.options.map((option) => (
         <label
           key={option.id}
           className={cn(
             ROW_CLASS,
             lockedReason && "cursor-not-allowed",
-            activeId === option.id && "bg-muted/60",
+            nav.isActive(option) && "bg-muted/60",
           )}
           // See the single-select rows: the board's note on the option, hover-only.
           title={option.description || undefined}
         >
           <Checkbox
-            data-row={option.id}
-            tabIndex={navIndexById.get(option.id) === focusIndex ? 0 : -1}
+            {...nav.rowProps(option)}
             checked={chosenIds.has(option.id)}
             disabled={!!lockedReason}
             onCheckedChange={(v) => toggle(option.id, v === true)}
-            onFocus={() => setActiveId(option.id)}
           />
           <OptionValue name={option.name} color={option.color} />
         </label>
