@@ -635,6 +635,7 @@ export function RemotePrView({
   // The composer/thread-create side of the forge detection: a strict provider key
   // (default "github" — gh is the authoritative default for an unrecognized host).
   const providerKey: ForgeProvider = provider ?? "github";
+
   // Palette-only PR actions — mounted here so they live only while a remote PR is
   // open. Every one whose enablement reads `details.data` also gates on
   // `!details.isPlaceholderData`: during a switch that data is the previous PR's,
@@ -2469,8 +2470,8 @@ export function RemotePrView({
         contentId={pr.id}
         lens={lens}
         disabledReason={pickerReason}
-        // The cells term of the palette gate is this branch; the trigger's own
-        // hold is the rest, and each component derives that for itself.
+        // The provider term of the palette gate is this branch's `canWrite`; the
+        // trigger's own hold is the rest, and each component derives that itself.
         paletteEnabled={isSelectedPr}
       />,
     );

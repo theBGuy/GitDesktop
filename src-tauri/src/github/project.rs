@@ -236,8 +236,8 @@ fn item_projects_query(field: &str) -> String {
     )
 }
 
-/// The two per-item reads must derive truncation identically because the frontend
-/// intersects their results.
+/// Shared by both per-item reads: the picker and the field-values row render the
+/// same partial-list note, so the two must agree on when the connection was capped.
 pub(super) fn item_projects_truncated(value: &Value, field: &str) -> bool {
     value
         .pointer(&format!(
