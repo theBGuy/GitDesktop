@@ -1782,6 +1782,22 @@ function outsideCode(html) {
     .replace(/<code[\s\S]*?<\/code>/g, " ");
 }
 
+/** `marked`, or null once the test has been skipped for lacking it. The ONE
+ *  import site, so a new oracle test can't reintroduce a bare catch that skips
+ *  silently in the enforced run: GD_EXPECT_DEPS is set there, where a broken
+ *  import must FAIL, and unset in the no-install guards job, where it skips. */
+async function importMarked(t) {
+  try {
+    return (await import("marked")).Marked;
+  } catch (e) {
+    if (process.env.GD_EXPECT_DEPS) throw e;
+    t.skip(
+      "marked is not installed — the guards job runs with no install step",
+    );
+    return null;
+  }
+}
+
 // The only oracle here that is not the scanner itself: every other property test
 // proves self-consistency, this one puts the wrapped output through a real
 // CommonMark parser and asserts the claim holds in the RENDERED shape. It skips
@@ -1789,18 +1805,8 @@ function outsideCode(html) {
 // install step — locally it runs, and the session's forge-render probes are the
 // cross-check that marked's geometry matches the forges'.
 test("a wrapped ref never renders more exposed than it started", async (t) => {
-  let Marked;
-  try {
-    ({ Marked } = await import("marked"));
-  } catch (e) {
-    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
-    // rather than skip; the no-install guards job leaves it unset and skips.
-    if (process.env.GD_EXPECT_DEPS) throw e;
-    t.skip(
-      "marked is not installed — the guards job runs with no install step",
-    );
-    return;
-  }
+  const Marked = await importMarked(t);
+  if (!Marked) return;
   const md = new Marked();
   for (const source of CORPUS) {
     // marked parses a few geometries differently from the forges; those are pinned
@@ -1840,18 +1846,8 @@ test("a wrapped ref never renders more exposed than it started", async (t) => {
 // renders, just as bracket text instead of an anchor, and its ref is not MORE exposed
 // than it started. So the link itself is what gets asserted.
 test("a reference link still renders as a link afterwards", async (t) => {
-  let Marked;
-  try {
-    ({ Marked } = await import("marked"));
-  } catch (e) {
-    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
-    // rather than skip; the no-install guards job leaves it unset and skips.
-    if (process.env.GD_EXPECT_DEPS) throw e;
-    t.skip(
-      "marked is not installed — the guards job runs with no install step",
-    );
-    return;
-  }
+  const Marked = await importMarked(t);
+  if (!Marked) return;
   const md = new Marked();
   for (const source of [
     LINK_REF_SHORTCUT,
@@ -1867,18 +1863,8 @@ test("a reference link still renders as a link afterwards", async (t) => {
 });
 
 test("the renderer agrees about the CRLF corpus too", async (t) => {
-  let Marked;
-  try {
-    ({ Marked } = await import("marked"));
-  } catch (e) {
-    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
-    // rather than skip; the no-install guards job leaves it unset and skips.
-    if (process.env.GD_EXPECT_DEPS) throw e;
-    t.skip(
-      "marked is not installed — the guards job runs with no install step",
-    );
-    return;
-  }
+  const Marked = await importMarked(t);
+  if (!Marked) return;
   const md = new Marked();
   // CommonMark accepts `\r\n`, so the same claim has to hold over the transformed
   // corpus. Exclusions are keyed on the LF original — the divergence they name is
@@ -1907,18 +1893,8 @@ test("the renderer agrees about the CRLF corpus too", async (t) => {
 // strictly-decreases assertion passes vacuously. What matters is the BARE reference
 // the forge filter would see post-render, so that is asserted directly.
 test("an escaped reference stops rendering live once wrapped", async (t) => {
-  let Marked;
-  try {
-    ({ Marked } = await import("marked"));
-  } catch (e) {
-    // The installed run sets GD_EXPECT_DEPS, where a broken import must FAIL
-    // rather than skip; the no-install guards job leaves it unset and skips.
-    if (process.env.GD_EXPECT_DEPS) throw e;
-    t.skip(
-      "marked is not installed — the guards job runs with no install step",
-    );
-    return;
-  }
+  const Marked = await importMarked(t);
+  if (!Marked) return;
   const md = new Marked();
   for (const source of [ESC_1, ESC_3]) {
     const label = JSON.stringify(source);

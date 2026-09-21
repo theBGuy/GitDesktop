@@ -185,7 +185,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const holdPolls = useRef(0);
   const holdLadderFor = useRef("");
   const holdSeen = useRef({ ok: 0, failed: 0 });
-  const holdRefreshed = useRef(false);
+  // Exempts the NEXT completion from spending a rung, for the two reads the
+  // armed poll didn't cause: an explicit refresh, and a fetch already in flight
+  // when a new hold identity resets the ladder.
+  const holdExemptNext = useRef(false);
   // Scope for the row-focus rescue below: every query it makes runs inside this
   // panel, never the document.
   const panelRef = useRef<HTMLDivElement>(null);
@@ -335,16 +338,17 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // CANCEL before invalidate: a read already in flight would otherwise resolve
   // afterwards and stamp itself fresh, erasing the invalidation (the repo's
   // cancel-then-invalidate class). The three hydrators ride along per
-  // `usePrReviewState`'s co-invalidation contract — a narrow `pr-list` refresh
-  // owes `pr-review-state` and `pr-ci` the same pass, and the conflict chips
-  // read `pr-mergeability` off the same rows.
+  // `usePrReviewState`'s co-invalidation contract, which names `pr-review-state`
+  // and `pr-ci` as owed a narrow `pr-list` refresh; `pr-mergeability` is the
+  // same shape of row-keyed badge and takes the same pass. Only `pr-ci` builds
+  // its map FROM the rows — the other two re-query the forge themselves.
   const queryClient = useQueryClient();
   function refreshPrList() {
     // An explicit refresh RE-ARMS the bounded chase rather than spending from
     // it: rungs go back to zero, and the flag exempts this refresh's own
     // completion so the user gets a whole ladder instead of one read.
     holdPolls.current = 0;
-    holdRefreshed.current = true;
+    holdExemptNext.current = true;
     // The four families go out CONCURRENTLY: each hydrator's key carries a digest
     // of the row set its map describes, so a refetch that raced the list caches
     // under the outgoing key rather than stamping a stale map fresh.
@@ -747,6 +751,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // re-arms on a new hold identity or an explicit refresh.
   const listUpdatedAt = prList.dataUpdatedAt;
   const listFailedAt = prList.errorUpdatedAt;
+  const listFetching = prList.isFetching;
   // Tab-gated on top of `refetchIntervalInBackground: false`: that covers a
   // hidden WINDOW, but an <Activity>-hidden panel keeps active observers and
   // would poll behind the Issues tab.
@@ -758,15 +763,17 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       // A reset ladder takes CURRENT state as its baseline, not zero: zeroing
       // would read the completion that predates this hold as a rung and leave
       // it seven. It also absorbs the placeholder `dataUpdatedAt: 0` dip, which
-      // can only move the baseline down.
+      // can only move the baseline down. A fetch already IN FLIGHT at the reset
+      // lands past that baseline, so it takes the same exemption a refresh does.
       holdSeen.current = { ok: listUpdatedAt, failed: listFailedAt };
+      if (listFetching) holdExemptNext.current = true;
     }
     const advanced =
       listUpdatedAt > holdSeen.current.ok ||
       listFailedAt > holdSeen.current.failed;
     holdSeen.current = { ok: listUpdatedAt, failed: listFailedAt };
     if (advanced) {
-      if (holdRefreshed.current) holdRefreshed.current = false;
+      if (holdExemptNext.current) holdExemptNext.current = false;
       else if (holdPollMs !== false) holdPolls.current += 1;
     }
     setHoldPollMs(
@@ -774,7 +781,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         ? HOLD_POLL_MS
         : false,
     );
-  }, [heldKey, canPollHold, holdPollMs, listUpdatedAt, listFailedAt]);
+  }, [
+    heldKey,
+    canPollHold,
+    holdPollMs,
+    listUpdatedAt,
+    listFailedAt,
+    listFetching,
+  ]);
 
   // Arrow keys walk the visible rows, local section first like the list. A
   // collapsed section's body is unmounted, so its rows must leave the registry

@@ -206,17 +206,15 @@ export function armPrCreateHandOff(
   if (verdicts.includes("settle")) settle();
   else if (verdicts.includes("release")) releaseGuard();
 
-  // The detail evidence's arm-time half, symmetric with the cached-pages check
-  // above: the held row is clickable BEFORE this runs, so the PR can already
-  // have been closed or merged from the detail view during the create's
-  // continuation. That detail sits cached with no cache event left to fire, so
-  // the subscription alone would never see it.
-  const detail = queryClient.getQueryData<PrDetails>([
-    "repo",
-    create.repoPath,
-    "pr",
-    create.lens,
-    create.number,
-  ]);
-  if (detail !== undefined && detail.state !== "OPEN") settle();
+  // The detail evidence's arm-time half: the held row is clickable BEFORE this
+  // runs, so the PR can already have been closed or merged from the detail view
+  // during the create's continuation. That detail sits cached with no cache
+  // event left to fire, so the subscription alone would never see it. Matched
+  // through the same predicate the subscription uses, so both halves compare
+  // the repo path the one way {@link normPath} allows.
+  const details = queryClient.getQueriesData<PrDetails>({
+    predicate: (q) =>
+      matchesPrDetail(q.queryKey, create.repoPath, create.lens, create.number),
+  });
+  if (details.some(([, d]) => d !== undefined && d.state !== "OPEN")) settle();
 }
