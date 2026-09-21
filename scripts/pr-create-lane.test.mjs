@@ -443,9 +443,9 @@ test("a detail already closed at arm time settles the hold", async (t) => {
   const closedHead = "feature-arm-closed";
   startPrCreate(REPO, closedHead, "main", display("Closed at arm time"));
   markPrCreated(REPO, closedHead, { number: 778, url: "https://x/778" });
-  // Cached under git's spelling of the path while the lane holds the ui store's:
-  // the arm-time read compares through `normPath`, exactly as the subscription
-  // does, so the two spellings are one repo.
+  // Cached under the backslashed spelling `validate_repo` returns on Windows,
+  // while the lane holds a forward-slash one: the arm-time read compares through
+  // `normPath`, exactly as the subscription does.
   closedQc.setQueryData(["repo", "C:\\Repos\\Demo", "pr", LENS, 778], {
     number: 778,
     state: "CLOSED",

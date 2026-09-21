@@ -336,12 +336,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
 
   // CANCEL before invalidate: a read already in flight would otherwise resolve
-  // afterwards and stamp itself fresh, erasing the invalidation (the repo's
-  // cancel-then-invalidate class). The three hydrators ride along per
-  // `usePrReviewState`'s co-invalidation contract, which names `pr-review-state`
-  // and `pr-ci` as owed a narrow `pr-list` refresh; `pr-mergeability` is the
-  // same shape of row-keyed badge and takes the same pass. Only `pr-ci` builds
-  // its map FROM the rows — the other two re-query the forge themselves.
+  // afterwards and stamp itself fresh, erasing the invalidation.
+  // `usePrReviewState`'s co-invalidation contract owes `pr-review-state` any
+  // narrow `pr-list` refresh. `pr-ci` and `pr-mergeability` are the rows' other
+  // badges and take the same pass.
   const queryClient = useQueryClient();
   function refreshPrList() {
     // An explicit refresh RE-ARMS the bounded chase rather than spending from
@@ -349,9 +347,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     // completion so the user gets a whole ladder instead of one read.
     holdPolls.current = 0;
     holdExemptNext.current = true;
-    // The four families go out CONCURRENTLY: each hydrator's key carries a digest
-    // of the row set its map describes, so a refetch that raced the list caches
-    // under the outgoing key rather than stamping a stale map fresh.
+    // The four families go out CONCURRENTLY: `pr-ci` and `pr-mergeability` key
+    // on a digest of the rows they describe, so a refetch that raced the list
+    // caches under the outgoing key; `pr-review-state` keys on no rows and
+    // re-walks the forge from the filters.
     for (const queryKey of [
       ["repo", repoPath, "pr-list"],
       ["repo", repoPath, "pr-ci"],

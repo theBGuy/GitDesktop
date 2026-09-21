@@ -1463,8 +1463,8 @@ GitLab the code reviews and security audits you start yourself read them too —
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
 **AI-generated** description{{/ai}}. Creating a pull request pushes your branch first, so it
 can run for a while: close the dialog and it carries on — a line at the top of the repository
-view names the branch until the new pull request has settled into the list. The PR list it's
-headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
+view names the branch while the create is still in flight. The PR list it's headed
+for holds its place meanwhile, with a **pending entry** at the top carrying its title,
 branches and draft state; the number appears there as the PR opens, and the real row takes
 over once the list catches up. From the moment that number appears the entry is a real row:
 click it, or move to it with **↑ / ↓**, and the pull request opens without waiting for
