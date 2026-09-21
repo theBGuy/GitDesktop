@@ -11,26 +11,44 @@
 // stripping (>= 23.6), which ERASES types rather than compiling them and
 // resolves no bundler aliases: the two store modules therefore carry their
 // runtime imports relative and extensioned. An `@/` value import added to
-// either fails this file, which is the point. Package imports resolve normally,
-// so the real zustand store and a real QueryClient are what run here.
+// either fails this file, which is the point.
 //
-// Node's stdlib test runner, so the CI `guards` job runs
-// `node --test "scripts/*.test.mjs"` with no install step.
+// They are DYNAMIC because the store pulls zustand and this file pulls
+// @tanstack/react-query: the CI `guards` job runs `node --test` with no install
+// step, where both are unresolvable. Unresolved deps skip every test here, and
+// frontend.yml's installed step is the enforced run.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { QueryClient } from "@tanstack/react-query";
-import {
+let deps = null;
+try {
+  deps = {
+    ...(await import("../src/lib/stores/pr-create.ts")),
+    ...(await import("../src/lib/stores/pr-create-handoff.ts")),
+    QueryClient: (await import("@tanstack/react-query")).QueryClient,
+  };
+} catch (e) {
+  // The rethrow is what keeps the skip honest: without it, a real import
+  // breakage in the INSTALLED run would silently skip all 11 tests instead of
+  // failing. That run sets GD_EXPECT_DEPS; the no-install job does not.
+  if (process.env.GD_EXPECT_DEPS) throw e;
+}
+const {
+  QueryClient,
+  armPrCreateHandOff,
   consumeLastFailed,
   laneBlocks,
+  markPrCreateArmed,
   markPrCreated,
   releasePrCreateGuard,
   settlePrCreate,
   settlePrCreateIfCurrent,
   startPrCreate,
   usePrCreateStore,
-} from "../src/lib/stores/pr-create.ts";
-import { armPrCreateHandOff } from "../src/lib/stores/pr-create-handoff.ts";
+} = deps ?? {};
+
+const NEEDS_DEPS =
+  "needs node_modules — frontend.yml's installed step is the enforced run";
 
 // Already lower-cased with forward slashes, so `normPath` is the identity here
 // and the store's bucket key is this exact string.
@@ -72,10 +90,12 @@ async function publish(qc, key, rows) {
 }
 
 afterEach(() => {
+  if (!deps) return;
   usePrCreateStore.setState({ byRepo: {} });
 });
 
-test("the entry outlives its guard, and a fresh claim replaces it", async () => {
+test("the entry outlives its guard, and a fresh claim replaces it", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-a";
   assert.equal(startPrCreate(REPO, head, "main", display("Add a thing")), null);
@@ -118,7 +138,8 @@ test("the entry outlives its guard, and a fresh claim replaces it", async () => 
   settlePrCreate(REPO, head, "release");
 });
 
-test("an open-axis page releases the guard and keeps the place", async () => {
+test("an open-axis page releases the guard and keeps the place", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-open";
   startPrCreate(REPO, head, "main", display("Open containment"));
@@ -150,7 +171,8 @@ test("an open-axis page releases the guard and keeps the place", async () => {
   );
 });
 
-test("releasing an already-released guard notifies nobody", () => {
+test("releasing an already-released guard notifies nobody", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   // The watcher calls this on EVERY matching page while the hold lasts, so the
   // already-released arm returning the same state object is what keeps a held
   // strip from re-rendering on every list refetch.
@@ -173,11 +195,13 @@ test("releasing an already-released guard notifies nobody", () => {
   settlePrCreate(REPO, head, "release");
 });
 
-test("settlePrCreateIfCurrent settles only the claim it names", () => {
+test("settlePrCreateIfCurrent settles only the claim it names", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const head = "feature-identity";
   startPrCreate(REPO, head, "main", display("Identity"));
   markPrCreated(REPO, head, { number: 111, url: "https://x/111" });
   const startedAt = entryFor(head).startedAt;
+  markPrCreateArmed(REPO, head, startedAt);
 
   settlePrCreateIfCurrent(REPO, head, startedAt - 1);
   assert.ok(entryFor(head), "another claim's stamp is a no-op");
@@ -187,7 +211,32 @@ test("settlePrCreateIfCurrent settles only the claim it names", () => {
   assert.equal(entryFor(head), undefined, "and it is idempotent");
 });
 
-test("a blocking lane refuses a second create, a released one admits it", async () => {
+test("a deferred settle cannot preempt a create that is still finishing", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // The continuation window: the forge has answered and the list may already
+  // show the row, but the flow is still posting notes / carrying comments over.
+  // Deleting the lane there reopens admission and a reopened dialog can start a
+  // SECOND create on the same head.
+  const head = "feature-continuing";
+  startPrCreate(REPO, head, "main", display("Still finishing"));
+  markPrCreated(REPO, head, { number: 222, url: "https://x/222" });
+  const startedAt = entryFor(head).startedAt;
+
+  settlePrCreateIfCurrent(REPO, head, startedAt);
+  assert.ok(entryFor(head), "unarmed: the owning flow still holds the lane");
+  assert.equal(
+    typeof startPrCreate(REPO, head, "main", display("Duplicate")),
+    "string",
+    "and the guard it carries still refuses a second create",
+  );
+
+  markPrCreateArmed(REPO, head, startedAt);
+  settlePrCreateIfCurrent(REPO, head, startedAt);
+  assert.equal(entryFor(head), undefined, "armed: the settle lands");
+});
+
+test("a blocking lane refuses a second create, a released one admits it", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-refused";
   assert.equal(startPrCreate(REPO, head, "main", display("First")), null);
@@ -227,7 +276,8 @@ test("a blocking lane refuses a second create, a released one admits it", async 
   settlePrCreate(REPO, head, "release");
 });
 
-test("a closed or merged row settles the lane too", async () => {
+test("a closed or merged row settles the lane too", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-merged";
   startPrCreate(
@@ -255,7 +305,8 @@ test("a closed or merged row settles the lane too", async () => {
   assert.equal(entryFor(head), undefined);
 });
 
-test("a closed-axis OPEN row and another lens's page hold nothing back", async () => {
+test("a closed-axis OPEN row and another lens's page hold nothing back", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-leaky";
   startPrCreate(REPO, head, "main", display("Leaky closed list"));
@@ -288,7 +339,8 @@ test("a closed-axis OPEN row and another lens's page hold nothing back", async (
   assert.equal(entryFor(head), undefined, "closed evidence still deletes");
 });
 
-test("the long stop removes an entry no list ever shows", async () => {
+test("the long stop removes an entry no list ever shows", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-invisible";
   startPrCreate(REPO, head, "main", display("Never listed"));
@@ -309,7 +361,8 @@ test("the long stop removes an entry no list ever shows", async () => {
   assert.equal(entryFor(head), undefined, "the hold is bounded");
 });
 
-test("a watcher whose head was re-claimed touches neither clock", async () => {
+test("a watcher whose head was re-claimed touches neither clock", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   const head = "feature-reclaimed";
   startPrCreate(REPO, head, "main", display("First"));
@@ -349,7 +402,8 @@ test("a watcher whose head was re-claimed touches neither clock", async () => {
   settlePrCreate(REPO, head, "release");
 });
 
-test("two heads in one repo are held independently", async () => {
+test("two heads in one repo are held independently", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();
   for (const [head, number] of [
     ["feature-one", 701],
@@ -386,7 +440,8 @@ test("two heads in one repo are held independently", async () => {
   assert.equal(usePrCreateStore.getState().byRepo[REPO], undefined);
 });
 
-test("settlePrCreate's delete and failed-create latch are unchanged", () => {
+test("settlePrCreate's delete and failed-create latch are unchanged", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
   const head = "feature-settle";
   const other = "feature-sibling";
 

@@ -5,6 +5,7 @@ import type { PrInfo, RemoteLens } from "@/lib/git/types";
 // path aliases and no extensionless specifiers.
 import { normPath } from "../git/path.ts";
 import {
+  markPrCreateArmed,
   prCreateStartedAt,
   releasePrCreateGuard,
   settlePrCreateIfCurrent,
@@ -105,6 +106,11 @@ export function armPrCreateHandOff(
    *  timers rather than faking the clock. */
   opts?: { guardTimeoutMs?: number; longStopMs?: number },
 ): void {
+  // FIRST act: arming is what lets the deferred settlers touch this entry at
+  // all, and the cached-page check below is one of them. It gates nothing in
+  // this function's own later paths, which by construction only exist after it.
+  markPrCreateArmed(create.repoPath, create.head, create.startedAt);
+
   let unsubscribe: (() => void) | undefined;
   let guardTimer: ReturnType<typeof setTimeout> | undefined;
   let longStopTimer: ReturnType<typeof setTimeout> | undefined;

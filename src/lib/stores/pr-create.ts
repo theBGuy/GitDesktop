@@ -43,6 +43,10 @@ export type PrCreate =
       /** The guard half of the lane is done — list containment or the guard
        *  timeout released it. The entry persists only to hold the list spot. */
       guardReleased: boolean;
+      /** The owning flow has handed the lane over to its watcher. Until then
+       *  the create is still running its post-forge steps, and no DEFERRED
+       *  settler may take the entry out from under it. */
+      armed: boolean;
     });
 
 /** Whether this lane entry still refuses a second create and keeps the
@@ -179,6 +183,7 @@ export function markPrCreated(
             number: result.number,
             url: result.url,
             guardReleased: false,
+            armed: false,
           },
         },
       },
@@ -227,6 +232,36 @@ export function releasePrCreateGuard(
 }
 
 /**
+ * Marks the owning flow done with the lane: its post-forge steps have finished
+ * and it has handed over to the hand-off watcher, so the DEFERRED settlers may
+ * act. Identity-guarded and repeat-safe exactly like
+ * {@link releasePrCreateGuard} — the already-armed arm returns the same state
+ * object, so a repeat notifies nobody.
+ */
+export function markPrCreateArmed(
+  repoPath: string,
+  head: string,
+  startedAt: number,
+): void {
+  const repo = normPath(repoPath);
+  usePrCreateStore.setState((s) => {
+    const entry = s.byRepo[repo]?.[head];
+    if (
+      entry?.phase !== "created" ||
+      entry.startedAt !== startedAt ||
+      entry.armed
+    )
+      return s;
+    return {
+      byRepo: {
+        ...s.byRepo,
+        [repo]: { ...s.byRepo[repo], [head]: { ...entry, armed: true } },
+      },
+    };
+  });
+}
+
+/**
  * Releases the lane. The outcome says what the caller owes
  * {@link consumeLastFailed}, and who may speak for it at all:
  * - `"error"` latches, so a reopen after a failure the user never saw keeps
@@ -269,15 +304,20 @@ export function settlePrCreate(
 }
 
 /** Settles a lane as `"success"`, but only while the entry is still the one the
- *  caller claimed. Every DEFERRED settle goes through here — a hand-off watcher,
- *  a panel effect — since a bare {@link settlePrCreate} from one of those deletes
- *  whatever create re-claimed the head in the meantime. */
+ *  caller claimed AND its owning flow has armed it. Every DEFERRED settle goes
+ *  through here — panel containment, the watcher's closed evidence, the long
+ *  stop — and none of them may preempt a create still running its post-forge
+ *  steps, which would reopen admission mid-continuation and let a reopened
+ *  dialog start a second create on the same head. {@link settlePrCreate} itself
+ *  stays ungated: the flow's own error/release paths speak for themselves. */
 export function settlePrCreateIfCurrent(
   repoPath: string,
   head: string,
   startedAt: number,
 ): void {
-  if (prCreateStartedAt(repoPath, head) !== startedAt) return;
+  const entry = usePrCreateStore.getState().byRepo[normPath(repoPath)]?.[head];
+  if (!entry || entry.startedAt !== startedAt) return;
+  if (entry.phase === "created" && !entry.armed) return;
   settlePrCreate(repoPath, head, "success");
 }
 

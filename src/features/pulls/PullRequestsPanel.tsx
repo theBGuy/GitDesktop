@@ -48,7 +48,7 @@ import {
 import { providerLabel, type ReviewStateEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import type { LocalPrStatus } from "@/lib/pulls/local";
+import { type LocalPrStatus, reloadLocalPrs } from "@/lib/pulls/local";
 import {
   localPrKey,
   useDeleteLocalPr,
@@ -183,6 +183,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // state goes stale under the compiler; `holdPollMs` is the render-visible
   // mirror the query's options read.
   const [holdPollMs, setHoldPollMs] = useState<number | false>(false);
+  // Scope for the row-focus rescue below: every query it makes runs inside this
+  // panel, never the document.
+  const panelRef = useRef<HTMLDivElement>(null);
   const holdPolls = useRef(0);
   const holdLadderFor = useRef("");
   const holdSeen = useRef({ ok: 0, failed: 0 });
@@ -329,9 +332,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // cancel-then-invalidate class). The three hydrators ride along per
   // `usePrReviewState`'s co-invalidation contract — a narrow `pr-list` refresh
   // owes `pr-review-state` and `pr-ci` the same pass, and the conflict chips
-  // read `pr-mergeability` off the same rows. The local section rides along
-  // too: the control speaks for the whole list, and the MCP writes those
-  // records from another process.
+  // read `pr-mergeability` off the same rows.
   const queryClient = useQueryClient();
   function refreshPrList() {
     // An explicit refresh RE-ARMS the bounded chase rather than spending from
@@ -344,11 +345,26 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       ["repo", repoPath, "pr-ci"],
       ["repo", repoPath, "pr-mergeability"],
       ["repo", repoPath, "pr-review-state"],
-      localPrKey(repoPath),
     ])
       void queryClient
         .cancelQueries({ queryKey })
-        .then(() => queryClient.invalidateQueries({ queryKey }));
+        .then(() => queryClient.invalidateQueries({ queryKey }))
+        .catch(() => {
+          // Best-effort, like the local arm below: an invalidate's refetch can
+          // settle as a rejection, which would otherwise surface as an
+          // unhandled rejection rather than a stale list.
+        });
+    // The local records ride along — the control speaks for the whole list —
+    // but reload FIRST: the MCP writes that store file from another process and
+    // tauri-plugin-store serves its in-memory copy, so a bare invalidate
+    // refetches the stale snapshot (the pair App.tsx's focus sweep makes).
+    const localKey = localPrKey(repoPath);
+    void reloadLocalPrs()
+      .then(() => queryClient.cancelQueries({ queryKey: localKey }))
+      .then(() => queryClient.invalidateQueries({ queryKey: localKey }))
+      .catch(() => {
+        // Best-effort: a failed reload leaves the last known records.
+      });
   }
 
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
@@ -661,15 +677,66 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             (prList.data?.some((p) => p.number === c.number) ?? false),
         )
       : [];
-  // Membership plus identity, so the effect fires on a real hand-off rather than
-  // on every render. The SPACE is what makes each record injective — a refname
-  // cannot contain one and the stamp is digits — so the join cannot alias.
+  // Membership plus identity plus the ARMED bit, so the effect fires on a real
+  // hand-off rather than on every render — and re-fires when a contained entry
+  // arms, since containment can land while the create is still finishing and
+  // the settle below no-ops until then. Pre-arm the UX is the old behavior:
+  // strip hidden by containment, entry retained, banner up until the flow ends.
+  // The SPACE is what makes each record injective — a refname cannot contain
+  // one and the stamp is digits — so the join cannot alias.
   const containedKey = containedCreates
-    .map((c) => `${c.head} ${c.startedAt}`)
+    .map(
+      (c) =>
+        `${c.head} ${c.startedAt} ${c.phase === "created" && c.armed ? 1 : 0}`,
+    )
     .join("|");
+  // Where the user last stood in THIS panel's rows, captured while the row
+  // still exists: an unmount fires no event that can report its own `data-row`.
+  // Scoped to the panel, not the document: `remote:<n>` is the shared list
+  // scaffold's namespace, so the issues panel — kept mounted by <Activity> —
+  // writes the same keys for its own numbers.
+  const lastRowFocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const root = panelRef.current;
+    if (!root) return;
+    const onFocusIn = (e: FocusEvent) => {
+      lastRowFocusRef.current =
+        e.target instanceof HTMLElement ? (e.target.dataset.row ?? null) : null;
+    };
+    root.addEventListener("focusin", onFocusIn);
+    return () => root.removeEventListener("focusin", onFocusIn);
+  }, []);
   const settleContained = useEffectEvent(() => {
+    // The held row's button unmounts on the CONTAINMENT render — the strip
+    // predicate drops the entry in the same render that fills `containedKey` —
+    // and React commits that removal before this passive effect runs, so focus
+    // has already fallen to <body> by now. The ref above, fed continuously by
+    // its focusin listener, is what still knows where the user stood.
+    const stood = lastRowFocusRef.current;
+    const orphaned =
+      document.activeElement === document.body ||
+      document.activeElement === null;
+    const losing =
+      orphaned &&
+      containedCreates.some(
+        (c) => c.phase === "created" && stood === `remote:${c.number}`,
+      );
     for (const c of containedCreates)
       settlePrCreateIfCurrent(repoPath, c.head, c.startedAt);
+    if (!losing || stood === null) return;
+    // Containment tests the RAW page, so the replacement row may not RENDER —
+    // a collapsed review group unmounts its rows, and the client-side text
+    // filter hides them — and then the first rendered row keeps the keyboard
+    // position inside the list rather than on <body>. Both queries stay inside
+    // this panel: the `remote:<n>` namespace is shared with the issues panel.
+    const selector = `[data-row="${CSS.escape(stood)}"]`;
+    requestAnimationFrame(() => {
+      const root = panelRef.current;
+      const row =
+        root?.querySelector<HTMLElement>(selector) ??
+        root?.querySelector<HTMLElement>("[data-row]");
+      row?.focus();
+    });
   });
   // Deferred while this panel's tab is hidden, since it lives under <Activity> —
   // accepted: the strip is invisible there and the long stop still bounds the
@@ -695,7 +762,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     if (holdLadderFor.current !== heldKey) {
       holdLadderFor.current = heldKey;
       holdPolls.current = 0;
-      holdSeen.current = { ok: 0, failed: 0 };
+      // A reset ladder takes CURRENT state as its baseline, not zero: zeroing
+      // would read the completion that predates this hold as a rung and leave
+      // it seven. It also absorbs the placeholder `dataUpdatedAt: 0` dip, which
+      // can only move the baseline down.
+      holdSeen.current = { ok: listUpdatedAt, failed: listFailedAt };
     }
     const advanced =
       listUpdatedAt > holdSeen.current.ok ||
@@ -798,7 +869,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const axisCap = isGitLab ? gitlabAxisCap(providerName) : undefined;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={panelRef} className="flex min-h-0 flex-1 flex-col">
       <SessionExpiryNotice repoPath={repoPath} />
       <ConversationListPanel
         repoPath={repoPath}
