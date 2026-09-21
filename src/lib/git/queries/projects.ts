@@ -618,20 +618,19 @@ function writeThroughBoards(
   });
 }
 
-/** One board's items under one LENS, paged. Keyed on the board and the saved
- *  view's filter — a board is the same object whichever remote reached it, but a
- *  filtered read is a different set of items — and `retry: false` for the same
- *  reason the rest of the Projects family uses it: the common failure is a
- *  missing `project` scope, which no retry fixes. The backend auto-pages, so a
- *  page here is up to 500 items and `truncated` drives "Load more" rather than an
- *  automatic walk to the end of a 5,000-item board.
+/** One board's items under one LENS, paged. Keyed on the board, the saved view's
+ *  filter and the archived toggle: a board is the same object whichever remote
+ *  reached it, but each filter and each archived state answers with a different set
+ *  of items and its own `totalCount`. `retry: false` for the same reason the rest of
+ *  the Projects family uses it: the common failure is a missing `project` scope,
+ *  which no retry fixes. The backend auto-pages, so a page here is up to 500 items
+ *  and `truncated` drives "Load more" rather than an automatic walk to the end of a
+ *  5,000-item board.
  *
  *  `query` rides to the server verbatim; null is the unfiltered board.
  *  `includeArchived` asks for both archived states rather than the default read's
- *  live items alone. BOTH are identity axes on the key — each answers with a
- *  different item set and its own `totalCount` — so the cache holds one entry per
- *  (filter, archived) pair. Switching lenses keeps the previous one's cards on
- *  screen (the axes below), so callers gate every claim they DERIVE from the data —
+ *  live items alone. Switching lenses keeps the previous one's cards on screen (the
+ *  placeholder axes below), so callers gate every claim they DERIVE from the data —
  *  a count, a page control — on `!isPlaceholderData`. */
 export function useProjectItems(
   repo: string,
@@ -649,10 +648,10 @@ export function useProjectItems(
     enabled,
     staleTime: 60_000,
     retry: false,
-    // The board is an axis (index 3 in the key literal above); the LENS at index 4
-    // and the archived axis at index 5 deliberately are not. Switching views — or
-    // showing archived cards — keeps the previous lens's cards on screen while the
-    // new read lands, where switching BOARDS must never show the other board's.
+    // The board is a placeholder axis (index 3 in the key literal above); the filter
+    // at index 4 and the archived state at index 5 deliberately are not. Switching
+    // views, or showing archived cards, keeps the previous lens's cards on screen
+    // while the new read lands, where switching BOARDS must never show another's.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, projectId]]),
   });
 }
@@ -798,22 +797,17 @@ function patchBoardItemArchived(
   };
 }
 
-/** One item appended to the LAST loaded page. For a freshly MINTED card that is
- *  where the board itself puts it — the pages are in the board's own position order,
- *  and a new item lands at the end of it. A REJOINING card (a restore) is the one
- *  caller this slot is only an approximation for: it returns to the position it
- *  always held, which no cache can say, so the end of the loaded pages stands in
- *  until the board's next natural read puts it back. Never twice — a refetch that
- *  already carried the card wins, and a second copy would be a card the menu and the
- *  move path can both target; that same guard is what lets a caller compose this
- *  after a patch without testing which of the two applies.
+/** One item appended to the LAST loaded page, which is where the board puts a MINTED
+ *  card: the pages are in position order. For a REJOINING one (a restore) that slot
+ *  only approximates the position it always held, which no cache can say. Never
+ *  twice — a second copy would be a card the menu and the move path can both target —
+ *  and that guard is what lets a caller compose this after a patch without testing
+ *  which of the two applies.
  *
  *  `totalCount` moves only when `countsIt` says this lens's figure excluded the item
- *  until now: always true for a MINTED card, true again for a REJOINING one on an
- *  unfiltered live-only lens, and unknowable under a filter. The flag lives here
- *  rather than at the call site because only this function knows whether the insert
- *  happened — the duplicate guard can decline it, and a count bumped from outside
- *  would fire anyway. A cache with no pages has no board to append to. */
+ *  until now, which is unknowable under a filter. The flag lives here rather than at
+ *  the call site because only this function knows whether the insert happened. A
+ *  cache with no pages has no board to append to. */
 function appendBoardItem(
   data: InfiniteData<BoardItems, string | null> | undefined,
   item: BoardItem,
@@ -1723,31 +1717,19 @@ export function useArchiveBoardItem() {
  * and membership-neutral in the same way, so no membership family is touched here
  * either.
  *
- * The OPTIMISTIC patch flips the flag in place, on the lenses that draw the card —
- * only archived-showing ones do.
+ * The optimistic flip lands on the lenses that draw the card; only archived-showing
+ * ones do. The settle REJOINS it to every populated lens — flip where the lens holds
+ * it, insert at the end of the loaded pages where it doesn't — moving `totalCount`
+ * on the unfiltered live-only key alone ({@link keyIsUnfiltered}).
  *
- * The SUCCESS settle REJOINS it to every populated lens, per lens: archived-showing
- * lenses drew and counted it all along, so the flip alone is the truth there and an
- * insert would pull it to a slot it doesn't occupy; a live-only lens lacked it from
- * its items and takes the insert, at the end of the loaded pages — the approximate
- * slot every mint write-through here already accepts, and under a filter the same
- * approximate membership, on the same terms now that those lenses keep their mark.
- * Its `totalCount` moves on the UNFILTERED live-only key alone
- * ({@link keyIsUnfiltered}).
- *
- * That settle takes {@link writeThroughBoards} rather than
+ * It settles through {@link writeThroughBoards} rather than
  * {@link invalidateProjectBoards} because the payload is transactionally fresh where
- * a read is not: GitHub's single-state reads lag this write in BOTH directions (~6s,
- * measured 2026-09-21), so a settle-time refetch can answer with the card still
- * archived or gone and stamp that fresh for the 60s staleTime. It lays no stale mark
- * on the lenses that payload DETERMINES — the unfiltered ones, where a mark over the
- * patch would only re-invalidate what it just freshened. FILTERED lenses are marked,
- * because the payload says nothing about whether a view keeps the card: the insert
- * there can show one the filter excludes, and the mark is what kills that at the
- * lens's next mount instead of letting it stand for the staleTime. Marks an EARLIER
- * write laid are preserved either way — captured at `onMutate`, since the flip there
- * clears `isInvalidated` on every lens it touches and a settle-time probe would find
- * the debt already gone.
+ * a read is not: GitHub's single-state reads lag this write in both directions (~6s,
+ * measured 2026-09-21), so a refetch here can answer with the card still archived or
+ * gone and stamp that fresh for the 60s staleTime. FILTERED lenses are marked anyway,
+ * the payload saying nothing about whether a view keeps the card, and marks an
+ * earlier write laid are captured at `onMutate` — the flip clears `isInvalidated`, so
+ * a settle-time probe would find the debt already gone.
  *
  * A FAILED write re-reads as usual — its rollback is a guess at what the board had
  * rather than a reading of what it has.

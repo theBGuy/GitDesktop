@@ -256,9 +256,9 @@ export function BoardCardMenuItems({
       {actionHeldReason === undefined ? (
         <>
           {/* Drafts only: an issue or pull request is already the thing a convert
-              would make, and is edited on its own tab. The ellipsis is the house
-              promise that a further step comes first — a dialog for the edit, a
-              confirmation for the two below. */}
+              would make, and is edited on its own tab. An ellipsis is the house
+              promise that a further step comes first: a dialog for the edit, a
+              confirmation for every other row carrying one. */}
           {isDraft &&
             (editHeldReason === undefined ? (
               <>

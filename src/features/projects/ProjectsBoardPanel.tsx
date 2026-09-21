@@ -191,12 +191,11 @@ type BoardDialog = "existing" | "draft" | "edit-draft";
  *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
 /** An archive is reversible and a removal is not, so the two prompts say different
- *  things — and a removal says a THIRD thing for a draft, which lives on this
- *  project alone and has nowhere to survive. Every one names where the card goes
- *  rather than asking the user to infer it. */
-/** Keyed on whether archived cards are being SHOWN, because the two states make
- *  different promises: with the toggle off the card leaves the columns, with it on
- *  the card stays put under an Archived badge. */
+ *  things, and a removal says a third for a draft, which lives on this project alone
+ *  and has nowhere to survive. Every one names where the card goes rather than asking
+ *  the user to infer it — which is why this one is keyed on whether archived cards
+ *  are SHOWN: with the toggle off the card leaves the columns, with it on it stays
+ *  put under an Archived badge. */
 const ARCHIVE_BODY: Record<"shown" | "hidden", string> = {
   hidden:
     "The card leaves the board. Bring it back any time from View options → Show archived cards.",
