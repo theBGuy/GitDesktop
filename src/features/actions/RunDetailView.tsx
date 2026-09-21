@@ -420,6 +420,10 @@ export function RunDetailView({
   // job; this retires the whole family, so a stale snapshot can't re-offer the
   // run-level buttons or a SIBLING failed job of the attempt just restarted.
   const [runRerunLatch, setRunRerunLatch] = useState<string | null>(null);
+  // The re-run family's synchronous edge: `isPending` is render state behind
+  // batched notifications, so two activations inside one pre-render window both
+  // pass it. (The rollup gets the same edge from its `rerunningJob` useState.)
+  const rerunLockRef = useRef(false);
   // Where a job action's focus goes when its own button dies with the offer.
   // The header's "View on <remote>" is the one control that renders for every
   // run whatever its status, and it stays focusable even URL-less (its reason
@@ -520,6 +524,8 @@ export function RunDetailView({
   // the observer has no listeners.
   async function doRerun(failedOnly: boolean) {
     if (rerunFamilyBusy) return;
+    if (rerunLockRef.current) return;
+    rerunLockRef.current = true;
     try {
       await rerun.mutateAsync({ runId, failed: failedOnly });
       toast.success(rerunSuccessMessage(provider, failedOnly));
@@ -531,6 +537,8 @@ export function RunDetailView({
       scheduleRunRepair();
     } catch (e) {
       toastError(e);
+    } finally {
+      rerunLockRef.current = false;
     }
   }
 
@@ -565,6 +573,8 @@ export function RunDetailView({
     buttonEl: HTMLElement,
   ) {
     if (rerunFamilyBusy) return;
+    if (rerunLockRef.current) return;
+    rerunLockRef.current = true;
     // Read before the first await: the refetch flips the run active (GitHub) or
     // remounts the row under a new job id (GitLab), either way taking this
     // button with it.
@@ -580,6 +590,8 @@ export function RunDetailView({
       scheduleRunRepair();
     } catch (e) {
       toastError(e);
+    } finally {
+      rerunLockRef.current = false;
     }
     handOffJobFocus(buttonEl, fromButton);
   }
