@@ -299,9 +299,10 @@ export interface BoardItem {
 }
 
 /** One page of a board's items, in the board's own POSITION order. `totalCount`
- *  is the board's full item count INCLUDING archived ones, so it can exceed what
- *  the board draws; `truncated` with `endCursor` is how the next page is asked
- *  for. */
+ *  is the server's figure for THIS read's archived-state filter (measured: the
+ *  default read settles to live items only), so it can exceed what a partly
+ *  loaded board draws; `truncated` with `endCursor` is how the next page is
+ *  asked for. */
 export interface BoardItems {
   items: BoardItem[];
   totalCount: number;

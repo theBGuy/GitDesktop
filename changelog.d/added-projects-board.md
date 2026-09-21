@@ -1,8 +1,10 @@
 - **See a GitHub Project as a board, without leaving the app.** The new **Projects** tab
   (More ▾, or the command palette) draws any open board this repository or its owner has
-  as a live kanban: pick which of the board's single-select fields makes the columns
-  (**Status** to start with), and anything that field doesn't cover collects in a column
-  of its own so nothing is hidden. Cards carry their state, number, owning repository
+  as a live kanban: pick which of the board's **single-select or iteration** fields makes
+  the columns (**Status** to start with), and anything that field doesn't cover collects
+  in a column of its own so nothing is hidden. Group by an iteration field and the board
+  is a sprint board: a column per iteration the field defines, plus any finished one that
+  still holds a card. Cards carry their state, number, owning repository
   (when a board spans several) and assignees; **draft** items open their notes in place,
   dated with when the note was written and when it last changed; issues and pull requests
   from this repository open on their own tab (cards from elsewhere open on GitHub), and
@@ -22,9 +24,13 @@
   everyone, and holding the keys down is fine: the board keeps up and writes where the
   card finally lands. The same menu **edits a draft** (its
   title, its Markdown notes and its assignees, saved with **Ctrl/Cmd+Enter**),
-  **converts a draft into a real issue**, **archives** a card (GitHub's archived items
-  hold it for you), and **removes** one from the project, the last three confirming
-  first. Creating an issue can put it on its boards in the same step: the **New issue**
+  **converts a draft into a real issue**, **archives** a card, and **removes** one from
+  the project, the last three confirming first. **Archived cards are one switch away**:
+  turn on **Show archived cards** under **View options** and they're back in their
+  columns, marked **Archived** and drawn quietly, with **Restore card** on each one
+  putting it straight back on the board. (The command palette carries the switch as
+  **Show or hide archived cards**.) Creating an issue can put it on its boards in the
+  same step: the **New issue**
   dialog gained a **Projects** picker. The board's **saved views** come along as lenses:
   pick one under **View options** and GitHub filters the read for you, its sort
   orders the cards in each column (by **Title**, or by a text, number, date,

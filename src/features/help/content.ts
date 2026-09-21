@@ -1929,16 +1929,41 @@ saved:
 - **Add item** puts work on the board (below).
 - **View options** gathers the controls for how the board is laid out. **View** picks one of
   the board's saved views as a lens over it (below). **Group by** picks which of the board's
-  single-select fields becomes the columns, starting on **Status**, since that's what a
-  board's columns usually mean. Both apply straight away, so you can try a few without
-  closing the popup. Anything the grouping field doesn't cover collects in a final
-  **No {field}** column, so nothing on the board is hidden from you. A board with no
-  single-select field at all shows every card in one column.
+  **single-select or iteration** fields becomes the columns, starting on **Status**, since
+  that's what a board's columns usually mean; group by an iteration field and you get a
+  sprint board — a column per iteration it defines, in the field's own order, followed by
+  any finished iteration that still holds a card. **Show archived cards** brings the
+  board's archived items back into view (below). All three apply straight away, so you can
+  try a few without closing the popup. Anything the grouping field doesn't cover collects
+  in a final **No {field}** column, so nothing on the board is hidden from you. A board
+  with no field of either kind shows every card in one column.
 
 Beside them, the count says how much of the board you're looking at, and **Load more**
-fetches the next page of a big one. Items the board has **archived** stay out of the columns
-and out of the per-column counts. The board's own total still counts them, so while a board
-is still paging in, that total can run ahead of the cards in front of you.
+fetches the next page of a big one. Both the count and the board's own total describe the
+cards the current read asked for, archived ones included only when you've asked for them.
+
+## Archived cards
+
+Archiving takes a card out of the board's columns without taking it off the project, and
+**View options → Show archived cards** is how you look at what's there. With it on, archived
+cards sit in the columns their fields put them in, marked **Archived** and drawn quietly so
+a live card still reads first, and they count in the column headers like everything else.
+The switch is for this visit only (nothing is saved), and the command palette carries it as
+**Show or hide archived cards**.
+
+**Restore card** on an archived card's own menu puts it back on the board, in place and
+with no prompt, since archiving was the step that asked. The card stops being archived as
+you click, and stays that way: GitHub's own read of it can lag by a few seconds, so
+GitDesktop keeps the answer the write gave rather than asking again. **Remove from
+project…** is still there too, and still confirms. Four rows would change what the card IS:
+**Move to**, **Position**, **Edit draft…** and **Convert to issue…**. Each of them says
+**Restore this card to change it** instead, because an archived card holds no column and no
+place in the project's order, so there's nothing for those writes to address.
+
+While archived cards are shown, **no** card can be repositioned: GitHub refuses an archived
+item as the anchor a position write needs, so the card below the one you're on isn't
+necessarily somewhere a write could land it. The **Position** rows say **Turn off Show
+archived cards to reposition**, and turning it off brings the project order back.
 
 ## Adding items
 
@@ -1975,10 +2000,11 @@ Pick one and it becomes a lens over the board:
 
 - Its **filter** travels to GitHub with the read, so the columns and the count are the
   filtered set rather than the whole board.
-- Its **grouping** seeds **Group by** at the moment you pick it. Change **Group by**
-  afterwards and the board regroups with the view still on, filter, sort and chips intact.
-  A view grouped by something that makes no columns here (an iteration field, say) leaves
-  your current grouping alone.
+- Its **grouping** seeds **Group by** at the moment you pick it, whether the view groups by
+  a single-select or by an iteration field. Change **Group by** afterwards and the board
+  regroups with the view still on, filter, sort and chips intact. A view grouped by
+  something that makes no columns here (a multi-select, say) leaves your current grouping
+  alone.
 - Its **sort** orders the cards inside each column, on the **Title** column or on a text,
   number, date, single-select or iteration field. A card with nothing in the sorted field
   goes last whichever way the sort runs, and cards the sort can't separate keep the board's
@@ -2066,7 +2092,9 @@ guess. The keyboard route says the same in full — **Load more cards to move pa
 loaded end**. Under a saved view that
 **sorts**, the whole section says **This view orders cards by its sort** — the columns are
 drawn in the sort's order there, not the board's own, so **Clear view** (or a view without
-a sort) is what brings the project order back. Reordering needs the same write access and
+a sort) is what brings the project order back. While **Show archived cards** is on it says
+**Turn off Show archived cards to reposition** for the same kind of reason (above).
+Reordering needs the same write access and
 \`project\` scope every other board write does, and waits the same way while another change
 to that card, or a **Load more** page, is still finishing.
 
@@ -2085,9 +2113,9 @@ ask first, and each prompt says where the card goes:
   lands when GitHub answers; until then the card itself dims and a line above the columns
   says what's happening. Drafts only: anything else on the board is already an issue or a
   pull request.
-- **Archive card…** takes the card out of the columns and leaves it on the project, where
-  GitHub's own **archived items** view can restore it. Archived items stay out of the
-  columns and out of the per-column counts.
+- **Archive card…** takes the card out of the columns and leaves it on the project. Turn
+  on **View options → Show archived cards** and it's back in front of you, with **Restore
+  card** on its own menu (above).
 - **Remove from project…** takes the card off this project. For an issue or a pull request
   that unlinks the membership and nothing else — the issue itself is untouched, and you can
   add it back from **Add item**. For a **draft** it's a deletion: a draft lives on this
@@ -2101,11 +2129,12 @@ and **Remove from project…**, since both reach it by its place on the board ra
 by what's inside it; **Show details**, **Edit draft…** and **Convert to issue…** aren't
 offered there.
 
-**Edit draft…**, **Convert to issue…**, **Archive card…** and **Remove from project…**
-are each held with their reason on them when your GitHub sign-in can read projects but
-not change them, when you don't have write access to the board, and while another card
-write or a **Load more** page is still finishing. **Show details** is never held:
-reading a card's dates asks nothing of the board.
+**Edit draft…**, **Convert to issue…**, **Archive card…**, **Restore card** and **Remove
+from project…** are each held with their reason on them when your GitHub sign-in can read
+projects but not change them, when you don't have write access to the board, and while
+another card write or a **Load more** page is still finishing. On an archived card the
+first two are held as well (above), while the restore and the removal stay live. **Show
+details** is never held: reading a card's dates asks nothing of the board.
 
 ## Keyboard
 
@@ -2119,7 +2148,8 @@ hands the board its width.
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
 and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here
-(adding, moving, reordering, editing a draft, converting, archiving, removing) needs the full
+(adding, moving, reordering, editing a draft, converting, archiving, restoring, removing)
+needs the full
 \`project\` scope, so a \`read:project\` sign-in draws the board with those controls held.`,
   },
   {

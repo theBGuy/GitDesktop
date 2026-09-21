@@ -79,14 +79,27 @@ export const ghProjectFields = (repoPath: string, projectId: string) =>
  *  call; more than that comes back `truncated` with the `endCursor` the next call
  *  passes as `after`. Board state like the field definitions, so no lens. `query`
  *  is the board's own filter grammar, passed VERBATIM for the server to parse —
- *  a saved view's filter is what fills it, and null is the unfiltered board. */
+ *  a saved view's filter is what fills it, and null is the unfiltered board.
+ *
+ *  `includeArchived` false is the board's default read, which settles to the
+ *  NOT_ARCHIVED items alone; true asks for both states, and GitHub interleaves the
+ *  archived ones in POSITION order with their field values intact. `totalCount`
+ *  follows the read's own filter either way, so the two answers count different
+ *  sets (measured 2026-09-21). */
 export const ghProjectItems = (
   repoPath: string,
   projectId: string,
   after: string | null,
   query: string | null,
+  includeArchived: boolean,
 ) =>
-  invoke<BoardItems>("gh_project_items", { repoPath, projectId, after, query });
+  invoke<BoardItems>("gh_project_items", {
+    repoPath,
+    projectId,
+    after,
+    query,
+    includeArchived,
+  });
 
 /** One board's saved views — the lenses its owner set up on GitHub, read-only
  *  here. Board state like the field definitions, so no lens; capped server-side,
@@ -205,14 +218,25 @@ export const ghConvertDraftItem = (
 ) =>
   invoke<ConvertedDraft>("gh_convert_draft_item", { repoPath, itemId, lens });
 
-/** Archives one card: it leaves the board's columns but stays on the project,
- *  restorable from the project's archived items on GitHub. Takes the
- *  membership's `itemId`. */
+/** Archives one card: it leaves the board's default read but stays on the project,
+ *  reachable again through {@link ghUnarchiveBoardItem}. Takes the membership's
+ *  `itemId`. */
 export const ghArchiveBoardItem = (
   repoPath: string,
   projectId: string,
   itemId: string,
 ) => invoke<void>("gh_archive_board_item", { repoPath, projectId, itemId });
+
+/** Puts an archived card back on the board — {@link ghArchiveBoardItem}'s reversal,
+ *  addressed the same way. GitHub's read replicas lag the write by seconds, so for a
+ *  moment afterwards the restored item can still answer the archived-filtered read
+ *  and be missing from the default one (measured ≤6s, 2026-09-21); the mutation's own
+ *  success is the transactional truth. */
+export const ghUnarchiveBoardItem = (
+  repoPath: string,
+  projectId: string,
+  itemId: string,
+) => invoke<void>("gh_unarchive_board_item", { repoPath, projectId, itemId });
 
 /** Removes one card from the project. For an issue or pull request that unlinks
  *  the membership alone; for a DRAFT it destroys the note, which exists nowhere

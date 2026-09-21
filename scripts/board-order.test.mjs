@@ -106,6 +106,34 @@ test("applyBoardOrder reorders the flatten to the payload order when it covers t
   );
 });
 
+test("applyBoardOrder leaves an archived-showing lens alone when the payload omits its archived ids", () => {
+  // The both-states lens (View options → Show archived cards) caches archived cards
+  // the position payload may never name. The all-or-nothing guard is what makes that
+  // safe: the whole lens is left EXACTLY as it is rather than sorted against a list
+  // that doesn't describe it, and the stale mark `writeThroughBoards` leaves behind
+  // is what reconciles it on the next read.
+  const data = pagesOf([mk("a"), mk("z", true), mk("b")]);
+  const out = applyBoardOrder(data, { itemIds: ["b", "a"], truncated: false });
+  assert.equal(out, data);
+  assert.deepEqual(ids(out), ["a", "z", "b"]);
+});
+
+test("applyBoardOrder re-asserts over archived cards when the payload names them", () => {
+  // The other half of the same guard: a payload that covers the archived-showing
+  // lens orders it like any other, archived cards included and still archived.
+  const data = pagesOf([mk("a"), mk("z", true)], [mk("b")]);
+  const out = applyBoardOrder(data, {
+    itemIds: ["b", "z", "a"],
+    truncated: false,
+  });
+  assert.deepEqual(ids(out), ["b", "z", "a"]);
+  assert.equal(
+    out.pages.flatMap((p) => p.items).find((it) => it.itemId === "z")
+      .isArchived,
+    true,
+  );
+});
+
 // --------------------------------------------------------- boardItemPredecessor
 
 test("boardItemPredecessor reads the LAST occurrence's predecessor", () => {

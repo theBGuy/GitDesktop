@@ -362,6 +362,14 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // Its checkbox lives in that same View options popover, so it ships palette-only
+  // for the same reason the row above does.
+  {
+    id: "toggle-archived-cards",
+    label: "Show or hide archived cards",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // Both of these have a toolbar button one Tab from the project name, so they
   // ship palette-only for the same reason the row above does.
   {
