@@ -46,8 +46,8 @@ export type RerunOffer = {
   label: string;
 };
 
-/** What each re-run offer is called. Every surface that offers a re-run reads
- *  these, so no two can spell the same operation differently. */
+/** What each re-run offer is called. Both offer builders below read these, so
+ *  the run views and the PR checks rollup can't spell one operation two ways. */
 export const RERUN_LABELS: Record<RerunOffer["kind"], string> = {
   all: "Re-run all jobs",
   failed: "Re-run failed jobs",

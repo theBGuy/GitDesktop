@@ -137,7 +137,7 @@ export const forgeCiRunView = (repoPath: string, runId: number | string) =>
   invoke<RunDetail>("forge_ci_run_view", { repoPath, runId: String(runId) });
 
 /** Re-run a finished run (`failed` = its failed jobs only). Ids stay strings over
- *  IPC — they exceed JS's safe-integer range. `lens` is GitHub-only (fork
+ *  IPC — they can exceed JS's safe-integer range. `lens` is GitHub-only (fork
  *  identity) and picks which repository the re-run targets; callers on a
  *  repo-wide CI surface omit it. */
 export const forgeCiRunRerun = (

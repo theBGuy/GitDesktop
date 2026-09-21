@@ -424,9 +424,10 @@ function CheckRow({
   );
 }
 
-/** Headless per-run fetcher: one `useRunDetail` query for a running Actions run,
- *  lifting its jobs to the parent so each row resolves its own job (React Query
- *  dedupes by run-id key, so N rows sharing a run cost one fetch). Mounted only
+/** Headless per-run fetcher: one `useRunDetail` query for a watched run, lifting
+ *  its jobs to the parent so each row resolves its own job (React Query dedupes
+ *  by run-id key, so N rows sharing a run cost one fetch). Mounted per
+ *  `mountedWatchIds` — the user's own re-runs always, plus every watched run
  *  while the rollup is open; refetches every 5s while the run stays active. */
 function RunDetailFetcher({
   repoPath,
@@ -524,9 +525,9 @@ export function ChecksRollup({
   // still holds the merge — either way the PR should show it without a click.
   // Otherwise collapsed by default.
   const [open, setOpen] = useState(failed > 0 || attention > 0);
-  // The jobs of each running Actions run, keyed by run id. Populated by the
-  // headless `RunDetailFetcher`s mounted while the rollup is open (one per distinct
-  // run id); each row resolves its own job from here. Empty until run detail lands.
+  // The jobs of each watched run, keyed by run id. Populated by the headless
+  // `RunDetailFetcher`s (one per id in `mountedWatchIds`); each row resolves its
+  // own job from here. Empty until run detail lands.
   const [jobsByRun, setJobsByRun] = useState<Record<string, RunJob[]>>({});
   // …and re-open when failures FIRST appear after mount: usePrDetails refetches
   // on window focus (no remount), so a PR opened while CI is pending would
@@ -554,28 +555,58 @@ export function ChecksRollup({
   // mutations' own `isPending` would flicker between them.
   const [approving, setApproving] = useState(false);
   const [rerunning, setRerunning] = useState(false);
-  // Run ids re-run from this rollup that still read failed — the one refetch
-  // onSettled fires can land before the forge flips them, and usePrDetails is
-  // focus-only after that, so the offer must retire locally. An id leaves the
-  // latch when it leaves the failed set (it flipped to pending, or vanished),
-  // so a later genuine re-failure of the same run re-offers.
-  const [recentlyRerun, setRecentlyRerun] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
+  // Runs re-run from this rollup, each against the completion signature its
+  // failed checks carried at the time. A latch releases on EVIDENCE OF A NEW
+  // ATTEMPT — a changed signature — never on observing a transient: refetches
+  // can miss the pending window entirely, and a raced-empty snapshot must not
+  // release a run that is in fact still re-running.
+  const [recentlyRerun, setRecentlyRerun] = useState<
+    ReadonlyMap<string, string>
+  >(new Map());
   // The re-run button unmounts the moment its offer retires, so a keyboard batch
-  // started there would drop focus to `<body>`; the summary disclosure is the
-  // stable neighbour that catches it.
+  // started there hands focus to the summary disclosure — stable for as long as
+  // any check renders. A refetch returning NO checks unmounts the rollup entire
+  // and focus still falls to `<body>`; the repair pass bounds that window.
   const rerunButtonRef = useRef<HTMLButtonElement>(null);
   const summaryRef = useRef<HTMLButtonElement>(null);
-  // The pending repair pass — one per batch, so a second batch resets it.
+  // The pending repair pass — the ref exists only to keep one timer per batch.
+  // It deliberately outlives this component: an Activity tab hide runs effect
+  // cleanups, so cancelling there would drop the repair whenever the user
+  // switches tabs inside the window, and the invalidation is global and
+  // idempotent whether or not the rollup is still mounted.
   const queryClient = useQueryClient();
   const repairTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (repairTimer.current !== null) clearTimeout(repairTimer.current);
-    },
-    [],
-  );
+  // PR details refetch on focus only, and the polled run detail below is the one
+  // place the rollup learns a run finished before the PR cache does — so a run
+  // whose jobs have all settled refreshes the checks once. Keyed on the settled
+  // jobs' completion signature, not on having observed the active transition:
+  // like the re-run latch, a mount-refetch can hand back an already-finished NEW
+  // attempt, and a run id alone would read that as the settle already reported.
+  // Dropping an id that reads active again re-arms it early, belt-and-braces.
+  const settledRuns = useRef(new Map<string, string>());
+  useEffect(() => {
+    let finished = false;
+    for (const [runId, jobs] of Object.entries(jobsByRun)) {
+      const settled =
+        jobs.length > 0 && jobs.every((j) => !isRunActive(j.status));
+      if (!settled) {
+        settledRuns.current.delete(runId);
+        continue;
+      }
+      const signature = jobs
+        .map((j) => j.completedAt)
+        .sort()
+        .join(" ");
+      if (settledRuns.current.get(runId) === signature) continue;
+      settledRuns.current.set(runId, signature);
+      finished = true;
+    }
+    if (!finished) return;
+    void queryClient.invalidateQueries({ queryKey: ["repo", repoPath, "pr"] });
+    void queryClient.invalidateQueries({
+      queryKey: ["repo", repoPath, "pr-ci"],
+    });
+  }, [jobsByRun, queryClient, repoPath]);
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
   // may not reach the check rollup at all — that shape is unverified — so an empty
   // list renders nothing rather than an approval offer with nothing to approve.
@@ -604,11 +635,9 @@ export function ChecksRollup({
     (!isPipelineProvider(rerunProvider) ||
       forgeFeatureReady(forge.data, "ciRerun"));
 
-  // The distinct run ids of the still-running GitHub Actions checks. Two
-  // consumers: one run-detail query mounts per id while the rollup is OPEN
-  // (React Query dedupes rows sharing a run, so a collapsed rollup fires
-  // nothing), and the GitHub re-run arm subtracts them — GitHub refuses a run
-  // still in progress, and that gate is not open-scoped.
+  // The distinct run ids of the still-running GitHub Actions checks — what the
+  // GitHub re-run arm subtracts, GitHub refusing a run still in progress. Not
+  // open-scoped, and deliberately GitHub-only, like the per-row live-steps UI.
   const runningRunIds = [
     ...new Set(
       checks
@@ -616,43 +645,67 @@ export function ChecksRollup({
         .map((c) => c.runId as string),
     ),
   ];
-  // The runs a failed check sits on. `completedAt` is required: a StatusContext
-  // whose `targetUrl` happens to parse as an Actions-run URL arrives FAILURE with
-  // no timestamps, and that id could name another repository's run (the parse is
-  // slug-blind). GitLab job checks always carry a finish time, so the term costs
-  // them nothing.
-  const failedRunIds = [
+  // The runs watched to completion: any provider's pending-bucket check with a
+  // run id and no finish time — `isRunningActionsCheck` without its GitHub gate,
+  // because the completion watch is provider-symmetric even though the steps UI
+  // it feeds is not.
+  const watchedRunIds = [
     ...new Set(
       checks
         .filter(
           (c) =>
-            checkPresentation(c.status, provider).bucket === "failed" &&
-            c.runId &&
-            c.completedAt,
+            Boolean(c.runId) &&
+            !c.completedAt &&
+            checkPresentation(c.status, provider).bucket === "pending",
         )
         .map((c) => c.runId as string),
     ),
   ];
-  // Membership alone decides whether a latched id still belongs, and the array
-  // itself is rebuilt every render — so the prune keys on a primitive.
-  const failedKey = failedRunIds.join(" ");
-  useEffect(() => {
-    const live = new Set(failedKey ? failedKey.split(" ") : []);
-    setRecentlyRerun((prev) => {
-      const next = new Set([...prev].filter((id) => live.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [failedKey]);
+  // Watchers mount from the LATCH — the user's own action — never from the
+  // checks snapshot, which can lag a re-run arbitrarily: a mount waiting for a
+  // pending check could miss the attempt entirely. Open additionally watches
+  // every running check, for the steps UI and general freshness; collapsed, the
+  // latch keys are exactly the set the click consented to poll. Bounded both
+  // ways — a settled run parks its own interval, and the latch dies with the
+  // per-PR remount.
+  const mountedWatchIds = open
+    ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
+    : [...recentlyRerun.keys()];
+  // Failed checks' completion times per run. `completedAt` is required: a
+  // StatusContext whose `targetUrl` happens to parse as an Actions-run URL
+  // arrives FAILURE with no timestamps, and that id could name another
+  // repository's run (the parse is slug-blind). GitLab job checks always carry a
+  // finish time, so the term costs them nothing.
+  const failedCompletions = new Map<string, string[]>();
+  for (const c of checks) {
+    if (!c.runId || !c.completedAt) continue;
+    if (checkPresentation(c.status, provider).bucket !== "failed") continue;
+    const times = failedCompletions.get(c.runId);
+    if (times) times.push(c.completedAt);
+    else failedCompletions.set(c.runId, [c.completedAt]);
+  }
+  // One signature per run: its failed checks' completion times, sorted and
+  // joined. Both forges stamp a fresh completion per attempt, so any change —
+  // a re-completion, a check joining or leaving the failed set — is proof that
+  // a new attempt finished.
+  const failedSignatures = new Map<string, string>(
+    [...failedCompletions].map(
+      ([id, times]) => [id, times.sort().join(" ")] as const,
+    ),
+  );
   // GitHub refuses to re-run a run that is still in progress, and one run can
   // hold a failed check while a sibling job runs on. GitLab gets no such gate:
   // it collapses running/pending/manual into one PENDING check status, so an
   // activity gate would hide the offer forever on a pipeline with a manual job —
   // a mid-run retry it rejects surfaces as that run's own error toast instead.
-  const rerunnable = (
+  const offerable =
     rerunProvider === "github"
-      ? failedRunIds.filter((id) => !runningRunIds.includes(id))
-      : failedRunIds
-  ).filter((id) => !recentlyRerun.has(id));
+      ? [...failedSignatures].filter(([id]) => !runningRunIds.includes(id))
+      : [...failedSignatures];
+  // A latched run comes back only once its signature moves off the latched one.
+  const rerunnable = offerable.filter(
+    ([id, signature]) => recentlyRerun.get(id) !== signature,
+  );
   // The one offer this rollup makes, or null when any gate closes — the button
   // and the palette action both read it, so no gate can hold for one and not the
   // other.
@@ -699,7 +752,7 @@ export function ChecksRollup({
   }
 
   async function rerunFailedChecks() {
-    if (writeBlocked || stale) return;
+    if (writeBlocked || stale || rerunning) return;
     // Read before the first await: the button may be gone by the end of the
     // batch, and `activeElement` then reads `<body>` for a palette run and a
     // button run alike.
@@ -707,20 +760,20 @@ export function ChecksRollup({
       rerunButtonRef.current !== null &&
       document.activeElement === rerunButtonRef.current;
     setRerunning(true);
-    let started = 0;
+    const startedIds: string[] = [];
     try {
       // Sequential, and each failure is reported on its own: one run raced to
       // "in progress" by the forge must not strand the rest of the batch.
-      for (const id of rerunnable) {
+      for (const [id, signature] of rerunnable) {
         try {
           await rerun.mutateAsync({ runId: id, failed: true, lens });
-          started += 1;
-          setRecentlyRerun((prev) => new Set(prev).add(id));
+          startedIds.push(id);
+          setRecentlyRerun((prev) => new Map(prev).set(id, signature));
         } catch (e) {
           toastError(e);
         }
       }
-      if (started > 0) {
+      if (startedIds.length > 0) {
         toast.success(rerunSuccessMessage(rerunProvider, true));
         if (repairTimer.current !== null) clearTimeout(repairTimer.current);
         repairTimer.current = setTimeout(() => {
@@ -733,21 +786,41 @@ export function ChecksRollup({
           void queryClient.invalidateQueries({
             queryKey: ["repo", repoPath, "pr-ci"],
           });
+          // Each re-run run's own detail query too: a watcher that never
+          // unmounts (a manual-gated GitLab pipeline stays pending) holds a
+          // completed-status cache with its interval off, and only an
+          // invalidation wakes it. A no-op for unmounted queries.
+          for (const id of startedIds) {
+            void queryClient.invalidateQueries({
+              queryKey: ["repo", repoPath, "actions", "run", id],
+            });
+          }
         }, CHECKS_REPAIR_DELAY_MS);
       }
     } finally {
       setRerunning(false);
     }
-    // Every id latched means the offer retires with its button; anything short
-    // of that leaves the button standing, and focus stays where the user put it.
-    if (fromButton && started === rerunnable.length)
+    // Hand off only when every id of THIS batch latched — the state that retires
+    // the offer and takes the button with it — and only while focus is still
+    // unclaimed: restore what the activation would otherwise lose, never
+    // override a move the user made during the await.
+    const unclaimed =
+      document.activeElement === document.body ||
+      document.activeElement === rerunButtonRef.current;
+    if (fromButton && startedIds.length === rerunnable.length && unclaimed)
       summaryRef.current?.focus();
   }
 
+  // The write probe only starts once the offer renders, so its first render has
+  // no verdict yet — hold both entry points until it answers rather than let a
+  // read-only viewer buy an API rejection.
   useHotkeyAction(
     "pr-rerun-failed-checks",
     () => void rerunFailedChecks(),
-    rerunOffer !== null && !writeBlocked && !rerunning,
+    rerunOffer !== null &&
+      !writeBlocked &&
+      !writeAccess.isPending &&
+      !rerunning,
   );
 
   // Failures first, then the required contexts still holding the merge, then
@@ -884,7 +957,7 @@ export function ChecksRollup({
             ref={rerunButtonRef}
             variant="outline"
             size="xs"
-            disabled={rerunning || writeBlocked}
+            disabled={rerunning || writeBlocked || writeAccess.isPending}
             reason={writeReason}
             title={RERUN_TITLES[rerunOffer.kind]}
             onClick={() => void rerunFailedChecks()}
@@ -898,48 +971,49 @@ export function ChecksRollup({
           </DisabledReasonButton>
         ) : null}
       </div>
+      {/* Headless: one run-detail query per watched run (React Query dedupes
+          rows sharing a run). This is the completion watch for BOTH forges —
+          the per-row step UI stays GitHub-only. `useRunDetail`'s 5s poll gates
+          on the run staying active, and a manual-blocked GitLab pipeline
+          reports run-level "completed", so it costs one fetch, not a loop. */}
+      {mountedWatchIds.map((id) => (
+        <RunDetailFetcher
+          key={id}
+          repoPath={repoPath}
+          runId={id}
+          setJobs={setJobsByRun}
+        />
+      ))}
       {open && (
-        <>
-          {/* Headless: one run-detail query per distinct running Actions run, only
-              while open. */}
-          {runningRunIds.map((id) => (
-            <RunDetailFetcher
-              key={id}
-              repoPath={repoPath}
-              runId={id}
-              setJobs={setJobsByRun}
-            />
-          ))}
-          <div
-            className="mt-1.5 max-h-64 overflow-y-auto border"
-            onKeyDown={onKeyDown}
-          >
-            {sorted.map((c, i) => {
-              const running = isRunningActionsCheck(c, provider);
-              const runJob = running
-                ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
-                : undefined;
-              // `useRunDetail` polls at 5s but usePrDetails only refetches on
-              // focus, so a finished run keeps a stale `completedAt` (→ `running`
-              // true) until a focus event. Treat the resolved job as authoritative:
-              // once it reports a non-active status, drop the live UI immediately.
-              const jobDone = runJob ? !isRunActive(runJob.status) : false;
-              const live = running && !jobDone;
-              return (
-                <CheckRow
-                  key={orderKey.get(c)}
-                  rowId={rowId(i)}
-                  repoPath={repoPath}
-                  check={c}
-                  provider={provider}
-                  isRunning={live}
-                  runJob={runJob}
-                  requiredAttention={attentionFlags.get(c) ?? false}
-                />
-              );
-            })}
-          </div>
-        </>
+        <div
+          className="mt-1.5 max-h-64 overflow-y-auto border"
+          onKeyDown={onKeyDown}
+        >
+          {sorted.map((c, i) => {
+            const running = isRunningActionsCheck(c, provider);
+            const runJob = running
+              ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
+              : undefined;
+            // `useRunDetail` polls at 5s but usePrDetails only refetches on
+            // focus, so a finished run keeps a stale `completedAt` (→ `running`
+            // true) until a focus event. Treat the resolved job as authoritative:
+            // once it reports a non-active status, drop the live UI immediately.
+            const jobDone = runJob ? !isRunActive(runJob.status) : false;
+            const live = running && !jobDone;
+            return (
+              <CheckRow
+                key={orderKey.get(c)}
+                rowId={rowId(i)}
+                repoPath={repoPath}
+                check={c}
+                provider={provider}
+                isRunning={live}
+                runJob={runJob}
+                requiredAttention={attentionFlags.get(c) ?? false}
+              />
+            );
+          })}
+        </div>
       )}
     </div>
   );

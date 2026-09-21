@@ -539,7 +539,8 @@ pub async fn gh_run_approve(repo_path: String, run_id: u64, lens: Option<String>
     Ok(())
 }
 
-/// Cancels an in-progress run.
+/// Cancels an in-progress run. Origin-pinned by choice: no PR-scoped surface
+/// offers cancel today — thread a lens like re-run/approve before adding one.
 pub async fn gh_run_cancel(repo_path: String, run_id: u64) -> AppResult<()> {
     let id = run_id.to_string();
     let slug = crate::github::gh_origin_slug(&repo_path).await?;

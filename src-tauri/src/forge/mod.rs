@@ -2388,9 +2388,10 @@ pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<S
     }
 }
 
-/// GitHub re-runs all jobs or (`failed`) just failed ones; GitLab retries failed
-/// and canceled jobs only, ignoring `failed` (the UI offers only retry there;
-/// "re-run all" stays GitHub-only). The lens is honored by the GitHub arm only.
+/// Re-run a finished CI run, behind the abstraction. GitHub re-runs all jobs or
+/// (`failed`) just failed ones; GitLab retries failed and canceled jobs only,
+/// ignoring `failed` (the UI offers only retry there; "re-run all" stays
+/// GitHub-only). The lens is honored by the GitHub arm only.
 #[tauri::command]
 pub async fn forge_ci_run_rerun(
     repo_path: String,
