@@ -7165,6 +7165,20 @@ pub async fn play_job(repo_path: &str, job_id: u64) -> AppResult<()> {
     Ok(())
 }
 
+/// Retry a finished job only; GitLab mints a new job id for the attempt.
+/// A rejected retry surfaces as glab's own error.
+pub async fn retry_job(repo_path: &str, job_id: u64) -> AppResult<()> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let endpoint = format!("projects/{enc}/jobs/{job_id}/retry");
+    run_glab(
+        Some(repo_path),
+        &["api", "--method", "POST", &endpoint],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// A key for a variable passed when running a pipeline manually — it becomes an
 /// environment variable in the jobs, so `[A-Za-z_][A-Za-z0-9_]*` (no leading
 /// digit). [`validate_variable_key`] shares the charset but guards the stored

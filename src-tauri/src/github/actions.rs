@@ -502,6 +502,11 @@ fn run_rerun_args<'a>(slug: &'a str, id: &'a str, failed: bool) -> Vec<&'a str> 
     args
 }
 
+/// gh resolves the run from the job id; no run-id positional belongs here.
+fn run_rerun_job_args<'a>(slug: &'a str, job_id: &'a str) -> Vec<&'a str> {
+    vec!["run", "rerun", "-R", slug, "--job", job_id]
+}
+
 /// Re-runs a completed run — all jobs, or only the failed ones.
 /// Lens-scoped because the PR checks strip renders under `upstream` too,
 /// where the run belongs to the parent repo.
@@ -514,6 +519,21 @@ pub async fn gh_run_rerun(
     let id = run_id.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = run_rerun_args(&slug, &id, failed);
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    Ok(())
+}
+
+/// Re-runs a job plus its dependent jobs.
+/// Lens-scoped because the PR checks strip renders under `upstream` too,
+/// where the job belongs to the parent repo.
+pub async fn gh_run_rerun_job(
+    repo_path: String,
+    job_id: u64,
+    lens: Option<String>,
+) -> AppResult<()> {
+    let id = job_id.to_string();
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let args = run_rerun_job_args(&slug, &id);
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -1545,6 +1565,14 @@ mod tests {
         let failed_only = run_rerun_args("o/r", "42", true);
         assert_eq!(failed_only[..plain.len()], plain[..]);
         assert_eq!(failed_only[plain.len()..], ["--failed"]);
+    }
+
+    #[test]
+    fn run_rerun_job_args_uses_job_flag_without_run_positional() {
+        assert_eq!(
+            run_rerun_job_args("o/r", "42"),
+            vec!["run", "rerun", "-R", "o/r", "--job", "42"]
+        );
     }
 
     #[test]

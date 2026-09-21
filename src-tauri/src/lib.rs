@@ -403,6 +403,7 @@ pub fn run() {
             forge::forge_ci_run_failed_logs,
             forge::forge_ci_job_logs,
             forge::forge_ci_run_rerun,
+            forge::forge_ci_job_rerun,
             forge::forge_ci_run_cancel,
             forge::forge_ci_run_approve,
             forge::forge_detect_fork_pr_for_branch,

@@ -75,3 +75,66 @@ export function rerunnableRuns(input: {
     ([id, signature]) => input.latched.get(id) !== signature,
   );
 }
+
+/** One re-runnable job: its id, the completion it carried when the list was
+ *  derived (the latch key), and the run it belongs to — the run-level latch the
+ *  caller writes alongside needs that id. */
+export type JobRerunCandidate = readonly [
+  jobId: string,
+  completedAt: string,
+  runId: string,
+];
+
+/**
+ * The individual jobs the PR checks rollup may re-run right now.
+ *
+ * A candidate is a failed-bucket check carrying a job id, a run id AND a
+ * `completedAt`. The completion term is the same guard `failedRunSignatures`
+ * documents: a StatusContext whose `targetUrl` happens to parse as an Actions
+ * URL arrives FAILURE with no timestamps, and the parse is slug-blind — it must
+ * never mint a re-runnable id pointing at another repository's job.
+ *
+ * An UNSETTLED provider derives nothing, deliberately diverging from
+ * `rerunnableRuns` (whose test pins the opposite): re-running one job is a
+ * capability-gated write with no GitHub default to fall back on, so the offer
+ * waits for the probe rather than guessing which forge — and which wording —
+ * the click would buy.
+ *
+ * GitHub refuses a per-job re-run while the run is still in flight, so its
+ * candidates drop any job whose run is still running; GitLab keeps the offer,
+ * exactly as the run-level derivation does (it collapses running/pending/manual
+ * into one PENDING status, so an activity gate would hide the offer forever on a
+ * pipeline with a manual job).
+ *
+ * A latched job comes back only once its `completedAt` moves — evidence of a new
+ * finished attempt, never the observation of a transient. Both forges mint a NEW
+ * job id per attempt, so a latch entry simply orphans once the re-run lands; it
+ * dies with the per-PR remount.
+ *
+ * Cancelled rows are out of scope by design, not by omission: a cancelled GitLab
+ * job is forge-retryable but presents in the skipped bucket, and the run-level
+ * Retry (which does fire on cancelled) already covers it.
+ */
+export function rerunnableJobs(input: {
+  checks: readonly PrCheckOut[];
+  bucketOf: (check: PrCheckOut) => CheckBucket;
+  /** Run ids whose GitHub Actions run is still in flight (GitHub-only by
+   *  construction; empty on the other providers). */
+  runningRunIds: readonly string[];
+  /** Job ids re-run from this rollup → the completion they carried then. */
+  latchedJobs: ReadonlyMap<string, string>;
+  /** The SETTLED forge provider — `undefined` while the probe is pending. */
+  provider: ForgeProvider | null | undefined;
+}): JobRerunCandidate[] {
+  if (input.provider !== "github" && input.provider !== "gitlab") return [];
+  const candidates: JobRerunCandidate[] = [];
+  for (const c of input.checks) {
+    if (!c.jobId || !c.runId || !c.completedAt) continue;
+    if (input.bucketOf(c) !== "failed") continue;
+    if (input.provider === "github" && input.runningRunIds.includes(c.runId))
+      continue;
+    if (input.latchedJobs.get(c.jobId) === c.completedAt) continue;
+    candidates.push([c.jobId, c.completedAt, c.runId]);
+  }
+  return candidates;
+}

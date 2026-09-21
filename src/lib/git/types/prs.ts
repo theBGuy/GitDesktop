@@ -252,7 +252,8 @@ export interface PrCheckOut {
    *  for non-Actions checks (external CI, or a StatusContext). */
   runId?: string;
   /** GitHub Actions job id, parsed from `.../actions/runs/<runId>/job/<jobId>`.
-   *  Absent when the URL has no job segment (or isn't an Actions URL). */
+   *  Absent when the URL has no job segment (or isn't an Actions URL). GitLab
+   *  doesn't parse at all — its jobs API reports the job's own id directly. */
   jobId?: string;
   /** When the check began — a CheckRun `startedAt`, or a StatusContext's creation
    *  time, which gh reports under this same key. Absent only when the rollup

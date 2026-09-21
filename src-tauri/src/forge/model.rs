@@ -222,6 +222,9 @@ pub struct Implemented {
     /// failed jobs; GitLab's retry restarts failed/canceled jobs only (there is no
     /// GitLab "re-run all", so that one button stays GitHub-only in the UI).
     pub ci_rerun: bool,
+    /// Re-running one CI job (GitHub: the job plus its dependents; GitLab: that
+    /// job alone). Bitbucket steps have no retry endpoint, so `false` there.
+    pub ci_job_rerun: bool,
     /// Cancelling an in-flight CI run — a shared control.
     pub ci_cancel: bool,
     /// Manually starting a CI run — a shared control (GitHub dispatches a workflow;
@@ -391,6 +394,7 @@ impl Implemented {
             issue_create: true,
             mr_create: true,
             ci_rerun: true,
+            ci_job_rerun: true,
             ci_cancel: true,
             ci_dispatch: true,
             release_create: true,
@@ -460,6 +464,7 @@ impl Implemented {
             issue_create: false,
             mr_create: false,
             ci_rerun: false,
+            ci_job_rerun: false,
             ci_cancel: false,
             ci_dispatch: false,
             release_create: false,
@@ -541,6 +546,7 @@ impl Implemented {
                 issue_create: true,
                 mr_create: true,
                 ci_rerun: true,
+                ci_job_rerun: true,
                 ci_cancel: true,
                 ci_dispatch: true,
                 release_create: true,
@@ -1316,7 +1322,7 @@ mod tests {
         assert!(i.issue_labels && i.mr_labels && i.issue_assignees);
         assert!(i.mr_assignees);
         assert!(i.issue_create && i.mr_create);
-        assert!(i.ci_rerun && i.ci_cancel && i.ci_dispatch);
+        assert!(i.ci_rerun && i.ci_job_rerun && i.ci_cancel && i.ci_dispatch);
         assert!(i.release_create && i.release_edit);
         assert!(!i.mr_request_changes && i.mr_reviewers);
         assert!(i.issue_edit && i.mr_edit && i.issue_milestone);
@@ -1352,7 +1358,7 @@ mod tests {
         assert!(imp.issue_edit && imp.mr_edit && imp.issue_milestone);
         assert!(imp.mr_request_changes);
         assert!(imp.issue_reactions && imp.mr_reactions);
-        assert!(imp.ci_job_play && imp.time_tracking && imp.issue_links);
+        assert!(imp.ci_job_play && imp.ci_job_rerun && imp.time_tracking && imp.issue_links);
         // PR tasks stay Bitbucket-only — not wired for GitLab.
         assert!(!imp.pr_tasks);
         assert!(imp.mr_review_threads && imp.mr_thread_reply && imp.mr_thread_resolve);
@@ -1402,7 +1408,7 @@ mod tests {
         assert!(!bb.release_create && !bb.release_edit && !bb.mr_assignees);
         assert!(!bb.issue_edit && !bb.issue_milestone);
         assert!(!bb.issue_reactions && !bb.mr_reactions);
-        assert!(!bb.ci_job_play && !bb.time_tracking && !bb.issue_links);
+        assert!(!bb.ci_job_play && !bb.ci_job_rerun && !bb.time_tracking && !bb.issue_links);
         // Review threads: inline reads + replies are wired; resolution is NOT
         // (no comment-resolution field/endpoint found on any probed Bitbucket comment).
         assert!(bb.mr_review_threads && bb.mr_thread_reply);

@@ -34,6 +34,7 @@ import {
   useCancelRun,
   useJobLogs,
   usePlayCiJob,
+  useRerunJob,
   useRerunRun,
   useRunDetail,
   useRunFailedLogs,
@@ -50,6 +51,8 @@ import {
   cancelStartedMessage,
   isFailureConclusion,
   isPipelineProvider,
+  type JobRerunOffer,
+  jobRerunOffer,
   RERUN_TITLES,
   rerunOffers,
   rerunSuccessMessage,
@@ -74,6 +77,10 @@ function JobRow({
   onPlay,
   playing = false,
   playDisabledReason,
+  onRerun,
+  rerunOffer,
+  rerunning = false,
+  rerunDisabledReason,
 }: {
   repoPath: string;
   job: RunJob;
@@ -89,6 +96,16 @@ function JobRow({
   /** Set when the viewer may not push: the play button stays visible but
    *  disabled, with this text as its hint. */
   playDisabledReason?: string;
+  /** Re-run this one finished job (GitHub + GitLab). */
+  onRerun?: () => void;
+  /** The provider's per-job wording — the button renders only with both this and
+   *  `onRerun`, so the label can never be spelled at this call site. */
+  rerunOffer?: JobRerunOffer;
+  /** Whether the re-run mutation is in flight for THIS job. */
+  rerunning?: boolean;
+  /** Set when the viewer may not push: the re-run button stays visible but
+   *  disabled, with this text as its hint. */
+  rerunDisabledReason?: string;
 }) {
   // Failed and in-progress jobs are the interesting ones — open them by default.
   const [open, setOpen] = useState(
@@ -161,6 +178,29 @@ function JobRow({
               <PlayIcon data-icon="inline-start" />
             )}
             Run job
+          </DisabledReasonButton>
+        )}
+        {onRerun && rerunOffer && (
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            wrapperClassName="mr-2"
+            className="text-muted-foreground"
+            disabled={rerunning || !!rerunDisabledReason}
+            reason={rerunDisabledReason}
+            title={rerunOffer.title}
+            // The visible label is provider wording alone; the job name makes the
+            // accessible name unique across rows (WCAG 2.5.3: it contains the
+            // visible label).
+            aria-label={`${rerunOffer.label} ${job.name}`}
+            onClick={onRerun}
+          >
+            {rerunning ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <ArrowClockwiseIcon data-icon="inline-start" />
+            )}
+            {rerunOffer.label}
           </DisabledReasonButton>
         )}
         {onDebug && (
@@ -310,6 +350,7 @@ export function RunDetailView({
   const rerun = useRerunRun(repoPath);
   const cancel = useCancelRun(repoPath);
   const playJob = usePlayCiJob(repoPath);
+  const rerunJob = useRerunJob(repoPath);
   const approveRun = useApproveWorkflowRun(repoPath);
   const aiEnabled = useAiEnabled();
   // Re-run and cancel are SHARED writes (GitHub + GitLab): `canWrite || …` keeps
@@ -325,6 +366,13 @@ export function RunDetailView({
   // alone gates — never `canWrite || …`. With the gate GitHub never matches the
   // manual-job shape anyway.
   const canPlay = forgeFeatureReady(forge.data, "ciJobPlay");
+  // Re-running ONE job is a shared write, so this flag reads like re-run/cancel
+  // above. It isn't what gates the offer while the probe is pending, though: the
+  // button's own wording comes from `provider`, which is undefined until the
+  // probe answers, so on EVERY provider the offer arrives a beat after the
+  // run-level ones — cosmetic.
+  const canRerunJob = canWrite || forgeFeatureReady(forge.data, "ciJobRerun");
+  const jobOffer = jobRerunOffer(provider);
   // Re-run and cancel are repo writes: an explicitly read-only viewer keeps the
   // buttons (disabled, with the reason). CI is repo-wide — no lens.
   const writeAccess = useRepoWriteAccess(
@@ -392,6 +440,16 @@ export function RunDetailView({
     try {
       await playJob.mutateAsync(jobId);
       toast.success("Starting job…");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function doRerunJob(jobId: number, offer: JobRerunOffer) {
+    try {
+      // No lens: this is the repo-wide CI surface, like the run-level re-run.
+      await rerunJob.mutateAsync({ jobId });
+      toast.success(offer.toast);
     } catch (e) {
       toastError(e);
     }
@@ -590,6 +648,21 @@ export function RunDetailView({
                   }
                   playing={playJob.isPending && playJob.variables === job.id}
                   playDisabledReason={writeReason}
+                  onRerun={
+                    // GitHub refuses a per-job re-run while the run is still in
+                    // flight; GitLab accepts one, so only GitHub gates on `active`.
+                    jobOffer &&
+                    canRerunJob &&
+                    isFailureConclusion(job.conclusion) &&
+                    (provider !== "github" || !active)
+                      ? () => doRerunJob(job.id, jobOffer)
+                      : undefined
+                  }
+                  rerunOffer={jobOffer ?? undefined}
+                  rerunning={
+                    rerunJob.isPending && rerunJob.variables?.jobId === job.id
+                  }
+                  rerunDisabledReason={writeReason}
                 />
               ))}
             </div>

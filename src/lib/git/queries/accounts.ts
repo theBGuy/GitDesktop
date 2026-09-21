@@ -222,6 +222,7 @@ const NO_FORGE_STATUS: ForgeStatus = {
     issueDueDate: false,
     repoSettings: false,
     ciJobPlay: false,
+    ciJobRerun: false,
     timeTracking: false,
     issueLinks: false,
     prTasks: false,

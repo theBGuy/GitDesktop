@@ -367,7 +367,7 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
-      "CI checks rollup — pass/fail/pending/skipped, live step progress on running Actions checks, one-click re-run of what failed (GitHub & GitLab)",
+      "CI checks rollup — pass/fail/pending/skipped, live step progress on running Actions checks, one-click re-run of what failed, batch or single job (GitHub & GitLab)",
   },
   {
     group: "CI, tags & releases",

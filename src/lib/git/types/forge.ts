@@ -149,6 +149,10 @@ export interface ForgeImplemented {
   /** Playing a manual CI job (one awaiting a "play"). GitLab-unique, so false for
    *  GitHub. */
   ciJobPlay: boolean;
+  /** Re-running ONE finished CI job — GitHub restarts the job plus every job that
+   *  depends on it; GitLab retries that job alone. Bitbucket steps have no retry
+   *  endpoint, so false there. */
+  ciJobRerun: boolean;
   /** Time tracking (estimate + spent) on issues and MRs. GitLab-unique, so false for
    *  GitHub. */
   timeTracking: boolean;

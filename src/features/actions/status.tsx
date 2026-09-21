@@ -102,6 +102,47 @@ export function checksRerunOffer(
   return null;
 }
 
+/** Every word a per-job re-run needs: the full label, the compact one for a
+ *  narrow row, the hover copy that says what the provider actually restarts, and
+ *  the started toast. */
+export type JobRerunOffer = {
+  label: string;
+  compactLabel: string;
+  title: string;
+  toast: string;
+};
+
+/**
+ * The per-job re-run a provider offers, or null where there is none (Bitbucket
+ * steps have no retry endpoint). Shared by the PR checks rollup and the run
+ * detail job rows so the two can't drift on the wording.
+ *
+ * Deliberately a flat bundle rather than the run-level `kind` + `RERUN_TITLES` +
+ * `rerunSuccessMessage` split: a job re-run has no `kind` axis to key those
+ * records off, so one object keeps all the per-job wording in one place.
+ */
+export function jobRerunOffer(
+  provider: ForgeProvider | null | undefined,
+): JobRerunOffer | null {
+  if (provider === "github") {
+    return {
+      label: "Re-run job",
+      compactLabel: "Re-run",
+      title: "Re-run this job and any jobs that depend on it",
+      toast: "Re-running job",
+    };
+  }
+  if (provider === "gitlab") {
+    return {
+      label: "Retry job",
+      compactLabel: "Retry",
+      title: "Retry this job",
+      toast: "Retrying job",
+    };
+  }
+  return null;
+}
+
 /** Hover copy per re-run offer, for the two whose label doesn't say what the
  *  provider actually restarts. Shared with the offers themselves so a surface
  *  can't show one without the other. */

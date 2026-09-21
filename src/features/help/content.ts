@@ -1145,8 +1145,12 @@ check has finished, and restarts the failed jobs of every such run; on **GitLab*
 it reads **Retry pipeline**, appears as soon as a job fails, and retries the
 pipeline's failed and canceled jobs. The command palette carries it as **Re-run
 failed jobs / Retry pipeline**, palette-only by default — bind a key in Settings.
-If your sign-in can't push, the button stays visible and disabled with the reason.
-**Bitbucket** has no pull-request-scoped re-run, so no button appears there.
+One flaky job doesn't need the whole batch: each failed row with a fetchable job
+carries its own **Re-run** (GitHub) or **Retry** (GitLab) beside **Open full
+run** — GitHub re-runs that job and any jobs that depend on it, GitLab retries
+that job alone. If your sign-in can't push, the buttons stay visible and
+disabled with the reason. **Bitbucket** has no pull-request-scoped re-run, so no
+buttons appear there.
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
@@ -2195,9 +2199,11 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   pages remain. Filter by text or scope to the current branch.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
-- **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run. A pull
-  request's checks rollup carries its own re-run as well (failed jobs on GitHub, the
-  pipeline retry on GitLab), so a red build restarts without a trip here.
+- **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a
+  failed job's own row adds **Re-run job**, restarting that job and any jobs that
+  depend on it. A pull request's checks rollup carries its own re-runs as well (the
+  failed batch on GitHub, the pipeline retry on GitLab, and per-job on both), so a
+  red build restarts without a trip here.
 - {{Secondaryclick}} a run in the list for its actions without leaving the list — the
   run is selected, so the detail pane follows. You get the same **re-run** and **cancel**
   offers, **Run workflow again…** (the Run dialog opens with that run's workflow already
@@ -2227,7 +2233,8 @@ filterable, optionally scoped to the current branch — with the header CI badge
 latest one. Open a pipeline to see its **jobs** (status + durations, counting up live while
 a job runs); expand a job for its **log** (copyable from its corner). The pipeline actions
 work here too: **Cancel** a running pipeline, **Retry** a failed or canceled one (GitLab
-restarts its failed jobs), and **Run pipeline…** starts a fresh pipeline on a branch or tag,
+restarts its failed jobs), **Retry job** on a failed job's row to retry just that job,
+and **Run pipeline…** starts a fresh pipeline on a branch or tag,
 with optional **CI/CD variables**. The row {{secondaryclick}} menu carries the same
 offers, named for pipelines. A **manual job** — one that waits for a manual trigger —
 shows a **Run job** button that plays it.

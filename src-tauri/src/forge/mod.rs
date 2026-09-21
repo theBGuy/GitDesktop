@@ -2408,6 +2408,25 @@ pub async fn forge_ci_run_rerun(
     }
 }
 
+/// Re-run one CI job: GitHub includes its dependents; GitLab retries that job
+/// alone. Bitbucket steps have no retry endpoint. The lens is honored by the
+/// GitHub arm only.
+#[tauri::command]
+pub async fn forge_ci_job_rerun(
+    repo_path: String,
+    job_id: String,
+    lens: Option<String>,
+) -> AppResult<()> {
+    let job_id = parse_ci_id("job", &job_id)?;
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::retry_job(&repo_path, job_id).await,
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Re-running a single job is GitHub/GitLab-only — Bitbucket pipeline steps have no retry endpoint.".into(),
+        )),
+        _ => github::rerun_job(&repo_path, job_id, lens).await,
+    }
+}
+
 /// Approve a CI run GitHub is withholding pending maintainer approval (the gate on
 /// a first-time contributor's fork PR). GitHub-only: GitDesktop surfaces run
 /// approval nowhere else, so the other providers refuse rather than guess.
@@ -5386,7 +5405,7 @@ mod tests {
     #[test]
     fn parse_ci_id_pins_the_observable_error_text() {
         // These strings cross the IPC boundary to the UI, so they are behavior, not
-        // diagnostics: the seven CI command sites — `forge_ci_*` plus
+        // diagnostics: the eight CI command sites — `forge_ci_*` plus
         // `forge_gl_ci_play_job` — must keep emitting them verbatim.
         let msg = |kind, raw| match parse_ci_id(kind, raw).unwrap_err() {
             AppError::InvalidArgument(s) => s,

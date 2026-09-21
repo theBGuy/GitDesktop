@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 import {
   failedRunSignatures,
+  rerunnableJobs,
   rerunnableRuns,
 } from "../src/features/pulls/checks-rerun.ts";
 
@@ -139,4 +140,108 @@ test("an unsettled provider still derives runs, and the gates above decide", () 
     offer({ checks, provider: undefined }).map(([id]) => id),
     ["7"],
   );
+});
+
+// ── Per-job re-run ───────────────────────────────────────────────────────────
+
+const jobOffer = (over) =>
+  rerunnableJobs({
+    checks: [],
+    bucketOf,
+    runningRunIds: [],
+    latchedJobs: new Map(),
+    provider: "github",
+    ...over,
+  });
+
+const jobCheck = (over) => check({ jobId: "j1", runId: "7", ...over });
+
+test("a failed job with both ids and a completion is offered", () => {
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(jobOffer({ checks }), [["j1", "t1", "7"]]);
+});
+
+test("a failed check with no job id is not a per-job candidate", () => {
+  // Run-level re-run still covers it; there is no job to name.
+  const checks = [check({ runId: "7", completedAt: "t1" })];
+  assert.deepEqual(jobOffer({ checks }), []);
+});
+
+test("a failed job with no completion time is dropped", () => {
+  // Same slug-blind-parse guard the run derivation documents: no timestamps means
+  // the ids could name another repository's job.
+  const checks = [jobCheck({ completedAt: undefined })];
+  assert.deepEqual(jobOffer({ checks }), []);
+});
+
+test("GitHub drops a job whose run still has work in flight", () => {
+  const checks = [
+    jobCheck({ jobId: "j1", runId: "7", completedAt: "t1" }),
+    jobCheck({ jobId: "j2", runId: "8", completedAt: "t2" }),
+  ];
+  assert.deepEqual(
+    jobOffer({ checks, runningRunIds: ["7"] }).map(([id]) => id),
+    ["j2"],
+    "GitHub refuses a per-job re-run while the run has not finished",
+  );
+});
+
+test("GitLab keeps a job its run's activity would have gated", () => {
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(
+    jobOffer({
+      checks,
+      runningRunIds: ["7"],
+      provider: "gitlab",
+    }).map(([id]) => id),
+    ["j1"],
+    "the running-run subtraction is GitHub-only, as at run level",
+  );
+});
+
+test("a latched job stays out while its completion is unchanged", () => {
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(
+    jobOffer({ checks, latchedJobs: new Map([["j1", "t1"]]) }),
+    [],
+  );
+});
+
+test("a changed completion releases the job latch", () => {
+  // Both forges stamp a fresh completion per attempt, so a different one IS a new
+  // attempt's failure — no pending snapshot need ever be observed.
+  const checks = [jobCheck({ completedAt: "t2" })];
+  assert.deepEqual(jobOffer({ checks, latchedJobs: new Map([["j1", "t1"]]) }), [
+    ["j1", "t2", "7"],
+  ]);
+});
+
+test("an unsettled provider offers no jobs", () => {
+  // The deliberate divergence from `rerunnableRuns` above: per-job re-run is a
+  // capability-gated write with no GitHub default, so the probe must answer first.
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(jobOffer({ checks, provider: undefined }), []);
+});
+
+test("Bitbucket offers no jobs", () => {
+  // Its pipeline steps have no retry endpoint.
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(jobOffer({ checks, provider: "bitbucket" }), []);
+});
+
+test("passed and pending jobs are not offered", () => {
+  // Only the failed bucket re-runs: a green job has nothing to retry, and a
+  // running one hasn't produced a result to retry yet.
+  const checks = [
+    jobCheck({ jobId: "ok", status: "SUCCESS", completedAt: "t1" }),
+    jobCheck({ jobId: "busy", status: "IN_PROGRESS", completedAt: "t1" }),
+  ];
+  assert.deepEqual(jobOffer({ checks }), []);
+});
+
+test("a cancelled job is not offered", () => {
+  // Out of scope by design: a cancelled GitLab job is forge-retryable but sits in
+  // the skipped bucket, and the run-level Retry (which fires on cancelled) covers it.
+  const checks = [jobCheck({ status: "CANCELLED", completedAt: "t1" })];
+  assert.deepEqual(jobOffer({ checks, provider: "gitlab" }), []);
 });

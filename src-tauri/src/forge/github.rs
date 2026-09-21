@@ -431,6 +431,10 @@ pub async fn rerun_run(
     crate::github::actions::gh_run_rerun(repo_path.to_string(), run_id, failed, lens).await
 }
 
+pub async fn rerun_job(repo_path: &str, job_id: u64, lens: Option<String>) -> AppResult<()> {
+    crate::github::actions::gh_run_rerun_job(repo_path.to_string(), job_id, lens).await
+}
+
 pub async fn cancel_run(repo_path: &str, run_id: u64) -> AppResult<()> {
     crate::github::actions::gh_run_cancel(repo_path.to_string(), run_id).await
 }
