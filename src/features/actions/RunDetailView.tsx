@@ -8,6 +8,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -68,6 +69,15 @@ function isLogPending(log: string): boolean {
   return t.length < 300 && /still in progress|will be available/i.test(t);
 }
 
+/** How long a started re-run or play waits before re-reading this run. The
+ *  mutation's own invalidation races the forge's attempt transition and can
+ *  cache the OLD finished attempt — and `useRunDetail` only polls while the run
+ *  reads active, so that stale read parks the poll and leaves the view offering
+ *  buttons the forge would now refuse. Same rationale and same 4.5s as the PR
+ *  checks rollup's repair pass; its constant stays private to that module rather
+ *  than exporting pull-request state into this view. */
+const RUN_REPAIR_DELAY_MS = 4500;
+
 function JobRow({
   repoPath,
   job,
@@ -89,15 +99,18 @@ function JobRow({
   stepsExpected?: boolean;
   remoteLabel?: string;
   onDebug?: () => void;
-  /** Play a manual GitLab job awaiting a manual trigger (GitLab-only). */
-  onPlay?: () => void;
+  /** Play a manual GitLab job awaiting a manual trigger (GitLab-only). Takes the
+   *  button element: this offer retires the moment the job starts, so the parent
+   *  needs it to tell whether the click is about to lose focus. */
+  onPlay?: (buttonEl: HTMLElement) => void;
   /** Whether the play mutation is in flight for THIS job. */
   playing?: boolean;
   /** Set when the viewer may not push: the play button stays visible but
    *  disabled, with this text as its hint. */
   playDisabledReason?: string;
-  /** Re-run this one finished job (GitHub + GitLab). */
-  onRerun?: () => void;
+  /** Re-run this one finished job (GitHub + GitLab). Takes the button element
+   *  for the same reason `onPlay` does — the offer retires on success. */
+  onRerun?: (buttonEl: HTMLElement) => void;
   /** The provider's per-job wording — the button renders only with both this and
    *  `onRerun`, so the label can never be spelled at this call site. */
   rerunOffer?: JobRerunOffer;
@@ -170,7 +183,7 @@ function JobRow({
             disabled={playing || !!playDisabledReason}
             reason={playDisabledReason}
             aria-label={`Run job ${job.name}`}
-            onClick={onPlay}
+            onClick={(e) => onPlay(e.currentTarget)}
           >
             {playing ? (
               <Spinner data-icon="inline-start" />
@@ -189,11 +202,10 @@ function JobRow({
             disabled={rerunning || !!rerunDisabledReason}
             reason={rerunDisabledReason}
             title={rerunOffer.title}
-            // The visible label is provider wording alone; the job name makes the
-            // accessible name unique across rows (WCAG 2.5.3: it contains the
-            // visible label).
+            // The accessible name adds the job to the visible label and keeps
+            // that label inside it (WCAG 2.5.3).
             aria-label={`${rerunOffer.label} ${job.name}`}
-            onClick={onRerun}
+            onClick={(e) => onRerun(e.currentTarget)}
           >
             {rerunning ? (
               <Spinner data-icon="inline-start" />
@@ -382,6 +394,22 @@ export function RunDetailView({
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
+  // ONE busy notion for the re-run FAMILY — the run-level re-runs and the
+  // per-job ones act on the same run, so an overlapping submission just buys the
+  // forge's mid-run refusal. Play, cancel and approve are different operations
+  // and keep their own. Each control suppresses the reason on ITSELF while it is
+  // the one running: its spinner already says so.
+  const rerunFamilyBusy = rerun.isPending || rerunJob.isPending;
+  const rerunHeldReason = (() => {
+    switch (true) {
+      case writeReason !== undefined:
+        return writeReason;
+      case rerunFamilyBusy:
+        return "A re-run is already in flight…";
+      default:
+        return undefined;
+    }
+  })();
   const remoteLabel = providerLabel(provider);
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
@@ -392,6 +420,45 @@ export function RunDetailView({
   const [debugOpen, setDebugOpen] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const logs = useRunFailedLogs(repoPath, runId, showLogs);
+  // Where a job action's focus goes when its own button dies with the offer.
+  // The header's "View on <remote>" is the one control that renders for every
+  // run whatever its status, and it stays focusable even URL-less (its reason
+  // takes `focusableWhenDisabled`) — the only keyless anchor on this view.
+  const viewOnRemoteRef = useRef<HTMLButtonElement>(null);
+
+  /** Hand focus to the header after a job action whose button retires on
+   *  success (play, per-job re-run): the awaited refetch flips the run active or
+   *  mints a new job id, and the row's button unmounts under the user. Never
+   *  overrides a move made during the await. */
+  function handOffJobFocus(buttonEl: HTMLElement, fromButton: boolean) {
+    const unclaimed =
+      document.activeElement === document.body ||
+      document.activeElement === buttonEl;
+    if (fromButton && unclaimed) viewOnRemoteRef.current?.focus();
+  }
+
+  // One pending repair — this view holds exactly one run, so a second start
+  // inside the window re-arms the same timer rather than accumulating ids: the
+  // keys it invalidates are identical either way, and a plain re-arm can never
+  // drop a repair without replacing it. It deliberately outlives an unmount,
+  // like the rollup's: the invalidation is global and idempotent whether or not
+  // this view is still mounted.
+  const queryClient = useQueryClient();
+  const repairTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Re-read this run once a started attempt has had time to transition. */
+  function scheduleRunRepair() {
+    if (repairTimer.current !== null) clearTimeout(repairTimer.current);
+    repairTimer.current = setTimeout(() => {
+      repairTimer.current = null;
+      // The same subtree the mutations' own `onSettled` invalidates — this run's
+      // detail, every runs-list shape, the header's latest badge. A narrower
+      // pass can't be written from here: the list keys carry the panel's branch
+      // filter, which this view never sees. Unawaited, like the mutation's pass.
+      void queryClient.invalidateQueries({
+        queryKey: ["repo", repoPath, "actions"],
+      });
+    }, RUN_REPAIR_DELAY_MS);
+  }
 
   const run = detail.data;
   const active = run ? isRunActive(run.status) : false;
@@ -419,9 +486,11 @@ export function RunDetailView({
   // moment another run is selected, and react-query drops per-call callbacks once
   // the observer has no listeners.
   async function doRerun(failedOnly: boolean) {
+    if (rerunFamilyBusy) return;
     try {
       await rerun.mutateAsync({ runId, failed: failedOnly });
       toast.success(rerunSuccessMessage(provider, failedOnly));
+      scheduleRunRepair();
     } catch (e) {
       toastError(e);
     }
@@ -436,23 +505,41 @@ export function RunDetailView({
     }
   }
 
-  async function doPlay(jobId: number) {
+  async function doPlay(jobId: number, buttonEl: HTMLElement) {
+    // Read before the first await: the started job stops being manual, so this
+    // button is gone by the time the mutation settles.
+    const fromButton = document.activeElement === buttonEl;
     try {
       await playJob.mutateAsync(jobId);
       toast.success("Starting job…");
+      // A played job flips the run active the same way a re-run does, so it
+      // races the same settle.
+      scheduleRunRepair();
     } catch (e) {
       toastError(e);
     }
+    handOffJobFocus(buttonEl, fromButton);
   }
 
-  async function doRerunJob(jobId: number, offer: JobRerunOffer) {
+  async function doRerunJob(
+    jobId: number,
+    offer: JobRerunOffer,
+    buttonEl: HTMLElement,
+  ) {
+    // Read before the first await: the refetch flips the run active (GitHub) or
+    // remounts the row under a new job id (GitLab), either way taking this
+    // button with it.
+    if (rerunFamilyBusy) return;
+    const fromButton = document.activeElement === buttonEl;
     try {
       // No lens: this is the repo-wide CI surface, like the run-level re-run.
       await rerunJob.mutateAsync({ jobId });
       toast.success(offer.toast);
+      scheduleRunRepair();
     } catch (e) {
       toastError(e);
     }
+    handOffJobFocus(buttonEl, fromButton);
   }
 
   async function doApprove() {
@@ -476,7 +563,7 @@ export function RunDetailView({
       !writeBlocked &&
       canRerun &&
       rerunChoices.length > 0 &&
-      !rerun.isPending,
+      !rerunFamilyBusy,
   );
   useHotkeyAction(
     "cancel-run",
@@ -555,21 +642,34 @@ export function RunDetailView({
                 </DisabledReasonButton>
               )
             : canRerun &&
-              rerunChoices.map((offer) => (
-                <DisabledReasonButton
-                  key={offer.kind}
-                  variant="outline"
-                  size="sm"
-                  disabled={rerun.isPending || writeBlocked}
-                  reason={writeReason}
-                  title={RERUN_TITLES[offer.kind]}
-                  onClick={() => doRerun(offer.kind === "failed")}
-                >
-                  <ArrowClockwiseIcon data-icon="inline-start" />
-                  {offer.label}
-                </DisabledReasonButton>
-              ))}
+              rerunChoices.map((offer) => {
+                // Which of the offers is the one running: the guards serialize
+                // the family, so at most one mutation is ever in flight and its
+                // `variables` still describe it.
+                const thisRerunning =
+                  rerun.isPending &&
+                  rerun.variables?.failed === (offer.kind === "failed");
+                return (
+                  <DisabledReasonButton
+                    key={offer.kind}
+                    variant="outline"
+                    size="sm"
+                    disabled={rerunFamilyBusy || writeBlocked}
+                    reason={thisRerunning ? undefined : rerunHeldReason}
+                    title={RERUN_TITLES[offer.kind]}
+                    onClick={() => doRerun(offer.kind === "failed")}
+                  >
+                    {thisRerunning ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <ArrowClockwiseIcon data-icon="inline-start" />
+                    )}
+                    {offer.label}
+                  </DisabledReasonButton>
+                );
+              })}
           <DisabledReasonButton
+            ref={viewOnRemoteRef}
             variant="ghost"
             size="sm"
             wrapperClassName="ml-auto"
@@ -626,45 +726,52 @@ export function RunDetailView({
             </p>
           ) : (
             <div className="border">
-              {run.jobs.map((job) => (
-                <JobRow
-                  key={job.id}
-                  repoPath={repoPath}
-                  job={job}
-                  stepsExpected={stepsExpected}
-                  remoteLabel={remoteLabel}
-                  onDebug={
-                    aiEnabled && isFailureConclusion(job.conclusion)
-                      ? () => {
-                          setDebugJob(job);
-                          setDebugOpen(true);
-                        }
-                      : undefined
-                  }
-                  onPlay={
-                    canPlay && isManualJob(job)
-                      ? () => doPlay(job.id)
-                      : undefined
-                  }
-                  playing={playJob.isPending && playJob.variables === job.id}
-                  playDisabledReason={writeReason}
-                  onRerun={
-                    // GitHub refuses a per-job re-run while the run is still in
-                    // flight; GitLab accepts one, so only GitHub gates on `active`.
-                    jobOffer &&
-                    canRerunJob &&
-                    isFailureConclusion(job.conclusion) &&
-                    (provider !== "github" || !active)
-                      ? () => doRerunJob(job.id, jobOffer)
-                      : undefined
-                  }
-                  rerunOffer={jobOffer ?? undefined}
-                  rerunning={
-                    rerunJob.isPending && rerunJob.variables?.jobId === job.id
-                  }
-                  rerunDisabledReason={writeReason}
-                />
-              ))}
+              {run.jobs.map((job) => {
+                // The row's own re-run, if it's the family's in-flight one —
+                // the guards serialize, so `variables` still describe it.
+                const thisJobRerunning =
+                  rerunJob.isPending && rerunJob.variables?.jobId === job.id;
+                return (
+                  <JobRow
+                    key={job.id}
+                    repoPath={repoPath}
+                    job={job}
+                    stepsExpected={stepsExpected}
+                    remoteLabel={remoteLabel}
+                    onDebug={
+                      aiEnabled && isFailureConclusion(job.conclusion)
+                        ? () => {
+                            setDebugJob(job);
+                            setDebugOpen(true);
+                          }
+                        : undefined
+                    }
+                    onPlay={
+                      canPlay && isManualJob(job)
+                        ? (buttonEl) => void doPlay(job.id, buttonEl)
+                        : undefined
+                    }
+                    playing={playJob.isPending && playJob.variables === job.id}
+                    playDisabledReason={writeReason}
+                    onRerun={
+                      // GitHub refuses a per-job re-run while the run is still in
+                      // flight; GitLab accepts one, so only GitHub gates on `active`.
+                      jobOffer &&
+                      canRerunJob &&
+                      isFailureConclusion(job.conclusion) &&
+                      (provider !== "github" || !active)
+                        ? (buttonEl) =>
+                            void doRerunJob(job.id, jobOffer, buttonEl)
+                        : undefined
+                    }
+                    rerunOffer={jobOffer ?? undefined}
+                    rerunning={thisJobRerunning}
+                    rerunDisabledReason={
+                      thisJobRerunning ? undefined : rerunHeldReason
+                    }
+                  />
+                );
+              })}
             </div>
           )}
 

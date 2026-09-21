@@ -41,6 +41,29 @@ export function failedRunSignatures(
 }
 
 /**
+ * Of the latched runs, the ones whose latch is still STANDING: their recorded
+ * signature is the one their failed checks carry right now.
+ *
+ * A latch releases on a CHANGED signature, but its key never leaves the map, so
+ * key presence outlives the suppression by an entire mount. Every view derived
+ * from a latch has to reproduce the latch's own release rule — ask here, never
+ * `latched.has(id)`.
+ *
+ * A run whose failed rows are gone (its re-run went green) has no current
+ * signature at all, so it reads as released too.
+ */
+export function stillLatchedRunIds(
+  checks: readonly PrCheckOut[],
+  bucketOf: (check: PrCheckOut) => CheckBucket,
+  latched: ReadonlyMap<string, string>,
+): string[] {
+  const signatures = failedRunSignatures(checks, bucketOf);
+  return [...latched]
+    .filter(([id, signature]) => signatures.get(id) === signature)
+    .map(([id]) => id);
+}
+
+/**
  * The runs the PR checks rollup may re-run right now, each with the signature
  * that identifies the attempt they failed on.
  *

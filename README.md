@@ -626,12 +626,12 @@ with a comment you've drafted posted alongside.
 A dedicated tab with live run status, run detail, re-run (all, failed
 only, or one job), cancel, manual dispatch, and inline failed-step logs
 (none of which GitHub Desktop does), plus a current-branch CI badge in
-the header and run-completion notifications. Right-click any run in the list to re-run or
-cancel it, run its workflow again with the picker already on that workflow,
-open it on the forge, or copy its link; those actions are in the command
-palette too. The Run workflow picker marks the workflows that can't be
-started by hand on the chosen ref, so a dispatch that would be rejected is
-visible before you run it.
+the header and run-completion notifications. Right-click any run in the
+list to re-run or cancel it, run its workflow again with the picker
+already on that workflow, open it on the forge, or copy its link; those
+actions are in the command palette too. The Run workflow picker marks
+the workflows that can't be started by hand on the chosen ref, so a
+dispatch that would be rejected is visible before you run it.
 
 - **Debug failed CI with AI**: turn a failed job's logs into a streamed
   root-cause + fix, ending with a ready-to-paste prompt for a coding agent.

@@ -66,6 +66,7 @@ import {
   type JobRerunCandidate,
   rerunnableJobs,
   rerunnableRuns,
+  stillLatchedRunIds,
 } from "./checks-rerun";
 import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
 
@@ -761,15 +762,33 @@ export function ChecksRollup({
     latched: recentlyRerun,
     provider: rerunProvider,
   });
-  // …and the same chain one job down, off the same running-run gate. Visibility
-  // never waits on the write probe: that probe is armed FROM this list and only
-  // contributes the disabled state + its reason.
+  // What the per-job arm treats as "that run is busy": the snapshot's running
+  // runs, plus — on GitHub — every run whose re-run latch is STILL STANDING. A
+  // run restarted from here is in flight before any snapshot says so, and
+  // GitHub refuses a per-job re-run there, so its sibling failed rows go quiet
+  // until the new attempt's own evidence lands. Still-latched, never the latch
+  // KEYS: those persist for the mount and would suppress a second failed
+  // attempt forever. GitLab keeps its offers — mid-run retry is accepted, the
+  // run-level precedent. Composed here rather than in `rerunnableJobs` so that
+  // module's rules stay one pure derivation over its inputs.
+  const jobBusyRunIds =
+    rerunProvider === "github"
+      ? [
+          ...new Set([
+            ...runningRunIds,
+            ...stillLatchedRunIds(checks, bucketOf, recentlyRerun),
+          ]),
+        ]
+      : runningRunIds;
+  // …and the same chain one job down. Visibility never waits on the write
+  // probe: that probe is armed FROM this list and only contributes the disabled
+  // state + its reason.
   const jobCandidates =
     canRerunJob && !stale
       ? rerunnableJobs({
           checks,
           bucketOf,
-          runningRunIds,
+          runningRunIds: jobBusyRunIds,
           latchedJobs: recentlyRerunJobs,
           provider: rerunProvider,
         })
@@ -802,19 +821,22 @@ export function ChecksRollup({
   // switch lands, while the transient wording doesn't.
   const heldReason =
     writeReason ?? (stale ? PR_SWITCH_LOADING_REASON : undefined);
-  // What holds EVERY per-job button, decided once: the write verdict, plus the
-  // re-run already in flight — `rerunOneJob` serializes across rows, so without
-  // the last term a sibling row would look live and click into a silent no-op.
-  const jobRerunHeld =
-    writeBlocked || writeAccess.isPending || rerunningJob !== null;
-  const jobRerunHeldReason = (() => {
+  // ONE busy notion for both re-run paths — the failed-checks batch and any
+  // single job. They act on the same runs, so an overlapping submission just
+  // buys the forge's mid-run refusal; every control holds while either runs.
+  const rerunBusy = rerunning || rerunningJob !== null;
+  // What holds EVERY re-run control, decided once. Each control suppresses the
+  // reason on ITSELF while it's the one running — its spinner already says so,
+  // and "already in flight" would read as a lie there.
+  const rerunHeld = rerunBusy || writeBlocked || writeAccess.isPending;
+  const rerunHeldReason = (() => {
     switch (true) {
       case writeReason !== undefined:
         return writeReason;
       case writeAccess.isPending:
         return "Checking write access…";
-      case rerunningJob !== null:
-        return "Re-running another job…";
+      case rerunBusy:
+        return "A re-run is already in flight…";
       default:
         return undefined;
     }
@@ -871,7 +893,7 @@ export function ChecksRollup({
   }
 
   async function rerunFailedChecks() {
-    if (writeBlocked || stale || rerunning) return;
+    if (writeBlocked || stale || rerunBusy) return;
     // Read before the first await: the button may be gone by the end of the
     // batch, and `activeElement` then reads `<body>` for a palette run and a
     // button run alike.
@@ -914,8 +936,7 @@ export function ChecksRollup({
     [jobId, completedAt, runId]: JobRerunCandidate,
     buttonEl: HTMLElement,
   ) {
-    if (writeBlocked || stale || rerunningJob !== null || writeAccess.isPending)
-      return;
+    if (writeBlocked || stale || rerunBusy || writeAccess.isPending) return;
     if (!jobOffer) return;
     // Read before the first await: this row is keyed by its job id, and a new
     // attempt mints a new one, so the button can be gone by the time the
@@ -961,7 +982,7 @@ export function ChecksRollup({
     rerunOffer !== null &&
       !writeBlocked &&
       !writeAccess.isPending &&
-      !rerunning,
+      !rerunBusy,
   );
 
   // Failures first, then the required contexts still holding the merge, then
@@ -1115,11 +1136,8 @@ export function ChecksRollup({
                 ref={rerunButtonRef}
                 variant="outline"
                 size="xs"
-                disabled={rerunning || writeBlocked || writeAccess.isPending}
-                reason={
-                  writeReason ??
-                  (writeAccess.isPending ? "Checking write access…" : undefined)
-                }
+                disabled={rerunHeld}
+                reason={rerunning ? undefined : rerunHeldReason}
                 title={RERUN_TITLES[rerunOffer.kind]}
                 onClick={() => void rerunFailedChecks()}
               >
@@ -1171,12 +1189,9 @@ export function ChecksRollup({
                         : null
                     }
                     jobRerunBusy={rerunningJob === c.jobId}
-                    jobRerunDisabled={jobRerunHeld}
-                    // The row that IS re-running explains itself with its
-                    // spinner, so it takes no reason — "another job" would be a
-                    // lie there, and the run-level button reads the same way.
+                    jobRerunDisabled={rerunHeld}
                     jobRerunReason={
-                      rerunningJob === c.jobId ? undefined : jobRerunHeldReason
+                      rerunningJob === c.jobId ? undefined : rerunHeldReason
                     }
                     onJobRerun={
                       candidate

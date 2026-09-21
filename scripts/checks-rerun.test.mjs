@@ -19,6 +19,7 @@ import {
   failedRunSignatures,
   rerunnableJobs,
   rerunnableRuns,
+  stillLatchedRunIds,
 } from "../src/features/pulls/checks-rerun.ts";
 
 /** The presentation buckets the rollup passes in, keyed off the raw status the
@@ -140,6 +141,34 @@ test("an unsettled provider still derives runs, and the gates above decide", () 
     offer({ checks, provider: undefined }).map(([id]) => id),
     ["7"],
   );
+});
+
+// ── Still-latched runs ───────────────────────────────────────────────────────
+//
+// The latch map only ever GROWS — `rerunnableRuns` releases a run by comparing
+// signatures, never by deleting the key — so anything that suppresses on the
+// latch has to re-derive that release rule instead of reading key presence.
+
+test("a latched run whose failure signature moved is no longer still-latched", () => {
+  // Run 7's second attempt failed too, with a fresh completion: its latch has
+  // released, and every view derived from the latch must release with it. Run 8
+  // hasn't moved, so it stays suppressed.
+  const latched = new Map([
+    ["7", "t1"],
+    ["8", "t1"],
+  ]);
+  const checks = [
+    check({ runId: "7", completedAt: "t2" }),
+    check({ runId: "8", completedAt: "t1" }),
+  ];
+  assert.deepEqual(stillLatchedRunIds(checks, bucketOf, latched), ["8"]);
+});
+
+test("a latched run with no failed checks left is no longer still-latched", () => {
+  // The re-run went green: no current signature at all, so the latch is spent.
+  const latched = new Map([["7", "t1"]]);
+  const checks = [check({ runId: "7", status: "SUCCESS", completedAt: "t2" })];
+  assert.deepEqual(stillLatchedRunIds(checks, bucketOf, latched), []);
 });
 
 // ── Per-job re-run ───────────────────────────────────────────────────────────
