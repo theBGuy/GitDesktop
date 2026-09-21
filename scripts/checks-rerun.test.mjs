@@ -178,6 +178,7 @@ const jobOffer = (over) =>
     checks: [],
     bucketOf,
     runningRunIds: [],
+    stillLatchedRunIds: [],
     latchedJobs: new Map(),
     provider: "github",
     ...over,
@@ -225,6 +226,41 @@ test("GitLab keeps a job its run's activity would have gated", () => {
     }).map(([id]) => id),
     ["j1"],
     "the running-run subtraction is GitHub-only, as at run level",
+  );
+});
+
+test("a still-latched run's jobs are dropped on GitLab too", () => {
+  // The run-level Retry restarts every failed job of the pipeline, so while that
+  // latch stands a per-job Retry would re-submit work already running. Our own
+  // resubmission, unlike snapshot-observed activity, suppresses on EVERY forge.
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(
+    jobOffer({ checks, provider: "gitlab", stillLatchedRunIds: ["7"] }),
+    [],
+  );
+});
+
+test("GitLab still offers a job whose run is merely running", () => {
+  // The recorded mid-run rule: activity that isn't ours stays legitimate to
+  // retry, and GitLab's one PENDING status would otherwise hide the offer
+  // forever on a pipeline with a manual job.
+  const checks = [jobCheck({ completedAt: "t1" })];
+  assert.deepEqual(
+    jobOffer({ checks, provider: "gitlab", runningRunIds: ["7"] }).map(
+      ([id]) => id,
+    ),
+    ["j1"],
+  );
+});
+
+test("a released run latch lets its jobs be offered again", () => {
+  // `stillLatchedRunIds` reports only the latches whose signature still matches,
+  // so a moved signature stops naming run 7 there — while run 8's latch stands.
+  // The subtraction is per run id, not a global "something is latched" flag.
+  const checks = [jobCheck({ completedAt: "t2" })];
+  assert.deepEqual(
+    jobOffer({ checks, provider: "gitlab", stillLatchedRunIds: ["8"] }),
+    [["j1", "t2", "7"]],
   );
 });
 

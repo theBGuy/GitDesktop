@@ -123,11 +123,17 @@ export type JobRerunCandidate = readonly [
  * waits for the probe rather than guessing which forge — and which wording —
  * the click would buy.
  *
- * GitHub refuses a per-job re-run while the run is still in flight, so its
- * candidates drop any job whose run is still running; GitLab keeps the offer,
- * exactly as the run-level derivation does (it collapses running/pending/manual
- * into one PENDING status, so an activity gate would hide the offer forever on a
- * pipeline with a manual job).
+ * Two run-level subtractions, and the split between them is the point.
+ * SNAPSHOT-RUNNING is GitHub-only: GitHub refuses a per-job re-run while the run
+ * is in flight, while GitLab keeps the offer exactly as the run-level derivation
+ * does (it collapses running/pending/manual into one PENDING status, so an
+ * activity gate would hide the offer forever on a pipeline with a manual job) —
+ * that activity is someone else's, and a mid-run retry there is legitimate.
+ * STILL-LATCHED is universal: a latched run is OUR OWN resubmission, and both
+ * forges' batch re-runs restart every failed job of the run (GitLab's retry
+ * covers failed AND canceled), so re-offering one of them would re-submit work
+ * already started. It releases on the latch's own signature rule, not on
+ * observing activity.
  *
  * A latched job comes back only once its `completedAt` moves — evidence of a new
  * finished attempt, never the observation of a transient. Both forges mint a NEW
@@ -144,6 +150,9 @@ export function rerunnableJobs(input: {
   /** Run ids whose GitHub Actions run is still in flight (GitHub-only by
    *  construction; empty on the other providers). */
   runningRunIds: readonly string[];
+  /** Run ids re-run from this rollup whose latch still STANDS (see
+   *  `stillLatchedRunIds`) — subtracted on every provider. */
+  stillLatchedRunIds: readonly string[];
   /** Job ids re-run from this rollup → the completion they carried then. */
   latchedJobs: ReadonlyMap<string, string>;
   /** The SETTLED forge provider — `undefined` while the probe is pending. */
@@ -156,6 +165,7 @@ export function rerunnableJobs(input: {
     if (input.bucketOf(c) !== "failed") continue;
     if (input.provider === "github" && input.runningRunIds.includes(c.runId))
       continue;
+    if (input.stillLatchedRunIds.includes(c.runId)) continue;
     if (input.latchedJobs.get(c.jobId) === c.completedAt) continue;
     candidates.push([c.jobId, c.completedAt, c.runId]);
   }

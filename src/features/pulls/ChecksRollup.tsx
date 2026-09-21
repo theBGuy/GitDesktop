@@ -762,24 +762,12 @@ export function ChecksRollup({
     latched: recentlyRerun,
     provider: rerunProvider,
   });
-  // What the per-job arm treats as "that run is busy": the snapshot's running
-  // runs, plus — on GitHub — every run whose re-run latch is STILL STANDING. A
-  // run restarted from here is in flight before any snapshot says so, and
-  // GitHub refuses a per-job re-run there, so its sibling failed rows go quiet
-  // until the new attempt's own evidence lands. Still-latched, never the latch
-  // KEYS: those persist for the mount and would suppress a second failed
-  // attempt forever. GitLab keeps its offers — mid-run retry is accepted, the
-  // run-level precedent. Composed here rather than in `rerunnableJobs` so that
-  // module's rules stay one pure derivation over its inputs.
-  const jobBusyRunIds =
-    rerunProvider === "github"
-      ? [
-          ...new Set([
-            ...runningRunIds,
-            ...stillLatchedRunIds(checks, bucketOf, recentlyRerun),
-          ]),
-        ]
-      : runningRunIds;
+  // The runs this rollup re-ran whose latch still STANDS — never the latch
+  // KEYS, which persist for the mount and would suppress a second failed
+  // attempt forever. The per-job arm subtracts these on every provider: a run
+  // restarted from here had every one of its failed jobs resubmitted, so
+  // re-offering one would duplicate work already started.
+  const latchedBusyRuns = stillLatchedRunIds(checks, bucketOf, recentlyRerun);
   // …and the same chain one job down. Visibility never waits on the write
   // probe: that probe is armed FROM this list and only contributes the disabled
   // state + its reason.
@@ -788,7 +776,8 @@ export function ChecksRollup({
       ? rerunnableJobs({
           checks,
           bucketOf,
-          runningRunIds: jobBusyRunIds,
+          runningRunIds,
+          stillLatchedRunIds: latchedBusyRuns,
           latchedJobs: recentlyRerunJobs,
           provider: rerunProvider,
         })

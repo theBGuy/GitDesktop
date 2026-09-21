@@ -42,6 +42,10 @@ export interface RunStep {
 }
 
 export interface RunJob {
+  /** Forge job id. u64 upstream, carried here as a JS number: measured
+   *  magnitudes are ~1e11 (GitHub) and ~1.7e10 (GitLab) against the 2^53 safe
+   *  ceiling, and the IPC boundary re-stringifies. Retyping ids as strings
+   *  end-to-end is a recorded repo-wide follow-up, not a per-call-site patch. */
   id: number;
   name: string;
   status: string;

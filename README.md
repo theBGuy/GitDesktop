@@ -374,8 +374,9 @@ in one click.
   pipeline** on GitLab, and **Re-run failed jobs / Retry pipeline** in the
   command palette (Bitbucket has no pull-request-scoped re-run). Each
   failed row with a fetchable job re-runs on its own too: **Re-run** on
-  GitHub restarts that job plus any jobs that depend on it, **Retry** on
-  GitLab retries just that job.
+  GitHub restarts that job plus any jobs that depend on it once its run
+  has finished, **Retry** on GitLab retries just that job the moment it
+  fails.
 - **Line-anchored review comments**, from Copilot, CodeRabbit, or humans:
   rendered grouped by file in the Conversation and at their exact line in
   the Files diff, with reply-in-thread, resolve/unresolve, and edit/delete

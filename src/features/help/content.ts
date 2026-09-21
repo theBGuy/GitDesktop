@@ -1146,10 +1146,11 @@ it reads **Retry pipeline**, appears as soon as a job fails, and retries the
 pipeline's failed and canceled jobs. The command palette carries it as **Re-run
 failed jobs / Retry pipeline**, palette-only by default — bind a key in Settings.
 One flaky job doesn't need the whole batch: each failed row with a fetchable job
-carries its own **Re-run** (GitHub) or **Retry** (GitLab) beside **Open full
-run** — GitHub re-runs that job and any jobs that depend on it, GitLab retries
-that job alone. If your sign-in can't push, the buttons stay visible and
-disabled with the reason. **Bitbucket** has no pull-request-scoped re-run, so no
+carries its own **Re-run** (GitHub, once that job's run has finished) or
+**Retry** (GitLab, as soon as the job fails) beside **Open full run** — GitHub
+re-runs that job and any jobs that depend on it, GitLab retries that job alone.
+If your sign-in can't push, the buttons stay visible and disabled with the
+reason. **Bitbucket** has no pull-request-scoped re-run, so no
 buttons appear there.
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**

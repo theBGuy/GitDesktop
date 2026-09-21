@@ -394,22 +394,6 @@ export function RunDetailView({
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // ONE busy notion for the re-run FAMILY — the run-level re-runs and the
-  // per-job ones act on the same run, so an overlapping submission just buys the
-  // forge's mid-run refusal. Play, cancel and approve are different operations
-  // and keep their own. Each control suppresses the reason on ITSELF while it is
-  // the one running: its spinner already says so.
-  const rerunFamilyBusy = rerun.isPending || rerunJob.isPending;
-  const rerunHeldReason = (() => {
-    switch (true) {
-      case writeReason !== undefined:
-        return writeReason;
-      case rerunFamilyBusy:
-        return "A re-run is already in flight…";
-      default:
-        return undefined;
-    }
-  })();
   const remoteLabel = providerLabel(provider);
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
@@ -420,6 +404,22 @@ export function RunDetailView({
   const [debugOpen, setDebugOpen] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const logs = useRunFailedLogs(repoPath, runId, showLogs);
+  // Jobs re-run from this view, each against the completion it carried at the
+  // click. The offer returns only on EVIDENCE of a new finished attempt — a
+  // different completion, which on both forges means a different job id — never
+  // on observing a transient; `checks-rerun.ts`'s latch states the rule in full.
+  // It holds the window where a refetch that loses to the forge's attempt
+  // transition hands back the OLD failed job, which GitHub would refuse and
+  // GitLab would honour by minting a second retry. A stale entry orphans once
+  // the new attempt lands, and dies with this view.
+  const [recentlyRerunJobs, setRecentlyRerunJobs] = useState<
+    ReadonlyMap<string, string>
+  >(new Map());
+  // …and the run-wide half of the same latch: the completion signature this run
+  // carried when any re-run started here. The per-job map retires ONE re-offered
+  // job; this retires the whole family, so a stale snapshot can't re-offer the
+  // run-level buttons or a SIBLING failed job of the attempt just restarted.
+  const [runRerunLatch, setRunRerunLatch] = useState<string | null>(null);
   // Where a job action's focus goes when its own button dies with the offer.
   // The header's "View on <remote>" is the one control that renders for every
   // run whatever its status, and it stays focusable even URL-less (its reason
@@ -463,6 +463,39 @@ export function RunDetailView({
   const run = detail.data;
   const active = run ? isRunActive(run.status) : false;
   const failed = run ? isFailureConclusion(run.conclusion) : false;
+  // This run's completion signature — the run-detail analogue of the rollup's
+  // `failedRunSignatures`. Every job's `completedAt`, sorted: a new attempt
+  // re-mints every job, so any movement here is evidence the attempt turned
+  // over. Empty completions count — they move too once the new attempt lands.
+  const runSignature = run
+    ? run.jobs
+        .map((j) => j.completedAt)
+        .sort()
+        .join(" ")
+    : "";
+  // Both latches are the rollup's evidence-keyed construction, stated in full on
+  // `checks-rerun.ts`: release is a MOVED signature, never the observation of a
+  // transient, so a refetch that never sees the pending window can neither free
+  // nor strand the offer.
+  const runLatched = runRerunLatch !== null && runRerunLatch === runSignature;
+  // ONE busy notion for the re-run FAMILY — the run-level re-runs and the
+  // per-job ones act on the same run, so an overlapping submission just buys the
+  // forge's mid-run refusal. Play, cancel and approve are different operations
+  // and keep their own. Each control suppresses the reason on ITSELF while it is
+  // the one running: its spinner already says so.
+  const rerunFamilyBusy = rerun.isPending || rerunJob.isPending;
+  const rerunHeldReason = (() => {
+    switch (true) {
+      case writeReason !== undefined:
+        return writeReason;
+      case rerunFamilyBusy:
+        return "A re-run is already in flight…";
+      case runLatched:
+        return "Re-run already started — waiting for the new attempt…";
+      default:
+        return undefined;
+    }
+  })();
   // Which re-runs this provider offers for this run, and whether Cancel applies
   // — shared with the runs-list context menu so the offers and their wording
   // stay identical on both surfaces.
@@ -490,6 +523,11 @@ export function RunDetailView({
     try {
       await rerun.mutateAsync({ runId, failed: failedOnly });
       toast.success(rerunSuccessMessage(provider, failedOnly));
+      // Latch only where the re-run mutates THIS run: GitHub re-attempts and
+      // GitLab retries move its signature, so the latch releases on that
+      // evidence. Bitbucket re-triggers the BRANCH into a fresh pipeline —
+      // this run's jobs never change again, so a latch here would never release.
+      if (provider !== "bitbucket") setRunRerunLatch(runSignature);
       scheduleRunRepair();
     } catch (e) {
       toastError(e);
@@ -522,19 +560,23 @@ export function RunDetailView({
   }
 
   async function doRerunJob(
-    jobId: number,
+    job: RunJob,
     offer: JobRerunOffer,
     buttonEl: HTMLElement,
   ) {
+    if (rerunFamilyBusy) return;
     // Read before the first await: the refetch flips the run active (GitHub) or
     // remounts the row under a new job id (GitLab), either way taking this
     // button with it.
-    if (rerunFamilyBusy) return;
     const fromButton = document.activeElement === buttonEl;
     try {
       // No lens: this is the repo-wide CI surface, like the run-level re-run.
-      await rerunJob.mutateAsync({ jobId });
+      await rerunJob.mutateAsync({ jobId: job.id });
       toast.success(offer.toast);
+      setRecentlyRerunJobs((prev) =>
+        new Map(prev).set(String(job.id), job.completedAt),
+      );
+      setRunRerunLatch(runSignature);
       scheduleRunRepair();
     } catch (e) {
       toastError(e);
@@ -563,7 +605,8 @@ export function RunDetailView({
       !writeBlocked &&
       canRerun &&
       rerunChoices.length > 0 &&
-      !rerunFamilyBusy,
+      !rerunFamilyBusy &&
+      !runLatched,
   );
   useHotkeyAction(
     "cancel-run",
@@ -654,7 +697,7 @@ export function RunDetailView({
                     key={offer.kind}
                     variant="outline"
                     size="sm"
-                    disabled={rerunFamilyBusy || writeBlocked}
+                    disabled={rerunFamilyBusy || runLatched || writeBlocked}
                     reason={thisRerunning ? undefined : rerunHeldReason}
                     title={RERUN_TITLES[offer.kind]}
                     onClick={() => doRerun(offer.kind === "failed")}
@@ -756,12 +799,16 @@ export function RunDetailView({
                     onRerun={
                       // GitHub refuses a per-job re-run while the run is still in
                       // flight; GitLab accepts one, so only GitHub gates on `active`.
+                      // The last two terms are the latches: while a stale
+                      // snapshot still reports the attempt that was re-run —
+                      // this job's own, or the run's — the offer stays retired.
                       jobOffer &&
                       canRerunJob &&
                       isFailureConclusion(job.conclusion) &&
-                      (provider !== "github" || !active)
-                        ? (buttonEl) =>
-                            void doRerunJob(job.id, jobOffer, buttonEl)
+                      (provider !== "github" || !active) &&
+                      !runLatched &&
+                      recentlyRerunJobs.get(String(job.id)) !== job.completedAt
+                        ? (buttonEl) => void doRerunJob(job, jobOffer, buttonEl)
                         : undefined
                     }
                     rerunOffer={jobOffer ?? undefined}
