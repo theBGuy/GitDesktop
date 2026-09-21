@@ -132,8 +132,10 @@ export type JobRerunCandidate = readonly [
  * STILL-LATCHED is universal: a latched run is OUR OWN resubmission, and both
  * forges' batch re-runs restart every failed job of the run (GitLab's retry
  * covers failed AND canceled), so re-offering one of them would re-submit work
- * already started. It releases on the latch's own signature rule, not on
- * observing activity.
+ * already started. A per-job start latches its run too, so that run's OTHER
+ * failed jobs park as well: wider than the act, accepted because it lasts only
+ * until the next snapshot. Either way release is the latch's own signature
+ * rule, not observed activity.
  *
  * A latched job comes back only once its `completedAt` moves — evidence of a new
  * finished attempt, never the observation of a transient. Both forges mint a NEW

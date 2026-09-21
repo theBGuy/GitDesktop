@@ -217,6 +217,8 @@ test("GitHub drops a job whose run still has work in flight", () => {
 });
 
 test("GitLab keeps a job its run's activity would have gated", () => {
+  // Snapshot activity is someone else's, so a mid-run retry stays legitimate —
+  // the half of the split that the still-latched case below inverts.
   const checks = [jobCheck({ completedAt: "t1" })];
   assert.deepEqual(
     jobOffer({
@@ -237,19 +239,6 @@ test("a still-latched run's jobs are dropped on GitLab too", () => {
   assert.deepEqual(
     jobOffer({ checks, provider: "gitlab", stillLatchedRunIds: ["7"] }),
     [],
-  );
-});
-
-test("GitLab still offers a job whose run is merely running", () => {
-  // The recorded mid-run rule: activity that isn't ours stays legitimate to
-  // retry, and GitLab's one PENDING status would otherwise hide the offer
-  // forever on a pipeline with a manual job.
-  const checks = [jobCheck({ completedAt: "t1" })];
-  assert.deepEqual(
-    jobOffer({ checks, provider: "gitlab", runningRunIds: ["7"] }).map(
-      ([id]) => id,
-    ),
-    ["j1"],
   );
 });
 

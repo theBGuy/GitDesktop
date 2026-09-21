@@ -764,9 +764,11 @@ export function ChecksRollup({
   });
   // The runs this rollup re-ran whose latch still STANDS — never the latch
   // KEYS, which persist for the mount and would suppress a second failed
-  // attempt forever. The per-job arm subtracts these on every provider: a run
-  // restarted from here had every one of its failed jobs resubmitted, so
-  // re-offering one would duplicate work already started.
+  // attempt forever. The per-job arm subtracts these on every provider: a
+  // batch re-run resubmitted every failed job of the run, so re-offering one
+  // would duplicate work already started. A single-job start latches its run
+  // too, so the run's other failed jobs go quiet with it — they return on the
+  // next snapshot, which is cheaper than tracking which sibling was spared.
   const latchedBusyRuns = stillLatchedRunIds(checks, bucketOf, recentlyRerun);
   // …and the same chain one job down. Visibility never waits on the write
   // probe: that probe is armed FROM this list and only contributes the disabled
@@ -940,9 +942,10 @@ export function ChecksRollup({
       // the header's run-level offer retires in the same render rather than
       // firing a second time into GitHub's mid-run refusal, and the run's
       // completion watcher mounts (mountedWatchIds reads these keys whether the
-      // rollup is open or collapsed). On GitLab this also parks the
-      // pipeline-level Retry for the run's OTHER failed jobs until the next
-      // snapshot moves the signature — self-releasing, and accepted.
+      // rollup is open or collapsed). On GitLab it also parks both the
+      // pipeline-level Retry and the per-job Retry of the run's OTHER failed
+      // jobs until the next snapshot moves the signature — self-releasing, and
+      // accepted.
       const signature = failedRunSignatures(checks, bucketOf).get(runId);
       if (signature !== undefined)
         setRecentlyRerun((prev) => new Map(prev).set(runId, signature));

@@ -2201,10 +2201,10 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a
-  failed job's own row adds **Re-run job**, restarting that job and any jobs that
-  depend on it. A pull request's checks rollup carries its own re-runs as well (the
-  failed batch on GitHub, the pipeline retry on GitLab, and per-job on both), so a
-  red build restarts without a trip here.
+  failed job's own row adds **Re-run job** once the run has finished, restarting
+  that job and any jobs that depend on it. A pull request's checks rollup carries
+  its own re-runs as well (the failed batch on GitHub, the pipeline retry on
+  GitLab, and per-job on both), so a red build restarts without a trip here.
 - {{Secondaryclick}} a run in the list for its actions without leaving the list — the
   run is selected, so the detail pane follows. You get the same **re-run** and **cancel**
   offers, **Run workflow again…** (the Run dialog opens with that run's workflow already
