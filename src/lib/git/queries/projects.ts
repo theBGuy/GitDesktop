@@ -17,6 +17,7 @@ import type {
   BoardItemContent,
   BoardItems,
   BoardOrder,
+  BulkItemOutcomes,
   ItemFieldValues,
   ItemProjects,
   ProjectFieldDef,
@@ -323,6 +324,20 @@ export type BoardWriteKind =
   | "add-existing"
   | "add-draft"
   | "edit-draft"
+  /** The four BATCH verbs, one per single-card sibling above. Apart from those
+   *  kinds rather than folded into them because the panel's gates, labels and
+   *  strip all have to tell "this one card" from "the selection" — and because a
+   *  bulk write's variables carry a LIST where the single-card ones carry an
+   *  `itemId`. */
+  | "bulk-move"
+  | "bulk-archive"
+  | "bulk-restore"
+  | "bulk-remove"
+  /** One set of field values written across a selection. Apart from `bulk-move`,
+   *  which is the same command over ONE field: this one can change several at
+   *  once, including the grouping field, so nothing about the board's shape
+   *  afterwards is locally derivable. */
+  | "bulk-fields"
   /** Fired from the create-issue dialog rather than the board, and it draws no
    *  card of its own — but its settle invalidates the same board reads, so the
    *  board's pagination has to wait on it like any other write here. */
@@ -359,29 +374,46 @@ const BOARD_WRITES_KEY = ["board-write"] as const;
 export interface PendingBoardWrite {
   mutationId: number;
   kind: BoardWriteKind | null;
-  /** The card a write is rewriting in place — a convert, or a draft edit. */
+  /** The card a write is rewriting in place — a convert, or a draft edit. Null on
+   *  every BULK kind: those address a list, and a single id would name one
+   *  arbitrary member of it. {@link count} is what they carry instead. */
   itemId: string | null;
   /** The issue/PR number an add-existing is putting on the board. */
   number: number | null;
+  /** How many cards a BULK write addresses, or null on the single-card kinds.
+   *  Keeping both fields on one total shape is what lets a consumer answer for
+   *  every kind without knowing which family it is looking at. */
+  count: number | null;
 }
 
 /** Every board write's variables carry the repo it addresses; the rest are per-kind
  *  and read only for labels. Untrusted at this boundary in the sense that the
  *  filter sees `Mutation<any>`, so each field is `typeof`-guarded rather than
- *  asserted. */
+ *  asserted. The two BULK list spellings are read here rather than at the call
+ *  site for the same reason: one place decides what a write's variables mean. */
 function boardWriteVars(mutation: { state: { variables?: unknown } }): {
   repo: string | null;
   itemId: string | null;
   number: number | null;
+  count: number | null;
 } {
   const vars = mutation.state.variables;
   if (typeof vars !== "object" || vars === null)
-    return { repo: null, itemId: null, number: null };
-  const { repo, itemId, number } = vars as Record<string, unknown>;
+    return { repo: null, itemId: null, number: null, count: null };
+  const { repo, itemId, number, items, itemIds } = vars as Record<
+    string,
+    unknown
+  >;
+  const list = Array.isArray(items)
+    ? items
+    : Array.isArray(itemIds)
+      ? itemIds
+      : null;
   return {
     repo: typeof repo === "string" ? repo : null,
     itemId: typeof itemId === "string" ? itemId : null,
     number: typeof number === "number" ? number : null,
+    count: list === null ? null : list.length,
   };
 }
 
@@ -432,6 +464,7 @@ export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
             kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
             itemId: vars.itemId,
             number: vars.number,
+            count: vars.count,
           },
         ];
       });
@@ -1562,12 +1595,14 @@ interface BoardItemRemoval extends BoardItemWrite {
   wasArchived: boolean;
 }
 
-/** How one cached lens was patched, so the rollback can undo exactly that: the card
- *  taken out of it, or flipped to archived in place. */
+/** How one cached lens was patched for ONE card, so the rollback can undo exactly
+ *  that: the card taken out of it, or flipped to archived in place. `itemId` rides
+ *  each entry because a BULK write's undo list spans several cards per lens. */
 type BoardItemUndo =
   | {
       mode: "drop";
       key: QueryKey;
+      itemId: string;
       /** Where the card sat, or null when this lens only ever COUNTED it — a card
        *  past the loaded pages of a lens whose count still included it. */
       at: RemovedBoardItem | null;
@@ -1575,7 +1610,86 @@ type BoardItemUndo =
        *  whether to give it back. */
       counted: boolean;
     }
-  | { mode: "archive"; key: QueryKey };
+  | { mode: "archive"; key: QueryKey; itemId: string };
+
+/**
+ * What a removal-family write does to ONE card on ONE cached lens, or null where
+ * that lens neither draws nor counts it.
+ *
+ * The whole per-lens decision of the removal family lives here, single-sited, so
+ * the single-card write and the bulk one can never drift: an ARCHIVE on a lens
+ * that draws archived cards leaves the card in place under its badge, and every
+ * other pairing takes it out — of the lens's items where they hold it, and of its
+ * `totalCount` where the BOUNDED-COUNTS test ({@link keyIsUnfiltered}) says the
+ * figure provably held it until now. An unfiltered LIVE-only count holds live
+ * cards only, so removing an already-archived one takes nothing more from it; an
+ * unfiltered INCLUSIVE count holds every member whatever its state. The archive
+ * arm reduces to the key test — it reaches the count line only on live-only keys
+ * and only ever fires on a live card — spelled out rather than left to the branch
+ * above.
+ *
+ * Planned against `data` READ BEFORE any patch of this lens: a slot recorded off a
+ * cache a sibling item's drop has already shortened would restore to the wrong
+ * place.
+ */
+function removalPlan(
+  kind: Extract<BoardWriteKind, "archive" | "remove">,
+  key: QueryKey,
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+  wasArchived: boolean,
+): BoardItemUndo | null {
+  const at = findBoardItem(data, itemId);
+  if (kind === "archive" && keyShowsArchived(key))
+    return at === null ? null : { mode: "archive", key, itemId };
+  const counted =
+    keyIsUnfiltered(key) &&
+    (kind === "archive"
+      ? !keyShowsArchived(key)
+      : keyShowsArchived(key) || !wasArchived);
+  if (at === null && !counted) return null;
+  return { mode: "drop", key, itemId, at, counted };
+}
+
+/** `plan` applied to one lens's cached pages — the patch half of
+ *  {@link removalPlan}. Composable over several plans for one key, which is what a
+ *  bulk write folds. */
+function applyRemovalPlan(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  plan: BoardItemUndo,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (plan.mode === "archive")
+    return patchBoardItemArchived(data, plan.itemId, true);
+  return withBoardCount(
+    dropBoardItem(data, plan.itemId),
+    plan.counted ? -1 : 0,
+  );
+}
+
+/** `plan` undone, arm for arm: the card goes back where it sat when this lens held
+ *  it, and the count goes back exactly where the drop took one. A count-only drop
+ *  has no slot to restore and undoes as the count alone. */
+function undoRemovalPlan(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  plan: BoardItemUndo,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (plan.mode === "archive")
+    return patchBoardItemArchived(data, plan.itemId, false);
+  return withBoardCount(
+    plan.at === null ? data : restoreBoardItem(data, plan.at),
+    plan.counted ? 1 : 0,
+  );
+}
+
+/** The ids a batch write REFUSED, as a set the rollback tests membership in. An
+ *  outcome with a null `error` landed; everything else is a failure to undo. */
+function failedItemIds(result: BulkItemOutcomes): Set<string> {
+  return new Set(
+    result.outcomes
+      .filter((outcome) => outcome.error !== null)
+      .map((outcome) => outcome.itemId),
+  );
+}
 
 /**
  * The shared shape of the two writes that take a card OFF the board's default read,
@@ -1621,38 +1735,18 @@ function useBoardItemRemoval(
       for (const [key, data] of queryClient.getQueriesData<
         InfiniteData<BoardItems, string | null>
       >({ queryKey })) {
-        const at = findBoardItem(data, args.itemId);
-        // An archive on a lens that DRAWS archived cards leaves the card exactly
-        // where it is, dimmed and badged, and moves no count: that lens counted it
-        // under either state. Nothing loaded means nothing to flip.
-        if (kind === "archive" && keyShowsArchived(key)) {
-          if (at === null) continue;
-          undo.push({ mode: "archive", key });
-          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-            key,
-            (cur) => patchBoardItemArchived(cur, args.itemId, true),
-          );
-          continue;
-        }
-        // Everywhere else the card leaves this lens's ITEMS where they hold it, and
-        // its COUNT where the figure provably held it. The count arm is key-driven,
-        // so it also fires for a card past the loaded pages. An unfiltered LIVE-only
-        // count holds live cards only, so removing an already-archived one takes
-        // nothing more from it; an unfiltered INCLUSIVE count holds every member
-        // whatever its state. The archive arm reduces to the key test — it reaches
-        // here only on live-only keys and only ever fires on a live card — spelled
-        // out rather than left to the branch above.
-        const counted =
-          keyIsUnfiltered(key) &&
-          (kind === "archive"
-            ? !keyShowsArchived(key)
-            : keyShowsArchived(key) || !args.wasArchived);
-        if (at === null && !counted) continue;
-        undo.push({ mode: "drop", key, at, counted });
+        const plan = removalPlan(
+          kind,
+          key,
+          data,
+          args.itemId,
+          args.wasArchived,
+        );
+        if (plan === null) continue;
+        undo.push(plan);
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           key,
-          (cur) =>
-            withBoardCount(dropBoardItem(cur, args.itemId), counted ? -1 : 0),
+          (cur) => applyRemovalPlan(cur, plan),
         );
       }
       return { undo };
@@ -1660,29 +1754,12 @@ function useBoardItemRemoval(
     // Reporting and rollback live here, not in the caller's `mutate` options: the
     // menu that fires this closes as it does, and react-query drops mutate-scoped
     // callbacks once the observer loses its listeners.
-    onError: (e, args, ctx) => {
-      for (const entry of ctx?.undo ?? []) {
-        if (entry.mode === "archive") {
-          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-            entry.key,
-            (cur) => patchBoardItemArchived(cur, args.itemId, false),
-          );
-          continue;
-        }
-        // Symmetric with the drop above, arm for arm: the card goes back where it
-        // sat when this lens held it, and the count goes back exactly where the
-        // drop took one. A count-only drop has no slot to restore and undoes as the
-        // count alone.
-        const { at, counted } = entry;
+    onError: (e, _args, ctx) => {
+      for (const entry of ctx?.undo ?? [])
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           entry.key,
-          (cur) =>
-            withBoardCount(
-              at === null ? cur : restoreBoardItem(cur, at),
-              counted ? 1 : 0,
-            ),
+          (cur) => undoRemovalPlan(cur, entry),
         );
-      }
       toastError(e);
     },
     // ACCEPTED EDGE: this refetch can land inside GitHub's replica lag (~6s,
@@ -1833,6 +1910,437 @@ export function useRemoveBoardItem() {
       ),
     true,
   );
+}
+
+/** What a BULK removal addresses: the board, and one `wasArchived`-tagged
+ *  membership per card. The flag is per ITEM where the single-card write has it
+ *  per call, for the same reason it exists at all — it is a COUNT axis no cache
+ *  key supplies, and one mixed selection carries both values at once. */
+interface BulkBoardRemoval {
+  repo: string;
+  projectId: string;
+  items: { itemId: string; wasArchived: boolean }[];
+}
+
+/**
+ * {@link useBoardItemRemoval} over a SELECTION: the same per-lens plan, looped,
+ * with one undo list spanning items × lenses.
+ *
+ * The arithmetic is not re-derived here — {@link removalPlan} is the one place
+ * that decides what a removal does to a lens, and this hook only decides how many
+ * times to ask it. That single-siting is the point of the extraction: a bulk
+ * archive that counted its cards differently from the single-card archive would
+ * leave the column headers disagreeing with themselves.
+ *
+ * A batch applies PER ITEM, so the settle rolls back only what GitHub refused and
+ * leaves the rest of the optimistic patch standing. The ACCEPTED EDGE
+ * {@link useBoardItemRemoval} names — a settle refetch landing inside GitHub's
+ * replica lag — holds here for the same reason: the FILTERED lenses' `totalCount`
+ * is decidable by no cache, so this read is the only thing that reconciles it.
+ */
+function useBulkBoardRemoval(
+  kind: Extract<BoardWriteKind, "bulk-archive" | "bulk-remove">,
+  call: (args: BulkBoardRemoval) => Promise<BulkItemOutcomes>,
+  /** Whether this write changes WHICH boards the items are on — the same claim
+   *  {@link useBoardItemRemoval} takes it for. */
+  membership: boolean,
+) {
+  const queryClient = useQueryClient();
+  // The single-card kind this batches. The plans are written against THAT kind:
+  // one selection is N of exactly that write, lens for lens.
+  const perCard: Extract<BoardWriteKind, "archive" | "remove"> =
+    kind === "bulk-archive" ? "archive" : "remove";
+  return useMutation({
+    mutationKey: boardWriteKey(kind),
+    mutationFn: call,
+    onMutate: async (args: BulkBoardRemoval) => {
+      const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
+      await queryClient.cancelQueries({ queryKey });
+      const undo: BoardItemUndo[] = [];
+      for (const [key, data] of queryClient.getQueriesData<
+        InfiniteData<BoardItems, string | null>
+      >({ queryKey })) {
+        // Every card's plan is read off the SAME pre-patch snapshot and the lens
+        // is then written once: a slot recorded after a sibling's drop had
+        // already shortened its page would restore the card to the wrong place.
+        const plans = args.items.flatMap((item) => {
+          const plan = removalPlan(
+            perCard,
+            key,
+            data,
+            item.itemId,
+            item.wasArchived,
+          );
+          return plan === null ? [] : [plan];
+        });
+        if (plans.length === 0) continue;
+        undo.push(...plans);
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (cur) =>
+            plans.reduce((acc, plan) => applyRemovalPlan(acc, plan), cur),
+        );
+      }
+      return { undo };
+    },
+    // Reporting and rollback live here for the reason the single-card family
+    // states: the bar or menu that fires this goes away as it does.
+    onError: (e, _args, ctx) => {
+      for (const entry of ctx?.undo ?? [])
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          entry.key,
+          (cur) => undoRemovalPlan(cur, entry),
+        );
+      toastError(e);
+    },
+    onSettled: (result, e, args, ctx) => {
+      // A resolved batch can still carry refusals, which is the whole reason it
+      // answers per item: those cards go back and the rest keep their patch. A
+      // THROWN write has already been undone whole by `onError`.
+      if (e === null && result !== undefined) {
+        const failed = failedItemIds(result);
+        for (const entry of ctx?.undo ?? []) {
+          if (!failed.has(entry.itemId)) continue;
+          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+            entry.key,
+            (cur) => undoRemovalPlan(cur, entry),
+          );
+        }
+      }
+      invalidateProjectBoards(queryClient, args.repo);
+      if (membership) invalidateItemMemberships(queryClient, args.repo);
+    },
+  });
+}
+
+/** Archives a whole selection. Board-only, like its single-card sibling: the items
+ *  stay on the project, restorable from the board itself. */
+export function useBulkArchiveBoardItems() {
+  return useBulkBoardRemoval(
+    "bulk-archive",
+    (args) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghArchiveBoardItems(
+          args.repo,
+          args.projectId,
+          args.items.map((item) => item.itemId),
+        ),
+      ),
+    false,
+  );
+}
+
+/** Removes a whole selection from the project — an unlink per issue or pull
+ *  request, a deletion per draft. Membership-touching either way. */
+export function useBulkRemoveBoardItems() {
+  return useBulkBoardRemoval(
+    "bulk-remove",
+    (args) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghRemoveBoardItems(
+          args.repo,
+          args.projectId,
+          args.items.map((item) => item.itemId),
+        ),
+      ),
+    true,
+  );
+}
+
+/**
+ * {@link useRestoreBoardItem} over a SELECTION, and it keeps that hook's whole
+ * freshness shield: the payload is transactionally fresh where a read is not, so
+ * the settle writes the cards through rather than re-reading inside GitHub's
+ * replica lag.
+ *
+ * The OWED MARKS are captured once per KEY, before that key's first flip, for the
+ * reason the single-card hook states and one this loop makes sharper: a
+ * `setQueryData` clears `isInvalidated`, so a debt read after the first item's
+ * patch has already been erased by this write's own hand.
+ *
+ * The settle's patch needs no record of which items each lens flipped: a lens
+ * drew a card exactly when it was flipped, and both halves of the patch are
+ * no-ops on a lens that holds neither.
+ */
+export function useBulkRestoreBoardItems() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("bulk-restore"),
+    mutationFn: (args: {
+      repo: string;
+      projectId: string;
+      itemIds: string[];
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghUnarchiveBoardItems(args.repo, args.projectId, args.itemIds),
+      ),
+    onMutate: async (args) => {
+      const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
+      await queryClient.cancelQueries({ queryKey });
+      const flipped: { key: QueryKey; itemIds: string[] }[] = [];
+      const owed: QueryKey[] = [];
+      // Each card as it will read once this lands, kept for the settle's insert
+      // onto the live-only lenses. Off the first lens that draws it, the rule the
+      // single-card hook keeps: every lens holds the same membership.
+      const restored = new Map<string, BoardItem>();
+      for (const [key, data] of queryClient.getQueriesData<
+        InfiniteData<BoardItems, string | null>
+      >({ queryKey })) {
+        if (queryClient.getQueryState(key)?.isInvalidated === true)
+          owed.push(key);
+        const drawn: string[] = [];
+        for (const itemId of args.itemIds) {
+          const at = findBoardItem(data, itemId);
+          if (at === null) continue;
+          drawn.push(itemId);
+          if (!restored.has(itemId))
+            restored.set(itemId, { ...at.item, isArchived: false });
+        }
+        if (drawn.length === 0) continue;
+        flipped.push({ key, itemIds: drawn });
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (cur) =>
+            drawn.reduce(
+              (acc, itemId) => patchBoardItemArchived(acc, itemId, false),
+              cur,
+            ),
+        );
+      }
+      return { flipped, restored, owed };
+    },
+    onError: (e, _args, ctx) => {
+      for (const entry of ctx?.flipped ?? [])
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          entry.key,
+          (cur) =>
+            entry.itemIds.reduce(
+              (acc, itemId) => patchBoardItemArchived(acc, itemId, true),
+              cur,
+            ),
+        );
+      toastError(e);
+    },
+    onSettled: (result, e, args, ctx) => {
+      const restored = ctx?.restored;
+      // No card in context means no lens drew any of them, so there is nothing to
+      // write through and the re-read is the only honest answer — the discrimination
+      // the single-card restore makes, since this write answers with outcomes rather
+      // than with cards.
+      if (e !== null || result === undefined || restored === undefined) {
+        invalidateProjectBoards(queryClient, args.repo);
+        return;
+      }
+      const failed = failedItemIds(result);
+      const landed = [...restored.keys()].filter((id) => !failed.has(id));
+      // Nothing was flipped, so there is no optimistic state to undo and nothing to
+      // write through: the re-read is the only answer. An EMPTY `restored` is the
+      // whole test — an all-FAILED write still flipped cards at `onMutate` and goes
+      // through the patch below to put them back, which the invalidation alone
+      // would not do for a lens with no observer (`invalidateQueries` refetches
+      // ACTIVE queries only, so an inactive view would keep serving
+      // `isArchived: false` until something else read it).
+      if (restored.size === 0) {
+        invalidateProjectBoards(queryClient, args.repo);
+        return;
+      }
+      // The failures are put BACK inside the patch rather than before it:
+      // `writeThroughBoards` cancels first, and query-core's cancel reverts the
+      // cache past anything written between a fetch's start and it.
+      //
+      // Stale where the payload leaves a question open — a card GitHub refused, or
+      // one no lens drew (so none can be inserted). An all-failed write is that
+      // case at its limit: every card reverts and the boards are marked, which is
+      // the same treatment a partial failure gets. Only a clean sweep holds the
+      // shield and keeps the restored cards put through the replica lag.
+      const settled =
+        failed.size === 0 && restored.size === args.itemIds.length;
+      writeThroughBoards(
+        queryClient,
+        args.repo,
+        projectItemsFamilyKey(args.repo, args.projectId),
+        (data, key) => {
+          let next = data;
+          for (const itemId of failed)
+            next = patchBoardItemArchived(next, itemId, true);
+          for (const itemId of landed) {
+            next = patchBoardItemArchived(next, itemId, false);
+            const card = restored.get(itemId);
+            // An archived-showing lens counted and drew the card under either
+            // state, so the flip alone is truthful there; a live-only lens takes
+            // the insert, bumping its count only where unfiltered.
+            if (!keyShowsArchived(key) && card !== undefined)
+              next = appendBoardItem(next, card, keyIsUnfiltered(key));
+          }
+          return next;
+        },
+        !settled,
+        ctx?.owed ?? [],
+      );
+    },
+  });
+}
+
+/**
+ * {@link useMoveBoardCard} over a SELECTION: ONE field write carrying every
+ * membership, with the same optimistic re-bucketing applied per card on the lens
+ * the move was fired from.
+ *
+ * Single-writer by the same contract, and for the same reason: two writes to one
+ * card's grouped field settle in an order nothing promises. The panel holds every
+ * bulk verb while any board write runs.
+ */
+export function useBulkMoveBoardCards() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("bulk-move"),
+    mutationFn: (args: {
+      repo: string;
+      projectId: string;
+      /** The memberships on `projectId` — what the write addresses. */
+      itemIds: string[];
+      field: BoardGroupField;
+      /** The column's bucket, or null for the board's "No {field}" column. */
+      bucket: BoardMoveBucket;
+      /** The lens the board was showing when the move was fired — the cache this
+       *  write patches and rolls back, pinned into the context at `onMutate`. */
+      query: string | null;
+      /** Whether that lens was drawing archived cards — the other half of the key. */
+      archived: boolean;
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghSetItemsFieldValues(
+          args.repo,
+          args.projectId,
+          args.itemIds,
+          moveUpdates(args.field.id, args.bucket),
+          args.bucket === null ? [args.field.id] : [],
+        ),
+      ),
+    onMutate: async (args) => {
+      const key = projectItemsKey(
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+      );
+      const railKey = itemFieldValuesFamilyKey(args.repo);
+      await queryClient.cancelQueries({ queryKey: key });
+      // Each moved card's values, never the whole tree: that is all the rollback
+      // needs, and all it may safely carry.
+      const wanted = new Set(args.itemIds);
+      const before = new Map<string, ProjectFieldValue[]>();
+      for (const item of queryClient
+        .getQueryData<InfiniteData<BoardItems, string | null>>(key)
+        ?.pages.flatMap((page) => page.items) ?? [])
+        if (wanted.has(item.itemId)) before.set(item.itemId, item.fieldValues);
+      queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+        key,
+        (data) =>
+          args.itemIds.reduce((acc, itemId) => {
+            const values = before.get(itemId);
+            return values === undefined
+              ? acc
+              : patchBoardItem(
+                  acc,
+                  itemId,
+                  withGroupValue(values, args.field, args.bucket),
+                );
+          }, data),
+      );
+      return { before, key, railKey, repo: args.repo };
+    },
+    onError: (e, _args, ctx) => {
+      if (ctx !== undefined)
+        for (const [itemId, values] of ctx.before)
+          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+            ctx.key,
+            (data) => patchBoardItem(data, itemId, values),
+          );
+      toastError(e);
+    },
+    onSettled: (result, e, _args, ctx) => {
+      if (ctx === undefined) return;
+      // Only the cards GitHub refused go back to their old column; the rest keep
+      // the patch until the invalidation's own read confirms it.
+      if (e === null && result !== undefined) {
+        const failed = failedItemIds(result);
+        for (const [itemId, values] of ctx.before) {
+          if (!failed.has(itemId)) continue;
+          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+            ctx.key,
+            (data) => patchBoardItem(data, itemId, values),
+          );
+        }
+      }
+      invalidateProjectBoards(queryClient, ctx.repo);
+      void queryClient
+        .cancelQueries({ queryKey: ctx.railKey })
+        .then(() => queryClient.invalidateQueries({ queryKey: ctx.railKey }));
+    },
+  });
+}
+
+/**
+ * ONE set of field values written across a selection — {@link useSetItemFieldValues}
+ * for several cards of one board, through the batch command.
+ *
+ * NO optimistic patch, deliberately, where every other bulk verb has one. A field
+ * write can move several fields at once and one of them may be the board's GROUPING
+ * field, so what the board looks like afterwards is not a local derivation: the card
+ * changes column, its position in that column is the server's answer, and a filtered
+ * lens may stop drawing it entirely. A patch would have to guess all three. The write
+ * is fast enough that the cards simply redraw on the settle's read.
+ *
+ * The settle therefore re-reads rather than writing through: `invalidateProjectBoards`
+ * for the boards, and the item-field-values family for the rail, cancel-before-
+ * invalidate on both for the reason {@link invalidateProjectBoards} states. The rail
+ * family is invalidated WHOLE rather than per succeeded item: a board write holds an
+ * item id and a project id, never an item's lens, kind and number, so the per-item
+ * keys are out of reach here — the same limit {@link invalidateItemMemberships}
+ * documents. Nothing optimistic is in flight, so the wider re-read costs only reads.
+ *
+ * Memberships are NOT touched: a field write changes what a card holds, never which
+ * boards it is on.
+ */
+export function useBulkSetItemFieldValues() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("bulk-fields"),
+    mutationFn: (args: {
+      repo: string;
+      projectId: string;
+      /** The memberships on `projectId` — what the write addresses. */
+      itemIds: string[];
+      updates: ProjectFieldValueUpdate[];
+      /** Field ids to UNSET; no update shape expresses a clear. */
+      clears: string[];
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghSetItemsFieldValues(
+          args.repo,
+          args.projectId,
+          args.itemIds,
+          args.updates,
+          args.clears,
+        ),
+      ),
+    // Reporting lives here for the family's reason: the dialog that fires this
+    // closes on success, and react-query drops mutate-scoped callbacks once the
+    // observer loses its listeners. A PARTIAL failure is the caller's to report —
+    // it reads the per-item outcomes this resolves with.
+    onError: toastError,
+    onSettled: (_result, _e, args) => {
+      invalidateProjectBoards(queryClient, args.repo);
+      void queryClient
+        .cancelQueries({ queryKey: itemFieldValuesFamilyKey(args.repo) })
+        .then(() =>
+          queryClient.invalidateQueries({
+            queryKey: itemFieldValuesFamilyKey(args.repo),
+          }),
+        );
+    },
+  });
 }
 
 /** Adds one existing issue or pull request to a board and draws the card it became.

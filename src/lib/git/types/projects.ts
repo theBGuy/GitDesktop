@@ -221,6 +221,23 @@ export type ProjectFieldValueUpdate =
   | { kind: "multiSelect"; fieldId: string; optionIds: string[] }
   | { kind: "iteration"; fieldId: string; iterationId: string };
 
+/** One item's result in a BATCH board write: the membership it addressed, and the
+ *  failure GitHub gave for it, or null when it landed. The message is already
+ *  presentable — the backend maps its own error there. */
+export interface BulkItemOutcome {
+  itemId: string;
+  error: string | null;
+}
+
+/** A batch board write's per-item results, in the order the request listed the
+ *  items. A batch PARTIALLY APPLIES — every item is attempted whatever the ones
+ *  before it did — so a caller rolls back the failures alone and leaves the rest
+ *  of its optimistic patch standing. An empty item list is refused by the backend
+ *  rather than answered with an empty list, so callers never send one. */
+export interface BulkItemOutcomes {
+  outcomes: BulkItemOutcome[];
+}
+
 /** One assignee on a board card — the login plus whatever avatar the forge gave
  *  us. Deliberately narrower than `ForgeUserRef` (forge.ts): a board page carries
  *  hundreds of these, and the card renders nothing else about a person. */

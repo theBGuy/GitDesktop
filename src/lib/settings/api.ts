@@ -378,6 +378,11 @@ export interface AppSettings {
   /** Show the Ctrl/Shift-click multi-select hint above the changes list.
    *  Cleared by the hint's "Don't show again". */
   showSelectionHint: boolean;
+  /** Show the Ctrl/Shift-click multi-select hint above the project board. Its own
+   *  key rather than {@link AppSettings.showSelectionHint} above: the two surfaces
+   *  teach the same gesture in different places, and dismissing one is no claim
+   *  about the other. Cleared by the hint's "Don't show again". */
+  showBoardSelectionHint: boolean;
   /** Show the "drag to stage individual lines" hint in the working-tree diff. */
   showLineStageHint: boolean;
   /** Check GitHub Releases for a new version on launch (install stays opt-in). */
@@ -498,6 +503,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoStashOnPull: false,
   reapplyStashOnSwitch: false,
   showSelectionHint: true,
+  showBoardSelectionHint: true,
   showLineStageHint: true,
   autoCheckUpdates: true,
   autoFetch: true,

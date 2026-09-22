@@ -26,6 +26,47 @@ export type BoardMenuTarget = {
   valueColumnId: string;
 } | null;
 
+/** Why the rows that act on ONE card are held while several are selected. They
+ *  address a single membership by construction — a position is a slot, a draft
+ *  edit is one note — so a bulk-looking menu must say so rather than quietly
+ *  acting on the card under the pointer. */
+export const BULK_SINGLE_ONLY_REASON = "Acts on one card — clear the selection";
+
+/** A column value no board column carries, so the bulk "Move to" group draws its
+ *  rows with none ticked: a selection spanning columns has no current value for
+ *  the indicator to claim. The same shape a card whose stored option the field no
+ *  longer defines already puts the group in. */
+const BULK_NO_COLUMN = "__bulk__";
+
+/** One bulk row's words and its hold. The panel resolves both: the count is the
+ *  ELIGIBLE set's, never the selection's, so a label can't promise a card the
+ *  verb will skip. */
+export interface BulkRow {
+  label: string;
+  /** Why this verb can't run over the selection, or undefined when it can. */
+  reason: string | undefined;
+}
+
+/** The menu's BULK arm, or null for the single-card menu. Present exactly when
+ *  the card under the pointer is one of several selected. */
+export interface BulkMenuState {
+  count: number;
+  move: BulkRow;
+  fields: BulkRow;
+  archive: BulkRow;
+  restore: BulkRow;
+  remove: BulkRow;
+  actions: {
+    /** Where the eligible cards should land, as an index into `columns`. */
+    move: (columnIndex: number) => void;
+    /** Open the bulk fields editor over the eligible cards. */
+    fields: () => void;
+    archive: () => void;
+    restore: () => void;
+    remove: () => void;
+  };
+}
+
 /** Callbacks the menu items invoke — owned by the panel, which holds the lens,
  *  the board's field definitions, and the one move mutation. */
 export interface BoardMenuActions {
@@ -48,6 +89,63 @@ export interface BoardMenuActions {
    *  does on a live card, since the two are one reversible pair. */
   restore: () => void;
   remove: () => void;
+}
+
+/**
+ * The write rows a SELECTION gets, count-worded per verb. Its own component rather
+ * than a fourth branch inside {@link BoardCardMenuItems}: this arm has grown a row
+ * per bulk verb while the single-card arm beside it has its own five, and one
+ * function holding both reads as a menu with two personalities.
+ *
+ * `isDraft` describes the card the menu OPENED on, which is the only thing about
+ * that one card this arm still says anything about: its two rewrites are one note's,
+ * so the row holds rather than quietly acting on the card under the pointer.
+ */
+function BoardBulkMenuItems({
+  bulk,
+  isDraft,
+}: {
+  bulk: BulkMenuState;
+  isDraft: boolean;
+}) {
+  return (
+    <>
+      {isDraft && (
+        <ContextMenuItem disabled>{BULK_SINGLE_ONLY_REASON}</ContextMenuItem>
+      )}
+      {/* Above the two removals, where the single-card menu puts its own rewrites:
+          a field write changes what the cards HOLD, which is a smaller step than
+          taking them off the board. */}
+      <ContextMenuItem
+        disabled={bulk.fields.reason !== undefined}
+        onClick={bulk.actions.fields}
+      >
+        {bulk.fields.reason ?? bulk.fields.label}
+      </ContextMenuItem>
+      {/* Both directions render, unlike the single card's either/or: a mixed
+          selection really can archive some cards and restore others, and each row
+          counts only what it will reach. */}
+      <ContextMenuItem
+        disabled={bulk.archive.reason !== undefined}
+        onClick={bulk.actions.archive}
+      >
+        {bulk.archive.reason ?? bulk.archive.label}
+      </ContextMenuItem>
+      <ContextMenuItem
+        disabled={bulk.restore.reason !== undefined}
+        onClick={bulk.actions.restore}
+      >
+        {bulk.restore.reason ?? bulk.restore.label}
+      </ContextMenuItem>
+      <ContextMenuItem
+        variant="destructive"
+        disabled={bulk.remove.reason !== undefined}
+        onClick={bulk.actions.remove}
+      >
+        {bulk.remove.reason ?? bulk.remove.label}
+      </ContextMenuItem>
+    </>
+  );
 }
 
 /** The reposition rows, in the order the menu draws them. All four ALWAYS render,
@@ -89,9 +187,16 @@ const REORDER_ROWS: {
  * archive or restore it, remove. Presentational — the panel records the target on
  * right-click (capture phase) and hands it down here with the labels, the gates and
  * the confirmations already resolved.
+ *
+ * With `bulk` set the write block speaks for the SELECTION instead, count-worded per
+ * verb. The rows that can only mean one card — Position, and a draft's edit and
+ * convert — stay in place holding {@link BULK_SINGLE_ONLY_REASON}: a menu that looks
+ * like it acts on several must never quietly act on one. Show details is the
+ * exception and stays the target's, reading nothing and writing nothing.
  */
 export function BoardCardMenuItems({
   target,
+  bulk,
   columns,
   openLabel,
   heldReason,
@@ -102,6 +207,10 @@ export function BoardCardMenuItems({
   actions,
 }: {
   target: BoardMenuTarget;
+  /** The selection this menu acts on, when the card under the pointer is one of
+   *  several selected — the whole write block then speaks for the SET, and the
+   *  rows that can only mean one card say so. Null is the single-card menu. */
+  bulk: BulkMenuState | null;
   /** The move targets, in board order. Empty on an ungrouped board, which drops
    *  the whole section. */
   columns: BoardColumnModel[];
@@ -149,7 +258,44 @@ export function BoardCardMenuItems({
         </>
       )}
       {columns.length > 0 &&
-        (heldReason === undefined ? (
+        (bulk !== null ? (
+          // The same section, addressing the SET. Nothing is ticked and nothing is
+          // held per row: a selection spanning columns has no current value, and
+          // which cards a pick can actually reach is the eligible count on the
+          // caption — not a per-column claim.
+          <ContextMenuRadioGroup
+            value={BULK_NO_COLUMN}
+            onValueChange={(next) => {
+              if (typeof next !== "string") return;
+              const index = columns.findIndex((column) => column.id === next);
+              if (index !== -1) bulk.actions.move(index);
+            }}
+          >
+            <ContextMenuLabel>{bulk.move.label}</ContextMenuLabel>
+            {bulk.move.reason !== undefined ? (
+              <ContextMenuItem disabled>{bulk.move.reason}</ContextMenuItem>
+            ) : (
+              columns.map((column) => (
+                <ContextMenuRadioItem
+                  key={column.id}
+                  value={column.id}
+                  closeOnClick
+                >
+                  {column.color === null ? (
+                    <span
+                      className="min-w-0 truncate"
+                      onMouseEnter={clipTitleFromText}
+                    >
+                      {column.label}
+                    </span>
+                  ) : (
+                    <OptionValue name={column.label} color={column.color} />
+                  )}
+                </ContextMenuRadioItem>
+              ))
+            )}
+          </ContextMenuRadioGroup>
+        ) : heldReason === undefined ? (
           // The caption names the radio group: Base UI's GroupLabel registers its
           // id as the group's `aria-labelledby`, and it throws outside a group at
           // all, so it can't be hoisted above this.
@@ -205,7 +351,12 @@ export function BoardCardMenuItems({
           Archive and Remove, rather than a claim about what the card holds. */}
       <ContextMenuGroup>
         <ContextMenuLabel>Position</ContextMenuLabel>
-        {reorderHeldReason === undefined ? (
+        {bulk !== null ? (
+          // A position is one card's slot in the project's order, so a selection
+          // has nothing for these four to address. Held with the reason rather
+          // than silently acting on the card under the pointer.
+          <ContextMenuItem disabled>{BULK_SINGLE_ONLY_REASON}</ContextMenuItem>
+        ) : reorderHeldReason === undefined ? (
           // All four rows ALWAYS render in their fixed order; a held one disables
           // in place with its reason parenthetically on the label (the only place a
           // disabled menu item can carry one) rather than dropping out and shifting
@@ -253,7 +404,14 @@ export function BoardCardMenuItems({
           <ContextMenuSeparator />
         </>
       )}
-      {actionHeldReason === undefined ? (
+      {actionHeldReason !== undefined ? (
+        // One held row carrying the reason, the same shape the Move section takes
+        // when it is held: a disabled menu item can't hold a tooltip, so the
+        // reason has to BE the row.
+        <ContextMenuItem disabled>{actionHeldReason}</ContextMenuItem>
+      ) : bulk !== null ? (
+        <BoardBulkMenuItems bulk={bulk} isDraft={isDraft} />
+      ) : (
         <>
           {/* Drafts only: an issue or pull request is already the thing a convert
               would make, and is edited on its own tab. An ellipsis is the house
@@ -290,11 +448,6 @@ export function BoardCardMenuItems({
             Remove from project…
           </ContextMenuItem>
         </>
-      ) : (
-        // One held row carrying the reason, the same shape the Move section takes
-        // when it is held: a disabled menu item can't hold a tooltip, so the
-        // reason has to BE the row.
-        <ContextMenuItem disabled>{actionHeldReason}</ContextMenuItem>
       )}
     </>
   );

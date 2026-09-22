@@ -30,6 +30,8 @@ export const BoardColumn = memo(function BoardColumn({
   columnIndex,
   activeIndex,
   activeItemId,
+  selectedIds,
+  selectionSize,
   busyItemId,
   peekItemId,
   tabStopIndex,
@@ -51,6 +53,15 @@ export const BoardColumn = memo(function BoardColumn({
    *  neighbour the moved card just swapped past. Null keeps the index-only
    *  behaviour for callers whose cursor moves are pure navigation. */
   activeItemId: string | null;
+  /** The board's selection, by item id. The RAW set rather than the pruned one:
+   *  a card this column draws is in one exactly when it is in the other, and the
+   *  raw set keeps a stable identity between selection changes, which is what this
+   *  memoized column's shallow compare needs. */
+  selectedIds: ReadonlySet<string>;
+  /** How many cards are selected board-wide, after pruning. A primitive for the
+   *  memo, and the gate on the cards' tick: a singleton is the cursor rather than a
+   *  set the user built, so it stays tick-free. */
+  selectionSize: number;
   /** The card a write is changing in place, wherever it is on the board — the
    *  item ID rather than an index, since this column may not hold it at all. A
    *  primitive on purpose: this component is memoized, and the comparison is the
@@ -195,6 +206,10 @@ export const BoardColumn = memo(function BoardColumn({
         aria-label={
           items.length === 0 ? undefined : `${column.label}, ${countLabel}`
         }
+        // Stated whether or not a selection is live: the board can always take
+        // one, and a listbox that only claimed to be multi-selectable once the
+        // user had already built a set would announce the capability too late.
+        aria-multiselectable={items.length === 0 ? undefined : true}
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {items.length === 0 ? (
@@ -210,41 +225,58 @@ export const BoardColumn = memo(function BoardColumn({
             className="relative w-full"
             style={{ height: `${virtualizer.getTotalSize()}px` }}
           >
-            {virtualizer.getVirtualItems().map((vi) => (
-              <div
-                key={items[vi.index].itemId}
-                data-index={vi.index}
-                ref={virtualizer.measureElement}
-                // Presentation wrapper so the virtualizer's positioning div
-                // doesn't sit between the listbox and its options.
-                role="presentation"
-                // The gap rides the measured ROW, never the spacer: padding on
-                // the spacer wouldn't move its absolutely-positioned children,
-                // and the first row carries the top gap itself.
-                className={cn(
-                  "absolute top-0 left-0 w-full px-1.5 pb-1.5",
-                  vi.index === 0 && "pt-1.5",
-                )}
-                style={{ transform: `translateY(${vi.start}px)` }}
-              >
-                <BoardCard
-                  item={items[vi.index]}
-                  index={vi.index}
-                  setSize={items.length}
-                  columnIndex={columnIndex}
-                  active={vi.index === activeIndex}
-                  busy={items[vi.index].itemId === busyItemId}
-                  peek={items[vi.index].itemId === peekItemId}
-                  rovingTab={vi.index === tabStopIndex ? 0 : -1}
-                  repoSlug={repoSlug}
-                  ghHost={ghHost}
-                  chipFields={chipFields}
-                  onFocus={onCardFocus}
-                  onPeekChange={onPeekChange}
-                  onOpen={onOpen}
-                />
-              </div>
-            ))}
+            {virtualizer.getVirtualItems().map((vi) => {
+              // With NOTHING selected the cursor's own card wears the accent, which
+              // is the board exactly as it was before selections existed; the
+              // moment a real selection exists, membership alone decides.
+              //
+              // The redacted test mirrors `pruneSelection`, which drops such a card
+              // from the LIVE selection: a card the board re-read as redacted while
+              // it was selected would otherwise keep its accent and its
+              // `aria-selected` while every verb had already stopped counting it.
+              // Per-card content read rather than a prop, so the memo identity the
+              // raw `selectedIds` buys is untouched.
+              const selectable = items[vi.index].content.kind !== "redacted";
+              const selected =
+                (selectable && selectedIds.has(items[vi.index].itemId)) ||
+                (selectionSize === 0 && vi.index === activeIndex);
+              return (
+                <div
+                  key={items[vi.index].itemId}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  // Presentation wrapper so the virtualizer's positioning div
+                  // doesn't sit between the listbox and its options.
+                  role="presentation"
+                  // The gap rides the measured ROW, never the spacer: padding on
+                  // the spacer wouldn't move its absolutely-positioned children,
+                  // and the first row carries the top gap itself.
+                  className={cn(
+                    "absolute top-0 left-0 w-full px-1.5 pb-1.5",
+                    vi.index === 0 && "pt-1.5",
+                  )}
+                  style={{ transform: `translateY(${vi.start}px)` }}
+                >
+                  <BoardCard
+                    item={items[vi.index]}
+                    index={vi.index}
+                    setSize={items.length}
+                    columnIndex={columnIndex}
+                    selected={selected}
+                    checked={selected && selectionSize >= 2}
+                    busy={items[vi.index].itemId === busyItemId}
+                    peek={items[vi.index].itemId === peekItemId}
+                    rovingTab={vi.index === tabStopIndex ? 0 : -1}
+                    repoSlug={repoSlug}
+                    ghHost={ghHost}
+                    chipFields={chipFields}
+                    onFocus={onCardFocus}
+                    onPeekChange={onPeekChange}
+                    onOpen={onOpen}
+                  />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

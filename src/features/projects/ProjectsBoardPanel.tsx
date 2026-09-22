@@ -1,5 +1,10 @@
 import { Popover } from "@base-ui/react/popover";
-import { FadersHorizontalIcon, PlusIcon } from "@phosphor-icons/react";
+import {
+  CaretDownIcon,
+  FadersHorizontalIcon,
+  InfoIcon,
+  PlusIcon,
+} from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent,
@@ -41,6 +46,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 // The read-only sentence arrives ALIASED: this panel says it about the BOARD, and
 // its own `READ_ONLY_SCOPE_REASON` below says a different thing about a card's
 // FIELDS. Two claims that happen to share a scope, so only the first is shared.
@@ -63,6 +69,11 @@ import {
   useAddExistingToBoard,
   useArchiveBoardItem,
   useAvailableProjects,
+  useBulkArchiveBoardItems,
+  useBulkMoveBoardCards,
+  useBulkRemoveBoardItems,
+  useBulkRestoreBoardItems,
+  useBulkSetItemFieldValues,
   useConvertDraftItem,
   useForgeStatus,
   useGhScopes,
@@ -80,19 +91,27 @@ import {
   type BoardCandidate,
   type BoardItem,
   type BoardItemContent,
+  type BulkItemOutcomes,
   type ProjectFieldDef,
+  type ProjectFieldValueUpdate,
   type ProjectViewDef,
   providerLabel,
 } from "@/lib/git/types";
-import { eventToBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
+import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
-import { BoardCardMenuItems, type BoardMenuTarget } from "./BoardCardMenu";
+import { BoardBulkFieldsDialog } from "./BoardBulkFieldsDialog";
+import {
+  BoardCardMenuItems,
+  type BoardMenuTarget,
+  type BulkMenuState,
+} from "./BoardCardMenu";
 import { BoardColumn } from "./BoardColumn";
 import { BoardDraftEditDialog } from "./BoardDraftEditDialog";
 import {
@@ -117,6 +136,12 @@ import {
   type ReorderDirection,
   type ReorderPlan,
 } from "./board-positioning";
+import {
+  type BulkVerb,
+  columnRange,
+  partitionEligible,
+  pruneSelection,
+} from "./board-selection";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
  *  owns it in-app, and the web path a CROSS-REPO card falls back to (GitHub's own
@@ -168,6 +193,16 @@ const UNTITLED_VIEW = "Untitled view";
  *  pagination. The split lives here as a lookup over {@link BoardWriteKind}, which
  *  is all the mutation key carries. Neither set is exhaustive — a kind in neither
  *  still counts as a board write for pagination, and says so generically. */
+/** The BULK half of the board-write family, as the panel's gates read it: a verb
+ *  fired over a selection, which every other verb waits on. Named apart from the
+ *  card set below because the wait says something different to the user. */
+const BULK_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
+  "bulk-move",
+  "bulk-fields",
+  "bulk-archive",
+  "bulk-restore",
+  "bulk-remove",
+]);
 const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "move",
   "reorder",
@@ -212,6 +247,35 @@ const REMOVE_BODY: Record<BoardItemContent["kind"], string> = {
   redacted:
     "The card leaves this project. The item itself is untouched, and you can add it back later.",
 };
+/** {@link ARCHIVE_BODY} for a SELECTION, keyed the same way and on the same fact:
+ *  with the toggle off the cards leave the board, with it on they stay put under
+ *  an Archived badge. An eligible set of one takes the single-card wording
+ *  verbatim rather than a pluralized copy of it. */
+const BULK_ARCHIVE_BODY: Record<"shown" | "hidden", (n: number) => string> = {
+  hidden: (n) =>
+    n === 1
+      ? ARCHIVE_BODY.hidden
+      : `The ${n} cards leave the board. Bring them back any time from View options → Show archived cards.`,
+  shown: (n) =>
+    n === 1
+      ? ARCHIVE_BODY.shown
+      : `The ${n} cards stay in place, marked Archived, and leave the board when you turn Show archived cards off. Restore card brings one back.`,
+};
+
+/** {@link REMOVE_BODY} for a SELECTION. Keyed on how many DRAFTS it holds, which
+ *  is the one thing a removal destroys outright: everything else is an unlink the
+ *  user can undo by adding the item back. */
+function bulkRemoveBody(cards: BoardItem[]): string {
+  if (cards.length === 1) return REMOVE_BODY[cards[0].content.kind];
+  const drafts = cards.filter((card) => card.content.kind === "draft").length;
+  const leaves = `The ${cards.length} cards leave this project.`;
+  if (drafts === 0)
+    return `${leaves} The items themselves are untouched, and you can add them back later.`;
+  return `${leaves} ${
+    drafts === 1 ? "One of them is a draft" : `${drafts} of them are drafts`
+  }, which live on this project and nowhere else, so ${drafts === 1 ? "it is" : "those are"} deleted permanently.`;
+}
+
 /** Held rather than queued: a move cancels the board's reads, and query-core's
  *  cancel REVERTS an in-flight one. */
 const LOADING_PAGE_REASON = "Finishing the board's next page…";
@@ -253,6 +317,18 @@ const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
   "alt+home": "top",
   "alt+end": "bottom",
 };
+/** The keys {@link REORDER_CHORDS} claims for Alt. An Alt-modified press on one of
+ *  these that is NOT a bare reposition chord (Alt+Shift+Arrow, say) is swallowed
+ *  rather than falling through to the cursor-and-selection arm, which would answer
+ *  one keystroke with two unrelated actions. */
+const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+]);
 /** Where the optimistic splice leaves the card, as an index in its own column: the
  *  grouping field is untouched by a reposition, so the card never changes column
  *  and the landing is arithmetic rather than a search. */
@@ -303,6 +379,59 @@ function oneCardPerItem(items: BoardItem[]): BoardItem[] {
   const lastAt = new Map<string, number>();
   items.forEach((item, i) => lastAt.set(item.itemId, i));
   return items.filter((item, i) => lastAt.get(item.itemId) === i);
+}
+
+/** One shared empty selection: a board with nothing selected hands its columns the
+ *  same Set identity every render, where a fresh one would defeat their memo and
+ *  re-render every mounted card. */
+const NO_SELECTION: ReadonlySet<string> = new Set<string>();
+/** The empty card snapshot, shared for the reason {@link NO_SELECTION} is: the
+ *  bulk fields dialog is memo-free but re-renders with the panel, and a fresh `[]`
+ *  per render would re-mint every hint it draws. */
+const NO_CARDS: BoardItem[] = [];
+/** Why every bulk verb is held while one is still running. Single-writer for the
+ *  same reason the single-card writes are: two writes to one card settle in an
+ *  order nothing promises. */
+const BULK_PENDING_REASON = "Applying the last bulk change…";
+/** What the keyboard says when Shift is held across the board rather than down a
+ *  column. A silent collapse under a held Shift is the outcome this refuses. */
+const SELECTION_SIDEWAYS_REASON = "Selection extends within a column";
+/** Each verb in the past tense, for the result a user reads back. */
+const BULK_DONE_WORD: Record<BulkVerb, string> = {
+  move: "Moved",
+  fields: "Updated fields on",
+  archive: "Archived",
+  restore: "Restored",
+  remove: "Removed",
+};
+/** The same five as the infinitive a partial failure names. */
+const BULK_FAIL_WORD: Record<BulkVerb, string> = {
+  move: "move",
+  fields: "update",
+  archive: "archive",
+  restore: "restore",
+  remove: "remove",
+};
+/** Why a verb has nothing to act on because the SELECTION is gone, which is a
+ *  different statement from every card being on the wrong side of the verb. Only
+ *  a surface that outlives the bar can reach it — the bar stops rendering below
+ *  two cards, where the bulk fields dialog stays up. */
+const BULK_NO_SELECTION_REASON = "No cards are selected";
+/** Why a verb has nothing to do over THIS selection. Each names the state that
+ *  put it there, since a mixed selection scopes a verb rather than blocking it —
+ *  a held row here means every selected card is on the wrong side of it. */
+const BULK_NOTHING_REASON: Record<BulkVerb, string> = {
+  move: "Every selected card is archived",
+  fields: "Every selected card is archived",
+  archive: "Every selected card is already archived",
+  restore: "No selected card is archived",
+  remove: "Select cards to remove",
+};
+
+/** `n` cards, with the singular the eligible count really can land on: a mixed
+ *  selection leaves one verb with a single card to act on. */
+function cardCount(n: number): string {
+  return `${n} ${n === 1 ? "card" : "cards"}`;
 }
 
 /** A view's filter as the board's LENS. GitHub reports an unfiltered view as
@@ -507,6 +636,10 @@ export function ProjectsBoardPanel({
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  // The selection hint's own dismissal, which is the only stored preference this
+  // panel has: everything else here is for the visit.
+  const settings = useSettings();
+  const saveSettings = useSaveSettings();
 
   const projects = useAvailableProjects(repoPath, canRead, lens);
   // Closed boards are out in v1: they still hold items, but a board nobody is
@@ -649,12 +782,113 @@ export function ProjectsBoardPanel({
       : null;
   const tabStop = liveCursor ?? firstCardPosition(columns);
 
+  // The board's selection, and the card a Shift range extends FROM. Beside the
+  // cursor rather than derived from it: the two move together for every plain
+  // gesture and apart for every modified one, which is the whole grammar.
+  const [selectedIds, setSelectedIds] =
+    useState<ReadonlySet<string>>(NO_SELECTION);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
+    null,
+  );
+  // PRUNED at the same place the cursor clamps, and for the same reason: the
+  // columns change under a selection from several directions at once (the
+  // archived toggle, a view's filter, a refetch, another write's patch), and a
+  // card the board has stopped drawing must never be acted on by a verb that
+  // counted it. Derived, never an effect chasing the writers.
+  const liveSelection = pruneSelection(selectedIds, columns);
+  const selectionSize = liveSelection.size;
+  // How big the selection was when it was last spoken. A held Shift+Arrow grows it
+  // one card per repeat, so the announcement waits for the burst to stop rather
+  // than reading every step out — the TRAILING edge is the only size the user is
+  // actually asking about. Sizes below two say nothing here: a singleton is the
+  // cursor, and Esc's own "Selection cleared" covers the way down to none.
+  const announcedSizeRef = useRef(0);
+  useEffect(() => {
+    if (announcedSizeRef.current === selectionSize) return;
+    const timer = setTimeout(() => {
+      announcedSizeRef.current = selectionSize;
+      if (selectionSize >= 2) announce(`${selectionSize} cards selected`);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [selectionSize, announce]);
+
+  /** The selected cards themselves, in the board's own draw order — what every
+   *  bulk verb partitions, read at FIRE time. */
+  function selectedCards(): BoardItem[] {
+    if (selectionSize === 0) return [];
+    return columns.flatMap((column) =>
+      column.items.filter((item) => liveSelection.has(item.itemId)),
+    );
+  }
+
+  /** Back to no selection at all. Fired everywhere the cursor resets today (the
+   *  columns are about to hold a different set of cards), by Esc, and by every
+   *  bulk verb as it goes out. */
+  function clearSelection() {
+    setSelectedIds(NO_SELECTION);
+    setSelectionAnchorId(null);
+  }
+
+  /** Collapse to one card and re-anchor there — what a plain click and a plain
+   *  arrow both do, and the fallback for a Shift gesture whose anchor the board
+   *  has stopped drawing. */
+  function selectOnly(itemId: string) {
+    // Already exactly this card: a fresh Set would be a new identity for the same
+    // selection, re-rendering every mounted card through the columns' memo on a
+    // click that changed nothing.
+    if (
+      selectedIds.size === 1 &&
+      selectedIds.has(itemId) &&
+      selectionAnchorId === itemId
+    )
+      return;
+    setSelectedIds(new Set([itemId]));
+    setSelectionAnchorId(itemId);
+  }
+
+  /** Add or drop one card. `reanchor` is false for the cross-column Shift alone,
+   *  which adds the card without moving the anchor the user set. */
+  function selectToggle(itemId: string, reanchor = true) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(itemId)) next.add(itemId);
+      return next;
+    });
+    if (reanchor) setSelectionAnchorId(itemId);
+  }
+
+  /** Extend from the anchor to `itemId`, COLUMN-SCOPED. A range REPLACES the
+   *  selection rather than adding to it, which is what lets a user walk one back
+   *  down with Shift held; the anchor stays put so every extension is measured
+   *  from the same card. */
+  function selectRange(itemId: string) {
+    const ids =
+      selectionAnchorId === null
+        ? null
+        : columnRange(columns, selectionAnchorId, itemId);
+    if (ids !== null) {
+      setSelectedIds(new Set(ids));
+      return;
+    }
+    // No anchor, or one the board no longer draws: nothing to extend from, so the
+    // landed card becomes the selection and the new anchor (ChangesPanel's
+    // hidden-anchor rule). A live anchor in ANOTHER column is the other null, and
+    // it toggle-adds — a kanban has no honest two-dimensional range.
+    if (
+      selectionAnchorId !== null &&
+      findCard(columns, selectionAnchorId) !== null
+    )
+      selectToggle(itemId, false);
+    else selectOnly(itemId);
+  }
+
   /** Take the board back to no lens: its whole item set, its own POSITION order,
    *  no chips. The GROUPING stays where it is — a view seeds it once, and what
    *  the user has in front of them is their own pick from then on. */
   function clearView() {
     setActiveViewId(null);
     setCursor(null);
+    clearSelection();
   }
 
   /** Selecting a view is an EVENT, never an effect: the grouping seed fires once,
@@ -674,6 +908,7 @@ export function ProjectsBoardPanel({
       setPickedFieldId(vgroup);
     // The columns are about to hold a different set of cards.
     setCursor(null);
+    clearSelection();
   }
 
   /** Show or hide the board's archived cards. A different set of cards either way,
@@ -683,6 +918,7 @@ export function ProjectsBoardPanel({
   function setArchivedShown(next: boolean) {
     setShowArchived(next);
     setCursor(null);
+    clearSelection();
   }
 
   // Palette-only, and live only where it can do something: a board on screen
@@ -762,6 +998,22 @@ export function ProjectsBoardPanel({
     const focused = document.activeElement;
     if (!(focused instanceof HTMLElement) || !e.currentTarget.contains(focused))
       return;
+    // Esc ahead of the cursor resolution: clearing a selection is an answer the
+    // board owes even when the cursor is addressing nothing. Gated at TWO, not at
+    // one: a plain click or arrow leaves a singleton behind, so a one-card gate
+    // would have Esc announce "Selection cleared" and swallow the key on an
+    // ordinary board where nothing visibly changed. A singleton IS the cursor, and
+    // Esc goes on doing there whatever it did before selections existed.
+    // The containment test above is what scopes this to the board: a keystroke
+    // typed inside an open popover or menu is a DOM descendant of neither, so it
+    // has already returned.
+    if (e.key === "Escape") {
+      if (selectionSize < 2) return;
+      e.preventDefault();
+      clearSelection();
+      announce("Selection cleared");
+      return;
+    }
     const from = cardAt(focused) ?? liveCursor;
     if (from === null) return;
     const column = columns[from.col];
@@ -778,6 +1030,14 @@ export function ProjectsBoardPanel({
     if (direction !== undefined) {
       e.preventDefault();
       reorderCard(from, direction);
+      return;
+    }
+    // Alt belongs to the REPOSITION chords, so any other Alt-modified key the board
+    // owns is swallowed rather than let through: Alt+Shift+Arrow would otherwise
+    // fall to the bare-key switch below and do BOTH things at once — move the
+    // cursor and extend the range — off a chord that means neither.
+    if (e.altKey && ALT_SWALLOWED_KEYS.has(e.key)) {
+      e.preventDefault();
       return;
     }
     const last = column.items.length - 1;
@@ -797,6 +1057,15 @@ export function ProjectsBoardPanel({
         break;
       case "ArrowLeft":
       case "ArrowRight": {
+        // A HELD Shift here means the user is extending and has run out of
+        // column, so the board says so rather than collapsing the selection to
+        // the neighbour it would otherwise step to — a silent collapse under a
+        // held modifier is the one outcome this refuses.
+        if (e.shiftKey) {
+          e.preventDefault();
+          announce(SELECTION_SIDEWAYS_REASON);
+          return;
+        }
         const col = nextColumn(from.col, e.key === "ArrowRight" ? 1 : -1);
         // Same visual row in the neighbour, clamped to its last card.
         if (col !== -1)
@@ -814,8 +1083,15 @@ export function ProjectsBoardPanel({
     e.preventDefault();
     if (next.col === from.col && next.idx === from.idx) return;
     setCursor(next);
-    setFocusItemId(columns[next.col].items[next.idx]?.itemId ?? null);
+    const landed = columns[next.col].items[next.idx];
+    setFocusItemId(landed?.itemId ?? null);
     setFocusNonce((n) => n + 1);
+    // The selection follows the cursor: a plain move collapses to the card it
+    // landed on, a Shift-held one extends the range from the anchor. Same split
+    // the pointer keeps, so the two routes can't drift.
+    if (landed === undefined) return;
+    if (e.shiftKey) selectRange(landed.itemId);
+    else selectOnly(landed.itemId);
   }
 
   // The board's writes. ONE instance each — the single-flight contract the menu
@@ -835,6 +1111,19 @@ export function ProjectsBoardPanel({
   const archiveItem = useArchiveBoardItem();
   const restoreItem = useRestoreBoardItem();
   const removeItem = useRemoveBoardItem();
+  // The same four verbs over a SELECTION. One instance each, like the single-card
+  // writes, and single-flight by the same contract — every bulk control is held
+  // while any board write runs.
+  const bulkMove = useBulkMoveBoardCards();
+  const bulkArchive = useBulkArchiveBoardItems();
+  const bulkRestore = useBulkRestoreBoardItems();
+  const bulkRemove = useBulkRemoveBoardItems();
+  const bulkFields = useBulkSetItemFieldValues();
+  /** Whether the bulk fields editor is open, and the cards it was opened over —
+   *  its hints' source, recorded at the click for the reason {@link openBulkFields}
+   *  states. */
+  const [bulkFieldsOpen, setBulkFieldsOpen] = useState(false);
+  const [bulkFieldCards, setBulkFieldCards] = useState<BoardItem[]>(NO_CARDS);
   // The add writes live HERE rather than inside the dialogs that fire them, so the
   // board can say what is in flight: a dialog closed mid-write would otherwise take
   // the only record of it with it.
@@ -852,6 +1141,12 @@ export function ProjectsBoardPanel({
   const movePending = pendingWrites.some((w) => w.kind === "move");
   const cardWritePending = pendingWrites.some(
     (w) => w.kind !== null && CARD_WRITE_KINDS.has(w.kind),
+  );
+  // Apart from `cardWritePending` rather than folded into it: the bulk kinds carry
+  // a LIST where that set's members carry an `itemId`, so the per-card gates can't
+  // read them, and what the user is waiting on says something different.
+  const bulkWritePending = pendingWrites.some(
+    (w) => w.kind !== null && BULK_WRITE_KINDS.has(w.kind),
   );
   // The draft dialog's single-flight gate. Its own form can't provide one: the
   // component persists across close/reopen, so an Esc'd submit and a later one share
@@ -923,6 +1218,9 @@ export function ProjectsBoardPanel({
   // landing) to THIS board: several repo tabs mount their own panel, and a
   // document-wide query would hand focus to another one's toolbar.
   const rootRef = useRef<HTMLDivElement>(null);
+  // The selection bar, so a control inside it can hand focus back to the board
+  // before the bar unmounts under it.
+  const selectionBarRef = useRef<HTMLDivElement>(null);
   // True from the moment the menu opens until its close has fully SETTLED, which
   // is why the completion callback owns the falling edge: Base UI returns focus to
   // the trigger from the popup's unmount cleanup, and that unmount is what fires
@@ -1084,11 +1382,20 @@ export function ProjectsBoardPanel({
   // rather than the dep list: listing it would re-run this on every render (the
   // ref-compare would refuse, but the effect is meant to fire on a board change
   // alone), and a dep-suppression is the thing this repo replaced with this hook.
-  const retireAddDialog = useEffectEvent(() => switchAddDialog(null));
+  const retireBoardDialogs = useEffectEvent(() => {
+    switchAddDialog(null);
+    // The bulk fields editor retires on the same edge and for a sharper version of
+    // the same reason: its rows are THIS board's field definitions and its draft
+    // addresses this board's memberships, so a silent re-point would leave a draft
+    // aimed at fields the new board may not even define. Its card snapshot goes
+    // with it — the selection behind it belonged to the previous board.
+    setBulkFieldsOpen(false);
+    setBulkFieldCards(NO_CARDS);
+  });
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
     dialogProjectRef.current = projectId;
-    retireAddDialog();
+    retireBoardDialogs();
   }, [projectId]);
 
   /** Why `item` can't be moved between columns, or undefined when it can. Ranked
@@ -1115,6 +1422,8 @@ export function ProjectsBoardPanel({
       // is about to have.
       case lensLoading:
         return LENS_LOADING_REASON;
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
       case movePending:
         return MOVING_REASON;
       case cardWritePending:
@@ -1143,6 +1452,8 @@ export function ProjectsBoardPanel({
         return BOARD_READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
       case movePending:
         return MOVING_REASON;
       case cardWritePending:
@@ -1165,6 +1476,8 @@ export function ProjectsBoardPanel({
         return NO_ACCESS_REASON;
       case item.isArchived:
         return ARCHIVED_CARD_REASON;
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
       case movePending:
         return MOVING_REASON;
       case cardWritePending:
@@ -1208,6 +1521,11 @@ export function ProjectsBoardPanel({
         return SORTED_VIEW_REASON;
       case lensLoading:
         return LENS_LOADING_REASON;
+      // Board-wide rather than per card, unlike the arm below it: a bulk write
+      // addresses a LIST no `itemId` names, and its settle re-reads the order this
+      // position write is computed against.
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
       case pendingWrites.some(
         (w) =>
           w.itemId === itemId &&
@@ -1225,6 +1543,103 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   }
+
+  /** Why EVERY bulk verb is held, or undefined when they're live. Ranked like the
+   *  card actions and on the same flags, plus the two that clear on their own: a
+   *  selection built under one lens names cards the next one may not draw, and a
+   *  page fetch is cancel-reverted by any write's settle. Re-checked inside every
+   *  fired handler, never trusted from the render that disabled a button. */
+  const bulkHeldReason = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      case lensLoading:
+        return LENS_LOADING_REASON;
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
+      case boardWritePending:
+        return CARD_WRITE_REASON;
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  // The same gate as of the last COMMIT, readable after an await. A handler's own
+  // `bulkHeldReason` is the closure from the render that started it, so a verb the
+  // user sat on a confirm prompt for would re-check an answer that predates the
+  // prompt. Written from an effect rather than during render, which is the ref
+  // write the React Compiler forbids.
+  const bulkHeldRef = useRef(bulkHeldReason);
+  useEffect(() => {
+    bulkHeldRef.current = bulkHeldReason;
+  }, [bulkHeldReason]);
+
+  /** What one bulk verb can do over the CURRENT selection: its eligible cards, the
+   *  count-worded label, and why it can't run. The count is always the ELIGIBLE
+   *  one — a mixed selection scopes a verb rather than blocking it, so a label that
+   *  counted the whole selection would promise cards the write will skip. */
+  function bulkState(verb: BulkVerb): {
+    cards: BoardItem[];
+    label: string;
+    reason: string | undefined;
+  } {
+    const selected = selectedCards();
+    const cards = partitionEligible(verb, selected).eligible;
+    const n = cards.length;
+    const label = {
+      move: `Move ${cardCount(n)} to`,
+      fields: `Edit fields of ${cardCount(n)}…`,
+      archive: `Archive ${cardCount(n)}…`,
+      restore: `Restore ${cardCount(n)}`,
+      remove: `Remove ${cardCount(n)} from project…`,
+    }[verb];
+    // The board-wide hold first, then the one this verb has over this selection:
+    // "every selected card is already archived" is a statement about the set, and
+    // it would be misleading under a sign-in that can't write at all.
+    const reason =
+      bulkHeldReason ??
+      // A move needs a column to write, which two of the board's states don't
+      // offer — the same pair `moveHeldFor` refuses a single card for.
+      (verb === "move" && groupField === null
+        ? NO_GROUP_FIELDS_REASON
+        : verb === "move" &&
+            groupField?.kind === "singleSelect" &&
+            groupField.isIssueField
+          ? ISSUE_FIELD_REASON
+          : selected.length === 0
+            ? BULK_NO_SELECTION_REASON
+            : n === 0
+              ? BULK_NOTHING_REASON[verb]
+              : undefined);
+    return { cards, label, reason };
+  }
+
+  // The four verbs resolved ONCE, shared by the selection bar and the card menu:
+  // both speak for the same selection, and a second derivation is a second thing
+  // to keep in step. Null below two cards, which is also what keeps the partition
+  // off every render of an ordinary board.
+  const bulkRows =
+    selectionSize < 2
+      ? null
+      : {
+          move: bulkState("move"),
+          fields: bulkState("fields"),
+          archive: bulkState("archive"),
+          restore: bulkState("restore"),
+          remove: bulkState("remove"),
+        };
+  // The bulk fields dialog OUTLIVES the bar that opened it — the bar stops
+  // rendering below two cards, and a refetch can prune the selection under an open
+  // dialog — so Apply reads its own live hold rather than the bar's snapshot.
+  // Costs nothing while the dialog is closed, which is nearly always.
+  // One derivation for both, so the dialog's title and its Apply hold can't
+  // disagree about the same selection.
+  const bulkFieldsLive = bulkFieldsOpen ? bulkState("fields") : null;
+  const bulkFieldsHeld = bulkFieldsLive?.reason;
+  const bulkFieldsEligible = bulkFieldsLive?.cards.length ?? 0;
 
   /** Why the toolbar's Add item is held. The same two permission arms the card
    *  actions take, plus the page-fetch one for the same reason a move takes it —
@@ -1283,6 +1698,65 @@ export function ProjectsBoardPanel({
    *  leaves a long press showing the previously right-clicked card's menu. */
   function handleCardPointerDown(e: PointerEvent) {
     recordMenuTarget(e.target instanceof Element ? e.target : null);
+  }
+
+  /** Whether a pointer event carries one of the two SELECTION modifiers, and which.
+   *  `mod` is Ctrl on Windows and Linux and Cmd on macOS, read off the event rather
+   *  than off a platform test — the same pair `formatBinding("mod")` prints. */
+  function selectionMods(e: {
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+  }) {
+    return { toggle: e.ctrlKey || e.metaKey, range: e.shiftKey };
+  }
+
+  /**
+   * Every LEFT-button press on a card, and the one place the pointer's selection
+   * grammar lives: plain collapses to that card, `mod` toggles it, Shift extends
+   * the column range from the anchor.
+   *
+   * MOUSEDOWN rather than click, because a draft card's notes open from Base UI's
+   * own mousedown (`useClick`) — a modified press has to be intercepted before
+   * that, not after it. `preventDefault` is what stops the browser extending a
+   * text range under Shift and moving focus for us; the focus is then handed to
+   * the card by hand, so the arrows resume from where the pointer landed.
+   */
+  function handleCardMouseDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    const mods = selectionMods(e);
+    const el = e.target instanceof Element ? e.target : null;
+    const at = el === null ? null : cardAt(el);
+    const item = at === null ? undefined : columns[at.col]?.items[at.idx];
+    // Board chrome and empty column space are nobody's business here.
+    if (item === undefined) return;
+    if (!mods.toggle && !mods.range) {
+      // A REDACTED card carries no handlers precisely so it can't be picked, so a
+      // plain press on one leaves the selection exactly where it was.
+      if (item.content.kind !== "redacted") selectOnly(item.itemId);
+      return;
+    }
+    // Swallowed even on a redacted card, which takes no part in a selection: the
+    // press still has to stop the browser extending a text range across the board
+    // under the held Shift.
+    e.preventDefault();
+    e.stopPropagation();
+    if (item.content.kind === "redacted") return;
+    if (mods.range) selectRange(item.itemId);
+    else selectToggle(item.itemId);
+    el?.closest<HTMLElement>("[data-card-index]")?.focus();
+  }
+
+  /** The other half of the modified-press intercept. Stopping mousedown leaves the
+   *  click that follows it untouched, and that click is what would open the card —
+   *  so a selection gesture swallows both. */
+  function handleCardClickCapture(e: MouseEvent) {
+    const mods = selectionMods(e);
+    if (!mods.toggle && !mods.range) return;
+    const el = e.target instanceof Element ? e.target : null;
+    if (el === null || cardAt(el) === null) return;
+    e.preventDefault();
+    e.stopPropagation();
   }
 
   /** The mouse and keyboard route. Re-records because Shift+F10 and the Menu key
@@ -1651,6 +2125,216 @@ export function ProjectsBoardPanel({
     }
   }
 
+  /** What a bulk write did, said once. A FULL success is announced and nothing
+   *  more — the cards changing IS the feedback — where a partial one also toasts:
+   *  a count of what didn't land is a short terminal result, and a live region
+   *  alone would lose it to the next announcement. */
+  function reportBulk(verb: BulkVerb, result: BulkItemOutcomes, sent: number) {
+    const failed = result.outcomes.filter(
+      (outcome) => outcome.error !== null,
+    ).length;
+    if (failed === 0) {
+      announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent)}`);
+      return;
+    }
+    announce(
+      `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent)} — ${failed} failed`,
+    );
+    toast.error(
+      `${failed} of ${cardCount(sent)} failed to ${BULK_FAIL_WORD[verb]}`,
+    );
+  }
+
+  /** Hand focus out of the selection bar before the bar leaves the tree. The card
+   *  the cursor is on is the board's own tab stop, and it is mounted by the
+   *  column's range extractor whatever the scroll position. SYNCHRONOUS: a rAF
+   *  handoff loses to Base UI's own focus recapture, and a bar that unmounts under
+   *  the focused button drops a keyboard user to the document body. */
+  function handOffBarFocus() {
+    const focused = document.activeElement;
+    const bar = selectionBarRef.current;
+    if (!(focused instanceof HTMLElement) || bar === null) return;
+    if (!bar.contains(focused)) return;
+    rootRef.current
+      ?.querySelector<HTMLElement>('[data-card-index][tabindex="0"]')
+      ?.focus();
+  }
+
+  /** Move every eligible selected card into `columns[columnIndex]`. No prompt: a
+   *  move is as reversible as the one the card menu offers, and the cards landing
+   *  in their new column is its own feedback. */
+  async function bulkMoveCards(columnIndex: number) {
+    // Every read happens BEFORE the first await, and the gates are re-checked here
+    // rather than trusted from the render that disabled the control.
+    const column = columns[columnIndex];
+    const { cards, reason } = bulkState("move");
+    if (groupField === null || projectId === null || column === undefined)
+      return;
+    if (reason !== undefined || cards.length === 0) return;
+    const itemIds = cards.map((card) => card.itemId);
+    const bucket = moveBucketFor(groupField, column.id);
+    handOffBarFocus();
+    clearSelection();
+    try {
+      // The board and the lens this write belongs to travel WITH it, the rule
+      // `moveCard` states: `onMutate` pins this lens's key into the context its
+      // rollback and its settle read.
+      const result = await bulkMove.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemIds,
+        field: groupField,
+        bucket,
+        query: lensQuery,
+        archived: showArchived,
+      });
+      reportBulk("move", result, itemIds.length);
+    } catch {
+      // The mutation reported it and rolled every card back to its old column.
+    }
+  }
+
+  /** Archive or remove every eligible selected card, after the prompt each one
+   *  owes. The prompts say where the cards GO, the same claim the single-card ones
+   *  make and keyed on the same two facts: whether archived cards are shown, and
+   *  whether the set holds a draft. */
+  async function bulkRetireCards(action: "archive" | "remove") {
+    const { cards, reason } = bulkState(action);
+    if (projectId === null || reason !== undefined || cards.length === 0)
+      return;
+    const n = cards.length;
+    const prompt =
+      action === "archive"
+        ? {
+            title: `Archive ${cardCount(n)}?`,
+            body: BULK_ARCHIVE_BODY[showArchived ? "shown" : "hidden"](n),
+            confirmLabel: "Archive",
+          }
+        : {
+            title: `Remove ${cardCount(n)} from the project?`,
+            body: bulkRemoveBody(cards),
+            confirmLabel: "Remove",
+            confirmVariant: "destructive" as const,
+          };
+    // BEFORE the prompt, never after it. The confirm dialog takes focus as it
+    // opens and restores it to whatever held focus beforehand — which is the bar
+    // button that fired this, and the bar unmounts the moment the selection
+    // clears. Handing focus to the cursor card first makes the CARD the confirm's
+    // restore target, and that card outlives the bar. A handoff after the await
+    // would find focus inside the confirm, skip its own bar-contains guard, and
+    // drop a keyboard user on <body> as the dialog closed onto a dead button.
+    handOffBarFocus();
+    const ok = await useConfirm.getState().ask(prompt);
+    if (!ok) return;
+    // Re-read the GATE after the prompt, not the card set: the user confirmed
+    // those N cards, and re-deriving the set would silently write a different one.
+    // The board can go held under an open prompt (another write starts, a page
+    // fetch begins), and a write fired into that is the race the render-time
+    // `disabled` can't catch. Announced rather than toasted — this route already
+    // has the user's attention.
+    const heldNow = bulkHeldRef.current;
+    if (heldNow !== undefined) {
+      announce(heldNow);
+      return;
+    }
+    // `wasArchived` rides each item for the reason the single-card write carries
+    // it: it is a COUNT axis no cache key supplies, and a mixed selection holds
+    // both values at once.
+    const items = cards.map((card) => ({
+      itemId: card.itemId,
+      wasArchived: card.isArchived,
+    }));
+    clearSelection();
+    try {
+      const write = action === "archive" ? bulkArchive : bulkRemove;
+      const result = await write.mutateAsync({
+        repo: repoPath,
+        projectId,
+        items,
+      });
+      reportBulk(action, result, items.length);
+    } catch {
+      // The mutation reported it and its rollback put every card back.
+    }
+  }
+
+  /** Put every archived card in the selection back on the board. No prompt, for
+   *  the reason the single-card restore has none: the archive is the step that
+   *  asked, and this is the reversal it promised. */
+  async function bulkRestoreCards() {
+    const { cards, reason } = bulkState("restore");
+    if (projectId === null || reason !== undefined || cards.length === 0)
+      return;
+    const itemIds = cards.map((card) => card.itemId);
+    handOffBarFocus();
+    clearSelection();
+    try {
+      const result = await bulkRestore.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemIds,
+      });
+      reportBulk("restore", result, itemIds.length);
+    } catch {
+      // The mutation reported it, and its rollback put the cards back under the
+      // Archived badges they came in with.
+    }
+  }
+
+  /** Open the bulk fields editor over the cards eligible for it RIGHT NOW, recording
+   *  them here at the click. The dialog holds none of this: it stays mounted across
+   *  open and close and `<Activity>` replays its effects on show, so a set it derived
+   *  for itself would describe whatever selection it last saw. The snapshot feeds the
+   *  dialog's hints ALONE — what a write addresses is re-derived when Apply fires. */
+  function openBulkFields() {
+    const { cards, reason } = bulkState("fields");
+    if (projectId === null || reason !== undefined || cards.length === 0)
+      return;
+    setBulkFieldCards(cards);
+    setBulkFieldsOpen(true);
+  }
+
+  /** Write one drafted set of field values across every card still eligible for it.
+   *  Reports whether it landed: the dialog closes on `true` and stays open with the
+   *  draft intact on `false`, where a failed write leaves the user's work. */
+  async function applyBulkFields(
+    updates: ProjectFieldValueUpdate[],
+    clears: string[],
+  ): Promise<boolean> {
+    // Re-derived at FIRE time rather than taken from the open-time snapshot: a card
+    // that left the board while the dialog was up must not be written to, which is
+    // the same rule every other bulk verb keeps. The gates are re-checked here too.
+    const { cards, reason } = bulkState("fields");
+    if (projectId === null || reason !== undefined || cards.length === 0)
+      return false;
+    if (updates.length === 0 && clears.length === 0) return false;
+    const itemIds = cards.map((card) => card.itemId);
+    try {
+      const result = await bulkFields.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemIds,
+        updates,
+        clears,
+      });
+      reportBulk("fields", result, itemIds.length);
+      return true;
+    } catch {
+      // The mutation reported it. Nothing was patched optimistically, so the board
+      // is already showing the truth and the draft stays where the user left it.
+      return false;
+    }
+  }
+
+  /** Drop the selection from the keyboard or the bar's own Clear. Focus leaves the
+   *  bar first: the control that fired this is about to unmount with it. */
+  function dismissSelection() {
+    if (selectionSize === 0) return;
+    handOffBarFocus();
+    clearSelection();
+    announce("Selection cleared");
+  }
+
   // Ranked, because the popup can be opened before the fields read settles and
   // an UNSETTLED read is not the same claim as a settled empty one. Claiming the
   // board defines no groupable field while the read is still in flight is a false
@@ -1781,6 +2465,8 @@ export function ProjectsBoardPanel({
       // would be thrown away between its request and the pages it was meant to
       // extend. One arm per kind rather than one shared sentence: the wait is the
       // same, but what the user is waiting ON is not.
+      case bulkWritePending:
+        return BULK_PENDING_REASON;
       case movePending:
         return "Finishing your last card move…";
       case cardWritePending:
@@ -1868,6 +2554,30 @@ export function ProjectsBoardPanel({
       : menuPos === null
         ? CARD_GONE_REASON
         : reorderHeldFor(menuTarget.item);
+  // The menu's BULK arm, or null for the single-card one. Present exactly when the
+  // card the menu opened on is one of SEVERAL selected — the open gate collapses
+  // the selection onto a card outside it, so this can never describe a set the
+  // menu isn't about.
+  const menuBulk: BulkMenuState | null =
+    menuTarget === null ||
+    bulkRows === null ||
+    !liveSelection.has(menuTarget.item.itemId)
+      ? null
+      : {
+          count: selectionSize,
+          move: bulkRows.move,
+          fields: bulkRows.fields,
+          archive: bulkRows.archive,
+          restore: bulkRows.restore,
+          remove: bulkRows.remove,
+          actions: {
+            move: (columnIndex) => void bulkMoveCards(columnIndex),
+            fields: openBulkFields,
+            archive: () => void bulkRetireCards("archive"),
+            restore: () => void bulkRestoreCards(),
+            remove: () => void bulkRetireCards("remove"),
+          },
+        };
 
   const body = (() => {
     switch (true) {
@@ -2003,7 +2713,18 @@ export function ProjectsBoardPanel({
                 details.cancel();
                 return;
               }
-              if (open) setMenuBusy(true);
+              if (open) {
+                // The one gate both menu routes share, which is why the
+                // collapse lives here rather than on a pointer handler: a touch
+                // long press dispatches no `contextmenu` at all. A menu opened
+                // OUTSIDE the selection is a statement about that card, so the
+                // selection collapses onto it first (HistoryPanel's own rule);
+                // one opened inside it keeps the set the menu is about to act on.
+                const itemId = menuTargetRef.current?.item.itemId;
+                if (itemId !== undefined && !liveSelection.has(itemId))
+                  selectOnly(itemId);
+                setMenuBusy(true);
+              }
             }}
             onOpenChangeComplete={setMenuBusy}
           >
@@ -2016,6 +2737,8 @@ export function ProjectsBoardPanel({
                   className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
                   onKeyDown={onBoardKeyDown}
                   onPointerDownCapture={handleCardPointerDown}
+                  onMouseDownCapture={handleCardMouseDown}
+                  onClickCapture={handleCardClickCapture}
                   onContextMenuCapture={handleCardContextMenu}
                 />
               }
@@ -2027,6 +2750,8 @@ export function ProjectsBoardPanel({
                   columnIndex={i}
                   activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
                   activeItemId={liveCursor?.col === i ? focusItemId : null}
+                  selectedIds={selectedIds}
+                  selectionSize={selectionSize}
                   busyItemId={busyItemId}
                   peekItemId={peekItemId}
                   tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
@@ -2043,6 +2768,7 @@ export function ProjectsBoardPanel({
             <ContextMenuContent className="min-w-56">
               <BoardCardMenuItems
                 target={menuTarget}
+                bulk={menuBulk}
                 // An ungrouped board has one column standing for the whole
                 // board, which is no move target at all. A REDACTED card has none
                 // either: its rows reach it by its place on the board, and a
@@ -2141,6 +2867,20 @@ export function ProjectsBoardPanel({
       });
     } else if (write.kind === "edit-draft") {
       pendingLines.push({ key: write.mutationId, label: "Saving a draft…" });
+    } else if (write.kind === "bulk-fields") {
+      // The ONE bulk kind that earns a line. The other four patch their cards
+      // optimistically, so the cards changing on the spot is already their
+      // feedback; this one writes several fields at once (the grouping field
+      // included), which makes no local patch honest — so without a line it is the
+      // only board write with no visible progress at all, and Cancel closing over
+      // it would leave nothing on screen saying it was still going.
+      pendingLines.push({
+        key: write.mutationId,
+        label:
+          write.count === null
+            ? "Setting fields…"
+            : `Setting fields on ${cardCount(write.count)}…`,
+      });
     } else if (write.kind === "reorder") {
       // A line despite the splice already being on screen, unlike a move: a burst
       // of presses converges through several round trips, so this write can still
@@ -2206,6 +2946,28 @@ export function ProjectsBoardPanel({
     },
     active && liveCursor !== null,
   );
+  // The bulk verbs, live only where they mean something: a board on screen with a
+  // real selection on it. Each handler re-derives its own eligibility and holds, so
+  // the palette answers a held board the same way the bar does. No bulk MOVE row —
+  // picking a column needs a menu the palette can't put up, which is the same
+  // reason the single-card move is menu-only.
+  const hasSelection = active && selectionSize >= 2;
+  useHotkeyAction(
+    "archive-selected-cards",
+    () => void bulkRetireCards("archive"),
+    hasSelection,
+  );
+  useHotkeyAction(
+    "restore-selected-cards",
+    () => void bulkRestoreCards(),
+    hasSelection,
+  );
+  useHotkeyAction(
+    "remove-selected-cards",
+    () => void bulkRetireCards("remove"),
+    hasSelection,
+  );
+  useHotkeyAction("clear-card-selection", dismissSelection, hasSelection);
   // The content node ids of every card LOADED so far, for the add dialog's
   // already-on-this-board rows. Off `items.data` rather than the derived `loaded`
   // array, which is re-minted each render and would defeat the memo.
@@ -2244,6 +3006,7 @@ export function ProjectsBoardPanel({
               // WITHOUT the grouping seed, which only `pickView` performs.
               setActiveViewId(null);
               setCursor(null);
+              clearSelection();
             }}
           >
             <SelectTrigger size="sm" aria-label="Project" className="max-w-64">
@@ -2434,6 +3197,7 @@ export function ProjectsBoardPanel({
                             if (typeof next !== "string") return;
                             setPickedFieldId(next);
                             setCursor(null);
+                            clearSelection();
                           }}
                         >
                           {groupFields.map((f) => (
@@ -2608,6 +3372,140 @@ export function ProjectsBoardPanel({
           ))}
         </div>
       )}
+      {/* How to build a selection at all, until the user says they know. Gated on
+          `settings.data` being loaded so "Don't show again" — which merges into it —
+          can't silently no-op during the cold load, and hidden the moment a real
+          selection exists: the bar below is the better teacher by then.
+          ChangesPanel's own hint, worded for cards and keyed on its own setting. */}
+      {showBoardChrome &&
+        settings.data &&
+        settings.data.showBoardSelectionHint !== false &&
+        shown >= 2 &&
+        selectionSize <= 1 && (
+          <div className="mb-2 flex shrink-0 items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+            <InfoIcon className="size-3.5 shrink-0" />
+            <span className="flex-1 leading-snug">
+              {formatBinding("mod")}-click to select cards individually,
+              Shift-click for a range.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (!settings.data) return;
+                void saveSettings
+                  .mutateAsync({
+                    ...settings.data,
+                    showBoardSelectionHint: false,
+                  })
+                  .catch(() => undefined);
+              }}
+              className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+            >
+              Don't show again
+            </button>
+          </div>
+        )}
+      {/* What the selection can do, in the layout FLOW like every strip above it —
+          a bar that floated over the board would cover the cards it is about. Two
+          cards in, since a singleton IS the keyboard cursor and has the card menu
+          already. */}
+      {showBoardChrome && bulkRows !== null && (
+        <div
+          ref={selectionBarRef}
+          // Esc works from inside the bar too. The board's own handler is on the
+          // COLUMNS container, which this strip is a sibling of — so a user who
+          // tabbed into the bar could otherwise only leave the selection by
+          // clicking Clear. Same pair Clear takes: the synchronous handoff first,
+          // since the control holding focus is about to unmount with the bar.
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            dismissSelection();
+          }}
+          className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-muted/40 px-2.5 py-1.5 text-[11px]"
+        >
+          <span className="mr-1 tabular-nums text-muted-foreground">
+            {cardCount(selectionSize)} selected
+          </span>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <DisabledReasonButton
+                  variant="ghost"
+                  size="sm"
+                  disabled={bulkRows.move.reason !== undefined}
+                  reason={bulkRows.move.reason}
+                />
+              }
+            >
+              {bulkRows.move.label}
+              <CaretDownIcon data-icon="inline-end" />
+            </DropdownMenuTrigger>
+            {/* The board's own columns, as rows — never a nested Select inside a
+                popup, which is the shape the View options popover documents. */}
+            <DropdownMenuContent className="min-w-56">
+              {columns.map((column, i) => (
+                <DropdownMenuItem
+                  key={column.id}
+                  onClick={() => void bulkMoveCards(i)}
+                >
+                  {column.color === null ? (
+                    <span
+                      className="min-w-0 truncate"
+                      onMouseEnter={clipTitleFromText}
+                    >
+                      {column.label}
+                    </span>
+                  ) : (
+                    <OptionValue name={column.label} color={column.color} />
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DisabledReasonButton
+            variant="ghost"
+            size="sm"
+            disabled={bulkRows.fields.reason !== undefined}
+            reason={bulkRows.fields.reason}
+            onClick={openBulkFields}
+          >
+            {bulkRows.fields.label}
+          </DisabledReasonButton>
+          <DisabledReasonButton
+            variant="ghost"
+            size="sm"
+            disabled={bulkRows.archive.reason !== undefined}
+            reason={bulkRows.archive.reason}
+            onClick={() => void bulkRetireCards("archive")}
+          >
+            {bulkRows.archive.label}
+          </DisabledReasonButton>
+          <DisabledReasonButton
+            variant="ghost"
+            size="sm"
+            disabled={bulkRows.restore.reason !== undefined}
+            reason={bulkRows.restore.reason}
+            onClick={() => void bulkRestoreCards()}
+          >
+            {bulkRows.restore.label}
+          </DisabledReasonButton>
+          <DisabledReasonButton
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            disabled={bulkRows.remove.reason !== undefined}
+            reason={bulkRows.remove.reason}
+            onClick={() => void bulkRetireCards("remove")}
+          >
+            {bulkRows.remove.label}
+          </DisabledReasonButton>
+          <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+          <Button variant="ghost" size="sm" onClick={dismissSelection}>
+            Clear
+          </Button>
+        </div>
+      )}
       {/* What the keyboard route just did, or why it refused. Mounted
           unconditionally so each result announces as a live update, and sr-only
           because the board itself is the visual answer: the card is already in its
@@ -2648,6 +3546,25 @@ export function ProjectsBoardPanel({
             pending={draftWritePending}
             onOpenChange={(o) => switchAddDialog(o ? "draft" : null)}
             onCreate={createDraft}
+          />
+          {/* The bulk fields editor, keyed like its siblings so a board change
+              drops the draft rather than handing it to another board's fields.
+              Every definition comes from the panel's own cached read, so opening
+              this costs no fetch of its own. */}
+          <BoardBulkFieldsDialog
+            key={`bulk-fields-${projectId}`}
+            open={bulkFieldsOpen}
+            cards={bulkFieldCards}
+            eligibleCount={bulkFieldsEligible}
+            fieldDefs={fieldDefs}
+            defsTruncated={fields.data?.truncated === true}
+            defsPending={fieldsPending}
+            defsError={fields.error}
+            onRetryDefs={() => void fields.refetch()}
+            pending={bulkWritePending}
+            heldReason={bulkFieldsHeld}
+            onOpenChange={setBulkFieldsOpen}
+            onApply={applyBulkFields}
           />
           {/* Mounted with a card to edit, which the menu records before it opens
               this. The seed values ride props for the reason `editing` is panel

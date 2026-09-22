@@ -6,6 +6,7 @@ import type {
   BoardItemContent,
   BoardItems,
   BoardOrder,
+  BulkItemOutcomes,
   ConvertedDraft,
   ItemFieldValues,
   ItemProjects,
@@ -246,6 +247,68 @@ export const ghRemoveBoardItem = (
   projectId: string,
   itemId: string,
 ) => invoke<void>("gh_remove_board_item", { repoPath, projectId, itemId });
+
+/** The four BATCH siblings of the single-card writes above, for the board's bulk
+ *  verbs. Each answers with one {@link BulkItemOutcomes} entry per item IN INPUT
+ *  ORDER — a batch applies per item, so a caller reads which ones landed rather
+ *  than treating the call as all-or-nothing. An EMPTY `itemIds` is an error
+ *  backend-side, never an empty answer, so no caller may send one. */
+export const ghArchiveBoardItems = (
+  repoPath: string,
+  projectId: string,
+  itemIds: string[],
+) =>
+  invoke<BulkItemOutcomes>("gh_archive_board_items", {
+    repoPath,
+    projectId,
+    itemIds,
+  });
+
+/** {@link ghArchiveBoardItems}'s reversal, item for item. GitHub's read replicas
+ *  lag it the way they lag the single-card unarchive, so the answer is the
+ *  transactional truth and the caller patches from it rather than re-reading. */
+export const ghUnarchiveBoardItems = (
+  repoPath: string,
+  projectId: string,
+  itemIds: string[],
+) =>
+  invoke<BulkItemOutcomes>("gh_unarchive_board_items", {
+    repoPath,
+    projectId,
+    itemIds,
+  });
+
+/** Removes several cards from the project at once — an unlink per issue or pull
+ *  request, a deletion per draft, the same split {@link ghRemoveBoardItem} makes. */
+export const ghRemoveBoardItems = (
+  repoPath: string,
+  projectId: string,
+  itemIds: string[],
+) =>
+  invoke<BulkItemOutcomes>("gh_remove_board_items", {
+    repoPath,
+    projectId,
+    itemIds,
+  });
+
+/** Writes ONE set of field values across several items of a board:
+ *  {@link ghSetItemFieldValues} for a whole selection, with the same `updates`
+ *  and `clears` split. Every item takes the same write, which is what makes a bulk
+ *  column move expressible as a single call. */
+export const ghSetItemsFieldValues = (
+  repoPath: string,
+  projectId: string,
+  itemIds: string[],
+  updates: ProjectFieldValueUpdate[],
+  clears: string[],
+) =>
+  invoke<BulkItemOutcomes>("gh_set_items_field_values", {
+    repoPath,
+    projectId,
+    itemIds,
+    updates,
+    clears,
+  });
 
 /** Adds one issue to boards by project id, addressed by issue NUMBER rather than
  *  node id — the create flow has the number before it has anything else. */

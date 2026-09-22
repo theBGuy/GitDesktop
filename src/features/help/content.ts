@@ -2061,6 +2061,78 @@ opens the item, {{secondaryclick}} → **Show details** is the same peek from th
 and **Esc** closes it and leaves you back on the card. Drafts have no separate peek,
 since their card already opens their notes, and a **redacted** card has nothing to show.
 
+## Working on several cards at once
+
+{{key:mod}}-click cards to pick them out one at a time, or {{key:shift}}-click for a
+range down a column. From the keyboard, hold {{key:shift}} with **↑ / ↓** or **Home /
+End** to extend the range from the card you started on. A plain click or a plain arrow
+goes back to one card, and {{key:escape}} drops a selection of several back to none.
+
+A range runs down **one column**: the columns are buckets of a field rather than an
+order, so a {{key:shift}}-click in another column adds that card instead of drawing a
+box across both. Selected cards carry a tick beside the title as well as the highlight.
+
+From two cards up, a bar appears above the columns with what the selection can do:
+
+- **Move N cards to** picks a column, exactly as the card menu's **Move to** does.
+- **Edit fields of N cards…** opens an editor for the board's own fields (below).
+- **Archive N cards…** and **Remove N cards from project…** ask first, and each prompt
+  says where the cards go: with **Show archived cards** off, archiving takes them out of
+  the columns; with it on, they stay in place under their new badge. A removal names how
+  many drafts are in the set, since those live on this project and nowhere else.
+- **Restore N cards** puts archived ones back, with no prompt, for the reason the
+  single-card restore has none.
+- **Clear** ends the selection and hands the keyboard back to the card you were on.
+  {{key:escape}} does the same from the board or from the bar itself.
+
+Every count is the number the verb will actually reach. A mixed selection **scopes** a
+verb rather than blocking it: **Archive** over three live cards and one archived one
+says **Archive 3 cards…** and leaves the fourth where it is, and a verb with nothing to
+reach says so in place of its count. The command palette carries three of them
+(**Archive selected board cards…**, **Restore selected board cards** and **Remove
+selected board cards from project…**) plus **Clear board card selection**. There is no
+palette move, since picking a column needs the menu.
+
+{{Secondaryclick}} a card in the selection and the menu speaks for the whole set. The
+rows that can only mean one card (**Position**, **Edit draft…** and **Convert to
+issue…**) say **Acts on one card — clear the selection** rather than quietly acting on
+the one under the pointer; **Show details** still reads the card you pointed at.
+{{Secondaryclick}}ing a card **outside** the selection drops the selection onto that card
+first, so the menu and the board always agree about what a click will do.
+
+A card that leaves the board leaves the selection with it, whatever took it away — the
+archived toggle, a view's filter, a refresh, or another change. The verbs act on what
+the board is drawing, never on what it was drawing when you picked.
+
+## Setting fields on several cards
+
+**Edit fields of N cards…**, from the selection bar or the card menu, opens the board's
+writable fields as a list of rows. Every row starts on **Leave as is**, and a row left
+there is not written at all — so a bulk edit carries exactly the fields you meant and
+nothing else. Each row offers three choices:
+
+- **Leave as is** — the default. The field keeps whatever each card already holds.
+- **Set to** — reveals the field's own control (options, iterations, a date, a number,
+  a line of text) and writes the value you pick to every card.
+- **Clear** — unsets the field on every card.
+
+Beside each field name, **Now:** says what the selection holds today: the value itself
+where every card agrees, or **(mixed)** where they don't. It's there to tell you what
+you're about to overwrite; it never decides what gets written, and a mixed field is as
+editable as an agreed one.
+
+Nothing is sent until you press **Apply** ({{key:mod+enter}} from anywhere in the
+dialog), and **Cancel** or {{key:escape}} discards the whole draft without asking.
+Reopening starts fresh on **Leave as is** everywhere. **Apply** says **Nothing to apply
+yet** until you've drafted at least one row.
+
+Archived cards are skipped, so the count on the button is the number that will really
+be written. Fields GitHub owns on the issue itself (assignees, labels, milestone)
+carry no row here, and an org-level field bridged onto the board renders held with
+**Issue fields are edited on GitHub**. If a card refuses the write, the rest still land
+and a message says how many didn't. While the write is on its way, a line above the
+columns says so, whether or not you left the dialog open.
+
 ## Moving a card
 
 {{Secondaryclick}} a card for its menu. On Windows and Linux, {{key:shift+f10}} (or the Menu
@@ -2158,8 +2230,9 @@ The board is fully keyboard-operable: **↑ / ↓** move through a column, **←
 the next column at the same height, **Home / End** jump to a column's first or last card,
 **Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
 Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with **↑ / ↓** or **Home / End**
-and the card moves instead of the cursor (above). Collapsing the sidebar ({{kbd:toggle-sidebar}})
-hands the board its width.
+and the card moves instead of the cursor (above); hold {{key:shift}} with the same keys
+and the selection extends instead (above), with {{key:escape}} to drop it. Collapsing the
+sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so

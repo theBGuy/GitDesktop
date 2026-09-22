@@ -1,5 +1,6 @@
 import { Popover } from "@base-ui/react/popover";
 import {
+  CheckIcon,
   CircleIcon,
   FileDashedIcon,
   GitMergeIcon,
@@ -116,6 +117,7 @@ function CardTitle({
   glyph,
   stateWord,
   title,
+  checked,
 }: {
   glyph: ReactNode;
   /** State AND kind — "Open issue", "Draft pull request". The glyph carries the
@@ -123,9 +125,16 @@ function CardTitle({
    *  leaves a reader unable to tell an issue from a pull request. */
   stateWord: string;
   title: string;
+  /** This card is one of SEVERAL selected. A tick rather than the accent seam
+   *  alone, so membership is never conveyed by colour: `aria-selected` already
+   *  carries it for a reader, which is why the glyph is hidden from one. The
+   *  singleton stays tick-free — it is the board's cursor, not a set the user
+   *  built. */
+  checked: boolean;
 }) {
   return (
     <span className="flex items-start gap-1.5">
+      {checked && <CheckIcon aria-hidden className="mt-px size-3.5 shrink-0" />}
       {glyph}
       <span className="sr-only">{stateWord}</span>
       {/* `clipTitleFromText` measures BOTH axes, so a two-line clamp counts as
@@ -177,14 +186,17 @@ function Assignees({
  *  surfaces already use, so a closed issue reads the same everywhere. */
 function IssueHead({
   content,
+  checked,
 }: {
   content: Extract<BoardItemContent, { kind: "issue" }>;
+  checked: boolean;
 }) {
   return (
     <CardTitle
       glyph={<StateIcon state={content.state} />}
       stateWord={issueStateWord(content.state, content.stateReason)}
       title={content.title}
+      checked={checked}
     />
   );
 }
@@ -192,8 +204,10 @@ function IssueHead({
 /** A pull request's head line, off {@link PR_STATE}. */
 function PullRequestHead({
   content,
+  checked,
 }: {
   content: Extract<BoardItemContent, { kind: "pullRequest" }>;
+  checked: boolean;
 }) {
   const pill = prPill(content.state, content.isDraft);
   return (
@@ -201,6 +215,7 @@ function PullRequestHead({
       glyph={<pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />}
       stateWord={pill.word}
       title={content.title}
+      checked={checked}
     />
   );
 }
@@ -449,7 +464,8 @@ export const BoardCard = memo(function BoardCard({
   index,
   setSize,
   columnIndex,
-  active,
+  selected,
+  checked,
   busy,
   peek,
   rovingTab,
@@ -466,7 +482,13 @@ export const BoardCard = memo(function BoardCard({
   /** The column's full item count — windowing hides it from a reader otherwise. */
   setSize: number;
   columnIndex: number;
-  active: boolean;
+  /** This card is in the board's selection — which, with nothing selected, is the
+   *  keyboard cursor's own card. The accent seam and `aria-selected` both ride
+   *  this one reading, so a cursor toggled OUT of a real selection keeps its focus
+   *  ring and drops the accent. */
+  selected: boolean;
+  /** {@link CardTitle}'s tick: selected, in a selection of several. */
+  checked: boolean;
   /** A write is changing this card in place — a draft being converted to an issue, or
    *  one being edited. BUSY, not disabled: the card is still a real card and still
    *  opens, and the menu rows that could collide with the write are held by the
@@ -508,7 +530,7 @@ export const BoardCard = memo(function BoardCard({
     // a neighbouring slot answers to the old index while carrying the wrong card.
     "data-item-id": item.itemId,
     role: "option",
-    "aria-selected": active,
+    "aria-selected": selected,
     "aria-setsize": setSize,
     "aria-posinset": index + 1,
     tabIndex: rovingTab,
@@ -518,7 +540,7 @@ export const BoardCard = memo(function BoardCard({
     "aria-busy": busy || undefined,
     onFocus: () => onFocus(columnIndex, index),
   } as const;
-  const toneClass = active && "bg-accent text-accent-foreground";
+  const toneClass = selected && "bg-accent text-accent-foreground";
   // Lighter than the app's 50% disabled dim on purpose: this card is BUSY, not
   // disabled — it still opens, and `aria-busy` is what carries the state to a
   // reader. Colour says nothing here that the attribute doesn't.
@@ -584,6 +606,7 @@ export const BoardCard = memo(function BoardCard({
             }
             stateWord="Draft item"
             title={content.title}
+            checked={checked}
           />
           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <Badge variant="secondary">Draft</Badge>
@@ -678,9 +701,9 @@ export const BoardCard = memo(function BoardCard({
       >
         {item.isArchived && <ArchivedBadge />}
         {content.kind === "pullRequest" ? (
-          <PullRequestHead content={content} />
+          <PullRequestHead content={content} checked={checked} />
         ) : (
-          <IssueHead content={content} />
+          <IssueHead content={content} checked={checked} />
         )}
         <CardMeta
           number={content.number}

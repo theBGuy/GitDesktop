@@ -29,6 +29,18 @@
   cards** under **View options** and they're back in their columns, marked **Archived**
   and drawn quietly, with **Restore card** on each one putting it straight back on the
   board. (The command palette carries the switch as **Show or hide archived cards**.)
+  **Take several cards at once**: **Ctrl/Cmd+click** picks cards out individually,
+  **Shift+click** (or **Shift** with the arrow keys) takes a range down a column, and
+  from two cards up a bar above the board **moves**, **archives**, **restores**,
+  **removes** or **sets the fields of** the whole selection in one go. **Edit fields
+  of N cards…** lists the board's own fields with every row on **Leave as is**: draft
+  only the ones you mean, set or clear them, and one **Apply** writes exactly those to
+  every card, with each row reporting what the selection holds today: the value where
+  the cards agree, **(mixed)** where they don't. Every count on the bar shows exactly
+  what that verb will reach, and the prompts say where the cards go, drafts included.
+  The card menu speaks for the selection too, the palette carries Archive, Restore,
+  Remove and Clear, and **Esc** drops the whole thing. Cards that leave the board
+  leave the selection with them.
   Creating an issue can put it on its boards in the same step: the **New issue** dialog
   gained a **Projects** picker. The board's **saved views** come along as lenses: pick
   one under **View options** and GitHub filters the read for you, its sort orders the

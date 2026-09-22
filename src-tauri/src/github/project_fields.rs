@@ -8,6 +8,9 @@ use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::project::{item_projects_truncated, project_ref, ProjectV2Ref, PROJECT_FIELDS};
+use crate::github::project_item_edits::{
+    bulk_document, bulk_outcomes, run_bulk_documents, BulkDocument, BulkItemOutcomes, BULK_ALIAS_CAP,
+};
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize)]
@@ -193,6 +196,93 @@ pub enum FieldValueUpdate {
     },
 }
 
+fn build_field_value_literal(
+    n: usize,
+    update: &FieldValueUpdate,
+    variables: &mut Vec<String>,
+    args: &mut Vec<String>,
+) -> AppResult<String> {
+    let (field_id, key, value_type, values) = match update {
+        FieldValueUpdate::Text { field_id, text } => {
+            (field_id, "text", Some("String!"), vec![text.clone()])
+        }
+        FieldValueUpdate::Number { field_id, number } => {
+            if !number.is_finite() {
+                return Err(AppError::InvalidArgument(
+                    "field number must be finite".into(),
+                ));
+            }
+            (field_id, "number", None, vec![number.to_string()])
+        }
+        FieldValueUpdate::Date { field_id, date } => {
+            (field_id, "date", Some("Date!"), vec![date.clone()])
+        }
+        FieldValueUpdate::SingleSelect {
+            field_id,
+            option_id,
+        } => {
+            validate_graphql_embed(option_id, "option id")?;
+            (
+                field_id,
+                "singleSelectOptionId",
+                Some("String!"),
+                vec![option_id.clone()],
+            )
+        }
+        FieldValueUpdate::MultiSelect {
+            field_id,
+            option_ids,
+        } => {
+            for option_id in option_ids {
+                validate_graphql_embed(option_id, "option id")?;
+            }
+            (
+                field_id,
+                "multiSelectOptionIds",
+                Some("[String!]!"),
+                option_ids.clone(),
+            )
+        }
+        FieldValueUpdate::Iteration {
+            field_id,
+            iteration_id,
+        } => {
+            validate_graphql_embed(iteration_id, "iteration id")?;
+            (
+                field_id,
+                "iterationId",
+                Some("String!"),
+                vec![iteration_id.clone()],
+            )
+        }
+    };
+    validate_graphql_embed(field_id, "field id")?;
+    variables.push(format!("$f{n}:ID!"));
+    args.extend(["-f".to_string(), format!("f{n}={field_id}")]);
+    let value = if let Some(value_type) = value_type {
+        variables.push(format!("$v{n}:{value_type}"));
+        let value_name = if matches!(update, FieldValueUpdate::MultiSelect { .. }) {
+            format!("v{n}[]")
+        } else {
+            format!("v{n}")
+        };
+        if matches!(update, FieldValueUpdate::MultiSelect { .. }) && values.is_empty() {
+            // gh's bracket key without '=' represents an empty array.
+            args.extend(["-f".to_string(), value_name]);
+        } else {
+            for value in values {
+                args.extend(["-f".to_string(), format!("{value_name}={value}")]);
+            }
+        }
+        format!("$v{n}")
+    } else {
+        // The is_finite gate above is required: finite f64 Display produces only
+        // a valid GraphQL numeric literal, so this splice cannot inject structure.
+        values[0].clone()
+    };
+    Ok(format!("fieldId:$f{n},value:{{{key}:{value}}}"))
+}
+
 fn build_set_item_field_values_args(
     project_id: &str,
     item_id: &str,
@@ -212,86 +302,9 @@ fn build_set_item_field_values_args(
         format!("i={item_id}"),
     ];
     for (n, update) in updates.iter().enumerate() {
-        let (field_id, key, value_type, values) = match update {
-            FieldValueUpdate::Text { field_id, text } => {
-                (field_id, "text", Some("String!"), vec![text.clone()])
-            }
-            FieldValueUpdate::Number { field_id, number } => {
-                if !number.is_finite() {
-                    return Err(AppError::InvalidArgument(
-                        "field number must be finite".into(),
-                    ));
-                }
-                (field_id, "number", None, vec![number.to_string()])
-            }
-            FieldValueUpdate::Date { field_id, date } => {
-                (field_id, "date", Some("Date!"), vec![date.clone()])
-            }
-            FieldValueUpdate::SingleSelect {
-                field_id,
-                option_id,
-            } => {
-                validate_graphql_embed(option_id, "option id")?;
-                (
-                    field_id,
-                    "singleSelectOptionId",
-                    Some("String!"),
-                    vec![option_id.clone()],
-                )
-            }
-            FieldValueUpdate::MultiSelect {
-                field_id,
-                option_ids,
-            } => {
-                for option_id in option_ids {
-                    validate_graphql_embed(option_id, "option id")?;
-                }
-                (
-                    field_id,
-                    "multiSelectOptionIds",
-                    Some("[String!]!"),
-                    option_ids.clone(),
-                )
-            }
-            FieldValueUpdate::Iteration {
-                field_id,
-                iteration_id,
-            } => {
-                validate_graphql_embed(iteration_id, "iteration id")?;
-                (
-                    field_id,
-                    "iterationId",
-                    Some("String!"),
-                    vec![iteration_id.clone()],
-                )
-            }
-        };
-        validate_graphql_embed(field_id, "field id")?;
-        variables.push(format!("$f{n}:ID!"));
-        args.extend(["-f".to_string(), format!("f{n}={field_id}")]);
-        let value = if let Some(value_type) = value_type {
-            variables.push(format!("$v{n}:{value_type}"));
-            let value_name = if matches!(update, FieldValueUpdate::MultiSelect { .. }) {
-                format!("v{n}[]")
-            } else {
-                format!("v{n}")
-            };
-            if matches!(update, FieldValueUpdate::MultiSelect { .. }) && values.is_empty() {
-                // gh's bracket key without '=' represents an empty array.
-                args.extend(["-f".to_string(), value_name]);
-            } else {
-                for value in values {
-                    args.extend(["-f".to_string(), format!("{value_name}={value}")]);
-                }
-            }
-            format!("$v{n}")
-        } else {
-            // The is_finite gate above is required: finite f64 Display produces only
-            // a valid GraphQL numeric literal, so this splice cannot inject structure.
-            values[0].clone()
-        };
+        let input = build_field_value_literal(n, update, &mut variables, &mut args)?;
         parts.push(format!(
-            "s{n}: updateProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i,fieldId:$f{n},value:{{{key}:{value}}}}}){{projectV2Item{{id}}}}"
+            "s{n}: updateProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i,{input}}}){{projectV2Item{{id}}}}"
         ));
     }
     for (n, field_id) in clears.iter().enumerate() {
@@ -311,6 +324,65 @@ fn build_set_item_field_values_args(
         ),
     ]);
     Ok(args)
+}
+
+fn build_bulk_field_documents(
+    project_id: &str,
+    item_ids: &[String],
+    updates: &[FieldValueUpdate],
+    clears: &[String],
+) -> AppResult<Vec<BulkDocument>> {
+    if item_ids.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "project item ids must not be empty".into(),
+        ));
+    }
+    validate_graphql_embed(project_id, "project id")?;
+    let mut documents = Vec::new();
+    let mut declarations = vec!["$p:ID!".into()];
+    let mut args = vec![
+        "api".into(), "graphql".into(), "-f".into(), format!("p={project_id}"),
+    ];
+    let mut parts = Vec::new();
+    let mut item_indices = Vec::new();
+    for (item_index, item_id) in item_ids.iter().enumerate() {
+        validate_graphql_embed(item_id, "project item id")?;
+        for op in 0..updates.len() + clears.len() {
+            let n = parts.len();
+            declarations.push(format!("$i{n}:ID!"));
+            args.extend(["-f".into(), format!("i{n}={item_id}")]);
+            let part = if let Some(update) = updates.get(op) {
+                let input = build_field_value_literal(n, update, &mut declarations, &mut args)?;
+                format!("updateProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i{n},{input}}}){{projectV2Item{{id}}}}")
+            } else {
+                let field_id = &clears[op - updates.len()];
+                validate_graphql_embed(field_id, "field id")?;
+                declarations.push(format!("$g{n}:ID!"));
+                args.extend(["-f".into(), format!("g{n}={field_id}")]);
+                format!("clearProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i{n},fieldId:$g{n}}}){{projectV2Item{{id}}}}")
+            };
+            parts.push(part);
+            item_indices.push(item_index);
+            if parts.len() == BULK_ALIAS_CAP {
+                documents.push(bulk_document(
+                    std::mem::replace(&mut declarations, vec!["$p:ID!".into()]),
+                    std::mem::take(&mut parts),
+                    std::mem::replace(
+                        &mut args,
+                        vec!["api".into(), "graphql".into(), "-f".into(), format!("p={project_id}")],
+                    ),
+                    std::mem::take(&mut item_indices),
+                    "/projectV2Item/id",
+                ));
+            }
+        }
+    }
+    if !parts.is_empty() {
+        documents.push(bulk_document(
+            declarations, parts, args, item_indices, "/projectV2Item/id",
+        ));
+    }
+    Ok(documents)
 }
 
 fn map_field_write_error(error: AppError) -> AppError {
@@ -364,6 +436,22 @@ pub async fn gh_set_item_field_values(
         .await
         .map_err(map_field_write_error)?;
     parse_field_write_response(&out.stdout_lossy())
+}
+
+/// Duplicate ids execute independently in input order. Each item keeps its first
+/// failed field-op error; fields may partially apply, so callers must refetch on failure.
+/// Empty updates and clears succeed without a request when item_ids is nonempty.
+#[tauri::command]
+pub async fn gh_set_items_field_values(
+    repo_path: String,
+    project_id: String,
+    item_ids: Vec<String>,
+    updates: Vec<FieldValueUpdate>,
+    clears: Vec<String>,
+) -> AppResult<BulkItemOutcomes> {
+    let outcomes = bulk_outcomes(&item_ids)?;
+    let documents = build_bulk_field_documents(&project_id, &item_ids, &updates, &clears)?;
+    Ok(run_bulk_documents(&repo_path, outcomes, documents, map_field_write_error).await)
 }
 
 const FIELDS_SCOPE_HINT: &str =
@@ -1749,4 +1837,140 @@ mod tests {
             AppError::InvalidArgument(_)
         ));
     }
+    #[test]
+    fn bulk_field_document_pins_two_items_by_two_operations() {
+        let ids = vec!["PVTI_z".into(), "PVTI_a".into()];
+        let docs = build_bulk_field_documents("PVT_p", &ids, &[
+            FieldValueUpdate::Text { field_id: "notes".into(), text: "@file\n\"hello\"".into() },
+        ], &["due".into()]).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].item_indices, [0, 0, 1, 1]);
+        assert_eq!(docs[0].payload_pointer, "/projectV2Item/id");
+        assert_eq!(docs[0].args.last().unwrap(), "query=mutation($p:ID!,$i0:ID!,$f0:ID!,$v0:String!,$i1:ID!,$g1:ID!,$i2:ID!,$f2:ID!,$v2:String!,$i3:ID!,$g3:ID!){ a0: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i0,fieldId:$f0,value:{text:$v0}}){projectV2Item{id}} a1: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i1,fieldId:$g1}){projectV2Item{id}} a2: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i2,fieldId:$f2,value:{text:$v2}}){projectV2Item{id}} a3: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i3,fieldId:$g3}){projectV2Item{id}} }");
+        assert_eq!(&docs[0].args[..docs[0].args.len() - 2], [
+            "api", "graphql", "-f", "p=PVT_p", "-f", "i0=PVTI_z", "-f", "f0=notes", "-f", "v0=@file\n\"hello\"",
+            "-f", "i1=PVTI_z", "-f", "g1=due", "-f", "i2=PVTI_a", "-f", "f2=notes", "-f", "v2=@file\n\"hello\"",
+            "-f", "i3=PVTI_a", "-f", "g3=due",
+        ]);
+    }
+
+    #[test]
+    fn bulk_field_chunks_split_an_items_operations_at_the_cap() {
+        for (count, sizes) in [(1, vec![2]), (13, vec![25, 1])] {
+            let ids: Vec<_> = (0..count).map(|n| format!("PVTI_{n}")).collect();
+            let docs = build_bulk_field_documents("PVT_p", &ids, &[], &["notes".into(), "due".into()]).unwrap();
+            assert_eq!(docs.iter().map(|doc| doc.item_indices.len()).collect::<Vec<_>>(), sizes);
+            assert_eq!(docs.iter().flat_map(|doc| doc.item_indices.iter().copied()).collect::<Vec<_>>(), (0..count).flat_map(|n| [n, n]).collect::<Vec<_>>());
+            for doc in &docs {
+                assert_eq!(doc.args.last().unwrap().matches("(input:").count(), doc.item_indices.len());
+            }
+            if count == 13 {
+                assert_eq!(docs[0].item_indices[24], 12);
+                assert_eq!(docs[1].item_indices, [12]);
+                assert!(docs[1].args.contains(&"i0=PVTI_12".into()));
+                assert!(docs[1].args.contains(&"g0=due".into()));
+            }
+        }
+        assert!(build_bulk_field_documents("PVT_p", &[], &[], &["notes".into()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn bulk_field_failure_aggregates_ops_and_keeps_duplicate_inputs_independent() {
+        use crate::github::project_item_edits::run_bulk_documents_with;
+        use crate::github::runner::GhOutput;
+
+        let ids = vec!["PVTI_z".into(), "PVTI_a".into(), "PVTI_z".into()];
+        let docs = build_bulk_field_documents("PVT_p", &ids, &field_updates()[..2], &[]).unwrap();
+        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |_| {
+            let mut data = json!({});
+            for n in 0..6 {
+                data[format!("a{n}")] = json!({"projectV2Item":{"id":"PVTI_ok"}});
+            }
+            data["a1"] = Value::Null;
+            std::future::ready(Ok(GhOutput {
+                stdout: serde_json::to_vec(&json!({"data":data,"errors":[
+                    {"path":["a1","projectV2Item"],"message":"gh: first failure"},
+                    {"path":["a1"],"message":"later failure"}
+                ]})).unwrap(),
+                stderr: "gh: first failure".into(), code: 1,
+            }))
+        }).await;
+        assert_eq!(serde_json::to_value(outcomes).unwrap(), json!({"outcomes":[
+            {"itemId":"PVTI_z","error":"first failure"},
+            {"itemId":"PVTI_a","error":null},
+            {"itemId":"PVTI_z","error":null}
+        ]}));
+    }
+
+    #[tokio::test]
+    async fn bulk_field_split_item_keeps_first_error_across_requests() {
+        use crate::github::project_item_edits::run_bulk_documents_with;
+        use crate::github::runner::GhOutput;
+
+        let ids: Vec<_> = (0..14).map(|n| format!("PVTI_{n}")).collect();
+        for transport_failure in [false, true] {
+            let docs = build_bulk_field_documents("PVT_p", &ids, &field_updates()[..2], &[]).unwrap();
+            let mut calls = 0;
+            let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |_| {
+                let call = calls;
+                calls += 1;
+                std::future::ready(if transport_failure && call == 0 {
+                    Err(AppError::Gh("gh: connection reset".into()))
+                } else {
+                    let mut data = json!({});
+                    for n in 0..if call == 0 { 25 } else { 3 } {
+                        data[format!("a{n}")] = json!({"projectV2Item":{"id":"PVTI_ok"}});
+                    }
+                    let mut value = json!({"data":data});
+                    if !transport_failure {
+                        let alias = if call == 0 { "a24" } else { "a0" };
+                        value["errors"] = json!([{"path":[alias],"message":if call == 0 { "first" } else { "second" }}]);
+                        value["data"][alias] = Value::Null;
+                    }
+                    Ok(GhOutput { stdout: serde_json::to_vec(&value).unwrap(), stderr: String::new(), code: 0 })
+                })
+            }).await;
+            assert_eq!(calls, 2);
+            for (n, outcome) in outcomes.outcomes.iter().enumerate() {
+                let expected = if transport_failure && n <= 12 { Some("connection reset") }
+                    else if !transport_failure && n == 12 { Some("first") } else { None };
+                assert_eq!(outcome.item_id, ids[n]);
+                assert_eq!(outcome.error.as_deref(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_field_values_share_literal_builder_and_id_validation() {
+        let id = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.=+/";
+        let docs = build_bulk_field_documents(id, &[id.into()], &field_updates(), &[id.into()]).unwrap();
+        assert_eq!(docs[0].item_indices.len(), 7);
+        assert!(!docs[0].args.last().unwrap().contains(id));
+        let single = build_set_item_field_values_args(id, id, &field_updates(), &[id.into()]).unwrap();
+        for argument in &single[6..single.len() - 2] {
+            if argument != &format!("i={id}") && argument != &format!("g0={id}") {
+                assert!(docs[0].args.contains(argument), "{argument}");
+            }
+        }
+        assert!(docs[0].args.last().unwrap().contains("value:{number:0.0001}"));
+        for invalid in ["", "bad\"id", "bad\\id", "bad\nid"] {
+            assert!(build_bulk_field_documents(invalid, &[id.into()], &[], &["notes".into()]).is_err());
+            assert!(build_bulk_field_documents(id, &[invalid.into()], &[], &["notes".into()]).is_err());
+            assert!(build_bulk_field_documents(id, &[id.into()], &[], &[invalid.into()]).is_err());
+        }
+        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(build_bulk_field_documents(id, &[id.into()], &[
+                FieldValueUpdate::Number { field_id: "points".into(), number },
+            ], &[]).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_field_empty_items_reject_and_empty_ops_skip_network() {
+        assert!(gh_set_items_field_values("missing".into(), "PVT_p".into(), vec![], vec![], vec![]).await.is_err());
+        let outcomes = gh_set_items_field_values("missing".into(), "PVT_p".into(), vec!["PVTI_z".into()], vec![], vec![]).await.unwrap();
+        assert_eq!(serde_json::to_value(outcomes).unwrap(), json!({"outcomes":[{"itemId":"PVTI_z","error":null}]}));
+        assert!(build_bulk_field_documents("PVT_p", &["PVTI_z".into()], &[], &[]).unwrap().is_empty());
+    }
+
 }

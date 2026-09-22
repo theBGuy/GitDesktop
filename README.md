@@ -586,7 +586,15 @@ column**, **edit a draft** (title, Markdown notes and assignees) or
 **convert it to a real issue**, **archive** the card, or **remove** it from
 the project. Archived cards come back on demand: turn on **Show archived
 cards** under **View options** and they sit in their columns, dimmed and
-badged **Archived**, with **Restore card** on each one putting it back. A
+badged **Archived**, with **Restore card** on each one putting it back.
+**Work on several cards at once**: `Ctrl`/`⌘`-click picks cards out
+individually and `Shift`-click (or `Shift` with the arrow keys) takes a range
+down a column, and a bar above the board then moves, archives, restores or
+removes the whole selection — or **sets its fields**, from a list of the board's
+own fields where every row starts on **Leave as is**, so one **Apply** writes
+exactly the ones you drafted and each row tells you what the selection holds
+today. Every count shows exactly what that verb will reach, each prompt says
+where the cards go, and a card that leaves the board leaves the selection. A
 move writes the board's grouping field and re-draws the card where it lands,
 keyboard place and all. `Alt`/`⌥`+`↑` and `Alt`/`⌥`+`↓` reorder the card you're
 on inside its column, `Alt`/`⌥`+`Home` and `Alt`/`⌥`+`End` send it to that

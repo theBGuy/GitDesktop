@@ -11,7 +11,193 @@ use crate::github::project_items::{
     board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
     DRAFT_CONTENT_SELECTION,
 };
-use crate::github::runner::{run_gh_input, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+
+pub(super) const BULK_ALIAS_CAP: usize = 25;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkItemOutcome {
+    pub item_id: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkItemOutcomes {
+    pub outcomes: Vec<BulkItemOutcome>,
+}
+
+pub(super) struct BulkDocument {
+    pub args: Vec<String>,
+    pub item_indices: Vec<usize>,
+    pub payload_pointer: &'static str,
+}
+
+pub(super) fn bulk_document(
+    declarations: Vec<String>,
+    parts: Vec<String>,
+    mut args: Vec<String>,
+    item_indices: Vec<usize>,
+    payload_pointer: &'static str,
+) -> BulkDocument {
+    let parts: Vec<_> = parts
+        .iter()
+        .enumerate()
+        .map(|(n, part)| format!("a{n}: {part}"))
+        .collect();
+    args.extend([
+        "-f".into(),
+        format!(
+            "query=mutation({}){{ {} }}",
+            declarations.join(","),
+            parts.join(" ")
+        ),
+    ]);
+    BulkDocument {
+        args,
+        item_indices,
+        payload_pointer,
+    }
+}
+
+pub(super) fn bulk_outcomes(item_ids: &[String]) -> AppResult<BulkItemOutcomes> {
+    if item_ids.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "project item ids must not be empty".into(),
+        ));
+    }
+    Ok(BulkItemOutcomes {
+        outcomes: item_ids
+            .iter()
+            .map(|item_id| BulkItemOutcome {
+                item_id: item_id.clone(),
+                error: None,
+            })
+            .collect(),
+    })
+}
+
+fn bulk_response(output: AppResult<GhOutput>) -> AppResult<Value> {
+    let output = output?;
+    let parsed = serde_json::from_slice::<Value>(&output.stdout);
+    // gh exits nonzero on per-alias GraphQL errors; stdout still carries landed writes.
+    if output.code != 0 {
+        if let Ok(value) = &parsed {
+            if value["data"].is_object() || value["errors"].is_array() {
+                return Ok(value.clone());
+            }
+        }
+        let message = output.stderr.trim();
+        return Err(AppError::Gh(if message.is_empty() {
+            format!("gh exited with code {}", output.code)
+        } else {
+            message.to_string()
+        }));
+    }
+    parsed.map_err(|e| {
+        gh_unreadable(
+            "the project item updates",
+            format!("could not parse the response: {e}"),
+        )
+    })
+}
+
+fn apply_bulk_response(
+    outcomes: &mut BulkItemOutcomes,
+    document: &BulkDocument,
+    response: AppResult<Value>,
+    map_error: fn(AppError) -> AppError,
+) {
+    let mut errors = vec![None; document.item_indices.len()];
+    match response {
+        Err(error) => errors.fill(Some(map_error(error).to_string())),
+        Ok(value) => {
+            for error in value["errors"].as_array().into_iter().flatten() {
+                let message = map_error(AppError::Gh(
+                    error["message"]
+                        .as_str()
+                        .unwrap_or("GitHub could not update the project item.")
+                        .to_string(),
+                ))
+                .to_string();
+                let alias = error["path"][0].as_str().unwrap_or("");
+                let index = (0..errors.len())
+                    .find(|n| alias == format!("a{n}"))
+                    .or_else(|| {
+                        alias
+                            .trim_start_matches(|c: char| !c.is_ascii_digit())
+                            .parse::<usize>()
+                            .ok()
+                    })
+                    .filter(|n| *n < errors.len());
+                if let Some(index) = index {
+                    errors[index].get_or_insert_with(|| message.clone());
+                    outcomes.outcomes[document.item_indices[index]]
+                        .error
+                        .get_or_insert(message);
+                } else {
+                    // An unscoped error cannot establish which writes landed.
+                    for (index, error) in errors.iter_mut().enumerate() {
+                        error.get_or_insert_with(|| message.clone());
+                        outcomes.outcomes[document.item_indices[index]]
+                            .error
+                            .get_or_insert_with(|| message.clone());
+                    }
+                }
+            }
+            for (n, error) in errors.iter_mut().enumerate() {
+                let pointer = format!("/data/a{n}{}", document.payload_pointer);
+                if value
+                    .pointer(&pointer)
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .is_none()
+                {
+                    error.get_or_insert_with(|| {
+                        gh_unreadable("the project item update", format!("missing id at {pointer}"))
+                            .to_string()
+                    });
+                }
+            }
+        }
+    }
+    for (item_index, error) in document.item_indices.iter().zip(errors) {
+        if let Some(error) = error {
+            outcomes.outcomes[*item_index].error.get_or_insert(error);
+        }
+    }
+}
+
+pub(super) async fn run_bulk_documents_with<F, Fut>(
+    mut outcomes: BulkItemOutcomes,
+    documents: Vec<BulkDocument>,
+    map_error: fn(AppError) -> AppError,
+    mut request: F,
+) -> BulkItemOutcomes
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<GhOutput>>,
+{
+    for mut document in documents {
+        let response = bulk_response(request(std::mem::take(&mut document.args)).await);
+        apply_bulk_response(&mut outcomes, &document, response, map_error);
+    }
+    outcomes
+}
+
+pub(super) async fn run_bulk_documents(
+    repo_path: &str,
+    outcomes: BulkItemOutcomes,
+    documents: Vec<BulkDocument>,
+    map_error: fn(AppError) -> AppError,
+) -> BulkItemOutcomes {
+    run_bulk_documents_with(outcomes, documents, map_error, |args| async move {
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        run_gh_raw(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await
+    })
+    .await
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +261,61 @@ const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
 const UNARCHIVE_POINTER: &str = "/data/unarchiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
 const ORDER_POINTER: &str = "/data/updateProjectV2ItemPosition/items";
+
+fn build_bulk_item_documents(
+    project_id: &str,
+    item_ids: &[String],
+    mutation: &str,
+    payload_pointer: &'static str,
+) -> AppResult<Vec<BulkDocument>> {
+    if item_ids.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "project item ids must not be empty".into(),
+        ));
+    }
+    // Only the static single-item documents supply structure and payload selections.
+    let selection = mutation
+        .split_once("{ ")
+        .expect("mutation selection")
+        .1
+        .strip_suffix(" }")
+        .expect("mutation closing brace");
+    Ok(item_ids
+        .chunks(BULK_ALIAS_CAP)
+        .enumerate()
+        .map(|(chunk, ids)| {
+            let mut declarations = vec!["$projectId:ID!".into()];
+            let mut args = vec![
+                "api".into(), "graphql".into(), "-f".into(), format!("projectId={project_id}"),
+            ];
+            let mut parts = Vec::new();
+            let mut item_indices = Vec::new();
+            for (n, item_id) in ids.iter().enumerate() {
+                declarations.push(format!("$itemId{n}:ID!"));
+                args.extend(["-f".into(), format!("itemId{n}={item_id}")]);
+                parts.push(selection.replace("$itemId", &format!("$itemId{n}")));
+                item_indices.push(chunk * BULK_ALIAS_CAP + n);
+            }
+            bulk_document(declarations, parts, args, item_indices, payload_pointer)
+        })
+        .collect())
+}
+
+fn map_bulk_item_error(error: AppError) -> AppError {
+    let error = match error {
+        AppError::Gh(message) if message.starts_with("gh: ") => AppError::Gh(
+            message
+                .strip_prefix("gh: ")
+                .unwrap_or(&message)
+                .lines()
+                .next()
+                .unwrap_or(&message)
+                .to_string(),
+        ),
+        other => other,
+    };
+    map_scope_error(error)
+}
 
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
@@ -501,6 +742,18 @@ pub async fn gh_archive_board_item(
     require_payload(&value, ARCHIVE_POINTER, "the archived project item")
 }
 
+/// Duplicate ids execute as separate aliases and retain separate outcomes in input order.
+#[tauri::command]
+pub async fn gh_archive_board_items(
+    repo_path: String,
+    project_id: String,
+    item_ids: Vec<String>,
+) -> AppResult<BulkItemOutcomes> {
+    let outcomes = bulk_outcomes(&item_ids)?;
+    let documents = build_bulk_item_documents(&project_id, &item_ids, ARCHIVE_MUTATION, "/item/id")?;
+    Ok(run_bulk_documents(&repo_path, outcomes, documents, map_bulk_item_error).await)
+}
+
 #[tauri::command]
 pub async fn gh_unarchive_board_item(
     repo_path: String,
@@ -517,6 +770,18 @@ pub async fn gh_unarchive_board_item(
     require_payload(&value, UNARCHIVE_POINTER, "the unarchived project item")
 }
 
+/// Duplicate ids execute as separate aliases and retain separate outcomes in input order.
+#[tauri::command]
+pub async fn gh_unarchive_board_items(
+    repo_path: String,
+    project_id: String,
+    item_ids: Vec<String>,
+) -> AppResult<BulkItemOutcomes> {
+    let outcomes = bulk_outcomes(&item_ids)?;
+    let documents = build_bulk_item_documents(&project_id, &item_ids, UNARCHIVE_MUTATION, "/item/id")?;
+    Ok(run_bulk_documents(&repo_path, outcomes, documents, map_bulk_item_error).await)
+}
+
 #[tauri::command]
 pub async fn gh_remove_board_item(
     repo_path: String,
@@ -531,6 +796,18 @@ pub async fn gh_remove_board_item(
         .await
         .map_err(map_scope_error)?;
     require_payload(&value, REMOVE_POINTER, "the removed project item")
+}
+
+/// Duplicate ids execute as separate aliases and retain separate outcomes in input order.
+#[tauri::command]
+pub async fn gh_remove_board_items(
+    repo_path: String,
+    project_id: String,
+    item_ids: Vec<String>,
+) -> AppResult<BulkItemOutcomes> {
+    let outcomes = bulk_outcomes(&item_ids)?;
+    let documents = build_bulk_item_documents(&project_id, &item_ids, REMOVE_MUTATION, "/deletedItemId")?;
+    Ok(run_bulk_documents(&repo_path, outcomes, documents, map_bulk_item_error).await)
 }
 
 #[tauri::command]
@@ -579,6 +856,139 @@ pub async fn gh_add_issue_to_projects(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn bulk_item_documents_pin_each_mutation_and_variable_order() {
+        let ids = vec!["PVTI_z".into(), "PVTI_a".into()];
+        for (mutation, pointer, expected) in [
+            (ARCHIVE_MUTATION, "/item/id", "query=mutation($projectId:ID!,$itemId0:ID!,$itemId1:ID!){ a0: archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId0}){ item{ id } } a1: archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId1}){ item{ id } } }"),
+            (UNARCHIVE_MUTATION, "/item/id", "query=mutation($projectId:ID!,$itemId0:ID!,$itemId1:ID!){ a0: unarchiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId0}){ item{ id } } a1: unarchiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId1}){ item{ id } } }"),
+            (REMOVE_MUTATION, "/deletedItemId", "query=mutation($projectId:ID!,$itemId0:ID!,$itemId1:ID!){ a0: deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId0}){ deletedItemId } a1: deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId1}){ deletedItemId } }"),
+        ] {
+            let docs = build_bulk_item_documents("PVT_p", &ids, mutation, pointer).unwrap();
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].args, ["api", "graphql", "-f", "projectId=PVT_p", "-f", "itemId0=PVTI_z", "-f", "itemId1=PVTI_a", "-f", expected]);
+            assert_eq!(docs[0].item_indices, [0, 1]);
+            assert_eq!(docs[0].payload_pointer, pointer);
+        }
+    }
+
+    #[test]
+    fn bulk_item_chunks_cover_one_cap_and_overflow() {
+        for mutation in [ARCHIVE_MUTATION, UNARCHIVE_MUTATION, REMOVE_MUTATION] {
+            for (count, sizes) in [(1, vec![1]), (25, vec![25]), (26, vec![25, 1])] {
+                let ids: Vec<_> = (0..count).map(|n| format!("PVTI_{n}")).collect();
+                let docs = build_bulk_item_documents("PVT_p", &ids, mutation, "/item/id").unwrap();
+                assert_eq!(docs.iter().map(|doc| doc.item_indices.len()).collect::<Vec<_>>(), sizes);
+                assert_eq!(docs.iter().flat_map(|doc| doc.item_indices.iter().copied()).collect::<Vec<_>>(), (0..count).collect::<Vec<_>>());
+                for doc in docs {
+                    assert_eq!(doc.args.last().unwrap().matches("(input:").count(), doc.item_indices.len());
+                }
+            }
+            assert!(build_bulk_item_documents("PVT_p", &[], mutation, "/item/id").is_err());
+        }
+    }
+
+    #[test]
+    fn bulk_item_partial_errors_preserve_order_duplicates_and_wire_keys() {
+        let ids = vec!["PVTI_z".into(), "PVTI_a".into(), "PVTI_z".into()];
+        for (mutation, pointer) in [(ARCHIVE_MUTATION, "/item/id"), (UNARCHIVE_MUTATION, "/item/id"), (REMOVE_MUTATION, "/deletedItemId")] {
+            let docs = build_bulk_item_documents("PVT_p", &ids, mutation, pointer).unwrap();
+            for path in [json!(["a1", "item"]), json!(["alias_1"])] {
+                let value = json!({"data":{
+                    "a0":{"item":{"id":"PVTI_z"},"deletedItemId":"PVTI_z"},
+                    "a1":null,
+                    "a2":{"item":{"id":"PVTI_z"},"deletedItemId":"PVTI_z"}
+                },"errors":[{"path":path,"message":"gh: forbidden"}]});
+                let response = bulk_response(Ok(GhOutput {
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    stderr: "gh: forbidden".into(),
+                    code: 1,
+                })).unwrap();
+                let mut outcomes = bulk_outcomes(&ids).unwrap();
+                apply_bulk_response(&mut outcomes, &docs[0], Ok(response), map_bulk_item_error);
+                assert_eq!(serde_json::to_value(outcomes).unwrap(), json!({"outcomes":[
+                    {"itemId":"PVTI_z","error":null},
+                    {"itemId":"PVTI_a","error":"forbidden"},
+                    {"itemId":"PVTI_z","error":null}
+                ]}));
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_item_ids_are_variables_for_all_legal_chars_and_hostile_text() {
+        for id in ["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.=+/", "\"} mutation { hostile }", "@file"] {
+            let ids = vec![id.into(), id.into()];
+            let docs = build_bulk_item_documents(id, &ids, REMOVE_MUTATION, "/deletedItemId").unwrap();
+            assert_eq!(docs[0].item_indices, [0, 1]);
+            for key in ["projectId", "itemId0", "itemId1"] {
+                assert!(docs[0].args.contains(&format!("{key}={id}")));
+            }
+            assert!(!docs[0].args.last().unwrap().contains(id));
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_item_transport_failure_marks_only_its_chunk_and_continues() {
+        let ids: Vec<_> = (0..51).map(|n| format!("PVTI_{n}")).collect();
+        let docs = build_bulk_item_documents("PVT_p", &ids, REMOVE_MUTATION, "/deletedItemId").unwrap();
+        let mut calls = 0;
+        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_bulk_item_error, |_| {
+            let call = calls;
+            calls += 1;
+            std::future::ready(if call == 1 {
+                Err(AppError::Gh("gh: connection reset".into()))
+            } else {
+                let mut data = json!({});
+                for n in 0..if call == 0 { 25 } else { 1 } {
+                    data[format!("a{n}")] = json!({"deletedItemId":"PVTI_ok"});
+                }
+                Ok(GhOutput { stdout: serde_json::to_vec(&json!({"data":data})).unwrap(), stderr: String::new(), code: 0 })
+            })
+        }).await;
+        assert_eq!(calls, 3);
+        for (n, outcome) in outcomes.outcomes.iter().enumerate() {
+            assert_eq!(outcome.item_id, ids[n]);
+            assert_eq!(outcome.error.as_deref(), (25..50).contains(&n).then_some("connection reset"));
+        }
+    }
+
+    #[test]
+    fn bulk_errors_fail_closed_on_missing_payloads_and_unscoped_errors() {
+        let ids = vec!["PVTI_z".into(), "PVTI_a".into()];
+        let docs = build_bulk_item_documents("PVT_p", &ids, REMOVE_MUTATION, "/deletedItemId").unwrap();
+        for response in [json!({"data":{"a0":{"deletedItemId":""}}}), json!({"errors":[{"message":"denied"}]})] {
+            let mut outcomes = bulk_outcomes(&ids).unwrap();
+            apply_bulk_response(&mut outcomes, &docs[0], Ok(response), map_bulk_item_error);
+            assert!(outcomes.outcomes.iter().all(|outcome| outcome.error.is_some()));
+        }
+        assert_eq!(bulk_response(Ok(GhOutput { stdout: b"not json".to_vec(), stderr: "gh: offline".into(), code: 1 })).unwrap_err().to_string(), "gh: offline");
+        assert!(bulk_response(Ok(GhOutput { stdout: b"not json".to_vec(), stderr: String::new(), code: 0 })).is_err());
+    }
+
+    #[test]
+    fn bulk_aggregation_keeps_first_response_error_even_when_paths_are_out_of_order() {
+        let ids = vec!["PVTI_z".into()];
+        let document = BulkDocument {
+            args: vec![],
+            item_indices: vec![0, 0],
+            payload_pointer: "/projectV2Item/id",
+        };
+        let mut outcomes = bulk_outcomes(&ids).unwrap();
+        apply_bulk_response(&mut outcomes, &document, Ok(json!({"errors":[
+            {"path":["a1"],"message":"first"},
+            {"path":["a0"],"message":"second"}
+        ]})), map_bulk_item_error);
+        assert_eq!(outcomes.outcomes[0].error.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn empty_bulk_item_commands_reject_before_network() {
+        assert!(gh_archive_board_items("missing".into(), "PVT_p".into(), vec![]).await.is_err());
+        assert!(gh_unarchive_board_items("missing".into(), "PVT_p".into(), vec![]).await.is_err());
+        assert!(gh_remove_board_items("missing".into(), "PVT_p".into(), vec![]).await.is_err());
+    }
 
     fn issue(reason: Value) -> Value {
         json!({"__typename":"Issue","id":"I_one","number":1,"title":"Issue","state":"CLOSED","stateReason":reason,"repository":{"nameWithOwner":"owner/repo"}})
