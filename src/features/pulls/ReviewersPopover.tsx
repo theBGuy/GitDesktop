@@ -208,11 +208,15 @@ export function ReviewersPopover({
               })}
             </div>
             {/* Tab is trapped in both directions while rows exist, so the
-                remaining keyboard exit has to be on screen. */}
+                remaining keyboard exit has to be on screen AND announced —
+                Description wires it as the popup's aria-describedby. */}
             {loaded.length > 0 && (
-              <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
+              <Popover.Description
+                render={<p />}
+                className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground"
+              >
                 Tab cycles the rows; Esc closes.
-              </p>
+              </Popover.Description>
             )}
           </Popover.Popup>
         </Popover.Positioner>

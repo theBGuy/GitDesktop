@@ -21,7 +21,8 @@ export interface ListKeyboardNavOptions<T> {
    * Also move on Tab / Shift+Tab, wrapping at both ends where the arrows clamp.
    * Opt-in and popup-only: it spends the surface's native Tab exit, so only a
    * popup with no other FOCUSABLE element can afford it, and only while its Esc
-   * exit is on screen. Modified Tab (Ctrl/Alt/Meta) stays native.
+   * exit is on screen as the popup's `Popover.Description`. Modified Tab
+   * (Ctrl/Alt/Meta) stays native.
    */
   tabAdvances?: boolean;
 }

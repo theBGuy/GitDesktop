@@ -398,30 +398,34 @@ export function ProjectsPopover({
                       No open projects in this repository or its owner.
                     </p>
                   )}
-                {/* py-2 contains the Checkbox touch-target's 8px vertical bleed
-                    (after:-inset-y-2) — without it the pseudo adds scrollable
-                    overflow and Windows draws a scrollbar for even one row. */}
-                <div
-                  className="max-h-64 overflow-y-auto py-2"
-                  onKeyDown={nav.onRowKeyDown}
-                >
-                  {rows.map((project) => {
-                    const row = nav.rowProps(project);
-                    return (
-                      <ProjectRow
-                        key={project.id}
-                        project={project}
-                        checked={draft.has(project.id)}
-                        active={nav.isActive(project)}
-                        rowKey={row["data-row"]}
-                        rovingTab={row.tabIndex}
-                        lockedReason={rowLockedReason}
-                        onToggle={(on) => toggleDraft(project.id, on)}
-                        onFocus={row.onFocus}
-                      />
-                    );
-                  })}
-                </div>
+                {rows.length > 0 && (
+                  // py-2 contains the Checkbox touch-target's 8px vertical bleed
+                  // (after:-inset-y-2) — without it the pseudo adds scrollable
+                  // overflow and Windows draws a scrollbar for even one row. The
+                  // rail renders only with rows, so that padding never paints a
+                  // blank band under the loading and empty notices.
+                  <div
+                    className="max-h-64 overflow-y-auto py-2"
+                    onKeyDown={nav.onRowKeyDown}
+                  >
+                    {rows.map((project) => {
+                      const row = nav.rowProps(project);
+                      return (
+                        <ProjectRow
+                          key={project.id}
+                          project={project}
+                          checked={draft.has(project.id)}
+                          active={nav.isActive(project)}
+                          rowKey={row["data-row"]}
+                          rovingTab={row.tabIndex}
+                          lockedReason={rowLockedReason}
+                          onToggle={(on) => toggleDraft(project.id, on)}
+                          onFocus={row.onFocus}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
                 {/* The truncation note stands alone: a 50-cap catalog of only
                       CLOSED boards renders zero rows, where a bare "no projects"
                       would be a lie. */}
