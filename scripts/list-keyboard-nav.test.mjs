@@ -3,17 +3,11 @@
 // off-by-one leaves a popup whose last row cannot be reached, and a dropped
 // modifier check swallows a window chord the browser owns.
 //
-// Node's stdlib test runner and node: imports only, so the CI `guards` job runs
-// `node --test "scripts/*.test.mjs"` with no install step. The module under test
-// is the one exception to the static-import shape its siblings use: it
-// value-imports `useState` from react for `useRovingRows`, which an installless
-// run cannot resolve, so the import is dynamic. The skip is bounded on BOTH
-// sides — an unresolved specifier (ERR_MODULE_NOT_FOUND, measured on node 24)
-// AND the module still being on disk, so a moved or renamed module fails loudly
-// instead of skipping forever as "react missing"; every other import error
-// rethrows, and every assertion below still fails as itself. Nothing
-// type-checks this path, so the frontend job's installed step is this suite's
-// one enforced run.
+// Stdlib-only, so the installless `guards` job runs it — but the module under
+// test value-imports react, so the import is dynamic and skips only when a
+// specifier is unresolved (ERR_MODULE_NOT_FOUND, measured on node 24) AND the
+// module is still on disk: nothing type-checks this path, so a moved module
+// must fail loudly. The frontend job's installed step is the enforced run.
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { describe, test } from "node:test";
