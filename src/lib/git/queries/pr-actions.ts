@@ -297,8 +297,8 @@ export function useSetPrReviewers(repo: string, lens: RemoteLens) {
       Promise.all(
         [
           ["repo", repo, "pr", lens, args.number],
-          ["repo", repo, "pr-list", lens],
-          ["repo", repo, "pr-review-state", lens],
+          [...repoKeys.prList(repo), lens],
+          [...repoKeys.prReviewState(repo), lens],
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
       ),
   });
@@ -345,8 +345,8 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
       return Promise.all(
         [
           ["repo", repo, "pr", lens, args.number],
-          ["repo", repo, "pr-list", lens],
-          ["repo", repo, "pr-review-state", lens],
+          [...repoKeys.prList(repo), lens],
+          [...repoKeys.prReviewState(repo), lens],
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
       );
     },
@@ -402,8 +402,8 @@ export const prUpdateBranchKeys = (
 ) =>
   [
     ["repo", repo, "pr", lens, number],
-    ["repo", repo, "pr-list", lens],
-    ["repo", repo, "pr-review-state", lens],
+    [...repoKeys.prList(repo), lens],
+    [...repoKeys.prReviewState(repo), lens],
     ["repo", repo, "prs", lens],
   ] as const;
 
@@ -446,7 +446,7 @@ export function useApproveWorkflowRun(repo: string) {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
       // `pr-ci` is a SIBLING key, not a child of `pr` — prefix matching compares
       // segments whole, so the line above never reaches the PR list's CI badges.
-      queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-ci"] });
+      queryClient.invalidateQueries({ queryKey: repoKeys.prCi(repo) });
     },
   });
 }

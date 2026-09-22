@@ -71,6 +71,7 @@ export function ConversationPresetSwitcher({
           key={s.value}
           variant={preset === s.value ? "secondary" : "ghost"}
           size="xs"
+          className="px-1.5"
           aria-pressed={preset === s.value}
           title={s.title}
           disabled={!!disabledReason}

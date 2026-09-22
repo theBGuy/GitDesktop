@@ -4,6 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { repoKeys } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { invoke } from "@/lib/tauri/invoke";
 
@@ -438,7 +439,7 @@ function useActionsMutation<TArgs>(
     // hold this button pending.
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
-      void queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-ci"] });
+      void queryClient.invalidateQueries({ queryKey: repoKeys.prCi(repo) });
       return queryClient.invalidateQueries({
         queryKey: ["repo", repo, "actions"],
       });

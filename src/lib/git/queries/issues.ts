@@ -38,9 +38,7 @@ export function useIssueList(
     // The filter key is APPENDED (index 6) so the existing axis indices — and the
     // positional axes list below — don't shift.
     queryKey: [
-      "repo",
-      repo,
-      "issue-list",
+      ...repoKeys.issueList(repo),
       lens,
       state,
       limit ?? null,
@@ -320,7 +318,7 @@ export function useSetIssueAssignees(repo: string, lens: RemoteLens) {
     // Assignee is a filter axis of the issue list ("Assigned to me"), and the server
     // decides membership — a detail-only reconcile leaves a filtered list showing a
     // row the next fetch would drop. No review-state sibling on the issue side.
-    [["repo", repo, "issue-list", lens]],
+    [[...repoKeys.issueList(repo), lens]],
     // Assignee avatars are drawn on every board card.
     true,
   );
@@ -583,7 +581,7 @@ function useIssueLifecycleMutation<TArgs, TData>(
       if (boardCards) invalidateProjectBoards(queryClient, repo);
       return void Promise.all([
         queryClient.invalidateQueries({
-          queryKey: ["repo", repo, "issue-list", lens],
+          queryKey: [...repoKeys.issueList(repo), lens],
         }),
         queryClient.invalidateQueries({
           queryKey: ["repo", repo, "issue", lens, numberOf(args)],

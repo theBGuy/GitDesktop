@@ -31,12 +31,16 @@ export function RepoLensSwitcher({ repoPath }: { repoPath: string }) {
   ];
 
   return (
-    <div className="flex items-center gap-1">
+    // ml-auto: flush-right on the scope row so Upstream's edge lines up with the
+    // filter funnel's on the row above (this root div is the row's own child —
+    // ConversationListPanel can't wrap it without defeating its `empty:hidden`).
+    <div className="ml-auto flex items-center gap-1">
       {buttons.map((b) => (
         <Button
           key={b.value}
           variant={lens === b.value ? "secondary" : "ghost"}
           size="xs"
+          className="px-1.5"
           aria-pressed={lens === b.value}
           title={b.slug ?? undefined}
           onClick={() => setLens(b.value)}

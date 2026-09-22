@@ -83,6 +83,14 @@ export const repoKeys = {
     ["repo", repo, "compare", base, compare, "merge-base"] as const,
   objectsPresent: (repo: string, oidsKey: string) =>
     ["repo", repo, "objects-present", oidsKey] as const,
+  // Family PREFIXES for the forge list queries: hooks append their axes onto these
+  // and invalidations pass them bare, so a declaration and its invalidations cannot
+  // drift. `scripts/query-key-families.test.mjs` refuses new spellings outside this file.
+  prList: (repo: string) => ["repo", repo, "pr-list"] as const,
+  prCi: (repo: string) => ["repo", repo, "pr-ci"] as const,
+  prMergeability: (repo: string) => ["repo", repo, "pr-mergeability"] as const,
+  prReviewState: (repo: string) => ["repo", repo, "pr-review-state"] as const,
+  issueList: (repo: string) => ["repo", repo, "issue-list"] as const,
 };
 
 export function useGitInstalled() {

@@ -7,7 +7,9 @@ import {
   updateLocalIssue,
 } from "./local";
 
-const localIssueKey = (repo: string) => ["local-issues", repo] as const;
+/** The local issue records for one repo. Exported because the MCP is a second
+ *  writer, so a surface offering a manual refresh has to reach this family. */
+export const localIssueKey = (repo: string) => ["local-issues", repo] as const;
 
 export function useLocalIssues(repo: string) {
   return useQuery({

@@ -1748,7 +1748,10 @@ beside it is the same popup as the PR list: an **Assigned to me** row over searc
 author and label rows. On **GitHub** and **GitLab** those axes are applied on the server,
 across the whole repository you're currently viewing — see *Pull requests* for how they
 combine. Both scopes are in the command palette as **Show all issues** and **Filter
-issues: assigned to me**.
+issues: assigned to me**. **Refresh issues**, beside the search box, re-reads the list
+you're looking at along with your local issues and a linked Jira project's list; it spins
+while the read is in flight. *Refresh issues* in the command palette does the same
+(palette-only by default — bind a key in **Settings → Keyboard**).
 **Create** an issue, comment with the Markdown editor, edit,
 add labels, **close / reopen** (closing asks first; either way your drafted comment posts
 alongside), **lock**, and **transfer** an issue to another repo.

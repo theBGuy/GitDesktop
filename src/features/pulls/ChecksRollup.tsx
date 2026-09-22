@@ -38,6 +38,7 @@ import {
 import { clipTitle } from "@/lib/clip-title";
 import {
   forgeFeatureReady,
+  repoKeys,
   useApproveWorkflowRun,
   useForgeStatus,
   useRepoWriteAccess,
@@ -682,7 +683,7 @@ export function ChecksRollup({
     if (!finished) return;
     void queryClient.invalidateQueries({ queryKey: ["repo", repoPath, "pr"] });
     void queryClient.invalidateQueries({
-      queryKey: ["repo", repoPath, "pr-ci"],
+      queryKey: repoKeys.prCi(repoPath),
     });
   }, [jobsByRun, queryClient, repoPath]);
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
@@ -849,7 +850,7 @@ export function ChecksRollup({
         queryKey: ["repo", repoPath, "pr"],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["repo", repoPath, "pr-ci"],
+        queryKey: repoKeys.prCi(repoPath),
       });
       // Each re-run run's own detail query too: a watcher that never unmounts (a
       // manual-gated GitLab pipeline stays pending) holds a completed-status

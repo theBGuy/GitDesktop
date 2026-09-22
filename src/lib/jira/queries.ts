@@ -50,6 +50,12 @@ import type {
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 
+/** The family PREFIX for a repo's Jira issue lists: the list query appends its
+ *  site/project/state axes onto it and invalidations pass it bare, so the
+ *  declaration and its invalidations cannot drift apart. */
+export const jiraIssuesKey = (repo: string) =>
+  ["repo", repo, "jira-issues"] as const;
+
 /** This repo's Jira link (or `null` when unlinked). */
 export function useJiraLink(repo: string) {
   return useQuery({
@@ -94,9 +100,7 @@ function invalidateJiraIssue(
       queryKey: jiraIssueDetailKey(repo, link.siteHost, issueKey),
     });
   }
-  queryClient.invalidateQueries({
-    queryKey: ["repo", repo, "jira-issues"],
-  });
+  queryClient.invalidateQueries({ queryKey: jiraIssuesKey(repo) });
 }
 
 export function useSaveJiraLink(repo: string) {
@@ -138,9 +142,7 @@ export function useJiraIssues(
     // cache entry, never served the prior project's list. `?? ""` keeps the key stable
     // while `link` is absent (the query is disabled then).
     queryKey: [
-      "repo",
-      repo,
-      "jira-issues",
+      ...jiraIssuesKey(repo),
       link?.siteHost ?? "",
       link?.projectKey ?? "",
       state,

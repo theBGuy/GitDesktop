@@ -37,6 +37,7 @@ import {
   forgeFeatureReady,
   keepPreviousDataForKeyAxes,
   prDetailsOptions,
+  repoKeys,
   useForgeStatus,
   useHoverPrefetch,
   usePrefetchPr,
@@ -315,7 +316,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     // `usePrList`'s key up to the state axis: every cached page for this lens and
     // state feeds the author/label options and counts, whatever limit or filter
     // produced it, so they don't collapse to the active filter.
-    optionSourcePrefix: ["repo", repoPath, "pr-list", lens, stateFilter],
+    optionSourcePrefix: [...repoKeys.prList(repoPath), lens, stateFilter],
   });
 
   // Creating a remote PR/MR follows its per-action write flag — ready GitHub AND
@@ -352,10 +353,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     // caches under the outgoing key; `pr-review-state` keys on no rows and
     // re-walks the forge from the filters.
     for (const queryKey of [
-      ["repo", repoPath, "pr-list"],
-      ["repo", repoPath, "pr-ci"],
-      ["repo", repoPath, "pr-mergeability"],
-      ["repo", repoPath, "pr-review-state"],
+      repoKeys.prList(repoPath),
+      repoKeys.prCi(repoPath),
+      repoKeys.prMergeability(repoPath),
+      repoKeys.prReviewState(repoPath),
     ])
       void queryClient
         .cancelQueries({ queryKey })

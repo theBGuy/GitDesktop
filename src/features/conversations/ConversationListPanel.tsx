@@ -110,16 +110,17 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   newMenu: NewMenuConfig;
   filterSlot: ReactNode;
   /** Extra list controls, rendered at the right of the SEARCH row rather than
-   *  the state-filter row above it, which is already full at the sidebar's width
-   *  and wraps. Omit (the default) and nothing renders. */
+   *  the scope row above it: the search row always renders and its flexing input
+   *  absorbs the width, while the scope row is optional and hides itself when
+   *  empty. Omit (the default) and nothing renders. */
   toolbarActions?: ReactNode;
-  /** Optional All | Mine | … scope switch, rendered in the toolbar between the
-   *  state filter and the lens switch. Omit (the default) and nothing renders,
-   *  so a provider without server-side scope filters keeps the old toolbar. */
+  /** Optional All | Mine | … scope switch, rendered first on the toolbar's scope
+   *  row. Omit (the default) and nothing renders, so a provider without
+   *  server-side scope filters keeps the old toolbar. */
   presetControl?: ReactNode;
-  /** Optional Fork | Upstream lens switch, rendered in the toolbar after the
-   *  state filter (before the New menu). Omit (the default) and nothing renders,
-   *  so panels without a lens are unaffected. */
+  /** Optional Fork | Upstream lens switch, rendered after the preset switch on
+   *  the toolbar's scope row. Omit (the default) and nothing renders, so panels
+   *  without a lens are unaffected. */
   lensControl?: ReactNode;
   // search
   filterRef: Ref<HTMLInputElement>;
@@ -380,53 +381,64 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-1 border-b p-2">
-        {(["open", "closed"] as const).map((s) => (
-          <Button
-            key={s}
-            variant={stateFilter === s ? "secondary" : "ghost"}
-            size="xs"
-            aria-pressed={stateFilter === s}
-            onClick={() => onStateFilter(s)}
-          >
-            {s === "open" ? "Open" : "Closed"}
-          </Button>
-        ))}
-        {presetControl}
-        {lensControl}
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button variant="ghost" size="xs" className="ml-auto">
-                <PlusIcon data-icon="inline-start" />
-                New
-                <CaretDownIcon data-icon="inline-end" />
-              </Button>
-            }
-          />
-          <DropdownMenuContent align="end" className="min-w-56">
-            <DropdownMenuItem
-              disabled={newMenu.ghDisabled}
-              title={newMenu.ghReason}
-              onClick={newMenu.onGh}
+      <div className="border-b p-2">
+        <div className="flex flex-wrap items-center gap-1">
+          {/* Toolbar SEGMENTS run px-1.5 rather than the xs default px-2 — the
+              scope row's five segments plus the fork lens overflow the sidebar's
+              default width by a pixel otherwise. The two switchers match this. */}
+          {(["open", "closed"] as const).map((s) => (
+            <Button
+              key={s}
+              variant={stateFilter === s ? "secondary" : "ghost"}
+              size="xs"
+              className="px-1.5"
+              aria-pressed={stateFilter === s}
+              onClick={() => onStateFilter(s)}
             >
-              {newMenu.ghLabel}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={newMenu.onLocal}>
-              {newMenu.localLabel}
-            </DropdownMenuItem>
-            {newMenu.jiraLabel && newMenu.onJira && (
-              <DropdownMenuItem onClick={newMenu.onJira}>
-                {newMenu.jiraLabel}
+              {s === "open" ? "Open" : "Closed"}
+            </Button>
+          ))}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button variant="ghost" size="xs" className="ml-auto">
+                  <PlusIcon data-icon="inline-start" />
+                  New
+                  <CaretDownIcon data-icon="inline-end" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-56">
+              <DropdownMenuItem
+                disabled={newMenu.ghDisabled}
+                title={newMenu.ghReason}
+                onClick={newMenu.onGh}
+              >
+                {newMenu.ghLabel}
               </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-        {filterSlot}
+              <DropdownMenuItem onClick={newMenu.onLocal}>
+                {newMenu.localLabel}
+              </DropdownMenuItem>
+              {newMenu.jiraLabel && newMenu.onJira && (
+                <DropdownMenuItem onClick={newMenu.onJira}>
+                  {newMenu.jiraLabel}
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {filterSlot}
+        </div>
+        {/* Both scope controls render null on providers/repos that can't offer
+            them, so this row must strip itself when empty — keep them BARE
+            children: a wrapper element would defeat `empty:hidden`. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1 empty:hidden">
+          {presetControl}
+          {lensControl}
+        </div>
       </div>
-      {/* The search row hosts the extra controls: the state-filter row above is
-          already full at the sidebar's width, so anything added there wraps to
-          an orphan line. The input flexes, so this row cannot. */}
+      {/* The search row hosts the extra controls: it always renders and its
+          flexing input absorbs the width, whereas the scope row above is
+          optional and hides itself when both controls render null. */}
       <div className="flex items-center gap-1 border-b p-2">
         <Input
           ref={filterRef}

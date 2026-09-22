@@ -6,6 +6,7 @@ import {
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
+import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 
 export function useEditPr(repo: string, lens: RemoteLens) {
@@ -94,16 +95,16 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
       // not lens-scoped (GitHub Discussions have no fork lens) — keyed as before.
       const keysByKind: Record<typeof args.kind, (n: number) => QueryKey[]> = {
         issue: (n) => [
-          ["repo", repo, "issue-list", lens],
+          [...repoKeys.issueList(repo), lens],
           ["repo", repo, "issue", lens, n],
         ],
         mr: (n) => [
           ["repo", repo, "pr", lens, n],
-          ["repo", repo, "pr-list", lens],
+          [...repoKeys.prList(repo), lens],
           // A label edit moves the PR's `updatedAt`, so the grouping map has to
           // refresh with the rows (see usePrReviewState). Issues and discussions
           // have no such sibling.
-          ["repo", repo, "pr-review-state", lens],
+          [...repoKeys.prReviewState(repo), lens],
         ],
         discussion: (n) => [
           ["repo", repo, "discussion", n],

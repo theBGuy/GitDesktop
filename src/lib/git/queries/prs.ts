@@ -59,9 +59,7 @@ export function usePrList(
     // The filter key is APPENDED (index 6) so the existing axis indices — and the
     // positional axes list below — don't shift.
     queryKey: [
-      "repo",
-      repo,
-      "pr-list",
+      ...repoKeys.prList(repo),
       lens,
       state,
       limit ?? null,
@@ -106,9 +104,7 @@ export function usePrListCi(
 ) {
   return useQuery({
     queryKey: [
-      "repo",
-      repo,
-      "pr-ci",
+      ...repoKeys.prCi(repo),
       lens,
       state,
       limit ?? null,
@@ -161,9 +157,7 @@ export function usePrListMergeability(
     // mergeability is a property of the PR, identical whichever query surfaced it, and
     // the numbers digest already refuses a map built for different rows.
     queryKey: [
-      "repo",
-      repo,
-      "pr-mergeability",
+      ...repoKeys.prMergeability(repo),
       lens,
       state,
       limit ?? null,
@@ -213,13 +207,13 @@ export function usePrListMergeability(
  * walk that a repo invalidation would otherwise re-run off-screen.
  *
  * CO-INVALIDATION CONTRACT for mutation authors: any mutation that refreshes the PR
- * list NARROWLY (`["repo", repo, "pr-list", lens]` rather than the whole `["repo",
- * repo]` subtree) must invalidate `["repo", repo, "pr-review-state", lens]` alongside
- * it — `updatedAt` here is what sorts a PR into "Updated since my review", and
- * staleTime alone schedules no refetch. A mutation that changes CI STATE (approve,
- * re-run, cancel, dispatch) owes {@link usePrListCi}'s `["repo", repo, "pr-ci"]` the
- * same: it hydrates the list's check badges from its own key, and neither `pr` nor
- * `pr-list` prefix-matches it.
+ * list NARROWLY (`[...repoKeys.prList(repo), lens]` rather than the whole
+ * `repoKeys.all(repo)` subtree) must invalidate
+ * `[...repoKeys.prReviewState(repo), lens]` alongside it — `updatedAt` here is what
+ * sorts a PR into "Updated since my review", and staleTime alone schedules no refetch.
+ * A mutation that changes CI STATE (approve, re-run, cancel, dispatch) owes
+ * {@link usePrListCi}'s `repoKeys.prCi(repo)` the same: it hydrates the list's check
+ * badges from its own key, and neither the PR-detail nor the PR-list prefix matches it.
  */
 export function usePrReviewState(
   repo: string,
@@ -232,9 +226,7 @@ export function usePrReviewState(
   const filterKey = remoteListFilterKey(filter);
   return useQuery({
     queryKey: [
-      "repo",
-      repo,
-      "pr-review-state",
+      ...repoKeys.prReviewState(repo),
       lens,
       state,
       limit ?? null,

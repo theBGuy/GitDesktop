@@ -34,7 +34,7 @@ import {
   boardPredecessorId,
   reorderBoardItem,
 } from "./board-order";
-import { keepPreviousDataForKeyAxes } from "./core";
+import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
 import {
   invalidateProjectBoards,
   pendingBoardWrites,
@@ -1538,7 +1538,7 @@ export function useConvertDraftItem() {
       // issue's own DETAIL key needs nothing — it had no cache entry to go stale,
       // the issue not having existed until now.
       void queryClient.invalidateQueries({
-        queryKey: ["repo", args.repo, "issue-list", args.lens],
+        queryKey: [...repoKeys.issueList(args.repo), args.lens],
       });
     },
   });

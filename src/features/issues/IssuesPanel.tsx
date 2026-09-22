@@ -1,9 +1,11 @@
 import {
+  ArrowClockwiseIcon,
   ArrowSquareOutIcon,
   CheckCircleIcon,
   CircleDashedIcon,
   KanbanIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -25,6 +27,7 @@ import { presentError } from "@/lib/error-summary";
 import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  repoKeys,
   useForgeStatus,
   useHoverPrefetch,
   useIssueList,
@@ -32,8 +35,10 @@ import {
 } from "@/lib/git/queries";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { useLocalIssues } from "@/lib/issues/queries";
+import { reloadLocalIssues } from "@/lib/issues/local";
+import { localIssueKey, useLocalIssues } from "@/lib/issues/queries";
 import {
+  jiraIssuesKey,
   useJiraIssues,
   useJiraLink,
   useJiraPermissions,
@@ -50,6 +55,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 import { CreateJiraIssueDialog } from "./CreateJiraIssueDialog";
 import { CreateLocalIssueDialog } from "./CreateLocalIssueDialog";
@@ -201,7 +207,44 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     { title: string; body: string; labels?: string[] } | undefined
   >();
 
+  // CANCEL before invalidate: a read already in flight would otherwise resolve
+  // afterwards and stamp itself fresh, erasing the invalidation. The Jira pass is
+  // unconditional — a no-op on a repo with no linked project.
+  const queryClient = useQueryClient();
+  function refreshIssueList() {
+    for (const queryKey of [
+      repoKeys.issueList(repoPath),
+      jiraIssuesKey(repoPath),
+    ])
+      void queryClient
+        .cancelQueries({ queryKey })
+        .then(() => queryClient.invalidateQueries({ queryKey }))
+        .catch(() => {
+          // Best-effort, like the local arm below: an invalidate's refetch can
+          // settle as a rejection, which would otherwise surface as an
+          // unhandled rejection rather than a stale list.
+        });
+    // The local records ride along — the control speaks for the whole list —
+    // but reload FIRST: the MCP writes that store file from another process and
+    // tauri-plugin-store serves its in-memory copy, so a bare invalidate
+    // refetches the stale snapshot (the pair App.tsx's focus sweep makes).
+    const localKey = localIssueKey(repoPath);
+    void reloadLocalIssues()
+      .then(() => queryClient.cancelQueries({ queryKey: localKey }))
+      .then(() => queryClient.invalidateQueries({ queryKey: localKey }))
+      .catch(() => {
+        // Best-effort: a failed reload leaves the last known records.
+      });
+  }
+  // The local arm contributes nothing here: a store reload has no `isFetching`
+  // to read (same as the PR twin).
+  const refreshing = issueList.isFetching || jiraIssues.isFetching;
+
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
+  // Tab-gated like the scope actions below: both panels stay mounted under
+  // <Activity>, so an ungated registration would refresh this list from Pull
+  // Requests.
+  useHotkeyAction("refresh-issue-list", () => refreshIssueList(), onIssuesTab);
   useHotkeyAction("create-issue", () => setCreateOpen(true), canOpenGhCreate);
   useHotkeyAction(
     "create-jira-issue",
@@ -280,7 +323,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     // `useIssueList`'s key up to the state axis: every cached page for this lens
     // and state feeds the author/label options and counts, whatever limit or
     // filter produced it, so they don't collapse to the active filter.
-    optionSourcePrefix: ["repo", repoPath, "issue-list", lens, stateFilter],
+    optionSourcePrefix: [...repoKeys.issueList(repoPath), lens, stateFilter],
   });
 
   // Jira issues aren't part of the local/remote filter hook (their author/label
@@ -442,6 +485,23 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               ],
             }}
           />
+        }
+        toolbarActions={
+          // Never `disabled` and never gated on `isFetching`: cancel-then-
+          // invalidate is idempotent against a read in flight, so a guard would
+          // only swallow presses. The spin plus `aria-busy` carry the state, and
+          // both arms feed it — on a host with no issue tracker (Bitbucket) the
+          // Jira list is the only read this button makes.
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Refresh issues"
+            title="Refresh issues"
+            aria-busy={refreshing}
+            onClick={refreshIssueList}
+          >
+            <ArrowClockwiseIcon className={cn(refreshing && "animate-spin")} />
+          </Button>
         }
         filterRef={filterRef}
         filterText={filterText}

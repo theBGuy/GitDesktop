@@ -340,6 +340,12 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  {
+    id: "refresh-issue-list",
+    label: "Refresh issues",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // The issue list's scope switches sit in its own toolbar, so they ship
   // palette-only rather than spending a chord.
   {

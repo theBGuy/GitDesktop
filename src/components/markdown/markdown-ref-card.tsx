@@ -20,6 +20,7 @@ import { useForgeGhHost } from "@/lib/git/host";
 import {
   issueDetailsOptions,
   prDetailsOptions,
+  repoKeys,
   useAssignableUsers,
 } from "@/lib/git/queries";
 import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
@@ -121,14 +122,14 @@ export function cachedRefKind(
   lens: RemoteLens,
   number: number,
 ): "pr" | "issue" | null {
-  const holds = (list: "pr-list" | "issue-list") =>
+  const holds = (family: typeof repoKeys.prList | typeof repoKeys.issueList) =>
     queryClient
       .getQueriesData<{ number: number }[]>({
-        queryKey: ["repo", repoPath, list, lens],
+        queryKey: [...family(repoPath), lens],
       })
       .some(([, rows]) => rows?.some((row) => row.number === number));
-  if (holds("pr-list")) return "pr";
-  if (holds("issue-list")) return "issue";
+  if (holds(repoKeys.prList)) return "pr";
+  if (holds(repoKeys.issueList)) return "issue";
   return null;
 }
 
