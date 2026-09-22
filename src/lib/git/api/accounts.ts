@@ -51,10 +51,11 @@ export const forgeAccountsHealth = () =>
   invoke<SessionHealth[]>("forge_accounts_health");
 
 /** Drive an in-app reconnect: `mode: "login"` signs in a new session, `"refresh"`
- *  renews an existing one. Streams `ReconnectEvent`s (gh's device code, glab's
- *  progress lines, then a terminal `finished`) over a Channel; resolves when the
- *  flow ends. Cancel a live flow via {@link forgeReconnectCancel} with the same
- *  `sessionId` (generated frontend-side with `crypto.randomUUID()`). */
+ *  renews an existing one. Streams `ReconnectEvent`s (the verification URL, the
+ *  one-time code when the CLI's wording is recognised, progress lines, then a
+ *  terminal `finished`) over a Channel; resolves when the flow ends. Cancel a live
+ *  flow via {@link forgeReconnectCancel} with the same `sessionId` (generated
+ *  frontend-side with `crypto.randomUUID()`). */
 export const forgeReconnect = (args: {
   sessionId: string;
   provider: "github" | "gitlab";

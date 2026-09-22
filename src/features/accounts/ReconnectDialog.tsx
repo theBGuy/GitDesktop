@@ -1,6 +1,10 @@
-import { ArrowSquareOutIcon, TerminalIcon } from "@phosphor-icons/react";
+import {
+  ArrowSquareOutIcon,
+  CopyIcon,
+  TerminalIcon,
+} from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeReconnect,
@@ -25,12 +30,16 @@ import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /** The distinct phases the reconnect flow drives through, from the streamed
- *  `ReconnectEvent`s. `starting` is the pre-event state; `code` is gh's device
- *  flow; `lines` is glab's browser flow (no code); `finished` is terminal. */
+ *  `ReconnectEvent`s. `starting` is the pre-event state; `progress` is CLI output with
+ *  no verification URL yet; `verify` holds the URL (and the one-time code once the
+ *  CLI's wording is recognised); `finished` is terminal. Progress lines live in their
+ *  own state, so a late one can never displace the verification the user is acting on.
+ *  `kind` stays `"verify"` across the code upgrade — the initial-focus effect keys on
+ *  it, and must not pull focus back once the user has tabbed on. */
 type Phase =
   | { kind: "starting" }
-  | { kind: "code"; code: string; url: string }
-  | { kind: "lines"; lines: string[] }
+  | { kind: "progress" }
+  | { kind: "verify"; code: string | null; url: string }
   | {
       kind: "finished";
       ok: boolean;
@@ -38,12 +47,41 @@ type Phase =
       message: string | null;
     };
 
+type ReconnectProvider = "github" | "gitlab";
+
+/** The heading over the raw CLI output, before any verification URL is known. */
+const PROGRESS_COPY: Record<ReconnectProvider, string> = {
+  github: "Waiting on gh…",
+  gitlab: "glab is opening your browser.",
+};
+
+/** The instruction above the verification link once a one-time code is in hand. */
+const VERIFY_WITH_CODE_COPY: Record<ReconnectProvider, string> = {
+  github: "Enter this code in your browser to finish signing in.",
+  gitlab: "Finish signing in on GitLab.",
+};
+
+/** The caption over the CLI's own output when no code was parsed. */
+const LINES_LABEL: Record<ReconnectProvider, string> = {
+  github: "What gh reported",
+  gitlab: "What glab reported",
+};
+
+/** Trailing progress lines kept on screen while the flow is still talking. */
+const PROGRESS_TAIL = 3;
+
+/** The window for the code-null fallback, where the CLI's raw output is the only
+ *  place an unrecognised one-time code can be read: a wording that prints the code
+ *  and then keeps talking must not scroll it away. */
+const UNPARSED_OUTPUT_TAIL = 8;
+
 /**
  * The global one-click reconnect dialog for a dead (or new) gh/glab session.
  * Opened from anywhere via the ui store's `reconnectTarget`; mounted once next to
- * the other global dialogs in `App`. Drives GitHub's device flow (a one-time code
- * + "Open browser") and GitLab's `--web` flow (progress lines) in-app, so a user
- * never has to drop to a terminal. Every close path cancels the live Rust flow.
+ * the other global dialogs in `App`. Drives GitHub's device flow and GitLab's `--web`
+ * flow in-app, so a user never has to drop to a terminal. Whatever the CLI's wording,
+ * the verification link itself is shown, copyable, and openable. Every close path
+ * cancels the live Rust flow.
  */
 export function ReconnectDialog() {
   const target = useUiStore((s) => s.reconnectTarget);
@@ -91,12 +129,21 @@ function ReconnectFlow({
   const invalidate = useInvalidateAfterReconnect();
 
   const [phase, setPhase] = useState<Phase>({ kind: "starting" });
+  // Progress output is its own state, never a phase: a line arriving after the
+  // verification URL must not wipe the code or link the user is acting on.
+  const [lines, setLines] = useState<string[]>([]);
   // The live session id, so every close path (and Try again) cancels the right
   // Rust flow. A ref because cleanup + the restart handler read the current id
   // without re-subscribing.
   const sessionIdRef = useRef<string | null>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const autoCloseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The `<session id>|<url>` we already auto-opened. Keyed on both because the device
+  // URL is a constant per host: a url-only latch would suppress the re-open on every
+  // "Try again". Latched on the ATTEMPT — a failed open toasts once and leaves the
+  // always-visible button as the retry, rather than re-firing on the code upgrade.
+  const autoOpenedRef = useRef<string | null>(null);
+  const linesLabelId = useId();
 
   const hostArg = reconnectHostArg(host);
   // The copy-paste fallback must match the flow the dialog was driving, argv spelling
@@ -118,13 +165,20 @@ function ReconnectFlow({
   // dependency — the start effect's own deps are what make it run exactly once.
   const onEvent = useEffectEvent((event: ReconnectEvent) => {
     if (event.type === "code") {
-      setPhase({ kind: "code", code: event.code, url: event.url });
+      setPhase({ kind: "verify", code: event.code, url: event.url });
+      // gh's non-interactive device flow never opens a browser itself, so open it
+      // here. glab opens its own (and its authorize URL carries a single-use
+      // localhost callback), so a second tab there would race the first.
+      if (isGitHub) {
+        const attempt = `${sessionIdRef.current}|${event.url}`;
+        if (autoOpenedRef.current !== attempt) {
+          autoOpenedRef.current = attempt;
+          openUrl(event.url).catch(toastError);
+        }
+      }
     } else if (event.type === "line") {
-      setPhase((p) =>
-        p.kind === "lines"
-          ? { kind: "lines", lines: [...p.lines, event.text] }
-          : { kind: "lines", lines: [event.text] },
-      );
+      setLines((prev) => [...prev, event.text]);
+      setPhase((p) => (p.kind === "starting" ? { kind: "progress" } : p));
     } else {
       // Terminal Rust-side: the flow's guard already unregistered its session, so null
       // the ref — otherwise the unmount cleanup and start()'s prior-cancel would cancel
@@ -156,6 +210,7 @@ function ReconnectFlow({
     const sessionId = crypto.randomUUID();
     sessionIdRef.current = sessionId;
     setPhase({ kind: "starting" });
+    setLines([]);
     forgeReconnect({
       sessionId,
       provider,
@@ -188,10 +243,11 @@ function ReconnectFlow({
     };
   }, []);
 
-  // Initial focus on the primary action once the code phase paints (gh); glab
-  // has no primary until finished, so this is a no-op there.
+  // Initial focus on the primary action once the verify phase paints. Keyed on `kind`
+  // alone: the code arriving after a URL-only event keeps the phase `verify`, so this
+  // doesn't re-fire and steal focus from a user already on the copy button.
   useEffect(() => {
-    if (phase.kind === "code") primaryRef.current?.focus();
+    if (phase.kind === "verify") primaryRef.current?.focus();
   }, [phase.kind]);
 
   const title = mode === "login" ? `Sign in to ${label}` : `Reconnect ${label}`;
@@ -223,25 +279,39 @@ function ReconnectFlow({
         </div>
       )}
 
-      {phase.kind === "code" && (
-        <div className="space-y-3">
-          <p
-            className="select-all text-center font-mono text-2xl tracking-[0.15em]"
-            aria-label={`One-time code ${phase.code}`}
-          >
-            {phase.code}
-          </p>
-          <p className="text-center text-xs text-muted-foreground">
-            Enter the code in your browser to finish signing in.
-          </p>
-          <div className="flex items-center justify-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => copyText(phase.code, "Code copied")}
+      {phase.kind === "verify" && (
+        <div className="min-w-0 space-y-3">
+          {phase.code !== null && (
+            <p
+              className="select-all text-center font-mono text-2xl tracking-[0.15em]"
+              aria-label={`One-time code ${phase.code}`}
             >
-              Copy code
-            </Button>
+              {phase.code}
+            </p>
+          )}
+          <p className="text-center text-xs text-muted-foreground">
+            {phase.code !== null
+              ? VERIFY_WITH_CODE_COPY[provider]
+              : "Open this page to finish signing in."}
+          </p>
+          <div className="flex items-center gap-2 text-xs">
+            <code
+              className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 font-mono"
+              onMouseEnter={clipTitleFromText}
+            >
+              {phase.url}
+            </code>
+            <button
+              type="button"
+              className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+              title="Copy link"
+              onClick={() => copyText(phase.url, "Link copied")}
+            >
+              <CopyIcon className="size-3.5" />
+            </button>
+          </div>
+          <div className="flex items-center justify-center gap-2">
+            {phase.code !== null && <CopyCodeButton code={phase.code} />}
             <Button
               ref={primaryRef}
               size="sm"
@@ -251,6 +321,18 @@ function ReconnectFlow({
               Open {host}
             </Button>
           </div>
+          {phase.code === null && lines.length > 0 && (
+            <div className="space-y-1">
+              <p id={linesLabelId} className="text-xs text-muted-foreground">
+                {LINES_LABEL[provider]}
+              </p>
+              <ProgressLines
+                lines={lines}
+                tail={UNPARSED_OUTPUT_TAIL}
+                labelledBy={linesLabelId}
+              />
+            </div>
+          )}
           <div
             className="flex items-center justify-center gap-2 text-xs text-muted-foreground"
             aria-live="polite"
@@ -261,24 +343,12 @@ function ReconnectFlow({
         </div>
       )}
 
-      {phase.kind === "lines" && (
-        <div className="space-y-2">
+      {phase.kind === "progress" && (
+        <div className="min-w-0 space-y-2">
           <p className="text-xs text-muted-foreground">
-            Follow the sign-in in your browser — glab opens it for you.
+            {PROGRESS_COPY[provider]}
           </p>
-          <div
-            className="space-y-0.5 font-mono text-[11px] text-muted-foreground"
-            aria-live="polite"
-          >
-            {phase.lines.slice(-3).map((line, i) => (
-              // Progress lines have no stable id; the tail window is tiny and
-              // append-only, so the position within the last-3 window plus the
-              // line text is a stable-enough key.
-              <p key={`${i}:${line}`} className="truncate">
-                {line}
-              </p>
-            ))}
-          </div>
+          <ProgressLines lines={lines} tail={PROGRESS_TAIL} />
         </div>
       )}
 
@@ -321,5 +391,46 @@ function ReconnectFlow({
         </div>
       )}
     </DialogContent>
+  );
+}
+
+/** Its own component so the narrowed non-null code reaches the click handler — a
+ *  property narrowed in JSX widens again inside a closure. */
+function CopyCodeButton({ code }: { code: string }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => copyText(code, "Code copied")}
+    >
+      Copy code
+    </Button>
+  );
+}
+
+/** The tail of the CLI's own output. Deliberately wraps rather than truncating: this
+ *  is the only place the user can read what the CLI actually said. */
+function ProgressLines({
+  lines,
+  tail,
+  labelledBy,
+}: {
+  lines: string[];
+  tail: number;
+  labelledBy?: string;
+}) {
+  return (
+    <div
+      className="space-y-0.5 break-words font-mono text-[11px] text-muted-foreground"
+      role={labelledBy ? "group" : undefined}
+      aria-labelledby={labelledBy}
+      aria-live="polite"
+    >
+      {lines.slice(-tail).map((line, i) => (
+        // Progress lines have no stable id; the tail window is tiny and append-only,
+        // so the position within it plus the line text is a stable-enough key.
+        <p key={`${i}:${line}`}>{line}</p>
+      ))}
+    </div>
   );
 }

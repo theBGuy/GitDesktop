@@ -3207,7 +3207,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's
   sign-in in-app (GitHub's one-time device code, GitLab's browser flow) — no terminal
-  needed, though \`gh\`/\`glab auth login\` in a terminal still works. Each signed-in
+  needed, though \`gh\`/\`glab auth login\` in a terminal still works. GitHub's flow
+  opens your browser for you and keeps the verification link on screen with a
+  one-click copy, so you can finish in whichever browser you like; when \`glab\` can't
+  open a browser itself, GitLab's dialog shows its link the same way. Each signed-in
   account lists here, and a **session that expired or was revoked** shows a *session
   expired* badge with a one-click **Reconnect** (GitHub reconnects the active account;
   switch first if it's another one). GitDesktop also **warns before a token lapses**: a

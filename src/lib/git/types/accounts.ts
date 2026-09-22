@@ -44,10 +44,11 @@ export interface SessionHealth {
 }
 
 /** A streaming event from a `forge_reconnect` flow, delivered over a Channel.
- *  `code` is gh's device-flow one-time code + URL; `line` is a glab progress
+ *  `code` carries the device-flow verification URL, plus the one-time code once the
+ *  CLI's wording is recognised (null when it isn't); `line` is any other progress
  *  line; `finished` is the terminal result. */
 export type ReconnectEvent =
-  | { type: "code"; code: string; url: string }
+  | { type: "code"; code: string | null; url: string }
   | { type: "line"; text: string }
   | {
       type: "finished";
