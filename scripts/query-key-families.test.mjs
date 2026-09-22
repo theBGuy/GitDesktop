@@ -24,9 +24,16 @@ const FAMILIES = [
   { name: "issue-list", builder: "repoKeys.issueList" },
 ];
 
-/** An array-literal key spelling: `["repo", <anything>, "<family>"`. `\s` covers CRLF. */
-const literalPattern = (family) =>
-  new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`);
+/**
+ * The two ways a family gets hand-spelled outside core.ts, both refused: the bare
+ * array literal `["repo", <anything>, "<family>"`, and the composed form that reaches
+ * the prefix through the repo builder, `[...repoKeys.all(repo), "<family>"`. `\s`
+ * covers CRLF.
+ */
+const spellingPatterns = (family) => [
+  new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`),
+  new RegExp(String.raw`repoKeys\.all\([^)]*\)\s*,\s*"${family}"`),
+];
 
 /** Floor for the scanned corpus, ~half the 700 .ts/.tsx files under src/ measured
  *  when this guard was written. A path-pinned scan that finds nothing scans nothing
@@ -41,10 +48,16 @@ function* sourceFiles(dir) {
   }
 }
 
-test("the regex matches a hand-spelled family key (negative control)", () => {
-  assert.match(
-    '  queryKey: ["repo", repoPath, "pr-list", lens],',
-    literalPattern("pr-list"),
+test("both patterns match a hand-spelled family key (negative control)", () => {
+  const matchesAny = (line, family) =>
+    spellingPatterns(family).some((re) => re.test(line));
+  assert.ok(
+    matchesAny('  queryKey: ["repo", repoPath, "pr-list", lens],', "pr-list"),
+    "the array-literal pattern went inert",
+  );
+  assert.ok(
+    matchesAny('  queryKey: [...repoKeys.all(repo), "pr-ci"],', "pr-ci"),
+    "the repoKeys.all-composed pattern went inert",
   );
 });
 
@@ -68,7 +81,7 @@ test("no file outside core.ts spells a list family as an array literal", () => {
       continue;
     const source = readFileSync(file, "utf8");
     for (const { name, builder } of FAMILIES) {
-      if (literalPattern(name).test(source))
+      if (spellingPatterns(name).some((re) => re.test(source)))
         offenders.push(
           `${rel}: spells the "${name}" family — build it from ${builder}() instead, or, in a comment, describe the shape in words instead of spelling the literal`,
         );

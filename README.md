@@ -543,8 +543,8 @@ parent repository's issues (creating one under the Upstream lens opens it
 **on the parent**), and a fork with issues turned off offers a one-click
 switch to Upstream instead of a dead end. An **All | Mine** switch in the
 list toolbar scopes the list to the issues **assigned to you**, and the
-funnel beside it narrows the whole repository's issues by **author** or
-**label** (GitHub & GitLab).
+funnel at the right end of the row above narrows the whole repository's
+issues by **author** or **label** (GitHub & GitLab).
 
 **Activity feed**: an issue's timeline events interleave with its comments,
 date-sorted oldest-to-newest — labels, assignees, milestones, title renames,

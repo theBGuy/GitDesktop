@@ -384,8 +384,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       <div className="border-b p-2">
         <div className="flex flex-wrap items-center gap-1">
           {/* Toolbar SEGMENTS run px-1.5 rather than the xs default px-2 — the
-              scope row's five segments plus the fork lens overflow the sidebar's
-              default width by a pixel otherwise. The two switchers match this. */}
+              scope row's five segments (the three scopes plus the fork lens pair)
+              overflow the sidebar's default width by a pixel otherwise. The two
+              switchers match this. */}
           {(["open", "closed"] as const).map((s) => (
             <Button
               key={s}

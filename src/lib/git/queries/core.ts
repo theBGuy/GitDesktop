@@ -85,7 +85,8 @@ export const repoKeys = {
     ["repo", repo, "objects-present", oidsKey] as const,
   // Family PREFIXES for the forge list queries: hooks append their axes onto these
   // and invalidations pass them bare, so a declaration and its invalidations cannot
-  // drift. `scripts/query-key-families.test.mjs` refuses new spellings outside this file.
+  // drift. `scripts/query-key-families.test.mjs` refuses new spellings outside this
+  // file, literal or repoKeys.all-composed.
   prList: (repo: string) => ["repo", repo, "pr-list"] as const,
   prCi: (repo: string) => ["repo", repo, "pr-ci"] as const,
   prMergeability: (repo: string) => ["repo", repo, "pr-mergeability"] as const,

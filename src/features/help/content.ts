@@ -1082,20 +1082,22 @@ them (see *Issues*).
 The list toolbar's **All | Mine | Needs review** switch scopes the list in one click:
 **Mine** is everything assigned to you or awaiting your review, and **Needs review** is
 that same set split by how far you've got with each one. **All** clears the funnel along
-with it, author and label picks included. The **funnel** beside it holds those axes one
-by one (**Assigned to me**, **Review requested: me**, **My teams**) alongside searchable
-**author** and **label** rows, each showing how many of the loaded rows it covers, with
-long lists scrolling inside the popup. On **GitHub** and **GitLab** the filtering happens
-on the server, across the whole repository you're currently viewing. On a very large
-GitLab repository a filter can need more of the list than GitDesktop searches, and the
-list says so rather than guessing. Type any author or label name and the funnel offers to
-filter by exactly that, whether or not the list has shown it. Several picks within one
-group widen the list (any of them matches), while picks in different groups narrow it.
-The **Mine** rows are remembered per repository; author and label picks last for the
-session. **Refresh pull requests**, beside the search box, re-reads the list you're looking
-at along with its checks, conflict chips, review-state grouping and your local pull
-requests; it spins while the read is in flight. *Refresh pull requests* in the command
-palette does the same (palette-only by default — bind a key in **Settings → Keyboard**).
+with it, author and label picks included. The **funnel** at the right end of the row
+above, beside **New**, holds those axes one by one (**Assigned to me**, **Review
+requested: me**, **My teams**) alongside searchable **author** and **label** rows, each
+showing how many of the loaded rows it covers, with long lists scrolling inside the
+popup. On **GitHub** and **GitLab** the filtering happens on the server, across the
+whole repository you're currently viewing. On a very large GitLab repository a filter
+can need more of the list than GitDesktop searches, and the list says so rather than
+guessing. Type any author or label name and the funnel offers to filter by exactly
+that, whether or not the list has shown it. Several picks within one group widen the
+list (any of them matches), while picks in different groups narrow it. The **Mine**
+rows are remembered per repository; author and label picks last for the session.
+**Refresh pull requests**, beside the search box, re-reads the list you're looking at
+along with its checks, conflict chips, review-state grouping and your local pull
+requests; it spins while the forge read is in flight. *Refresh pull requests* in the
+command palette does the same (palette-only by default — bind a key in
+**Settings → Keyboard**).
 While a newly created pull request is still holding its place in the list, the list chases
 the forge on its own for a short spell, so the real row usually arrives without a press.
 
@@ -1744,14 +1746,15 @@ GitLab actions are available.)
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
 milestone, and reactions. An **All | Mine** switch in the toolbar scopes the list to the
 issues **assigned to you** (**All** clears the funnel along with it), and the **funnel**
-beside it is the same popup as the PR list: an **Assigned to me** row over searchable
-author and label rows. On **GitHub** and **GitLab** those axes are applied on the server,
-across the whole repository you're currently viewing — see *Pull requests* for how they
-combine. Both scopes are in the command palette as **Show all issues** and **Filter
-issues: assigned to me**. **Refresh issues**, beside the search box, re-reads the list
-you're looking at along with your local issues and a linked Jira project's list; it spins
-while the read is in flight. *Refresh issues* in the command palette does the same
-(palette-only by default — bind a key in **Settings → Keyboard**).
+at the right end of the row above is the same popup as the PR list: an **Assigned to
+me** row over searchable author and label rows. On **GitHub** and **GitLab** those axes
+are applied on the server, across the whole repository you're currently viewing — see
+*Pull requests* for how they combine. Both scopes are in the command palette as **Show
+all issues** and **Filter issues: assigned to me**. **Refresh issues**, beside the
+search box, re-reads the list you're looking at along with your local issues and a
+linked Jira project's list; it spins while the forge or Jira read is in flight.
+*Refresh issues* in the command palette does the same (palette-only by default — bind a
+key in **Settings → Keyboard**).
 **Create** an issue, comment with the Markdown editor, edit,
 add labels, **close / reopen** (closing asks first; either way your drafted comment posts
 alongside), **lock**, and **transfer** an issue to another repo.

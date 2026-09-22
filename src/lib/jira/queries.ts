@@ -50,9 +50,9 @@ import type {
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 
-/** The family PREFIX for a repo's Jira issue lists: the list query appends its
- *  site/project/state axes onto it and invalidations pass it bare, so the
- *  declaration and its invalidations cannot drift apart. */
+/** The family PREFIX for a repo's Jira issue lists: the list query and the prefix
+ *  invalidations share it, so those can't drift. The segment predicates below still
+ *  compare `queryKey[2]` by hand — a rename has to sweep them too. */
 export const jiraIssuesKey = (repo: string) =>
   ["repo", repo, "jira-issues"] as const;
 

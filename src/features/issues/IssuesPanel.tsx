@@ -491,7 +491,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           // invalidate is idempotent against a read in flight, so a guard would
           // only swallow presses. The spin plus `aria-busy` carry the state, and
           // both arms feed it — on a host with no issue tracker (Bitbucket) the
-          // Jira list is the only read this button makes.
+          // Jira list is the only read that feeds the spin.
           <Button
             variant="outline"
             size="icon-sm"
