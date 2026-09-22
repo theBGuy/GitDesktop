@@ -68,3 +68,9 @@ jobs:
       # job is its one enforced run.
       - name: Reference-detector suite (render oracle enforced)
         run: node --test "scripts/comment-refs.test.mjs"
+
+      # The keyboard-nav suite reaches react through the module under test and
+      # skips in the no-install guards job — this installed job is its one
+      # enforced run.
+      - name: Keyboard-nav suite (react import enforced)
+        run: node --test "scripts/list-keyboard-nav.test.mjs"

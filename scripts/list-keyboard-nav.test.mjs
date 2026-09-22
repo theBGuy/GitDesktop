@@ -7,18 +7,25 @@
 // `node --test "scripts/*.test.mjs"` with no install step. The module under test
 // is the one exception to the static-import shape its siblings use: it
 // value-imports `useState` from react for `useRovingRows`, which an installless
-// run cannot resolve, so the import is dynamic and the suite skips on exactly
-// that failure (ERR_MODULE_NOT_FOUND — measured on node 24). Any other import
-// error rethrows, and every assertion below still fails as itself.
+// run cannot resolve, so the import is dynamic. The skip is bounded on BOTH
+// sides — an unresolved specifier (ERR_MODULE_NOT_FOUND, measured on node 24)
+// AND the module still being on disk, so a moved or renamed module fails loudly
+// instead of skipping forever as "react missing"; every other import error
+// rethrows, and every assertion below still fails as itself. Nothing
+// type-checks this path, so the frontend job's installed step is this suite's
+// one enforced run.
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { describe, test } from "node:test";
+
+const MODULE = new URL("../src/lib/list-keyboard-nav.ts", import.meta.url);
 
 let listKeyboardNav = null;
 let skip = false;
 try {
-  ({ listKeyboardNav } = await import("../src/lib/list-keyboard-nav.ts"));
+  ({ listKeyboardNav } = await import(MODULE.href));
 } catch (err) {
-  if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
+  if (err?.code !== "ERR_MODULE_NOT_FOUND" || !existsSync(MODULE)) throw err;
   skip = "react is not installed — the guards job runs with no install step";
 }
 
