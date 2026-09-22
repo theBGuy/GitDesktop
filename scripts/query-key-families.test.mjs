@@ -24,13 +24,12 @@ const FAMILIES = [
   { name: "issue-list", builder: "repoKeys.issueList" },
 ];
 
-/**
- * Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
- * array literal `["repo", <anything>, "<family>"` is regular, so a regex settles it;
- * the composed form `[...repoKeys.all(repo), "<family>"` is not, because a nested
- * argument (`repoKeys.all(normalizeRepo(repo))`) puts a `)` in the way that no
- * `[^)]*` can cross — that one takes a balanced-paren scan. `\s` covers CRLF in both.
- */
+// Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
+// array literal `["repo", <anything>, "<family>"` is regular, so a regex settles it;
+// the composed form `[...repoKeys.all(repo), "<family>"` is not, because a nested
+// argument (`repoKeys.all(normalizeRepo(repo))`) puts a `)` in the way that no
+// `[^)]*` can cross — that one takes a balanced-paren scan. `\s` covers CRLF in both.
+
 const literalPattern = (family) =>
   new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`);
 
@@ -102,7 +101,7 @@ test("core.ts still declares every family string", () => {
   }
 });
 
-test("no file outside core.ts spells a list family as an array literal", () => {
+test("no file outside core.ts spells a list family", () => {
   const offenders = [];
   let scanned = 0;
   for (const file of sourceFiles(SRC)) {
