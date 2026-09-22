@@ -6,9 +6,13 @@ import type {
   ProjectViewSort,
 } from "@/lib/git/types";
 
-/** A board field that can group a board: one column per option. Narrowed off the
- *  shared union so the column builder can read `options` without re-testing. */
-export type GroupField = Extract<ProjectFieldDef, { kind: "singleSelect" }>;
+/** A board field that can group a board: one column per option, or per iteration.
+ *  Narrowed off the shared union so the column builder can read each kind's own
+ *  bucket list without re-testing the rest of it. */
+export type GroupField = Extract<
+  ProjectFieldDef,
+  { kind: "singleSelect" | "iteration" }
+>;
 
 export interface BoardColumnModel {
   /** React key and the column's identity for the roving tab stop. */
@@ -21,11 +25,14 @@ export interface BoardColumnModel {
   items: BoardItem[];
 }
 
-/** The single-select fields a board can be grouped by, in the board's own field
- *  order. Issue fields (GitHub's own single-selects, which this build can't
- *  write) group just as well as board-defined ones, so they stay in. */
+/** The fields a board can be grouped by, in the board's own field order: its
+ *  single-selects and its iteration fields. Issue fields (GitHub's own
+ *  single-selects, which this build can't write) group just as well as
+ *  board-defined ones, so they stay in. */
 export function groupableFields(fields: ProjectFieldDef[]): GroupField[] {
-  return fields.filter((f): f is GroupField => f.kind === "singleSelect");
+  return fields.filter(
+    (f): f is GroupField => f.kind === "singleSelect" || f.kind === "iteration",
+  );
 }
 
 /** The catch-all column's id. Not an option id — it stands for the ABSENCE of a
@@ -57,51 +64,126 @@ export const TRUNCATED_ORDER_REASON =
  *  register: the row hints, the announcement explains. */
 export const TRUNCATED_ROW_REASON = "load more first";
 
-/** The option a board item sits under for `field`, or null when the field is
- *  unset on it. Matched on `optionId`, never the name: options are renamable.
- *  Exported so a surface acting on the VALUE reads it the same way the bucketing
- *  does — the catch-all holds unset cards AND cards whose stored option the field
- *  no longer defines, so a column is not a value. */
-export function optionIdFor(item: BoardItem, field: GroupField): string | null {
+/** Why a card's placement and content rows are held while it is ARCHIVED: an
+ *  archived card sits in no column and in none of the board's position order, so
+ *  every write addressing either has nothing to address. Shared by the menu's held
+ *  rows and the keyboard route's announcement, for the reason
+ *  {@link CARD_WRITE_REASON} lives here — one copy the two surfaces can't drift. */
+export const ARCHIVED_CARD_REASON = "Restore this card to change it";
+
+/** Why NO card can be repositioned while archived cards are drawn: GitHub refuses
+ *  an archived item as a position anchor, so a card's drawn neighbour is not
+ *  necessarily one a write may land it after. Naming the control that clears it,
+ *  since the state is the user's own toggle rather than the board's. */
+export const ARCHIVED_SHOWN_REASON =
+  "Turn off Show archived cards to reposition";
+
+/** The bucket a board item sits in for `field`, or null when the field is unset on
+ *  it: a single-select's `optionId`, an iteration field's `iterationId`. Matched on
+ *  the id, never the name — options are renamable and an iteration's title and dates
+ *  are editable on the board. Exported so a surface acting on the VALUE reads it the
+ *  same way the bucketing does — the catch-all holds unset cards AND cards whose
+ *  stored id the field no longer defines, so a column is not a value. */
+export function bucketIdFor(item: BoardItem, field: GroupField): string | null {
   for (const value of item.fieldValues) {
-    if (value.kind === "singleSelect" && value.fieldId === field.id)
+    if (
+      field.kind === "singleSelect" &&
+      value.kind === "singleSelect" &&
+      value.fieldId === field.id
+    )
       return value.optionId;
+    if (
+      field.kind === "iteration" &&
+      value.kind === "iteration" &&
+      value.fieldId === field.id
+    )
+      return value.iterationId;
   }
   return null;
 }
 
+/** One column the grouping field defines, before any card lands in it.
+ *  `droppable` marks a bucket that is only drawn once something is in it. */
+interface GroupBucket {
+  id: string;
+  label: string;
+  color: string | null;
+  droppable: boolean;
+}
+
 /**
- * The board's columns: one per option of `field` in the field's own order, then
- * a trailing catch-all for the items that don't carry it — including any whose
- * stored option the field no longer defines, which would otherwise vanish from a
- * board that still holds them. With no `field` the whole board is one column.
+ * The buckets `field` defines, in the order the board draws them.
  *
- * ARCHIVED items are dropped here rather than at the call site, so the column
- * counts, the board's own total, and the keyboard walk can't disagree about what
- * the board contains.
+ * A single-select offers its options. An iteration field offers its CURRENT and
+ * upcoming iterations always, empty ones included — a board grouped by iteration is
+ * there to show what the next ones hold — then its COMPLETED iterations only where
+ * they still hold a card: a long-running project accumulates dozens of finished
+ * iterations, and drawing every empty one would bury the columns that matter. The
+ * deliberate consequence is that "Move to" can't target an undrawn empty completed
+ * iteration; the field editor on an issue or pull request still assigns into one.
+ */
+function groupBuckets(field: GroupField): GroupBucket[] {
+  if (field.kind === "singleSelect")
+    return field.options.map((option) => ({
+      id: option.id,
+      label: option.name,
+      color: option.color,
+      droppable: false,
+    }));
+  // No colour on any iteration column: GitHub gives iterations none, and the header
+  // and the menu rows both take the null arm for exactly that.
+  return [
+    ...field.iterations.map((iteration) => ({
+      id: iteration.id,
+      label: iteration.title,
+      color: null,
+      droppable: false,
+    })),
+    ...field.completedIterations.map((iteration) => ({
+      id: iteration.id,
+      label: iteration.title,
+      color: null,
+      droppable: true,
+    })),
+  ];
+}
+
+/**
+ * The board's columns: one per bucket of `field` in the field's own order, then a
+ * trailing catch-all for the items that don't carry it — including any whose stored
+ * id the field no longer defines, which would otherwise vanish from a board that
+ * still holds them. With no `field` the whole board is one column.
+ *
+ * ARCHIVED items are the CALLER's one decision — the View options toggle — and it is
+ * made here rather than at the call site so the column counts, the keyboard walk and
+ * the card menu can't disagree about what the board contains.
  */
 export function buildColumns(
   items: BoardItem[],
   field: GroupField | null,
+  includeArchived: boolean,
 ): BoardColumnModel[] {
-  const live = items.filter((item) => !item.isArchived);
+  const drawn = includeArchived
+    ? items
+    : items.filter((item) => !item.isArchived);
   if (field === null)
-    return [{ id: "all", label: "All items", color: null, items: live }];
-  const byOption = new Map<string, BoardItem[]>();
-  for (const option of field.options) byOption.set(option.id, []);
+    return [{ id: "all", label: "All items", color: null, items: drawn }];
+  const buckets = groupBuckets(field);
+  const byBucket = new Map<string, BoardItem[]>();
+  for (const bucket of buckets) byBucket.set(bucket.id, []);
   const unset: BoardItem[] = [];
-  for (const item of live) {
-    const optionId = optionIdFor(item, field);
-    const bucket = optionId === null ? undefined : byOption.get(optionId);
-    (bucket ?? unset).push(item);
+  for (const item of drawn) {
+    const id = bucketIdFor(item, field);
+    const into = id === null ? undefined : byBucket.get(id);
+    (into ?? unset).push(item);
   }
   return [
-    ...field.options.map((option) => ({
-      id: option.id,
-      label: option.name,
-      color: option.color,
-      items: byOption.get(option.id) ?? [],
-    })),
+    // A droppable bucket is dropped only when EMPTY, so no card is ever bucketed
+    // into a column the board then declines to draw.
+    ...buckets
+      .map((bucket) => ({ ...bucket, items: byBucket.get(bucket.id) ?? [] }))
+      .filter((column) => !column.droppable || column.items.length > 0)
+      .map(({ droppable: _droppable, ...column }) => column),
     {
       id: UNSET_COLUMN_ID,
       label: `No ${field.name}`,

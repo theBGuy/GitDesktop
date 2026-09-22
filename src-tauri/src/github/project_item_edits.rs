@@ -56,9 +56,10 @@ const SEARCH_QUERY: &str = "query($q:String!){ search(query:$q, type: ISSUE_ADVA
 const REPOSITORY_QUERY: &str =
     "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ id } }";
 const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ id } } }";
-// Conversion, archive, and removal address PVTI_ item ids; updates take DI_ content ids.
-// Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_ ids.
+// Conversion, archive, unarchive, and removal address PVTI_ item ids; updates take DI_
+// content ids. Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_.
 const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
+const UNARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ unarchiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
 const POSITION_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!,$afterId:ID){ updateProjectV2ItemPosition(input:{projectId:$projectId,itemId:$itemId,afterId:$afterId}){ items(first:100){ pageInfo{hasNextPage} nodes{id} } } }";
 
@@ -71,6 +72,7 @@ const ADD_ITEM_POINTER: &str = "/data/addProjectV2ItemById/item";
 const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item";
 const UPDATE_DRAFT_POINTER: &str = "/data/updateProjectV2DraftIssue/draftIssue";
 const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
+const UNARCHIVE_POINTER: &str = "/data/unarchiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
 const ORDER_POINTER: &str = "/data/updateProjectV2ItemPosition/items";
 
@@ -497,6 +499,22 @@ pub async fn gh_archive_board_item(
         .await
         .map_err(map_scope_error)?;
     require_payload(&value, ARCHIVE_POINTER, "the archived project item")
+}
+
+#[tauri::command]
+pub async fn gh_unarchive_board_item(
+    repo_path: String,
+    project_id: String,
+    item_id: String,
+) -> AppResult<()> {
+    let input = graphql_input(
+        UNARCHIVE_MUTATION,
+        json!({"projectId": project_id, "itemId": item_id}),
+    );
+    let value = request(&repo_path, &input, "the unarchived project item")
+        .await
+        .map_err(map_scope_error)?;
+    require_payload(&value, UNARCHIVE_POINTER, "the unarchived project item")
 }
 
 #[tauri::command]
@@ -1204,9 +1222,13 @@ mod tests {
     }
 
     #[test]
-    fn archive_and_remove_require_mutation_payloads() {
-        let value = json!({"data":{"archiveProjectV2Item":{"item":{"id":"PVTI_one"}},"deleteProjectV2Item":{"deletedItemId":"PVTI_one"}}});
-        for pointer in [ARCHIVE_POINTER, REMOVE_POINTER] {
+    fn archive_unarchive_and_remove_require_mutation_payloads() {
+        let value = json!({"data":{
+            "archiveProjectV2Item":{"item":{"id":"PVTI_one"}},
+            "unarchiveProjectV2Item":{"item":{"id":"PVTI_one"}},
+            "deleteProjectV2Item":{"deletedItemId":"PVTI_one"}
+        }});
+        for pointer in [ARCHIVE_POINTER, UNARCHIVE_POINTER, REMOVE_POINTER] {
             assert!(require_payload(&value, pointer, "the project item").is_ok());
             assert!(require_payload(&Value::Null, pointer, "the project item").is_err());
         }

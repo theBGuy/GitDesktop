@@ -61,6 +61,7 @@ import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   consumeLastFailed,
+  laneBlocks,
   markPrCreated,
   type PrCreate,
   prCreatePhase,
@@ -416,6 +417,8 @@ export function CreatePrDialog({
         toast.error(refusal);
         return;
       }
+      // Captured before any await, so the `finally` arms exactly this claim.
+      const claimedAt = prCreateStartedAt(repoPath, value.head);
       let outcome: "success" | "error" = "error";
       // Hoisted so the `finally` can arm the hand-off for a PR that exists even
       // when a step after it threw.
@@ -591,8 +594,8 @@ export function CreatePrDialog({
         // arms only once this flow's last step is done — armed at the forge's
         // answer, a fast list refetch could settle it mid-continuation and a
         // remounted dialog would re-arm Create over a PR that already exists.
-        // Armed with the entry's OWN startedAt: a fresh clock read would let
-        // this watcher settle a later create that re-claimed the head.
+        // Armed with the stamp captured at claim time: a stale one only yields a
+        // watcher that no-ops and reaps itself, which is the designed outcome.
         if (outcome === "error") {
           // "error" latches to protect the retained draft, so it has to still
           // have one: a seed for another repo, or this mount moving on to
@@ -607,16 +610,14 @@ export function CreatePrDialog({
             value.head,
             draftAlive ? "error" : "release",
           );
-        } else if (created) {
-          const startedAt = prCreateStartedAt(repoPath, value.head);
-          if (startedAt !== null)
-            armPrCreateHandOff(queryClient, {
-              repoPath,
-              head: value.head,
-              lens: createLens,
-              number: created.number,
-              startedAt,
-            });
+        } else if (created && claimedAt !== null) {
+          armPrCreateHandOff(queryClient, {
+            repoPath,
+            head: value.head,
+            lens: createLens,
+            number: created.number,
+            startedAt: claimedAt,
+          });
         }
       }
     },
@@ -718,10 +719,13 @@ export function CreatePrDialog({
     ? `Creating the ${prNoun} — the target is locked until it finishes.`
     : null;
   // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
-  // mid-flight still owns the head branch until it settles, which is now the
-  // whole catch-up window after the forge answers. The entry, not just a
-  // boolean, so the hint below can name the number it already has.
-  const lane = usePrCreates(repoPath).find((c) => c.head === head);
+  // mid-flight still owns the head branch through the catch-up window after the
+  // forge answers. Filtered to BLOCKING lanes: an entry whose guard has been
+  // released refuses nothing and only holds the list's spot. The entry, not
+  // just a boolean, so the hint below can name the number it already has.
+  const lane = usePrCreates(repoPath).find(
+    (c) => c.head === head && laneBlocks(c),
+  );
   // The RE-ENTRY case only. This submit claims the lane synchronously, so the
   // flag is also true during the user's own create — which `isSubmitting`
   // already covers, and where a "someone else is creating this" refusal would

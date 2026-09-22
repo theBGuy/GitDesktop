@@ -24,6 +24,7 @@ import type {
   ProjectFieldValue,
   ProjectFieldValueUpdate,
   ProjectItemRemove,
+  ProjectIterationDef,
   ProjectV2Ref,
   RemoteLens,
 } from "../types";
@@ -244,11 +245,62 @@ export function useProjectFields(
 const projectItemsFamilyKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-items", projectId] as const;
 
+/** `archived` is an identity axis for the same reason `query` is: asking for both
+ *  archived states is a DIFFERENT set of items, with its own `totalCount`. It sits
+ *  past the board in the key, so the family above still prefixes over it — a write
+ *  that patches every cached lens reaches both states without knowing about them. */
 const projectItemsKey = (
   repo: string,
   projectId: string,
   query: string | null,
-) => [...projectItemsFamilyKey(repo, projectId), query] as const;
+  archived: boolean,
+) => [...projectItemsFamilyKey(repo, projectId), query, archived] as const;
+
+/** Whether a cached board key is the archived-INCLUSIVE lens. Read off the key
+ *  rather than passed in: one write patches every cached lens of a board at once,
+ *  and what the right patch IS differs between a lens that draws archived cards and
+ *  one that doesn't. The axis is {@link projectItemsKey}'s last element. */
+function keyShowsArchived(key: QueryKey): boolean {
+  return key.at(-1) === true;
+}
+
+/**
+ * Whether a cached board key is the UNFILTERED read — the `query` axis, which sits
+ * one before the archived one in {@link projectItemsKey}.
+ *
+ * The BOUNDED-COUNTS line, and the first of two local tests. A patch may move a
+ * lens's `totalCount` only where it can decide that the figure held the card: an
+ * unfiltered read is decidable, a FILTERED one never is, since whether a view's
+ * filter matches is the server's answer and the filter rides to it verbatim. The
+ * other test is the CARD's state, which no key carries (`wasArchived` on
+ * {@link BoardItemRemoval}); a writer that fires on one state only has it constant.
+ * Untouched beats guessed: a count this layer leaves alone is at most one read
+ * stale, where a guess compounds across repeated writes.
+ */
+function keyIsUnfiltered(key: QueryKey): boolean {
+  return key.at(-2) === null;
+}
+
+/** `data` with the LAST loaded page's `totalCount` moved by `delta` — the last page
+ *  because that is the figure the board reads, and the slot {@link appendBoardItem}
+ *  already bumps. Clamped at zero: a count is never negative however the cache and
+ *  the server disagree. A cache with no pages has no figure to move. */
+function withBoardCount(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  delta: number,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined || delta === 0) return data;
+  const last = data.pages.length - 1;
+  if (last < 0) return data;
+  return {
+    ...data,
+    pages: data.pages.map((page, i) =>
+      i === last
+        ? { ...page, totalCount: Math.max(0, page.totalCount + delta) }
+        : page,
+    ),
+  };
+}
 
 /** One board's saved views. Repo + board and no account axis, the family contract
  *  {@link projectItemsKey} states. */
@@ -264,6 +316,9 @@ export type BoardWriteKind =
   | "reorder"
   | "convert"
   | "archive"
+  /** An archived card put back on the board — the archive's reversal, which changes
+   *  the card in place rather than taking it off. */
+  | "restore"
   | "remove"
   | "add-existing"
   | "add-draft"
@@ -484,24 +539,74 @@ function markProjectBoardsStale(queryClient: QueryClient, repo: string): void {
  * `patchKey` because {@link invalidateProjectBoards}'s deferred branch cancels that
  * wide and cannot restart either, and the last write out of a burst may now be one of
  * these rather than a refetching one.
+ *
+ * The restart runs in BOTH stale modes, and is the only rescue in the
+ * `markStale: false` one, where a read cancelled with nothing has no mark of its own
+ * to reconcile on.
  */
 function writeThroughBoards(
   queryClient: QueryClient,
   repo: string,
   patchKey: QueryKey,
+  /** The patch, per cached lens. `key` is that lens's own key, for a write whose
+   *  right answer differs by what the lens SHOWS — `setQueryData` hands an updater
+   *  the previous data alone, so the key is closed over below rather than passed
+   *  through it. A caller whose patch is the same everywhere just ignores it. */
   patch: (
     data: InfiniteData<BoardItems, string | null> | undefined,
+    key: QueryKey,
   ) => InfiniteData<BoardItems, string | null> | undefined,
+  /**
+   * Whether the patched boards still owe a re-read. TRUE where the answer is
+   * PARTIAL — a minted card says nothing about the rest of the board.
+   *
+   * FALSE shields only the lenses the payload DETERMINES: it keeps every mark ANY
+   * code laid before or during this write, lays none of its own on UNFILTERED keys,
+   * and marks FILTERED ones, whose membership only a server read can settle. A lens
+   * carrying an earlier write's debt keeps it and re-inherits the in-window refetch
+   * that implies — the earlier correction wins over this patch's freshness.
+   */
+  markStale = true,
+  /** Keys seen invalidated BEFORE this write started clearing marks. A caller with
+   *  an optimistic `onMutate` has already erased its own evidence by settle time —
+   *  `setQueryData` clears `isInvalidated` — so it captures the debt there and hands
+   *  it here. Read by the shield arm alone; duplicates are harmless, since
+   *  `Query.invalidate()` no-ops on an already-invalidated query. */
+  owedMarks: readonly QueryKey[] = [],
 ): void {
   void queryClient.cancelQueries({ queryKey: patchKey }).then(() => {
-    for (const [key] of queryClient.getQueriesData<
-      InfiniteData<BoardItems, string | null>
-    >({ queryKey: patchKey }))
+    const keys = queryClient
+      .getQueriesData<InfiniteData<BoardItems, string | null>>({
+        queryKey: patchKey,
+      })
+      .map(([key]) => key);
+    // Three reasons a key still owes a read under the shield: it is FILTERED, where
+    // the payload cannot settle membership at all — only the server knows whether
+    // that view keeps the card; a mark landed between mutate and settle; or the
+    // caller saw one before its own `onMutate` cleared it. The middle test is read
+    // BEFORE the patch, which would clear it too.
+    const toMark = markStale
+      ? []
+      : [
+          ...owedMarks,
+          ...keys.filter(
+            (key) =>
+              !keyIsUnfiltered(key) ||
+              queryClient.getQueryState(key)?.isInvalidated === true,
+          ),
+        ];
+    for (const key of keys)
       queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
         key,
-        patch,
+        (data) => patch(data, key),
       );
-    markProjectBoardsStale(queryClient, repo);
+    if (markStale) markProjectBoardsStale(queryClient, repo);
+    for (const queryKey of toMark)
+      void queryClient.invalidateQueries({
+        queryKey,
+        exact: true,
+        refetchType: "none",
+      });
     void queryClient.refetchQueries({
       queryKey: projectItemsRepoKey(repo),
       // `active` is query-core's "some observer has `enabled !== false`", so a board
@@ -513,37 +618,40 @@ function writeThroughBoards(
   });
 }
 
-/** One board's items under one LENS, paged. Keyed on the board and the saved
- *  view's filter — a board is the same object whichever remote reached it, but a
- *  filtered read is a different set of items — and `retry: false` for the same
- *  reason the rest of the Projects family uses it: the common failure is a
- *  missing `project` scope, which no retry fixes. The backend auto-pages, so a
- *  page here is up to 500 items and `truncated` drives "Load more" rather than an
- *  automatic walk to the end of a 5,000-item board.
+/** One board's items under one LENS, paged. Keyed on the board, the saved view's
+ *  filter and the archived toggle: a board is the same object whichever remote
+ *  reached it, but each filter and each archived state answers with a different set
+ *  of items and its own `totalCount`. `retry: false` for the same reason the rest of
+ *  the Projects family uses it: the common failure is a missing `project` scope,
+ *  which no retry fixes. The backend auto-pages, so a page here is up to 500 items
+ *  and `truncated` drives "Load more" rather than an automatic walk to the end of a
+ *  5,000-item board.
  *
- *  `query` rides to the server verbatim; null is the unfiltered board. Switching
- *  lenses keeps the previous one's cards on screen (the axes below), so callers
- *  gate every claim they DERIVE from the data — a count, a page control — on
- *  `!isPlaceholderData`. */
+ *  `query` rides to the server verbatim; null is the unfiltered board.
+ *  `includeArchived` asks for both archived states rather than the default read's
+ *  live items alone. Switching lenses keeps the previous one's cards on screen (the
+ *  placeholder axes below), so callers gate every claim they DERIVE from the data —
+ *  a count, a page control — on `!isPlaceholderData`. */
 export function useProjectItems(
   repo: string,
   projectId: string,
   query: string | null,
   enabled: boolean,
+  includeArchived: boolean,
 ) {
   return useInfiniteQuery({
-    queryKey: projectItemsKey(repo, projectId, query),
+    queryKey: projectItemsKey(repo, projectId, query, includeArchived),
     queryFn: ({ pageParam }) =>
-      api.ghProjectItems(repo, projectId, pageParam, query),
+      api.ghProjectItems(repo, projectId, pageParam, query, includeArchived),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.truncated ? last.endCursor : null),
     enabled,
     staleTime: 60_000,
     retry: false,
-    // The board is an axis (index 3 in the key literal above); the LENS at index
-    // 4 deliberately is not. Switching views keeps the previous lens's cards on
-    // screen while the filtered read lands, where switching BOARDS must never
-    // show the other board's.
+    // The board is a placeholder axis (index 3 in the key literal above); the filter
+    // at index 4 and the archived state at index 5 deliberately are not. Switching
+    // views, or showing archived cards, keeps the previous lens's cards on screen
+    // while the new read lands, where switching BOARDS must never show another's.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, projectId]]),
   });
 }
@@ -565,37 +673,78 @@ export function useProjectViews(
   });
 }
 
-/** The board field a move writes: the single-select arm alone, since only that
- *  kind makes columns. */
-type BoardGroupField = Extract<ProjectFieldDef, { kind: "singleSelect" }>;
+/** The board fields a move writes: the kinds that make columns. */
+type BoardGroupField = Extract<
+  ProjectFieldDef,
+  { kind: "singleSelect" | "iteration" }
+>;
 
-/** The moved item's field values with `field` set to `option`, or dropped when
- *  `option` is null — the clear. Replaced IN PLACE where an entry already exists
- *  so the rail's line order survives a move. */
+/** Where a move sends a card, per grouping kind — or null for the board's
+ *  "No {field}" column, which stands for the ABSENCE of a value and so clears the
+ *  field rather than setting it. */
+export type BoardMoveBucket =
+  | { kind: "option"; option: ProjectFieldOptionDef }
+  | { kind: "iteration"; iteration: ProjectIterationDef }
+  | null;
+
+/** `bucket` as the value the card will read as once the write lands. */
+function groupValue(
+  field: BoardGroupField,
+  bucket: NonNullable<BoardMoveBucket>,
+): ProjectFieldValue {
+  // Iteration field definitions carry no `isIssueField` at all: GitHub has no
+  // org-level iteration field, so an iteration value is always the board's own.
+  const isIssueField = field.kind === "iteration" ? false : field.isIssueField;
+  if (bucket.kind === "option")
+    return {
+      kind: "singleSelect",
+      fieldId: field.id,
+      fieldName: field.name,
+      optionId: bucket.option.id,
+      name: bucket.option.name,
+      color: bucket.option.color,
+      isIssueField,
+    };
+  return {
+    kind: "iteration",
+    fieldId: field.id,
+    fieldName: field.name,
+    iterationId: bucket.iteration.id,
+    title: bucket.iteration.title,
+    startDate: bucket.iteration.startDate,
+    duration: bucket.iteration.duration,
+    isIssueField,
+  };
+}
+
+/** `bucket` as the wire's set list: one update, or none at all for the clear —
+ *  which rides the write's separate `clears` list, no update shape expressing it. */
+function moveUpdates(
+  fieldId: string,
+  bucket: BoardMoveBucket,
+): ProjectFieldValueUpdate[] {
+  if (bucket === null) return [];
+  if (bucket.kind === "option")
+    return [{ kind: "singleSelect", fieldId, optionId: bucket.option.id }];
+  return [{ kind: "iteration", fieldId, iterationId: bucket.iteration.id }];
+}
+
+/** The moved item's field values with `field` set to `bucket`, or dropped when
+ *  `bucket` is null — the clear. Replaced IN PLACE where an entry already exists so
+ *  the rail's line order survives a move. Matched on the FIELD ID alone: one field
+ *  holds one value, whatever kind the cached copy of it was read as. */
 function withGroupValue(
   values: ProjectFieldValue[],
   field: BoardGroupField,
-  option: ProjectFieldOptionDef | null,
+  bucket: BoardMoveBucket,
 ): ProjectFieldValue[] {
-  const next: ProjectFieldValue | null =
-    option === null
-      ? null
-      : {
-          kind: "singleSelect",
-          fieldId: field.id,
-          fieldName: field.name,
-          optionId: option.id,
-          name: option.name,
-          color: option.color,
-          isIssueField: field.isIssueField,
-        };
-  const held = values.some(
-    (value) => value.kind === "singleSelect" && value.fieldId === field.id,
-  );
+  const next = bucket === null ? null : groupValue(field, bucket);
+  const isField = (value: ProjectFieldValue) =>
+    "fieldId" in value && value.fieldId === field.id;
+  const held = values.some(isField);
   if (!held) return next === null ? values : [...values, next];
   return values.flatMap((value) => {
-    if (value.kind !== "singleSelect" || value.fieldId !== field.id)
-      return [value];
+    if (!isField(value)) return [value];
     return next === null ? [] : [next];
   });
 }
@@ -622,18 +771,47 @@ function patchBoardItem(
   };
 }
 
-/** One new item appended to the LAST loaded page, which is where the board itself
- *  puts it: the pages are in the board's own position order, and a fresh item lands
- *  at the end of it. Never twice — a refetch that already carried the card wins, and
- *  a second copy would be a card the menu and the move path can both target.
+/** One item's ARCHIVED flag flipped across every cached page — the patch for a write
+ *  that changes whether a card is archived rather than what it holds, which is why it
+ *  sits beside {@link patchBoardItem} rather than reusing it (that one replaces field
+ *  values and nothing else). Pages that don't hold the card keep their identity, so no
+ *  column re-renders for a card it doesn't draw. */
+function patchBoardItemArchived(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+  isArchived: boolean,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  return {
+    ...data,
+    pages: data.pages.map((page) =>
+      page.items.some((item) => item.itemId === itemId)
+        ? {
+            ...page,
+            items: page.items.map((item) =>
+              item.itemId === itemId ? { ...item, isArchived } : item,
+            ),
+          }
+        : page,
+    ),
+  };
+}
+
+/** One item appended to the LAST loaded page, which is where the board puts a MINTED
+ *  card: the pages are in position order. For a REJOINING one (a restore) that slot
+ *  only approximates the position it always held, which no cache can say. Never
+ *  twice — a second copy would be a card the menu and the move path can both target —
+ *  and that guard is what lets a caller compose this after a patch without testing
+ *  which of the two applies.
  *
- *  `totalCount` moves with the insert, unlike {@link dropBoardItem}'s deliberate
- *  refusal to touch it: the figure counts ARCHIVED items too, so an archive really
- *  doesn't change it where an add really does. A cache with no pages is left alone —
- *  there is no board drawn to append to. */
+ *  `totalCount` moves only when `countsIt` says this lens's figure excluded the item
+ *  until now, which is unknowable under a filter. The flag lives here rather than at
+ *  the call site because only this function knows whether the insert happened. A
+ *  cache with no pages has no board to append to. */
 function appendBoardItem(
   data: InfiniteData<BoardItems, string | null> | undefined,
   item: BoardItem,
+  countsIt = true,
 ): InfiniteData<BoardItems, string | null> | undefined {
   if (data === undefined) return undefined;
   const last = data.pages.length - 1;
@@ -649,7 +827,7 @@ function appendBoardItem(
         ? {
             ...page,
             items: [...page.items, item],
-            totalCount: page.totalCount + 1,
+            totalCount: countsIt ? page.totalCount + 1 : page.totalCount,
           }
         : page,
     ),
@@ -712,11 +890,10 @@ function patchDraftContent(
 }
 
 /** Where one item sits in a board's cached pages, plus the item itself — what a
- *  removal has to remember to be able to put it back exactly where it was. The
- *  `key` is the LENS this record belongs to: one removal patches every cached lens
- *  of the board, and each needs its own place. */
+ *  removal has to remember to be able to put it back exactly where it was. One
+ *  removal patches every cached lens of the board and each needs its own record; the
+ *  LENS it belongs to rides the undo entry that carries this. */
 interface RemovedBoardItem {
-  key: QueryKey;
   pageIndex: number;
   itemIndex: number;
   item: BoardItem;
@@ -738,9 +915,16 @@ function findBoardItem(
 
 /** One item dropped from every cached page, leaving every OTHER item and every page
  *  the caller never read exactly as they are — {@link patchBoardItem}'s rule, for
- *  the other kind of write. `totalCount` is deliberately untouched: it is the
- *  board's own figure and COUNTS ARCHIVED ITEMS, so an archive must not move it and
- *  a removal's correction rides the settle refetch rather than a guess made here. */
+ *  the other kind of write.
+ *
+ *  `totalCount` is untouched HERE, and the caller decides: each lens's figure matches
+ *  its OWN filter (measured 2026-09-21), so what a drop means for it is a question
+ *  about the KEY rather than about these pages. The removal loop composes
+ *  {@link withBoardCount} over this for the keys where that question has a local
+ *  answer, and leaves the figure alone on the rest, where it still rides an ordinary
+ *  read. Composing rather than flagging is right for this direction precisely because
+ *  the decrement is key-driven, not presence-driven: an unfiltered live-only lens
+ *  loses the card from its count whether or not these pages had loaded it. */
 function dropBoardItem(
   data: InfiniteData<BoardItems, string | null> | undefined,
   itemId: string,
@@ -813,36 +997,38 @@ export function useMoveBoardCard() {
       /** The membership's item id on `projectId` — what the write addresses. */
       itemId: string;
       field: BoardGroupField;
-      /** The column's option, or null for the board's "No {field}" column. */
-      option: ProjectFieldOptionDef | null;
+      /** The column's bucket, or null for the board's "No {field}" column. */
+      bucket: BoardMoveBucket;
       /** The lens the board was showing when the move was fired — the cache this
        *  write patches and rolls back. Switching views mid-flight is safe because
        *  `onMutate` pins the key into the context the settle handlers read, not
        *  because anything cancels the write. */
       query: string | null;
+      /** Whether that lens was drawing archived cards — the other half of the key,
+       *  for the reason `query` is a variable rather than a render read. */
+      archived: boolean;
     }) =>
       trackBoardWrite(args.repo, () =>
         api.ghSetItemFieldValues(
           args.repo,
           args.projectId,
           args.itemId,
-          args.option === null
-            ? []
-            : [
-                {
-                  kind: "singleSelect",
-                  fieldId: args.field.id,
-                  optionId: args.option.id,
-                },
-              ],
-          args.option === null ? [args.field.id] : [],
+          // The wire takes the field id and the bucket's own id, so the field's
+          // KIND never enters here — a mismatched pair is unrepresentable.
+          moveUpdates(args.field.id, args.bucket),
+          args.bucket === null ? [args.field.id] : [],
         ),
       ),
     onMutate: async (args) => {
       // Derived from the variables, like every other target here: `onMutate` runs
       // before the pause so its own scope is safe, but one source of truth for
       // WHERE the write lands is what keeps the settle handlers honest.
-      const key = projectItemsKey(args.repo, args.projectId, args.query);
+      const key = projectItemsKey(
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+      );
       const railKey = itemFieldValuesFamilyKey(args.repo);
       await queryClient.cancelQueries({ queryKey: key });
       // The one card's values, not the whole tree: that is all the rollback needs,
@@ -858,7 +1044,7 @@ export function useMoveBoardCard() {
             patchBoardItem(
               data,
               args.itemId,
-              withGroupValue(before, args.field, args.option),
+              withGroupValue(before, args.field, args.bucket),
             ),
         );
       // The settle handlers read these, never their own scope: they too run on the
@@ -897,9 +1083,9 @@ export function useMoveBoardCard() {
 
 /**
  * The reposition writes between their request and their answer, keyed by the CACHE
- * each one chases: repo, board, lens and card together. Module scope for the reason
- * {@link pendingBoardWrites} is — the serializer has to hold across renders and
- * across the hook instance.
+ * each one chases: repo, board, lens (filter and archived state both) and card
+ * together. Module scope for the reason {@link pendingBoardWrites} is — the
+ * serializer has to hold across renders and across the hook instance.
  *
  * This keys the FOLD-vs-RUN decision only (repo + board + lens + card): the chase
  * re-reads ONE lens's cache, so a press made under a different saved view (or a
@@ -919,8 +1105,16 @@ const reorderFoldKey = (args: {
   repo: string;
   projectId: string;
   query: string | null;
+  archived: boolean;
   itemId: string;
-}) => JSON.stringify([args.repo, args.projectId, args.query, args.itemId]);
+}) =>
+  JSON.stringify([
+    args.repo,
+    args.projectId,
+    args.query,
+    args.archived,
+    args.itemId,
+  ]);
 
 /**
  * How many reposition writes are in flight against each BOARD, keyed
@@ -1005,6 +1199,11 @@ export function useReorderBoardCard() {
       /** The lens the board was showing when the press landed — the cache this
        *  write patches, rolls back, and re-reads the card's place from. */
       query: string | null;
+      /** Whether that lens was drawing archived cards — the other half of the key.
+       *  The board holds every reposition while they are shown (an archived card is
+       *  not a legal position anchor), so this is false in practice; it rides the
+       *  variables anyway, since the key is built from them and nothing else. */
+      archived: boolean;
     }): Promise<ReorderOutcome> => {
       const fold = reorderFoldKey(args);
       // Folded into the write already chasing THIS cache: its own loop below picks
@@ -1017,7 +1216,12 @@ export function useReorderBoardCard() {
       const boardKey = reorderBoardKey(args);
       reorderingBoards.set(boardKey, (reorderingBoards.get(boardKey) ?? 0) + 1);
       try {
-        const key = projectItemsKey(args.repo, args.projectId, args.query);
+        const key = projectItemsKey(
+          args.repo,
+          args.projectId,
+          args.query,
+          args.archived,
+        );
         let afterId = args.afterId;
         const write = () =>
           trackBoardWrite(args.repo, () =>
@@ -1107,7 +1311,12 @@ export function useReorderBoardCard() {
     },
     onMutate: async (args) => {
       // Derived from the variables, like every other target here.
-      const key = projectItemsKey(args.repo, args.projectId, args.query);
+      const key = projectItemsKey(
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+      );
       await queryClient.cancelQueries({ queryKey: key });
       const before = boardPredecessorId(
         queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key),
@@ -1343,20 +1552,51 @@ interface BoardItemWrite {
   itemId: string;
 }
 
+/** What the two card-REMOVING writes address. `wasArchived` is the card's state at
+ *  fire time, and it belongs on the variables rather than being read off a cache
+ *  because it is a COUNT axis the key cannot supply: what a removal takes from a
+ *  live-only lens's `totalCount` depends on whether that count ever held the card,
+ *  which is exactly "was it archived". Archived-showing lenses counted it either way,
+ *  so only the live-only arm asks. */
+interface BoardItemRemoval extends BoardItemWrite {
+  wasArchived: boolean;
+}
+
+/** How one cached lens was patched, so the rollback can undo exactly that: the card
+ *  taken out of it, or flipped to archived in place. */
+type BoardItemUndo =
+  | {
+      mode: "drop";
+      key: QueryKey;
+      /** Where the card sat, or null when this lens only ever COUNTED it — a card
+       *  past the loaded pages of a lens whose count still included it. */
+      at: RemovedBoardItem | null;
+      /** Whether the drop took this lens's `totalCount` with it, so the undo knows
+       *  whether to give it back. */
+      counted: boolean;
+    }
+  | { mode: "archive"; key: QueryKey };
+
 /**
- * The shared shape of the two writes that take a card OFF the board, with an
- * optimistic removal of it. The card vanishing is the feedback: the round trip runs
- * seconds, and a board that sits unchanged that long reads as a click gone nowhere.
+ * The shared shape of the two writes that take a card OFF the board's default read,
+ * with an optimistic patch of it. The card visibly changing is the feedback: the
+ * round trip runs seconds, and a board that sits unchanged that long reads as a
+ * click gone nowhere.
  *
  * Every cached LENS of the board is patched, not just the one on screen — a view
  * switched away from holds its own pages of the same item set, and the user can
- * switch back before the settle refetch lands. Cancel comes FIRST, for the reason
+ * switch back before the settle refetch lands. WHAT the patch is differs per lens,
+ * which is why each key is read rather than assumed: an ARCHIVE on a lens that draws
+ * archived cards leaves the card there, dimmed and badged, so flipping the flag is
+ * the truthful patch and dropping it would hide a card that is still shown. Every
+ * other pairing — an archive on the default lens, a removal on any lens — really
+ * does take the card out. Cancel comes FIRST, for the reason
  * {@link invalidateProjectBoards} states: a read already in flight would otherwise
  * resolve over the patch and put the card back.
  *
- * The rollback re-inserts exactly what was taken, at the page and slot it left, onto
- * the CURRENT cache. Never a snapshot of the tree: that would revert a concurrent
- * write to a sibling card and drop a `Load more` page that landed mid-flight.
+ * The rollback undoes each lens the way it was patched, onto the CURRENT cache.
+ * Never a snapshot of the tree: that would revert a concurrent write to a sibling
+ * card and drop a `Load more` page that landed mid-flight.
  *
  * The write TARGET rides the call-time variables, never this hook's scope — the rule
  * {@link useMoveBoardCard} states, and the reason `onSettled` reads `args` rather
@@ -1365,44 +1605,93 @@ interface BoardItemWrite {
  */
 function useBoardItemRemoval(
   kind: Extract<BoardWriteKind, "archive" | "remove">,
-  call: (args: BoardItemWrite) => Promise<void>,
+  call: (args: BoardItemRemoval) => Promise<void>,
   /** Whether this write changes WHICH boards the item is on. An archive doesn't —
-   *  the item stays on the project, restorable from its archived items. */
+   *  the item stays on the project, restorable in place. */
   membership: boolean,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: boardWriteKey(kind),
     mutationFn: call,
-    onMutate: async (args: BoardItemWrite) => {
+    onMutate: async (args: BoardItemRemoval) => {
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey });
-      const removed: RemovedBoardItem[] = [];
+      const undo: BoardItemUndo[] = [];
       for (const [key, data] of queryClient.getQueriesData<
         InfiniteData<BoardItems, string | null>
       >({ queryKey })) {
         const at = findBoardItem(data, args.itemId);
-        if (at === null) continue;
-        removed.push({ key, ...at });
+        // An archive on a lens that DRAWS archived cards leaves the card exactly
+        // where it is, dimmed and badged, and moves no count: that lens counted it
+        // under either state. Nothing loaded means nothing to flip.
+        if (kind === "archive" && keyShowsArchived(key)) {
+          if (at === null) continue;
+          undo.push({ mode: "archive", key });
+          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+            key,
+            (cur) => patchBoardItemArchived(cur, args.itemId, true),
+          );
+          continue;
+        }
+        // Everywhere else the card leaves this lens's ITEMS where they hold it, and
+        // its COUNT where the figure provably held it. The count arm is key-driven,
+        // so it also fires for a card past the loaded pages. An unfiltered LIVE-only
+        // count holds live cards only, so removing an already-archived one takes
+        // nothing more from it; an unfiltered INCLUSIVE count holds every member
+        // whatever its state. The archive arm reduces to the key test — it reaches
+        // here only on live-only keys and only ever fires on a live card — spelled
+        // out rather than left to the branch above.
+        const counted =
+          keyIsUnfiltered(key) &&
+          (kind === "archive"
+            ? !keyShowsArchived(key)
+            : keyShowsArchived(key) || !args.wasArchived);
+        if (at === null && !counted) continue;
+        undo.push({ mode: "drop", key, at, counted });
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           key,
-          (cur) => dropBoardItem(cur, args.itemId),
+          (cur) =>
+            withBoardCount(dropBoardItem(cur, args.itemId), counted ? -1 : 0),
         );
       }
-      return { removed };
+      return { undo };
     },
     // Reporting and rollback live here, not in the caller's `mutate` options: the
     // menu that fires this closes as it does, and react-query drops mutate-scoped
     // callbacks once the observer loses its listeners.
-    onError: (e, _args, ctx) => {
-      for (const at of ctx?.removed ?? []) {
+    onError: (e, args, ctx) => {
+      for (const entry of ctx?.undo ?? []) {
+        if (entry.mode === "archive") {
+          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+            entry.key,
+            (cur) => patchBoardItemArchived(cur, args.itemId, false),
+          );
+          continue;
+        }
+        // Symmetric with the drop above, arm for arm: the card goes back where it
+        // sat when this lens held it, and the count goes back exactly where the
+        // drop took one. A count-only drop has no slot to restore and undoes as the
+        // count alone.
+        const { at, counted } = entry;
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-          at.key,
-          (cur) => restoreBoardItem(cur, at),
+          entry.key,
+          (cur) =>
+            withBoardCount(
+              at === null ? cur : restoreBoardItem(cur, at),
+              counted ? 1 : 0,
+            ),
         );
       }
       toastError(e);
     },
+    // ACCEPTED EDGE: this refetch can land inside GitHub's replica lag (~6s,
+    // measured 2026-09-21) and answer with the pre-write card, then stamp it fresh
+    // for the staleTime. {@link useRestoreBoardItem}'s fresh-patch defence does not
+    // extend here because of the FILTERED lenses: the loop above corrects their
+    // items but never their `totalCount`, which no cache can decide, so this read is
+    // the only thing that reconciles those figures — going fresh-patch would trade a
+    // transient wrong state for a durable wrong number.
     onSettled: (_d, _e, args) => {
       invalidateProjectBoards(queryClient, args.repo);
       if (membership) invalidateItemMemberships(queryClient, args.repo);
@@ -1410,8 +1699,8 @@ function useBoardItemRemoval(
   });
 }
 
-/** Archives one card. Board-only: the item stays on the project (restorable from
- *  its archived items on GitHub), so no membership family is touched. */
+/** Archives one card. Board-only: the item stays on the project, restorable from
+ *  the board itself, so no membership family is touched. */
 export function useArchiveBoardItem() {
   return useBoardItemRemoval(
     "archive",
@@ -1421,6 +1710,116 @@ export function useArchiveBoardItem() {
       ),
     false,
   );
+}
+
+/**
+ * Puts an archived card back on the board — {@link useArchiveBoardItem}'s reversal,
+ * and membership-neutral in the same way, so no membership family is touched here
+ * either.
+ *
+ * The optimistic flip lands on the lenses that draw the card; only archived-showing
+ * ones do. The settle REJOINS it to every populated lens: a flip where the lens holds
+ * it, and on a live-only lens that lacks it, an insert at the end of the loaded
+ * pages, moving `totalCount` on the unfiltered live-only key alone
+ * ({@link keyIsUnfiltered}). An archived-showing lens that lacks it holds it
+ * UNLOADED, so it takes the flip alone.
+ *
+ * It settles through {@link writeThroughBoards} rather than
+ * {@link invalidateProjectBoards} because the payload is transactionally fresh where
+ * a read is not: GitHub's single-state reads lag this write in both directions (~6s,
+ * measured 2026-09-21), so a refetch here can answer with the card still archived or
+ * gone and stamp that fresh for the 60s staleTime. FILTERED lenses are marked anyway,
+ * the payload saying nothing about whether a view keeps the card, and marks an
+ * earlier write laid are captured at `onMutate` — the flip clears `isInvalidated`, so
+ * a settle-time probe would find the debt already gone.
+ *
+ * A FAILED write re-reads as usual — its rollback is a guess at what the board had
+ * rather than a reading of what it has.
+ */
+export function useRestoreBoardItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("restore"),
+    mutationFn: (args: BoardItemWrite) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghUnarchiveBoardItem(args.repo, args.projectId, args.itemId),
+      ),
+    onMutate: async (args) => {
+      const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
+      await queryClient.cancelQueries({ queryKey });
+      const flipped: QueryKey[] = [];
+      // Debts an EARLIER write left, captured HERE rather than at the settle: the flip
+      // below is a `setQueryData` and clears `isInvalidated` on every lens it touches,
+      // so by settle time a mark this write never owned has already vanished. Read per
+      // key before that key's own write, which is the last moment it is still true.
+      const owed: QueryKey[] = [];
+      // The card as it will read once this lands, kept for the settle: the LIVE-ONLY
+      // lenses are the ones that will need it inserted, and by then the only copy of
+      // it left in this repo may be the one taken here. Off the first lens that draws
+      // it: every lens holds the same membership, and a staler snapshot reconciles on
+      // the board's next natural read like anything else.
+      let restored: BoardItem | undefined;
+      for (const [key, data] of queryClient.getQueriesData<
+        InfiniteData<BoardItems, string | null>
+      >({ queryKey })) {
+        if (queryClient.getQueryState(key)?.isInvalidated === true)
+          owed.push(key);
+        const at = findBoardItem(data, args.itemId);
+        if (at === null) continue;
+        restored ??= { ...at.item, isArchived: false };
+        flipped.push(key);
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (cur) => patchBoardItemArchived(cur, args.itemId, false),
+        );
+      }
+      return { flipped, restored, owed };
+    },
+    // Reporting and rollback live here for the reason {@link useBoardItemRemoval}
+    // states: the menu that fires this closes as it does.
+    onError: (e, args, ctx) => {
+      for (const key of ctx?.flipped ?? []) {
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (cur) => patchBoardItemArchived(cur, args.itemId, true),
+        );
+      }
+      toastError(e);
+    },
+    // The success arm is discriminated on the ERROR, never on the result: this write
+    // answers with nothing, so an `undefined` data argument is what success looks
+    // like here — unlike the write-through hooks above, which each answer with a card.
+    // No card in context means no lens drew it when the write fired, so there is
+    // nothing to write through and the re-read is the only honest answer.
+    onSettled: (_d, e, args, ctx) => {
+      const restored = ctx?.restored;
+      if (e !== null || restored === undefined) {
+        invalidateProjectBoards(queryClient, args.repo);
+        return;
+      }
+      writeThroughBoards(
+        queryClient,
+        args.repo,
+        projectItemsFamilyKey(args.repo, args.projectId),
+        // PER-KEY: an archived-showing lens counted and drew the card under either
+        // state, so a card missing there is unloaded rather than lost and the flip
+        // alone is truthful; a live-only lens takes the insert, bumping its count
+        // only where unfiltered. No card-STATE branch, unlike the removal loop: this
+        // write is the unarchive, so the card was archived by construction.
+        (data, key) => {
+          const flipped = patchBoardItemArchived(data, args.itemId, false);
+          if (keyShowsArchived(key)) return flipped;
+          return appendBoardItem(flipped, restored, keyIsUnfiltered(key));
+        },
+        // No NEW stale mark on the keys this payload determines: one over the patch
+        // would re-invalidate what it just freshened, and the next mount would
+        // refetch inside the replica lag. Filtered keys are marked anyway, and the
+        // debts captured at `onMutate` are re-laid — the flip there cleared them.
+        false,
+        ctx?.owed ?? [],
+      );
+    },
+  });
 }
 
 /** Removes one card from the project — an unlink for an issue or pull request, a

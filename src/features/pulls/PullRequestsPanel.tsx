@@ -1,4 +1,5 @@
 import {
+  ArrowClockwiseIcon,
   CheckCircleIcon,
   ClockIcon,
   GitPullRequestIcon,
@@ -7,7 +8,7 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
@@ -47,18 +48,25 @@ import {
 import { providerLabel, type ReviewStateEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import type { LocalPrStatus } from "@/lib/pulls/local";
+import { type LocalPrStatus, reloadLocalPrs } from "@/lib/pulls/local";
 import {
+  localPrKey,
   useDeleteLocalPr,
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
 import { useLensState, useRemoteSlug } from "@/lib/repo-lens/queries";
-import { usePrCreates } from "@/lib/stores/pr-create";
+import {
+  containedHolds,
+  containedHoldsKey,
+  settlePrCreateIfCurrent,
+  usePrCreates,
+} from "@/lib/stores/pr-create";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { cn } from "@/lib/utils";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
 import { PendingPrRow } from "./PendingPrRow";
@@ -78,6 +86,13 @@ const REVIEW_GROUPS: {
   },
   { kind: "reviewed", label: "Reviewed" },
 ];
+
+/** How the list chases a held row the forge hasn't listed yet. The limit bounds
+ *  ONE chase, not the tab: a server-side filter may genuinely never show the PR,
+ *  and an unbounded poll would spend API budget on that case forever, while a
+ *  new hold identity or the toolbar's refresh re-arms a full ladder. */
+const HOLD_POLL_MS = 5_000;
+const HOLD_POLL_LIMIT = 8;
 
 /** Why the list is flat despite the grouping toggle being on. */
 const UNGROUPED_NOTE = {
@@ -160,6 +175,23 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     canGroupByReview,
     tabActive: onPullsTab,
   });
+  // Bounded self-heal for a held row the forge's list hasn't caught up to. The
+  // interval is decided below, once containment is known — that read comes from
+  // this query, so it is one render behind by construction. Rungs live in a ref
+  // because the ladder is advanced from an effect and a render read of mutable
+  // state goes stale under the compiler; `holdPollMs` is the render-visible
+  // mirror the query's options read.
+  const [holdPollMs, setHoldPollMs] = useState<number | false>(false);
+  const holdPolls = useRef(0);
+  const holdLadderFor = useRef("");
+  const holdSeen = useRef({ ok: 0, failed: 0 });
+  // Exempts the NEXT completion from spending a rung, for the two reads the
+  // armed poll didn't cause: an explicit refresh, and a fetch already in flight
+  // when a new hold identity resets the ladder.
+  const holdExemptNext = useRef(false);
+  // Scope for the row-focus rescue below: every query it makes runs inside this
+  // panel, never the document.
+  const panelRef = useRef<HTMLDivElement>(null);
   // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
   // once under a DIFFERENT scope and again under the saved one — unfiltered before
   // the prefs land, or whole-repo before a saved team choice validates. The wait is
@@ -173,6 +205,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     limit,
     lens,
     listFilter.filter,
+    holdPollMs,
   );
   // Row CI icons hydrate separately from the list, so the list paints immediately; the
   // backend routes GitHub/GitLab/Bitbucket, so `ghReady` is the readiness gate. Idle
@@ -302,7 +335,53 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const clearPendingCreate = useUiStore((s) => s.clearPendingCreate);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
 
+  // CANCEL before invalidate: a read already in flight would otherwise resolve
+  // afterwards and stamp itself fresh, erasing the invalidation.
+  // `usePrReviewState`'s co-invalidation contract owes `pr-review-state` any
+  // narrow `pr-list` refresh. `pr-ci` and `pr-mergeability` are the rows' other
+  // badges and take the same pass.
+  const queryClient = useQueryClient();
+  function refreshPrList() {
+    // An explicit refresh RE-ARMS the bounded chase rather than spending from
+    // it: rungs go back to zero, and the flag exempts this refresh's own
+    // completion so the user gets a whole ladder instead of one read.
+    holdPolls.current = 0;
+    holdExemptNext.current = true;
+    // The four families go out CONCURRENTLY: `pr-ci` and `pr-mergeability` key
+    // on a digest of the rows they describe, so a refetch that raced the list
+    // caches under the outgoing key; `pr-review-state` keys on no rows and
+    // re-walks the forge from the filters.
+    for (const queryKey of [
+      ["repo", repoPath, "pr-list"],
+      ["repo", repoPath, "pr-ci"],
+      ["repo", repoPath, "pr-mergeability"],
+      ["repo", repoPath, "pr-review-state"],
+    ])
+      void queryClient
+        .cancelQueries({ queryKey })
+        .then(() => queryClient.invalidateQueries({ queryKey }))
+        .catch(() => {
+          // Best-effort, like the local arm below: an invalidate's refetch can
+          // settle as a rejection, which would otherwise surface as an
+          // unhandled rejection rather than a stale list.
+        });
+    // The local records ride along — the control speaks for the whole list —
+    // but reload FIRST: the MCP writes that store file from another process and
+    // tauri-plugin-store serves its in-memory copy, so a bare invalidate
+    // refetches the stale snapshot (the pair App.tsx's focus sweep makes).
+    const localKey = localPrKey(repoPath);
+    void reloadLocalPrs()
+      .then(() => queryClient.cancelQueries({ queryKey: localKey }))
+      .then(() => queryClient.invalidateQueries({ queryKey: localKey }))
+      .catch(() => {
+        // Best-effort: a failed reload leaves the last known records.
+      });
+  }
+
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
+  // Tab-gated like the scope actions below: both panels stay mounted under
+  // <Activity>, so an ungated registration would refresh this list from Issues.
+  useHotkeyAction("refresh-pr-list", () => refreshPrList(), onPullsTab);
   useHotkeyAction("create-local-pr", () => openLocalPrCreate());
   useHotkeyAction("create-pr", () => setGhCreateOpen(true), canCreateGhPr);
   // Each scope action mirrors its toolbar segment's availability, and adds the
@@ -563,11 +642,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       .filter(Boolean)
       .join(" ") || undefined;
 
-  // Running creates that still need a place held in this list. Derived at
-  // render, never in an effect: this panel lives under <Activity>, where an
-  // effect would be deferred while the tab is hidden — and the hand-off has to
-  // be exact, since a frame showing both the strip and the real row (or
-  // neither) is what the strip exists to prevent.
+  // Running creates that still need a place held in this list. The HIDE
+  // predicate is derived at render, never in an effect: this panel lives under
+  // <Activity>, where an effect would be deferred while the tab is hidden — and
+  // the hand-off has to be exact, since a frame showing both the strip and the
+  // real row (or neither) is what the strip exists to prevent. (The delete below
+  // is the deliberate exception; its own note says why it can afford to wait.)
   // The containment test runs against the RAW page, not `visibleRemote`: a real
   // row hidden by the user's own text/label filter means the strip's job is
   // done, not that it should linger. Per entry by its OWN number, so one
@@ -575,6 +655,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // Deliberately NOT gated on `isPlaceholderData`: the strip and the rows render
   // from the SAME `prList.data`, so a placeholder page holding the number is
   // already painting that row — gating here would show both at once.
+  // Entries persist past their guard release, so this predicate is also what
+  // RE-shows the strip when a pre-settle refetch loses the number again — the
+  // hold self-heals. Never gate it on the lane's guard state.
   const creates = usePrCreates(repoPath);
   const pendingCreates =
     stateFilter === "open"
@@ -588,6 +671,124 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         )
       : [];
 
+  // Deleting a held entry is THIS panel's call, because only it knows which page
+  // the strip sits in: sibling surfaces fetch UNFILTERED pages under the same
+  // lens, and a watcher settling on one of those would drop the strip while this
+  // panel's own filtered page still lacks the row. Pre-arm, containment only
+  // hides the strip; the entry and banner stay until the flow ends. Both derives
+  // are pure store functions, where their own tests reach them.
+  const containedCreates = containedHolds(creates, prList.data, {
+    open: stateFilter === "open",
+    lens,
+    isPlaceholder: prList.isPlaceholderData,
+  });
+  const containedKey = containedHoldsKey(containedCreates);
+  // Where the user last stood in THIS panel's rows, captured while the row
+  // still exists: an unmount fires no event that can report its own `data-row`.
+  // Scoped to the panel, not the document: `remote:<n>` is the shared list
+  // scaffold's namespace, so the issues panel — kept mounted by <Activity> —
+  // writes the same keys for its own numbers.
+  const lastRowFocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const root = panelRef.current;
+    if (!root) return;
+    const onFocusIn = (e: FocusEvent) => {
+      lastRowFocusRef.current =
+        e.target instanceof HTMLElement ? (e.target.dataset.row ?? null) : null;
+    };
+    root.addEventListener("focusin", onFocusIn);
+    return () => root.removeEventListener("focusin", onFocusIn);
+  }, []);
+  const settleContained = useEffectEvent(() => {
+    // The held row's button unmounts on the CONTAINMENT render — the strip
+    // predicate drops the entry in the same render that fills `containedKey` —
+    // and React commits that removal before this passive effect runs, so focus
+    // has already fallen to <body> by now. The ref above, fed continuously by
+    // its focusin listener, is what still knows where the user stood.
+    const stood = lastRowFocusRef.current;
+    const orphaned =
+      document.activeElement === document.body ||
+      document.activeElement === null;
+    const losing =
+      orphaned &&
+      containedCreates.some(
+        (c) => c.phase === "created" && stood === `remote:${c.number}`,
+      );
+    for (const c of containedCreates)
+      settlePrCreateIfCurrent(repoPath, c.head, c.startedAt);
+    if (!losing || stood === null) return;
+    // Containment tests the RAW page, so the replacement row may not RENDER —
+    // a collapsed review group unmounts its rows, and the client-side text
+    // filter hides them — and then the first rendered row keeps the keyboard
+    // position inside the list rather than on <body>. When the panel renders NO
+    // row at all (every group collapsed, or the filter excludes all of them),
+    // the search input is the terminal landing: always rendered, and where
+    // `focus-filter` already puts the keyboard. Both row queries stay inside
+    // this panel: the `remote:<n>` namespace is shared with the issues panel.
+    const selector = `[data-row="${CSS.escape(stood)}"]`;
+    requestAnimationFrame(() => {
+      const root = panelRef.current;
+      const row =
+        root?.querySelector<HTMLElement>(selector) ??
+        root?.querySelector<HTMLElement>("[data-row]");
+      (row ?? filterRef.current)?.focus();
+    });
+  });
+  // Deferred while this panel's tab is hidden, since it lives under <Activity> —
+  // accepted: the strip is invisible there and the long stop still bounds the
+  // entry, and the settle is idempotent, so the replay on show costs nothing.
+  useEffect(() => {
+    if (containedKey) settleContained();
+  }, [containedKey]);
+
+  // The rows a hold is actually waiting on: the created subset of the SAME strip
+  // predicate, so the poll and the strip can never disagree about what is
+  // outstanding. A `creating` entry has no number for the list to show yet.
+  const heldRows = pendingCreates.filter((c) => c.phase === "created");
+  const heldKey = heldRows.map((c) => `${c.head} ${c.startedAt}`).join("|");
+  // One rung per completion that lands while the poll is armed; the ladder
+  // re-arms on a new hold identity or an explicit refresh.
+  const listUpdatedAt = prList.dataUpdatedAt;
+  const listFailedAt = prList.errorUpdatedAt;
+  const listFetching = prList.isFetching;
+  // Tab-gated on top of `refetchIntervalInBackground: false`: that covers a
+  // hidden WINDOW, but an <Activity>-hidden panel keeps active observers and
+  // would poll behind the Issues tab.
+  const canPollHold = onPullsTab && ghReady && listFilter.scopeReady;
+  useEffect(() => {
+    if (holdLadderFor.current !== heldKey) {
+      holdLadderFor.current = heldKey;
+      holdPolls.current = 0;
+      // A reset ladder takes CURRENT state as its baseline, not zero: zeroing
+      // would read the completion that predates this hold as a rung and leave
+      // it seven. It also absorbs the placeholder `dataUpdatedAt: 0` dip, which
+      // can only move the baseline down. A fetch already IN FLIGHT at the reset
+      // lands past that baseline, so it takes the same exemption a refresh does.
+      holdSeen.current = { ok: listUpdatedAt, failed: listFailedAt };
+      if (listFetching) holdExemptNext.current = true;
+    }
+    const advanced =
+      listUpdatedAt > holdSeen.current.ok ||
+      listFailedAt > holdSeen.current.failed;
+    holdSeen.current = { ok: listUpdatedAt, failed: listFailedAt };
+    if (advanced) {
+      if (holdExemptNext.current) holdExemptNext.current = false;
+      else if (holdPollMs !== false) holdPolls.current += 1;
+    }
+    setHoldPollMs(
+      heldKey && canPollHold && holdPolls.current < HOLD_POLL_LIMIT
+        ? HOLD_POLL_MS
+        : false,
+    );
+  }, [
+    heldKey,
+    canPollHold,
+    holdPollMs,
+    listUpdatedAt,
+    listFailedAt,
+    listFetching,
+  ]);
+
   // Arrow keys walk the visible rows, local section first like the list. A
   // collapsed section's body is unmounted, so its rows must leave the registry
   // too — otherwise an arrow key could select an invisible row. Grouped, the
@@ -595,17 +796,32 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const navRemote = remoteGroups
     ? remoteGroups.flatMap((group) => (group.collapsed ? [] : group.items))
     : visibleRemote;
+  // Held rows walk where they are drawn: pinned above the remote rows, in the
+  // order `usePrCreates` sorts them. They carry the real row's id, so the
+  // registry entry survives the swap untouched.
   const navTargets = [
     ...(localCollapsed
       ? []
       : visibleLocal.map((pr) => ({ kind: "local" as const, id: pr.id }))),
     ...(remoteCollapsed
       ? []
-      : navRemote.map((pr) => ({
-          kind: "remote" as const,
-          id: String(pr.number),
-        }))),
+      : [
+          ...heldRows.map((c) => ({
+            kind: "remote" as const,
+            id: String(c.number),
+          })),
+          ...navRemote.map((pr) => ({
+            kind: "remote" as const,
+            id: String(pr.number),
+          })),
+        ]),
   ];
+
+  // One spelling for "this number is the selection", shared by the real rows and
+  // the held rows standing in for them — the swap only carries the selection
+  // across because both answer the same question.
+  const isRemoteSelected = (number: number) =>
+    selectedPr?.kind === "remote" && selectedPr.id === String(number);
 
   const onListKeyDown = listKeyboardNav({
     items: navTargets,
@@ -659,7 +875,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const axisCap = isGitLab ? gitlabAxisCap(providerName) : undefined;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={panelRef} className="flex min-h-0 flex-1 flex-col">
       <SessionExpiryNotice repoPath={repoPath} />
       <ConversationListPanel
         repoPath={repoPath}
@@ -745,6 +961,24 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               ],
             }}
           />
+        }
+        toolbarActions={
+          // Never `disabled` and never gated on `isFetching`: cancel-then-
+          // invalidate is idempotent against a read in flight, and mid-poll a
+          // guard would swallow the user's FIRST press. The spin plus
+          // `aria-busy` carry the state instead.
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Refresh pull requests"
+            title="Refresh pull requests"
+            aria-busy={prList.isFetching}
+            onClick={refreshPrList}
+          >
+            <ArrowClockwiseIcon
+              className={cn(prList.isFetching && "animate-spin")}
+            />
+          </Button>
         }
         filterRef={filterRef}
         filterText={filterText}
@@ -839,20 +1073,31 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         remoteGroups={remoteGroups}
         remoteNote={remoteNote}
         // Oldest-first, the order `usePrCreates` already sorts — the same order
-        // the repo view's banner lists them in.
-        remotePinnedSlot={
-          pendingCreates.length > 0 ? (
-            <>
-              {pendingCreates.map((c) => (
-                <PendingPrRow key={c.head} create={c} />
-              ))}
-            </>
-          ) : undefined
+        // the repo view's banner lists them in, and the order `navTargets`
+        // registers them in. A created entry already has the number the PR view
+        // fetches by, so its row is real; a creating one has nothing to open.
+        remotePinned={
+          pendingCreates.length > 0
+            ? {
+                items: pendingCreates,
+                key: (c) => c.head,
+                rowId: (c) => (c.phase === "created" ? String(c.number) : null),
+                isActive: (c) =>
+                  c.phase === "created" && isRemoteSelected(c.number),
+                onSelect: (c) => {
+                  if (c.phase === "created")
+                    selectPr({ kind: "remote", id: String(c.number) });
+                },
+                onHover: (c) => {
+                  if (c.phase === "created")
+                    hoverPrefetch(() => prefetchPr(c.number));
+                },
+                render: (c) => <PendingPrRow create={c} />,
+              }
+            : undefined
         }
         remoteKey={(pr) => String(pr.number)}
-        isRemoteActive={(pr) =>
-          selectedPr?.kind === "remote" && selectedPr.id === String(pr.number)
-        }
+        isRemoteActive={(pr) => isRemoteSelected(pr.number)}
         onSelectRemote={(pr) =>
           selectPr({ kind: "remote", id: String(pr.number) })
         }

@@ -24,7 +24,9 @@ import {
   updateReviewText,
 } from "./reviews-history";
 
-const localPrKey = (repo: string) => ["local-prs", repo] as const;
+/** The local PR records for one repo. Exported because the MCP is a second
+ *  writer, so a surface offering a manual refresh has to reach this family. */
+export const localPrKey = (repo: string) => ["local-prs", repo] as const;
 
 export function useLocalPrs(repo: string) {
   return useQuery({

@@ -44,6 +44,9 @@ export interface BoardMenuActions {
   /** Turn a DRAFT into a real issue. Offered on draft cards alone. */
   convert: () => void;
   archive: () => void;
+  /** Put an ARCHIVED card back on the board — the row that stands where Archive
+   *  does on a live card, since the two are one reversible pair. */
+  restore: () => void;
   remove: () => void;
 }
 
@@ -83,9 +86,9 @@ const REORDER_ROWS: {
  * current grouping's columns in board order, a "Position" section that moves the
  * card inside its own column, a read-only "Show details" peek for an issue or pull
  * request, then the rows that change what the card IS — edit a draft, convert it,
- * archive, remove. Presentational — the panel records the target on right-click
- * (capture phase) and hands it down here with the labels, the gates and the
- * confirmations already resolved.
+ * archive or restore it, remove. Presentational — the panel records the target on
+ * right-click (capture phase) and hands it down here with the labels, the gates and
+ * the confirmations already resolved.
  */
 export function BoardCardMenuItems({
   target,
@@ -93,6 +96,7 @@ export function BoardCardMenuItems({
   openLabel,
   heldReason,
   actionHeldReason,
+  editHeldReason,
   reorderHeldReason,
   reorderPlans,
   actions,
@@ -106,11 +110,16 @@ export function BoardCardMenuItems({
   openLabel: string | null;
   /** Why every move is held, or undefined when they're live. */
   heldReason: string | undefined;
-  /** Why convert/archive/remove are held, or undefined when they're live. Apart
-   *  from {@link heldReason} because a move can be held by something that leaves
-   *  these three fine — an ungrouped board, or a grouping GitHub owns on the issue
-   *  itself. */
+  /** Why the whole write block below the peek is held — the draft rows as well as
+   *  archive-or-restore and remove — or undefined when it's live. Apart from
+   *  {@link heldReason} because a move can be held by something that leaves these
+   *  fine: an ungrouped board, or a grouping GitHub owns on the issue itself. */
   actionHeldReason: string | undefined;
+  /** Why the DRAFT rows — edit and convert — are held, or undefined when they're
+   *  live. Apart from {@link actionHeldReason} because an ARCHIVED card holds these
+   *  two (they rewrite what the card IS) while leaving its restore and its removal
+   *  live: the whole point of the menu on such a card is the way back. */
+  editHeldReason: string | undefined;
   /** Why every reposition row is held, or undefined when they're live. Apart from
    *  the two above because it takes an arm neither of them does: a saved view's own
    *  sort draws the columns in an order the board's position sequence isn't. */
@@ -125,6 +134,7 @@ export function BoardCardMenuItems({
   if (target === null) return null;
   const kind = target.item.content.kind;
   const isDraft = kind === "draft";
+  const isArchived = target.item.isArchived;
   // Only these two have a peek: a draft's notes open from the card itself, and a
   // redacted card has nothing to tell.
   const isPeekable = kind === "issue" || kind === "pullRequest";
@@ -246,22 +256,36 @@ export function BoardCardMenuItems({
       {actionHeldReason === undefined ? (
         <>
           {/* Drafts only: an issue or pull request is already the thing a convert
-              would make, and is edited on its own tab. The ellipsis is the house
-              promise that a further step comes first — a dialog for the edit, a
-              confirmation for the other three. */}
-          {isDraft && (
-            <>
-              <ContextMenuItem onClick={actions.editDraft}>
-                Edit draft…
-              </ContextMenuItem>
-              <ContextMenuItem onClick={actions.convert}>
-                Convert to issue…
-              </ContextMenuItem>
-            </>
+              would make, and is edited on its own tab. An ellipsis is the house
+              promise that a further step comes first: a dialog for the edit, a
+              confirmation for every other row carrying one. */}
+          {isDraft &&
+            (editHeldReason === undefined ? (
+              <>
+                <ContextMenuItem onClick={actions.editDraft}>
+                  Edit draft…
+                </ContextMenuItem>
+                <ContextMenuItem onClick={actions.convert}>
+                  Convert to issue…
+                </ContextMenuItem>
+              </>
+            ) : (
+              // One held row carrying the reason, the shape the sections above take
+              // when they are held: a disabled menu item can't hold a tooltip.
+              <ContextMenuItem disabled>{editHeldReason}</ContextMenuItem>
+            ))}
+          {/* One reversible pair, one row: whichever direction this card can go.
+              Restore carries NO ellipsis and asks nothing first — the archive is the
+              step that warns, and its reversal is what that warning promised. */}
+          {isArchived ? (
+            <ContextMenuItem onClick={actions.restore}>
+              Restore card
+            </ContextMenuItem>
+          ) : (
+            <ContextMenuItem onClick={actions.archive}>
+              Archive card…
+            </ContextMenuItem>
           )}
-          <ContextMenuItem onClick={actions.archive}>
-            Archive card…
-          </ContextMenuItem>
           <ContextMenuItem variant="destructive" onClick={actions.remove}>
             Remove from project…
           </ContextMenuItem>

@@ -124,8 +124,11 @@ export const pendingBoardWrites = new Map<string, number>();
  * clear count and performs the one real refetch. The gap: when the last one out
  * settles through {@link markProjectBoardsStale} instead, nothing refetches at all.
  * That is the point of that mode — its own patch is already on screen, and the
- * boards stay marked stale for the next natural read. A lone write here sees zero
- * and refetches immediately, exactly as before.
+ * boards stay marked stale for the next natural read. A write under the shield
+ * (writeThroughBoards' `markStale: false`) marks only the FILTERED lenses it patches,
+ * whose membership no payload can settle, and preserves every mark it found — so a
+ * mark laid here still reaches its refetch. A lone write here sees zero and refetches
+ * immediately, exactly as before.
  *
  * Read PER REPO, matching the key this invalidates: a write pending in another
  * repository must not defer this one, whose stale mark that write's own settle

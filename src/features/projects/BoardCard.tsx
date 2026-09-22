@@ -420,6 +420,18 @@ function CardDates({ item }: { item: BoardItem }) {
 const CARD_CLASS =
   "flex w-full flex-col gap-1 border bg-background px-2 py-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
 
+/** An archived card's own line, drawn above everything else on it: the board draws
+ *  these only while **Show archived cards** is on, so the card has to say which one
+ *  it is. The BADGE is what carries that — the quieter text around it is a hint for
+ *  a sighted reader scanning a column, never the statement itself. */
+function ArchivedBadge() {
+  return (
+    <span className="flex items-center">
+      <Badge variant="outline">Archived</Badge>
+    </span>
+  );
+}
+
 /**
  * One board card. Memoized and deliberately light: a column re-renders its whole
  * mounted window whenever the keyboard cursor moves, and only the two cards whose
@@ -511,6 +523,10 @@ export const BoardCard = memo(function BoardCard({
   // disabled — it still opens, and `aria-busy` is what carries the state to a
   // reader. Colour says nothing here that the attribute doesn't.
   const busyClass = busy && "opacity-60";
+  // The muted TOKEN rather than an opacity filter: the token is the app's own
+  // AA-passing quiet text in both themes, where dimming real foreground would put
+  // the title under it. The badge beside the title is what states the fact.
+  const archivedClass = item.isArchived && "text-muted-foreground";
 
   if (content.kind === "redacted") {
     return (
@@ -526,6 +542,7 @@ export const BoardCard = memo(function BoardCard({
           busyClass,
         )}
       >
+        {item.isArchived && <ArchivedBadge />}
         <span className="flex items-start gap-1.5">
           <LockSimpleIcon className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 font-medium">Redacted item</span>
@@ -550,10 +567,17 @@ export const BoardCard = memo(function BoardCard({
             <button
               type="button"
               {...shared}
-              className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
+              className={cn(
+                CARD_CLASS,
+                "cursor-pointer",
+                archivedClass,
+                toneClass,
+                busyClass,
+              )}
             />
           }
         >
+          {item.isArchived && <ArchivedBadge />}
           <CardTitle
             glyph={
               <NoteIcon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -631,7 +655,13 @@ export const BoardCard = memo(function BoardCard({
         aria-haspopup="dialog"
         aria-expanded={peek}
         aria-controls={peek ? peekId : undefined}
-        className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
+        className={cn(
+          CARD_CLASS,
+          "cursor-pointer",
+          archivedClass,
+          toneClass,
+          busyClass,
+        )}
         onClick={() => onOpen(item)}
         // Space peeks where Enter opens. These cards are `role="option"` in a roving
         // listbox, where Space previews and Enter activates, and `preventDefault` on
@@ -646,6 +676,7 @@ export const BoardCard = memo(function BoardCard({
           onPeekChange(item.itemId);
         }}
       >
+        {item.isArchived && <ArchivedBadge />}
         {content.kind === "pullRequest" ? (
           <PullRequestHead content={content} />
         ) : (

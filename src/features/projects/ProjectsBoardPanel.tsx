@@ -19,6 +19,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -55,7 +56,7 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { presentError } from "@/lib/error-summary";
 import { useActiveGhHost, useForgeGhHost } from "@/lib/git/host";
-import type { BoardWriteKind } from "@/lib/git/queries";
+import type { BoardMoveBucket, BoardWriteKind } from "@/lib/git/queries";
 import {
   forgeReady,
   useAddDraftItem,
@@ -72,6 +73,7 @@ import {
   useProjectViews,
   useRemoveBoardItem,
   useReorderBoardCard,
+  useRestoreBoardItem,
   useUpdateDraftItem,
 } from "@/lib/git/queries";
 import {
@@ -94,14 +96,17 @@ import { BoardCardMenuItems, type BoardMenuTarget } from "./BoardCardMenu";
 import { BoardColumn } from "./BoardColumn";
 import { BoardDraftEditDialog } from "./BoardDraftEditDialog";
 import {
+  ARCHIVED_CARD_REASON,
+  ARCHIVED_SHOWN_REASON,
   type BoardColumnModel,
+  bucketIdFor,
   buildColumns,
   CARD_WRITE_REASON,
   chipFieldDefs,
   firstCardPosition,
+  type GroupField,
   groupableFields,
   lensSorted,
-  optionIdFor,
   SORTED_VIEW_REASON,
   sortColumnItems,
   TRUNCATED_ORDER_REASON,
@@ -126,7 +131,7 @@ const FORGE_KIND: Record<
 };
 
 const NO_GROUP_FIELDS_REASON =
-  "This project has no single-select fields to group its board by";
+  "This project has no single-select or iteration fields to group its board by";
 const LOADING_FIELDS_REASON = "Loading this project's fields…";
 const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
 /** The next three mirror the field editor's own wording verbatim: each surface
@@ -168,6 +173,7 @@ const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "reorder",
   "convert",
   "archive",
+  "restore",
   "remove",
   "edit-draft",
 ]);
@@ -185,11 +191,17 @@ type BoardDialog = "existing" | "draft" | "edit-draft";
  *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
 /** An archive is reversible and a removal is not, so the two prompts say different
- *  things — and a removal says a THIRD thing for a draft, which lives on this
- *  project alone and has nowhere to survive. Every one names where the card goes
- *  rather than asking the user to infer it. */
-const ARCHIVE_BODY =
-  "The card leaves the board. You can restore it from the project's archived items on GitHub.";
+ *  things, and a removal says a third for a draft, which lives on this project alone
+ *  and has nowhere to survive. Every one names where the card goes rather than asking
+ *  the user to infer it — which is why this one is keyed on whether archived cards
+ *  are SHOWN: with the toggle off the card leaves the columns, with it on it stays
+ *  put under an Archived badge. */
+const ARCHIVE_BODY: Record<"shown" | "hidden", string> = {
+  hidden:
+    "The card leaves the board. Bring it back any time from View options → Show archived cards.",
+  shown:
+    "The card stays in place, marked Archived, and leaves the board when you turn Show archived cards off. Restore card brings it back.",
+};
 const REMOVE_BODY: Record<BoardItemContent["kind"], string> = {
   draft:
     "This deletes the draft permanently — drafts live on this project and nowhere else.",
@@ -350,6 +362,20 @@ function openLabelFor(
   return opensInApp(content, repoSlug) ? "Open" : "Open on GitHub";
 }
 
+/** The move target a column id names under `field`: that field's own option or
+ *  iteration. Null for the catch-all — and for any id the field no longer defines,
+ *  which is the same statement, since the catch-all is where such a card is drawn. */
+function moveBucketFor(field: GroupField, columnId: string): BoardMoveBucket {
+  if (field.kind === "singleSelect") {
+    const option = field.options.find((o) => o.id === columnId);
+    return option === undefined ? null : { kind: "option", option };
+  }
+  const iteration = [...field.iterations, ...field.completedIterations].find(
+    (i) => i.id === columnId,
+  );
+  return iteration === undefined ? null : { kind: "iteration", iteration };
+}
+
 /** Where `itemId` sits in the freshly derived columns, or null when the board no
  *  longer draws it — which a move's own patch can never cause, but a refetch
  *  landing mid-chase can. */
@@ -444,8 +470,8 @@ function BoardNotice({ children }: { children: ReactNode }) {
 
 /**
  * The Projects tab: a kanban of one GitHub Project, grouped by one of the board's
- * single-select fields, with one write — a card's context menu moves it between
- * the columns of that grouping.
+ * single-select or iteration fields, with one write — a card's context menu moves it
+ * between the columns of that grouping.
  *
  * Every read gates on `active` as well as the provider — `<Activity>` defers a
  * hidden panel's effects but NOT its queries, so a board left on another tab
@@ -508,9 +534,15 @@ export function ProjectsBoardPanel({
   const [pickedFieldId, setPickedFieldId] = useState<string | null>(null);
   // "Status" by name is what a GitHub board means by its columns; anything else
   // is a board that renamed or dropped it, where the first single-select is the
-  // closest thing to the same promise.
+  // closest thing to the same promise. Single-selects are preferred over an
+  // iteration field declared ahead of them for exactly that reason: a board opened
+  // for the first time should show the columns it is usually read in, and grouping
+  // by iteration is a thing to ask for rather than to land on.
   const defaultField =
-    groupFields.find((f) => f.name === "Status") ?? groupFields[0] ?? null;
+    groupFields.find((f) => f.name === "Status") ??
+    groupFields.find((f) => f.kind === "singleSelect") ??
+    groupFields[0] ??
+    null;
   const groupField =
     groupFields.find((f) => f.id === pickedFieldId) ?? defaultField;
 
@@ -539,11 +571,16 @@ export function ProjectsBoardPanel({
       setActiveViewId(null);
   }, [activeViewId, views.data]);
 
+  // Transient like the grouping and the view above it: what a user looked at once
+  // doesn't become a stored preference. An identity axis on the read, so the board
+  // on screen stays put while the both-states read lands.
+  const [showArchived, setShowArchived] = useState(false);
   const items = useProjectItems(
     repoPath,
     projectId ?? "",
     lensQuery,
     canRead && projectId !== null,
+    showArchived,
   );
   // The cards on screen belong to the PREVIOUS lens until this clears, so every
   // claim derived from them waits: the count, Load more, and the move rows.
@@ -554,7 +591,7 @@ export function ProjectsBoardPanel({
   // The view's sort orders cards WITHIN a column, so it applies after bucketing —
   // which column a card lands in is the grouping's answer alone. With no sort the
   // columns are untouched, board POSITION order and all.
-  const grouped = buildColumns(loaded, groupField);
+  const grouped = buildColumns(loaded, groupField, showArchived);
   const columns = lensSorted(view)
     ? grouped.map((column) => ({
         ...column,
@@ -570,8 +607,9 @@ export function ProjectsBoardPanel({
     [view, fieldDefs, groupField],
   );
   // Counts the cards the board DRAWS, so it agrees with the column headers;
-  // `totalCount` is the board's own figure and includes archived items, which is
-  // why it only ever appears as the "of M" of a partly-loaded board.
+  // `totalCount` is the READ's own figure and matches that read's filter, archived
+  // state included (measured 2026-09-21), which is why it only ever appears as the
+  // "of M" of a partly-loaded board.
   const shown = columns.reduce((n, column) => n + column.items.length, 0);
   const totalCount = items.data?.pages.at(-1)?.totalCount ?? shown;
 
@@ -627,8 +665,10 @@ export function ProjectsBoardPanel({
     const picked =
       nextId === null ? null : (viewList.find((v) => v.id === nextId) ?? null);
     // Seeded only from a grouping this board can actually draw, off the same
-    // `groupableFields` set the Group-by rows offer: a table view groups by
-    // nothing, and a view grouped by an iteration field makes no columns here.
+    // `groupableFields` set the Group-by rows offer — which is the board's
+    // single-selects AND its iteration fields, so a view grouped either way seeds.
+    // A table view groups by nothing, and a view grouped by anything else (a
+    // multi-select, an issue field) leaves the current grouping alone.
     const vgroup = picked?.verticalGroupFieldIds[0];
     if (vgroup !== undefined && groupFields.some((f) => f.id === vgroup))
       setPickedFieldId(vgroup);
@@ -636,9 +676,25 @@ export function ProjectsBoardPanel({
     setCursor(null);
   }
 
+  /** Show or hide the board's archived cards. A different set of cards either way,
+   *  so the cursor can't address what it was on. Takes the state it is going TO
+   *  rather than flipping what it finds: the checkbox row reports the value it now
+   *  holds, and an idempotent setter can't be double-applied by one click. */
+  function setArchivedShown(next: boolean) {
+    setShowArchived(next);
+    setCursor(null);
+  }
+
   // Palette-only, and live only where it can do something: a board on screen
   // with a view on it.
   useHotkeyAction("clear-project-view", clearView, active && view !== null);
+  // Palette-only for the same reason — its checkbox sits in the same popover — and
+  // live wherever there is a board to toggle it on.
+  useHotkeyAction(
+    "toggle-archived-cards",
+    () => setArchivedShown(!showArchived),
+    canRead && projectId !== null,
+  );
 
   const openItem = useCallback(
     (item: BoardItem) => {
@@ -777,6 +833,7 @@ export function ProjectsBoardPanel({
   const convertDraft = useConvertDraftItem();
   const updateDraft = useUpdateDraftItem();
   const archiveItem = useArchiveBoardItem();
+  const restoreItem = useRestoreBoardItem();
   const removeItem = useRemoveBoardItem();
   // The add writes live HERE rather than inside the dialogs that fire them, so the
   // board can say what is in flight: a dialog closed mid-write would otherwise take
@@ -1034,21 +1091,28 @@ export function ProjectsBoardPanel({
     retireAddDialog();
   }, [projectId]);
 
-  // Ranked like the field editor's own holds, and for the same reasons — the two
-  // surfaces gate on the same flags, so they say it the same way. The last two arms
-  // rank at the tail because they are the only ones that clear on their own.
-  const moveHeldReason = (() => {
+  /** Why `item` can't be moved between columns, or undefined when it can. Ranked
+   *  like the field editor's own holds, and for the same reasons — the two surfaces
+   *  gate on the same flags, so they say it the same way. The last two arms rank at
+   *  the tail because they are the only ones that clear on their own. */
+  function moveHeldFor(item: BoardItem): string | undefined {
     switch (true) {
       case projectScopeReadOnly(scopes.data):
         return READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
-      case groupField !== null && groupField.isIssueField:
+      // Iteration fields have no issue-field arm at all — GitHub defines none at
+      // the org level — so this asks only of the kind that can carry one.
+      case groupField?.kind === "singleSelect" && groupField.isIssueField:
         return ISSUE_FIELD_REASON;
-      // Below the three permission arms, which are true whatever is on screen,
-      // and above the two that clear on their own: the cards drawn while a lens
-      // loads are the PREVIOUS view's, so the column a pick names isn't the one
-      // the board is about to have.
+      // Under the three arms above, which say a move is impossible HERE whatever the
+      // card is: an archived card sits in no column, so a column pick has nothing to
+      // write — and the restore row is what clears this one.
+      case item.isArchived:
+        return ARCHIVED_CARD_REASON;
+      // Above the two that clear on their own: the cards drawn while a lens loads
+      // are the PREVIOUS view's, so the column a pick names isn't the one the board
+      // is about to have.
       case lensLoading:
         return LENS_LOADING_REASON;
       case movePending:
@@ -1063,13 +1127,16 @@ export function ProjectsBoardPanel({
       default:
         return undefined;
     }
-  })();
-  /** Why edit-draft, convert, archive and remove are held. Ranked like the move rows,
-   *  and the first two arms are the SAME permission flags — but the grouping arms are
-   *  absent: these four address the membership's item id alone, so an ungrouped
-   *  board and a GitHub-owned grouping field hold neither of them. So does a lens
-   *  still loading: the card under the pointer was recorded off the cards on
-   *  screen, and its item id is its item id whichever view drew it. */
+  }
+  /** Why the menu's whole write block is held — the draft rows as well as
+   *  archive-or-restore and remove. Ranked like the move rows, and the first two arms
+   *  are the SAME permission flags — but the grouping arms are absent: these address
+   *  the membership's item id alone, so an ungrouped board and a GitHub-owned
+   *  grouping field hold neither of them. So does a lens still loading: the card
+   *  under the pointer was recorded off the cards on screen, and its item id is its
+   *  item id whichever view drew it. The ARCHIVED arm is absent too, and lives in
+   *  {@link cardEditHeldFor} instead: it must hold the draft rows while leaving the
+   *  restore live, which is the one thing an archived card's menu is opened for. */
   const cardActionHeldReason = (() => {
     switch (true) {
       case projectScopeReadOnly(scopes.data):
@@ -1086,20 +1153,54 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
-  /** Why `itemId` can't be repositioned, or undefined when it can. Per CARD rather
+  /** Why a DRAFT's edit and convert rows are held for this card. The card-action
+   *  ranking plus the archived arm the two removals deliberately skip: both of these
+   *  rewrite what the card IS, which an archived card is in no state to accept, and
+   *  the restore row beside them is the way to that state. */
+  function cardEditHeldFor(item: BoardItem): string | undefined {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      case item.isArchived:
+        return ARCHIVED_CARD_REASON;
+      case movePending:
+        return MOVING_REASON;
+      case cardWritePending:
+        return CARD_WRITE_REASON;
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  }
+  /** Why `item` can't be repositioned, or undefined when it can. Per CARD rather
    *  than board-wide, and it deliberately ignores a reposition already in flight on
    *  that card: the mutation coalesces those itself, which is what makes a burst of
    *  presses land. Any OTHER write to the same card does hold — a convert or a
    *  draft edit rewrites the very card a position would address.
    *
    *  Ranked like the card actions: the permission arms first (true whatever is on
-   *  screen), then the view's own sort, then the two that clear on their own. */
-  function reorderHeldFor(itemId: string): string | undefined {
+   *  screen), then the three ways the drawn column isn't the board's own order, then
+   *  the two that clear on their own. */
+  function reorderHeldFor(item: BoardItem): string | undefined {
+    const itemId = item.itemId;
     switch (true) {
       case projectScopeReadOnly(scopes.data):
         return BOARD_READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
+      // An archived card holds no place in the project's order, so there is no slot
+      // for a position write to move it between.
+      case item.isArchived:
+        return ARCHIVED_CARD_REASON;
+      // Every OTHER card is held too while archived ones are drawn: GitHub refuses
+      // an archived item as a position anchor, so a card's drawn neighbour is not
+      // necessarily one a write may land it after, and the plan the menu shows would
+      // be computed against a column the board can't address.
+      case showArchived:
+        return ARCHIVED_SHOWN_REASON;
       // A sorted view draws the columns in the SORT's order, so the board's own
       // position sequence — the only thing a position write addresses — isn't what
       // is on screen, and a card would land somewhere the user never saw.
@@ -1163,13 +1264,13 @@ export function ProjectsBoardPanel({
         : {
             item,
             // The card's VALUE, read the way the bucketing reads it. An unset field
-            // names the catch-all; a stored option the field no longer defines
-            // names a column that isn't drawn, which is what leaves the clear row
-            // live for the one card that needs it.
+            // names the catch-all; a stored option or iteration the field no longer
+            // defines names a column that isn't drawn, which is what leaves the
+            // clear row live for the one card that needs it.
             valueColumnId:
               groupField === null
                 ? UNSET_COLUMN_ID
-                : (optionIdFor(item, groupField) ?? UNSET_COLUMN_ID),
+                : (bucketIdFor(item, groupField) ?? UNSET_COLUMN_ID),
           };
     menuTargetRef.current = next;
     setMenuTarget(next);
@@ -1203,8 +1304,8 @@ export function ProjectsBoardPanel({
       return;
     // Belt-and-braces with the rows' own `disabled`: the hold is derived at render,
     // and a pick racing the render that sets it must not get through either.
-    if (moveHeldReason !== undefined) return;
-    const option = groupField.options.find((o) => o.id === column.id) ?? null;
+    if (moveHeldFor(item) !== undefined) return;
+    const bucket = moveBucketFor(groupField, column.id);
     setChase(item.itemId);
     // The board AND the lens this move belongs to travel WITH it: an offline move
     // parks before the write and resumes on whatever render is current by then,
@@ -1215,8 +1316,9 @@ export function ProjectsBoardPanel({
       projectId,
       itemId: item.itemId,
       field: groupField,
-      option,
+      bucket,
       query: lensQuery,
+      archived: showArchived,
     });
   }
 
@@ -1272,7 +1374,7 @@ export function ProjectsBoardPanel({
     // A held reason is surprising on a keyboard/palette route with no row to grey
     // out, so it both announces (SR) and toasts (sighted). The truncated-loaded-end
     // hold below is the same class and gets the same pair.
-    const held = reorderHeldFor(item.itemId);
+    const held = reorderHeldFor(item);
     if (held !== undefined) {
       announce(held);
       toast(held, { id: REORDER_REFUSAL_TOAST_ID });
@@ -1310,6 +1412,7 @@ export function ProjectsBoardPanel({
       itemId: item.itemId,
       afterId: plan.afterId,
       query: lensQuery,
+      archived: showArchived,
     });
     // The cursor rides the card to where the optimistic splice puts it; the
     // column's own focus machinery does the rest off the nonce. The moved card's
@@ -1388,7 +1491,7 @@ export function ProjectsBoardPanel({
    *  itself would outlive the card it came from. */
   function openDraftEdit(item: BoardItem) {
     // Belt-and-braces with the row's own hold, which is derived at render.
-    if (cardActionHeldReason !== undefined) return;
+    if (cardEditHeldFor(item) !== undefined) return;
     if (item.content.kind !== "draft") return;
     setEditing({
       itemId: item.itemId,
@@ -1444,7 +1547,7 @@ export function ProjectsBoardPanel({
     // Every read this needs happens BEFORE the first await, so a render landing
     // under the prompt can't change what the write addresses. Belt-and-braces with
     // the row's own hold, which is derived at render.
-    if (cardActionHeldReason !== undefined) return;
+    if (cardEditHeldFor(item) !== undefined) return;
     if (item.content.kind !== "draft") return;
     const target = repoSlug ?? "this repository";
     const ok = await useConfirm.getState().ask({
@@ -1482,7 +1585,7 @@ export function ProjectsBoardPanel({
     const prompt = {
       archive: {
         title: "Archive this card?",
-        body: ARCHIVE_BODY,
+        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"],
         confirmLabel: "Archive",
       },
       remove: {
@@ -1499,8 +1602,23 @@ export function ProjectsBoardPanel({
     // for the round trip would leave the keyboard parked on a card that is already
     // off the board for seconds. The latch still only lands when the columns stop
     // drawing the card, which is the effect's own gate.
-    setRetired(at === null ? null : { itemId: item.itemId, ...at });
-    const vars = { repo: repoPath, projectId, itemId: item.itemId };
+    //
+    // And only where the card really LEAVES them: with archived cards shown, an
+    // archive keeps it in its slot under an Archived badge, so the cursor has
+    // nothing to follow and a latch that can never land would re-scan the columns
+    // on every render until the tab went away.
+    const leaves = action === "remove" || !showArchived;
+    setRetired(at === null || !leaves ? null : { itemId: item.itemId, ...at });
+    // `wasArchived` rides the write because it is a COUNT axis the cache key can't
+    // supply: a removal takes nothing from a live-only lens's total when the card had
+    // already left that count at archive time. Read off the card the menu recorded,
+    // like every other value here.
+    const vars = {
+      repo: repoPath,
+      projectId,
+      itemId: item.itemId,
+      wasArchived: item.isArchived,
+    };
     try {
       if (action === "archive") await archiveItem.mutateAsync(vars);
       else await removeItem.mutateAsync(vars);
@@ -1511,9 +1629,31 @@ export function ProjectsBoardPanel({
     }
   }
 
+  /** Put an archived card back on the board. No prompt: the ARCHIVE is the step that
+   *  asked, and this is the reversal it promised. Nothing retires a cursor either —
+   *  the card keeps its slot and only stops being archived, which the toggle that
+   *  drew it goes on showing.
+   *
+   *  GitHub's single-state reads lag this write by seconds either way, so the write
+   *  settles by re-asserting its own answer rather than re-reading — the card stops
+   *  being archived on the spot and stays that way. */
+  async function restoreCard(item: BoardItem) {
+    if (cardActionHeldReason !== undefined || projectId === null) return;
+    try {
+      await restoreItem.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemId: item.itemId,
+      });
+    } catch {
+      // The mutation reported it, and its rollback put the card back under the
+      // Archived badge it came in with.
+    }
+  }
+
   // Ranked, because the popup can be opened before the fields read settles and
-  // an UNSETTLED read is not the same claim as a settled empty one. Claiming "no
-  // single-select fields" while the read is still in flight is a false
+  // an UNSETTLED read is not the same claim as a settled empty one. Claiming the
+  // board defines no groupable field while the read is still in flight is a false
   // statement, not a placeholder.
   const fieldsPending = canRead && projectId !== null && fields.isPending;
   const groupHeldReason = (() => {
@@ -1727,7 +1867,7 @@ export function ProjectsBoardPanel({
       ? undefined
       : menuPos === null
         ? CARD_GONE_REASON
-        : reorderHeldFor(menuTarget.item.itemId);
+        : reorderHeldFor(menuTarget.item);
 
   const body = (() => {
     switch (true) {
@@ -1915,8 +2055,15 @@ export function ProjectsBoardPanel({
                     : columns
                 }
                 openLabel={openLabelFor(menuTarget?.item, repoSlug)}
-                heldReason={moveHeldReason}
+                heldReason={
+                  menuTarget === null ? undefined : moveHeldFor(menuTarget.item)
+                }
                 actionHeldReason={cardActionHeldReason}
+                editHeldReason={
+                  menuTarget === null
+                    ? undefined
+                    : cardEditHeldFor(menuTarget.item)
+                }
                 reorderHeldReason={reorderHeldReason}
                 reorderPlans={reorderPlans}
                 actions={{
@@ -1950,6 +2097,9 @@ export function ProjectsBoardPanel({
                   archive: () => {
                     if (menuTarget !== null)
                       void retireCard(menuTarget.item, "archive");
+                  },
+                  restore: () => {
+                    if (menuTarget !== null) void restoreCard(menuTarget.item);
                   },
                   remove: () => {
                     if (menuTarget !== null)
@@ -2299,6 +2449,27 @@ export function ProjectsBoardPanel({
                           ))}
                         </RadioGroup>
                       )}
+                    </div>
+                    <div className="space-y-1">
+                      {/* One checkbox rather than a two-row radio group: this is a
+                          yes-or-no about the same board, where View and Group by
+                          each pick one of several. The caption keeps the section
+                          shape its siblings set. */}
+                      <p className="px-1 text-xs text-muted-foreground">
+                        Archived cards
+                      </p>
+                      {/* Applies on change, like the rows above — the popup stays
+                          open so the board can be looked at both ways without
+                          reopening it. */}
+                      <label className={GROUP_ROW_CLASS}>
+                        <Checkbox
+                          checked={showArchived}
+                          onCheckedChange={(c) => setArchivedShown(c === true)}
+                        />
+                        <span className="min-w-0 truncate">
+                          Show archived cards
+                        </span>
+                      </label>
                     </div>
                   </div>
                 </Popover.Popup>
