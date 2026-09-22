@@ -25,15 +25,36 @@ const FAMILIES = [
 ];
 
 /**
- * The two ways a family gets hand-spelled outside core.ts, both refused: the bare
- * array literal `["repo", <anything>, "<family>"`, and the composed form that reaches
- * the prefix through the repo builder, `[...repoKeys.all(repo), "<family>"`. `\s`
- * covers CRLF.
+ * Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
+ * array literal `["repo", <anything>, "<family>"` is regular, so a regex settles it;
+ * the composed form `[...repoKeys.all(repo), "<family>"` is not, because a nested
+ * argument (`repoKeys.all(normalizeRepo(repo))`) puts a `)` in the way that no
+ * `[^)]*` can cross — that one takes a balanced-paren scan. `\s` covers CRLF in both.
  */
-const spellingPatterns = (family) => [
-  new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`),
-  new RegExp(String.raw`repoKeys\.all\([^)]*\)\s*,\s*"${family}"`),
-];
+const literalPattern = (family) =>
+  new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`);
+
+/** Whether `source` reaches a family prefix through `repoKeys.all(…)` at any argument
+ *  nesting depth. A `repoKeys.all(` whose parens never balance is not a spelling: the
+ *  walk runs out and reports false rather than reading past the end. */
+function hasComposedSpelling(source, family) {
+  const opener = /repoKeys\.all\(/g;
+  const tail = new RegExp(String.raw`^\s*,\s*"${family}"`);
+  for (let m = opener.exec(source); m; m = opener.exec(source)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < source.length && depth > 0; i++) {
+      if (source[i] === "(") depth++;
+      else if (source[i] === ")") depth--;
+    }
+    if (depth === 0 && tail.test(source.slice(i))) return true;
+  }
+  return false;
+}
+
+/** Either shape, for one family. */
+const spellsFamily = (source, family) =>
+  literalPattern(family).test(source) || hasComposedSpelling(source, family);
 
 /** Floor for the scanned corpus, ~half the 700 .ts/.tsx files under src/ measured
  *  when this guard was written. A path-pinned scan that finds nothing scans nothing
@@ -48,16 +69,26 @@ function* sourceFiles(dir) {
   }
 }
 
-test("both patterns match a hand-spelled family key (negative control)", () => {
-  const matchesAny = (line, family) =>
-    spellingPatterns(family).some((re) => re.test(line));
+test("every hand-spelled shape is matched (negative control)", () => {
   assert.ok(
-    matchesAny('  queryKey: ["repo", repoPath, "pr-list", lens],', "pr-list"),
+    spellsFamily('  queryKey: ["repo", repoPath, "pr-list", lens],', "pr-list"),
     "the array-literal pattern went inert",
   );
   assert.ok(
-    matchesAny('  queryKey: [...repoKeys.all(repo), "pr-ci"],', "pr-ci"),
-    "the repoKeys.all-composed pattern went inert",
+    spellsFamily('  queryKey: [...repoKeys.all(repo), "pr-ci"],', "pr-ci"),
+    "the repoKeys.all-composed scan went inert",
+  );
+  assert.ok(
+    spellsFamily(
+      '  queryKey: [...repoKeys.all(normalizeRepo(repo)), "pr-ci"],',
+      "pr-ci",
+    ),
+    "the composed scan stopped at a NESTED argument's closing paren",
+  );
+  assert.equal(
+    spellsFamily('[...repoKeys.all(repo, "pr-ci"', "pr-ci"),
+    false,
+    "an unbalanced repoKeys.all( tail must fall out false, never crash or match",
   );
 });
 
@@ -81,7 +112,7 @@ test("no file outside core.ts spells a list family as an array literal", () => {
       continue;
     const source = readFileSync(file, "utf8");
     for (const { name, builder } of FAMILIES) {
-      if (spellingPatterns(name).some((re) => re.test(source)))
+      if (spellsFamily(source, name))
         offenders.push(
           `${rel}: spells the "${name}" family — build it from ${builder}() instead, or, in a comment, describe the shape in words instead of spelling the literal`,
         );
