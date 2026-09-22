@@ -7,7 +7,8 @@
 // test value-imports react, so the import is dynamic and skips only when a
 // specifier is unresolved (ERR_MODULE_NOT_FOUND, measured on node 24) AND the
 // module is still on disk: nothing type-checks this path, so a moved module
-// must fail loudly. The frontend job's installed step is the enforced run.
+// must fail loudly. The frontend job's installed step is the enforced run: it
+// sets GD_EXPECT_DEPS, which fails any unresolved import there.
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { describe, test } from "node:test";
@@ -19,7 +20,12 @@ let skip = false;
 try {
   ({ listKeyboardNav } = await import(MODULE.href));
 } catch (err) {
-  if (err?.code !== "ERR_MODULE_NOT_FOUND" || !existsSync(MODULE)) throw err;
+  if (
+    process.env.GD_EXPECT_DEPS ||
+    err?.code !== "ERR_MODULE_NOT_FOUND" ||
+    !existsSync(MODULE)
+  )
+    throw err;
   skip = "react is not installed — the guards job runs with no install step";
 }
 
