@@ -1,7 +1,7 @@
 //! Projects v2 field values and definitions for issue and PR sidebars.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
@@ -9,9 +9,10 @@ use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::project::{item_projects_truncated, project_ref, ProjectV2Ref, PROJECT_FIELDS};
 use crate::github::project_item_edits::{
-    bulk_document, bulk_outcomes, run_bulk_documents, BulkDocument, BulkItemOutcomes, BULK_ALIAS_CAP,
+    bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, BulkDocument, BulkItemOutcomes,
+    BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
 };
-use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,6 +327,37 @@ fn build_set_item_field_values_args(
     Ok(args)
 }
 
+// Field builders emit raw -f strings and bracket arrays only. Preserve those types
+// in JSON so both write paths can use stdin without duplicating the literal builder.
+fn field_write_input(args: &[String]) -> String {
+    let mut variables = json!({});
+    let mut document = None;
+    for pair in args[2..].chunks_exact(2) {
+        debug_assert_eq!(pair[0], "-f");
+        let (key, value) = pair[1]
+            .split_once('=')
+            .map_or((pair[1].as_str(), None), |(key, value)| (key, Some(value)));
+        if key == "query" {
+            document = value;
+        } else if let Some(key) = key.strip_suffix("[]") {
+            let values = variables
+                .as_object_mut()
+                .expect("variables object")
+                .entry(key)
+                .or_insert_with(|| json!([]));
+            if let Some(value) = value {
+                values
+                    .as_array_mut()
+                    .expect("array variable")
+                    .push(json!(value));
+            }
+        } else {
+            variables[key] = json!(value.expect("scalar variable"));
+        }
+    }
+    graphql_input(document.expect("field mutation document"), variables)
+}
+
 fn build_bulk_field_documents(
     project_id: &str,
     item_ids: &[String],
@@ -382,11 +414,18 @@ fn build_bulk_field_documents(
             declarations, parts, args, item_indices, "/projectV2Item/id",
         ));
     }
+    for document in &mut documents {
+        document.input = Some(field_write_input(&document.args));
+        document.args = GRAPHQL_INPUT_ARGS
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+    }
     Ok(documents)
 }
 
 fn map_field_write_error(error: AppError) -> AppError {
-    // run_gh exposes nonzero GraphQL responses as stderr, where gh lists errors in order.
+    // Checked runners expose nonzero GraphQL responses as stderr, with errors in order.
     let error = match error {
         AppError::Gh(message) if message.starts_with("gh: ") => AppError::Gh(
             message
@@ -431,10 +470,15 @@ pub async fn gh_set_item_field_values(
         return Ok(());
     }
     let args = build_set_item_field_values_args(&project_id, &item_id, &updates, &clears)?;
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
-        .await
-        .map_err(map_field_write_error)?;
+    let input = field_write_input(&args);
+    let out = run_gh_input(
+        Some(&repo_path),
+        &GRAPHQL_INPUT_ARGS,
+        &input,
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(map_field_write_error)?;
     parse_field_write_response(&out.stdout_lossy())
 }
 
@@ -1846,12 +1890,14 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].item_indices, [0, 0, 1, 1]);
         assert_eq!(docs[0].payload_pointer, "/projectV2Item/id");
-        assert_eq!(docs[0].args.last().unwrap(), "query=mutation($p:ID!,$i0:ID!,$f0:ID!,$v0:String!,$i1:ID!,$g1:ID!,$i2:ID!,$f2:ID!,$v2:String!,$i3:ID!,$g3:ID!){ a0: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i0,fieldId:$f0,value:{text:$v0}}){projectV2Item{id}} a1: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i1,fieldId:$g1}){projectV2Item{id}} a2: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i2,fieldId:$f2,value:{text:$v2}}){projectV2Item{id}} a3: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i3,fieldId:$g3}){projectV2Item{id}} }");
-        assert_eq!(&docs[0].args[..docs[0].args.len() - 2], [
-            "api", "graphql", "-f", "p=PVT_p", "-f", "i0=PVTI_z", "-f", "f0=notes", "-f", "v0=@file\n\"hello\"",
-            "-f", "i1=PVTI_z", "-f", "g1=due", "-f", "i2=PVTI_a", "-f", "f2=notes", "-f", "v2=@file\n\"hello\"",
-            "-f", "i3=PVTI_a", "-f", "g3=due",
-        ]);
+        assert_eq!(docs[0].args, GRAPHQL_INPUT_ARGS);
+        let input: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+        assert_eq!(input["query"], "mutation($p:ID!,$i0:ID!,$f0:ID!,$v0:String!,$i1:ID!,$g1:ID!,$i2:ID!,$f2:ID!,$v2:String!,$i3:ID!,$g3:ID!){ a0: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i0,fieldId:$f0,value:{text:$v0}}){projectV2Item{id}} a1: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i1,fieldId:$g1}){projectV2Item{id}} a2: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i2,fieldId:$f2,value:{text:$v2}}){projectV2Item{id}} a3: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i3,fieldId:$g3}){projectV2Item{id}} }");
+        assert_eq!(input["variables"], json!({
+            "p":"PVT_p", "i0":"PVTI_z", "f0":"notes", "v0":"@file\n\"hello\"",
+            "i1":"PVTI_z", "g1":"due", "i2":"PVTI_a", "f2":"notes", "v2":"@file\n\"hello\"",
+            "i3":"PVTI_a", "g3":"due",
+        }));
     }
 
     #[test]
@@ -1862,13 +1908,16 @@ mod tests {
             assert_eq!(docs.iter().map(|doc| doc.item_indices.len()).collect::<Vec<_>>(), sizes);
             assert_eq!(docs.iter().flat_map(|doc| doc.item_indices.iter().copied()).collect::<Vec<_>>(), (0..count).flat_map(|n| [n, n]).collect::<Vec<_>>());
             for doc in &docs {
-                assert_eq!(doc.args.last().unwrap().matches("(input:").count(), doc.item_indices.len());
+                let input: Value = serde_json::from_str(doc.input.as_deref().unwrap()).unwrap();
+                assert_eq!(doc.args, GRAPHQL_INPUT_ARGS);
+                assert_eq!(input["query"].as_str().unwrap().matches("(input:").count(), doc.item_indices.len());
             }
             if count == 13 {
                 assert_eq!(docs[0].item_indices[24], 12);
                 assert_eq!(docs[1].item_indices, [12]);
-                assert!(docs[1].args.contains(&"i0=PVTI_12".into()));
-                assert!(docs[1].args.contains(&"g0=due".into()));
+                let input: Value = serde_json::from_str(docs[1].input.as_deref().unwrap()).unwrap();
+                assert_eq!(input["variables"]["i0"], "PVTI_12");
+                assert_eq!(input["variables"]["g0"], "due");
             }
         }
         assert!(build_bulk_field_documents("PVT_p", &[], &[], &["notes".into()]).is_err());
@@ -1881,7 +1930,9 @@ mod tests {
 
         let ids = vec!["PVTI_z".into(), "PVTI_a".into(), "PVTI_z".into()];
         let docs = build_bulk_field_documents("PVT_p", &ids, &field_updates()[..2], &[]).unwrap();
-        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |_| {
+        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |args, input| {
+            assert_eq!(args, GRAPHQL_INPUT_ARGS);
+            assert!(input.is_some());
             let mut data = json!({});
             for n in 0..6 {
                 data[format!("a{n}")] = json!({"projectV2Item":{"id":"PVTI_ok"}});
@@ -1911,7 +1962,9 @@ mod tests {
         for transport_failure in [false, true] {
             let docs = build_bulk_field_documents("PVT_p", &ids, &field_updates()[..2], &[]).unwrap();
             let mut calls = 0;
-            let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |_| {
+            let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |args, input| {
+                assert_eq!(args, GRAPHQL_INPUT_ARGS);
+                assert!(input.is_some());
                 let call = calls;
                 calls += 1;
                 std::future::ready(if transport_failure && call == 0 {
@@ -1945,14 +1998,17 @@ mod tests {
         let id = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.=+/";
         let docs = build_bulk_field_documents(id, &[id.into()], &field_updates(), &[id.into()]).unwrap();
         assert_eq!(docs[0].item_indices.len(), 7);
-        assert!(!docs[0].args.last().unwrap().contains(id));
+        let input: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+        assert!(!input["query"].as_str().unwrap().contains(id));
         let single = build_set_item_field_values_args(id, id, &field_updates(), &[id.into()]).unwrap();
-        for argument in &single[6..single.len() - 2] {
-            if argument != &format!("i={id}") && argument != &format!("g0={id}") {
-                assert!(docs[0].args.contains(argument), "{argument}");
+        let single: Value = serde_json::from_str(&field_write_input(&single)).unwrap();
+        for (key, value) in single["variables"].as_object().unwrap() {
+            if key != "i" && key != "g0" {
+                assert_eq!(input["variables"][key], *value, "{key}");
             }
         }
-        assert!(docs[0].args.last().unwrap().contains("value:{number:0.0001}"));
+        assert_eq!(input["variables"]["g6"], id);
+        assert!(input["query"].as_str().unwrap().contains("value:{number:0.0001}"));
         for invalid in ["", "bad\"id", "bad\\id", "bad\nid"] {
             assert!(build_bulk_field_documents(invalid, &[id.into()], &[], &["notes".into()]).is_err());
             assert!(build_bulk_field_documents(id, &[invalid.into()], &[], &["notes".into()]).is_err());
@@ -1971,6 +2027,94 @@ mod tests {
         let outcomes = gh_set_items_field_values("missing".into(), "PVT_p".into(), vec!["PVTI_z".into()], vec![], vec![]).await.unwrap();
         assert_eq!(serde_json::to_value(outcomes).unwrap(), json!({"outcomes":[{"itemId":"PVTI_z","error":null}]}));
         assert!(build_bulk_field_documents("PVT_p", &["PVTI_z".into()], &[], &[]).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn long_bulk_field_text_stays_on_stdin_and_preserves_partial_outcomes() {
+        use crate::github::project_item_edits::run_bulk_documents_with;
+        use crate::github::runner::GhOutput;
+
+        let text = "@file\n\"quoted\" \\path=value ".repeat(70);
+        let ids: Vec<_> = (0..25).map(|n| format!("PVTI_{n}")).collect();
+        let docs = build_bulk_field_documents(
+            "PVT_p",
+            &ids,
+            &[FieldValueUpdate::Text { field_id: "notes".into(), text: text.clone() }],
+            &[],
+        ).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].input.as_ref().unwrap().encode_utf16().count() > 32_767);
+        let mut calls = 0;
+        let outcomes = run_bulk_documents_with(
+            bulk_outcomes(&ids).unwrap(), docs, map_field_write_error,
+            |args, input| {
+                calls += 1;
+                assert_eq!(args, ["api", "graphql", "--method", "POST", "--input", "-"]);
+                let input: Value = serde_json::from_str(input.as_deref().unwrap()).unwrap();
+                assert!(!input["query"].as_str().unwrap().contains(&text));
+                let mut data = json!({});
+                for (n, id) in ids.iter().enumerate() {
+                    assert_eq!(input["variables"][format!("v{n}")], text);
+                    assert_eq!(input["variables"][format!("i{n}")], *id);
+                    data[format!("a{n}")] = json!({"projectV2Item":{"id":id}});
+                }
+                data["a1"] = Value::Null;
+                std::future::ready(Ok(GhOutput {
+                    stdout: serde_json::to_vec(&json!({"data":data,"errors":[
+                        {"path":["a1"],"message":"denied"}
+                    ]})).unwrap(),
+                    stderr: "gh: denied".into(),
+                    code: 1,
+                }))
+            },
+        ).await;
+        assert_eq!(calls, 1);
+        for (n, outcome) in outcomes.outcomes.iter().enumerate() {
+            assert_eq!(outcome.item_id, ids[n]);
+            assert_eq!(outcome.error.as_deref(), (n == 1).then_some("denied"));
+        }
+    }
+
+    #[test]
+    fn field_stdin_preserves_all_variable_types_and_empty_values() {
+        for text in ["", "true", "123", "@file\n\"quoted\"=\\path"] {
+            for options in [vec![], vec!["web".into(), "api".into()]] {
+                let mut updates = field_updates();
+                updates[0] = FieldValueUpdate::Text { field_id: "notes".into(), text: text.into() };
+                updates[4] = FieldValueUpdate::MultiSelect { field_id: "teams".into(), option_ids: options.clone() };
+                let args = build_set_item_field_values_args("PVT_p", "PVTI_z", &updates, &["clear".into()]).unwrap();
+                let input: Value = serde_json::from_str(&field_write_input(&args)).unwrap();
+                assert_eq!(input["query"], args.last().unwrap().strip_prefix("query=").unwrap());
+                assert_eq!(input["variables"], json!({
+                    "p":"PVT_p", "i":"PVTI_z", "f0":"notes", "v0":text,
+                    "f1":"points", "f2":"due", "v2":"2027-01-01",
+                    "f3":"status", "v3":"done", "f4":"teams", "v4":options,
+                    "f5":"sprint", "v5":"past", "g0":"clear",
+                }));
+                let docs = build_bulk_field_documents("PVT_p", &["PVTI_z".into()], &updates, &[]).unwrap();
+                let bulk: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+                assert_eq!(docs[0].args, GRAPHQL_INPUT_ARGS);
+                for n in 0..updates.len() {
+                    assert_eq!(bulk["variables"][format!("f{n}")], input["variables"][format!("f{n}")]);
+                    assert_eq!(bulk["variables"][format!("v{n}")], input["variables"][format!("v{n}")]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_single_item_field_text_round_trips_through_stdin() {
+        let text = "@file\n\"quoted\" \\path=value ".repeat(2000);
+        assert!(text.encode_utf16().count() > 32_767);
+        let args = build_set_item_field_values_args(
+            "PVT_p", "PVTI_z",
+            &[FieldValueUpdate::Text { field_id: "notes".into(), text: text.clone() }],
+            &[],
+        ).unwrap();
+        let input: Value = serde_json::from_str(&field_write_input(&args)).unwrap();
+        assert_eq!(input["variables"]["v0"], text);
+        assert_eq!(input["query"], args.last().unwrap().strip_prefix("query=").unwrap());
+        assert_eq!(GRAPHQL_INPUT_ARGS, ["api", "graphql", "--method", "POST", "--input", "-"]);
     }
 
 }

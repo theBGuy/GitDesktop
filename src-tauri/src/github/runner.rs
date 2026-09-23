@@ -316,6 +316,26 @@ pub async fn run_gh_input(
     input: &str,
     timeout: Duration,
 ) -> AppResult<GhOutput> {
+    let out = run_gh_input_raw(repo_path, args, input, timeout).await?;
+    if out.code != 0 {
+        let msg = out.stderr.trim();
+        return Err(AppError::Gh(if msg.is_empty() {
+            format!("gh exited with code {}", out.code)
+        } else {
+            msg.to_string()
+        }));
+    }
+    Ok(out)
+}
+
+/// Aliased mutations return partial data and per-alias errors on a nonzero exit;
+/// outcome mapping needs both, so preserve stdout alongside the exit code and stderr.
+pub async fn run_gh_input_raw(
+    repo_path: Option<&str>,
+    args: &[&str],
+    input: &str,
+    timeout: Duration,
+) -> AppResult<GhOutput> {
     use tokio::io::AsyncWriteExt;
 
     let gh = gh_bin().await?;
@@ -360,20 +380,11 @@ pub async fn run_gh_input(
         .await
         .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
 
-    let out = GhOutput {
+    Ok(GhOutput {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code().unwrap_or(-1),
-    };
-    if out.code != 0 {
-        let msg = out.stderr.trim();
-        return Err(AppError::Gh(if msg.is_empty() {
-            format!("gh exited with code {}", out.code)
-        } else {
-            msg.to_string()
-        }));
-    }
-    Ok(out)
+    })
 }
 
 #[cfg(test)]

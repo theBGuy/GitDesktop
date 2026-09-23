@@ -11,7 +11,7 @@ use crate::github::project_items::{
     board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
     DRAFT_CONTENT_SELECTION,
 };
-use crate::github::runner::{run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{run_gh_input, run_gh_input_raw, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 
 pub(super) const BULK_ALIAS_CAP: usize = 25;
 
@@ -30,6 +30,7 @@ pub struct BulkItemOutcomes {
 
 pub(super) struct BulkDocument {
     pub args: Vec<String>,
+    pub input: Option<String>,
     pub item_indices: Vec<usize>,
     pub payload_pointer: &'static str,
 }
@@ -56,6 +57,7 @@ pub(super) fn bulk_document(
     ]);
     BulkDocument {
         args,
+        input: None,
         item_indices,
         payload_pointer,
     }
@@ -176,11 +178,13 @@ pub(super) async fn run_bulk_documents_with<F, Fut>(
     mut request: F,
 ) -> BulkItemOutcomes
 where
-    F: FnMut(Vec<String>) -> Fut,
+    F: FnMut(Vec<String>, Option<String>) -> Fut,
     Fut: std::future::Future<Output = AppResult<GhOutput>>,
 {
     for mut document in documents {
-        let response = bulk_response(request(std::mem::take(&mut document.args)).await);
+        let response = bulk_response(
+            request(std::mem::take(&mut document.args), document.input.take()).await,
+        );
         apply_bulk_response(&mut outcomes, &document, response, map_error);
     }
     outcomes
@@ -192,9 +196,12 @@ pub(super) async fn run_bulk_documents(
     documents: Vec<BulkDocument>,
     map_error: fn(AppError) -> AppError,
 ) -> BulkItemOutcomes {
-    run_bulk_documents_with(outcomes, documents, map_error, |args| async move {
+    run_bulk_documents_with(outcomes, documents, map_error, |args, input| async move {
         let args: Vec<_> = args.iter().map(String::as_str).collect();
-        run_gh_raw(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await
+        match input {
+            Some(input) => run_gh_input_raw(Some(repo_path), &args, &input, GH_NETWORK_TIMEOUT).await,
+            None => run_gh_raw(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await,
+        }
     })
     .await
 }
@@ -327,11 +334,11 @@ fn map_scope_error(e: AppError) -> AppError {
     e
 }
 
-const GRAPHQL_INPUT_ARGS: [&str; 6] = ["api", "graphql", "--method", "POST", "--input", "-"];
+pub(super) const GRAPHQL_INPUT_ARGS: [&str; 6] = ["api", "graphql", "--method", "POST", "--input", "-"];
 
 // Stdin keeps bodies, titles, search text, and batched documents outside Windows'
 // command-line limit. JSON variables preserve strings without gh's -F coercion.
-fn graphql_input(document: &str, variables: Value) -> String {
+pub(super) fn graphql_input(document: &str, variables: Value) -> String {
     json!({"query": document, "variables": variables}).to_string()
 }
 
@@ -934,7 +941,8 @@ mod tests {
         let ids: Vec<_> = (0..51).map(|n| format!("PVTI_{n}")).collect();
         let docs = build_bulk_item_documents("PVT_p", &ids, REMOVE_MUTATION, "/deletedItemId").unwrap();
         let mut calls = 0;
-        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_bulk_item_error, |_| {
+        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_bulk_item_error, |_, input| {
+            assert!(input.is_none());
             let call = calls;
             calls += 1;
             std::future::ready(if call == 1 {
@@ -972,6 +980,7 @@ mod tests {
         let ids = vec!["PVTI_z".into()];
         let document = BulkDocument {
             args: vec![],
+            input: None,
             item_indices: vec![0, 0],
             payload_pointer: "/projectV2Item/id",
         };

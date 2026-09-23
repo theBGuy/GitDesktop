@@ -797,6 +797,52 @@ export function ProjectsBoardPanel({
   // counted it. Derived, never an effect chasing the writers.
   const liveSelection = pruneSelection(selectedIds, columns);
   const selectionSize = liveSelection.size;
+  /**
+   * The THIRD piece of the lens-resurrection closure, beside the derived
+   * `liveSelection` above and the switch-time clears below. The derived view keeps
+   * a departed card out of every verb, but `selectedIds` still HOLDS its id — so a
+   * card that comes BACK (another client's archive-then-restore, any refetch round
+   * trip) silently rejoins the selection and the next bulk write, having never
+   * been re-picked.
+   *
+   * Only a SETTLED read may retire an id, the discipline the menu latch and the
+   * stale-view-id effect both keep: the cards on screen while a lens loads are the
+   * PREVIOUS view's, and a refetch in flight has not said anything yet, so absence
+   * in either is transient rather than departure.
+   *
+   * DELIBERATE CONSEQUENCE: turning **Show archived cards** off retires the
+   * archived cards from the selection, because the board has genuinely stopped
+   * drawing them. Hiding deselects; turning it back on does not re-select. That is
+   * prune-to-visible's own rule, made durable rather than derived-only.
+   *
+   * The invariant it buys: on a settled board `selectedIds` IS its own live
+   * subset, so the modifier gestures extend from the same set the verbs act on.
+   */
+  const boardSettled =
+    items.data !== undefined && !items.isFetching && !lensLoading;
+  const selectionDrifted =
+    boardSettled && liveSelection.size !== selectedIds.size;
+  const anchorGone =
+    boardSettled &&
+    selectionAnchorId !== null &&
+    findCard(columns, selectionAnchorId) === null;
+  // Rides a `useEffectEvent` so the effect's deps stay the two primitive verdicts
+  // above: `liveSelection` and `columns` are re-derived every render, and listing
+  // either would re-run this on every one of them.
+  const retireLostSelection = useEffectEvent(() => {
+    // Size alone decides: `liveSelection` is a subset of `selectedIds` by
+    // construction, so an equal size means nothing was lost and a fresh Set would
+    // only re-render every mounted card through the columns' memo.
+    if (liveSelection.size !== selectedIds.size) setSelectedIds(liveSelection);
+    if (
+      selectionAnchorId !== null &&
+      findCard(columns, selectionAnchorId) === null
+    )
+      setSelectionAnchorId(null);
+  });
+  useEffect(() => {
+    if (selectionDrifted || anchorGone) retireLostSelection();
+  }, [selectionDrifted, anchorGone]);
   // How big the selection was when it was last spoken. A held Shift+Arrow grows it
   // one card per repeat, so the announcement waits for the burst to stop rather
   // than reading every step out — the TRAILING edge is the only size the user is
@@ -857,27 +903,36 @@ export function ProjectsBoardPanel({
     if (reanchor) setSelectionAnchorId(itemId);
   }
 
-  /** Extend from the anchor to `itemId`, COLUMN-SCOPED. A range REPLACES the
-   *  selection rather than adding to it, which is what lets a user walk one back
-   *  down with Shift held; the anchor stays put so every extension is measured
-   *  from the same card. */
-  function selectRange(itemId: string) {
+  /**
+   * Extend from the anchor to `itemId`, COLUMN-SCOPED. A range REPLACES the
+   * selection rather than adding to it, which is what lets a user walk one back
+   * down with Shift held; the anchor stays put so every extension is measured from
+   * the same card.
+   *
+   * `seedAnchorId` is where the gesture STARTED, used only when there is no anchor
+   * yet. Nothing seeds one on its own — a Tab into the board moves the cursor
+   * without touching the selection, and Esc drops the anchor with it — so without
+   * this the first Shift+Arrow (or Shift+click) of a run would range from the card
+   * it landed ON and select that alone, losing the card the user started from.
+   * That is a NEVER-SET anchor, which is a different thing from the PRUNED one
+   * {@link columnRange}'s own null covers.
+   */
+  function selectRange(itemId: string, seedAnchorId: string | null = null) {
+    const anchorId = selectionAnchorId ?? seedAnchorId;
     const ids =
-      selectionAnchorId === null
-        ? null
-        : columnRange(columns, selectionAnchorId, itemId);
+      anchorId === null ? null : columnRange(columns, anchorId, itemId);
     if (ids !== null) {
       setSelectedIds(new Set(ids));
+      // A seeded anchor has to be RECORDED, or the next extension seeds again from
+      // wherever the cursor has since got to and the range walks its own start.
+      if (selectionAnchorId === null) setSelectionAnchorId(anchorId);
       return;
     }
     // No anchor, or one the board no longer draws: nothing to extend from, so the
     // landed card becomes the selection and the new anchor (ChangesPanel's
     // hidden-anchor rule). A live anchor in ANOTHER column is the other null, and
     // it toggle-adds — a kanban has no honest two-dimensional range.
-    if (
-      selectionAnchorId !== null &&
-      findCard(columns, selectionAnchorId) !== null
-    )
+    if (anchorId !== null && findCard(columns, anchorId) !== null)
       selectToggle(itemId, false);
     else selectOnly(itemId);
   }
@@ -1090,7 +1145,12 @@ export function ProjectsBoardPanel({
     // landed on, a Shift-held one extends the range from the anchor. Same split
     // the pointer keeps, so the two routes can't drift.
     if (landed === undefined) return;
-    if (e.shiftKey) selectRange(landed.itemId);
+    // THE SEEDING SITE for a keyboard range. `from` is the card the press started
+    // on, which is the anchor a first Shift+Arrow means — the pure helper can't
+    // supply it, since "there is no anchor yet" is panel state rather than a
+    // property of the columns.
+    if (e.shiftKey)
+      selectRange(landed.itemId, column.items[from.idx]?.itemId ?? null);
     else selectOnly(landed.itemId);
   }
 
@@ -1124,6 +1184,15 @@ export function ProjectsBoardPanel({
    *  states. */
   const [bulkFieldsOpen, setBulkFieldsOpen] = useState(false);
   const [bulkFieldCards, setBulkFieldCards] = useState<BoardItem[]>(NO_CARDS);
+  /** Which RUN of the bulk fields editor is current. An Apply's continuation
+   *  outlives the editor that fired it — Cancel stays live through the write, and
+   *  closing doesn't unmount this dialog — while the close it performs is a panel
+   *  setter every run shares. Without the token, a resolution from a cancelled run
+   *  shuts whichever editor is open by then and discards the draft in it. The
+   *  discipline {@link dialogSessionRef} keeps for the add dialogs, and it is a ref
+   *  for the same reason: a write that settles while the tab is hidden must not
+   *  have needed a render to be seen. */
+  const bulkFieldsSessionRef = useRef(0);
   // The add writes live HERE rather than inside the dialogs that fire them, so the
   // board can say what is in flight: a dialog closed mid-write would otherwise take
   // the only record of it with it.
@@ -1148,6 +1217,10 @@ export function ProjectsBoardPanel({
   const bulkWritePending = pendingWrites.some(
     (w) => w.kind !== null && BULK_WRITE_KINDS.has(w.kind),
   );
+  // The one bulk kind the CURSOR has to follow, and so the only one the chase
+  // waits on: a bulk move re-buckets its cards into another column, where the
+  // other three either leave them in place or take them off the board entirely.
+  const bulkMovePending = pendingWrites.some((w) => w.kind === "bulk-move");
   // The draft dialog's single-flight gate. Its own form can't provide one: the
   // component persists across close/reopen, so an Esc'd submit and a later one share
   // a form instance whose `isSubmitting` the FIRST settle clears unconditionally —
@@ -1221,6 +1294,12 @@ export function ProjectsBoardPanel({
   // The selection bar, so a control inside it can hand focus back to the board
   // before the bar unmounts under it.
   const selectionBarRef = useRef<HTMLDivElement>(null);
+  /** The card the cursor sat on before the current pointer press moved it — the
+   *  anchor a Shift+click seeds from when the selection has none yet. A ref
+   *  because pointerdown and mousedown are separate dispatches with a render
+   *  between them, so state written by the first is already visible to the
+   *  second. */
+  const prePressCardRef = useRef<string | null>(null);
   // True from the moment the menu opens until its close has fully SETTLED, which
   // is why the completion callback owns the falling edge: Base UI returns focus to
   // the trigger from the popup's unmount cleanup, and that unmount is what fires
@@ -1245,7 +1324,12 @@ export function ProjectsBoardPanel({
   const boardWritePending = pendingWrites.length > 0;
   useEffect(() => {
     if (chase === null || menuBusy) return;
-    const settled = !movePending;
+    // A BULK move counts as unsettled here exactly as a single move does. Without
+    // it the chase would read the card at its PRE-patch place — the optimistic
+    // re-bucketing lands a cancel and a notify-batch later — stamp that, and
+    // disarm before the card ever moved, parking the cursor in the column the
+    // cards just left.
+    const settled = !movePending && !bulkMovePending;
     if (chaseCol === null || chaseIdx === null) {
       // The board stopped drawing the card — a regroup, a project switch, or a
       // refetch that dropped it. Disarming on settle is what keeps a chase that
@@ -1269,7 +1353,7 @@ export function ProjectsBoardPanel({
       if (settled) setChase(null);
     });
     return () => cancelAnimationFrame(frame);
-  }, [chase, chaseCol, chaseIdx, menuBusy, movePending]);
+  }, [chase, chaseCol, chaseIdx, menuBusy, movePending, bulkMovePending]);
 
   // The card an archive or a removal took off the board, and where it sat. The
   // ABSENCE of it from the columns is the arming edge, not the write settling: the
@@ -1389,6 +1473,11 @@ export function ProjectsBoardPanel({
     // addresses this board's memberships, so a silent re-point would leave a draft
     // aimed at fields the new board may not even define. Its card snapshot goes
     // with it — the selection behind it belonged to the previous board.
+    //
+    // The token is retired as well as the state: a write still in flight against
+    // the OLD board must not be allowed to decide anything about the editor once
+    // this board's own run opens.
+    bulkFieldsSessionRef.current += 1;
     setBulkFieldsOpen(false);
     setBulkFieldCards(NO_CARDS);
   });
@@ -1697,6 +1786,15 @@ export function ProjectsBoardPanel({
    *  pointerdown is the one gesture both routes share — recording anywhere else
    *  leaves a long press showing the previously right-clicked card's menu. */
   function handleCardPointerDown(e: PointerEvent) {
+    // The card the cursor sat on BEFORE this press, recorded ahead of
+    // `recordMenuTarget` because that moves the cursor onto whatever was pressed.
+    // A Shift+click with no anchor yet seeds from it: mousedown runs in a later
+    // dispatch than pointerdown, by which time the cursor is already the clicked
+    // card, and seeding from THAT would range a card to itself.
+    prePressCardRef.current =
+      liveCursor === null
+        ? null
+        : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
     recordMenuTarget(e.target instanceof Element ? e.target : null);
   }
 
@@ -1742,7 +1840,10 @@ export function ProjectsBoardPanel({
     e.preventDefault();
     e.stopPropagation();
     if (item.content.kind === "redacted") return;
-    if (mods.range) selectRange(item.itemId);
+    // THE SEEDING SITE for a pointer range — the keyboard's twin sits in
+    // `onBoardKeyDown`. Both hand `selectRange` the card the gesture started on so
+    // a first Shift+click covers start AND destination.
+    if (mods.range) selectRange(item.itemId, prePressCardRef.current);
     else selectToggle(item.itemId);
     el?.closest<HTMLElement>("[data-card-index]")?.focus();
   }
@@ -2125,23 +2226,51 @@ export function ProjectsBoardPanel({
     }
   }
 
-  /** What a bulk write did, said once. A FULL success is announced and nothing
-   *  more — the cards changing IS the feedback — where a partial one also toasts:
-   *  a count of what didn't land is a short terminal result, and a live region
-   *  alone would lose it to the next announcement. */
+  /**
+   * What a bulk write did, said once. A FULL success is announced and nothing
+   * more — the cards changing IS the feedback — where a partial one also toasts:
+   * a count of what didn't land is a short terminal result, and a live region
+   * alone would lose it to the next announcement.
+   *
+   * The toast carries WHY, not just how many. Every single-card path surfaces
+   * GitHub's own message through its hook's `onError`, and a batch that answered
+   * with a bare count would be the one place in this panel that knows the reason
+   * and throws it away — a missing `project` scope, a dead connection and a
+   * rejected field value would all read identically.
+   *
+   * DISPOSITION (settled): the per-item reasons are summarized, not enumerated.
+   * A bulk failure is homogeneous in practice — one scope error across every
+   * card, one transport error across a chunk — so the first distinct reason is
+   * the actionable one and the rest are a count. The reversal, if a per-card
+   * breakdown is ever wanted, is a results section inside the bulk dialog fed by
+   * these same outcomes; it is deliberately not built here, where a toast has to
+   * stay terminal.
+   */
   function reportBulk(verb: BulkVerb, result: BulkItemOutcomes, sent: number) {
-    const failed = result.outcomes.filter(
-      (outcome) => outcome.error !== null,
-    ).length;
+    const errors = result.outcomes.flatMap((outcome) =>
+      outcome.error === null ? [] : [outcome.error],
+    );
+    const failed = errors.length;
     if (failed === 0) {
       announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent)}`);
       return;
     }
+    // COUNT-ONLY on purpose: the live region is terse by design, and the toast
+    // beside it carries the diagnosis. The reason lives in one place, not two.
     announce(
       `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent)} — ${failed} failed`,
     );
+    // Distinct, in the order GitHub gave them (`Set` keeps insertion order), each
+    // through the house presenter so a multi-line dump reads as its one
+    // meaningful line and an empty string still says something.
+    const reasons = [
+      ...new Set(errors.map((error) => presentError(error).summary)),
+    ];
+    const more = reasons.length - 1;
     toast.error(
-      `${failed} of ${cardCount(sent)} failed to ${BULK_FAIL_WORD[verb]}`,
+      `${failed} of ${cardCount(sent)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
+        more > 0 ? ` (+${more} more ${more === 1 ? "reason" : "reasons"})` : ""
+      }`,
     );
   }
 
@@ -2173,6 +2302,23 @@ export function ProjectsBoardPanel({
     if (reason !== undefined || cards.length === 0) return;
     const itemIds = cards.map((card) => card.itemId);
     const bucket = moveBucketFor(groupField, column.id);
+    // The cursor rides one of the moved cards into the destination column, the way
+    // the single-card `moveCard` does. Without it the keyboard is left on a card
+    // the optimistic re-bucketing is about to unmount from the column it is
+    // looking at, with no nonce advancing to move it anywhere: `handOffBarFocus`
+    // below only gets focus OUT of the bar, and the bar's own control is gone
+    // either way. The representative is the cursor's card when the write takes it,
+    // else the first moved card — the same rule the removal landing follows.
+    const cursorCard =
+      liveCursor === null
+        ? undefined
+        : columns[liveCursor.col]?.items[liveCursor.idx];
+    const movedIds = new Set(itemIds);
+    setChase(
+      cursorCard !== undefined && movedIds.has(cursorCard.itemId)
+        ? cursorCard.itemId
+        : itemIds[0],
+    );
     handOffBarFocus();
     clearSelection();
     try {
@@ -2237,6 +2383,35 @@ export function ProjectsBoardPanel({
       announce(heldNow);
       return;
     }
+    // Where the keyboard lands once the cards go, armed BEFORE the write for the
+    // reason `retireCard` states: the patch takes them off the board within a
+    // microtask, so the latch has to be watching by then. Only where they really
+    // LEAVE — an archive under a shown-archived toggle keeps every card in its
+    // slot, so there is nothing to follow and a latch that could never land would
+    // re-scan the columns on every render.
+    //
+    // ONE representative card carries the whole set: a bulk patch takes every card
+    // out of a lens in a single write, so the first one's absence is the group's.
+    // The CURSOR's card is preferred as that representative whenever the write
+    // takes it, which is what measures the landing from where the user actually
+    // is; the landing itself is a SLOT, so whatever survivor slid into it is who
+    // gets focus — the eligible set never has to be re-consulted.
+    const leaves = action === "remove" || !showArchived;
+    const goneIds = new Set(cards.map((card) => card.itemId));
+    const cursorCard =
+      liveCursor === null
+        ? undefined
+        : columns[liveCursor.col]?.items[liveCursor.idx];
+    const anchor =
+      cursorCard !== undefined && goneIds.has(cursorCard.itemId)
+        ? cursorCard
+        : cards[0];
+    const anchorAt = findCard(columns, anchor.itemId);
+    setRetired(
+      anchorAt === null || !leaves
+        ? null
+        : { itemId: anchor.itemId, ...anchorAt },
+    );
     // `wasArchived` rides each item for the reason the single-card write carries
     // it: it is a COUNT axis no cache key supplies, and a mixed selection holds
     // both values at once.
@@ -2290,17 +2465,32 @@ export function ProjectsBoardPanel({
     const { cards, reason } = bulkState("fields");
     if (projectId === null || reason !== undefined || cards.length === 0)
       return;
+    // Mints the run this editor's Apply will belong to. Read the token's own note:
+    // a resolution from a PREVIOUS run may still be on its way.
+    bulkFieldsSessionRef.current += 1;
     setBulkFieldCards(cards);
     setBulkFieldsOpen(true);
   }
 
-  /** Write one drafted set of field values across every card still eligible for it.
-   *  Reports whether it landed: the dialog closes on `true` and stays open with the
-   *  draft intact on `false`, where a failed write leaves the user's work. */
+  /**
+   * Write one drafted set of field values across every card still eligible for it.
+   *
+   * Answers whether the dialog may CLOSE, which is a narrower claim than "the
+   * mutation resolved". The batch command resolves with its refusals INSIDE it, so
+   * a write every card rejected still settles successfully — the verdict is
+   * therefore derived from the per-item outcomes, and any refusal at all keeps the
+   * editor open over the draft that produced it. Re-applying the same absolute
+   * values is idempotent for the cards that did land, so a retry from that draft
+   * costs nothing and loses nothing.
+   *
+   * A STALE run answers `false` whatever it wrote: see the session token.
+   */
   async function applyBulkFields(
     updates: ProjectFieldValueUpdate[],
     clears: string[],
   ): Promise<boolean> {
+    // Read before the round trip, like every other target here.
+    const session = bulkFieldsSessionRef.current;
     // Re-derived at FIRE time rather than taken from the open-time snapshot: a card
     // that left the board while the dialog was up must not be written to, which is
     // the same rule every other bulk verb keeps. The gates are re-checked here too.
@@ -2317,8 +2507,15 @@ export function ProjectsBoardPanel({
         updates,
         clears,
       });
+      // Reported whatever run this was: the message describes a write the user
+      // really fired, and is true wherever they have since got to.
       reportBulk("fields", result, itemIds.length);
-      return true;
+      // Only the run still on screen may close anything. A stale token means the
+      // user cancelled over this write and opened the editor again (or switched
+      // board), and the close below is a PANEL setter every run shares — so a
+      // stale `true` would shut the editor now open and discard the draft in it.
+      if (session !== bulkFieldsSessionRef.current) return false;
+      return result.outcomes.every((outcome) => outcome.error === null);
     } catch {
       // The mutation reported it. Nothing was patched optimistically, so the board
       // is already showing the truth and the draft stays where the user left it.
@@ -2952,6 +3149,9 @@ export function ProjectsBoardPanel({
   // picking a column needs a menu the palette can't put up, which is the same
   // reason the single-card move is menu-only.
   const hasSelection = active && selectionSize >= 2;
+  // `openBulkFields` re-derives its own eligibility and holds off `bulkState`, so
+  // the palette answers a held board exactly as the bar's button does.
+  useHotkeyAction("edit-selected-card-fields", openBulkFields, hasSelection);
   useHotkeyAction(
     "archive-selected-cards",
     () => void bulkRetireCards("archive"),

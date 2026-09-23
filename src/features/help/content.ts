@@ -2088,10 +2088,11 @@ From two cards up, a bar appears above the columns with what the selection can d
 Every count is the number the verb will actually reach. A mixed selection **scopes** a
 verb rather than blocking it: **Archive** over three live cards and one archived one
 says **Archive 3 cards…** and leaves the fourth where it is, and a verb with nothing to
-reach says so in place of its count. The command palette carries three of them
-(**Archive selected board cards…**, **Restore selected board cards** and **Remove
-selected board cards from project…**) plus **Clear board card selection**. There is no
-palette move, since picking a column needs the menu.
+reach says so in place of its count. The command palette carries four of them
+(**Edit fields of selected board cards…**, **Archive selected board cards…**,
+**Restore selected board cards** and **Remove selected board cards from project…**)
+plus **Clear board card selection**. There is no palette move, since picking a column
+needs the menu.
 
 {{Secondaryclick}} a card in the selection and the menu speaks for the whole set. The
 rows that can only mean one card (**Position**, **Edit draft…** and **Convert to
@@ -2106,10 +2107,10 @@ the board is drawing, never on what it was drawing when you picked.
 
 ## Setting fields on several cards
 
-**Edit fields of N cards…**, from the selection bar or the card menu, opens the board's
-writable fields as a list of rows. Every row starts on **Leave as is**, and a row left
-there is not written at all — so a bulk edit carries exactly the fields you meant and
-nothing else. Each row offers three choices:
+**Edit fields of N cards…**, from the selection bar, the card menu or the command
+palette, opens the board's writable fields as a list of rows. Every row starts on
+**Leave as is**, and a row left there is not written at all — so a bulk edit carries
+exactly the fields you meant and nothing else. Each row offers three choices:
 
 - **Leave as is** — the default. The field keeps whatever each card already holds.
 - **Set to** — reveals the field's own control (options, iterations, a date, a number,

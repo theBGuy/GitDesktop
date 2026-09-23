@@ -33,6 +33,9 @@ import {
   applyBoardOrder,
   boardAnchorId,
   boardPredecessorId,
+  captureRemovedCard,
+  insertBoardCardAfter,
+  type RemovedBoardCard,
   reorderBoardItem,
 } from "./board-order";
 import { keepPreviousDataForKeyAxes } from "./core";
@@ -922,16 +925,6 @@ function patchDraftContent(
   };
 }
 
-/** Where one item sits in a board's cached pages, plus the item itself — what a
- *  removal has to remember to be able to put it back exactly where it was. One
- *  removal patches every cached lens of the board and each needs its own record; the
- *  LENS it belongs to rides the undo entry that carries this. */
-interface RemovedBoardItem {
-  pageIndex: number;
-  itemIndex: number;
-  item: BoardItem;
-}
-
 /** `itemId`'s page and slot in `data`, or null when this lens doesn't draw it. */
 function findBoardItem(
   data: InfiniteData<BoardItems, string | null> | undefined,
@@ -969,35 +962,6 @@ function dropBoardItem(
       page.items.some((item) => item.itemId === itemId)
         ? { ...page, items: page.items.filter((i) => i.itemId !== itemId) }
         : page,
-    ),
-  };
-}
-
-/** {@link dropBoardItem}'s inverse: the one item back at the page and slot it left,
- *  onto the CURRENT cache rather than a snapshot of the world — restoring a whole
- *  tree would revert a concurrent write to a sibling card and drop a `Load more`
- *  page that landed while this one was in flight.
- *
- *  Three ways the board can have moved on underneath, each left alone rather than
- *  forced: a refetch already put the item back (never insert it twice), the page it
- *  sat on no longer exists, or that page is now shorter than its old slot (the
- *  splice clamps to the end). */
-function restoreBoardItem(
-  data: InfiniteData<BoardItems, string | null> | undefined,
-  at: RemovedBoardItem,
-): InfiniteData<BoardItems, string | null> | undefined {
-  if (data === undefined) return undefined;
-  const held = data.pages.some((page) =>
-    page.items.some((item) => item.itemId === at.item.itemId),
-  );
-  const page = data.pages[at.pageIndex];
-  if (held || page === undefined) return data;
-  const items = [...page.items];
-  items.splice(Math.min(at.itemIndex, items.length), 0, at.item);
-  return {
-    ...data,
-    pages: data.pages.map((p, i) =>
-      i === at.pageIndex ? { ...page, items } : p,
     ),
   };
 }
@@ -1605,7 +1569,7 @@ type BoardItemUndo =
       itemId: string;
       /** Where the card sat, or null when this lens only ever COUNTED it — a card
        *  past the loaded pages of a lens whose count still included it. */
-      at: RemovedBoardItem | null;
+      at: RemovedBoardCard | null;
       /** Whether the drop took this lens's `totalCount` with it, so the undo knows
        *  whether to give it back. */
       counted: boolean;
@@ -1639,7 +1603,7 @@ function removalPlan(
   itemId: string,
   wasArchived: boolean,
 ): BoardItemUndo | null {
-  const at = findBoardItem(data, itemId);
+  const at = captureRemovedCard(data, itemId);
   if (kind === "archive" && keyShowsArchived(key))
     return at === null ? null : { mode: "archive", key, itemId };
   const counted =
@@ -1666,19 +1630,110 @@ function applyRemovalPlan(
   );
 }
 
-/** `plan` undone, arm for arm: the card goes back where it sat when this lens held
- *  it, and the count goes back exactly where the drop took one. A count-only drop
- *  has no slot to restore and undoes as the count alone. */
+/**
+ * Where `plan`'s card goes back, resolved against the cache AS IT IS NOW.
+ *
+ * The recorded anchor is the card's IMMEDIATE predecessor, which may itself have
+ * been in the same batch. Three cases, and the walk covers all of them: the anchor
+ * is still on the board (a survivor, or a sibling this rollback already put back,
+ * which the ordering below guarantees) and is used as-is; the anchor was removed
+ * SUCCESSFULLY and is never coming back, so the walk steps through it to whatever
+ * IT followed; or the chain runs out, which is the head of the board.
+ *
+ * `chain` is this lens's own batch, by item id. An anchor that is neither drawn nor
+ * ours vanished under a concurrent change — the head is the honest answer there,
+ * since nothing in this cache still says where it was.
+ */
+function resolveUndoAnchor(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  plan: Extract<BoardItemUndo, { mode: "drop" }>,
+  chain: ReadonlyMap<string, BoardItemUndo>,
+): string | null {
+  const drawn = (id: string) =>
+    data?.pages.some((page) => page.items.some((cur) => cur.itemId === id)) ===
+    true;
+  let anchor = plan.at?.afterId ?? null;
+  // Bounded by the batch: every step consumes one of its entries, and `seen`
+  // refuses a cycle a corrupted chain could otherwise spin on.
+  const seen = new Set<string>();
+  while (anchor !== null && !drawn(anchor)) {
+    if (seen.has(anchor)) return null;
+    seen.add(anchor);
+    const prev = chain.get(anchor);
+    if (prev === undefined || prev.mode !== "drop") return null;
+    anchor = prev.at?.afterId ?? null;
+  }
+  return anchor;
+}
+
+/** `plan` undone, arm for arm: the card goes back after the id it followed, and the
+ *  count goes back exactly where the drop took one. A count-only drop has no card
+ *  to restore and undoes as the count alone. */
 function undoRemovalPlan(
   data: InfiniteData<BoardItems, string | null> | undefined,
   plan: BoardItemUndo,
+  chain: ReadonlyMap<string, BoardItemUndo>,
 ): InfiniteData<BoardItems, string | null> | undefined {
   if (plan.mode === "archive")
     return patchBoardItemArchived(data, plan.itemId, false);
   return withBoardCount(
-    plan.at === null ? data : restoreBoardItem(data, plan.at),
+    plan.at === null
+      ? data
+      : insertBoardCardAfter(
+          data,
+          plan.at.item,
+          resolveUndoAnchor(data, plan, chain),
+        ),
     plan.counted ? 1 : 0,
   );
+}
+
+/**
+ * Put a removal's cards back, one `setQueryData` per cached lens.
+ *
+ * Grouped by key and applied in ONE pass per key so each restore sees the previous
+ * one's result — an anchor that is a sibling of this same rollback has to be on the
+ * board before the card that follows it looks for it. Ordered by where the cards
+ * sat when they LEFT, which is what makes that true: a predecessor always left
+ * before its dependents.
+ *
+ * `restoring` picks the subset — every card on a thrown write, the refused ones
+ * alone at a partial settle.
+ */
+function undoRemovals(
+  queryClient: QueryClient,
+  undo: readonly BoardItemUndo[],
+  restoring: (plan: BoardItemUndo) => boolean,
+): void {
+  const byKey = new Map<string, { key: QueryKey; plans: BoardItemUndo[] }>();
+  for (const plan of undo) {
+    // `JSON.stringify` rather than a joined string: a saved view's filter and a
+    // Windows repo path both carry spaces, and array encoding is injective
+    // without having to claim a delimiter is impossible.
+    const id = JSON.stringify(plan.key);
+    const slot = byKey.get(id) ?? { key: plan.key, plans: [] };
+    slot.plans.push(plan);
+    byKey.set(id, slot);
+  }
+  for (const { key, plans } of byKey.values()) {
+    // The chain spans the whole batch, not just the restored subset: a card that
+    // succeeded is walked THROUGH, which is the only way its dependents find the
+    // survivor behind it.
+    const chain = new Map(plans.map((plan) => [plan.itemId, plan]));
+    const wanted = plans
+      .filter(restoring)
+      .toSorted(
+        (a, b) =>
+          (a.mode === "drop" ? (a.at?.flatIndex ?? -1) : -1) -
+          (b.mode === "drop" ? (b.at?.flatIndex ?? -1) : -1),
+      );
+    if (wanted.length === 0) continue;
+    queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+      key,
+      (cur) =>
+        wanted.reduce((acc, plan) => undoRemovalPlan(acc, plan, chain), cur),
+    );
+  }
 }
 
 /** The ids a batch write REFUSED, as a set the rollback tests membership in. An
@@ -1755,11 +1810,7 @@ function useBoardItemRemoval(
     // menu that fires this closes as it does, and react-query drops mutate-scoped
     // callbacks once the observer loses its listeners.
     onError: (e, _args, ctx) => {
-      for (const entry of ctx?.undo ?? [])
-        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-          entry.key,
-          (cur) => undoRemovalPlan(cur, entry),
-        );
+      undoRemovals(queryClient, ctx?.undo ?? [], () => true);
       toastError(e);
     },
     // ACCEPTED EDGE: this refetch can land inside GitHub's replica lag (~6s,
@@ -1986,11 +2037,7 @@ function useBulkBoardRemoval(
     // Reporting and rollback live here for the reason the single-card family
     // states: the bar or menu that fires this goes away as it does.
     onError: (e, _args, ctx) => {
-      for (const entry of ctx?.undo ?? [])
-        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-          entry.key,
-          (cur) => undoRemovalPlan(cur, entry),
-        );
+      undoRemovals(queryClient, ctx?.undo ?? [], () => true);
       toastError(e);
     },
     onSettled: (result, e, args, ctx) => {
@@ -1999,13 +2046,9 @@ function useBulkBoardRemoval(
       // THROWN write has already been undone whole by `onError`.
       if (e === null && result !== undefined) {
         const failed = failedItemIds(result);
-        for (const entry of ctx?.undo ?? []) {
-          if (!failed.has(entry.itemId)) continue;
-          queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-            entry.key,
-            (cur) => undoRemovalPlan(cur, entry),
-          );
-        }
+        undoRemovals(queryClient, ctx?.undo ?? [], (plan) =>
+          failed.has(plan.itemId),
+        );
       }
       invalidateProjectBoards(queryClient, args.repo);
       if (membership) invalidateItemMemberships(queryClient, args.repo);

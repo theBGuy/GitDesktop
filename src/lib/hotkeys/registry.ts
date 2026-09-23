@@ -429,9 +429,17 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   // The board's bulk verbs, live only while it has a real selection on it. The
-  // bar carries all four as buttons, so these ship palette-only for the reason
-  // the rows above do — and there is no bulk MOVE here, since picking a column
-  // needs a menu the palette can't put up.
+  // bar carries every one of them as a button, so these ship palette-only for the
+  // reason the rows above do — and there is no bulk MOVE here, since picking a
+  // column needs a menu the palette can't put up. The fields editor DOES appear:
+  // it opens a dialog that asks for everything itself, so a palette row reaches it
+  // whole.
+  {
+    id: "edit-selected-card-fields",
+    label: "Edit fields of selected board cards…",
+    category: "Repository",
+    defaultBinding: null,
+  },
   {
     id: "archive-selected-cards",
     label: "Archive selected board cards…",

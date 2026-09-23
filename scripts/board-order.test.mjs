@@ -16,6 +16,8 @@ import { test } from "node:test";
 import {
   applyBoardOrder,
   boardItemPredecessor,
+  captureRemovedCard,
+  insertBoardCardAfter,
   rechunkPages,
   reorderBoardItem,
 } from "../src/lib/git/queries/board-order.ts";
@@ -210,4 +212,234 @@ test("reorderBoardItem dedupes even when the moved copy lands before the stale o
   const out = reorderBoardItem(data, "x", null);
   assert.deepEqual(ids(out), ["x", "a", "b"]);
   assert.equal(ids(out).filter((id) => id === "x").length, 1);
+});
+
+// ------------------------------------------- removal capture / anchored restore
+
+test("captureRemovedCard records the card, its flat place and what it followed", () => {
+  const data = pagesOf([mk("a"), mk("b")], [mk("c"), mk("d")]);
+  assert.deepEqual(captureRemovedCard(data, "a"), {
+    flatIndex: 0,
+    afterId: null,
+    item: mk("a"),
+  });
+  // Across the page boundary: the predecessor is the flattened one, not a
+  // per-page one, which is what makes the anchor survive a rechunk.
+  assert.deepEqual(captureRemovedCard(data, "c"), {
+    flatIndex: 2,
+    afterId: "b",
+    item: mk("c"),
+  });
+  assert.equal(captureRemovedCard(data, "gone"), null);
+  assert.equal(captureRemovedCard(undefined, "a"), null);
+});
+
+test("captureRemovedCard reads the LAST copy and never anchors a card to itself", () => {
+  // One membership held twice (a write-through insert plus a later page).
+  const data = pagesOf([mk("a"), mk("x")], [mk("x"), mk("b")]);
+  assert.deepEqual(captureRemovedCard(data, "x"), {
+    flatIndex: 2,
+    afterId: "a",
+    item: mk("x"),
+  });
+});
+
+test("insertBoardCardAfter puts a card back after its anchor, or at the head", () => {
+  const data = pagesOf([mk("a"), mk("b")], [mk("c")]);
+  assert.deepEqual(ids(insertBoardCardAfter(data, mk("x"), "a")), [
+    "a",
+    "x",
+    "b",
+    "c",
+  ]);
+  assert.deepEqual(ids(insertBoardCardAfter(data, mk("x"), null)), [
+    "x",
+    "a",
+    "b",
+    "c",
+  ]);
+  // Anchored to the last card of a page: lands at that page's end, not the next
+  // page's start — the pages stay the shape the rest of the cache expects.
+  const out = insertBoardCardAfter(data, mk("x"), "b");
+  assert.deepEqual(
+    out.pages[0].items.map((i) => i.itemId),
+    ["a", "b", "x"],
+  );
+});
+
+test("insertBoardCardAfter never inserts a card the cache already holds", () => {
+  const data = pagesOf([mk("a"), mk("b")]);
+  assert.deepEqual(ids(insertBoardCardAfter(data, mk("b"), "a")), ["a", "b"]);
+});
+
+// The partial-rollback case this whole anchor shape exists for. The old
+// index-based restore put B back at its captured slot 1, which the successful
+// removal of A had already vacated — yielding [C, B, D].
+test("a partial rollback restores at the anchor, not the stale index", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c"), mk("d")]);
+  const capA = captureRemovedCard(data, "a");
+  const capB = captureRemovedCard(data, "b");
+  // Both removed; only B is refused and comes back.
+  let live = pagesOf([mk("c"), mk("d")]);
+  // B's anchor was A, which succeeded and is gone, so the walk steps through A to
+  // what IT followed — the head of the board.
+  const anchor = capB.afterId === "a" ? capA.afterId : capB.afterId;
+  live = insertBoardCardAfter(live, capB.item, anchor);
+  assert.deepEqual(ids(live), ["b", "c", "d"]);
+});
+
+test("an all-failed rollback restores in order and keeps the original sequence", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c"), mk("d")]);
+  const caps = ["a", "b"].map((id) => captureRemovedCard(data, id));
+  let live = pagesOf([mk("c"), mk("d")]);
+  // Original flat order, so A is back before B looks for it.
+  for (const cap of caps.toSorted((x, y) => x.flatIndex - y.flatIndex)) {
+    live = insertBoardCardAfter(live, cap.item, cap.afterId);
+  }
+  assert.deepEqual(ids(live), ["a", "b", "c", "d"]);
+});
+
+test("a non-adjacent partial rollback anchors to the survivor in front of it", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c"), mk("d")]);
+  const capC = captureRemovedCard(data, "c");
+  // B and C removed, C refused: its anchor B is gone, and B followed the survivor A.
+  const capB = captureRemovedCard(data, "b");
+  let live = pagesOf([mk("a"), mk("d")]);
+  const anchor = capC.afterId === "b" ? capB.afterId : capC.afterId;
+  live = insertBoardCardAfter(live, capC.item, anchor);
+  assert.deepEqual(ids(live), ["a", "c", "d"]);
+});
+
+// The board DRAWS the last copy of a duplicated membership (`oneCardPerItem` in
+// ProjectsBoardPanel keeps the last occurrence at the flatten point), so a
+// rollback's anchor has to be that copy too. Mirrors that dedupe here rather than
+// asserting raw pages: the raw order can be right while the rendered one is wrong.
+const rendered = (data) => {
+  const flat = data.pages.flatMap((p) => p.items);
+  const lastAt = new Map();
+  flat.forEach((item, i) => lastAt.set(item.itemId, i));
+  return flat
+    .filter((item, i) => lastAt.get(item.itemId) === i)
+    .map((item) => item.itemId);
+};
+
+test("insertBoardCardAfter anchors to the anchor's LAST copy across pages", () => {
+  // One membership ("x") held twice: a write-through insert plus a later page.
+  const data = pagesOf([mk("a"), mk("x")], [mk("x"), mk("c")]);
+  const out = insertBoardCardAfter(data, mk("b"), "x");
+  // Landing after the FIRST copy would render [a, b, x, c] — b ahead of its own
+  // anchor, the one order anchoring was supposed to rule out.
+  assert.deepEqual(rendered(out), ["a", "x", "b", "c"]);
+  // And it really went into the later page, not the first.
+  assert.deepEqual(
+    out.pages[1].items.map((i) => i.itemId),
+    ["x", "b", "c"],
+  );
+});
+
+test("insertBoardCardAfter still anchors correctly with no duplicate anchor", () => {
+  const data = pagesOf([mk("a"), mk("x")], [mk("c")]);
+  const out = insertBoardCardAfter(data, mk("b"), "x");
+  assert.deepEqual(rendered(out), ["a", "x", "b", "c"]);
+  assert.deepEqual(
+    out.pages[0].items.map((i) => i.itemId),
+    ["a", "x", "b"],
+  );
+});
+
+test("a duplicated anchor within ONE page still takes its last copy", () => {
+  const data = pagesOf([mk("a"), mk("x"), mk("d"), mk("x")]);
+  const out = insertBoardCardAfter(data, mk("b"), "x");
+  assert.deepEqual(rendered(out), ["a", "d", "x", "b"]);
+});
+
+// ------------------------------------------- round-trip PROPERTY over duplicates
+
+/** Every card of `ids` dropped from every page, the way `dropBoardItem` does it:
+ *  a removal takes ALL copies of a membership, not just the drawn one. */
+const dropAll = (data, ids) => ({
+  ...data,
+  pages: data.pages.map((p) => ({
+    ...p,
+    items: p.items.filter((it) => !ids.has(it.itemId)),
+  })),
+});
+
+/** Non-empty subsets of `xs`, smallest first — a deterministic sweep rather than
+ *  one more hand-picked example. */
+const subsets = (xs) => {
+  const out = [];
+  for (let mask = 1; mask < 1 << xs.length; mask += 1) {
+    out.push(xs.filter((_, i) => (mask >> i) & 1));
+  }
+  return out;
+};
+
+/**
+ * THE PROPERTY: capture a set, remove it, put every one back (an all-failed
+ * rollback) and the board RENDERS exactly what it rendered before. Pages may end
+ * up shaped differently — a removal drops duplicate copies a restore does not
+ * re-mint — but the drawn sequence is the invariant, which is what the anchors
+ * exist to preserve.
+ *
+ * An all-failed rollback is the case that exercises capture and insert against
+ * each other with no walking: every recorded anchor is itself restored, in
+ * `flatIndex` order, so each is on the board before its dependent looks for it.
+ */
+const roundTrips = (label, data) => {
+  const before = rendered(data);
+  for (const ids of subsets(before)) {
+    const gone = new Set(ids);
+    const caps = ids
+      .map((id) => captureRemovedCard(data, id))
+      .toSorted((a, b) => a.flatIndex - b.flatIndex);
+    let live = dropAll(data, gone);
+    for (const cap of caps) {
+      live = insertBoardCardAfter(live, cap.item, cap.afterId);
+    }
+    assert.deepEqual(
+      rendered(live),
+      before,
+      `${label}: removing {${ids.join(",")}} then restoring all changed the drawn order`,
+    );
+  }
+};
+
+test("round trip preserves the drawn order: duplicate inside one page", () => {
+  // The r0d case: raw [x, b, x, c] renders [b, x, c], so b's predecessor is the
+  // HEAD, not the leading undrawn copy of x.
+  roundTrips("dup-in-page", pagesOf([mk("x"), mk("b"), mk("x"), mk("c")]));
+});
+
+test("round trip preserves the drawn order: duplicate across pages", () => {
+  roundTrips("dup-cross-page", pagesOf([mk("a"), mk("x")], [mk("x"), mk("c")]));
+});
+
+test("round trip preserves the drawn order: adjacent duplicate", () => {
+  roundTrips("dup-adjacent", pagesOf([mk("a"), mk("x"), mk("x"), mk("b")]));
+});
+
+test("round trip preserves the drawn order: duplicate spanning three pages", () => {
+  roundTrips(
+    "dup-triple",
+    pagesOf([mk("x")], [mk("a"), mk("x"), mk("b")], [mk("x"), mk("c")]),
+  );
+});
+
+test("round trip preserves the drawn order: no duplicates at all (control)", () => {
+  roundTrips("no-dups", pagesOf([mk("a"), mk("b")], [mk("c"), mk("d")]));
+});
+
+test("captureRemovedCard reads the DEDUPED predecessor, not the raw one", () => {
+  const data = pagesOf([mk("x"), mk("b"), mk("x"), mk("c")]);
+  // b is drawn FIRST, so it follows nothing — the leading x is not on screen.
+  assert.equal(captureRemovedCard(data, "b").afterId, null);
+  // c follows the DRAWN x, which is the later copy.
+  assert.equal(captureRemovedCard(data, "c").afterId, "x");
+  // x itself is captured at its drawn index, following the drawn b.
+  assert.deepEqual(captureRemovedCard(data, "x"), {
+    flatIndex: 2,
+    afterId: "b",
+    item: mk("x"),
+  });
 });

@@ -211,8 +211,14 @@ export function BoardBulkFieldsDialog({
   heldReason: string | undefined;
   onOpenChange: (open: boolean) => void;
   /** Write the draft. The panel owns it, so it can re-check its own gates, report
-   *  the result, and decide whether this run is still the one on screen. Resolves
-   *  `true` when the write landed, which is what closes this dialog. */
+   *  the result, and decide whether this run is still the one on screen.
+   *
+   *  Resolves `true` only when EVERY card took the write — the batch command
+   *  resolves with its refusals inside it, so "the call returned" is not the same
+   *  claim. Anything less keeps this dialog open over the draft that produced it,
+   *  which is what makes a retry possible; the panel has already reported what
+   *  failed. A resolution from a run the user has since cancelled answers `false`
+   *  too, so it can't close the editor that replaced it. */
   onApply: (
     updates: ProjectFieldValueUpdate[],
     clears: string[],
