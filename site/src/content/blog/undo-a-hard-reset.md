@@ -59,12 +59,12 @@ pop it after. Stashing writes a reset entry of its own into HEAD's
 reflog, which slides the lost commit one slot down: after a stash,
 re-read `git reflog`, or skip the counting entirely with
 `git reset --hard 30b6dbc`, which names the commit and can't drift.
-(A stash carries no ignored files, so if one shares a path with the
-commits you're restoring, move it aside first or reach for
-`git stash --all`.) And if you'd rather not move the branch at all,
-`git branch rescue 30b6dbc` hangs a new branch on the lost commit
-and leaves everything else where it is. Otherwise, the undo is one
-more move:
+(`--include-untracked` still leaves ignored files out, so if one
+shares a path with the commits you're restoring, move it aside
+first or reach for `git stash --all`.) And if you'd rather not move
+the branch at all, `git branch rescue 30b6dbc` hangs a new branch
+on the lost commit and leaves everything else where it is.
+Otherwise, the undo is one more move:
 
 ```sh
 $ git reset --hard HEAD@{1}
@@ -254,8 +254,8 @@ The history is intact; the record of its moves is gone. And notice
 what the emptiness looks like: `git reflog show main` prints nothing,
 which is also exactly what it prints for a ref whose logging was
 switched off from the start. To every read of the log those two are
-the same thing; the one witness left is `git reflog exists`, because
-expiry empties the file where disabling never writes one:
+the same thing, but `git reflog exists` still tells them apart,
+because expiry empties the file where disabling never writes one:
 
 ```sh
 $ git reflog exists refs/heads/main && echo yes
