@@ -25,7 +25,7 @@ import { isReconnectHostSafe, reconnectHostArg } from "@/lib/git/host";
 import { useInvalidateAfterReconnect } from "@/lib/git/queries";
 import { providerLabel, type ReconnectEvent } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
+import { type ReconnectTarget, useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
@@ -47,7 +47,8 @@ type Phase =
       message: string | null;
     };
 
-type ReconnectProvider = "github" | "gitlab";
+/** Derived from the store's target so the dialog can't drift from what opens it. */
+type ReconnectProvider = ReconnectTarget["provider"];
 
 /** The heading over the raw CLI output, before any verification URL is known. */
 const PROGRESS_COPY: Record<ReconnectProvider, string> = {
@@ -116,7 +117,7 @@ function ReconnectFlow({
   scopes,
   onClose,
 }: {
-  provider: "github" | "gitlab";
+  provider: ReconnectProvider;
   host: string;
   mode: "login" | "refresh";
   scopes?: string[];
@@ -169,7 +170,10 @@ function ReconnectFlow({
       // gh's non-interactive device flow never opens a browser itself, so open it
       // here. glab opens its own (and its authorize URL carries a single-use
       // localhost callback), so a second tab there would race the first.
-      if (isGitHub) {
+      // https only: the row below deliberately shows and copies `http://` too (a
+      // self-managed host's own choice), but an UNCLICKED open never follows a
+      // cleartext URL — every GitHub-family device URL is https.
+      if (isGitHub && event.url.startsWith("https://")) {
         const attempt = `${sessionIdRef.current}|${event.url}`;
         if (autoOpenedRef.current !== attempt) {
           autoOpenedRef.current = attempt;
@@ -301,14 +305,16 @@ function ReconnectFlow({
             >
               {phase.url}
             </code>
-            <button
-              type="button"
-              className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Copy link"
               title="Copy link"
+              className="shrink-0 text-muted-foreground"
               onClick={() => copyText(phase.url, "Link copied")}
             >
               <CopyIcon className="size-3.5" />
-            </button>
+            </Button>
           </div>
           <div className="flex items-center justify-center gap-2">
             {phase.code !== null && <CopyCodeButton code={phase.code} />}
@@ -330,6 +336,7 @@ function ReconnectFlow({
                 lines={lines}
                 tail={UNPARSED_OUTPUT_TAIL}
                 labelledBy={linesLabelId}
+                live="off"
               />
             </div>
           )}
@@ -348,7 +355,12 @@ function ReconnectFlow({
           <p className="text-xs text-muted-foreground">
             {PROGRESS_COPY[provider]}
           </p>
-          <ProgressLines lines={lines} tail={PROGRESS_TAIL} />
+          <ProgressLines
+            lines={lines}
+            tail={PROGRESS_TAIL}
+            label="CLI output"
+            live="polite"
+          />
         </div>
       )}
 
@@ -409,22 +421,34 @@ function CopyCodeButton({ code }: { code: string }) {
 }
 
 /** The tail of the CLI's own output. Deliberately wraps rather than truncating: this
- *  is the only place the user can read what the CLI actually said. */
+ *  is the only place the user can read what the CLI actually said. Height-capped and
+ *  scrollable because `DialogContent` neither caps nor scrolls — a few 300-char lines
+ *  at this size would push the centered dialog off-viewport. Every call site names the
+ *  region (`label` or `labelledBy`) and picks `live`. */
 function ProgressLines({
   lines,
   tail,
+  live,
+  label,
   labelledBy,
 }: {
   lines: string[];
   tail: number;
+  /** `"off"` where the code and link above are the actionable content: a tall polite
+   *  region re-announces the whole block on every arriving line. */
+  live: "polite" | "off";
+  label?: string;
   labelledBy?: string;
 }) {
   return (
     <div
-      className="space-y-0.5 break-words font-mono text-[11px] text-muted-foreground"
-      role={labelledBy ? "group" : undefined}
+      className="max-h-40 space-y-0.5 overflow-y-auto break-words font-mono text-[11px] text-muted-foreground"
+      role="group"
+      aria-label={label}
       aria-labelledby={labelledBy}
-      aria-live="polite"
+      aria-live={live}
+      // A scrollable region has to be reachable without a pointer.
+      tabIndex={0}
     >
       {lines.slice(-tail).map((line, i) => (
         // Progress lines have no stable id; the tail window is tiny and append-only,
