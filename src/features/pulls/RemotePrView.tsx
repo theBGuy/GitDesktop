@@ -1940,14 +1940,14 @@ export function RemotePrView({
     if (revealReviewId !== null) setRevealReviewId(null);
   }, [revealReviewId]);
 
-  const threadJumpEnabled =
+  const threadActive =
     isSelectedPr &&
     section === "conversation" &&
     !resolve &&
     !!pr &&
     !details.isPlaceholderData &&
     !details.isError;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Every term the composer itself is
   // gated on rides here too, so the action is offered only where there is a box
   // to focus: a resolve takes the whole view over, and the other sub-tabs have
@@ -1955,7 +1955,7 @@ export function RemotePrView({
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled && canComment,
+    threadActive && canComment,
   );
 
   if (details.isPending) {

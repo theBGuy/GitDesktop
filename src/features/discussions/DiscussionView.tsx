@@ -262,19 +262,19 @@ export function DiscussionView({
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
 
-  const threadJumpEnabled =
+  const threadActive =
     selectedDiscussion?.number === number &&
     !!d &&
     !details.isPlaceholderData &&
     !details.isError;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box, so reaching it never depends on
   // tabbing the whole thread. Only the view that owns the selection answers —
   // the mounted one lags it through a switch.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled,
+    threadActive,
   );
 
   if (details.isPending) {

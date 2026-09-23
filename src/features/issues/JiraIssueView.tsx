@@ -1529,13 +1529,13 @@ export function JiraIssueView({
   // remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${issueKey}`;
   const compose = useKeyedEntityState(issueIdentity, "");
-  const threadJumpEnabled =
+  const threadActive =
     selectedIssue?.kind === "jira" &&
     selectedIssue.id === issueKey &&
     !!details.data &&
     !details.isPlaceholderData &&
     !details.isError;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
   // only while the box is actually on screen, and only for the view that owns
@@ -1543,7 +1543,7 @@ export function JiraIssueView({
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled && canComment,
+    threadActive && canComment,
   );
 
   // The link resolved to nothing (unlinked, or unlinked while this view was

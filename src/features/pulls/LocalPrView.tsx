@@ -303,20 +303,20 @@ export function LocalPrView({
   );
   const defaultBranch = useDefaultBranch(repoPath);
 
-  const threadJumpEnabled =
+  const threadActive =
     selectedPr?.kind === "local" &&
     selectedPr.id === id &&
     section === "conversation" &&
     !!pr &&
     !pr.pendingMerge?.worktreePath;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Every term the composer itself is
   // gated on rides here too: a paused merge takes the whole view over, and the
   // other sub-tabs have no composer.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled,
+    threadActive,
   );
 
   if (!pr) {

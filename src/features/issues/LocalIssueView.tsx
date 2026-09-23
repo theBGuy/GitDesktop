@@ -130,15 +130,15 @@ export function LocalIssueView({
     edit.setOpen(false);
   }
 
-  const threadJumpEnabled =
+  const threadActive =
     selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Only the view that owns the
   // selection answers — the mounted one lags it through a switch.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled,
+    threadActive,
   );
 
   if (!issue) {

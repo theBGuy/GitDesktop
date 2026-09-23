@@ -291,19 +291,19 @@ export function RemoteIssueView({
 
   const issue = details.data;
 
-  const threadJumpEnabled =
+  const threadActive =
     isSelectedIssue &&
     !!issue &&
     !details.isPlaceholderData &&
     !details.isError;
-  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  const jumpRef = useThreadJumpHotkeys(threadActive);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
   // only while the box is actually on screen.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    threadJumpEnabled && canComment,
+    threadActive && canComment,
   );
 
   if (details.isPending) {
