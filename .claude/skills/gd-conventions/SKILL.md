@@ -151,6 +151,10 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   (a muted `bin`) and `format` (Insights abbreviates via `fmt`); never
   hand-rolled, and the `hand-rolled-diff-stat` guard in `pnpm run checks`
   fails on a new pair.
+- Icon-only copy buttons are `CopyIconButton`
+  (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
+  it always stops click propagation, and the `raw-copy-icon-button` guard in
+  `pnpm run checks` fails on a new one.
 - Disabled actions explain why via `DisabledReasonButton`
   (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
   announcement; menu/popover trigger sites take the render arm with `disabled`

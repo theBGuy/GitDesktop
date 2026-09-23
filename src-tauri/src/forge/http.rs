@@ -192,20 +192,14 @@ impl BbErrorBody {
     }
 }
 
-/// Turn a non-2xx response body + status into an [`AppError::Bitbucket`], with the
-/// 401/429 special-casing the provider contract requires. `body` is raw response text
-/// (it may echo request context but never our credentials, which live only in the
-/// request header). Exposed to the provider so a caller that inspects the status
-/// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
-/// doesn't special-case.
-///
-/// Assumes a write operation for the privilege-scope 403; a read path that wants
-/// read-scope guidance calls `bb_error_detail` with `BbOpKind::Read` directly,
-/// as `bitbucket_findings::classify` does.
+/// The write-family non-2xx error arm, including 401/429 guidance and API detail.
+/// GET helpers take an explicit [`BbOpKind`]; callers inspecting a GET status use
+/// [`bb_error_detail`] with `BbOpKind::Read`.
 pub(crate) fn http_error(status: u16, body: &str) -> AppError {
     AppError::Bitbucket(bb_error_detail(status, body, BbOpKind::Write))
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum BbOpKind {
     Read,
     Write,
@@ -311,18 +305,22 @@ async fn bb_get_status(
 }
 
 /// GET a Bitbucket endpoint and return the raw response body as text, following
-/// redirects (the default policy — see [`CLIENT`]). Non-2xx → [`http_error`]. Used
+/// redirects (the default policy — see [`CLIENT`]). Non-2xx → [`bb_error_detail`]. Used
 /// for the PR `/diff` (raw unified diff) and step logs (raw octet-stream).
-pub async fn bb_get_text(creds: &BbCredentials, path_or_url: &str) -> AppResult<String> {
+pub async fn bb_get_text(
+    creds: &BbCredentials,
+    path_or_url: &str,
+    op: BbOpKind,
+) -> AppResult<String> {
     let (status, body) = bb_get_text_status(creds, path_or_url).await?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
+        return Err(AppError::Bitbucket(bb_error_detail(status, &body, op)));
     }
     Ok(body)
 }
 
 /// GET a Bitbucket endpoint expecting JSON, deserializing into `T` (HTTP Basic,
-/// `Accept: application/json`, default redirect policy). Non-2xx → [`http_error`]; a
+/// `Accept: application/json`, default redirect policy). Non-2xx → [`bb_error_detail`]; a
 /// 2xx body that won't parse takes [`bb_unreadable`]'s summary on line one, with the
 /// original serde error on line two. That summary reads `what` through the helper's
 /// article map, so a listed label gains its article and any other passes through as
@@ -331,10 +329,11 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
     what: &str,
+    op: BbOpKind,
 ) -> AppResult<T> {
     let (status, body) = bb_get_status(creds, path_or_url, true).await?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
+        return Err(AppError::Bitbucket(bb_error_detail(status, &body, op)));
     }
     serde_json::from_str(&body)
         .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
@@ -456,6 +455,72 @@ pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn forbidden_response(body: &'static str, json: bool, write: bool) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(if write { b"POST " } else { b"GET " }));
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        });
+        let creds = BbCredentials {
+            email: "fixture@example.test".into(),
+            token: "fixture".into(),
+        };
+        let error = if write {
+            bb_post_empty(&creds, &url).await.unwrap_err()
+        } else if json {
+            bb_get_json::<serde_json::Value>(&creds, &url, "repository", BbOpKind::Read)
+                .await
+                .unwrap_err()
+        } else {
+            bb_get_text(&creds, &url, BbOpKind::Read).await.unwrap_err()
+        };
+        server.join().unwrap();
+        error.to_string()
+    }
+
+    #[tokio::test]
+    async fn get_helpers_use_read_scope_guidance_and_writes_keep_write_guidance() {
+        let body = r#"{"error":{"message":"Your credentials lack required privilege scopes."}}"#;
+        for json in [false, true] {
+            let message = forbidden_response(body, json, false).await;
+            assert!(message.contains("repository read access"), "{message}");
+            assert!(!message.contains("write scope"), "{message}");
+        }
+        let message = forbidden_response(body, false, true).await;
+        assert!(message.contains("required write scope"), "{message}");
+        assert!(!message.contains("repository read access"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn get_helpers_keep_generic_403_details_without_privilege_scopes_marker() {
+        let body = r#"{"error":{"message":"You do not have access to this repository."}}"#;
+        for json in [false, true] {
+            assert_eq!(
+                forbidden_response(body, json, false).await,
+                "You do not have access to this repository.",
+            );
+        }
+    }
 
     #[test]
     fn bitbucket_unreadable_keeps_the_detail_on_its_own_line() {

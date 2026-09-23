@@ -1,4 +1,4 @@
-// The OS-keychain credential store; GitHub Actions repo secrets (`ghSecrets*`)
+// The OS-keychain credential store; GitHub Actions repo secrets (`ghSecret*`)
 // live in repo-config.ts.
 
 import { invoke } from "@/lib/tauri/invoke";

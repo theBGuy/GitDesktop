@@ -1,10 +1,9 @@
-import { CopyIcon } from "@phosphor-icons/react";
 import { Fragment, type ReactNode, useMemo } from "react";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
-import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
   isReconnectHostSafe,
@@ -241,14 +240,11 @@ export function DeliveryPayload({
       <div className="flex items-center justify-between">
         <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
         {trimmed.length > 0 && (
-          <button
-            type="button"
-            className="text-muted-foreground transition-colors hover:text-foreground"
-            title={`Copy ${label.toLowerCase()}`}
-            onClick={() => copyText(body, `${label} copied`)}
-          >
-            <CopyIcon className="size-3.5" />
-          </button>
+          <CopyIconButton
+            text={body}
+            label={`Copy ${label.toLowerCase()}`}
+            toast={`${label} copied`}
+          />
         )}
       </div>
       {trimmed.length > 0 ? (

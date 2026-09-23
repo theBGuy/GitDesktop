@@ -13,6 +13,15 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT};
 
+// Job ids can exceed JS's safe integer range, so
+// the frontend handles them as strings — serialize the u64 as a string here.
+fn id_to_string<S>(id: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&id.to_string())
+}
+
 /// gh emits `null` for a not-yet-decided conclusion (and timestamps that
 /// haven't happened); fold those into "" so the frontend sees a plain string.
 fn de_null_string<'de, D>(d: D) -> Result<String, D::Error>
@@ -111,6 +120,7 @@ pub struct RunStep {
 #[serde(rename_all = "camelCase")]
 pub struct RunJob {
     #[serde(rename(serialize = "id", deserialize = "databaseId"))]
+    #[serde(serialize_with = "id_to_string")]
     pub id: u64,
     #[serde(default)]
     pub name: String,
@@ -964,8 +974,8 @@ mod tests {
 
     /// The TS mirror at the top of `src/lib/github/actions.ts` is hand-maintained, so
     /// nothing but this test stops a casing or id-type drift from reaching the UI as
-    /// `undefined`. Ids serialize as raw JSON NUMBERS (`id: number` in TS); only the
-    /// `forge_ci_*` command PARAMS take the string form, for JS precision headroom.
+    /// `undefined`. Ids serialize as JSON numbers except `RunJob.id`, deliberately
+    /// serialized as a string to preserve u64 precision beyond JS's safe range.
     #[test]
     fn wire_shape_is_pinned() {
         let run = WorkflowRun {
@@ -1004,16 +1014,16 @@ mod tests {
             })
         );
 
-        // A GitHub/GitLab job: numeric id, `logRef` omitted entirely (the TS mirror
+        // A GitHub/GitLab job: string id, `logRef` omitted entirely (the TS mirror
         // declares it optional, and Bitbucket is the only provider that sets it).
         let job = RunJob {
-            id: 49_876_543_210,
+            id: 9_007_199_254_740_993,
             name: "test (windows-latest)".to_string(),
             status: "completed".to_string(),
             conclusion: "failure".to_string(),
             started_at: "2026-08-13T09:00:40Z".to_string(),
             completed_at: "2026-08-13T09:04:00Z".to_string(),
-            url: "https://github.com/o/r/actions/runs/17234567890/job/49876543210".to_string(),
+            url: "https://github.com/o/r/actions/runs/17234567890/job/9007199254740993".to_string(),
             steps: vec![RunStep {
                 name: "Run tests".to_string(),
                 status: "completed".to_string(),
@@ -1028,13 +1038,13 @@ mod tests {
         assert_eq!(
             job_value,
             json!({
-                "id": 49_876_543_210u64,
+                "id": "9007199254740993",
                 "name": "test (windows-latest)",
                 "status": "completed",
                 "conclusion": "failure",
                 "startedAt": "2026-08-13T09:00:40Z",
                 "completedAt": "2026-08-13T09:04:00Z",
-                "url": "https://github.com/o/r/actions/runs/17234567890/job/49876543210",
+                "url": "https://github.com/o/r/actions/runs/17234567890/job/9007199254740993",
                 "steps": [{
                     "name": "Run tests",
                     "status": "completed",
@@ -1098,20 +1108,26 @@ mod tests {
             })
         );
 
-        // Pins explicitly the property the `assert_eq!`s above encode only
-        // implicitly: every id is a JSON number, never the string form the
-        // command params use.
+        // RunJob ids are strings; run and workflow ids remain JSON numbers.
         for (label, value) in [
             ("WorkflowRun", serde_json::to_value(&run).unwrap()),
             ("RunJob", serde_json::to_value(&job).unwrap()),
             ("RunDetail", serde_json::to_value(&detail).unwrap()),
             ("Workflow", serde_json::to_value(&workflow).unwrap()),
         ] {
-            assert!(
-                value["id"].is_u64(),
-                "{label}.id must serialize as a JSON number, got {}",
-                value["id"]
-            );
+            if label == "RunJob" {
+                assert!(
+                    value["id"].is_string(),
+                    "{label}.id must serialize as a JSON string, got {}",
+                    value["id"]
+                );
+            } else {
+                assert!(
+                    value["id"].is_u64(),
+                    "{label}.id must serialize as a JSON number, got {}",
+                    value["id"]
+                );
+            }
         }
     }
 

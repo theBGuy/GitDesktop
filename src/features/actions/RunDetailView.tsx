@@ -552,7 +552,7 @@ export function RunDetailView({
     }
   }
 
-  async function doPlay(jobId: number, buttonEl: HTMLElement) {
+  async function doPlay(jobId: string, buttonEl: HTMLElement) {
     // Read before the first await: the started job stops being manual, so this
     // button is gone by the time the mutation settles.
     const fromButton = document.activeElement === buttonEl;
@@ -585,7 +585,7 @@ export function RunDetailView({
       await rerunJob.mutateAsync({ jobId: job.id });
       toast.success(offer.toast);
       setRecentlyRerunJobs((prev) =>
-        new Map(prev).set(String(job.id), job.completedAt),
+        new Map(prev).set(job.id, job.completedAt),
       );
       setRunRerunLatch(runSignature);
       scheduleRunRepair();
@@ -820,7 +820,7 @@ export function RunDetailView({
                       isFailureConclusion(job.conclusion) &&
                       (provider !== "github" || !active) &&
                       !runLatched &&
-                      recentlyRerunJobs.get(String(job.id)) !== job.completedAt
+                      recentlyRerunJobs.get(job.id) !== job.completedAt
                         ? (buttonEl) => void doRerunJob(job, jobOffer, buttonEl)
                         : undefined
                     }

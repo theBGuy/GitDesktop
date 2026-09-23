@@ -91,7 +91,7 @@ export function useIssueDetails(
 }
 
 /** Warms an issue's view so opening it from the list is instant (hover/adjacent
- *  rows), mirroring {@link usePrefetchPr}. */
+ *  rows), mirroring `usePrefetchPr` in prs.ts. */
 export function usePrefetchIssue(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useCallback(

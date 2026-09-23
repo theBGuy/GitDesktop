@@ -298,10 +298,12 @@ interface UiState {
   pendingReviewId: string | null;
   /** One-shot: the Pulls list should align its open/closed tab with the opened PR's
    *  ACTUAL state once that state is known. Raised by `openPr`, the one door every
-   *  navigation from outside the list goes through, because that tab is panel state
-   *  no navigation can reach, and the event behind one (a review posted on a PR that
-   *  merged later) can't name the state either. Consumed by the panel once the state
-   *  lands; any reselection clears it, so it can only ever align the PR it opened. */
+   *  navigation from outside the list goes through (and `selectPrWithAlign`, its
+   *  in-view twin for stack hops), because that tab is panel state no navigation
+   *  can reach, and the event behind one (a review posted on a PR that merged
+   *  later) can't name the state either. Consumed by the panel once the state
+   *  lands; a list reselection clears it, so it can only ever align the PR it
+   *  opened. */
   pendingPrAlign: boolean;
   /** Selected issue on the Issues tab. */
   selectedIssue: SelectedIssue | null;
@@ -479,6 +481,10 @@ interface UiState {
   setRepoTab: (tab: RepoTab) => void;
   setCompareBranch: (branch: string | null) => void;
   selectPr: (pr: SelectedPr | null) => void;
+  /** `selectPr` that also arms `pendingPrAlign`, for a pick made off the list: the
+   *  list's open/closed tab can't contain every stack member a PR view links to, so
+   *  the panel resolves the chosen PR's real state and aligns the tab to it. */
+  selectPrWithAlign: (pr: SelectedPr) => void;
   setPendingPrSection: (section: PrSection | null) => void;
   setPendingReviewId: (reviewId: string | null) => void;
   /** Retire the pending tab align (consumed, or overridden by an explicit tab pick). */
@@ -797,6 +803,15 @@ export const useUiStore = create<UiState>()((set, get) => {
       })),
     setPendingPrSection: (section) => set({ pendingPrSection: section }),
     setPendingReviewId: (reviewId) => set({ pendingReviewId: reviewId }),
+    // selectPr plus the tab align, in ONE set: selectPr clears the flag, so a
+    // follow-up arming set() would race it.
+    selectPrWithAlign: (pr) =>
+      set((s) => ({
+        selectedPr: pr,
+        pendingReviewId: null,
+        pendingPrAlign: true,
+        interactionEpoch: s.interactionEpoch + 1,
+      })),
     clearPendingPrAlign: () => set({ pendingPrAlign: false }),
     selectIssue: (issue) =>
       set((s) => ({

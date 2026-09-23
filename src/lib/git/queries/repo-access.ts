@@ -117,10 +117,10 @@ export function useGhScopes(host?: string) {
 }
 
 /** The real avatar URL for a GitHub bot, via `gh api users/<name>[bot]` — bot logins
- *  have no `<host>/<login>.png`. Pass the bare name from {@link botLoginName}, or `null`
- *  for a non-bot / off-GitHub handle. Cached hard (the URL is stable); `retry: false`
- *  keeps a 404/offline miss from a retry storm — the caller falls back to initials on
- *  `""`. */
+ *  have no `<host>/<login>.png`. Pass the bare name from bot-login.ts's `botLoginName`,
+ *  or `null` for a non-bot / off-GitHub handle. Cached hard (the URL is stable);
+ *  `retry: false` keeps a 404/offline miss from a retry storm — the caller falls back
+ *  to initials on `""`. */
 export function useBotAvatarUrl(name: string | null) {
   return useQuery({
     queryKey: ["bot-avatar", name] as const,

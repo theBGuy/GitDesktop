@@ -1,11 +1,8 @@
-import {
-  ArrowSquareOutIcon,
-  CopyIcon,
-  TerminalIcon,
-} from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, TerminalIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -311,16 +308,11 @@ function ReconnectFlow({
             >
               {phase.url}
             </code>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Copy link"
-              title="Copy link"
-              className="shrink-0 text-muted-foreground"
-              onClick={() => copyText(phase.url, "Link copied")}
-            >
-              <CopyIcon className="size-3.5" />
-            </Button>
+            <CopyIconButton
+              text={phase.url}
+              label="Copy link"
+              toast="Link copied"
+            />
           </div>
           <div className="flex items-center justify-center gap-2">
             {phase.code !== null && <CopyCodeButton code={phase.code} />}

@@ -15,10 +15,10 @@ export function useRepoStatus(repo: string) {
 }
 
 /** Per-file line counts for the Changes panel's rows. The key MUST stay a child
- *  of {@link repoKeys.status} — {@link workingTreeKeys} invalidates that key as a
- *  PREFIX, so every staging-class mutation already refreshes these counts with no
- *  extra wiring. `enabled` gates it on the Changes tab being active and the tree
- *  being dirty; a `<TabPanel>`-hidden panel still renders and would otherwise poll. */
+ *  of {@link repoKeys.status} — internal.ts's `workingTreeKeys` invalidates that
+ *  key as a PREFIX, so every staging-class mutation already refreshes these counts
+ *  with no extra wiring. `enabled` gates it on the Changes tab being active and the
+ *  tree being dirty; a `<TabPanel>`-hidden panel still renders and would otherwise poll. */
 export function useWorkingLineStats(repo: string, enabled: boolean) {
   return useQuery({
     queryKey: [...repoKeys.status(repo), "line-stats"],

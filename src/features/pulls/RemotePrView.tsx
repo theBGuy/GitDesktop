@@ -542,7 +542,9 @@ export function RemotePrView({
   const pendingReviewId = useUiStore((s) => s.pendingReviewId);
   const setPendingReviewId = useUiStore((s) => s.setPendingReviewId);
   const selectedPr = useUiStore((s) => s.selectedPr);
-  const selectPr = useUiStore((s) => s.selectPr);
+  // A stack member can sit on the list tab that isn't showing, so hops arm the
+  // tab align (plain `selectPr` clears it).
+  const selectPrWithAlign = useUiStore((s) => s.selectPrWithAlign);
   // Merge-queue record for THIS pull request. The forge reports the queue once,
   // in the merge outcome, and nothing fetchable carries it afterwards, so the
   // store is the only source and the PR leaving OPEN is the only retraction.
@@ -754,7 +756,8 @@ export function RemotePrView({
     // Re-resolved on activation: `enabled` is a render snapshot, while `run` reads
     // live state through useEffectEvent.
     const target = stackNeighbor(delta);
-    if (target) selectPr({ kind: "remote", id: String(target.number) });
+    if (target)
+      selectPrWithAlign({ kind: "remote", id: String(target.number) });
   }
   useHotkeyAction(
     "pr-stack-next",
@@ -2695,7 +2698,7 @@ export function RemotePrView({
           stack={pr.stack}
           members={pr.stackMembers}
           currentNumber={number}
-          onSelect={(n) => selectPr({ kind: "remote", id: String(n) })}
+          onSelect={(n) => selectPrWithAlign({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
           dissolving={stackDissolve.isPending}
           // `dissolveStack` refuses while the rendered stack is the previous PR's,

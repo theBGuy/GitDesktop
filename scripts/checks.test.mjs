@@ -38,6 +38,7 @@ import {
   hasInlineGap,
   INLINE_GAP,
 } from "./check-built-whitespace.mjs";
+import { fragmentVerdict } from "./check-changelog-fragment.mjs";
 import {
   parseInvoked,
   parseRegistered,
@@ -82,6 +83,111 @@ import {
   parseNpmVersions,
   verdict,
 } from "./check-tauri-plugin-parity.mjs";
+
+// -------------------------------------------------- check-changelog-fragment
+
+for (const [name, changedFiles, presentFiles, prTitle, required, satisfied] of [
+  [
+    "fragment present",
+    ["src/app.ts"],
+    ["changelog.d/added-app.md"],
+    "",
+    true,
+    true,
+  ],
+  ["fragment missing", ["src/app.ts"], [], "", true, false],
+  [
+    "title opt-out",
+    ["src/app.ts"],
+    [],
+    "fix: [SKIP-CHANGELOG] copy",
+    false,
+    true,
+  ],
+  ["site only", ["site/page.astro"], [], "", false, true],
+  [
+    "deleted fragment",
+    ["src/app.ts", "changelog.d/fixed-app.md"],
+    ["src/app.ts"],
+    "",
+    true,
+    false,
+  ],
+  [
+    "wrong category",
+    ["src/app.ts"],
+    ["changelog.d/removed-app.md"],
+    "",
+    true,
+    false,
+  ],
+  ["wrong directory", ["src/app.ts"], ["other/fixed-app.md"], "", true, false],
+  [
+    "directory case",
+    ["src/app.ts"],
+    ["Changelog.d/fixed-app.md"],
+    "",
+    true,
+    false,
+  ],
+  [
+    "basename case",
+    ["src/app.ts"],
+    ["changelog.d/FIXED-app.MD"],
+    "",
+    true,
+    true,
+  ],
+  [
+    "nested fragment",
+    ["src/app.ts"],
+    ["changelog.d/fixed-dir/app.md"],
+    "",
+    true,
+    false,
+  ],
+  ["empty slug", ["src/app.ts"], ["changelog.d/fixed-.md"], "", true, false],
+  ["deleted Rust source", ["src-tauri/src/app.rs"], [], "", true, false],
+  [
+    "source prefix boundary",
+    ["src-other/app.ts", "Src/app.ts"],
+    [],
+    "",
+    false,
+    true,
+  ],
+  ["empty diff", [], [], "", false, true],
+  [
+    "fragment precedes title opt-out",
+    ["src/app.ts"],
+    ["changelog.d/changed-app.md"],
+    "skip-changelog",
+    true,
+    true,
+  ],
+]) {
+  test(`changelog-fragment: ${name}`, () => {
+    const result = fragmentVerdict({ changedFiles, presentFiles, prTitle });
+    assert.equal(result.required, required);
+    assert.equal(result.satisfied, satisfied);
+    assert.ok(result.reason.length > 0);
+    if (!satisfied) {
+      assert.ok(
+        result.reason.startsWith("::error::This PR changes src/ or src-tauri/"),
+      );
+    }
+  });
+}
+
+test("changelog-fragment: invalid inputs fail closed", () => {
+  for (const input of [
+    { changedFiles: null, presentFiles: [], prTitle: "" },
+    { changedFiles: [], presentFiles: [null], prTitle: "" },
+    { changedFiles: [], presentFiles: [], prTitle: null },
+  ]) {
+    assert.throws(() => fragmentVerdict(input), TypeError);
+  }
+});
 
 // ------------------------------------------------------- check-banned-patterns
 
@@ -4021,4 +4127,106 @@ test("skill-mirrors fails rather than passing vacuously", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+const rawCopyIconButton = scanner("raw-copy-icon-button");
+
+test("raw-copy-icon-button flags an icon-only copy button in every spelling", () => {
+  // One line, raw element.
+  assert.deepEqual(
+    rawCopyIconButton(
+      '<button type="button" title="Copy command" onClick={() => copyText(cmd, "Command copied")}><CopyIcon className="size-3.5" /></button>',
+    ),
+    [1],
+  );
+  // The formatter-wrapped raw element, reported on its opening line.
+  const wrapped = [
+    "<code>{cmd}</code>",
+    "<button",
+    '  type="button"',
+    '  className="shrink-0 cursor-pointer text-muted-foreground"',
+    '  title="Copy command"',
+    '  onClick={() => copyText(cmd, "Command copied")}',
+    ">",
+    '  <CopyIcon className="size-3.5" />',
+    "</button>",
+  ].join("\n");
+  assert.deepEqual(rawCopyIconButton(wrapped), [2]);
+  // The vendored Button, labelled, with a block-bodied arrow in its props: the
+  // `=>` must not end the opening tag.
+  const vendored = [
+    "<Button",
+    '  variant="ghost"',
+    '  size="icon-xs"',
+    '  aria-label="Copy thread as Markdown"',
+    "  onClick={(e) => {",
+    "    e.stopPropagation();",
+    '    copyText(threadToMarkdown(thread), "Markdown copied");',
+    "  }}",
+    ">",
+    "  <CopyIcon />",
+    "</Button>",
+  ].join("\n");
+  assert.deepEqual(rawCopyIconButton(vendored), [1]);
+});
+
+test("raw-copy-icon-button leaves icon+text controls and the component alone", () => {
+  for (const source of [
+    // Icon then visible text (LogBlock's header button).
+    [
+      '<button type="button" onClick={() => copyText(trimmed, "Logs copied")}>',
+      '  <CopyIcon className="size-3" />',
+      "  Copy",
+      "</button>",
+    ].join("\n"),
+    // Text then icon (the short-SHA copy in the commit headers).
+    [
+      '<button type="button" onClick={() => copyText(commit.oid, "SHA copied")}>',
+      "  {commit.oid.slice(0, 7)}",
+      '  <CopyIcon className="size-3" />',
+      "</button>",
+    ].join("\n"),
+    // An inline-start icon on a labelled Button.
+    [
+      '<Button variant="ghost" size="sm" onClick={() => copyText(text, "Copied")}>',
+      '  <CopyIcon data-icon="inline-start" />',
+      "  Copy all",
+      "</Button>",
+    ].join("\n"),
+    '<Button size="xs"><CopyIcon data-icon="inline-start" /> Copy</Button>',
+    // A menu item is not a button, and carries its own text anyway.
+    [
+      '<DropdownMenuItem onClick={() => copyText(path, "Path copied")}>',
+      "  <CopyIcon />",
+      "  Copy path",
+      "</DropdownMenuItem>",
+    ].join("\n"),
+    // The component route, and a different icon alone in a button.
+    '<CopyIconButton text={cmd} label="Copy command" toast="Command copied" />',
+    '<Button size="icon-xs" aria-label="Done"><CheckIcon /></Button>',
+    // The idiom named in a comment is not a use of it.
+    "// <button><CopyIcon /></button>",
+  ]) {
+    assert.deepEqual(rawCopyIconButton(source), [], source);
+  }
+});
+
+test("raw-copy-icon-button exempts the component file and vendored ui only", () => {
+  const check = CHECKS.find((c) => c.name === "raw-copy-icon-button");
+  assert.equal(check.appliesTo("src/components/CopyIconButton.tsx"), false);
+  assert.equal(check.appliesTo("src/components/ui/button.tsx"), false);
+  assert.equal(
+    check.appliesTo("src/features/repo-settings/ScopeRefreshHint.tsx"),
+    true,
+  );
+  // The component's own body IS the idiom, so appliesTo is what keeps it clean —
+  // pinned against the real file so a rename can't turn the exemption stale.
+  const file = "src/components/CopyIconButton.tsx";
+  const source = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", file),
+    "utf8",
+  );
+  assert.notDeepEqual(rawCopyIconButton(source), []);
+  const views = new Map([[file, view(source)]]);
+  assert.deepEqual(runCheck(check, [file], views).violations, []);
 });

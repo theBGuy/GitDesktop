@@ -391,6 +391,10 @@ pub async fn run_git_raw_input_bytes(
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C");
+    if cfg!(test) {
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1");
+    }
     cmd.stdin(if input.is_some() {
         Stdio::piped()
     } else {
@@ -765,6 +769,38 @@ mod lock_tests {
 #[cfg(test)]
 mod stdin_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nosystem_suppresses_an_explicitly_redirected_system_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("system.config");
+        std::fs::write(&config, "[gitdesktopFixture]\n poison = visible\n").unwrap();
+        let git = git_bin().await.unwrap();
+        // The config poison is measured; attribute suppression relies on Git's
+        // behavior confirmed with `git var GIT_ATTR_SYSTEM`, not a redirected
+        // system-attributes fixture. Explicit `config --system` bypasses NOSYSTEM.
+        for suppress in [false, true] {
+            let mut cmd = Command::new(&git);
+            cmd.current_dir(dir.path())
+                .args(["config", "--get", "gitdesktopFixture.poison"])
+                .env("GIT_CONFIG_SYSTEM", &config)
+                .env_remove("GIT_CONFIG_NOSYSTEM");
+            if suppress {
+                cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+            }
+            let out = cmd.output().await.unwrap();
+            assert_eq!(out.status.code(), Some(if suppress { 1 } else { 0 }));
+            assert_eq!(
+                out.stdout,
+                if suppress { b"".as_slice() } else { b"visible\n" },
+            );
+            assert!(
+                out.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+    }
 
     /// Both sides have to clear the point where a write-then-read runner wedges,
     /// and that point is platform-specific: on unix the stdin write blocks once the

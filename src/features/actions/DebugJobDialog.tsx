@@ -50,7 +50,7 @@ export function DebugJobDialog({
   const [logsError, setLogsError] = useState<string | null>(null);
   // The job id we've already kicked off an analysis for, so reopening the dialog
   // resumes that run instead of restarting it.
-  const startedJobId = useRef<number | null>(null);
+  const startedJobId = useRef<string | null>(null);
 
   async function runDebug(j: RunJob, ai: AiSettings) {
     // Stop any prior run before starting a new one (e.g. switching jobs). Done

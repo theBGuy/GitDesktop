@@ -15,8 +15,9 @@ import { repoKeys } from "./core";
  * and only the MUTABLE file-at-rev slices — `"worktree"` and the index `":0"`, which
  * staging rewrites — all prefix-matched. Staging-class mutations (stage/unstage/discard/
  * apply) pass this ALONE so they don't mark the heavy history/branches/Insights/SBOM
- * queries stale; {@link useCommit} passes it as its AWAITED set and defers what HEAD
- * moves to {@link commitAftermathKeys}. Committed-rev reads are immutable under staging.
+ * queries stale; `useCommit` in workingtree.ts passes it as its AWAITED set and defers
+ * what HEAD moves to `commitAftermathKeys` (same file). Committed-rev reads are
+ * immutable under staging.
  */
 export const workingTreeKeys = (repo: string) =>
   [
@@ -120,15 +121,15 @@ export const pendingBoardWrites = new Map<string, number>();
  * server truth fetched mid-flight puts an archived card back on the board, or a
  * moved one in its old column, until the sibling's own settle re-reads. Deferring
  * costs nothing while the last write out is one of THESE —
- * {@link trackBoardWrite} decrements before any `onSettled` runs, so it sees a
+ * projects.ts's `trackBoardWrite` decrements before any `onSettled` runs, so it sees a
  * clear count and performs the one real refetch. The gap: when the last one out
- * settles through {@link markProjectBoardsStale} instead, nothing refetches at all.
- * That is the point of that mode — its own patch is already on screen, and the
- * boards stay marked stale for the next natural read. A write under the shield
- * (writeThroughBoards' `markStale: false`) marks only the FILTERED lenses it patches,
- * whose membership no payload can settle, and preserves every mark it found — so a
- * mark laid here still reaches its refetch. A lone write here sees zero and refetches
- * immediately, exactly as before.
+ * settles through `markProjectBoardsStale` (also projects.ts) instead, nothing
+ * refetches at all. That is the point of that mode — its own patch is already on
+ * screen, and the boards stay marked stale for the next natural read. A write under
+ * the shield (writeThroughBoards' `markStale: false`) marks only the FILTERED lenses
+ * it patches, whose membership no payload can settle, and preserves every mark it
+ * found — so a mark laid here still reaches its refetch. A lone write here sees zero
+ * and refetches immediately, exactly as before.
  *
  * Read PER REPO, matching the key this invalidates: a write pending in another
  * repository must not defer this one, whose stale mark that write's own settle
@@ -141,7 +142,7 @@ export const pendingBoardWrites = new Map<string, number>();
  * default active type re-runs every cancelled read that still has an enabled
  * observer, dataless ones included. The deferred branch does not, and relies on the
  * last write out to do it; when that last write settles through
- * {@link markProjectBoardsStale} instead, its own repo-wide rescue is what covers
+ * projects.ts's `markProjectBoardsStale` instead, its own repo-wide rescue is what covers
  * the reads this branch left with nothing.
  */
 export function invalidateProjectBoards(

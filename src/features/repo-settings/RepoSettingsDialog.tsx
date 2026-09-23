@@ -3,7 +3,6 @@ import {
   BroadcastIcon,
   CaretLeftIcon,
   ClockCounterClockwiseIcon,
-  CopyIcon,
   PencilSimpleIcon,
   PlusIcon,
   TrashIcon,
@@ -11,6 +10,7 @@ import {
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import { type ComponentType, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
@@ -37,7 +37,6 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
   useCreateWebhook,
@@ -599,14 +598,11 @@ function WebhookRow({
             >
               {hook.config.url}
             </p>
-            <button
-              type="button"
-              className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-              title="Copy URL"
-              onClick={() => copyText(hook.config.url, "Webhook URL copied")}
-            >
-              <CopyIcon className="size-3.5" />
-            </button>
+            <CopyIconButton
+              text={hook.config.url}
+              label="Copy URL"
+              toast="Webhook URL copied"
+            />
           </div>
           <p className="mt-1 text-muted-foreground">
             {eventsSummary(hook.events)} ·{" "}

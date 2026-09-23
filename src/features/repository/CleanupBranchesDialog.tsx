@@ -17,7 +17,7 @@ import {
 import * as api from "@/lib/git/api";
 import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { cn } from "@/lib/utils";
 
@@ -298,7 +298,6 @@ export function CleanupBranchesDialog({
   const [mode, setMode] = useState<Mode>("archive");
   const [windowDays, setWindowDays] = useState<number>(60);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [activeName, setActiveName] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // Batch progress + per-branch failures (kept visible so a partial run is honest).
   const [progress, setProgress] = useState<{
@@ -380,6 +379,13 @@ export function CleanupBranchesDialog({
     });
   }, [stale, mode, isProtected, isInWorktree, isWorktreeRemoving]);
 
+  // No `tabAdvances`: Tab must keep reaching the dialog's other controls (mode,
+  // window, select-all, footer buttons).
+  const nav = useRovingRows({
+    items: candidates,
+    rowKey: (c) => c.branch.name,
+  });
+
   // Until the worktree read lands, `isInWorktree` excludes nothing, so every
   // candidate below is provisional — the list stays behind the skeleton and the
   // selection stays unseeded rather than offering a row the answer would remove.
@@ -419,7 +425,6 @@ export function CleanupBranchesDialog({
     // once those reads land and the excluded rows are really gone.
     if (holdingReads) return;
     setSelected(new Set(autoSelectKey ? autoSelectKey.split("\n") : []));
-    setActiveName(null);
   }, [autoSelectKey, running, holdingReads]);
 
   // First load: a merged signal still in flight and nothing has surfaced yet.
@@ -485,14 +490,6 @@ export function CleanupBranchesDialog({
     setWindowDays(next);
     setFailed(new Map());
   }
-
-  const activeIndex = candidates.findIndex((c) => c.branch.name === activeName);
-  const onKeyDown = listKeyboardNav({
-    items: candidates,
-    activeIndex,
-    onActivate: (c) => setActiveName(c.branch.name),
-    rowKey: (c) => c.branch.name,
-  });
 
   async function runBatch() {
     const names = candidateNames.filter((n) => selected.has(n));
@@ -794,29 +791,25 @@ export function CleanupBranchesDialog({
               // overflow and Windows draws a scrollbar for even one row.
               <div
                 className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1 py-2"
-                onKeyDown={onKeyDown}
+                onKeyDown={nav.onRowKeyDown}
               >
-                {candidates.map((c, idx) => {
+                {candidates.map((c) => {
                   const name = c.branch.name;
                   const checked = selected.has(name);
                   const err = failed.get(name);
-                  const rovingTab =
-                    idx === (activeIndex === -1 ? 0 : activeIndex) ? 0 : -1;
                   return (
                     <label
                       key={name}
                       className={cn(
                         "flex cursor-pointer items-center gap-2 rounded-none px-1.5 py-1.5 text-xs transition-colors hover:bg-accent",
-                        activeName === name && "bg-accent",
+                        nav.isActive(c) && "bg-accent",
                       )}
                     >
                       <Checkbox
-                        data-row={name}
-                        tabIndex={rovingTab}
+                        {...nav.rowProps(c)}
                         checked={checked}
                         disabled={running}
                         onCheckedChange={() => toggle(name)}
-                        onFocus={() => setActiveName(name)}
                       />
                       <span className="min-w-0 flex-1 truncate font-mono">
                         {name}

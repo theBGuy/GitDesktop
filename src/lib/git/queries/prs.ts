@@ -553,9 +553,9 @@ export function usePrReviewThreads(
 /**
  * Applies a review suggestion to the working tree (GitHub's "Commit suggestion", done
  * locally). A staging-class edit, so it narrows invalidation to {@link workingTreeKeys}
- * like {@link useStage} — the whole-repo default would prefix-match the review-threads
- * key and force a needless GitHub GraphQL refetch even though no thread changed. The
- * backend verifies the expected lines before editing; a mismatch throws.
+ * like workingtree.ts's `useStage` — the whole-repo default would prefix-match the
+ * review-threads key and force a needless GitHub GraphQL refetch even though no thread
+ * changed. The backend verifies the expected lines before editing; a mismatch throws.
  */
 export function useApplySuggestion(repo: string) {
   return useRepoMutation(
@@ -708,7 +708,7 @@ export function useCreateCommitComment(repo: string, lens: RemoteLens) {
 }
 
 /** Optimistic edit/delete of one commit comment with exact-key rollback — the
- *  commit-comment analogue of {@link useOptimisticCommentMutation}. */
+ *  commit-comment analogue of pr-actions.ts's `useOptimisticCommentMutation`. */
 function useOptimisticCommitCommentMutation<TData>(
   repo: string,
   lens: RemoteLens,
@@ -857,8 +857,8 @@ export function useCreateReviewThread(repo: string, lens: RemoteLens) {
 
 /** Submit a batch review (verdict + summary + staged draft comments). NOT
  *  optimistic — on some providers it fans out to several calls, so it just
- *  invalidates the repo subtree on success and returns the {@link ReviewSubmitOut}
- *  so the caller can toast the posted/total counts. */
+ *  invalidates the repo subtree on success and returns the `ReviewSubmitOut`
+ *  (types/pr-reviews.ts) so the caller can toast the posted/total counts. */
 export function useSubmitReview(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,

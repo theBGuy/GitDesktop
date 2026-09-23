@@ -1,6 +1,5 @@
 import {
   CheckCircleIcon,
-  CopyIcon,
   PlusIcon,
   XCircleIcon,
   XIcon,
@@ -11,6 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -989,19 +989,11 @@ export const AiProviderSection = withForm({
             <span className="flex min-w-0 items-center gap-1 text-xs text-destructive">
               <XCircleIcon className="size-4 shrink-0" />
               <span className="line-clamp-2">{testResult.message}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Copy error message"
-                className="shrink-0"
-                onClick={() => {
-                  navigator.clipboard.writeText(testResult.message ?? "");
-                  toast.success("Error message copied");
-                }}
-              >
-                <CopyIcon />
-              </Button>
+              <CopyIconButton
+                text={testResult.message ?? ""}
+                label="Copy error message"
+                toast="Error message copied"
+              />
             </span>
           )}
         </div>

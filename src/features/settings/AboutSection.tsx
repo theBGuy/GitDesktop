@@ -2,7 +2,6 @@ import {
   ArrowClockwiseIcon,
   ArrowSquareOutIcon,
   CheckCircleIcon,
-  CopyIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
@@ -14,12 +13,12 @@ import {
 } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import type { AuthStatus } from "@/lib/ai/agent";
-import { copyText } from "@/lib/clipboard";
 import {
   cliFloorWarning,
   type ToolStatus,
@@ -271,20 +270,14 @@ export function AboutSection() {
         <dd className="flex items-center gap-1.5 font-mono">
           {geo ? `${geo.x}, ${geo.y}` : "…"}
           {geo && (
-            <button
-              type="button"
-              onClick={() =>
-                copyText(
-                  `x=${geo.x} y=${geo.y} w=${geo.width} h=${geo.height}`,
-                  "Window coordinates copied",
-                )
-              }
-              className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
-              aria-label="Copy window coordinates"
-              title="Copy window coordinates"
-            >
-              <CopyIcon className="size-3.5" />
-            </button>
+            <CopyIconButton
+              text={`x=${geo.x} y=${geo.y} w=${geo.width} h=${geo.height}`}
+              label="Copy window coordinates"
+              toast="Window coordinates copied"
+              // Pulls the 24px hit target back to the row's 16px text line so the
+              // value keeps its label's baseline and the grid's row rhythm.
+              className="-my-1"
+            />
           )}
         </dd>
         <dt className="text-muted-foreground">Window size</dt>

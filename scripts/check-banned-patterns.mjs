@@ -358,6 +358,17 @@ const DIFF_STAT_PAIR_RE = new RegExp(
   "g",
 );
 
+// An icon-only copy control built by hand: a `<button>`/`<Button>` whose SOLE
+// child is a self-closing `<CopyIcon/>`. Requiring the opening tag's own `>`
+// directly before the icon, and the matching close directly after it, is what
+// keeps icon+text sites clean (visible text on either side breaks the match).
+// The attribute runs step over `=>` arrows but stop at any other `>`, so two
+// evasions stay open, both zero-instance today: an attribute holding JSX or a
+// `>` comparison ends the tag early and the site is missed, and so is a
+// non-self-closing `<CopyIcon></CopyIcon>`.
+const RAW_COPY_ICON_BUTTON_RE =
+  /<(button|Button)\b(?:=>|[^>=]|=(?!>))*>\s*<CopyIcon\b(?:=>|[^>=]|=(?!>))*\/>\s*<\/\1>/g;
+
 // A local DEFINITION of the change-kind badge table — the `const KIND_BADGE`
 // binding, not a read of the shared one (an import names it without `const`).
 // Matched per line: nothing wraps between the keyword and the name. A table
@@ -1168,6 +1179,16 @@ export const CHECKS = [
     allowlist: [],
     message:
       "`+added -deleted` counts render through DiffStat (src/components/diff-stat.tsx) — a hand-rolled pair drifts from the canonical spacing, minus glyph, and tabular digits one site at a time; a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "raw-copy-icon-button",
+    // The component IS the idiom; everything else routes through it.
+    appliesTo: (file) =>
+      file !== "src/components/CopyIconButton.tsx" && notVendoredUi(file),
+    scan: perFile(RAW_COPY_ICON_BUTTON_RE),
+    allowlist: [],
+    message:
+      "icon-only copy buttons use CopyIconButton (src/components/CopyIconButton.tsx) — it carries the vendored focus ring, sets aria-label and title to the same string, and stops click propagation so a copy never also activates its row; a hand-rolled button drifts on all three one site at a time (a copy control with visible text is not this idiom), and a site the component genuinely can't express needs an allowlist entry with rationale",
   },
   {
     name: "kind-badge-single-source",

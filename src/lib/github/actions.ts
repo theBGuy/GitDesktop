@@ -43,11 +43,9 @@ export interface RunStep {
 }
 
 export interface RunJob {
-  /** Forge job id. u64 upstream, carried here as a JS number: measured
-   *  magnitudes are ~1e11 (GitHub) and ~1.7e10 (GitLab) against the 2^53 safe
-   *  ceiling, and the IPC boundary re-stringifies. Retyping ids as strings
-   *  end-to-end is a recorded repo-wide follow-up, not a per-call-site patch. */
-  id: number;
+  /** Forge job id, serialized from u64 as a string to preserve precision
+   *  beyond JavaScript's 2^53 safe-integer boundary. */
+  id: string;
   name: string;
   status: string;
   conclusion: string;
@@ -171,8 +169,8 @@ export const forgeCiRunFailedLogs = (
   });
 
 /** One job's failed-step logs (fallback: full job log), for AI debugging. */
-export const forgeCiJobLogs = (repoPath: string, jobId: number | string) =>
-  invoke<string>("forge_ci_job_logs", { repoPath, jobId: String(jobId) });
+export const forgeCiJobLogs = (repoPath: string, jobId: string) =>
+  invoke<string>("forge_ci_job_logs", { repoPath, jobId });
 
 /** A Bitbucket pipeline step's logs (cleaned/capped). Bitbucket jobs carry a
  *  `logRef` instead of a numeric job id, and `forge_ci_job_logs` errors for
@@ -185,7 +183,7 @@ export const forgeBbStepLogs = (repoPath: string, logRef: string) =>
  *  `forge_ci_job_logs`. */
 export const forgeJobLogs = (
   repoPath: string,
-  job: { id: number | string; logRef?: string },
+  job: { id: string; logRef?: string },
 ) =>
   job.logRef
     ? forgeBbStepLogs(repoPath, job.logRef)
@@ -197,15 +195,14 @@ export const forgeJobLogs = (
  *  repository the re-run targets; callers on a repo-wide CI surface omit it. */
 export const forgeCiJobRerun = (
   repoPath: string,
-  jobId: number | string,
+  jobId: string,
   lens?: RemoteLens,
-) =>
-  invoke<void>("forge_ci_job_rerun", { repoPath, jobId: String(jobId), lens });
+) => invoke<void>("forge_ci_job_rerun", { repoPath, jobId, lens });
 
 /** Play (start) a manual GitLab CI job awaiting a manual trigger — GitLab-only,
  *  gated on `implemented.ciJobPlay`; errors on other providers. */
-export const forgeGlCiPlayJob = (repoPath: string, jobId: number) =>
-  invoke<void>("forge_gl_ci_play_job", { repoPath, jobId: String(jobId) });
+export const forgeGlCiPlayJob = (repoPath: string, jobId: string) =>
+  invoke<void>("forge_gl_ci_play_job", { repoPath, jobId });
 
 export const ghWorkflowList = (repoPath: string) =>
   invoke<Workflow[]>("gh_workflow_list", { repoPath });
@@ -410,15 +407,15 @@ export function useRunFailedLogs(
  *  The query key stays distinct per job either way. */
 export function useJobLogs(
   repo: string,
-  job: { id: number | string; logRef?: string } | null,
+  job: { id: string; logRef?: string } | null,
   enabled: boolean,
 ) {
   // Bitbucket steps are keyed by logRef (their numeric id can collide across a
   // run's jobs); GitHub/GitLab jobs by their unique id.
-  const jobKey = job?.logRef ?? String(job?.id ?? 0);
+  const jobKey = job?.logRef ?? job?.id ?? "0";
   return useQuery({
     queryKey: ["repo", repo, "actions", "job", jobKey, "logs"] as const,
-    queryFn: () => forgeJobLogs(repo, job ?? { id: 0 }),
+    queryFn: () => forgeJobLogs(repo, job ?? { id: "0" }),
     enabled: enabled && job !== null,
     staleTime: 30_000,
   });
@@ -467,7 +464,7 @@ export function useCancelRun(repo: string) {
 export function useRerunJob(repo: string) {
   return useActionsMutation(
     repo,
-    (args: { jobId: number | string; lens?: RemoteLens }) =>
+    (args: { jobId: string; lens?: RemoteLens }) =>
       forgeCiJobRerun(repo, args.jobId, args.lens),
   );
 }
@@ -476,7 +473,7 @@ export function useRerunJob(repo: string) {
  *  refreshes the run detail + list; the job goes active and the existing 5s
  *  poll takes over. */
 export function usePlayCiJob(repo: string) {
-  return useActionsMutation(repo, (jobId: number) =>
+  return useActionsMutation(repo, (jobId: string) =>
     forgeGlCiPlayJob(repo, jobId),
   );
 }

@@ -1,7 +1,8 @@
 import { Popover } from "@base-ui/react/popover";
-import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
+import { KanbanIcon } from "@phosphor-icons/react";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -9,7 +10,6 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
   isReconnectHostSafe,
@@ -611,14 +611,12 @@ export function ScopeGapBlock({
             <code className="min-w-0 flex-1 break-all rounded bg-muted px-1.5 py-1 font-mono text-[11px]">
               {cmd}
             </code>
-            <button
-              type="button"
-              className="mt-1 shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
-              title="Copy command"
-              onClick={() => copyText(cmd, "Command copied")}
-            >
-              <CopyIcon className="size-3.5" />
-            </button>
+            <CopyIconButton
+              text={cmd}
+              label="Copy command"
+              toast="Command copied"
+              className="mt-1"
+            />
           </div>
         </>
       )}

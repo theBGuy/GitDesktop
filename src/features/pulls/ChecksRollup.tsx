@@ -143,9 +143,7 @@ function jobForCheck(
 ): RunJob | undefined {
   if (!jobs) return undefined;
   if (check.jobId) {
-    // Compare as strings: `check.jobId` is a string (ids can exceed 2^53) while
-    // RunJob.id is still numeric — stringify the numeric side to match.
-    const byId = jobs.find((j) => String(j.id) === check.jobId);
+    const byId = jobs.find((j) => j.id === check.jobId);
     if (byId) return byId;
   }
   return jobs.find((j) => j.name === check.name);

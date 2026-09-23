@@ -1,4 +1,4 @@
-import { CaretRightIcon, CopyIcon } from "@phosphor-icons/react";
+import { CaretRightIcon } from "@phosphor-icons/react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { MarkdownEditor } from "@/components/markdown-editor";
@@ -17,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
-import { copyText } from "@/lib/clipboard";
 import type {
   ApplyLinesResult,
   ForgeProvider,
@@ -651,21 +651,11 @@ export function ReviewThreadCard({
             </Badge>
           )}
         </button>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label="Copy thread as Markdown"
-          title="Copy thread as Markdown"
-          className="shrink-0 text-muted-foreground"
-          // The header row toggles expand on click — stop the bubble so copying
-          // doesn't also collapse the card (clickable-header row-bubble gotcha).
-          onClick={(e) => {
-            e.stopPropagation();
-            copyText(threadToMarkdown(thread), "Markdown copied");
-          }}
-        >
-          <CopyIcon className="size-3.5" />
-        </Button>
+        <CopyIconButton
+          text={() => threadToMarkdown(thread)}
+          label="Copy thread as Markdown"
+          toast="Markdown copied"
+        />
         {onResolve && (
           <Button
             variant="ghost"

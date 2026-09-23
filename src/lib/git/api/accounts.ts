@@ -83,19 +83,23 @@ export const forgeReconnectCancel = (sessionId: string) =>
   invoke<void>("forge_reconnect_cancel", { sessionId });
 
 // ── GitLab review-bot token ──────────────────────────────────────────────────
+//
+// A second GitLab token so batch reviews / bot comments post under a distinct
+// identity. The token itself is never returned. Cold-start test mode has no
+// keychain, so status reports null.
 
-// The GitLab review-bot token — a second GitLab token so batch reviews / bot
-// comments post under a distinct identity. Status returns the bot login when one
-// is configured (null otherwise); the token itself is never returned. Cold-start
-// test mode has no keychain, so status reports null.
+/** The bot login when a review-bot token is configured; null otherwise. */
 export const forgeGitlabReviewTokenStatus = () =>
   COLD_START
     ? Promise.resolve<string | null>(null)
     : invoke<string | null>("forge_gitlab_review_token_status", {});
 
+/** Validate and store a review-bot token; resolves to the bot login. Throws
+ *  (nothing stored) when validation fails. */
 export const forgeGitlabReviewTokenSet = (token: string) =>
   invoke<string>("forge_gitlab_review_token_set", { token });
 
+/** Clear the stored review-bot token and its login. */
 export const forgeGitlabReviewTokenClear = () =>
   invoke<void>("forge_gitlab_review_token_clear", {});
 

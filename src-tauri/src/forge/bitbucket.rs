@@ -27,7 +27,7 @@ use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
 use crate::forge::gitlab::null_to_default;
 use crate::forge::http::{
-    self, BbCredentials, BB_API_BASE, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN,
+    self, BbCredentials, BbOpKind, BB_API_BASE, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN,
     KEY_USERNAME,
 };
 use crate::forge::model::{
@@ -124,7 +124,7 @@ impl Forge for BitbucketForge {
         };
 
         // Token present. Probe `/user`; a success authenticates and yields the login.
-        match http::bb_get_json::<BbUser>(&creds, "user", "user").await {
+        match http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read).await {
             Ok(user) => {
                 let login = user.username.or(user.display_name);
                 Ok(bitbucket_status(true, true, &self.host, repo, login))
@@ -237,7 +237,7 @@ pub async fn set_account(email: &str, token: &str) -> AppResult<BbAccountInfo> {
         email: email.clone(),
         token: token.clone(),
     };
-    let user: BbUser = http::bb_get_json(&creds, "user", "user").await?;
+    let user: BbUser = http::bb_get_json(&creds, "user", "user", BbOpKind::Read).await?;
     let username = user.username.clone();
     let display_name = user.display_name.clone();
 
@@ -409,7 +409,7 @@ async fn bb_paginate<T: serde::de::DeserializeOwned>(
     let mut url = first_url;
     let mut out: Vec<T> = Vec::new();
     for _ in 0..BB_MAX_PAGES {
-        let page: BbPage<T> = http::bb_get_json(creds, &url, what).await?;
+        let page: BbPage<T> = http::bb_get_json(creds, &url, what, BbOpKind::Read).await?;
         out.extend(page.values);
         match next_page_url(page.next) {
             Some(next) => url = next,
@@ -535,8 +535,13 @@ async fn workspace_slugs(creds: &BbCredentials) -> AppResult<Vec<String>> {
     let mut accesses: Vec<BbWorkspaceAccess> = Vec::new();
     let mut ws_url = "user/workspaces?pagelen=100".to_string();
     for page in 0..BB_MAX_PAGES {
-        let fetched =
-            http::bb_get_json::<BbPage<BbWorkspaceAccess>>(creds, &ws_url, "workspaces").await;
+        let fetched = http::bb_get_json::<BbPage<BbWorkspaceAccess>>(
+            creds,
+            &ws_url,
+            "workspaces",
+            BbOpKind::Read,
+        )
+        .await;
         match best_effort_page_step(fetched, &mut accesses, page == 0)? {
             Some(next) => ws_url = next,
             None => break,
@@ -708,7 +713,7 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
     }
 
     let creds = http::load_credentials().await?;
-    let viewer: BbUser = http::bb_get_json(&creds, "user", "user").await?;
+    let viewer: BbUser = http::bb_get_json(&creds, "user", "user", BbOpKind::Read).await?;
     let uuid = viewer
         .uuid
         .filter(|u| !u.is_empty())
@@ -733,7 +738,13 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
                     encode_query_value(ws),
                     encode_query_value(slug),
                 );
-                http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "pull requests").await
+                http::bb_get_json::<BbPage<serde_json::Value>>(
+                    creds,
+                    &path,
+                    "pull requests",
+                    BbOpKind::Read,
+                )
+                .await
             }
         }))
         .await;
@@ -797,7 +808,13 @@ pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let pr: serde_json::Value = http::bb_get_json(&creds, &path, "pull request").await?;
+    let pr: serde_json::Value = http::bb_get_json(
+        &creds,
+        &path,
+        "pull request",
+        BbOpKind::Read,
+    )
+    .await?;
     let str_at = |p: &str| {
         pr.pointer(p)
             .and_then(serde_json::Value::as_str)
@@ -817,7 +834,7 @@ pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
 /// `pagelen` (100), sorted `-updated_on`, so repos past 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let creds = http::load_credentials().await?;
-    let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user")
+    let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read)
         .await
         .ok()
         .and_then(|u| u.username.or(u.display_name))
@@ -841,7 +858,13 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
             "repositories/{}?role=member&sort=-updated_on&pagelen=100",
             encode_query_value(slug)
         );
-        match http::bb_get_json::<BbPage<BbRepo>>(&creds, &path, "repositories").await {
+        match http::bb_get_json::<BbPage<BbRepo>>(
+            &creds,
+            &path,
+            "repositories",
+            BbOpKind::Read,
+        )
+        .await {
             Ok(page) => {
                 any_ok = true;
                 repos.extend(page.values.into_iter().map(from_bb_repo));
@@ -1055,7 +1078,13 @@ pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppRe
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let page: BbPage<BbPr> = http::bb_get_json(&creds, &path, "pull requests").await?;
+    let page: BbPage<BbPr> = http::bb_get_json(
+        &creds,
+        &path,
+        "pull requests",
+        BbOpKind::Read,
+    )
+    .await?;
     let mut prs: Vec<PrInfo> = page.values.into_iter().map(from_bb_pr).collect();
     if let Some(n) = limit {
         prs.truncate(n as usize);
@@ -1085,7 +1114,13 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
         encode_query_value(&slug),
         encode_query_value(&query),
     );
-    let page: BbPage<BbPr> = http::bb_get_json(&creds, &path, "pull requests").await?;
+    let page: BbPage<BbPr> = http::bb_get_json(
+        &creds,
+        &path,
+        "pull requests",
+        BbOpKind::Read,
+    )
+    .await?;
     Ok(page.values.into_iter().map(from_bb_pr).collect())
 }
 
@@ -1197,11 +1232,17 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<PrPollInfo>> {
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let page: BbPage<BbPollPr> = http::bb_get_json(&creds, &path, "pull requests").await?;
+    let page: BbPage<BbPollPr> = http::bb_get_json(
+        &creds,
+        &path,
+        "pull requests",
+        BbOpKind::Read,
+    )
+    .await?;
 
     // Resolve the viewer's identity (uuid to match the author, login to emit as the
     // author when it's the viewer's own PR) — one GET, like `pr_approvals`.
-    let self_user = http::bb_get_json::<BbUser>(&creds, "user", "user").await.ok();
+    let self_user = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read).await.ok();
     let viewer_uuid = self_user
         .as_ref()
         .and_then(|u| u.uuid.clone())
@@ -1396,7 +1437,13 @@ pub async fn pr_list_ci(repo_path: &str, prs: &[PrCiRefIn]) -> AppResult<Vec<PrC
             encode_query_value(&pr.head_sha),
         );
         // Per-call tolerance: a failed fetch just leaves this PR without an icon.
-        let Ok(page) = http::bb_get_json::<BbPage<BbCommitStatus>>(&creds, &path, "statuses").await
+        let Ok(page) = http::bb_get_json::<BbPage<BbCommitStatus>>(
+            &creds,
+            &path,
+            "statuses",
+            BbOpKind::Read,
+        )
+        .await
         else {
             continue;
         };
@@ -1454,7 +1501,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     );
 
     // Core PR — a hard error (the view can't render without it).
-    let pr: BbPr = http::bb_get_json(&creds, &base, "pull request").await?;
+    let pr: BbPr = http::bb_get_json(&creds, &base, "pull request", BbOpKind::Read).await?;
 
     // Commits — Bitbucket returns newest-first; the neutral model wants oldest-first
     // (the frontend treats the last as head), matching gitlab's reversal.
@@ -1462,6 +1509,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         &creds,
         &format!("{base}/commits?pagelen=100"),
         "commits",
+        BbOpKind::Read,
     )
     .await
     .map(|page| {
@@ -1486,6 +1534,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         &creds,
         &format!("{base}/diffstat?pagelen=100"),
         "diffstat",
+        BbOpKind::Read,
     )
     .await
     .map(|page| {
@@ -1514,7 +1563,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // Resolve the viewer's account uuid once (tolerant — a failure just leaves
     // every comment's edit/delete hidden; it must not fail the view). Drives the
     // truthful `viewer_did_author` below.
-    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user")
+    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read)
         .await
         .ok()
         .and_then(|u| u.uuid)
@@ -1558,6 +1607,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
                 encode_query_value(&head_sha),
             ),
             "statuses",
+            BbOpKind::Read,
         )
         .await
         .map(|page| {
@@ -1707,7 +1757,12 @@ pub async fn pr_activity(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTim
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let page: BbPage<BbActivity> = http::bb_get_json(&creds, &path, "pull request activity")
+    let page: BbPage<BbActivity> = http::bb_get_json(
+        &creds,
+        &path,
+        "pull request activity",
+        BbOpKind::Read,
+    )
         .await
         .unwrap_or_default();
 
@@ -1863,7 +1918,7 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let diff = http::bb_get_text(&creds, &path).await?;
+    let diff = http::bb_get_text(&creds, &path, BbOpKind::Read).await?;
     let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, PR_DIFF_CAP);
     Ok(text)
 }
@@ -1884,7 +1939,7 @@ pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let path = format!("{base}/diff/{sha}");
-    let diff = http::bb_get_text(&creds, &path).await?;
+    let diff = http::bb_get_text(&creds, &path, BbOpKind::Read).await?;
     let (text, _) = crate::git::diff::truncate_at_char_boundary(diff, PR_DIFF_CAP);
     Ok(text)
 }
@@ -1901,7 +1956,7 @@ pub async fn commit_comments(repo_path: &str, sha: &str) -> AppResult<Vec<Commit
     validate_commit_sha(sha)?;
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user")
+    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read)
         .await
         .ok()
         .and_then(|u| u.uuid)
@@ -1910,6 +1965,7 @@ pub async fn commit_comments(repo_path: &str, sha: &str) -> AppResult<Vec<Commit
         &creds,
         &format!("{base}/commit/{sha}/comments?pagelen=100"),
         "commit comments",
+        BbOpKind::Read,
     )
     .await?;
     Ok(page
@@ -2170,7 +2226,13 @@ pub async fn run_page(
     if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
         path.push_str(&format!("&target.branch={}", encode_query_value(b)));
     }
-    let fetched: BbPage<BbPipeline> = http::bb_get_json(&creds, &path, "pipelines").await?;
+    let fetched: BbPage<BbPipeline> = http::bb_get_json(
+        &creds,
+        &path,
+        "pipelines",
+        BbOpKind::Read,
+    )
+    .await?;
     Ok(CiRunPage {
         total_count: fetched.size,
         has_more: fetched.next.is_some(),
@@ -2250,14 +2312,24 @@ async fn resolve_pipeline(
         let q = format!(
             "repositories/{ws_e}/{slug_e}/pipelines/?q=build_number={build_number}&pagelen=1"
         );
-        let page: BbPage<BbPipeline> = http::bb_get_json(creds, &q, "pipeline").await?;
+        let page: BbPage<BbPipeline> = http::bb_get_json(
+            creds,
+            &q,
+            "pipeline",
+            BbOpKind::Read,
+        )
+        .await?;
         page.values.into_iter().next().ok_or_else(|| {
             AppError::Bitbucket(format!(
                 "no Bitbucket pipeline with build number {build_number}"
             ))
         })
     } else {
-        Err(http::http_error(status, &body))
+        Err(AppError::Bitbucket(http::bb_error_detail(
+            status,
+            &body,
+            BbOpKind::Read,
+        )))
     }
 }
 
@@ -2269,7 +2341,7 @@ async fn pipeline_steps(creds: &BbCredentials, ws: &str, slug: &str, uuid: &str)
         encode_query_value(slug),
         encode_uuid(uuid),
     );
-    http::bb_get_json::<BbPage<BbStep>>(creds, &path, "steps")
+    http::bb_get_json::<BbPage<BbStep>>(creds, &path, "steps", BbOpKind::Read)
         .await
         .map(|p| p.values)
         .unwrap_or_default()
@@ -2392,7 +2464,11 @@ async fn step_log_raw(
         return Ok(EXPIRED_LOG_MESSAGE.to_string());
     }
     if !(200..300).contains(&status) {
-        return Err(http::http_error(status, &body));
+        return Err(AppError::Bitbucket(http::bb_error_detail(
+            status,
+            &body,
+            BbOpKind::Read,
+        )));
     }
     let text = if body.trim().is_empty() {
         "This step produced no log output.".to_string()
@@ -2721,7 +2797,7 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<Revie
 
     // Resolve the viewer's uuid once (tolerant — a failure just hides edit/delete; it
     // must not fail the read). Drives `viewer_did_author` in the grouping.
-    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user")
+    let viewer_uuid = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read)
         .await
         .ok()
         .and_then(|u| u.uuid)
@@ -2883,7 +2959,11 @@ async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()>
     for _ in 0..30 {
         let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None).await?;
         if !(200..300).contains(&status) {
-            return Err(http::http_error(status, &body));
+            return Err(AppError::Bitbucket(http::bb_error_detail(
+                status,
+                &body,
+                BbOpKind::Read,
+            )));
         }
         let task: BbMergeTask = serde_json::from_str(&body).map_err(|e| {
             http::bb_unreadable(
@@ -2956,7 +3036,7 @@ async fn read_reviewer_uuids(
 ) -> AppResult<Vec<String>> {
     let read_path = format!("{base}/pullrequests/{number}?fields=reviewers.uuid");
     let existing: BbPrReviewers =
-        http::bb_get_json(creds, &read_path, "pull request reviewers").await?;
+        http::bb_get_json(creds, &read_path, "pull request reviewers", BbOpKind::Read).await?;
     Ok(existing
         .reviewers
         .into_iter()
@@ -3100,13 +3180,19 @@ pub async fn reviewer_candidates(
     let exclude_uuid = match number {
         Some(n) => {
             let pr_path = format!("{base}/pullrequests/{n}?fields=author.uuid");
-            let pr: BbPrAuthorOnly = http::bb_get_json(&creds, &pr_path, "pull request").await?;
+            let pr: BbPrAuthorOnly = http::bb_get_json(
+                &creds,
+                &pr_path,
+                "pull request",
+                BbOpKind::Read,
+            )
+            .await?;
             pr.author.and_then(|a| a.uuid).unwrap_or_default()
         }
         None => {
             // No PR yet — the viewer would be its author, so exclude them (the
             // pr_approvals `user` idiom).
-            let me: BbUser = http::bb_get_json(&creds, "user", "user").await?;
+            let me: BbUser = http::bb_get_json(&creds, "user", "user", BbOpKind::Read).await?;
             me.uuid.unwrap_or_default()
         }
     };
@@ -3650,11 +3736,17 @@ pub async fn pr_approvals(repo_path: &str, number: u64) -> AppResult<ApprovalSta
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let path = format!("{base}/pullrequests/{number}?fields=participants.user.uuid,participants.user.nickname,participants.user.display_name,participants.approved,participants.state");
-    let pr: BbPrParticipants = http::bb_get_json(&creds, &path, "pull request participants").await?;
+    let pr: BbPrParticipants = http::bb_get_json(
+        &creds,
+        &path,
+        "pull request participants",
+        BbOpKind::Read,
+    )
+    .await?;
 
     // Resolve the viewer's uuid (for matching) and login (for the reconciling
     // approved_by entry) from the self object — one GET, like GitLab's approvals read.
-    let self_user = http::bb_get_json::<BbUser>(&creds, "user", "user").await.ok();
+    let self_user = http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read).await.ok();
     let viewer_uuid = self_user
         .as_ref()
         .and_then(|u| u.uuid.clone())
@@ -4241,7 +4333,13 @@ pub async fn repo_admin(repo_path: &str) -> AppResult<bool> {
         encode_query_value(&ws),
         encode_query_value(&query),
     );
-    let page: BbPage<BbRepoSlug> = http::bb_get_json(&creds, &path, "repositories").await?;
+    let page: BbPage<BbRepoSlug> = http::bb_get_json(
+        &creds,
+        &path,
+        "repositories",
+        BbOpKind::Read,
+    )
+    .await?;
     Ok(repo_admin_matches(&page.values, &slug))
 }
 
@@ -4266,7 +4364,13 @@ pub async fn repo_write_access(repo_path: &str) -> AppResult<crate::forge::Forge
         encode_query_value(&ws),
         encode_query_value(&query),
     );
-    let page: BbPage<BbRepoSlug> = http::bb_get_json(&creds, &path, "repositories").await?;
+    let page: BbPage<BbRepoSlug> = http::bb_get_json(
+        &creds,
+        &path,
+        "repositories",
+        BbOpKind::Read,
+    )
+    .await?;
     let listed = repo_admin_matches(&page.values, &slug);
     Ok(crate::forge::ForgeRepoWriteAccess {
         can_push: Some(listed),
@@ -4505,7 +4609,13 @@ fn settings_from_repo(r: BbRepoSettingsRaw) -> BitbucketRepoSettings {
 pub async fn repo_settings(repo_path: &str) -> AppResult<BitbucketRepoSettings> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let raw: BbRepoSettingsRaw = http::bb_get_json(&creds, &base, "repository").await?;
+    let raw: BbRepoSettingsRaw = http::bb_get_json(
+        &creds,
+        &base,
+        "repository",
+        BbOpKind::Read,
+    )
+    .await?;
     Ok(settings_from_repo(raw))
 }
 
@@ -4533,7 +4643,13 @@ struct BbForkParent {
 pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVisibilityRaw> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
-    let raw: BbRepoVisibility = http::bb_get_json(&creds, &base, "repository").await?;
+    let raw: BbRepoVisibility = http::bb_get_json(
+        &creds,
+        &base,
+        "repository",
+        BbOpKind::Read,
+    )
+    .await?;
     let is_private = raw.is_private.ok_or_else(|| {
         http::bb_unreadable(
             "the repository's visibility",
@@ -4833,7 +4949,11 @@ fn parse_pipelines_config(status: u16, body: &str) -> AppResult<BitbucketPipelin
         return Ok(BitbucketPipelinesConfig { enabled: false });
     }
     if !(200..300).contains(&status) {
-        return Err(http::http_error(status, body));
+        return Err(AppError::Bitbucket(http::bb_error_detail(
+            status,
+            body,
+            BbOpKind::Read,
+        )));
     }
     let raw: BbPipelinesConfigRaw = serde_json::from_str(body).map_err(|e| {
         http::bb_unreadable(
@@ -5488,7 +5608,13 @@ pub async fn search_repos(query: &str, _sort: &str, _page: u32) -> AppResult<For
                 "repositories/{}?q={q_enc}&sort=-updated_on&pagelen={BB_SEARCH_PAGELEN}",
                 encode_query_value(&ws.slug),
             );
-            http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "repositories").await
+            http::bb_get_json::<BbPage<serde_json::Value>>(
+                creds,
+                &path,
+                "repositories",
+                BbOpKind::Read,
+            )
+            .await
         }
     }))
     .await;
@@ -5609,7 +5735,7 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
         #[serde(default)]
         mainbranch: Option<BbBranchRef>,
     }
-    let repo: RepoMain = http::bb_get_json(&creds, &repo_path, "repository").await?;
+    let repo: RepoMain = http::bb_get_json(&creds, &repo_path, "repository", BbOpKind::Read).await?;
     let branch = repo.mainbranch.map(|b| b.name).filter(|s| !s.is_empty());
     let Some(branch) = branch else {
         return Ok(None);
@@ -5629,7 +5755,11 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
         // Only a 404 means "this candidate doesn't exist" — try the next one. Any
         // other non-2xx is a real failure worth surfacing, not "No README."
         if status != 404 {
-            return Err(http::http_error(status, &body));
+            return Err(AppError::Bitbucket(http::bb_error_detail(
+                status,
+                &body,
+                BbOpKind::Read,
+            )));
         }
     }
     Ok(None)
@@ -5705,7 +5835,7 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let path = format!("{base}/forks?pagelen={FORK_LIST_CAP}&sort=-updated_on");
-    let page: BbForkPage = http::bb_get_json(&creds, &path, "forks").await?;
+    let page: BbForkPage = http::bb_get_json(&creds, &path, "forks", BbOpKind::Read).await?;
     let forks: Vec<ForgeForkEntry> = page.values.iter().filter_map(fork_entry_from_repo).collect();
     Ok(ForgeForkActivity {
         total_count: page.size,

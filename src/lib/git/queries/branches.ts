@@ -230,8 +230,8 @@ export function branchRewriteStatusOptions(repo: string, branch: string) {
 
 /** Points a NON-current branch at its upstream's tip, refusing if that upstream
  *  moved away from `expectedTip` since the caller measured it. The current branch
- *  takes {@link useHardResetToCommit} instead — only that moves the working tree
- *  with it. */
+ *  takes commit-ops.ts's `useHardResetToCommit` instead — only that moves the
+ *  working tree with it. */
 export function useBranchResetToUpstream(repo: string) {
   return useRepoMutation(
     repo,

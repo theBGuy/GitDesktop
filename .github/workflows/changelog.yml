@@ -47,27 +47,12 @@ jobs:
           changed=$(git diff --name-only "$BASE...$HEAD")
           echo "Changed files (includes deletions):"
           printf '%s\n' "$changed"
-          if grep -qE '^(src|src-tauri)/' <<< "$changed"; then
-            # A deleted fragment must not satisfy the gate: presence scans an
-            # exclude-deletions view; the src detection above stays unfiltered.
-            present=$(git diff --name-only --diff-filter=d "$BASE...$HEAD")
-            # Printed next to the list above so a deleted fragment showing in
-            # "changed" can't read as the fragment this gate looked for.
-            echo "Files present on the head commit (what the fragment check reads):"
-            printf '%s\n' "$present"
-            # Directory match stays case-sensitive; only the basename folds
-            # (mirrors FRAGMENT_RE's /i scope + readdirSync's top-level scan).
-            if grep -E '^changelog\.d/' <<< "$present" | grep -qiE '^changelog\.d/(added|changed|fixed)-[^/]+\.md$'; then
-              echo "Changelog fragment present — thanks!"
-            elif grep -qiF 'skip-changelog' <<< "$TITLE"; then
-              echo "'skip-changelog' in the PR title — fragment not required."
-            else
-              echo "::error::This PR changes src/ or src-tauri/ but adds no changelog.d/ fragment."
-              echo "A fragment DELETED by this PR doesn't count — only fragments present on the head commit do."
-              echo "Add changelog.d/<added|changed|fixed>-<slug>.md (see changelog.d/README.md),"
-              echo "or add the 'no-changelog' label / put 'skip-changelog' in the PR title."
-              exit 1
-            fi
-          else
-            echo "No src/ or src-tauri/ changes — fragment not required."
-          fi
+          # The fragment must EXIST on the head commit: --diff-filter=d drops
+          # deletions, so a PR that only removes a fragment cannot satisfy the gate.
+          present=$(git diff --name-only --diff-filter=d "$BASE...$HEAD")
+          echo "Files present on the head commit (what the fragment check reads):"
+          printf '%s\n' "$present"
+          printf '%s\n' "$changed" > "$RUNNER_TEMP/changelog-changed.txt"
+          printf '%s\n' "$present" > "$RUNNER_TEMP/changelog-present.txt"
+          node scripts/check-changelog-fragment.mjs \
+            "$RUNNER_TEMP/changelog-changed.txt" "$RUNNER_TEMP/changelog-present.txt" "$TITLE"

@@ -1,6 +1,5 @@
-import { CopyIcon } from "@phosphor-icons/react";
+import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
-import { copyText } from "@/lib/clipboard";
 import {
   isReconnectHostSafe,
   reconnectHostArg,
@@ -73,14 +72,11 @@ export function ScopeRefreshHint({
             <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 font-mono">
               {cmd}
             </code>
-            <button
-              type="button"
-              className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
-              title="Copy command"
-              onClick={() => copyText(cmd, "Command copied")}
-            >
-              <CopyIcon className="size-3.5" />
-            </button>
+            <CopyIconButton
+              text={cmd}
+              label="Copy command"
+              toast="Command copied"
+            />
           </div>
         </>
       )}
