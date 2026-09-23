@@ -193,16 +193,6 @@ const UNTITLED_VIEW = "Untitled view";
  *  pagination. The split lives here as a lookup over {@link BoardWriteKind}, which
  *  is all the mutation key carries. Neither set is exhaustive — a kind in neither
  *  still counts as a board write for pagination, and says so generically. */
-/** The BULK half of the board-write family, as the panel's gates read it: a verb
- *  fired over a selection, which every other verb waits on. Named apart from the
- *  card set below because the wait says something different to the user. */
-const BULK_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
-  "bulk-move",
-  "bulk-fields",
-  "bulk-archive",
-  "bulk-restore",
-  "bulk-remove",
-]);
 const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "move",
   "reorder",
@@ -215,6 +205,16 @@ const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
 const ADD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "add-existing",
   "add-draft",
+]);
+/** The BULK set of the board-write family, as the panel's gates read it: a verb
+ *  fired over a selection, which every other verb waits on. Named apart from
+ *  CARD_WRITE_KINDS above because the wait says something different to the user. */
+const BULK_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
+  "bulk-move",
+  "bulk-fields",
+  "bulk-archive",
+  "bulk-restore",
+  "bulk-remove",
 ]);
 
 /** The board's dialogs, one open at a time. Two put work ON the board; the third
@@ -2821,7 +2821,6 @@ export function ProjectsBoardPanel({
     !liveSelection.has(menuTarget.item.itemId)
       ? null
       : {
-          count: selectionSize,
           move: bulkRows.move,
           fields: bulkRows.fields,
           archive: bulkRows.archive,

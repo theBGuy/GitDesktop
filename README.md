@@ -588,21 +588,22 @@ the project. Archived cards come back on demand: turn on **Show archived
 cards** under **View options** and they sit in their columns, dimmed and
 badged **Archived**, with **Restore card** on each one putting it back.
 **Work on several cards at once**: `Ctrl`/`⌘`-click picks cards out
-individually and `Shift`-click (or `Shift` with the arrow keys) takes a range
-down a column, and a bar above the board then moves, archives, restores or
-removes the cards each verb can reach — or **sets their fields**, from a list of
-the board's own fields where every row starts on **Leave as is**, so one
-**Apply** writes exactly the ones you drafted to every eligible card, and each
-row tells you what the selection holds today. Every count shows exactly what
-that verb will reach (archived cards sit out a field edit, for instance), each
-prompt says where the cards go, and a card that leaves the board leaves the
-selection. A move writes the board's grouping field and re-draws the card where
-it lands, keyboard place and all. `Alt`/`⌥`+`↑` and `Alt`/`⌥`+`↓` reorder the card you're
-on inside its column, `Alt`/`⌥`+`Home` and `Alt`/`⌥`+`End` send it to that
-column's top or bottom, and the card's menu and the command palette carry the
-same four moves. That order is the project's own, so it's the order GitHub
-shows everyone; hold the keys down and the board keeps up, writing where the
-card finally lands. A saved view that sorts says so instead, since its columns
+individually and `Shift`-click (or `Shift` with the arrow keys) takes a
+range down a column, and a bar above the board then moves, archives,
+restores or removes the cards each verb can reach — or **sets their
+fields**, from a list of the board's own fields where every row starts on
+**Leave as is**, so one **Apply** writes exactly the ones you drafted to
+every eligible card, and each row tells you what the selection holds today.
+Every count shows exactly what that verb will reach (archived cards sit out
+a field edit, for instance), each prompt says where the cards go, and a card
+that leaves the board leaves the selection. A move writes the board's
+grouping field and re-draws the card where it lands, keyboard place and all.
+`Alt`/`⌥`+`↑` and `Alt`/`⌥`+`↓` reorder the card you're on inside its
+column, `Alt`/`⌥`+`Home` and `Alt`/`⌥`+`End` send it to that column's top or
+bottom, and the card's menu and the command palette carry the same four
+moves. That order is the project's own, so it's the order GitHub shows
+everyone; hold the keys down and the board keeps up, writing where the card
+finally lands. A saved view that sorts says so instead, since its columns
 are drawn in the sort's order rather than the board's, and so does a board
 showing its archived cards — GitHub won't position a card against one of
 those, so the rows say which switch brings the order back.

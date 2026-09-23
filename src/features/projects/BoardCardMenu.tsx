@@ -50,7 +50,6 @@ export interface BulkRow {
 /** The menu's BULK arm, or null for the single-card menu. Present exactly when
  *  the card under the pointer is one of several selected. */
 export interface BulkMenuState {
-  count: number;
   move: BulkRow;
   fields: BulkRow;
   archive: BulkRow;
