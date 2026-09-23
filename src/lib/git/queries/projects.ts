@@ -349,7 +349,7 @@ export type BoardWriteKind =
 
 /**
  * The key every board write is tagged with: `["board-write", kind]`. It says WHAT a
- * write is and nothing else — the card-vs-add split the panel's gates need is a
+ * write is and nothing else — the card/add/bulk split the panel's gates need is a
  * lookup over {@link BoardWriteKind} at the call site, not a key segment, so the key
  * carries no group to fall out of sync with it.
  *

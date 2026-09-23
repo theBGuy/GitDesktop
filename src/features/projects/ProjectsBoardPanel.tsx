@@ -187,11 +187,11 @@ const LENS_LOADING_REASON = "Loading this view of the board…";
 const VIEWS_TRUNCATED_NOTE = "Showing the first 50 views.";
 /** A view GitHub reports with no name. */
 const UNTITLED_VIEW = "Untitled view";
-/** The two LABELLED halves of the board-write family, as the panel's gates read
+/** The LABELLED sets of the board-write family, as the panel's gates read
  *  them: a card write can collide with another write to the same CARD (so the menu
  *  rows hold on each other), where an add touches no existing card and holds only
  *  pagination. The split lives here as a lookup over {@link BoardWriteKind}, which
- *  is all the mutation key carries. Neither set is exhaustive — a kind in neither
+ *  is all the mutation key carries. No set is exhaustive — a kind in none of them
  *  still counts as a board write for pagination, and says so generically. */
 const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "move",
@@ -2730,7 +2730,7 @@ export function ProjectsBoardPanel({
         return "Finishing your last card change…";
       case addPending:
         return "Finishing your last add…";
-      // The catch-all for the family, and the reason the two sets above don't have
+      // The catch-all for the family, and the reason the sets above don't have
       // to be exhaustive: a board write the panel has no label for still holds
       // pagination, because the click gate below refuses on `boardWritePending`
       // whatever kind it is. Without this the button would render UNHELD and then
