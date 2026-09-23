@@ -7,7 +7,7 @@
  * `scripts/board-order.test.mjs` can load it directly. Keep it that way — a runtime
  * import here fails that test.
  */
-import type { InfiniteData } from "@tanstack/react-query";
+import type { InfiniteData, QueryKey } from "@tanstack/react-query";
 import type { BoardItem, BoardItems, BoardOrder } from "../types";
 
 /** One flat item sequence chunked back onto `data`'s pages at their ORIGINAL
@@ -85,6 +85,67 @@ export const boardAnchorId = (
   data: InfiniteData<BoardItems, string | null> | undefined,
   itemId: string,
 ) => boardItemPredecessor(data, itemId, true);
+
+/**
+ * How one cached lens was patched for ONE card of a removal, so the rollback can
+ * undo exactly that: the card taken out of it, or flipped to archived in place.
+ * `itemId` rides each entry because a BULK write's undo list spans several cards
+ * per lens.
+ *
+ * Lives here rather than beside the hooks that build it so {@link resolveUndoAnchor}
+ * can too — the anchor walk is pure cache-shape reasoning, and keeping it in an
+ * alias-free module is what lets the node test runner exercise the REAL walk
+ * instead of a copy of it.
+ */
+export type BoardItemUndo =
+  | {
+      mode: "drop";
+      key: QueryKey;
+      itemId: string;
+      /** Where the card sat, or null when this lens only ever COUNTED it — a card
+       *  past the loaded pages of a lens whose count still included it. */
+      at: RemovedBoardCard | null;
+      /** Whether the drop took this lens's `totalCount` with it, so the undo knows
+       *  whether to give it back. */
+      counted: boolean;
+    }
+  | { mode: "archive"; key: QueryKey; itemId: string };
+
+/**
+ * Where `plan`'s card goes back, resolved against the cache AS IT IS NOW.
+ *
+ * The recorded anchor is the card's IMMEDIATE predecessor, which may itself have
+ * been in the same batch. Three cases, and the walk covers all of them: the anchor
+ * is still on the board (a survivor, or a sibling this rollback already put back,
+ * which restoring in `flatIndex` order guarantees) and is used as-is; the anchor
+ * was removed SUCCESSFULLY and is never coming back, so the walk steps through it
+ * to whatever IT followed; or the chain runs out, which is the head of the board.
+ *
+ * `chain` is this lens's own batch, by item id. An anchor that is neither drawn nor
+ * ours vanished under a concurrent change — the head is the honest answer there,
+ * since nothing in this cache still says where it was.
+ */
+export function resolveUndoAnchor(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  plan: Extract<BoardItemUndo, { mode: "drop" }>,
+  chain: ReadonlyMap<string, BoardItemUndo>,
+): string | null {
+  const drawn = (id: string) =>
+    data?.pages.some((page) => page.items.some((cur) => cur.itemId === id)) ===
+    true;
+  let anchor = plan.at?.afterId ?? null;
+  // Bounded by the batch: every step consumes one of its entries, and `seen`
+  // refuses a cycle a corrupted chain could otherwise spin on.
+  const seen = new Set<string>();
+  while (anchor !== null && !drawn(anchor)) {
+    if (seen.has(anchor)) return null;
+    seen.add(anchor);
+    const prev = chain.get(anchor);
+    if (prev === undefined || prev.mode !== "drop") return null;
+    anchor = prev.at?.afterId ?? null;
+  }
+  return anchor;
+}
 
 /** Where one card sat when a removal took it, as the ROLLBACK addresses it. */
 export interface RemovedBoardCard {

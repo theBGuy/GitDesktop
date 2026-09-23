@@ -309,19 +309,22 @@ fn build_bulk_item_documents(
 }
 
 fn map_bulk_item_error(error: AppError) -> AppError {
-    let error = match error {
+    map_scope_error(strip_gh_prefix(error))
+}
+
+pub(super) fn strip_gh_prefix(error: AppError) -> AppError {
+    // Checked runners expose nonzero GraphQL responses as stderr, with errors in order.
+    match error {
         AppError::Gh(message) if message.starts_with("gh: ") => AppError::Gh(
-            message
-                .strip_prefix("gh: ")
-                .unwrap_or(&message)
+            message["gh: ".len()..]
                 .lines()
                 .next()
+                // A bare "gh: " has no first line, so preserve the original message.
                 .unwrap_or(&message)
                 .to_string(),
         ),
         other => other,
-    };
-    map_scope_error(error)
+    }
 }
 
 fn map_scope_error(e: AppError) -> AppError {

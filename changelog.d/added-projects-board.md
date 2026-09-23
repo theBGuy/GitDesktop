@@ -32,12 +32,13 @@
   **Take several cards at once**: **Ctrl/Cmd+click** picks cards out individually,
   **Shift+click** (or **Shift** with the arrow keys) takes a range down a column, and
   from two cards up a bar above the board **moves**, **archives**, **restores**,
-  **removes** or **sets the fields of** the whole selection in one go. **Edit fields
+  **removes** or **sets the fields of** the cards each verb can reach. **Edit fields
   of N cards…** lists the board's own fields with every row on **Leave as is**: draft
   only the ones you mean, set or clear them, and one **Apply** writes exactly those to
-  every card, with each row reporting what the selection holds today: the value where
-  the cards agree, **(mixed)** where they don't. Every count on the bar shows exactly
-  what that verb will reach, and the prompts say where the cards go, drafts included.
+  every eligible card, with each row reporting what the selection holds today: the
+  value where the cards agree, **(mixed)** where they don't. Every count on the bar
+  shows exactly what that verb will reach (archived cards sit out a field edit, for
+  instance), and the prompts say where the cards go, drafts included.
   The card menu speaks for the selection too, the palette carries Edit fields,
   Archive, Restore, Remove and Clear, and **Esc** drops the whole thing. Cards that
   leave the board leave the selection with them.

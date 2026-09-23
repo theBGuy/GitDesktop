@@ -97,7 +97,7 @@ import {
   type ProjectViewDef,
   providerLabel,
 } from "@/lib/git/types";
-import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import { eventToBinding, formatBinding, isMac } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
@@ -271,9 +271,12 @@ function bulkRemoveBody(cards: BoardItem[]): string {
   const leaves = `The ${cards.length} cards leave this project.`;
   if (drafts === 0)
     return `${leaves} The items themselves are untouched, and you can add them back later.`;
-  return `${leaves} ${
-    drafts === 1 ? "One of them is a draft" : `${drafts} of them are drafts`
-  }, which live on this project and nowhere else, so ${drafts === 1 ? "it is" : "those are"} deleted permanently.`;
+  // Both arms built whole rather than stitched from shared fragments: "which
+  // live(s)" has to agree with the subject the branch chose, and the version that
+  // shared the relative clause read "One of them is a draft, which live…".
+  return drafts === 1
+    ? `${leaves} One of them is a draft, which lives on this project and nowhere else, so it is deleted permanently.`
+    : `${leaves} ${drafts} of them are drafts, which live on this project and nowhere else, so those are deleted permanently.`;
 }
 
 /** Held rather than queued: a move cancels the board's reads, and query-core's
@@ -317,10 +320,17 @@ const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
   "alt+home": "top",
   "alt+end": "bottom",
 };
-/** The keys {@link REORDER_CHORDS} claims for Alt. An Alt-modified press on one of
- *  these that is NOT a bare reposition chord (Alt+Shift+Arrow, say) is swallowed
- *  rather than falling through to the cursor-and-selection arm, which would answer
- *  one keystroke with two unrelated actions. */
+/** Every key the board answers with Alt held: {@link REORDER_CHORDS}' own four,
+ *  plus ← and → which it deliberately answers with NOTHING. An Alt-modified press
+ *  on any of them that is not a bare reposition chord (Alt+Shift+Arrow, say) is
+ *  swallowed rather than falling through to the cursor-and-selection arm, which
+ *  would answer one keystroke with two unrelated actions.
+ *
+ *  BEHAVIOUR CHANGE, recorded here because no surface names it: Alt+←/→ used to
+ *  step the cursor between columns, the bare arrows' own move. It no longer does.
+ *  Alt means "act on the card" everywhere else on this board, and a modifier that
+ *  silently degrades to plain navigation on two of six keys is the inconsistency
+ *  worth losing the shortcut over. */
 const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
   "ArrowUp",
   "ArrowDown",
@@ -419,7 +429,14 @@ const BULK_FAIL_WORD: Record<BulkVerb, string> = {
 const BULK_NO_SELECTION_REASON = "No cards are selected";
 /** Why a verb has nothing to do over THIS selection. Each names the state that
  *  put it there, since a mixed selection scopes a verb rather than blocking it —
- *  a held row here means every selected card is on the wrong side of it. */
+ *  a held row here means every selected card is on the wrong side of it.
+ *
+ *  `remove` is a TOTALITY PLACEHOLDER, not a reachable string: a removal skips
+ *  nothing, so its eligible set is the selection, and an empty one is already
+ *  answered by {@link BULK_NO_SELECTION_REASON} upstream. Kept as a full
+ *  `Record<BulkVerb, …>` rather than narrowed with `Exclude`, so a sixth verb
+ *  added later has to state its own sentence here instead of type-checking its
+ *  way past a lookup that would return `undefined` at runtime. */
 const BULK_NOTHING_REASON: Record<BulkVerb, string> = {
   move: "Every selected card is archived",
   fields: "Every selected card is archived",
@@ -1791,22 +1808,59 @@ export function ProjectsBoardPanel({
     // A Shift+click with no anchor yet seeds from it: mousedown runs in a later
     // dispatch than pointerdown, by which time the cursor is already the clicked
     // card, and seeding from THAT would range a card to itself.
-    prePressCardRef.current =
-      liveCursor === null
-        ? null
-        : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
+    //
+    // Skipped for a mac Ctrl-click, so that gesture writes NOTHING the selection
+    // machinery reads — the seed included. Harmless either way (every range
+    // gesture rewrites this in its own pointerdown before its mousedown reads it),
+    // but "the secondary click touches no selection state" is a property worth
+    // being able to state without a timing argument attached.
+    if (!isMacSecondaryClick(e))
+      prePressCardRef.current =
+        liveCursor === null
+          ? null
+          : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
+    // ALWAYS recorded: this is the menu's own target, and a mac Ctrl-click is a
+    // menu gesture. The collapse-if-outside-the-selection decision belongs to the
+    // context menu's open gate, exactly as it does for a right-click.
     recordMenuTarget(e.target instanceof Element ? e.target : null);
   }
 
   /** Whether a pointer event carries one of the two SELECTION modifiers, and which.
-   *  `mod` is Ctrl on Windows and Linux and Cmd on macOS, read off the event rather
-   *  than off a platform test — the same pair `formatBinding("mod")` prints. */
+   *  The toggle is `mod`: Cmd on macOS, Ctrl everywhere else, DERIVED from the
+   *  platform rather than accepting either flag.
+   *
+   *  Accepting both is wrong on macOS specifically: Ctrl-click there is the
+   *  SECONDARY-CLICK gesture, so the press the user means as "open the menu" would
+   *  read as a toggle — and WebKit may deliver it as `contextmenu` with no `click`
+   *  at all, which makes the ctrl arm either harmful or dead depending on the
+   *  route. Windows and Linux keep Ctrl, where it carries no such meaning. */
   function selectionMods(e: {
     ctrlKey: boolean;
     metaKey: boolean;
     shiftKey: boolean;
   }) {
-    return { toggle: e.ctrlKey || e.metaKey, range: e.shiftKey };
+    return { toggle: isMac ? e.metaKey : e.ctrlKey, range: e.shiftKey };
+  }
+
+  /**
+   * A macOS Ctrl-click: that platform's SECONDARY-CLICK gesture, not a selection
+   * modifier of any kind.
+   *
+   * Every selection route ignores it wholesale, because WebKit can deliver a
+   * PRIMARY-button `mousedown` for it ahead of the `contextmenu` — and with the
+   * toggle derived as Cmd on mac, that mousedown carries no modifier this panel
+   * recognises, so it would take the plain-click arm and collapse the very
+   * selection the user opened the menu to act on. Shift is no exemption either:
+   * Ctrl+Shift-click is still a ctrl-click there, and the range arm would fire on
+   * it for the same reason.
+   *
+   * What still runs is the menu machinery — the target recording, and the
+   * collapse-if-outside-the-selection rule the context menu's own open gate
+   * applies. That is the point: this gesture behaves exactly like a right-click,
+   * which is what it is.
+   */
+  function isMacSecondaryClick(e: { ctrlKey: boolean }): boolean {
+    return isMac && e.ctrlKey;
   }
 
   /**
@@ -1821,6 +1875,9 @@ export function ProjectsBoardPanel({
    * the card by hand, so the arrows resume from where the pointer landed.
    */
   function handleCardMouseDown(e: MouseEvent) {
+    // Ahead of the button test, which a mac Ctrl-click can pass: WebKit may report
+    // it as the PRIMARY button. Nothing below may touch the selection for it.
+    if (isMacSecondaryClick(e)) return;
     if (e.button !== 0) return;
     const mods = selectionMods(e);
     const el = e.target instanceof Element ? e.target : null;
@@ -1852,6 +1909,11 @@ export function ProjectsBoardPanel({
    *  click that follows it untouched, and that click is what would open the card —
    *  so a selection gesture swallows both. */
   function handleCardClickCapture(e: MouseEvent) {
+    // Ahead of the modifier read for the reason the mousedown twin states. A bare
+    // mac Ctrl-click already falls out of the test below (it carries neither
+    // modifier this panel reads), but Ctrl+SHIFT-click does not — and swallowing
+    // that click would suppress an activation the user never asked to replace.
+    if (isMacSecondaryClick(e)) return;
     const mods = selectionMods(e);
     if (!mods.toggle && !mods.range) return;
     const el = e.target instanceof Element ? e.target : null;
@@ -3617,8 +3679,20 @@ export function ProjectsBoardPanel({
           // tabbed into the bar could otherwise only leave the selection by
           // clicking Clear. Same pair Clear takes: the synchronous handoff first,
           // since the control holding focus is about to unmount with the bar.
+          //
+          // DOM containment first, the guard `onBoardKeyDown` carries and for the
+          // same reason: the Move dropdown's popup is PORTALLED, so it is a React
+          // child of this strip without being a DOM descendant, and React routes
+          // synthetic events through the COMPONENT tree. Without this, the Esc that
+          // closes that menu also drops the very selection the user opened it to
+          // move.
           onKeyDown={(e) => {
             if (e.key !== "Escape") return;
+            if (
+              !(e.target instanceof Node) ||
+              !e.currentTarget.contains(e.target)
+            )
+              return;
             e.preventDefault();
             dismissSelection();
           }}

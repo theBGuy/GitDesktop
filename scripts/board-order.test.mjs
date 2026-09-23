@@ -20,7 +20,22 @@ import {
   insertBoardCardAfter,
   rechunkPages,
   reorderBoardItem,
+  resolveUndoAnchor,
 } from "../src/lib/git/queries/board-order.ts";
+
+/** A removal's undo entry for `id`, as the rollback builds it. `counted` is
+ *  irrelevant to the anchor walk, so it stays false throughout. */
+const planOf = (cap, id) => ({
+  mode: "drop",
+  key: ["board", "test"],
+  itemId: id,
+  at: cap,
+  counted: false,
+});
+
+/** The per-lens batch the walk steps through, by item id. */
+const chainOf = (...pairs) =>
+  new Map(pairs.map(([cap, id]) => [id, planOf(cap, id)]));
 
 /** A board item as the helpers read it: only `itemId` and `isArchived` matter. */
 const mk = (itemId, isArchived = false) => ({ itemId, isArchived });
@@ -282,8 +297,13 @@ test("a partial rollback restores at the anchor, not the stale index", () => {
   // Both removed; only B is refused and comes back.
   let live = pagesOf([mk("c"), mk("d")]);
   // B's anchor was A, which succeeded and is gone, so the walk steps through A to
-  // what IT followed — the head of the board.
-  const anchor = capB.afterId === "a" ? capA.afterId : capB.afterId;
+  // what IT followed — the head of the board. PRODUCTION's walk, not a copy of it.
+  const anchor = resolveUndoAnchor(
+    live,
+    planOf(capB, "b"),
+    chainOf([capA, "a"], [capB, "b"]),
+  );
+  assert.equal(anchor, null);
   live = insertBoardCardAfter(live, capB.item, anchor);
   assert.deepEqual(ids(live), ["b", "c", "d"]);
 });
@@ -305,7 +325,12 @@ test("a non-adjacent partial rollback anchors to the survivor in front of it", (
   // B and C removed, C refused: its anchor B is gone, and B followed the survivor A.
   const capB = captureRemovedCard(data, "b");
   let live = pagesOf([mk("a"), mk("d")]);
-  const anchor = capC.afterId === "b" ? capB.afterId : capC.afterId;
+  const anchor = resolveUndoAnchor(
+    live,
+    planOf(capC, "c"),
+    chainOf([capB, "b"], [capC, "c"]),
+  );
+  assert.equal(anchor, "a");
   live = insertBoardCardAfter(live, capC.item, anchor);
   assert.deepEqual(ids(live), ["a", "c", "d"]);
 });
@@ -442,4 +467,78 @@ test("captureRemovedCard reads the DEDUPED predecessor, not the raw one", () => 
     afterId: "b",
     item: mk("x"),
   });
+});
+
+// ------------------------------------------------- resolveUndoAnchor, directly
+
+test("resolveUndoAnchor falls to the HEAD when the whole chain is gone", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c")]);
+  const capA = captureRemovedCard(data, "a");
+  const capB = captureRemovedCard(data, "b");
+  const capC = captureRemovedCard(data, "c");
+  // Every predecessor of c was removed and none is coming back, so the walk
+  // exhausts the chain rather than anchoring to something undrawn.
+  const live = pagesOf([]);
+  assert.equal(
+    resolveUndoAnchor(
+      live,
+      planOf(capC, "c"),
+      chainOf([capA, "a"], [capB, "b"], [capC, "c"]),
+    ),
+    null,
+  );
+});
+
+test("resolveUndoAnchor falls to the HEAD when the anchor is neither drawn nor ours", () => {
+  const data = pagesOf([mk("ghost"), mk("b")]);
+  const capB = captureRemovedCard(data, "b");
+  assert.equal(capB.afterId, "ghost");
+  // "ghost" left under a concurrent change and is not in this batch, so nothing
+  // in the cache still says where it was.
+  const live = pagesOf([mk("z")]);
+  assert.equal(
+    resolveUndoAnchor(live, planOf(capB, "b"), chainOf([capB, "b"])),
+    null,
+  );
+});
+
+test("resolveUndoAnchor refuses to spin on a cyclic chain", () => {
+  // A corrupted batch where two entries name each other as predecessor. Neither
+  // is drawn, so a walk with no `seen` guard would loop forever.
+  const cycle = new Map([
+    ["x", planOf({ flatIndex: 0, afterId: "y", item: mk("x") }, "x")],
+    ["y", planOf({ flatIndex: 1, afterId: "x", item: mk("y") }, "y")],
+  ]);
+  assert.equal(resolveUndoAnchor(pagesOf([]), cycle.get("x"), cycle), null);
+});
+
+test("resolveUndoAnchor uses a DRAWN anchor as-is, without walking", () => {
+  const data = pagesOf([mk("a"), mk("b")]);
+  const capB = captureRemovedCard(data, "b");
+  // `a` survived, so the walk never starts.
+  assert.equal(
+    resolveUndoAnchor(
+      pagesOf([mk("a")]),
+      planOf(capB, "b"),
+      chainOf([capB, "b"]),
+    ),
+    "a",
+  );
+});
+
+test("resolveUndoAnchor stops at a sibling this rollback already restored", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c")]);
+  const capB = captureRemovedCard(data, "b");
+  const capC = captureRemovedCard(data, "c");
+  // b and c both failed; restoring in flatIndex order puts b back first, so by
+  // the time c resolves its anchor b is drawn again and the walk stops there.
+  const live = pagesOf([mk("a"), mk("b")]);
+  assert.equal(
+    resolveUndoAnchor(
+      live,
+      planOf(capC, "c"),
+      chainOf([capB, "b"], [capC, "c"]),
+    ),
+    "b",
+  );
 });

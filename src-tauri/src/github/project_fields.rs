@@ -9,8 +9,8 @@ use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::project::{item_projects_truncated, project_ref, ProjectV2Ref, PROJECT_FIELDS};
 use crate::github::project_item_edits::{
-    bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, BulkDocument, BulkItemOutcomes,
-    BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
+    bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, strip_gh_prefix, BulkDocument,
+    BulkItemOutcomes, BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
 };
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
@@ -425,20 +425,7 @@ fn build_bulk_field_documents(
 }
 
 fn map_field_write_error(error: AppError) -> AppError {
-    // Checked runners expose nonzero GraphQL responses as stderr, with errors in order.
-    let error = match error {
-        AppError::Gh(message) if message.starts_with("gh: ") => AppError::Gh(
-            message
-                .strip_prefix("gh: ")
-                .unwrap_or(&message)
-                .lines()
-                .next()
-                .unwrap_or(&message)
-                .to_string(),
-        ),
-        other => other,
-    };
-    map_scope_error(error)
+    map_scope_error(strip_gh_prefix(error))
 }
 
 fn parse_field_write_response(stdout: &str) -> AppResult<()> {
