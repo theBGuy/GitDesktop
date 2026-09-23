@@ -183,7 +183,11 @@ function ReconnectFlow({
     } else if (event.type === "line") {
       // Capped at the largest window any view renders: a 900s flow can stream far
       // more than that, and nothing reads past the tail.
-      setLines((prev) => [...prev, event.text].slice(-UNPARSED_OUTPUT_TAIL));
+      setLines((prev) =>
+        [...prev, event.text].slice(
+          -Math.max(PROGRESS_TAIL, UNPARSED_OUTPUT_TAIL),
+        ),
+      );
       setPhase((p) => (p.kind === "starting" ? { kind: "progress" } : p));
     } else {
       // Terminal Rust-side: the flow's guard already unregistered its session, so null
