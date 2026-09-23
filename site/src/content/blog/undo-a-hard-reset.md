@@ -36,10 +36,11 @@ of this is Git 2.51, stock configuration.)
 
 ## The reflog
 
-Every time a ref moves, Git appends a line to that ref's reflog: the
-new position and the action that caused it. The list runs on
-wall-clock order, not ancestry, and it keeps growing whether or not
-the old position stays reachable:
+Every time a ref that keeps a reflog moves (your branches and HEAD
+all do, by default), Git appends a line: the new position and the
+action that caused it. The list runs on wall-clock order, not
+ancestry, and it keeps growing whether or not the old position
+stays reachable:
 
 ```sh
 $ git reflog
@@ -51,13 +52,19 @@ $ git reflog
 
 `HEAD@{0}` is where HEAD stands now and the move that put it there.
 `HEAD@{1}` is one move earlier — and there is the "lost" commit, hash
-and all. The rescue is itself a hard reset, so two cautions first.
+and all. The rescue is itself a hard reset, so a few cautions first.
 `--hard` replaces your working tree: if you've made uncommitted
 changes since the incident, run `git stash --include-untracked` and
-pop it after. And if you'd rather not move the branch again at all,
-`git branch rescue 30b6dbc` hangs a new branch on the lost commit and
-leaves everything else where it is. Otherwise, the undo is one more
-move:
+pop it after. Stashing writes a reset entry of its own into HEAD's
+reflog, which slides the lost commit one slot down: after a stash,
+re-read `git reflog`, or skip the counting entirely with
+`git reset --hard 30b6dbc`, which names the commit and can't drift.
+(A stash carries no ignored files, so if one shares a path with the
+commits you're restoring, move it aside first or reach for
+`git stash --all`.) And if you'd rather not move the branch at all,
+`git branch rescue 30b6dbc` hangs a new branch on the lost commit
+and leaves everything else where it is. Otherwise, the undo is one
+more move:
 
 ```sh
 $ git reset --hard HEAD@{1}
@@ -149,11 +156,16 @@ db4f742 feature@{0}: branch: Created from db4f742
 ```
 
 The branch is back. Its reflog is not: one entry, dated now. Whatever
-you want to know about the branch's past, you now ask HEAD. (A branch
-created and deleted without ever being checked out is the one case
-HEAD missed — there the receipt is the whole rescue, and if it has
-scrolled away, `git fsck --unreachable` still knows the hash; more on
-that door below.)
+you want to know about the branch's past, you now ask HEAD — and
+HEAD's reflog holds only the moves HEAD itself made. A branch that
+was created and deleted without a checkout, or one that was
+[moved without one](/blog/update-a-branch-without-checking-it-out/)
+by `git fetch origin main:main` or `git branch -f`, or one tended in
+a linked worktree (each worktree's HEAD keeps its own reflog, which
+leaves when the worktree does) has positions no reflog of yours
+remembers. There the delete receipt is the whole rescue, and if it
+has scrolled away, `git fsck --unreachable` still knows the hash;
+more on that door below.
 
 ## Commits no branch ever held
 
@@ -190,8 +202,7 @@ shows `52dcfb2 HEAD@{1}: commit: try a spike`, and
 ## Where the reflog ends
 
 Everything so far worked because a reflog existed and reached back
-far enough. Three ways that assumption fails, in rising order of
-surprise.
+far enough. Three ways that assumption fails, in rising order of surprise.
 
 **It clamps at its own beginning.** A reflog answers time queries:
 `main@{1.hour.ago}` means "where was main an hour ago". But ask about
@@ -214,6 +225,7 @@ each side's reflogs record only what happened locally. A clone starts
 new ones:
 
 ```sh
+$ cd ..
 $ git clone -q app copy
 $ cd copy
 $ git reflog
@@ -241,10 +253,17 @@ $ git log --oneline
 The history is intact; the record of its moves is gone. And notice
 what the emptiness looks like: `git reflog show main` prints nothing,
 which is also exactly what it prints for a ref whose logging was
-switched off from the start. From the outside, an expired reflog and
-one that was disabled all along are the same thing. The expiry above
-was per-ref, too: it named `refs/heads/main`, and HEAD's reflog is
-untouched.
+switched off from the start. To every read of the log those two are
+the same thing; the one witness left is `git reflog exists`, because
+expiry empties the file where disabling never writes one:
+
+```sh
+$ git reflog exists refs/heads/main && echo yes
+yes
+```
+
+The expiry above was per-ref, too: it named `refs/heads/main`, and
+left HEAD's reflog untouched.
 
 Two smaller edges: tags don't get reflogs by default (branches,
 remote-tracking refs, notes, and HEAD do), and the stash list is
@@ -268,9 +287,13 @@ A force push from the app reaches for the strict flag pair,
 `--force-with-lease --force-if-includes`. The second of those walks
 the reflog to prove the remote work you're about to overwrite was
 actually seen and integrated locally, not merely fetched past. A
-branch with no reflog has no way to pass that check, and the app
-doesn't pretend it did: the push falls back to the lease alone, and
-the success toast names the weaker guarantee it ran under.
+branch whose reflog was never written has no way to pass that check,
+and the app doesn't pretend it did: the push falls back to the lease
+alone, and the success toast names the weaker guarantee it ran
+under. An expired reflog gets no such grace: `git reflog exists`
+still answers yes for the emptied file, and the app leaves Git's
+refusal standing rather than trading an evidence problem for a
+weaker guard.
 
 The second reader watches for the situation [the fork-point
 post](/blog/pull-rebase-deleted-your-commit/) was about: an
@@ -281,12 +304,11 @@ patch-for-patch, and is the upstream's tip a position your branch's
 own reflog has ever seen? A rewrite says yes to the first and no
 to the second. A branch with no reflog can't answer the second
 question at all — and reading no data as "rewritten", or as
-"safe", would both be guesses. The verdict stays unknown, pinned by
-`rewrite_status_without_a_reflog_refuses_to_guess`.
+"safe", would both be guesses. The verdict stays unknown,
+pinned by `rewrite_status_without_a_reflog_refuses_to_guess`.
 
 The reflog is a record with edges, and a tool that reads it has to
 treat the edge as an answer of its own, distinct from anything the
 record could have said.
 
-`git log` is the history that won. The reflog is the history that
-happened.
+`git log` is the history that won. The reflog is the history that happened.
