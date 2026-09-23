@@ -182,9 +182,9 @@ to do so with:
 Switched to branch 'main'
 ```
 
-The rescue command is printed for you, hash included. If it scrolled
-past, HEAD's reflog caught the same hash: `git reflog` shows
-`52dcfb2 HEAD@{1}: commit: try a spike`, and
+The rescue command is printed for you, hash included. If it
+scrolled past, HEAD's reflog caught the same hash: `git reflog`
+shows `52dcfb2 HEAD@{1}: commit: try a spike`, and
 `git branch spike 52dcfb2` makes the commit permanent.
 
 ## Where the reflog ends
@@ -251,13 +251,12 @@ remote-tracking refs, notes, and HEAD do), and the stash list is
 itself a reflog on one ref — `stash@{0}` is a reflog entry, so
 dropping one edits the record.
 
-And when the reflog has failed you (expired, erased, or never there),
-one door is left. Garbage collection spares whatever a reflog still
-names, but a commit nothing names anymore only waits; until gc takes
-it, `git fsck --unreachable` will list it, hash and all, and a hash
-is all a rescue needs. That walk, and telling the right orphan from
-its look-alike twin, is
-[the dropped-stash post](/blog/recover-a-dropped-git-stash/).
+And when the reflog has failed you (expired, erased, or never
+there), one door is left. Garbage collection spares whatever a
+reflog still names, but a commit nothing names anymore only waits;
+until gc takes it, `git fsck --unreachable` will list it, hash and
+all, and a hash is all a rescue needs. That walk, twin trap and all,
+is [the dropped-stash post](/blog/recover-a-dropped-git-stash/).
 
 ## Or don't do any of this
 
@@ -265,25 +264,25 @@ Two of [GitDesktop](/features/)'s safety checks are reflog readers,
 and both had to answer the question this last section raises: what do
 you do when the reflog isn't there?
 
-A force push from the app runs `--force-with-lease
---force-if-includes`, the strict pair. The second flag walks the
-reflog to prove the remote work you're about to overwrite was actually
-seen and integrated locally, not merely fetched past. A branch with no
-reflog has no way to pass that check, and the app doesn't pretend it
-did: the push falls back to the lease alone, and the success toast
-names the weaker guarantee it ran under.
+A force push from the app reaches for the strict flag pair,
+`--force-with-lease --force-if-includes`. The second of those walks
+the reflog to prove the remote work you're about to overwrite was
+actually seen and integrated locally, not merely fetched past. A
+branch with no reflog has no way to pass that check, and the app
+doesn't pretend it did: the push falls back to the lease alone, and
+the success toast names the weaker guarantee it ran under.
 
-The second reader watches for the situation
-[the fork-point post](/blog/pull-rebase-deleted-your-commit/) was
-about: an upstream rewritten underneath your branch. When a branch
-and its upstream have diverged, the app pairs two probes before it
-offers the recovery reset: are all of your local commits already
-upstream patch-for-patch, and is the upstream's tip a position your
-branch's own reflog has ever seen? A rewrite says yes to the first
-and no to the second. A branch with no reflog can't answer the second
-question at all — and reading no data as "rewritten", or as "safe",
-would both be guesses. The verdict stays unknown, and a test named
-`rewrite_status_without_a_reflog_refuses_to_guess` pins it that way.
+The second reader watches for the situation [the fork-point
+post](/blog/pull-rebase-deleted-your-commit/) was about: an
+upstream rewritten underneath your branch. When a branch and its
+upstream have diverged, the app pairs two probes before it offers
+the recovery reset: are all of your local commits already upstream
+patch-for-patch, and is the upstream's tip a position your branch's
+own reflog has ever seen? A rewrite says yes to the first and no
+to the second. A branch with no reflog can't answer the second
+question at all — and reading no data as "rewritten", or as
+"safe", would both be guesses. The verdict stays unknown, pinned by
+`rewrite_status_without_a_reflog_refuses_to_guess`.
 
 The reflog is a record with edges, and a tool that reads it has to
 treat the edge as an answer of its own, distinct from anything the
