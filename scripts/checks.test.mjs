@@ -4168,6 +4168,15 @@ test("raw-copy-icon-button flags an icon-only copy button in every spelling", ()
     "</Button>",
   ].join("\n");
   assert.deepEqual(rawCopyIconButton(vendored), [1]);
+  // A JSX comment beside the icon: stripComments leaves an empty `{}` pair,
+  // which must not hide the button from the scan.
+  const commented = [
+    '<Button variant="ghost" size="icon-xs" aria-label="Copy link" onClick={onCopy}>',
+    "  {/* the label names the control; the SVG is decoration */}",
+    '  <CopyIcon className="size-3.5" aria-hidden="true" />',
+    "</Button>",
+  ].join("\n");
+  assert.deepEqual(rawCopyIconButton(commented), [1]);
 });
 
 test("raw-copy-icon-button leaves icon+text controls and the component alone", () => {

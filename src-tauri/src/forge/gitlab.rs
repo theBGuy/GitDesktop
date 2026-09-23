@@ -6421,7 +6421,7 @@ pub async fn publish_repo(
     }
     run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| gl_publish_create_error(name, e))?;
+        .map_err(|e| gl_publish_create_error(&format!("{}/{name}", me.username), e))?;
 
     // The project now exists — from here on, any failure must SAY so, or a
     // retry (which re-creates) reads as an inexplicable "name already taken".
