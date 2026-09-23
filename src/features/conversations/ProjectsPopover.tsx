@@ -615,7 +615,6 @@ export function ScopeGapBlock({
               text={cmd}
               label="Copy command"
               toast="Command copied"
-              className="mt-1"
             />
           </div>
         </>

@@ -6285,6 +6285,17 @@ pub async fn cli_ready() -> bool {
     }
 }
 
+// A create timeout can leave a project behind; other failures retain their kind.
+fn gl_publish_create_error(name: &str, error: AppError) -> AppError {
+    match error {
+        AppError::Timeout(seconds) => AppError::Glab(format!(
+            "GitLab CLI timed out after {seconds}s.\nThe GitLab project {name} may have been created before publishing failed. \
+             Check your GitLab projects before retrying."
+        )),
+        other => other,
+    }
+}
+
 /// The manual recovery a post-create failure hands the user, shared so every arm
 /// below the create states the same one.
 fn gl_created_project_hint(owner: &str, name: &str) -> String {
@@ -6294,9 +6305,14 @@ fn gl_created_project_hint(owner: &str, name: &str) -> String {
     )
 }
 
-/// The created fact must ride line one, before multi-line CLI detail, for the toast headline.
+/// Both callers run after creation, so every variant becomes Glab to put that
+/// fact on line one, including git's remote-add failures. Unit variants cannot
+/// carry it; only the label changes, while Display preserves the original detail.
 fn gl_created_project_error(hint: &str, error: AppError) -> AppError {
-    AppError::Glab(gl_error_message(hint, error.to_string()))
+    AppError::Glab(gl_error_message(
+        &format!("Publishing didn't finish, but {hint}."),
+        error.to_string(),
+    ))
 }
 
 /// The created fact must ride line one, before parse detail, for the toast headline.
@@ -6403,7 +6419,9 @@ pub async fn publish_repo(
             args.push(topic);
         }
     }
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| gl_publish_create_error(name, e))?;
 
     // The project now exists — from here on, any failure must SAY so, or a
     // retry (which re-creates) reads as an inexplicable "name already taken".
@@ -9949,6 +9967,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publish_create_timeout_keeps_timeout_first_and_appends_hedge() {
+        let error = gl_publish_create_error("demo", AppError::Timeout(120));
+        let AppError::Glab(message) = error else {
+            panic!("a publish timeout must carry partial-publish guidance");
+        };
+        assert_eq!(
+            message.lines().next(),
+            Some("GitLab CLI timed out after 120s."),
+        );
+        let hedge = message.lines().last().unwrap();
+        assert!(hedge.contains("project demo may have been created"), "{hedge}");
+        assert!(hedge.contains("Check your GitLab projects before retrying"));
+        assert!(!message.to_ascii_lowercase().contains("was created"), "{message}");
+        assert!(matches!(
+            gl_publish_create_error("demo", AppError::GlabNotFound),
+            AppError::GlabNotFound,
+        ));
+    }
+
+    #[test]
     fn created_project_cli_failures_keep_creation_on_line_one() {
         let hint = gl_created_project_hint("alice", "demo");
         for error in [
@@ -9963,7 +10001,7 @@ mod tests {
             let first = message.lines().next().unwrap();
             assert!(first.contains("WAS created"), "{first}");
             assert!(first.contains("alice/demo"), "{first}");
-            assert_eq!(message, format!("{hint}\n{detail}"));
+            assert_eq!(message, format!("Publishing didn't finish, but {hint}.\n{detail}"));
         }
     }
 

@@ -13,8 +13,8 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT};
 
-// Job ids can exceed JS's safe integer range, so
-// the frontend handles them as strings — serialize the u64 as a string here.
+// Job ids can exceed JS's safe integer range, so the frontend handles them as
+// strings — serialize the u64 as a string here.
 fn id_to_string<S>(id: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,

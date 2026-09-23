@@ -206,8 +206,8 @@ pub(crate) enum BbOpKind {
 }
 
 /// Shared Bitbucket status guidance, API envelope detail, or a bounded text snippet.
-/// `op` picks the 403 privilege-scope guidance: `Read` asks for repository read
-/// access, `Write` for the write scopes.
+/// `op` picks the 403 privilege-scope guidance: `Read` names repository, account,
+/// or pipeline read access; `Write` names pull request, repository, or pipeline writes.
 pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
     // Prefer the API's own message when the body is the JSON error envelope.
     let api_msg = serde_json::from_str::<BbErrorEnvelope>(body)
@@ -228,7 +228,7 @@ pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
             match op {
                 BbOpKind::Read => {
                     "Bitbucket rejected the request (403) — your API token is missing a scope \
-                     this read needs. Reconnect it in Settings → Accounts with repository read access."
+                     this read needs. Reconnect it in Settings → Accounts with repository, account, or pipeline read access."
                         .into()
                 }
                 BbOpKind::Write => {
@@ -503,12 +503,18 @@ mod tests {
         let body = r#"{"error":{"message":"Your credentials lack required privilege scopes."}}"#;
         for json in [false, true] {
             let message = forbidden_response(body, json, false).await;
-            assert!(message.contains("repository read access"), "{message}");
+            assert!(
+                message.contains("repository, account, or pipeline read access"),
+                "{message}",
+            );
             assert!(!message.contains("write scope"), "{message}");
         }
         let message = forbidden_response(body, false, true).await;
         assert!(message.contains("required write scope"), "{message}");
-        assert!(!message.contains("repository read access"), "{message}");
+        assert!(
+            !message.contains("repository, account, or pipeline read access"),
+            "{message}",
+        );
     }
 
     #[tokio::test]

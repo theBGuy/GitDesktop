@@ -1,4 +1,4 @@
-- GitHub and GitLab publish errors show when the repository was already
-  created in the error summary, so you can recover before retrying. When a
-  GitHub create-and-push attempt fails, the summary advises checking your
-  repositories for a possible partial publish.
+- When a GitHub or GitLab publish stops after the repository was created,
+  the error headline now says so, letting you recover before retrying. If
+  a GitHub create-and-push fails, the error details suggest checking your
+  repositories for a partial publish.

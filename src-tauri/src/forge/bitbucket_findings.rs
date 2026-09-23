@@ -1152,7 +1152,7 @@ mod tests {
                 403,
                 r#"{"error":{"message":"Your credentials lack one or more required privilege scopes."}}"#,
                 BbFindingsAvailability::Forbidden,
-                "Bitbucket rejected the request (403) — your API token is missing a scope this read needs. Reconnect it in Settings → Accounts with repository read access.",
+                "Bitbucket rejected the request (403) — your API token is missing a scope this read needs. Reconnect it in Settings → Accounts with repository, account, or pipeline read access.",
             ),
             (
                 404,

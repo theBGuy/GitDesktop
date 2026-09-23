@@ -359,16 +359,25 @@ pub(crate) fn parse_auth_accounts(report: &str) -> Vec<ParsedAccount> {
     accounts
 }
 
+// Failures that can leave a created repository behind need the hedge; failures
+// that cannot must retain their original kind.
 fn gh_publish_create_error(name: &str, error: AppError) -> AppError {
     match error {
         AppError::Gh(message) => AppError::Gh(format!(
             "{message}\nThe GitHub repository {name} may have been created before publishing failed. \
              Check your repositories on GitHub before retrying."
         )),
+        AppError::Timeout(seconds) => AppError::Gh(format!(
+            "GitHub CLI timed out after {seconds}s.\nThe GitHub repository {name} may have been created before publishing failed. \
+             Check your repositories on GitHub before retrying."
+        )),
         other => other,
     }
 }
 
+// Create and push succeeded, so every variant becomes Gh to lead with that fact;
+// unit variants cannot carry it. The kind change affects only the label, while
+// the original error's Display retains its information below the headline.
 fn gh_publish_url_error(name: &str, error: AppError) -> AppError {
     AppError::Gh(format!(
         "The GitHub repository {name} was created and pushed, but its URL could not be read back.\n{error}"
@@ -6279,15 +6288,24 @@ mod tests {
     }
 
     #[test]
-    fn publish_create_failure_preserves_non_gh_variants() {
+    fn publish_create_failure_preserves_gh_not_found() {
         assert!(matches!(
             super::gh_publish_create_error("alice/demo", AppError::GhNotFound),
             AppError::GhNotFound,
         ));
-        assert!(matches!(
-            super::gh_publish_create_error("alice/demo", AppError::Timeout(120)),
-            AppError::Timeout(120),
-        ));
+    }
+
+    #[test]
+    fn publish_create_timeout_keeps_timeout_first_and_appends_hedge() {
+        let error = super::gh_publish_create_error("alice/demo", AppError::Timeout(120));
+        let AppError::Gh(message) = error else {
+            panic!("a publish timeout must carry partial-publish guidance");
+        };
+        assert_eq!(message.lines().next(), Some("GitHub CLI timed out after 120s."));
+        let hedge = message.lines().last().unwrap();
+        assert!(hedge.contains("alice/demo may have been created"), "{hedge}");
+        assert!(hedge.contains("Check your repositories on GitHub before retrying"));
+        assert!(!message.contains("was created"), "{message}");
     }
 
     #[test]

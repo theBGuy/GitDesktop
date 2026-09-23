@@ -37,7 +37,9 @@ export function CopyIconButton({
         copyText(typeof text === "function" ? text() : text, toast);
       }}
     >
-      <CopyIcon className="size-3.5" />
+      {/* aria-hidden: the button's aria-label names the control; the SVG is
+          decoration and Phosphor doesn't hide it by default. */}
+      <CopyIcon className="size-3.5" aria-hidden="true" />
     </Button>
   );
 }

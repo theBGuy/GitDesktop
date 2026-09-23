@@ -223,7 +223,7 @@ struct BbUserLink {
 /// persisting anything (a pre-mutation guard — nothing is written if validation
 /// fails), then store email/token/username in the keyring and return the account
 /// info (never the token). The error distinguishes a network failure from a 401
-/// invalid-token (`http_error` special-cases 401).
+/// invalid-token ([`http::bb_error_detail`] with `BbOpKind::Read` special-cases 401).
 pub async fn set_account(email: &str, token: &str) -> AppResult<BbAccountInfo> {
     let email = email.trim().to_string();
     let token = token.trim().to_string();
@@ -2954,7 +2954,8 @@ pub async fn merge_pr(
 
 /// Poll a Bitbucket merge task-status URL until it resolves. `PENDING` loops (bounded
 /// to ~30 tries, 2s apart); `SUCCESS` → Ok; anything else → an error carrying the raw
-/// body. A non-2xx poll response errors via [`http::http_error`].
+/// body. A non-2xx poll response errors via [`http::bb_error_detail`] as a read
+/// (the poll GETs status; the merge POST's own failures stay on the write arm).
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
     for _ in 0..30 {
         let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None).await?;
@@ -4943,7 +4944,8 @@ struct BbPipelinesConfigRaw {
 /// A never-configured repo 404s → `{enabled:false}` (Bitbucket's error message wording
 /// isn't guaranteed to mention "404"/"not found", so branch on the numeric status like
 /// the expired-log path does); 2xx → parse the JSON; any other status → the normal
-/// `http_error` mapping so 401/403 messages stay identical to the JSON helper.
+/// [`http::bb_error_detail`] read mapping so 401/403 messages stay identical to the
+/// JSON helper.
 fn parse_pipelines_config(status: u16, body: &str) -> AppResult<BitbucketPipelinesConfig> {
     if status == 404 {
         return Ok(BitbucketPipelinesConfig { enabled: false });
