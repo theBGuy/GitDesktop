@@ -272,8 +272,7 @@ function bulkRemoveBody(cards: BoardItem[]): string {
   if (drafts === 0)
     return `${leaves} The items themselves are untouched, and you can add them back later.`;
   // Both arms built whole rather than stitched from shared fragments: "which
-  // live(s)" has to agree with the subject the branch chose, and the version that
-  // shared the relative clause read "One of them is a draft, which live…".
+  // live(s)" has to agree with the subject the branch chose.
   return drafts === 1
     ? `${leaves} One of them is a draft, which lives on this project and nowhere else, so it is deleted permanently.`
     : `${leaves} ${drafts} of them are drafts, which live on this project and nowhere else, so those are deleted permanently.`;
@@ -326,11 +325,8 @@ const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
  *  swallowed rather than falling through to the cursor-and-selection arm, which
  *  would answer one keystroke with two unrelated actions.
  *
- *  BEHAVIOUR CHANGE, recorded here because no surface names it: Alt+←/→ used to
- *  step the cursor between columns, the bare arrows' own move. It no longer does.
- *  Alt means "act on the card" everywhere else on this board, and a modifier that
- *  silently degrades to plain navigation on two of six keys is the inconsistency
- *  worth losing the shortcut over. */
+ *  ← and → are swallowed too: Alt means "act on the card" on this board, so it
+ *  never degrades to plain navigation. */
 const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
   "ArrowUp",
   "ArrowDown",
@@ -1600,6 +1596,11 @@ export function ProjectsBoardPanel({
    *  presses land. Any OTHER write to the same card does hold — a convert or a
    *  draft edit rewrites the very card a position would address.
    *
+   *  No selection-size arm, deliberately: chords and palette rows reposition the
+   *  CURSOR card with the selection intact (Alt means "act on the card"); only the
+   *  menu holds its Position rows, because a menu opened on a selection reads as
+   *  acting on all of it.
+   *
    *  Ranked like the card actions: the permission arms first (true whatever is on
    *  screen), then the three ways the drawn column isn't the board's own order, then
    *  the two that clear on their own. */
@@ -1809,11 +1810,7 @@ export function ProjectsBoardPanel({
     // dispatch than pointerdown, by which time the cursor is already the clicked
     // card, and seeding from THAT would range a card to itself.
     //
-    // Skipped for a mac Ctrl-click, so that gesture writes NOTHING the selection
-    // machinery reads — the seed included. Harmless either way (every range
-    // gesture rewrites this in its own pointerdown before its mousedown reads it),
-    // but "the secondary click touches no selection state" is a property worth
-    // being able to state without a timing argument attached.
+    // Skipped for a mac Ctrl-click, which writes no selection state.
     if (!isMacSecondaryClick(e))
       prePressCardRef.current =
         liveCursor === null
@@ -1846,18 +1843,19 @@ export function ProjectsBoardPanel({
    * A macOS Ctrl-click: that platform's SECONDARY-CLICK gesture, not a selection
    * modifier of any kind.
    *
-   * Every selection route ignores it wholesale, because WebKit can deliver a
-   * PRIMARY-button `mousedown` for it ahead of the `contextmenu` — and with the
-   * toggle derived as Cmd on mac, that mousedown carries no modifier this panel
-   * recognises, so it would take the plain-click arm and collapse the very
-   * selection the user opened the menu to act on. Shift is no exemption either:
-   * Ctrl+Shift-click is still a ctrl-click there, and the range arm would fire on
-   * it for the same reason.
+   * WebKit can deliver a PRIMARY-button `mousedown` and a `click` for it ahead of
+   * the `contextmenu`, and with the toggle derived as Cmd on mac neither carries a
+   * modifier this panel reads. So both are named here: the mousedown is IGNORED
+   * (no selection write) and the click is SWALLOWED (no activation). Shift is no
+   * exemption — Ctrl+Shift-click is still a ctrl-click there.
+   *
+   * The two macOS outcomes this buys, both of them what a right-click already
+   * does: Ctrl-click on a selected issue card opens only the menu, and Ctrl-click
+   * on a multi-selection leaves it intact for the menu's bulk arm.
    *
    * What still runs is the menu machinery — the target recording, and the
    * collapse-if-outside-the-selection rule the context menu's own open gate
-   * applies. That is the point: this gesture behaves exactly like a right-click,
-   * which is what it is.
+   * applies.
    */
   function isMacSecondaryClick(e: { ctrlKey: boolean }): boolean {
     return isMac && e.ctrlKey;
@@ -1868,11 +1866,13 @@ export function ProjectsBoardPanel({
    * grammar lives: plain collapses to that card, `mod` toggles it, Shift extends
    * the column range from the anchor.
    *
-   * MOUSEDOWN rather than click, because a draft card's notes open from Base UI's
-   * own mousedown (`useClick`) — a modified press has to be intercepted before
-   * that, not after it. `preventDefault` is what stops the browser extending a
-   * text range under Shift and moving focus for us; the focus is then handed to
-   * the card by hand, so the arrows resume from where the pointer landed.
+   * MOUSEDOWN rather than click, for the two things only a mousedown can do:
+   * `preventDefault` here is what stops the browser extending a text range under
+   * Shift and moving focus, which is then handed to the card by hand so the arrows
+   * resume from where the pointer landed. Stopping the card from OPENING is the
+   * click-capture's job — Base UI's `useClick` defaults to `event: 'click'`
+   * (@base-ui/react 1.8.0), so a card's opener and a draft's notes both fire on
+   * the click, and this handler is too early to swallow either.
    */
   function handleCardMouseDown(e: MouseEvent) {
     // Ahead of the button test, which a mac Ctrl-click can pass: WebKit may report
@@ -1909,13 +1909,11 @@ export function ProjectsBoardPanel({
    *  click that follows it untouched, and that click is what would open the card —
    *  so a selection gesture swallows both. */
   function handleCardClickCapture(e: MouseEvent) {
-    // Ahead of the modifier read for the reason the mousedown twin states. A bare
-    // mac Ctrl-click already falls out of the test below (it carries neither
-    // modifier this panel reads), but Ctrl+SHIFT-click does not — and swallowing
-    // that click would suppress an activation the user never asked to replace.
-    if (isMacSecondaryClick(e)) return;
     const mods = selectionMods(e);
-    if (!mods.toggle && !mods.range) return;
+    // A mac Ctrl-click is swallowed here too, not ignored: it carries no modifier
+    // this panel reads, so without naming it the click would reach the card's own
+    // opener and activate it alongside the menu — which a right-click never does.
+    if (!isMacSecondaryClick(e) && !mods.toggle && !mods.range) return;
     const el = e.target instanceof Element ? e.target : null;
     if (el === null || cardAt(el) === null) return;
     e.preventDefault();

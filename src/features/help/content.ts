@@ -2114,13 +2114,13 @@ exactly the fields you meant and nothing else. Each row offers three choices:
 
 - **Leave as is** — the default. The field keeps whatever each card already holds.
 - **Set to** — reveals the field's own control (options, iterations, a date, a number,
-  a line of text) and writes the value you pick to every card.
-- **Clear** — unsets the field on every card.
+  a line of text) and writes the value you pick to every eligible card.
+- **Clear** — unsets the field on every eligible card.
 
 Beside each field name, **Now:** says what the selection holds today: the value itself
-where every card agrees, or **(mixed)** where they don't. It's there to tell you what
-you're about to overwrite; it never decides what gets written, and a mixed field is as
-editable as an agreed one.
+where every eligible card agrees, or **(mixed)** where they don't. It's there to tell
+you what you're about to overwrite; it never decides what gets written, and a mixed
+field is as editable as an agreed one.
 
 Nothing is sent until you press **Apply** ({{key:mod+enter}} from anywhere in the
 dialog), and **Cancel** or {{key:escape}} discards the whole draft without asking.

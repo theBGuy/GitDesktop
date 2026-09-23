@@ -287,9 +287,9 @@ test("insertBoardCardAfter never inserts a card the cache already holds", () => 
   assert.deepEqual(ids(insertBoardCardAfter(data, mk("b"), "a")), ["a", "b"]);
 });
 
-// The partial-rollback case this whole anchor shape exists for. The old
-// index-based restore put B back at its captured slot 1, which the successful
-// removal of A had already vacated — yielding [C, B, D].
+// The partial-rollback case the anchor shape exists for: a restored card's
+// captured slot has been vacated by a SUCCESSFUL sibling removal, so only its
+// recorded predecessor still says where it belongs.
 test("a partial rollback restores at the anchor, not the stale index", () => {
   const data = pagesOf([mk("a"), mk("b"), mk("c"), mk("d")]);
   const capA = captureRemovedCard(data, "a");
@@ -297,7 +297,7 @@ test("a partial rollback restores at the anchor, not the stale index", () => {
   // Both removed; only B is refused and comes back.
   let live = pagesOf([mk("c"), mk("d")]);
   // B's anchor was A, which succeeded and is gone, so the walk steps through A to
-  // what IT followed — the head of the board. PRODUCTION's walk, not a copy of it.
+  // what IT followed — the head of the board.
   const anchor = resolveUndoAnchor(
     live,
     planOf(capB, "b"),

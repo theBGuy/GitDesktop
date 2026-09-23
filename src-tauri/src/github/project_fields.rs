@@ -332,7 +332,7 @@ fn build_set_item_field_values_args(
 fn field_write_input(args: &[String]) -> String {
     let mut variables = json!({});
     let mut document = None;
-    for pair in args[2..].chunks_exact(2) {
+    for pair in args[2..].as_chunks::<2>().0 {
         debug_assert_eq!(pair[0], "-f");
         let (key, value) = pair[1]
             .split_once('=')
