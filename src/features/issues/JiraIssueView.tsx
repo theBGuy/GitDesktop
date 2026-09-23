@@ -45,10 +45,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import type { ForgeUserRef } from "@/lib/git/types";
@@ -1526,12 +1524,18 @@ export function JiraIssueView({
   const transition = useJiraTransition(repoPath, link.data);
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   // The repo is part of the identity because two repos linked to DIFFERENT Jira
   // sites can share an issue key. The same identity keys the sidebar below,
   // remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${issueKey}`;
   const compose = useKeyedEntityState(issueIdentity, "");
+  const threadJumpEnabled =
+    selectedIssue?.kind === "jira" &&
+    selectedIssue.id === issueKey &&
+    !!details.data &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
   // only while the box is actually on screen, and only for the view that owns
@@ -1539,29 +1543,7 @@ export function JiraIssueView({
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    selectedIssue?.kind === "jira" &&
-      selectedIssue.id === issueKey &&
-      canComment &&
-      !!details.data &&
-      !details.isPlaceholderData &&
-      !details.isError,
-  );
-  // The thread's jumps ride the focus-comment gate minus its composer term.
-  const threadJumpEnabled =
-    selectedIssue?.kind === "jira" &&
-    selectedIssue.id === issueKey &&
-    !!details.data &&
-    !details.isPlaceholderData &&
-    !details.isError;
-  useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
-    threadJumpEnabled,
+    threadJumpEnabled && canComment,
   );
 
   // The link resolved to nothing (unlinked, or unlinked while this view was

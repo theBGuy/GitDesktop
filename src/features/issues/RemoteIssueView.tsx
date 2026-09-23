@@ -27,10 +27,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -44,6 +41,7 @@ import {
   Thread,
 } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import {
   sortTimeline,
@@ -251,7 +249,6 @@ export function RemoteIssueView({
   );
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -294,33 +291,19 @@ export function RemoteIssueView({
 
   const issue = details.data;
 
+  const threadJumpEnabled =
+    isSelectedIssue &&
+    !!issue &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
   // only while the box is actually on screen.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    isSelectedIssue &&
-      canComment &&
-      !!issue &&
-      !details.isPlaceholderData &&
-      !details.isError,
-  );
-  // The thread's jumps ride the focus-comment gate minus its composer term.
-  const threadJumpEnabled =
-    isSelectedIssue &&
-    !!issue &&
-    !details.isPlaceholderData &&
-    !details.isError;
-  useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
-    threadJumpEnabled,
+    threadJumpEnabled && canComment,
   );
 
   if (details.isPending) {

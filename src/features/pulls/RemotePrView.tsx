@@ -54,10 +54,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -71,6 +68,7 @@ import { ReactionBar } from "@/features/conversations/ReactionBar";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
@@ -1424,7 +1422,6 @@ export function RemotePrView({
   });
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   // The generate-commit-message binding's title suffix. The chord itself lives in
   // EditTitleBodyDialog; this is only the label, so a rebinding drives both.
   const generateHint = useGenerateChordHint();
@@ -1943,23 +1940,6 @@ export function RemotePrView({
     if (revealReviewId !== null) setRevealReviewId(null);
   }, [revealReviewId]);
 
-  // The palette's route to the comment box. Every term the composer itself is
-  // gated on rides here too, so the action is offered only where there is a box
-  // to focus: a resolve takes the whole view over, and the other sub-tabs have
-  // no composer.
-  useHotkeyAction(
-    "focus-comment",
-    () => composerRef.current?.focus(),
-    isSelectedPr &&
-      canComment &&
-      section === "conversation" &&
-      !resolve &&
-      !!pr &&
-      !details.isPlaceholderData &&
-      !details.isError,
-  );
-  // The thread's jumps ride the focus-comment gate minus its composer term; the
-  // resolve term stays, since a resolve replaces the thread outright.
   const threadJumpEnabled =
     isSelectedPr &&
     section === "conversation" &&
@@ -1967,15 +1947,15 @@ export function RemotePrView({
     !!pr &&
     !details.isPlaceholderData &&
     !details.isError;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  // The palette's route to the comment box. Every term the composer itself is
+  // gated on rides here too, so the action is offered only where there is a box
+  // to focus: a resolve takes the whole view over, and the other sub-tabs have
+  // no composer.
   useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
-    threadJumpEnabled,
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    threadJumpEnabled && canComment,
   );
 
   if (details.isPending) {

@@ -15,7 +15,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -34,10 +34,7 @@ import { Input } from "@/components/ui/input";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -47,6 +44,7 @@ import { LocalComment } from "@/features/conversations/LocalComment";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
@@ -204,7 +202,6 @@ export function LocalPrView({
   } = useLocalConversation(id, pr, (mutate) => {
     if (pr) update.mutate({ id: pr.id, mutate });
   });
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
@@ -306,34 +303,19 @@ export function LocalPrView({
   );
   const defaultBranch = useDefaultBranch(repoPath);
 
-  // The palette's route to the comment box. Every term the composer itself is
-  // gated on rides here too: a paused merge takes the whole view over, and the
-  // other sub-tabs have no composer.
-  useHotkeyAction(
-    "focus-comment",
-    () => composerRef.current?.focus(),
-    selectedPr?.kind === "local" &&
-      selectedPr.id === id &&
-      section === "conversation" &&
-      !!pr &&
-      !pr.pendingMerge?.worktreePath,
-  );
-  // The thread's jumps share that gate: it has no composer term, and a paused
-  // merge replaces the thread outright.
   const threadJumpEnabled =
     selectedPr?.kind === "local" &&
     selectedPr.id === id &&
     section === "conversation" &&
     !!pr &&
     !pr.pendingMerge?.worktreePath;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
+  // The palette's route to the comment box. Every term the composer itself is
+  // gated on rides here too: a paused merge takes the whole view over, and the
+  // other sub-tabs have no composer.
   useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
+    "focus-comment",
+    () => composerRef.current?.focus(),
     threadJumpEnabled,
   );
 

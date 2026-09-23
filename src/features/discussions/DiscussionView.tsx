@@ -36,10 +36,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
@@ -50,6 +47,7 @@ import {
   Thread,
 } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { copyText } from "@/lib/clipboard";
@@ -236,7 +234,6 @@ export function DiscussionView({
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -265,31 +262,18 @@ export function DiscussionView({
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
 
+  const threadJumpEnabled =
+    selectedDiscussion?.number === number &&
+    !!d &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
   // The palette's route to the comment box, so reaching it never depends on
   // tabbing the whole thread. Only the view that owns the selection answers —
   // the mounted one lags it through a switch.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    selectedDiscussion?.number === number &&
-      !!d &&
-      !details.isPlaceholderData &&
-      !details.isError,
-  );
-  // The thread's jumps share the focus-comment gate, which has no composer term.
-  const threadJumpEnabled =
-    selectedDiscussion?.number === number &&
-    !!d &&
-    !details.isPlaceholderData &&
-    !details.isError;
-  useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
     threadJumpEnabled,
   );
 

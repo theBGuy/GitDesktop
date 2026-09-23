@@ -29,8 +29,9 @@ export function notifyPrCreateFailed(input: {
       subtitle: reason,
       repoPath,
       repoName,
+      // No dedupeKey: each create settles once, so a second failure inside the
+      // dedupe window is a real retry failing, and it must still be recorded.
       target: { type: "repo", tab: "pulls" },
-      dedupeKey: `create-failed:${head}`,
     },
     os: { title, body: `${repoName}: ${reason}`, focus: "unfocused" },
   });

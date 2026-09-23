@@ -1065,9 +1065,9 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 Closing asks first: everyone watching is notified, and reopening puts the pull request
 back but can't unsend that. The command palette's **Focus the comment box** jumps
 straight to the composer here too.
-On a long conversation, the arrow buttons by the scrollbar jump to its top or bottom,
-each showing only while that end is out of view; the command palette carries them as
-**Jump to the top of the thread** and **Jump to the bottom of the thread**.
+On a long thread (merge requests and local pull requests included), the arrow buttons by
+the scrollbar jump to its top or bottom, and the command palette's **Jump to the top of
+the thread** and **Jump to the bottom of the thread** do the same.
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays

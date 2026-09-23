@@ -12,7 +12,7 @@ import {
   UploadSimpleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -35,10 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
-import {
-  ConversationScrollArea,
-  type ConversationScrollHandle,
-} from "@/features/conversations/ConversationScrollArea";
+import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -47,6 +44,7 @@ import {
 import { LocalComment } from "@/features/conversations/LocalComment";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
@@ -108,7 +106,6 @@ export function LocalIssueView({
   } = useLocalConversation(id, issue, (mutate) => {
     if (issue) update.mutate({ id: issue.id, mutate });
   });
-  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const portalContainer = usePanelPortalContainer();
@@ -133,24 +130,14 @@ export function LocalIssueView({
     edit.setOpen(false);
   }
 
+  const threadJumpEnabled =
+    selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue;
+  const jumpRef = useThreadJumpHotkeys(threadJumpEnabled);
   // The palette's route to the comment box. Only the view that owns the
   // selection answers — the mounted one lags it through a switch.
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue,
-  );
-  // The thread's jumps share the focus-comment gate, which has no composer term.
-  const threadJumpEnabled =
-    selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue;
-  useHotkeyAction(
-    "jump-to-thread-top",
-    () => jumpRef.current?.jumpToTop(),
-    threadJumpEnabled,
-  );
-  useHotkeyAction(
-    "jump-to-thread-bottom",
-    () => jumpRef.current?.jumpToBottom(),
     threadJumpEnabled,
   );
 
