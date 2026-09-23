@@ -181,7 +181,9 @@ function ReconnectFlow({
         }
       }
     } else if (event.type === "line") {
-      setLines((prev) => [...prev, event.text]);
+      // Capped at the largest window any view renders: a 900s flow can stream far
+      // more than that, and nothing reads past the tail.
+      setLines((prev) => [...prev, event.text].slice(-UNPARSED_OUTPUT_TAIL));
       setPhase((p) => (p.kind === "starting" ? { kind: "progress" } : p));
     } else {
       // Terminal Rust-side: the flow's guard already unregistered its session, so null
@@ -421,10 +423,11 @@ function CopyCodeButton({ code }: { code: string }) {
 }
 
 /** The tail of the CLI's own output. Deliberately wraps rather than truncating: this
- *  is the only place the user can read what the CLI actually said. Height-capped and
- *  scrollable because `DialogContent` neither caps nor scrolls — a few 300-char lines
- *  at this size would push the centered dialog off-viewport. Every call site names the
- *  region (`label` or `labelledBy`) and picks `live`. */
+ *  is the only place the user can read what the CLI actually said. Height-capped,
+ *  scrollable, and pinned to the newest line because `DialogContent` neither caps nor
+ *  scrolls — a few 300-char lines at this size would push the centered dialog
+ *  off-viewport. Every call site names the region (`label` or `labelledBy`) and picks
+ *  `live`. */
 function ProgressLines({
   lines,
   tail,
@@ -440,8 +443,17 @@ function ProgressLines({
   label?: string;
   labelledBy?: string;
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Re-pin per line: this region appends live, and an overflowing one renders scrolled
+  // to the top, hiding the newest output — the whole point of showing it. Reading
+  // `lines` is what makes the dependency real; a mount-only pin would go stale.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && lines.length > 0) el.scrollTop = el.scrollHeight;
+  }, [lines]);
   return (
     <div
+      ref={scrollRef}
       className="max-h-40 space-y-0.5 overflow-y-auto break-words font-mono text-[11px] text-muted-foreground"
       role="group"
       aria-label={label}
