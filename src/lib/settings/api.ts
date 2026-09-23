@@ -180,6 +180,7 @@ export interface ChannelPrefs {
 export const NOTIFICATION_SOURCES = [
   "prChecks",
   "prActivity",
+  "prCreate",
   "prReviews",
   "actionRuns",
   "reviews",
@@ -218,6 +219,8 @@ const SOURCE_OUTCOMES: Record<OutcomeSource, readonly NotificationOutcome[]> &
   Record<Exclude<NotificationSource, OutcomeSource>, readonly []> = {
   prChecks: OUTCOME_CLASSES,
   prActivity: [],
+  // Empty by design: only a failed create emits, so there is no result to filter.
+  prCreate: [],
   prReviews: [],
   actionRuns: OUTCOME_CLASSES,
   reviews: [],
@@ -472,6 +475,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     sources: {
       prChecks: { inApp: true, os: true },
       prActivity: { inApp: true, os: true },
+      prCreate: { inApp: true, os: true },
       prReviews: { inApp: true, os: true },
       actionRuns: { inApp: true, os: true },
       reviews: { inApp: true, os: true },

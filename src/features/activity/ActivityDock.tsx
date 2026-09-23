@@ -59,7 +59,7 @@ import {
   resetReview,
   useReviewTasks,
 } from "@/lib/stores/reviews";
-import { useUiStore } from "@/lib/stores/ui";
+import { isRepoTab, useUiStore } from "@/lib/stores/ui";
 import { formatDuration, validEpochMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
@@ -346,6 +346,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const openPr = useUiStore((s) => s.openPr);
   const openRun = useUiStore((s) => s.openRun);
   const openAgentTab = useUiStore((s) => s.openAgentTab);
+  const openRepoView = useUiStore((s) => s.openRepoView);
   const openHistory = useAutomationHistoryDialog((s) => s.open);
   const aiEnabled = useAiEnabled();
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -392,7 +393,12 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       }
       return;
     }
-    if (t?.type !== "pr" && t?.type !== "run" && t?.type !== "agent") {
+    if (
+      t?.type !== "pr" &&
+      t?.type !== "run" &&
+      t?.type !== "agent" &&
+      t?.type !== "repo"
+    ) {
       // Nowhere to navigate (no target, or a kind this build doesn't route) —
       // the click is still an acknowledgement, as it has always been.
       markNotificationRead(n.id);
@@ -424,6 +430,14 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       }
       if (t.type === "agent") {
         openAgentTab({ ...target, stillValid });
+        return;
+      }
+      if (t.type === "repo") {
+        openRepoView({
+          ...target,
+          tab: isRepoTab(t.tab) ? t.tab : undefined,
+          stillValid,
+        });
         return;
       }
       // Land under the lens the event happened under — a fork's two lenses
@@ -880,6 +894,7 @@ const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
   "pr-opened": GitPullRequestIcon,
   "pr-merged": GitMergeIcon,
   "pr-closed": GitPullRequestIcon,
+  "pr-create-failed": GitPullRequestIcon,
   "pr-approved": CheckCircleIcon,
   "pr-changes-requested": WarningCircleIcon,
   "pr-comment": ChatCircleIcon,

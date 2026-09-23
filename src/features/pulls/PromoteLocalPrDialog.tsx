@@ -16,6 +16,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
+import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
@@ -177,6 +178,13 @@ export function PromoteLocalPrDialog({
       if (created === null) {
         // The create itself failed — retrying is correct, keep the dialog open.
         toastError(e);
+        // The toast fades in seconds; this outlives it for a user who moved on.
+        notifyPrCreateFailed({
+          repoPath,
+          head: pr.head,
+          noun: prNoun,
+          error: e,
+        });
         return;
       }
       // The remote PR already exists. Close the dialog (leaving it open on this

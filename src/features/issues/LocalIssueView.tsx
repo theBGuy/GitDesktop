@@ -12,7 +12,7 @@ import {
   UploadSimpleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -34,8 +34,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
+import {
+  ConversationScrollArea,
+  type ConversationScrollHandle,
+} from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -105,6 +108,7 @@ export function LocalIssueView({
   } = useLocalConversation(id, issue, (mutate) => {
     if (issue) update.mutate({ id: issue.id, mutate });
   });
+  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const portalContainer = usePanelPortalContainer();
@@ -135,6 +139,19 @@ export function LocalIssueView({
     "focus-comment",
     () => composerRef.current?.focus(),
     selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue,
+  );
+  // The thread's jumps share the focus-comment gate, which has no composer term.
+  const threadJumpEnabled =
+    selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue;
+  useHotkeyAction(
+    "jump-to-thread-top",
+    () => jumpRef.current?.jumpToTop(),
+    threadJumpEnabled,
+  );
+  useHotkeyAction(
+    "jump-to-thread-bottom",
+    () => jumpRef.current?.jumpToBottom(),
+    threadJumpEnabled,
   );
 
   if (!issue) {
@@ -317,9 +334,7 @@ export function LocalIssueView({
         )}
       </header>
 
-      {/* overflow-hidden contains the content's natural height (vendored Root is
-          `relative`-only) so a long issue can't leak a window scrollbar. */}
-      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <ConversationScrollArea ref={jumpRef} className="flex-1">
         <div className="space-y-4 p-4">
           <div className="group flex items-start justify-between gap-2 border-b pb-3">
             <div className="min-w-0 flex-1">
@@ -373,7 +388,7 @@ export function LocalIssueView({
             <p className="text-xs text-muted-foreground">No comments yet.</p>
           )}
         </div>
-      </ScrollArea>
+      </ConversationScrollArea>
 
       <CommentComposer
         ref={composerRef}

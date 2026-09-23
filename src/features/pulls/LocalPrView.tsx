@@ -15,7 +15,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -31,10 +31,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
+import {
+  ConversationScrollArea,
+  type ConversationScrollHandle,
+} from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -201,6 +204,7 @@ export function LocalPrView({
   } = useLocalConversation(id, pr, (mutate) => {
     if (pr) update.mutate({ id: pr.id, mutate });
   });
+  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
@@ -313,6 +317,24 @@ export function LocalPrView({
       section === "conversation" &&
       !!pr &&
       !pr.pendingMerge?.worktreePath,
+  );
+  // The thread's jumps share that gate: it has no composer term, and a paused
+  // merge replaces the thread outright.
+  const threadJumpEnabled =
+    selectedPr?.kind === "local" &&
+    selectedPr.id === id &&
+    section === "conversation" &&
+    !!pr &&
+    !pr.pendingMerge?.worktreePath;
+  useHotkeyAction(
+    "jump-to-thread-top",
+    () => jumpRef.current?.jumpToTop(),
+    threadJumpEnabled,
+  );
+  useHotkeyAction(
+    "jump-to-thread-bottom",
+    () => jumpRef.current?.jumpToBottom(),
+    threadJumpEnabled,
   );
 
   if (!pr) {
@@ -858,9 +880,7 @@ export function LocalPrView({
 
       {section === "conversation" && (
         <>
-          {/* overflow-hidden contains the thread's natural height (vendored Root is
-              `relative`-only) so a long PR can't leak a window scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+          <ConversationScrollArea ref={jumpRef} className="flex-1">
             <div className="space-y-4 p-4">
               <div className="group flex items-start justify-between gap-2 border-b pb-3">
                 <div className="min-w-0 flex-1">
@@ -1009,7 +1029,7 @@ export function LocalPrView({
                 return <div className="space-y-4">{rendered}</div>;
               })()}
             </div>
-          </ScrollArea>
+          </ConversationScrollArea>
           {/* Shown for closed PRs too, so you can comment / quote-reply after
               closing; approving stays open-only. */}
           <CommentComposer

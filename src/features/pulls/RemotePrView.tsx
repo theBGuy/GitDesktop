@@ -50,11 +50,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
+import {
+  ConversationScrollArea,
+  type ConversationScrollHandle,
+} from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -1421,6 +1424,7 @@ export function RemotePrView({
   });
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  const jumpRef = useRef<ConversationScrollHandle>(null);
   // The generate-commit-message binding's title suffix. The chord itself lives in
   // EditTitleBodyDialog; this is only the label, so a rebinding drives both.
   const generateHint = useGenerateChordHint();
@@ -1953,6 +1957,25 @@ export function RemotePrView({
       !!pr &&
       !details.isPlaceholderData &&
       !details.isError,
+  );
+  // The thread's jumps ride the focus-comment gate minus its composer term; the
+  // resolve term stays, since a resolve replaces the thread outright.
+  const threadJumpEnabled =
+    isSelectedPr &&
+    section === "conversation" &&
+    !resolve &&
+    !!pr &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  useHotkeyAction(
+    "jump-to-thread-top",
+    () => jumpRef.current?.jumpToTop(),
+    threadJumpEnabled,
+  );
+  useHotkeyAction(
+    "jump-to-thread-bottom",
+    () => jumpRef.current?.jumpToBottom(),
+    threadJumpEnabled,
   );
 
   if (details.isPending) {
@@ -2874,9 +2897,7 @@ export function RemotePrView({
 
       {section === "conversation" && (
         <>
-          {/* overflow-hidden contains the thread's natural height (vendored Root is
-              `relative`-only) so a long PR can't leak a window scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+          <ConversationScrollArea ref={jumpRef} className="flex-1">
             <div className="space-y-4 p-4">
               <div className="group space-y-1 border-b pb-3">
                 <div className="flex items-start justify-between gap-2">
@@ -3071,7 +3092,7 @@ export function RemotePrView({
                   </p>
                 )}
             </div>
-          </ScrollArea>
+          </ConversationScrollArea>
           {/* Shown for closed/merged PRs too — GitHub lets you comment (and
               quote-reply) after a PR closes; only reviews are open-only. On GitLab
               the composer shows (the first MR writes), but the GitHub-only Review

@@ -43,6 +43,27 @@ export type RepoTab =
   | "code-todos"
   | "tasks"
   | "agent";
+/** Total over {@link RepoTab}, so the runtime check below can't drift from the union. */
+const REPO_TAB_KEYS: Record<RepoTab, true> = {
+  changes: true,
+  history: true,
+  compare: true,
+  pulls: true,
+  issues: true,
+  projects: true,
+  discussions: true,
+  actions: true,
+  findings: true,
+  tags: true,
+  insights: true,
+  "code-todos": true,
+  tasks: true,
+  agent: true,
+};
+/** Narrows an untrusted value (a hydrated notification's target) to a real tab. */
+export function isRepoTab(v: unknown): v is RepoTab {
+  return typeof v === "string" && Object.hasOwn(REPO_TAB_KEYS, v);
+}
 /** A create dialog the command palette / New menus can request from any tab. */
 export type CreateKind =
   | "issue"
@@ -451,6 +472,16 @@ interface UiState {
     /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
     stillValid?: (epochAtRequest: number) => boolean;
   }) => void;
+  /** Open a repo (if not already) and, when `tab` is given, land on that tab;
+   *  otherwise the current tab stands. Atomic. Unlike openRepo, staying in the
+   *  same repo resets nothing. */
+  openRepoView: (target: {
+    repoPath: string;
+    repoName: string;
+    tab?: RepoTab;
+    /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
+    stillValid?: (epochAtRequest: number) => boolean;
+  }) => void;
   /** Jump to a commit in the History tab (e.g. from the blame gutter). ONE atomic set of
    *  `repoTab` + `selectedCommitHash` — a follow-up `set()` gets clobbered by the deferred
    *  transition sets elsewhere. Pass the full 40-char hash; CommitDetailView fetches by
@@ -772,6 +803,21 @@ export const useUiStore = create<UiState>()((set, get) => {
           repoPath: target.repoPath,
           repoName: target.repoName,
           repoTab: "agent",
+          ...(switchingRepo ? CROSS_REPO_RESET : {}),
+        });
+      });
+    },
+    openRepoView: (target) => {
+      const epochAtRequest = bumpEpochNow();
+      startViewTransition(() => {
+        if (target.stillValid?.(epochAtRequest) === false) return;
+        const switchingRepo = get().repoPath !== target.repoPath;
+        set({
+          view: "repo",
+          previousView: "repo",
+          repoPath: target.repoPath,
+          repoName: target.repoName,
+          ...(target.tab ? { repoTab: target.tab } : {}),
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
       });

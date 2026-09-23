@@ -51,6 +51,7 @@ import {
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
+import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 import {
   applyRepoLens,
   useLensGate,
@@ -580,14 +581,21 @@ export function CreatePrDialog({
         // failure happened, so a landing in another repo names the one it
         // belongs to rather than going unsaid.
         const away = stillHere() ? null : repoNameFromPath(repoPath);
-        if (outcome === "error")
+        if (outcome === "error") {
           toastErrorWithNote(
             e,
             away
               ? `In ${away}, the ${prNoun} for ${value.head} wasn't created.`
               : `The ${prNoun} for ${value.head} wasn't created.`,
           );
-        else if (away) toastErrorWithNote(e, `In ${away}`);
+          // The toast fades in seconds; this outlives it for a user who moved on.
+          notifyPrCreateFailed({
+            repoPath,
+            head: value.head,
+            noun: prNoun,
+            error: e,
+          });
+        } else if (away) toastErrorWithNote(e, `In ${away}`);
         else toastError(e);
       } finally {
         // The lane is also the duplicate-create admission guard, so the watcher

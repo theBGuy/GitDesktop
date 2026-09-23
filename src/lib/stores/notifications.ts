@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { normPath } from "@/lib/git/path";
 import type { RemoteLens } from "@/lib/git/types";
 import { memoizedStoreLoader } from "@/lib/plugin-store";
-import { useUiStore } from "@/lib/stores/ui";
+import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 
 /** Semantic tone for a notification's glyph — paired with an icon + word in the
  *  UI so state never rides on color alone (WCAG AA). */
@@ -29,6 +29,7 @@ export type NotificationKind =
   | "pr-opened"
   | "pr-merged"
   | "pr-closed"
+  | "pr-create-failed"
   | "pr-approved"
   | "pr-changes-requested"
   | "pr-review"
@@ -80,7 +81,12 @@ export type NotificationTarget =
       id: string;
     }
   | { type: "agent" }
-  | { type: "repo" };
+  | {
+      type: "repo";
+      /** The tab to land on; absent leaves the user's current tab. Narrowed with
+       *  `isRepoTab` on read, since a hydrated row is untrusted. */
+      tab?: RepoTab;
+    };
 
 /** One terminal, notification-worthy event. Cross-repo: `repoName` is shown on
  *  the row and the target navigates (switching repos when needed). */

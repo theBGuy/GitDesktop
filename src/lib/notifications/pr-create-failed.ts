@@ -1,0 +1,37 @@
+import { repoNameFromPath } from "@/lib/stores/notifications";
+import { errorMessage } from "@/lib/tauri/invoke";
+import { emitNotification } from "./emit";
+
+/**
+ * Announces a pull/merge request create that failed — inbox row plus an OS ping
+ * while the window is unfocused, on whichever channels the `prCreate` source has
+ * for this repo. Every input is captured by the caller at submit time: the create
+ * can settle minutes later, after the dialog and even the repo view are gone, so
+ * nothing here reads live UI state. Gating is `emitNotification`'s alone.
+ */
+export function notifyPrCreateFailed(input: {
+  repoPath: string;
+  head: string;
+  /** "pull request" | "merge request" — the dialog's prNoun, passed through. */
+  noun: string;
+  error: unknown;
+}): void {
+  const { repoPath, head, noun, error } = input;
+  const repoName = repoNameFromPath(repoPath);
+  const reason = errorMessage(error);
+  const title = `The ${noun} for ${head} wasn't created`;
+  emitNotification({
+    source: "prCreate",
+    row: {
+      kind: "pr-create-failed",
+      tone: "danger",
+      title,
+      subtitle: reason,
+      repoPath,
+      repoName,
+      target: { type: "repo", tab: "pulls" },
+      dedupeKey: `create-failed:${head}`,
+    },
+    os: { title, body: `${repoName}: ${reason}`, focus: "unfocused" },
+  });
+}

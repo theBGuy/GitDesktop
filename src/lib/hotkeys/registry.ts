@@ -230,6 +230,21 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "jump-to-thread-top",
+    label: "Jump to the top of the thread",
+    category: "Navigation",
+    // Palette-only by default: conversation surfaces alone, so it ships without
+    // spending a chord; native Home/End still scroll a focused thread.
+    defaultBinding: null,
+  },
+  {
+    id: "jump-to-thread-bottom",
+    label: "Jump to the bottom of the thread",
+    category: "Navigation",
+    // Palette-only by default, for the same reason as the top jump.
+    defaultBinding: null,
+  },
+  {
     id: "toggle-comment-composer",
     label: "Collapse or expand the comment box",
     category: "Navigation",

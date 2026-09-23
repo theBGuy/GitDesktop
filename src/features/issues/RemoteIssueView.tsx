@@ -25,9 +25,12 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
+import {
+  ConversationScrollArea,
+  type ConversationScrollHandle,
+} from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
@@ -248,6 +251,7 @@ export function RemoteIssueView({
   );
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  const jumpRef = useRef<ConversationScrollHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -301,6 +305,22 @@ export function RemoteIssueView({
       !!issue &&
       !details.isPlaceholderData &&
       !details.isError,
+  );
+  // The thread's jumps ride the focus-comment gate minus its composer term.
+  const threadJumpEnabled =
+    isSelectedIssue &&
+    !!issue &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  useHotkeyAction(
+    "jump-to-thread-top",
+    () => jumpRef.current?.jumpToTop(),
+    threadJumpEnabled,
+  );
+  useHotkeyAction(
+    "jump-to-thread-bottom",
+    () => jumpRef.current?.jumpToBottom(),
+    threadJumpEnabled,
   );
 
   if (details.isPending) {
@@ -1037,9 +1057,7 @@ export function RemoteIssueView({
             flex MAIN axis, so in the column the body would otherwise floor at its
             thread's full height and push a scrollbar onto the document. */}
         <div className="flex min-w-0 flex-1 flex-col @max-2xl/issue-detail:min-h-0">
-          {/* overflow-hidden contains the thread's natural height (vendored Root is
-              `relative`-only) so a long issue can't leak a window scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+          <ConversationScrollArea ref={jumpRef} className="flex-1">
             <div className="space-y-4 p-4">
               <div className="group space-y-1">
                 <p className="flex items-center gap-2 text-xs">
@@ -1154,7 +1172,7 @@ export function RemoteIssueView({
                   </p>
                 )}
             </div>
-          </ScrollArea>
+          </ConversationScrollArea>
         </div>
         <IssueSidebar
           // Remounts the rail per issue so its sections' drafts (the uncontrolled

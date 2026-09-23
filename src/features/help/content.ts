@@ -1065,6 +1065,9 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 Closing asks first: everyone watching is notified, and reopening puts the pull request
 back but can't unsend that. The command palette's **Focus the comment box** jumps
 straight to the composer here too.
+On a long conversation, the arrow buttons by the scrollbar jump to its top or bottom,
+each showing only while that end is out of view; the command palette carries them as
+**Jump to the top of the thread** and **Jump to the bottom of the thread**.
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays
@@ -1762,7 +1765,9 @@ The comment box sits at the bottom of the issue,
 past the side rail, and the command palette's **Focus the comment box** jumps straight
 to it — no default shortcut, so give it one in **Settings → Keyboard**. It folds to a
 one-line strip and completes **@** mentions and **#** references the same way it does on
-the Pull Requests tab.
+the Pull Requests tab. On a long thread (local and Jira issues included), the arrow
+buttons by the scrollbar jump to its top or bottom, and the command palette's **Jump to
+the top of the thread** and **Jump to the bottom of the thread** do the same.
 
 Comments share the issue with a **date-sorted activity feed**: timeline events interleave
 with the conversation oldest-to-newest, each a calm one-line entry carrying the actor's
@@ -2269,6 +2274,9 @@ part in GitHub Discussions for the repo. (Discussions must be enabled on the rep
   alongside, and the menu item says so while a draft is waiting. Closing asks first:
   everyone watching is notified, and reopening puts the discussion back but can't
   unsend that. The command palette's **Focus the comment box** works here too.
+- On a long thread, the arrow buttons by the scrollbar jump to its top or bottom, as do
+  the command palette's **Jump to the top of the thread** and **Jump to the bottom of
+  the thread**.
 - **Create a discussion**, or **create an issue from a discussion** when a thread turns
   into actionable work (the new issue links back to it).
 - If GitDesktop can see that your GitHub sign-in can't write discussions, the
@@ -3246,7 +3254,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   window isn't focused{{ai}}, apart from **Agent tasks finish**, which pings even while
   you're working elsewhere in the app{{/ai}}. The sources are **CI checks finish**
   (which also carries a **Watch** choice of *My pull requests only* or *All open
-  pull requests*), **Pull requests opened, merged, or closed**, **Reviews on my pull
+  pull requests*), **Pull requests opened, merged, or closed**, **Creating a pull
+  request fails** (any failed create, including one that fails in the background
+  after you've moved on, such as minutes into a long push), **Reviews on my pull
   requests**, and **Workflow runs finish on the current branch**{{ai}}, plus **AI reviews
   I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. Both CI sources
   carry a **Notify on** choice (*Successes and failures*, *Failures only*, or
@@ -3270,7 +3280,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   fork/upstream view it belongs to, so a new comment or approval lands on
   **Conversation** — and a review entry scrolls to the review itself. The
   pull-request list itself switches to **Open** or **Closed** to match the PR's
-  current state, so one merged since the event still arrives selected. When the
+  current state, so one merged since the event still arrives selected. A failed
+  create's entry opens that repository's pull-request list. When the
   checkout an entry points to has been removed, GitDesktop opens another copy of
   that repository when it knows one; with none left it says so and changes
   nothing.{{ai}} A review still running shows

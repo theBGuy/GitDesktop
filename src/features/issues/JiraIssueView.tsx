@@ -42,10 +42,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import {
+  ConversationScrollArea,
+  type ConversationScrollHandle,
+} from "@/features/conversations/ConversationScrollArea";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import type { ForgeUserRef } from "@/lib/git/types";
@@ -1523,6 +1526,7 @@ export function JiraIssueView({
   const transition = useJiraTransition(repoPath, link.data);
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  const jumpRef = useRef<ConversationScrollHandle>(null);
   // The repo is part of the identity because two repos linked to DIFFERENT Jira
   // sites can share an issue key. The same identity keys the sidebar below,
   // remounting its own per-issue drafts.
@@ -1541,6 +1545,23 @@ export function JiraIssueView({
       !!details.data &&
       !details.isPlaceholderData &&
       !details.isError,
+  );
+  // The thread's jumps ride the focus-comment gate minus its composer term.
+  const threadJumpEnabled =
+    selectedIssue?.kind === "jira" &&
+    selectedIssue.id === issueKey &&
+    !!details.data &&
+    !details.isPlaceholderData &&
+    !details.isError;
+  useHotkeyAction(
+    "jump-to-thread-top",
+    () => jumpRef.current?.jumpToTop(),
+    threadJumpEnabled,
+  );
+  useHotkeyAction(
+    "jump-to-thread-bottom",
+    () => jumpRef.current?.jumpToBottom(),
+    threadJumpEnabled,
   );
 
   // The link resolved to nothing (unlinked, or unlinked while this view was
@@ -1734,10 +1755,7 @@ export function JiraIssueView({
             flex MAIN axis, so in the column the body would otherwise floor at its
             thread's full height and push a scrollbar onto the document. */}
         <div className="flex min-w-0 flex-1 flex-col @max-2xl/jira-detail:min-h-0">
-          {/* overflow-hidden contains the content's natural height (vendored
-              Root is `relative`-only) so a long issue can't leak a window
-              scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+          <ConversationScrollArea ref={jumpRef} className="flex-1">
             <div className={cn("space-y-4 p-4", PLACEHOLDER_FADE, staleDim)}>
               <div className="border-b pb-3">
                 {issue.descriptionMd.trim() ? (
@@ -1776,7 +1794,7 @@ export function JiraIssueView({
                 </p>
               )}
             </div>
-          </ScrollArea>
+          </ConversationScrollArea>
         </div>
 
         <JiraIssueSidebar

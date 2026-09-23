@@ -38,6 +38,7 @@ const CHANNEL_ARIA: Record<Channel, string> = {
 export const SOURCE_LABELS: Record<NotificationSource, string> = {
   prChecks: "CI checks finish",
   prActivity: "Pull requests opened, merged, or closed",
+  prCreate: "Creating a pull request fails",
   prReviews: "Reviews on my pull requests",
   actionRuns: "Workflow runs finish on the current branch",
   reviews: "AI reviews I start",
@@ -48,6 +49,8 @@ export const SOURCE_LABELS: Record<NotificationSource, string> = {
 /** Second line under a row's label; a source with nothing to add carries none. */
 export const SOURCE_DESCRIPTIONS: Partial<Record<NotificationSource, string>> =
   {
+    prCreate:
+      "Any failed create, including one that fails in the background after you've moved on",
     prReviews:
       "Approvals, change requests, comments, and requests for your review",
     reviews: "A review or security audit finishing in the background",
