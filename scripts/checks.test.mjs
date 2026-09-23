@@ -4177,6 +4177,13 @@ test("raw-copy-icon-button flags an icon-only copy button in every spelling", ()
     "</Button>",
   ].join("\n");
   assert.deepEqual(rawCopyIconButton(commented), [1]);
+  // The after-icon side of the same skip: without it this spelling hides.
+  assert.deepEqual(
+    rawCopyIconButton(
+      '<button type="button" title="Copy" onClick={onCopy}><CopyIcon />{/* trailing */}</button>',
+    ),
+    [1],
+  );
 });
 
 test("raw-copy-icon-button leaves icon+text controls and the component alone", () => {
