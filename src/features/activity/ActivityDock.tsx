@@ -759,13 +759,15 @@ function NotificationRow({
 }) {
   const Glyph = glyphFor(n);
   const detailId = useId();
+  // A one-line failure's full text IS its subtitle, already in the accessible name.
+  const detail = n.detail !== n.subtitle ? n.detail : undefined;
 
   return (
     <div className="flex items-stretch not-last:border-b hover:bg-muted/60">
       <button
         type="button"
         data-row={n.id}
-        aria-describedby={n.detail ? detailId : undefined}
+        aria-describedby={detail ? detailId : undefined}
         onClick={onNavigate}
         onKeyDown={(e) => {
           if (e.key === "Delete" || e.key === "Backspace") {
@@ -797,7 +799,7 @@ function NotificationRow({
           {n.subtitle && (
             <span
               className="mt-0.5 block truncate text-[11px] text-muted-foreground"
-              title={n.detail ?? n.subtitle}
+              title={detail ?? n.subtitle}
             >
               {n.subtitle}
             </span>
@@ -845,9 +847,9 @@ function NotificationRow({
       </button>
       {/* The full text is otherwise only in the subtitle's hover title, which
           assistive tech never reads; aria-describedby resolves hidden targets. */}
-      {n.detail && (
+      {detail && (
         <span id={detailId} hidden>
-          {n.detail}
+          {detail}
         </span>
       )}
       {n.action && (
