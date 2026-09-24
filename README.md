@@ -626,10 +626,18 @@ ungrouped table with archived cards hidden reorders rows with the same
 `Alt`/`⌥` keys. Roadmap views are drawn as a board, and **Clear view**
 brings the whole item set back in the board's own order with the chips off,
 leaving the grouping where you last put it. Nothing here writes to the view.
-Adding, moving, reordering, editing a draft, converting, archiving, restoring
-and removing all need write access to the board and the `project` sign-in
-scope; reading one needs only the `project` or `read:project` scope the
-Projects picker already asks for.
+**Status updates** show the project's health at a glance: once a project
+has one, a strip above the board carries the latest status (**On track**,
+**At risk**, **Off track**, **Complete** or **Inactive**, always named as
+well as coloured), the first line of its note, its target date and how long
+ago it was posted. Press it to fold out the history, newest first, with
+each update's author, dates and Markdown note, and post a new one from
+**Add item → Post status update…** or the command palette. Updates you
+wrote can be edited or deleted from their own menu.
+Adding, moving, reordering, editing a draft, converting, archiving, restoring,
+removing and posting status updates all need write access to the board and
+the `project` sign-in scope; reading one needs only the `project` or
+`read:project` scope the Projects picker already asks for.
 
 ### Code TODOs
 

@@ -2021,7 +2021,35 @@ whole board either way.
 
 **Add item** is held with its reason on it when your GitHub sign-in can read projects but
 not change them, when you don't have write access to the board, and while **Load more** is
-still fetching a page.
+still fetching a page. Its last row, **Post status update…**, is covered next.
+
+## Status updates
+
+A project's **status updates** say how the work as a whole is going. Once a project has
+one, a strip between the toolbar and the board shows the latest: its status as a named
+chip (**On track**, **At risk**, **Off track**, **Complete** or **Inactive**; an update
+posted with no status reads **Status update**), the first line of its note, its target
+date, and how long ago it was posted. A project with no updates shows no strip at all.
+
+Click the strip, or press {{key:enter}} or {{key:space}} on it, to fold out the history
+below it, newest first. Each entry carries its status, who posted it, when, its start and
+target dates, and its note rendered as Markdown. {{key:up}} and {{key:down}} move
+between entries and {{key:home}} and {{key:end}} reach the first and last. GitDesktop
+reads the newest 25; when there are more, the history ends with **Older updates are on
+GitHub**. The history starts folded each time you pick a project.
+
+**Add item → Post status update…** posts a new one, and so does the command palette's
+**Post project status update…**. Pick a status (**Post update** says it's waiting on
+one until you do), write a Markdown note if you like, and set a start or target date
+with the date fields; **Clear** beside each empties it. {{key:mod+enter}} posts from
+anywhere in the dialog. The new update leads the strip straight away while GitHub takes
+it.
+
+The updates **you** posted carry a menu, from the **⋯** button on the entry or
+{{secondaryclick}}: **Edit update…** reopens the dialog with everything filled in (an
+edit can also set **No status**), and **Delete update…** asks first. Both change the
+project for everyone. Updates other people posted are read-only here; edit those on
+GitHub.
 
 ## Saved views
 
@@ -2311,8 +2339,8 @@ sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
 and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here
-(adding, moving, reordering, editing a draft, converting, archiving, restoring, removing)
-needs the full
+(adding, moving, reordering, editing a draft, converting, archiving, restoring, removing,
+and posting, editing or deleting a status update) needs the full
 \`project\` scope, so a \`read:project\` sign-in draws the board with those controls held.`,
   },
   {

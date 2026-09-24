@@ -13,6 +13,10 @@ import type {
   ProjectFieldDefs,
   ProjectFieldValueUpdate,
   ProjectItemRemove,
+  ProjectStatusContent,
+  ProjectStatusUpdate,
+  ProjectStatusUpdates,
+  ProjectStatusValue,
   ProjectViews,
   RemoteLens,
 } from "../types";
@@ -112,6 +116,56 @@ export const ghProjectItems = (
  *  which is what `truncated` reports. */
 export const ghProjectViews = (repoPath: string, projectId: string) =>
   invoke<ProjectViews>("gh_project_views", { repoPath, projectId });
+
+/** One project's status updates, newest first — the first page only, which is
+ *  what `truncated` reports. Project state like the saved views, so no lens. */
+export const ghProjectStatusUpdates = (repoPath: string, projectId: string) =>
+  invoke<ProjectStatusUpdates>("gh_project_status_updates", {
+    repoPath,
+    projectId,
+  });
+
+/** Posts a status update and answers with it as GitHub stored it. Absent fields
+ *  (null, or an empty string) are left out of the create. */
+export const ghCreateProjectStatusUpdate = (
+  repoPath: string,
+  projectId: string,
+  status: ProjectStatusValue,
+  content: ProjectStatusContent,
+) =>
+  invoke<ProjectStatusUpdate>("gh_create_project_status_update", {
+    repoPath,
+    projectId,
+    status,
+    ...content,
+  });
+
+/** Rewrites a status update WHOLE: every field rides explicitly, and null CLEARS
+ *  it (GitHub reads an omitted field as "leave it", which an editor holding the
+ *  full state never means). `status` stays a wide string so an edit can keep a
+ *  value this build doesn't name. */
+export const ghUpdateProjectStatusUpdate = (
+  repoPath: string,
+  statusUpdateId: string,
+  status: string | null,
+  content: ProjectStatusContent,
+) =>
+  invoke<ProjectStatusUpdate>("gh_update_project_status_update", {
+    repoPath,
+    statusUpdateId,
+    status,
+    ...content,
+  });
+
+/** Deletes one status update. */
+export const ghDeleteProjectStatusUpdate = (
+  repoPath: string,
+  statusUpdateId: string,
+) =>
+  invoke<void>("gh_delete_project_status_update", {
+    repoPath,
+    statusUpdateId,
+  });
 
 /** Writes one board's field values for one item in a single call. `updates` sets or
  *  replaces; `clears` carries the field ids to UNSET, which no update shape can

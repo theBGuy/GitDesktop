@@ -15,6 +15,7 @@ pub mod project;
 pub mod project_fields;
 pub mod project_item_edits;
 pub mod project_items;
+pub mod project_status_updates;
 pub mod project_views;
 pub mod release;
 pub mod repo_settings;

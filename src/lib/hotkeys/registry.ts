@@ -405,6 +405,13 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // Beside the Add item rows it shares a menu with, palette-only for their reason.
+  {
+    id: "post-project-status-update",
+    label: "Post project status update…",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // Registered by ProjectsPopover and ProjectFieldsEditor themselves — they mount
   // on the issue rail and the PR header alike, and the dispatcher runs whichever
   // registrant is enabled. Filed here rather than under Pull requests because

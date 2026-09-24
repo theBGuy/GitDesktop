@@ -1264,6 +1264,9 @@ export const CHECKS = [
       // Its `eventToBinding` call tests a HARDCODED mod+enter submit chord, not
       // a user binding, so there is no rebindable dispatch to guard.
       "src/components/mention-autocomplete.tsx",
+      // Same shape: a HARDCODED mod+enter submit chord on the status-update
+      // dialog, not a user binding.
+      "src/features/projects/ProjectStatusStrip.tsx",
       // Its `eventToBinding` call tests four hardcoded Alt reorder chords
       // against a fixed table, not a user binding, and the handler's DOM
       // containment check already pins focus to a board card — the board

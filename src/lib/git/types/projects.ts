@@ -267,6 +267,50 @@ export interface ProjectViews {
   truncated: boolean;
 }
 
+/** The status values GitHub offers a project status update today — the ones this
+ *  build can WRITE and names itself. */
+export type ProjectStatusValue =
+  | "INACTIVE"
+  | "ON_TRACK"
+  | "AT_RISK"
+  | "OFF_TRACK"
+  | "COMPLETE";
+
+/** One project status update. `status` is GitHub's enum spelling VERBATIM, typed
+ *  wide on purpose: null is a real state (an update posted or edited without one),
+ *  and a value GitHub adds later arrives as-is for the reader's fallback arm rather
+ *  than being dropped. Both dates are bare `YYYY-MM-DD`; the two timestamps are
+ *  ISO-8601 from the forge, so a reader validates before formatting. `creator` is
+ *  null where GitHub names no one (a deleted account). */
+export interface ProjectStatusUpdate {
+  id: string;
+  body: string | null;
+  status: string | null;
+  startDate: string | null;
+  targetDate: string | null;
+  creator: AssigneeRef | null;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+/** A status update write's content beside its status, which the create and the
+ *  edit type differently. Null is an absent field: left out of a create, and
+ *  CLEARED by an edit. */
+export interface ProjectStatusContent {
+  body: string | null;
+  startDate: string | null;
+  targetDate: string | null;
+}
+
+/** One project's status updates, NEWEST FIRST, capped server-side at the first
+ *  page — `truncated` says GitHub holds older ones this read didn't ask for, and
+ *  `totalCount` is GitHub's figure for all of them. */
+export interface ProjectStatusUpdates {
+  updates: ProjectStatusUpdate[];
+  totalCount: number;
+  truncated: boolean;
+}
+
 /** One field to SET on an item, tagged by the field's kind. These field names are
  *  the wire the backend deserializes by — a renamed one reads as absent there.
  *  Unsetting is not expressed here: a clear rides the write's separate id list. */

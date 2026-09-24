@@ -35,6 +35,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
@@ -170,6 +171,10 @@ import {
   isWritable,
   valueKey,
 } from "./ProjectFieldControls";
+import {
+  ProjectStatusSection,
+  type StatusEditorState,
+} from "./ProjectStatusStrip";
 import { ProjectsTableView } from "./ProjectsTableView";
 import { cellEditHeld } from "./TableCell";
 
@@ -1959,6 +1964,17 @@ export function ProjectsBoardPanel({
    *  tab switches and retires sessions no user action ended. (The one effect that
    *  bumps it is a real retirement and guards on the value having changed.) */
   const dialogSessionRef = useRef(0);
+  /** The status update editor: a new post, an edit, or closed. Apart from
+   *  `addDialog` because it writes to the PROJECT rather than the board, so no
+   *  board dialog is its alternative, and its run is marked by the state object
+   *  itself rather than the session token above. */
+  const [statusEditor, setStatusEditor] = useState<StatusEditorState>(null);
+  /** Open a new post — only over a CLOSED editor. The dialog seeds on its open
+   *  transition alone, so replacing an open run in place would post with that
+   *  run's draft rather than a fresh one. */
+  function openStatusPost() {
+    setStatusEditor((current) => current ?? { mode: "create" });
+  }
 
   /** Open or close one of the board's dialogs, retiring whatever session was
    *  running. Every transition goes through here so the token can't drift from the
@@ -2194,6 +2210,9 @@ export function ProjectsBoardPanel({
     setBulkFieldCards(NO_CARDS);
     // A cell editor is the same draft against the same board, retired the same way.
     retireCellEditor();
+    // A status post would land on the re-pointed project under the old one's
+    // title, and an edit names an entry the new project doesn't hold.
+    setStatusEditor(null);
   });
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
@@ -2660,6 +2679,20 @@ export function ProjectsBoardPanel({
         return NO_ACCESS_REASON;
       case items.isFetchingNextPage:
         return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  /** Why a status update write is held: the permission arms alone. A status
+   *  update is PROJECT state, so no board read or card write can collide with it.
+   *  Worded as the short parenthetical a held menu row carries beside its label —
+   *  the same two claims as {@link addHeldReason}'s first arms, cut to fit. */
+  const statusWriteHeld = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return "needs the project scope";
+      case project !== null && !project.viewerCanUpdate:
+        return "no write access";
       default:
         return undefined;
     }
@@ -4215,6 +4248,18 @@ export function ProjectsBoardPanel({
     () => switchAddDialog("draft"),
     active && canAdd,
   );
+  // Gated on the project's write permission alone, where the menu row it mirrors
+  // also waits out a page fetch: a post touches no board read. Dead while the
+  // editor is open — the palette reaches over its modal, and swapping an open edit
+  // for a post would carry the edit's draft into it.
+  useHotkeyAction(
+    "post-project-status-update",
+    openStatusPost,
+    active &&
+      showBoardChrome &&
+      statusWriteHeld === undefined &&
+      statusEditor === null,
+  );
   // The four reposition rows, from the palette. Palette-ONLY on purpose: the chord
   // that drives these lives on the board itself, because "focus is on a card" is a
   // DOM question the global binding layer can't ask. Live wherever the keyboard
@@ -4370,6 +4415,13 @@ export function ProjectsBoardPanel({
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => switchAddDialog("draft")}>
                 New draft…
+              </DropdownMenuItem>
+              {/* Here even with no strip on screen: a project with no updates
+                  draws none, so this row is how its first one gets posted. Its
+                  permission holds are already the trigger's, which says why. */}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={openStatusPost}>
+                Post status update…
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -4637,6 +4689,25 @@ export function ProjectsBoardPanel({
             )}
           </div>
         </div>
+      )}
+      {/* The PROJECT's own status, in the layout flow like the notices below and
+          above them: it describes the whole project rather than this read of the
+          board. Draws nothing until the project has an update; the editor behind
+          it is mounted regardless, since the toolbar's Add item opens it too. */}
+      {showBoardChrome && (
+        <ProjectStatusSection
+          repoPath={repoPath}
+          projectId={projectId}
+          enabled={canRead}
+          viewer={
+            gh.data?.login ? { login: gh.data.login, avatarUrl: "" } : null
+          }
+          ghHost={ghHost}
+          writeHeldNote={statusWriteHeld}
+          editor={statusEditor}
+          setEditor={setStatusEditor}
+          onFocusLost={() => focusBodyLanding(rootRef.current)}
+        />
       )}
       {/* In the layout FLOW, pushing the board down — a persistent claim about
           what this surface is showing must never float over its chrome (the

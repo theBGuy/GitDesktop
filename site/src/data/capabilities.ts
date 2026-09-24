@@ -341,6 +341,11 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
+      "Project status updates — the latest status (On track, At risk, Off track, Complete, Inactive) with its note, target date and age in a strip above the board, the history newest-first with Markdown notes, and post, edit or delete your own updates without leaving the app",
+  },
+  {
+    group: "Issues & discussions",
+    label:
       "Issue activity timeline — labels, assignees, milestones, renames, linked PRs, mentions & state changes, with actor avatars",
   },
   {
