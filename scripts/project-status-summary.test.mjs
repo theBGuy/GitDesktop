@@ -141,3 +141,20 @@ test("a very long line is read only as far as the strip could show", () => {
   assert.ok(summary.length <= 400);
   assert.ok(!summary.includes("end"));
 });
+
+test("a triple underscore pair strips like its star twin, but never inside a word", () => {
+  assert.equal(plainFirstLine("___both___"), "both");
+  assert.equal(plainFirstLine("***both***"), "both");
+  assert.equal(plainFirstLine("snake___case___name"), "snake___case___name");
+});
+
+test("nested container prefixes strip together, then one heading marker", () => {
+  assert.equal(plainFirstLine("> - quoted item"), "quoted item");
+  assert.equal(plainFirstLine("- 1. step"), "step");
+  assert.equal(plainFirstLine("> > nested quote"), "nested quote");
+  assert.equal(plainFirstLine("> # Title"), "Title");
+  // A heading holds no blocks, so what follows its marker is its text.
+  assert.equal(plainFirstLine("# 1. Intro"), "1. Intro");
+  // A thematic break is still read as one before any prefix is stripped.
+  assert.equal(plainFirstLine("- - -\nafter"), "after");
+});

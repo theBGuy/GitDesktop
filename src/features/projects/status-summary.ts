@@ -17,8 +17,10 @@ const FENCE_OPEN = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/;
 /** A fence CLOSER carries nothing after its marker run. */
 const FENCE_CLOSE = /^\s*(`{3,}|~{3,})\s*$/;
 const RULE = /^\s*(?:[-*_]\s*){3,}$/;
+/** Every leading container marker — quotes and list items nest ("> - item") —
+ *  then at most one heading marker, which holds no blocks of its own. */
 const BLOCK_PREFIX =
-  /^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/;
+  /^(?:\s*(?:>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+))*\s*(?:#{1,6}\s+)?/;
 const IMAGE = /!\[([^\]]*)\]\([^)]*\)/g;
 const LINK = /\[([^\]]*)\]\([^)]*\)/g;
 /** URI and email autolinks, which read as their own text. */
@@ -31,6 +33,7 @@ const HTML_TAG = /<\/?[A-Za-z][^<>]*>/g;
 // matches the pair alone; whether its surroundings let it open and close is
 // decided in the replacer (see `flanked`), since no lookbehind is available.
 const STRONG_STAR = /\*\*(\S(?:.*?\S)?)\*\*/g;
+const STRONG_EM_UNDERSCORE = /___(\S(?:.*?\S)?)___/g;
 const STRONG_UNDERSCORE = /__(\S(?:.*?\S)?)__/g;
 const STRIKE = /~~(\S(?:.*?\S)?)~~/g;
 const EM_STAR = /\*([^\s*](?:[^*]*?[^\s*])?)\*/g;
@@ -38,9 +41,10 @@ const EM_UNDERSCORE = /_([^\s_](?:[^_]*?[^\s_])?)_/g;
 const BACKTICK_RUN = /`+/g;
 const WORD_CHAR = /[\p{L}\p{N}]/u;
 
-/** The longest line the inline passes read. Their lazy `.+?` scans are quadratic
- *  in the line's length (~1s measured on a 64K line with no closer), and the strip
- *  shows one truncated line — far less than this. */
+/** The longest line the inline passes read. Their lazy scans — `.*?` in the strong
+ *  and strikethrough pairs, `[^*]*?` / `[^_]*?` in the emphasis ones — are
+ *  quadratic in the line's length when no closer follows (~1s measured at 64K),
+ *  and the strip shows one truncated line, far less than this. */
 const MAX_LINE = 400;
 
 /** Private-use characters stand in for code spans while the other passes run, so
@@ -48,8 +52,8 @@ const MAX_LINE = 400;
  *  itself holds one of these would have it read as a marker; written prose doesn't. */
 const CODE_MARK = 0xe000;
 
-/** Whether `ch` is a letter or digit — the characters a delimiter pair mustn't
- *  touch from outside when the rule forbids intraword emphasis. */
+/** Whether `ch` is a letter or digit — the characters a FLANKED delimiter pair
+ *  mustn't touch from outside (see {@link flanked} and where it's applied). */
 function isWordChar(ch: string | undefined): boolean {
   return ch !== undefined && WORD_CHAR.test(ch);
 }
@@ -116,10 +120,16 @@ function plainInline(line: string): string {
     .replace(AUTOLINK, (_m, target: string) => target)
     .replace(HTML_TAG, "")
     .replace(STRONG_STAR, (_m, inner: string) => inner)
-    // Underscores can't open or close inside a word, so `snake__case__name`
-    // stays; `**` can, which is why the `**` arm alone runs unflanked.
+    // Underscores can't open or close inside a word (CommonMark), so
+    // `snake__case__name` stays. The triple pair goes first: the double alone
+    // would take `___x__` and leave a stray `_` the flank then refuses.
+    .replace(STRONG_EM_UNDERSCORE, flanked("_"))
     .replace(STRONG_UNDERSCORE, flanked("_"))
     .replace(STRIKE, (_m, inner: string) => inner)
+    // `*` and `**` CAN pair inside a word in CommonMark (`foo*bar*` is emphasis).
+    // Flanking the single `*` is this summary's own choice, so arithmetic like
+    // `2*3*4` stays literal in the strip; the history's full render reads it as
+    // Markdown.
     .replace(EM_STAR, flanked("*"))
     .replace(EM_UNDERSCORE, flanked("_"));
   return restoreCodeSpans(plain, codes).trim();
