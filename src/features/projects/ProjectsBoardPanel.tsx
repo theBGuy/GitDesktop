@@ -4872,6 +4872,7 @@ export function ProjectsBoardPanel({
             repoPath={repoPath}
             projectTitle={project.title}
             lens={lens}
+            noun={noun}
             open={addDialog === "existing"}
             onOpenChange={(o) => switchAddDialog(o ? "existing" : null)}
             onBoardContentIds={loadedContentIds}
@@ -4880,6 +4881,7 @@ export function ProjectsBoardPanel({
           <NewDraftDialog
             key={`draft-${projectId}`}
             projectTitle={project.title}
+            noun={noun}
             open={addDialog === "draft"}
             pending={draftWritePending}
             onOpenChange={(o) => switchAddDialog(o ? "draft" : null)}

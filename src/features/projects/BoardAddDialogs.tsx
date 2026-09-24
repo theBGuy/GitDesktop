@@ -35,6 +35,11 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import {
+  ALREADY_DRAWN_REASON,
+  type ItemNoun,
+  NOTES_PLACEHOLDER,
+} from "./board-model";
 
 /** Long enough that a word typed at speed makes one search, short enough that the
  *  list feels live. The Explore and registry searches sit either side of it. */
@@ -193,7 +198,6 @@ function CandidateRow({
  *  so the footer and the pending strip behind it name the same wait. */
 const DRAFT_PENDING_REASON = "Finishing your last draft…";
 
-const ON_BOARD_REASON = "Already on this board";
 const ADDED_REASON = "Added";
 /** The row the user actually clicked, from the click itself until the write
  *  settles. Its sibling names the hold the OTHER rows take meanwhile, which is a
@@ -213,6 +217,7 @@ export function AddExistingItemsDialog({
   repoPath,
   projectTitle,
   lens,
+  noun,
   open,
   onOpenChange,
   onBoardContentIds,
@@ -222,6 +227,8 @@ export function AddExistingItemsDialog({
   /** The board's title, for this dialog's own copy — never an id in user-facing
    *  text. The add's toast is the panel's, which owns the write. */
   projectTitle: string;
+  /** What the item is called where the dialog opened: a board card or a table row. */
+  noun: ItemNoun;
   /** The fork/upstream lens the board was read under: which repo "this" is. */
   lens: RemoteLens;
   open: boolean;
@@ -308,7 +315,7 @@ export function AddExistingItemsDialog({
       case added.has(candidate.id):
         return ADDED_REASON;
       case onBoardContentIds.has(candidate.id):
-        return ON_BOARD_REASON;
+        return ALREADY_DRAWN_REASON[noun];
       case pendingId === candidate.id:
         return ADDING_REASON;
       case pendingId !== null:
@@ -459,12 +466,15 @@ export function AddExistingItemsDialog({
  */
 export function NewDraftDialog({
   projectTitle,
+  noun,
   open,
   pending,
   onOpenChange,
   onCreate,
 }: {
   projectTitle: string;
+  /** What the item is called where the dialog opened: a board card or a table row. */
+  noun: ItemNoun;
   open: boolean;
   /** A draft write is in flight for this repo's boards — from THIS run or an
    *  earlier one the user closed over. Repo-level rather than per-board because the
@@ -538,7 +548,7 @@ export function NewDraftDialog({
             <DialogTitle>New draft</DialogTitle>
             <DialogDescription>
               A note that lives on {projectTitle} alone. Convert it to an issue
-              from the card's menu whenever it earns one.
+              from the {noun}'s menu whenever it earns one.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
@@ -554,7 +564,7 @@ export function NewDraftDialog({
               {(field) => (
                 <field.MarkdownField
                   label="Notes"
-                  placeholder="Markdown, rendered on the card"
+                  placeholder={NOTES_PLACEHOLDER[noun]}
                   rows={8}
                   textareaClassName="max-h-72 min-h-24 resize-y font-mono"
                 />

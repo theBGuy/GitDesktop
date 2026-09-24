@@ -54,6 +54,19 @@ export const ITEM_WRITE_REASON: Record<ItemNoun, string> = {
   row: "Finishing your last row change…",
 };
 
+/** A draft's Notes field invitation, naming where the notes are read back. Shared by
+ *  the new-draft and edit-draft dialogs, which both open from either surface. */
+export const NOTES_PLACEHOLDER: Record<ItemNoun, string> = {
+  card: "Markdown, rendered on the card",
+  row: "Markdown, rendered in the row's details",
+};
+
+/** Why a search result can't be added: the surface already draws it. */
+export const ALREADY_DRAWN_REASON: Record<ItemNoun, string> = {
+  card: "Already on this board",
+  row: "Already in this table",
+};
+
 /** Why a card can't be repositioned under a saved view that sorts: the columns are
  *  drawn in the sort's order, so the board's own manual order — the only thing a
  *  position write addresses — isn't what is on screen. Shared by the menu's held

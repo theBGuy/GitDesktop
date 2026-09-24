@@ -18,13 +18,11 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
-import { ITEM_WRITE_REASON, type ItemNoun } from "./board-model";
-
-/** The Notes field's invitation, naming where the notes are read back. */
-const NOTES_PLACEHOLDER: Record<ItemNoun, string> = {
-  card: "Markdown, rendered on the card",
-  row: "Markdown, rendered in the row's details",
-};
+import {
+  ITEM_WRITE_REASON,
+  type ItemNoun,
+  NOTES_PLACEHOLDER,
+} from "./board-model";
 
 /** Whether two login lists name the same people, order ignored. Set-equality rather
  *  than a dirty flag so opening the picker and closing it unchanged still counts as
