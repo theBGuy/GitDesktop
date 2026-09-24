@@ -45,14 +45,10 @@ export function toastErrorWithNote(e: unknown, note: string) {
 }
 
 /**
- * A failure toast whose title composes app prose around one or more underlying
- * errors ("Created issue #12, but adding it to a project failed: …"). The title
- * stays the calm composed line; this keeps a route to the raw text, which a
- * plain `toastError` gives but these composed sites lost: Details/Copy rides
- * the cancel slot when `view` occupies the action, else it IS the action —
- * exactly `errorToastAction`'s affordance either way. The Details dialog
- * headlines the composed title too, so that context outlives the toast; its body
- * is the raw full text, one headed section per failure when several compose.
+ * A failure toast whose title composes app prose around one or more raw errors
+ * ("Created issue #12, but adding it to a project failed: …"). Details/Copy
+ * (`errorToastAction`) rides the cancel slot when `view` holds the action,
+ * else it IS the action; the dialog content is `composedErrorPresentation`'s.
  */
 export function toastComposedError(opts: {
   /** The composed headline (already carries summaries where it wants them). */

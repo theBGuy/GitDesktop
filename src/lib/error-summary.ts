@@ -605,7 +605,8 @@ export function composedErrorPresentation(
   errors: readonly unknown[],
   headings?: readonly string[],
 ): ErrorPresentation {
-  if (errors.length === 1) return { ...presentError(errors[0]), summary: title };
+  if (errors.length === 1)
+    return { ...presentError(errors[0]), summary: title };
   return {
     label: null,
     summary: title,
