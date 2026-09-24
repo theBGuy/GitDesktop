@@ -3,9 +3,11 @@
 // lines can precede it) that names the destination, not the failure, so the
 // summarizer skips it as noise and lands on the next meaningful line. The header
 // matcher is one end-anchored token: prose containing a space must keep its
-// current summary, a lone `word:token` line is the accepted residual, local-path
-// remotes keep line-one behavior, and the mapped families (force-push rejections,
-// push protection) and rollback verdicts must keep outranking the fall-through.
+// current summary, a lone `word:token` line is the accepted residual, Windows
+// drive-letter and `file://` remotes are skipped like any other, POSIX and
+// relative paths keep line-one behavior, the picked line's whitespace runs
+// collapse, and the mapped families (force-push rejections, push protection) and
+// rollback verdicts must keep outranking the fall-through.
 //
 // `src/lib/error-summary.ts` carries an `@/` value import, which Node's type
 // stripping cannot resolve, so the shared src hooks go in first. The import is
@@ -25,6 +27,8 @@ const { presentError } = await import("@/lib/error-summary");
 
 const REMOTE = "https://gitlab.com/x/y.git";
 const REJECTED = " ! [rejected]        main -> main (non-fast-forward)";
+/** git's column padding collapses to single spaces in the summary. */
+const REJECTED_SUMMARY = "! [rejected] main -> main (non-fast-forward)";
 const FAILED = `error: failed to push some refs to '${REMOTE}'`;
 const HINTS = [
   "hint: Updates were rejected because the tip of your current branch is behind",
@@ -47,15 +51,17 @@ const nonFastForward = (eol) =>
 
 test("a rejected push leads with the ! [rejected] line, not the To header", () => {
   const p = presentError(gitError(nonFastForward("\n")));
-  assert.equal(
-    p.summary,
-    "! [rejected]        main -> main (non-fast-forward)",
-  );
+  assert.equal(p.summary, REJECTED_SUMMARY);
   assert.equal(p.label, "Git error");
   assert.ok(
     p.fullText.startsWith(`To ${REMOTE}\n`),
     "fullText keeps the header",
   );
+  assert.ok(
+    p.fullText.includes(REJECTED.trim()),
+    "fullText keeps git's column padding",
+  );
+  assert.doesNotMatch(p.summary, /\s{2}/, "summary collapses whitespace runs");
   assert.equal(p.long, true);
 });
 
@@ -66,10 +72,7 @@ test("header followed only by error: lands on the prefix-stripped error line", (
 
 test("CRLF joints summarize the same as LF", () => {
   const p = presentError(gitError(nonFastForward("\r\n")));
-  assert.equal(
-    p.summary,
-    "! [rejected]        main -> main (non-fast-forward)",
-  );
+  assert.equal(p.summary, REJECTED_SUMMARY);
 });
 
 test("scp-style and ssh remotes are skipped as the header too", () => {
@@ -80,11 +83,7 @@ test("scp-style and ssh remotes are skipped as the header too", () => {
     "http://example.com/user/repo.git",
   ]) {
     const p = presentError(gitError(`To ${remote}\n${REJECTED}\n${FAILED}`));
-    assert.equal(
-      p.summary,
-      "! [rejected]        main -> main (non-fast-forward)",
-      remote,
-    );
+    assert.equal(p.summary, REJECTED_SUMMARY, remote);
   }
 });
 
@@ -107,6 +106,17 @@ test("a lone word:token line is skipped too (accepted residual)", () => {
   assert.equal(p.summary, `failed to push some refs to '${REMOTE}'`);
 });
 
+test("a Windows drive-letter or file:// header is skipped like a remote", () => {
+  for (const remote of [
+    "C:/temp/bare.git",
+    "C:\\temp\\bare.git",
+    "file:///C:/temp/bare.git",
+  ]) {
+    const p = presentError(gitError(`To ${remote}\n${REJECTED}\n${FAILED}`));
+    assert.equal(p.summary, REJECTED_SUMMARY, remote);
+  }
+});
+
 test("a local-path header is not matched and keeps line one", () => {
   const header = "To /home/u/bare.git";
   const p = presentError(gitError(`${header}\n${REJECTED}\n${FAILED}`));
@@ -124,10 +134,7 @@ test("a header-only message still summarizes as that line, never blank", () => {
 test("a plain Error carrying push output skips the header as well", () => {
   const p = presentError(new Error(nonFastForward("\n")));
   assert.equal(p.label, null);
-  assert.equal(
-    p.summary,
-    "! [rejected]        main -> main (non-fast-forward)",
-  );
+  assert.equal(p.summary, REJECTED_SUMMARY);
 });
 
 test("app prose in message still leads when the push output rides stderr", () => {

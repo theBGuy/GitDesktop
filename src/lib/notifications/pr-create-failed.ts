@@ -18,8 +18,8 @@ export function notifyPrCreateFailed(input: {
 }): void {
   const { repoPath, head, noun, error } = input;
   const repoName = repoNameFromPath(repoPath);
-  // Same one-liner the toast shows; the subtitle and OS body are single-line
-  // surfaces.
+  // Same one-liner the toast shows, so the visible row line and the OS body lead
+  // with the reason; the full text stays behind the toast's Details.
   const reason = presentError(error).summary;
   const title = `The ${noun} for ${head} wasn't created`;
   emitNotification({

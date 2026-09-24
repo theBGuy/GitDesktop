@@ -357,10 +357,11 @@ function notifyReviewDone(
   mode: ReviewMode,
   ok: boolean,
   target: ReviewTarget,
-  /** Failure reason (the one-line `presentError` summary), carried into the failed row's
-   *  subtitle so the durable inbox record says WHY. Ignored on success. No Re-run action here (unlike
-   *  automation): a manual re-fire closure would capture a stale AiSettings snapshot,
-   *  whereas the panel's Run button re-resolves fresh config. */
+  /** Failure reason (the one-line `presentError` summary), carried into the failed
+   *  row's subtitle so the durable inbox record says WHY. Ignored on success. No
+   *  Re-run action here (unlike automation): a manual re-fire closure would capture
+   *  a stale AiSettings snapshot, whereas the panel's Run button re-resolves fresh
+   *  config. */
   error?: string,
 ): void {
   try {
