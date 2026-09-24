@@ -2567,10 +2567,11 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
     }
 
     /// Mirror of `TRANSFER_REF_LINE` (src/lib/error-summary.ts), on the UNTRIMMED
-    /// line: a space, any flag but `!`, a space, a `[…]` status, a lowercase hex
-    /// range (`..` or `...`), or a bare `branch`/`tag` word, a space run, then a
-    /// non-space character with a ` -> ` arrow somewhere after it that a non-space
-    /// character follows.
+    /// line: a space, one of the documented success flags ` +-*=t`, a space, a
+    /// `[…]` status, a lowercase hex range (`..` or `...`), or the bare `branch` /
+    /// `tag` / `remote-tracking branch` words, a space run, then a non-space
+    /// character with a ` -> ` arrow somewhere after it that a non-space character
+    /// follows.
     fn is_transfer_ref_noise(line: &str) -> bool {
         let Some(rest) = line.strip_prefix(' ') else {
             return false;
@@ -2587,6 +2588,8 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
                 Some((inner, tail)) if !inner.is_empty() => tail,
                 _ => return false,
             }
+        } else if let Some(tail) = rest.strip_prefix("remote-tracking branch") {
+            tail
         } else {
             let is_hex =
                 |s: &str| !s.is_empty() && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
@@ -2658,12 +2661,15 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
     }
 
     /// Canary for the frontend's transfer-report noise family: `firstMeaningfulLine`
-    /// (src/lib/error-summary.ts) skips git's `To`/`From` headers and every per-ref
-    /// line but `!`, so a failed push, pull, or fetch summarizes git's reason
-    /// rather than a ref that moved fine. Real repos re-derive the measured shapes
-    /// against Rust mirrors of `PUSH_TRANSFER_HEADER`, `FETCH_TRANSFER_HEADER`,
+    /// (src/lib/error-summary.ts) skips git's `To`/`From` headers and the per-ref
+    /// lines carrying a documented success flag, while a `!` line stays meaningful,
+    /// so a failed push, pull, or fetch summarizes git's reason rather than a ref
+    /// that moved fine. Real repos re-derive the measured shapes against Rust
+    /// mirrors of `PUSH_TRANSFER_HEADER`, `FETCH_TRANSFER_HEADER`,
     /// `TRANSFER_REF_LINE`, and `TRANSFER_DELETED_LINE`, in both directions — keep
-    /// the two lists in step.
+    /// the two lists in step. The `remote-tracking branch` form needs a
+    /// `refs/remotes/*` ref on the remote to reproduce, so it is pinned from its
+    /// measured line only.
     #[tokio::test]
     async fn transfer_report_stderr_still_matches_the_frontend_markers() {
         let (_guard, base, _origin_s, url) = seeded_origin("transfer-report").await;
@@ -2800,6 +2806,13 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
                     && l.contains("(non-fast-forward)")
             }),
             "the rejected push would no longer summarize its `!` line. Actual stderr:\n{push}"
+        );
+
+        // Measured on git 2.51.1.windows.1 (a fetch of a `refs/remotes/*` ref): the
+        // two-word summary column, followed by a single space.
+        assert!(
+            is_summary_noise(" * remote-tracking branch mirror/main -> FETCH_HEAD"),
+            "the remote-tracking fetch line no longer reads as noise"
         );
 
         // Shapes the mirrors refuse, as the frontend's own boundary tests do.

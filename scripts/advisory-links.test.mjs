@@ -121,8 +121,13 @@ test("a repository advisory prefers its own page when the wire carried one", () 
   assert.equal(repoAdvisoryGhsaUrl("GHSA-pj86-cfqh-vqx6", own), own);
 });
 
+// Scheme-guarding htmlUrl is the CALLER's contract: FindingDetailView passes
+// `httpUrl(htmlUrl) ?? ""`, and that guard lives in a React module this
+// installless suite can't load. What is pinned here is the module's half: the
+// `""` a missing or rejected URL becomes means "no page", never an empty link.
 test("a repository advisory without its own page falls back to the global database", () => {
-  // The Rust layer degrades a missing html_url to an empty string.
+  // Both a missing html_url (the Rust layer sends "") and a caller-rejected
+  // one (e.g. `javascript:`, guarded to "") arrive as the empty string.
   assert.equal(
     repoAdvisoryGhsaUrl("GHSA-pj86-cfqh-vqx6", ""),
     "https://github.com/advisories/GHSA-pj86-cfqh-vqx6",

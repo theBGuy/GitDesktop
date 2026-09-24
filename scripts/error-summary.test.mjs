@@ -2,8 +2,9 @@
 // leads with. git's transfer report opens with a `To <remote>` / `From <remote>`
 // header (sideband `remote:` lines can precede it) and lists every ref it moved,
 // so the summarizer skips the header and the non-`!` per-ref lines as noise and
-// lands on git's reason. Matched and unmatched shapes: see PUSH_TRANSFER_HEADER
-// and TRANSFER_REF_LINE's docs in src/lib/error-summary.ts.
+// lands on git's reason. Matched and unmatched shapes: see the docs on
+// PUSH_TRANSFER_HEADER, TRANSFER_REF_LINE, and TRANSFER_DELETED_LINE in
+// src/lib/error-summary.ts.
 //
 // `src/lib/error-summary.ts` carries an `@/` value import, which Node's type
 // stripping cannot resolve, so the shared src hooks go in first. The import is
@@ -254,6 +255,9 @@ const FORCED =
   " + c5bdbe9...1d0d257 main       -> origin/main  (forced update)";
 const mixedFetch = (eol, lines) => [`From ${LOCAL_ORIGIN}`, ...lines].join(eol);
 
+/** Fetching a `refs/remotes/*` ref names it with a two-word summary. */
+const REMOTE_TRACKING = " * remote-tracking branch mirror/main -> FETCH_HEAD";
+
 /** The Rust serialization verbatim: `message` is the trimmed stderr, `stderr`
  *  the raw blob with git's trailing newline. */
 const rawGitError = (text) => ({
@@ -328,6 +332,19 @@ for (const [name, eol] of [
       `From ${LOCAL_ORIGIN}`,
     );
   });
+
+  test(`a fetched remote-tracking ref's line is noise above a rejection (${name})`, () => {
+    // Measured: the two-word summary column is followed by a single space.
+    const measured = mixedFetch(eol, [REMOTE_TRACKING, TAG_CLOBBER]);
+    assert.equal(
+      presentError(gitError(measured)).summary,
+      "! [rejected] v1 -> v1 (would clobber existing tag)",
+    );
+    assert.equal(
+      presentError(gitError(mixedFetch(eol, [REMOTE_TRACKING]))).summary,
+      `From ${LOCAL_ORIGIN}`,
+    );
+  });
 }
 
 test("app prose in message still leads when the pull report rides stderr", () => {
@@ -344,7 +361,7 @@ test("app prose in message still leads when the pull report rides stderr", () =>
   );
 });
 
-test("every per-ref flag but ! is noise", () => {
+test("the documented success flags (+ - * = t, and space) with known summaries are noise; ! is not", () => {
   for (const line of [
     FF_TABLE,
     " + 22952d8...c5bdbe9 main       -> origin/main  (forced update)",
@@ -355,6 +372,7 @@ test("every per-ref flag but ! is noise", () => {
     " t [tag update]      v1         -> v1",
     " * branch            main       -> FETCH_HEAD",
     " * tag               v1         -> FETCH_HEAD",
+    " * remote-tracking branch mirror/main -> FETCH_HEAD",
     // A push deletion prints no arrow, only the remote refname.
     " - [deleted]         feat",
   ]) {

@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { create } from "zustand";
+import { presentError } from "@/lib/error-summary";
 import {
   gitBranches,
   gitCheckoutBranch,
@@ -12,7 +13,6 @@ import { normPath } from "@/lib/git/path";
 import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useUiStore } from "./ui";
 
@@ -314,7 +314,7 @@ function settleRemoval(repoPath: string, path: string) {
 function toastArchiveRefused(branch: string, e: unknown) {
   toast.error(
     `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
-    { description: errorMessage(e) },
+    { description: presentError(e).summary },
   );
 }
 
@@ -544,7 +544,7 @@ async function runPromote(
           ? `Removed the worktree, but couldn't stash your main workspace changes — commit or stash them, then check out ${branch} manually.`
           : `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${stashedClause}`;
       toast.error(message, {
-        description: errorMessage(e),
+        description: presentError(e).summary,
       });
     } else {
       toastError(e);

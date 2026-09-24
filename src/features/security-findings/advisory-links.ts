@@ -1,7 +1,7 @@
 // Advisory identifiers arrive as forge data, so a link is built only from an id
-// that matches its grammar in full; anything else gets no link at all. The URLs
-// are https literals around a validated token, so they skip the `httpUrl()`
-// scheme guard that arbitrary report URLs need.
+// that matches its grammar in full; anything else gets no link at all. The
+// built URLs are https literals around a validated token, so they skip the
+// `httpUrl()` scheme guard; the one forge URL passed in arrives already guarded.
 
 const CWE_ID = /^CWE-(\d+)$/;
 // The full lowercase-alphanumeric alphabet, wider than GitHub's published
@@ -28,9 +28,10 @@ export function cveUrl(id: string): string | null {
   return CVE_ID.test(id) ? `https://nvd.nist.gov/vuln/detail/${id}` : null;
 }
 
-/** A repository advisory's GHSA link: its own `htmlUrl` when the wire carried
- *  one, since a draft or unpublished advisory has no global-database page. The
- *  grammar still gates the link, so an id that fails it stays plain text. */
+/** A repository advisory's GHSA link: its own page when it has one, since a
+ *  draft or unpublished advisory has no global-database page. `htmlUrl` must be
+ *  the caller's `httpUrl()`-guarded value or `""`, which keeps every return an
+ *  http(s) target. The grammar still gates the link, even with a page URL. */
 export function repoAdvisoryGhsaUrl(
   ghsaId: string,
   htmlUrl: string,

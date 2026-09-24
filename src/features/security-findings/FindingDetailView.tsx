@@ -449,7 +449,10 @@ function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
           <Row label="GHSA">
             <AdvisoryIdValue
               id={advisory.ghsaId}
-              url={repoAdvisoryGhsaUrl(advisory.ghsaId, advisory.htmlUrl)}
+              url={repoAdvisoryGhsaUrl(
+                advisory.ghsaId,
+                httpUrl(advisory.htmlUrl) ?? "",
+              )}
             />
           </Row>
           {advisory.cveId ? (

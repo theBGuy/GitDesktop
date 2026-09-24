@@ -52,16 +52,17 @@ const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 const FETCH_TRANSFER_HEADER = /^From (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 
 /** A per-ref line of git's transfer report (git-push/git-fetch OUTPUT:
- *  ` <flag> <summary> <from> -> <to> [(<reason>)]`), for every flag but `!`:
- *  a `! [rejected]` line IS the failure's reason, while the others report
- *  updates that succeeded or needed none. Tested on the untrimmed line, since
- *  the fast-forward flag is a space; the summary must be a `[…]` status, a hex
- *  range, or fetch's bare `branch`/`tag` word, and the arrow must follow, so
- *  prose and echoed commit subjects can't match. Accepted residual: prose shaped
- *  exactly like that grammar (a ` - [x] step -> next` task item) is skipped too,
- *  and the next line summarizes instead. */
+ *  ` <flag> <summary> <from> -> <to> [(<reason>)]`) carrying one of the
+ *  documented success flags ` +-*=t`. `!` stays out because a `! [rejected]`
+ *  line IS the failure's reason, as does any flag not listed here. Tested on the
+ *  untrimmed line, since the fast-forward flag is a space; the summary must be a
+ *  `[…]` status, a hex range, or fetch's bare `branch` / `tag` /
+ *  `remote-tracking branch` words, and the arrow must follow, so prose and
+ *  echoed commit subjects can't match. Accepted residual: prose shaped exactly
+ *  like that grammar (a ` - [x] step -> next` task item) is skipped too, and the
+ *  next line summarizes instead. */
 const TRANSFER_REF_LINE =
-  /^ [ +\-*=t] (?:\[[^\]]+\]|[0-9a-f]+\.\.\.?[0-9a-f]+|branch|tag) +\S.* -> \S/;
+  /^ [ +\-*=t] (?:\[[^\]]+\]|[0-9a-f]+\.\.\.?[0-9a-f]+|branch|tag|remote-tracking branch) +\S.* -> \S/;
 
 /** A push's deleted-ref line, the one per-ref shape with no arrow: git prints
  *  only the remote refname, which can't contain a space, so the line is
