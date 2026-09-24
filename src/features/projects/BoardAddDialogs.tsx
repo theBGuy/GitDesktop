@@ -195,7 +195,7 @@ function CandidateRow({
 }
 
 /** The draft dialog's single-flight hold, in the board's own "Finishing…" register
- *  so the footer and the pending strip behind it name the same wait. */
+ *  so the footer and the toolbar's write indicator behind it name the same wait. */
 const DRAFT_PENDING_REASON = "Finishing your last draft…";
 
 const ADDED_REASON = "Added";
@@ -461,8 +461,8 @@ export function AddExistingItemsDialog({
 
 /**
  * A new DRAFT item: a note that lives on this board alone, with no issue behind it.
- * The body rides to GitHub as Markdown verbatim — the card's popover renders it as
- * such, so anything typed here survives the round trip.
+ * The body rides to GitHub as Markdown verbatim — the card's popover or the row's
+ * details renders it as such, so anything typed here survives the round trip.
  */
 export function NewDraftDialog({
   projectTitle,
@@ -489,7 +489,7 @@ export function NewDraftDialog({
    *  knows whether this run is still the one on screen. Resolves when the write
    *  settles either way; `onSubmit` awaits it, which drives the submit button's own
    *  spinner — the in-place feedback for the window where this dialog covers the
-   *  board's strip. */
+   *  toolbar's write indicator. */
   onCreate: (title: string, body: string) => Promise<void>;
 }) {
   const form = useAppForm({
@@ -502,9 +502,10 @@ export function NewDraftDialog({
     onSubmit: ({ value }) => onCreate(value.title.trim(), value.body),
   });
   // Held rather than hidden, and explained where the user is looking. The reason is
-  // the board's own "Finishing…" register, so the footer and the strip behind the
-  // dialog describe the same wait. The submit chord's hint rides the same wrapper,
-  // which is what keeps the reason from being overwritten by it while held.
+  // the board's own "Finishing…" register, so the footer and the toolbar's write
+  // indicator behind the dialog describe the same wait. The submit chord's hint
+  // rides the same wrapper, which is what keeps the reason from being overwritten
+  // by it while held.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
       disabled: pending,

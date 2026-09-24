@@ -111,8 +111,9 @@ export function BoardDraftEditDialog({
   });
   // Held rather than hidden, and explained where the user is looking. The reason is
   // the board's shared one rather than a copy spelled here, so this footer and the
-  // strip behind it can't drift apart. The submit chord's hint rides the same
-  // wrapper, which keeps the reason from being overwritten by it while held.
+  // toolbar's write indicator behind it can't drift apart. The submit chord's
+  // hint rides the same wrapper, which keeps the reason from being overwritten by
+  // it while held.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
       disabled: pending,
@@ -168,7 +169,7 @@ export function BoardDraftEditDialog({
           <DialogHeader>
             <DialogTitle>Edit draft</DialogTitle>
             <DialogDescription>
-              Changes the note on the board. Drafts live on the project alone,
+              Changes the note on the project. Drafts live on the project alone,
               so nothing outside it changes.
             </DialogDescription>
           </DialogHeader>

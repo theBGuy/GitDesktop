@@ -2960,14 +2960,15 @@ export function ProjectsBoardPanel({
   }
 
   /** Put one searched issue or pull request on the board. Owned here rather than in
-   *  the dialog so the pending strip can see it, and so the toast names the board
-   *  from the same place every other message about it does. Reports whether it
-   *  landed: the dialog flips its row on `true` and leaves it pickable on `false`.
+   *  the dialog so the toolbar's write indicator can see it, and so the toast
+   *  names the board from the same place every other message about it does.
+   *  Reports whether it landed: the dialog flips its row on `true` and leaves it
+   *  pickable on `false`.
    *
    *  Never optimistic, and never fabricated: the card the board draws is the one
    *  GitHub answered the write with, patched in at the settle, so the ids the menu
-   *  and the move path target are server-minted. The strip covers the window before
-   *  that answer arrives. */
+   *  and the move path target are server-minted. The toolbar's write indicator
+   *  covers the window before that answer arrives. */
   async function addExistingToBoard(
     candidate: BoardCandidate,
   ): Promise<boolean> {

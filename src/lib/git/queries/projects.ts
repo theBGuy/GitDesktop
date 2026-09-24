@@ -356,9 +356,9 @@ export type BoardWriteKind =
   | "edit-draft"
   /** The four BATCH verbs, one per single-card sibling above. Apart from those
    *  kinds rather than folded into them because the panel's gates, labels and
-   *  strip all have to tell "this one card" from "the selection" — and because a
-   *  bulk write's variables carry a LIST where the single-card ones carry an
-   *  `itemId`. */
+   *  write indicator all have to tell "this one card" from "the selection" — and
+   *  because a bulk write's variables carry a LIST where the single-card ones
+   *  carry an `itemId`. */
   | "bulk-move"
   | "bulk-archive"
   | "bulk-restore"
@@ -398,9 +398,9 @@ const boardWriteKey = (kind: BoardWriteKind) => ["board-write", kind] as const;
 /** Filter prefix for EVERY board write — narrowed to one repo by variables below. */
 const BOARD_WRITES_KEY = ["board-write"] as const;
 
-/** One pending board write, flattened for the panel's holds, strip and busy card.
- *  The two value fields are display-only reads off the write's own variables, and
- *  absent on the kinds that don't carry them. */
+/** One pending board write, flattened for the panel's holds, write indicator and
+ *  busy card. The two value fields are display-only reads off the write's own
+ *  variables, and absent on the kinds that don't carry them. */
 export interface PendingBoardWrite {
   mutationId: number;
   kind: BoardWriteKind | null;
@@ -449,7 +449,8 @@ function boardWriteVars(mutation: { state: { variables?: unknown } }): {
 
 /**
  * Every board write against `repo` that is currently in flight, one entry per
- * INVOCATION — the observer-independent reading the panel's gates and strip need.
+ * INVOCATION — the observer-independent reading the panel's gates and write
+ * indicator need.
  *
  * `getSnapshot` COMPUTES from the cache rather than returning a value some
  * subscription last wrote, which is the whole point of doing this by hand instead of
@@ -458,9 +459,9 @@ function boardWriteVars(mutation: { state: { variables?: unknown } }): {
  * blind spot it never reconciles: this panel lives under `<Activity>`, which tears
  * passive effects down on hide, and a write settling while the tab is away notifies
  * nobody. On show, re-subscribing re-reads the same untouched ref, React sees no
- * change, and the pre-hide list latches — holds and strip lines for writes that
- * finished minutes ago. `useMutationState` has the same blind spot for `repo`, which
- * reaches its filters through an options ref updated after render.
+ * change, and the pre-hide list latches — holds and indicator lines for writes
+ * that finished minutes ago. `useMutationState` has the same blind spot for
+ * `repo`, which reaches its filters through an options ref updated after render.
  *
  * Computing on demand makes both moot: React calls this on every render and again
  * when it re-subscribes, and each call reads the live cache under the CURRENT
@@ -2543,12 +2544,12 @@ export function useAddExistingToBoard() {
       repo: string;
       projectId: string;
       contentId: string;
-      /** The item's number, for the board's pending strip alone — the write
+      /** The item's number, for the toolbar's write indicator alone — the write
        *  addresses the content id. Carried as a variable rather than looked up
-       *  later because the strip reads `variables` off the in-flight mutation, and
-       *  the search result it came from lives in a dialog that may be closed by
-       *  then. (The same display-only shape {@link useSetIssueMilestone}'s `title`
-       *  keeps.) */
+       *  later because the indicator reads `variables` off the in-flight mutation,
+       *  and the search result it came from lives in a dialog that may be closed
+       *  by then. (The same display-only shape {@link useSetIssueMilestone}'s
+       *  `title` keeps.) */
       number: number;
     }) =>
       trackBoardWrite(args.repo, () =>
@@ -2575,8 +2576,9 @@ export function useAddExistingToBoard() {
  *
  * `draftId` is the DRAFT's own content id, which is the id the write addresses;
  * `itemId` rides alongside for the board's own use — the card the patch lands on,
- * the card the panel marks busy, and the write's line in the pending strip — the
- * same display-only shape {@link useAddExistingToBoard}'s `number` keeps.
+ * the card the panel marks busy, and the write's line in the toolbar's write
+ * indicator — the same display-only shape {@link useAddExistingToBoard}'s `number`
+ * keeps.
  *
  * `assigneeLogins` is tri-state, the contract {@link api.ghUpdateDraftItem} states: a
  * list replaces the set, `[]` clears it, and `undefined` leaves it alone. Callers send
