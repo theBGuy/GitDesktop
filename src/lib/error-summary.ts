@@ -38,12 +38,12 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   timeout: "Timed out",
 };
 
-/** git's push transfer header `To <remote>` (git 2.51.1.windows.1): it opens git's
- *  own push report (sideband `remote:` lines may precede it); the reason follows below.
- *  One END-anchored remote token (scheme URL, scp, `host:path`), so prose with a space
- *  never matches; accepted residual: a lone `word:token` line (`To do:x`) is skipped.
- *  Windows drive-letter and `file://` remotes match too (skipped as intended); POSIX,
- *  relative, UNC, IPv6-scp, and space-containing paths don't and keep line one. */
+/** git's push header `To <remote>` (git 2.51.1.windows.1) opens its own report
+ *  (sideband `remote:` lines may precede it); the reason follows below. One
+ *  END-anchored token (scheme URL, scp, `host:path`), so spaced prose never
+ *  matches; accepted residual: a lone `word:token` line (`To do:x`) is skipped.
+ *  Windows drive-letter and `file://` remotes match too; POSIX, relative, UNC,
+ *  IPv6-scp, and space-containing paths don't, and keep line one. */
 const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 
 /** Lines that carry no signal for a one-line summary: git `hint:` guidance,

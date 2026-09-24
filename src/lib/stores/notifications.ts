@@ -99,9 +99,9 @@ export interface AppNotification {
   tone: NotificationTone;
   title: string;
   subtitle?: string;
-  /** Full text behind a one-line `subtitle` (a failure's whole reason), shown as
-   *  the row's hover title; the persisted row can be its only durable copy. Absent
-   *  on rows persisted before this field existed. */
+  /** Full text behind a one-line `subtitle` (a failure's whole reason): the row's
+   *  hover title and its button's accessible description. The persisted row can be
+   *  its only durable copy. Absent on rows persisted before this field existed. */
   detail?: string;
   /** Epoch ms. */
   ts: number;

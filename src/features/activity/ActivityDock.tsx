@@ -16,7 +16,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ElapsedTime } from "@/components/elapsed-time";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -758,12 +758,14 @@ function NotificationRow({
   onDelete: () => void;
 }) {
   const Glyph = glyphFor(n);
+  const detailId = useId();
 
   return (
     <div className="flex items-stretch not-last:border-b hover:bg-muted/60">
       <button
         type="button"
         data-row={n.id}
+        aria-describedby={n.detail ? detailId : undefined}
         onClick={onNavigate}
         onKeyDown={(e) => {
           if (e.key === "Delete" || e.key === "Backspace") {
@@ -841,6 +843,13 @@ function NotificationRow({
           </span>
         )}
       </button>
+      {/* The full text is otherwise only in the subtitle's hover title, which
+          assistive tech never reads; aria-describedby resolves hidden targets. */}
+      {n.detail && (
+        <span id={detailId} hidden>
+          {n.detail}
+        </span>
+      )}
       {n.action && (
         <Button
           variant="ghost"
