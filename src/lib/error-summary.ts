@@ -38,13 +38,25 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   timeout: "Timed out",
 };
 
+/** git's push transfer header, `To <remote>` (git 2.51.1.windows.1), which opens
+ *  git's own push report (sideband `remote:` lines can precede it) and names where
+ *  the push went; the reason follows on a `! [rejected]` or `error:` line. The
+ *  remote is one END-anchored token (scheme URL, scp `user@host:path`, `host:path`),
+ *  so prose containing a space never matches. Accepted residual: a lone
+ *  `word:token` line (`To do:x`) is skipped too, and the all-noise fallback still
+ *  keeps a summary from blanking. POSIX, relative, UNC, and IPv6-scp remotes don't
+ *  match and keep line-one behavior. */
+const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.-]+:\S+$/;
+
 /** Lines that carry no signal for a one-line summary: git `hint:` guidance,
- *  `Rebasing (x/y)` progress counters, and blanks. */
+ *  `Rebasing (x/y)` progress counters, the push transfer header, and blanks.
+ *  Matched against the trimmed line, which also drops a CRLF joint's `\r`. */
 function isNoiseLine(line: string): boolean {
   const t = line.trim();
   if (t === "") return true;
   if (t.startsWith("hint:")) return true;
   if (/^Rebasing \(\d+\/\d+\)/.test(t)) return true;
+  if (PUSH_TRANSFER_HEADER.test(t)) return true;
   return false;
 }
 
@@ -143,9 +155,9 @@ const DIRTY_TREE_MARKERS = [
 ];
 
 /** Force-push rejections whose reason git prints ONLY inside its per-ref
- *  `! [rejected]        main -> main (<reason>)` line — everything above and
- *  below that line is the remote URL and a generic "failed to push some refs",
- *  which is what a raw summary would otherwise show. Anchored to that line
+ *  `! [rejected]        main -> main (<reason>)` line. The fall-through already
+ *  surfaces that line; a mapped entry earns its place by adding the ADVICE git's
+ *  reason alone doesn't give. Anchored to that line
  *  shape and matched case-sensitively, since the same blob echoes branch names
  *  and URLs. The leading space is optional: the Rust layer trims the whole
  *  report, so the line loses its indent whenever nothing precedes it.

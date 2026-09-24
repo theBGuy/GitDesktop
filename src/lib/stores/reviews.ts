@@ -31,6 +31,7 @@ import type {
   ReviewMode,
 } from "@/lib/ai/types";
 import { track } from "@/lib/analytics";
+import { presentError } from "@/lib/error-summary";
 import { readRepoInstructions } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
@@ -356,8 +357,8 @@ function notifyReviewDone(
   mode: ReviewMode,
   ok: boolean,
   target: ReviewTarget,
-  /** Failure reason (from `errorMessage`), carried into the failed row's subtitle so the
-   *  durable inbox record says WHY. Ignored on success. No Re-run action here (unlike
+  /** Failure reason (the one-line `presentError` summary), carried into the failed row's
+   *  subtitle so the durable inbox record says WHY. Ignored on success. No Re-run action here (unlike
    *  automation): a manual re-fire closure would capture a stale AiSettings snapshot,
    *  whereas the panel's Run button re-resolves fresh config. */
   error?: string,
@@ -814,8 +815,9 @@ export async function startReview(
   } catch (e) {
     if (!control.cancelled) {
       // CLI failures reject with a plain AppError object (not an Error), so `String(e)`
-      // would print "[object Object]" — use the shared extractor. Computed once: the
-      // store patch and the inbox subtitle read the same reason.
+      // would print "[object Object]" — use the shared extractor. The store keeps the
+      // full text; the single-line subtitle gets the toast's one-liner, and only when
+      // there is a message at all (the summary never comes back empty).
       const message = errorMessage(e);
       patch({
         phase: "error",
@@ -823,7 +825,13 @@ export async function startReview(
         error: message,
         endedAt: Date.now(),
       });
-      notifyReviewDone(title, mode, false, target, message);
+      notifyReviewDone(
+        title,
+        mode,
+        false,
+        target,
+        message.trim() ? presentError(e).summary : undefined,
+      );
       // Whatever the run produced before it failed — this store is memory-only, so
       // without a record a timed-out 20-minute run is gone at the next restart. Saved
       // as a PARTIAL record (`phase`), which the history reads exclude: it's kept

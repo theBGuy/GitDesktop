@@ -66,10 +66,12 @@ jobs:
       # Suites whose dependencies live in node_modules and therefore SKIP in the
       # no-install guards job: the reference detector's render oracle needs
       # `marked`, the PR-create lane needs zustand plus @tanstack/react-query,
-      # and the keyboard-nav suite reaches react through the module under test.
+      # the keyboard-nav suite reaches react through the module under test, and
+      # the notification-settings suite loads the settings graph, which pulls
+      # react plus @tauri-apps/plugin-store.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
       # unresolvable import there into a failure rather than a silent skip.
       - name: Node suites needing node_modules (enforced)
         env:
           GD_EXPECT_DEPS: "1"
-        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs"
+        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs"

@@ -1,5 +1,5 @@
+import { presentError } from "@/lib/error-summary";
 import { repoNameFromPath } from "@/lib/stores/notifications";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { emitNotification } from "./emit";
 
 /**
@@ -18,7 +18,9 @@ export function notifyPrCreateFailed(input: {
 }): void {
   const { repoPath, head, noun, error } = input;
   const repoName = repoNameFromPath(repoPath);
-  const reason = errorMessage(error);
+  // Same one-liner the toast shows; the subtitle and OS body are single-line
+  // surfaces.
+  const reason = presentError(error).summary;
   const title = `The ${noun} for ${head} wasn't created`;
   emitNotification({
     source: "prCreate",
