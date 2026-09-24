@@ -56,7 +56,11 @@ import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  toastComposedError,
+  toastError,
+  toastErrorWithNote,
+} from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -283,6 +287,10 @@ export function CreateIssueDialog({
       // `number > 0` guards both — a forge that answered without one names no
       // issue to link.
       const failed: string[] = [];
+      // The raw errors behind `failed`, index-aligned with their headings, so the
+      // toast's Details can show each failure's full text under its own step.
+      const failedErrors: unknown[] = [];
+      const failedHeadings: string[] = [];
       const addProjectIds = pickedProjects.map((p) => p.id);
       if (showProjects && addProjectIds.length > 0 && number > 0) {
         try {
@@ -295,6 +303,8 @@ export function CreateIssueDialog({
         } catch (e) {
           const key = addProjectIds.length === 1 ? "project" : "projects";
           failed.push(`${LINK_FAILED[key]}: ${presentError(e).summary}`);
+          failedErrors.push(e);
+          failedHeadings.push(LINK_FAILED[key]);
         }
       }
       let subIssueLinked = false;
@@ -311,6 +321,8 @@ export function CreateIssueDialog({
           failed.push(
             `${LINK_FAILED["sub-issue"]}: ${presentError(e).summary}`,
           );
+          failedErrors.push(e);
+          failedHeadings.push(LINK_FAILED["sub-issue"]);
         }
       }
       // The toasts below name the origin repo when this settles elsewhere;
@@ -325,10 +337,13 @@ export function CreateIssueDialog({
       if (failed.length > 0) {
         // Every failure in one message, so a run that lost both links doesn't
         // report one and hide the other.
-        toast.error(`Created issue #${number}, but ${failed.join("; ")}`, {
-          duration: 10000,
+        toastComposedError({
+          title: `Created issue #${number}, but ${failed.join("; ")}`,
+          errors: failedErrors,
+          headings: failedHeadings,
           description: originNote,
-          action,
+          view: { url },
+          duration: 10000,
         });
         // The issue EXISTS whatever the links did, so it still opens — the same
         // navigate the clean path makes, under the same gate. A sub-issue keeps

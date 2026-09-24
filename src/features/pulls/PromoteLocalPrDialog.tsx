@@ -21,7 +21,7 @@ import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
-import { repoNameFromPath } from "@/lib/stores/notifications";
+import { landedIn } from "@/lib/stores/notifications";
 import {
   LANE_BLOCKED_HINT,
   markPrCreated,
@@ -32,7 +32,7 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastComposedError, toastError } from "@/lib/toast";
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -159,14 +159,11 @@ export function PromoteLocalPrDialog({
       // close, and this continuation outlives the host's unmount on a repo
       // switch: landed elsewhere they would close a dialog the user reopened
       // there and point that repo's Pulls tab at a number belonging to this one.
-      const live = useUiStore.getState().repoPath === repoPath;
-      toast.success(
-        `Opened ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
-        {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      const { live, away } = landedIn(repoPath);
+      toast.success(`Opened ${prNoun} #${number}${away}`, {
+        description: url,
+        action: { label: "View", onClick: () => openUrl(url) },
+      });
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
       if (live) {
@@ -197,19 +194,18 @@ export function PromoteLocalPrDialog({
       // nothing here and shuts a dialog the user opened for something else.
       const { number, url } = created;
       const ui = useUiStore.getState();
-      const live = ui.repoPath === repoPath;
+      const { live, away } = landedIn(repoPath);
       // The close needs the subject too; the toast names only the REPO, since
       // that is the part the user can't see for themselves.
       const onThisPr =
         live && ui.selectedPr?.kind === "local" && ui.selectedPr.id === pr.id;
       if (onThisPr) onOpenChange(false);
-      toast.error(
-        `Created ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}, but ${failedStep} failed: ${presentError(e).summary}`,
-        {
-          duration: 10000,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      toastComposedError({
+        title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
+        errors: [e],
+        view: { url },
+        duration: 10000,
+      });
     } finally {
       // The lane is also the duplicate-create admission guard, so the watcher
       // arms only once this flow's last step is done — armed at the forge's

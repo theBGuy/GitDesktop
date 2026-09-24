@@ -404,6 +404,15 @@ export function originNoteFor(repoPath: string): string | undefined {
     : `In ${repoNameFromPath(repoPath)}`;
 }
 
+/** Where a settle landed, from ONE store read: `live` is this repo still being the
+ *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't.
+ *  Both derive from that single read, so the navigation gate and the copy can never
+ *  disagree about where the work ended up. Call it AFTER the await, never before. */
+export function landedIn(repoPath: string): { live: boolean; away: string } {
+  const live = originNoteFor(repoPath) === undefined;
+  return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };
+}
+
 export const markNotificationRead = (id: string): void =>
   useNotifStore.getState().markRead(id);
 export const markAllNotificationsRead = (): void =>

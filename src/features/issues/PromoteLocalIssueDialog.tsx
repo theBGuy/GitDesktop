@@ -29,21 +29,12 @@ import {
   useJiraPermissions,
 } from "@/lib/jira/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
-import { originNoteFor, repoNameFromPath } from "@/lib/stores/notifications";
+import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastComposedError, toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 type Destination = "forge" | "jira";
-
-/** Where a settle landed, from ONE store read: `live` is this repo still being the
- *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't.
- *  Both derive from that single read, so the navigation gate and the copy can never
- *  disagree about where the work ended up. Call it AFTER the await, never before. */
-function landedIn(repoPath: string): { live: boolean; away: string } {
-  const live = originNoteFor(repoPath) === undefined;
-  return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };
-}
 
 /**
  * Publishes a local issue to a real tracker — the repo's forge (GitHub or
@@ -204,13 +195,12 @@ export function PromoteLocalIssueDialog({
         ui.selectedIssue?.kind === "local" &&
         ui.selectedIssue.id === issue.id;
       if (onThisIssue) onOpenChange(false);
-      toast.error(
-        `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
-        {
-          duration: 10000,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      toastComposedError({
+        title: `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
+        errors: [e],
+        view: { url },
+        duration: 10000,
+      });
     }
   }
 
@@ -263,13 +253,12 @@ export function PromoteLocalIssueDialog({
         ui.selectedIssue?.kind === "local" &&
         ui.selectedIssue.id === issue.id;
       if (onThisIssue) onOpenChange(false);
-      toast.error(
-        `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
-        {
-          duration: 10000,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      toastComposedError({
+        title: `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
+        errors: [e],
+        view: { url },
+        duration: 10000,
+      });
     }
   }
 

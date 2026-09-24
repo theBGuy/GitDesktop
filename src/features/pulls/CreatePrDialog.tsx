@@ -60,7 +60,11 @@ import {
 } from "@/lib/repo-lens/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
-import { repoNameFromPath } from "@/lib/stores/notifications";
+import {
+  landedIn,
+  originNoteFor,
+  repoNameFromPath,
+} from "@/lib/stores/notifications";
 import {
   consumeLastFailed,
   laneBlocks,
@@ -74,7 +78,11 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  toastComposedError,
+  toastError,
+  toastErrorWithNote,
+} from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -500,13 +508,13 @@ export function CreatePrDialog({
               await queryClient.invalidateQueries({
                 queryKey: ["repo", repoPath, "pr", createLens, number],
               });
-            } catch {
+            } catch (e) {
               // Fires wherever the user is by then, so it names the repo it
               // belongs to when that isn't the one on screen.
-              toast.error("PR created — posting reviewer notes failed.", {
-                description: stillHere()
-                  ? undefined
-                  : `In ${repoNameFromPath(repoPath)}`,
+              toastComposedError({
+                title: "PR created — posting reviewer notes failed.",
+                errors: [e],
+                description: originNoteFor(repoPath),
               });
             }
           }
@@ -534,10 +542,11 @@ export function CreatePrDialog({
         // repository itself once this settles somewhere the user no longer is.
         // The slug arm is the narrow one — both remote reads behind it are gated
         // on the fork lens, so a plain repo never resolves one.
-        const landedIn =
-          targetSlug || (stillHere() ? null : repoNameFromPath(repoPath));
+        const landedRepo =
+          targetSlug ||
+          (landedIn(repoPath).live ? null : repoNameFromPath(repoPath));
         toast.success(
-          `Opened ${prNoun} #${number}${landedIn ? ` in ${landedIn}` : ""}`,
+          `Opened ${prNoun} #${number}${landedRepo ? ` in ${landedRepo}` : ""}`,
           {
             description: url,
             action: { label: "View", onClick: () => openUrl(url) },
@@ -581,7 +590,9 @@ export function CreatePrDialog({
         // created, whatever followed it. Unconditional, guard or no guard: the
         // failure happened, so a landing in another repo names the one it
         // belongs to rather than going unsaid.
-        const away = stillHere() ? null : repoNameFromPath(repoPath);
+        const away = landedIn(repoPath).live
+          ? null
+          : repoNameFromPath(repoPath);
         if (outcome === "error") {
           toastErrorWithNote(
             e,

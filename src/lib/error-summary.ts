@@ -249,10 +249,12 @@ const READ_ONLY_REPOSITORY_SUMMARY =
  *  against gitlab.com; the credential/permission entries against github.com,
  *  gitlab.com, and bitbucket.org (all three land on the same fatal: lines — git's
  *  own wording, not the host's — except a Bitbucket https remote with an embedded
- *  username, which asks for "Password" rather than "Username"). Paired with the
- *  Rust canary `remote_access_stderr_still_matches_the_frontend_markers`
- *  (git/remote.rs), which pins measured stderr against Rust mirrors of these
- *  patterns — keep the two lists in step, ORDER INCLUDED.
+ *  username, which asks for "Password" rather than "Username"); the SSH
+ *  key-refusal entry against gitlab.com and github.com with no usable key
+ *  offered. Paired with the Rust canary
+ *  `remote_access_stderr_still_matches_the_frontend_markers` (git/remote.rs),
+ *  which pins measured stderr against Rust mirrors of these patterns — keep the
+ *  two lists in step, ORDER INCLUDED.
  *
  *  Bitbucket's read-only/archived wording is UNMEASURED — Bitbucket Cloud has no
  *  project-archive feature to reproduce it against, and its branch-restriction
@@ -278,6 +280,15 @@ const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   [
     /^fatal: unable to access '[^'\n]*': The requested URL returned error: 403/m,
     "The remote recognizes the account but it lacks permission for this operation on this repository. Ask an owner for access, or check that the credentials in use belong to the account you expect.",
+  ],
+  // Anchored on ssh's `user@host: Permission denied (` line, not git's shared
+  // `fatal: Could not read from remote repository.` tail: that tail follows every
+  // failed SSH or file-path first contact, whose own first line (a missing path,
+  // an unresolvable host) is the better headline (measured 2026-09-24). The
+  // method list after the paren varies (`publickey,password`), so no end anchor.
+  [
+    /^\S+@\S+: Permission denied \(/m,
+    "The remote refused the SSH connection because no key it accepts was offered. Add or load an SSH key with access to this remote, then try again.",
   ],
 ];
 

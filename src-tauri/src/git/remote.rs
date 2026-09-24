@@ -2293,6 +2293,46 @@ remote: The requested repository either does not exist or you do not have access
 fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/': The requested URL returned error: 403
 ";
 
+    /// `git ls-remote` over SSH with no usable key — measured against gitlab.com
+    /// on git 2.51.1.windows.1, 2026-09. The ssh client ends its line with CRLF
+    /// while git's own lines use LF; the `\r` is kept byte-exact.
+    const GITLAB_SSH_NO_ACCESS_STDERR: &str = "\
+git@gitlab.com: Permission denied (publickey).\r
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+";
+
+    /// The github.com counterpart, same provenance: identical but for the host.
+    const GITHUB_SSH_NO_ACCESS_STDERR: &str = "\
+git@github.com: Permission denied (publickey).\r
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+";
+
+    /// `git ls-remote` against a local path that doesn't exist, same git,
+    /// 2026-09-24. It ends on the same `fatal:` tail as the SSH refusals above.
+    const LOCAL_MISSING_PATH_STDERR: &str = "\
+fatal: 'C:/definitely-not-a-repo-x7q9z' does not appear to be a git repository
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+";
+
+    /// `git ls-remote` against an SSH host that doesn't resolve, same provenance;
+    /// the ssh line ends in CRLF like the key refusals'.
+    const UNRESOLVABLE_HOST_STDERR: &str = "\
+ssh: Could not resolve hostname definitely-not-a-host-x7q9z.invalid: Name or service not known\r
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+";
+
     /// The chunks the frontend's `/m` regexes see as lines. JS `.` refuses every
     /// LineTerminator and `^` re-anchors after each, while `str::lines` splits on
     /// `\n` alone — and git's sideband re-emits `remote: ` after a BARE `\r` when
@@ -2378,14 +2418,35 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
         })
     }
 
+    /// Entry six, `^\S+@\S+: Permission denied \(`. The regex's `\S` runs can't
+    /// cross whitespace, so its `user@host:` token is the line's whole first word:
+    /// that word must end in `:` and hold an `@` with a character on each side
+    /// before that colon. `is_js_space` is JS's `\s`, which differs from
+    /// `char::is_whitespace` on U+0085 and U+FEFF.
+    fn marks_ssh_key_refused(report: &str) -> bool {
+        fn is_js_space(c: char) -> bool {
+            (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+        }
+        js_lines(report).any(|l| {
+            let (word, rest) = l.split_at(l.find(is_js_space).unwrap_or(l.len()));
+            rest.starts_with(" Permission denied (")
+                && word.strip_suffix(':').is_some_and(|user_host| {
+                    user_host
+                        .char_indices()
+                        .any(|(i, c)| c == '@' && i > 0 && i + 1 < user_host.len())
+                })
+        })
+    }
+
     /// Rust mirrors of `REMOTE_ACCESS_SUMMARIES` (src/lib/error-summary.ts), in
     /// the frontend's table order.
-    const REMOTE_ACCESS_MARKERS: [fn(&str) -> bool; 5] = [
+    const REMOTE_ACCESS_MARKERS: [fn(&str) -> bool; 6] = [
         marks_read_only_repository,
         marks_gitlab_archived_project,
         marks_missing_credentials,
         marks_rejected_credentials,
         marks_forbidden_403,
+        marks_ssh_key_refused,
     ];
 
     /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the pattern each entry
@@ -2398,6 +2459,7 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
     const NO_CREDENTIALS: usize = 2;
     const REJECTED_CREDENTIALS: usize = 3;
     const FORBIDDEN_403: usize = 4;
+    const SSH_KEY_REFUSED: usize = 5;
 
     /// The entry `remoteAccessSummary` would pick: the FIRST match in table order,
     /// mirroring its `.find()`. The index is the table POSITION, so order is
@@ -2463,6 +2525,16 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
                 GITLAB_ARCHIVED,
                 "an archived GitLab project",
             ),
+            (
+                GITLAB_SSH_NO_ACCESS_STDERR,
+                SSH_KEY_REFUSED,
+                "an SSH key refusal, on GitLab",
+            ),
+            (
+                GITHUB_SSH_NO_ACCESS_STDERR,
+                SSH_KEY_REFUSED,
+                "an SSH key refusal, on GitHub",
+            ),
         ] {
             assert_eq!(
                 first_remote_access_match(stderr),
@@ -2505,6 +2577,27 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
             );
         }
 
+        // The ssh line's CRLF joint is part of the measured shape; a fixture that
+        // lost it would stop exercising the `\r` the frontend regex must tolerate.
+        for stderr in [GITLAB_SSH_NO_ACCESS_STDERR, GITHUB_SSH_NO_ACCESS_STDERR] {
+            assert!(
+                stderr.contains("(publickey).\r\nfatal: "),
+                "an SSH fixture lost its measured CRLF joint. Actual stderr:\n{stderr}"
+            );
+        }
+
+        // These end on the same shared `fatal:` tail as the key refusals, but their
+        // own first lines say more than any mapped summary, so no entry may claim
+        // them.
+        for stderr in [LOCAL_MISSING_PATH_STDERR, UNRESOLVABLE_HOST_STDERR] {
+            assert_eq!(
+                first_remote_access_match(stderr),
+                None,
+                "a first-contact failure with a specific first line was claimed by \
+                 a remote-access entry. Actual stderr:\n{stderr}"
+            );
+        }
+
         // Shapes the line anchor, word boundaries, and exact wording refuse.
         // Looser matching here would let the canary pass stderr the frontend
         // leaves raw, which is the one direction it must not be loose in.
@@ -2524,6 +2617,9 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
             // Entry two's wording is GitLab's exact copy — a paraphrase must not
             // borrow its verdict.
             "remote: You cannot push code to an archived project.",
+            // Entry six's `user@host:` token must open the line, so ssh's
+            // refusal quoted after other text is not ssh's.
+            "warning: git@gitlab.com: Permission denied (publickey).",
         ] {
             assert_eq!(
                 first_remote_access_match(line),

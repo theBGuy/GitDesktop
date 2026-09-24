@@ -827,6 +827,7 @@ export async function startReview(
       // full text, as does the row's hover; the subtitle gets the toast's one-liner.
       // Both only when there is a message at all (the summary never comes back empty).
       const message = errorMessage(e);
+      const trimmed = message.trim();
       patch({
         phase: "error",
         status: "",
@@ -838,8 +839,8 @@ export async function startReview(
         mode,
         false,
         target,
-        message.trim() ? presentError(e).summary : undefined,
-        message.trim() ? message : undefined,
+        trimmed ? presentError(e).summary : undefined,
+        trimmed || undefined,
       );
       // Whatever the run produced before it failed — this store is memory-only, so
       // without a record a timed-out 20-minute run is gone at the next restart. Saved

@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { type ErrorPresentation, presentError } from "@/lib/error-summary";
 import { useErrorDialog } from "@/lib/stores/error-dialog";
@@ -37,6 +38,56 @@ export function toastError(e: unknown) {
  */
 export function toastErrorWithNote(e: unknown, note: string) {
   showErrorToast(e, note);
+}
+
+/**
+ * A failure toast whose title composes app prose around one or more underlying
+ * errors ("Created issue #12, but adding it to a project failed: …"). The title
+ * stays the calm composed line; this keeps a route to the raw text, which a
+ * plain `toastError` gives but these composed sites lost: Details/Copy rides
+ * the cancel slot when `view` occupies the action, else it IS the action —
+ * exactly `errorToastAction`'s affordance either way.
+ */
+export function toastComposedError(opts: {
+  /** The composed headline (already carries summaries where it wants them). */
+  title: string;
+  /** The raw failure(s) behind it — at least one. */
+  errors: readonly unknown[];
+  /** Per-failure heading when several compose (same order as `errors`); each
+   *  becomes a section header above that failure's full text in Details. */
+  headings?: readonly string[];
+  /** Toast description (origin note, or a one-line reason) — free text. */
+  description?: string;
+  /** Primary View action for the created entity, when one exists. */
+  view?: { url: string };
+  /** Defaults to 8000, matching `showErrorToast`. */
+  duration?: number;
+}): void {
+  const { title, errors, headings, description, view, duration } = opts;
+  const presentation: ErrorPresentation =
+    errors.length === 1
+      ? presentError(errors[0])
+      : {
+          label: null,
+          summary: title,
+          fullText: errors
+            .map((e, i) => {
+              const heading = headings?.[i];
+              const text = presentError(e).fullText;
+              return heading ? `${heading}\n${text}` : text;
+            })
+            .join("\n\n"),
+          long: true,
+        };
+  const details = errorToastAction(presentation);
+  toast.error(title, {
+    description,
+    duration: duration ?? 8000,
+    action: view
+      ? { label: "View", onClick: () => openUrl(view.url) }
+      : details,
+    cancel: view ? details : undefined,
+  });
 }
 
 /**

@@ -442,6 +442,67 @@ test("an all-noise report still summarizes its first non-empty line", () => {
   );
 });
 
+// `git ls-remote` refusals measured on git 2.51.1.windows.1, 2026-09-24: an SSH
+// remote with no usable key, a missing local path, and an unresolvable SSH host
+// (the ssh client's lines end in CRLF, git's own in LF), all ending on git's
+// shared `fatal:` tail; and an https remote naming a missing project.
+const SSH_KEY_REFUSED_SUMMARY =
+  "The remote refused the SSH connection because no key it accepts was offered. Add or load an SSH key with access to this remote, then try again.";
+const UNREADABLE_TAIL =
+  "fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n";
+const sshNoAccess = (host) =>
+  `git@${host}: Permission denied (publickey).\r\n${UNREADABLE_TAIL}`;
+const MISSING_PATH_LINE =
+  "'C:/definitely-not-a-repo-x7q9z' does not appear to be a git repository";
+const UNRESOLVED_HOST_LINE =
+  "ssh: Could not resolve hostname definitely-not-a-host-x7q9z.invalid: Name or service not known";
+
+test("an SSH remote with no usable key gets the calm key-refusal line", () => {
+  for (const host of ["gitlab.com", "github.com"]) {
+    for (const make of [gitError, rawGitError]) {
+      const p = presentError(make(sshNoAccess(host)));
+      assert.equal(p.summary, SSH_KEY_REFUSED_SUMMARY, host);
+      assert.ok(
+        p.fullText.includes(`git@${host}: Permission denied (publickey).`),
+        "fullText keeps the ssh line",
+      );
+    }
+  }
+});
+
+test("an https missing-project refusal keeps its remote: line", () => {
+  const gitlabLine =
+    "remote: The project you were looking for could not be found or you don't have permission to view it.";
+  const githubLine = "remote: Repository not found.";
+  for (const [first, url] of [
+    [gitlabLine, "https://gitlab.com/x/y.git/"],
+    [githubLine, "https://github.com/x/y.git/"],
+  ]) {
+    const text = `${first}\nfatal: repository '${url}' not found\n`;
+    for (const make of [gitError, rawGitError]) {
+      assert.equal(presentError(make(text)).summary, first, url);
+    }
+  }
+});
+
+test("first-contact failures on git's shared tail keep their own first line", () => {
+  for (const [text, summary] of [
+    [`fatal: ${MISSING_PATH_LINE}\n${UNREADABLE_TAIL}`, MISSING_PATH_LINE],
+    [`${UNRESOLVED_HOST_LINE}\r\n${UNREADABLE_TAIL}`, UNRESOLVED_HOST_LINE],
+  ]) {
+    for (const make of [gitError, rawGitError]) {
+      assert.equal(presentError(make(text)).summary, summary);
+    }
+  }
+});
+
+test("ssh's key refusal after other text on its line falls through", () => {
+  const line = "warning: git@gitlab.com: Permission denied (publickey).";
+  const p = presentError(gitError(line));
+  assert.notEqual(p.summary, SSH_KEY_REFUSED_SUMMARY);
+  assert.equal(p.summary, line);
+});
+
 test("empty messages fall through to a non-blank summary", () => {
   assert.equal(
     presentError({ kind: "git", message: "", code: 1, stderr: "" }).summary,

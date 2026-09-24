@@ -13,7 +13,7 @@ import { normPath } from "@/lib/git/path";
 import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
-import { toastError } from "@/lib/toast";
+import { toastComposedError, toastError } from "@/lib/toast";
 import { useUiStore } from "./ui";
 
 /** A worktree removal the app is still waiting on. */
@@ -312,10 +312,11 @@ function settleRemoval(repoPath: string, path: string) {
 /** The one recovery message for an archive that didn't happen, spelled once so
  *  the two ways it can be refused can't drift apart. */
 function toastArchiveRefused(branch: string, e: unknown) {
-  toast.error(
-    `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
-    { description: presentError(e).summary },
-  );
+  toastComposedError({
+    title: `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
+    errors: [e],
+    description: presentError(e).summary,
+  });
 }
 
 /** Honours the delete dialog's "archive when done" checkbox, once the removal
@@ -543,7 +544,9 @@ async function runPromote(
         willStash && !stashed
           ? `Removed the worktree, but couldn't stash your main workspace changes — commit or stash them, then check out ${branch} manually.`
           : `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${stashedClause}`;
-      toast.error(message, {
+      toastComposedError({
+        title: message,
+        errors: [e],
         description: presentError(e).summary,
       });
     } else {

@@ -32,7 +32,11 @@ import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  toastComposedError,
+  toastError,
+  toastErrorWithNote,
+} from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -161,8 +165,14 @@ export function CreateLocalPrDialog({
               await queryClient.invalidateQueries({
                 queryKey: ["local-prs", repoPath],
               });
-            } catch {
-              toast.error("Local PR created — adding reviewer notes failed.");
+            } catch (e) {
+              // Read at settle time, like the success toast below: this can land
+              // after a switch, and then names the repo it belongs to.
+              toastComposedError({
+                title: "Local PR created — adding reviewer notes failed.",
+                errors: [e],
+                description: originNoteFor(repoPath),
+              });
             }
           }
           // Consume the deposit — the create consumed the note. Best-effort.
