@@ -542,16 +542,13 @@ export function CreatePrDialog({
         // repository itself once this settles somewhere the user no longer is.
         // The slug arm is the narrow one — both remote reads behind it are gated
         // on the fork lens, so a plain repo never resolves one.
-        const landedRepo =
-          targetSlug ||
-          (landedIn(repoPath).live ? null : repoNameFromPath(repoPath));
-        toast.success(
-          `Opened ${prNoun} #${number}${landedRepo ? ` in ${landedRepo}` : ""}`,
-          {
-            description: url,
-            action: { label: "View", onClick: () => openUrl(url) },
-          },
-        );
+        const where = targetSlug
+          ? ` in ${targetSlug}`
+          : landedIn(repoPath).away;
+        toast.success(`Opened ${prNoun} #${number}${where}`, {
+          description: url,
+          action: { label: "View", onClick: () => openUrl(url) },
+        });
         // This dialog is panel-hosted under <Activity>, so the success path must
         // only close — never setRepoTab/selectPr, which would conceal this panel
         // mid-close and defer the close and unmount until it is next shown. Want
@@ -590,14 +587,14 @@ export function CreatePrDialog({
         // created, whatever followed it. Unconditional, guard or no guard: the
         // failure happened, so a landing in another repo names the one it
         // belongs to rather than going unsaid.
-        const away = landedIn(repoPath).live
+        const awayRepo = landedIn(repoPath).live
           ? null
           : repoNameFromPath(repoPath);
         if (outcome === "error") {
           toastErrorWithNote(
             e,
-            away
-              ? `In ${away}, the ${prNoun} for ${value.head} wasn't created.`
+            awayRepo
+              ? `In ${awayRepo}, the ${prNoun} for ${value.head} wasn't created.`
               : `The ${prNoun} for ${value.head} wasn't created.`,
           );
           // The toast fades in seconds; this outlives it for a user who moved on.
@@ -607,7 +604,7 @@ export function CreatePrDialog({
             noun: prNoun,
             error: e,
           });
-        } else if (away) toastErrorWithNote(e, `In ${away}`);
+        } else if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
         else toastError(e);
       } finally {
         // The lane is also the duplicate-create admission guard, so the watcher

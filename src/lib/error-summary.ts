@@ -251,10 +251,9 @@ const READ_ONLY_REPOSITORY_SUMMARY =
  *  own wording, not the host's — except a Bitbucket https remote with an embedded
  *  username, which asks for "Password" rather than "Username"); the SSH
  *  key-refusal entry against gitlab.com and github.com with no usable key
- *  offered. Paired with the Rust canary
- *  `remote_access_stderr_still_matches_the_frontend_markers` (git/remote.rs),
- *  which pins measured stderr against Rust mirrors of these patterns — keep the
- *  two lists in step, ORDER INCLUDED.
+ *  offered. Paired with `remote_access_stderr_still_matches_the_frontend_markers`
+ *  (git/remote.rs), the Rust canary that pins measured stderr against Rust
+ *  mirrors of these patterns — keep the two lists in step, ORDER INCLUDED.
  *
  *  Bitbucket's read-only/archived wording is UNMEASURED — Bitbucket Cloud has no
  *  project-archive feature to reproduce it against, and its branch-restriction
@@ -285,9 +284,12 @@ const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   // `fatal: Could not read from remote repository.` tail: that tail follows every
   // failed SSH or file-path first contact, whose own first line (a missing path,
   // an unresolvable host) is the better headline (measured 2026-09-24). The
-  // method list after the paren varies (`publickey,password`), so no end anchor.
+  // method list varies (`publickey,password`), so it need only name `publickey`
+  // for the key advice to hold. ssh diagnostics PRECEDING the refusal in the same
+  // fold (bad key format, agent refusals; unmeasured) lose the headline here, and
+  // Details keeps them.
   [
-    /^\S+@\S+: Permission denied \(/m,
+    /^\S+@\S+: Permission denied \((?=[^)\n]*publickey)/m,
     "The remote refused the SSH connection because no key it accepts was offered. Add or load an SSH key with access to this remote, then try again.",
   ],
 ];
@@ -590,4 +592,30 @@ export function presentError(e: unknown): ErrorPresentation {
   const summary = firstMeaningfulLine(message) || "Unexpected error";
   const long = nonEmptyLineCount(message) > 1 || message.length > 140;
   return { label: null, summary, fullText: message, long };
+}
+
+/**
+ * The Details presentation behind a composed failure toast (`toastComposedError`):
+ * the composed `title` headlines the dialog so its context outlives the toast.
+ * One error keeps its own label and full text; several become one section per
+ * failure, each under its `headings[i]` when given, separated by a blank line.
+ */
+export function composedErrorPresentation(
+  title: string,
+  errors: readonly unknown[],
+  headings?: readonly string[],
+): ErrorPresentation {
+  if (errors.length === 1) return { ...presentError(errors[0]), summary: title };
+  return {
+    label: null,
+    summary: title,
+    fullText: errors
+      .map((e, i) => {
+        const heading = headings?.[i];
+        const text = presentError(e).fullText;
+        return heading ? `${heading}\n${text}` : text;
+      })
+      .join("\n\n"),
+    long: true,
+  };
 }

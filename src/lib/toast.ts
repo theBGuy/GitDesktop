@@ -1,6 +1,10 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { type ErrorPresentation, presentError } from "@/lib/error-summary";
+import {
+  composedErrorPresentation,
+  type ErrorPresentation,
+  presentError,
+} from "@/lib/error-summary";
 import { useErrorDialog } from "@/lib/stores/error-dialog";
 
 /**
@@ -46,7 +50,9 @@ export function toastErrorWithNote(e: unknown, note: string) {
  * stays the calm composed line; this keeps a route to the raw text, which a
  * plain `toastError` gives but these composed sites lost: Details/Copy rides
  * the cancel slot when `view` occupies the action, else it IS the action —
- * exactly `errorToastAction`'s affordance either way.
+ * exactly `errorToastAction`'s affordance either way. The Details dialog
+ * headlines the composed title too, so that context outlives the toast; its body
+ * is the raw full text, one headed section per failure when several compose.
  */
 export function toastComposedError(opts: {
   /** The composed headline (already carries summaries where it wants them). */
@@ -64,22 +70,9 @@ export function toastComposedError(opts: {
   duration?: number;
 }): void {
   const { title, errors, headings, description, view, duration } = opts;
-  const presentation: ErrorPresentation =
-    errors.length === 1
-      ? presentError(errors[0])
-      : {
-          label: null,
-          summary: title,
-          fullText: errors
-            .map((e, i) => {
-              const heading = headings?.[i];
-              const text = presentError(e).fullText;
-              return heading ? `${heading}\n${text}` : text;
-            })
-            .join("\n\n"),
-          long: true,
-        };
-  const details = errorToastAction(presentation);
+  const details = errorToastAction(
+    composedErrorPresentation(title, errors, headings),
+  );
   toast.error(title, {
     description,
     duration: duration ?? 8000,

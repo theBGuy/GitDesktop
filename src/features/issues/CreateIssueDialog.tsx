@@ -282,15 +282,11 @@ export function CreateIssueDialog({
       }
       // The post-create links are INDEPENDENT of each other: a board refusing the
       // issue says nothing about whether its parent will take it, so each runs on
-      // its own and reports into `failed` rather than throwing past the other. A
-      // shared try/catch let the first failure cancel the second link silently.
+      // its own and reports into `failures` rather than throwing past the other.
+      // A shared try/catch let the first failure cancel the second link silently.
       // `number > 0` guards both — a forge that answered without one names no
       // issue to link.
-      const failed: string[] = [];
-      // The raw errors behind `failed`, index-aligned with their headings, so the
-      // toast's Details can show each failure's full text under its own step.
-      const failedErrors: unknown[] = [];
-      const failedHeadings: string[] = [];
+      const failures: { heading: string; error: unknown }[] = [];
       const addProjectIds = pickedProjects.map((p) => p.id);
       if (showProjects && addProjectIds.length > 0 && number > 0) {
         try {
@@ -302,9 +298,7 @@ export function CreateIssueDialog({
           });
         } catch (e) {
           const key = addProjectIds.length === 1 ? "project" : "projects";
-          failed.push(`${LINK_FAILED[key]}: ${presentError(e).summary}`);
-          failedErrors.push(e);
-          failedHeadings.push(LINK_FAILED[key]);
+          failures.push({ heading: LINK_FAILED[key], error: e });
         }
       }
       let subIssueLinked = false;
@@ -318,11 +312,7 @@ export function CreateIssueDialog({
           });
           subIssueLinked = true;
         } catch (e) {
-          failed.push(
-            `${LINK_FAILED["sub-issue"]}: ${presentError(e).summary}`,
-          );
-          failedErrors.push(e);
-          failedHeadings.push(LINK_FAILED["sub-issue"]);
+          failures.push({ heading: LINK_FAILED["sub-issue"], error: e });
         }
       }
       // The toasts below name the origin repo when this settles elsewhere;
@@ -334,13 +324,19 @@ export function CreateIssueDialog({
       const ourDraft =
         draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
       if (ourDraft) onOpenChange(false);
-      if (failed.length > 0) {
+      if (failures.length > 0) {
         // Every failure in one message, so a run that lost both links doesn't
-        // report one and hide the other.
+        // report one and hide the other. The title keeps each step mid-sentence
+        // lowercase; Details capitalizes it, since there it heads a section.
+        const reasons = failures.map(
+          (f) => `${f.heading}: ${presentError(f.error).summary}`,
+        );
         toastComposedError({
-          title: `Created issue #${number}, but ${failed.join("; ")}`,
-          errors: failedErrors,
-          headings: failedHeadings,
+          title: `Created issue #${number}, but ${reasons.join("; ")}`,
+          errors: failures.map((f) => f.error),
+          headings: failures.map(
+            (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
+          ),
           description: originNote,
           view: { url },
           duration: 10000,

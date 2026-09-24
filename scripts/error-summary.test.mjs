@@ -20,7 +20,9 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const { presentError } = await import("@/lib/error-summary");
+const { composedErrorPresentation, presentError } = await import(
+  "@/lib/error-summary"
+);
 
 const REMOTE = "https://gitlab.com/x/y.git";
 const REJECTED = " ! [rejected]        main -> main (non-fast-forward)";
@@ -494,6 +496,54 @@ test("first-contact failures on git's shared tail keep their own first line", ()
       assert.equal(presentError(make(text)).summary, summary);
     }
   }
+});
+
+test("constructed method lists: publickey among several maps, keyless lists fall through", () => {
+  const withKey = "git@example.com: Permission denied (publickey,password).";
+  assert.equal(
+    presentError(gitError(withKey)).summary,
+    SSH_KEY_REFUSED_SUMMARY,
+  );
+  for (const keyless of [
+    "git@example.com: Permission denied (password).",
+    "git@example.com: Permission denied (keyboard-interactive).",
+  ]) {
+    assert.equal(presentError(gitError(keyless)).summary, keyless);
+  }
+});
+
+test("a composed presentation headlines the title over one error's own text", () => {
+  const error = gitError(sshNoAccess("gitlab.com"));
+  const own = presentError(error);
+  const p = composedErrorPresentation("Created issue #12, but it failed.", [
+    error,
+  ]);
+  assert.equal(p.summary, "Created issue #12, but it failed.");
+  assert.equal(p.label, own.label);
+  assert.equal(p.fullText, own.fullText);
+  assert.equal(p.long, own.long);
+});
+
+test("a composed presentation sections several errors under their headings", () => {
+  const first = gitError("fatal: first failure");
+  const second = new Error("second failure\nwith detail");
+  const p = composedErrorPresentation(
+    "Created issue #12, but two steps failed.",
+    [first, second],
+    ["Adding to project", "Setting labels"],
+  );
+  assert.deepEqual(p, {
+    label: null,
+    summary: "Created issue #12, but two steps failed.",
+    fullText:
+      "Adding to project\nfatal: first failure\n\nSetting labels\nsecond failure\nwith detail",
+    long: true,
+  });
+  // Without headings the sections join bare.
+  assert.equal(
+    composedErrorPresentation("t", [first, second]).fullText,
+    "fatal: first failure\n\nsecond failure\nwith detail",
+  );
 });
 
 test("ssh's key refusal after other text on its line falls through", () => {

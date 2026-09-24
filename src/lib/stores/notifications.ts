@@ -406,8 +406,9 @@ export function originNoteFor(repoPath: string): string | undefined {
 
 /** Where a settle landed, from ONE store read: `live` is this repo still being the
  *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't.
- *  Both derive from that single read, so the navigation gate and the copy can never
- *  disagree about where the work ended up. Call it AFTER the await, never before. */
+ *  Both derive from that single read, so a caller deriving its gate and its copy
+ *  from one call cannot have them disagree about where the work ended up. Call it
+ *  AFTER the await, never before. */
 export function landedIn(repoPath: string): { live: boolean; away: string } {
   const live = originNoteFor(repoPath) === undefined;
   return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };

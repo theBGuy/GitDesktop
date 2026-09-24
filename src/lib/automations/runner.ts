@@ -58,6 +58,7 @@ import {
 } from "@/lib/stores/reviews";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
 import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
+import { toastComposedError } from "@/lib/toast";
 import {
   clearDismissedHead,
   getDismissedHeadMap,
@@ -1090,7 +1091,10 @@ export function rerunAutomation(
     } catch (e) {
       // A throw before/inside the loop (loadAutomations, store I/O) must not be swallowed —
       // surface it; the stopped row stays.
-      toast.error(`Couldn't re-run the ${label}: ${presentError(e).summary}`);
+      toastComposedError({
+        title: `Couldn't re-run the ${label}: ${presentError(e).summary}`,
+        errors: [e],
+      });
     }
   })();
 }
@@ -1329,9 +1333,10 @@ export function runAutomationNow(
       }
       // attempted > 0: the dock's live row is the feedback — no toast.
     } catch (e) {
-      toast.error(
-        `Couldn't run automations on this pull request: ${presentError(e).summary}`,
-      );
+      toastComposedError({
+        title: `Couldn't run automations on this pull request: ${presentError(e).summary}`,
+        errors: [e],
+      });
     } finally {
       runNowStarting.delete(latchKey);
     }

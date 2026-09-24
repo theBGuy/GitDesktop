@@ -2418,18 +2418,27 @@ and the repository exists.
         })
     }
 
-    /// Entry six, `^\S+@\S+: Permission denied \(`. The regex's `\S` runs can't
-    /// cross whitespace, so its `user@host:` token is the line's whole first word:
-    /// that word must end in `:` and hold an `@` with a character on each side
-    /// before that colon. `is_js_space` is JS's `\s`, which differs from
-    /// `char::is_whitespace` on U+0085 and U+FEFF.
+    /// Entry six, `^\S+@\S+: Permission denied \((?=[^)\n]*publickey)`. The
+    /// regex's `\S` runs can't cross whitespace, so its `user@host:` token is the
+    /// line's whole first word: that word must end in `:` and hold an `@` with a
+    /// character on each side before that colon. `is_js_space` is JS's `\s`, which
+    /// differs from `char::is_whitespace` on U+0085 and U+FEFF. The method list up
+    /// to the first `)` must name `publickey`; a bare `\r`, U+2028, or U+2029
+    /// inside it ends the chunk here while JS keeps reading, stricter like entry
+    /// five.
     fn marks_ssh_key_refused(report: &str) -> bool {
         fn is_js_space(c: char) -> bool {
             (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
         }
         js_lines(report).any(|l| {
             let (word, rest) = l.split_at(l.find(is_js_space).unwrap_or(l.len()));
-            rest.starts_with(" Permission denied (")
+            rest.strip_prefix(" Permission denied (")
+                .is_some_and(|methods| {
+                    methods
+                        .split_once(')')
+                        .map_or(methods, |(list, _)| list)
+                        .contains("publickey")
+                })
                 && word.strip_suffix(':').is_some_and(|user_host| {
                     user_host
                         .char_indices()
@@ -2598,6 +2607,14 @@ and the repository exists.
             );
         }
 
+        // Constructed, not measured: ssh's method list varies, and entry six only
+        // needs it to name `publickey`.
+        assert_eq!(
+            first_remote_access_match("git@example.com: Permission denied (publickey,password).\n"),
+            Some(SSH_KEY_REFUSED),
+            "a key refusal listing more methods than publickey must still match"
+        );
+
         // Shapes the line anchor, word boundaries, and exact wording refuse.
         // Looser matching here would let the canary pass stderr the frontend
         // leaves raw, which is the one direction it must not be loose in.
@@ -2620,6 +2637,10 @@ and the repository exists.
             // Entry six's `user@host:` token must open the line, so ssh's
             // refusal quoted after other text is not ssh's.
             "warning: git@gitlab.com: Permission denied (publickey).",
+            // Constructed: a refusal that never involved a key must not get key
+            // advice.
+            "git@example.com: Permission denied (password).",
+            "git@example.com: Permission denied (keyboard-interactive).",
         ] {
             assert_eq!(
                 first_remote_access_match(line),
