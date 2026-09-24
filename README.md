@@ -676,7 +676,8 @@ advisories** published on the repository itself. Select a row for its
 detail, then open it on GitHub. A Dependabot alert's detail adds a
 base-metric table per CVSS version the advisory carries (3.x and 4.0), its
 CWEs, labeled reference links, and whether the package is a direct or
-transitive dependency. When a category isn't reporting (scanning switched
+transitive dependency. The GHSA, CVE, and CWE ids a detail shows link to
+their advisory pages. When a category isn't reporting (scanning switched
 off, a token that can't read it, or a check that didn't complete), the tab
 says which and why; for the three scanning categories, **Open security
 settings** (with repo-admin access) goes straight to Repository settings →

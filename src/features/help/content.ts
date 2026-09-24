@@ -2470,7 +2470,10 @@ GitHub** to open it there. A Dependabot alert's detail goes further: whether the
 vulnerable package is a **direct** or **transitive** dependency, a **base-metric
 table** for each CVSS version the advisory carries (**3.x** and **4.0** can both be
 there), the **CWEs** GitHub classified it under, and its **references** as labeled
-links.
+links. The **GHSA**, **CVE**, and **CWE** ids in an alert's or advisory's detail open
+their advisory pages: CWEs on MITRE, CVEs on NVD, and GHSA ids in the GitHub Advisory
+Database, or on a repository advisory's own page when it has one. Hover an id to
+preview the full URL.
 
 A category that isn't reporting tells you why rather than looking empty — a category
 only reads as clean once GitHub has confirmed it's switched on. When **Dependabot
@@ -2501,10 +2504,10 @@ findings your pipelines already produce.
 
 Move through the list with **↑ / ↓** and select a row for its detail: its **severity**,
 the **file and line**, the **scanner** that raised it, its **identifiers** (CVE, CWE,
-rule keys) as links where the report gives one, and the description. **View file on
-GitLab** opens that line in the file at the exact commit the pipeline scanned. Detected
-secret *values* never leave the report — the raw extract is dropped before a finding
-reaches the app.
+rule keys) as links where the report gives one, each previewing the full URL on hover,
+and the description. **View file on GitLab** opens that line in the file at the exact
+commit the pipeline scanned. Detected secret *values* never leave the report — the raw
+extract is dropped before a finding reaches the app.
 
 Each section explains itself rather than looking clean; when one cause covers all
 three — no pipeline to read yet, or one problem across every category — a single card
