@@ -188,6 +188,22 @@ impl StatusContent {
         }
         Ok(content)
     }
+
+    /// Refuses content with none of the four fields. GitHub rejects a create that
+    /// is that empty, and an all-null edit is unprobed, so the edit is held to the
+    /// same rule here, before the network, in the dialog's own words.
+    fn require_any(self) -> AppResult<Self> {
+        if self.status.is_none()
+            && self.body.is_none()
+            && self.start_date.is_none()
+            && self.target_date.is_none()
+        {
+            return Err(AppError::InvalidArgument(
+                "Keep a status, a note or a date on the update".into(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 /// The create sends only the fields that are present, since a new update has
@@ -314,7 +330,7 @@ pub async fn gh_update_project_status_update(
     start_date: Option<String>,
     target_date: Option<String>,
 ) -> AppResult<ProjectStatusUpdate> {
-    let content = StatusContent::new(status, body, start_date, target_date)?;
+    let content = StatusContent::new(status, body, start_date, target_date)?.require_any()?;
     let input = update_input(&status_update_id, &content);
     let value = write(&repo_path, &input, "the updated status update").await?;
     response_update(&value, UPDATE_POINTER, "the updated status update")
@@ -638,6 +654,41 @@ mod tests {
                 matches!(validate_status(status), Err(AppError::InvalidArgument(_))),
                 "{status} should be refused"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_all_empty_edit_is_refused_before_the_network() {
+        // A repo path that doesn't exist: a gh invocation would fail with some
+        // OTHER error, so InvalidArgument proves the refusal came first.
+        for (status, body, start, target) in [
+            (None, None, None, None),
+            (Some(""), Some("  "), Some(""), Some(" ")),
+        ] {
+            let result = gh_update_project_status_update(
+                "missing-repo".into(),
+                "PVTSU_one".into(),
+                status.map(str::to_string),
+                body.map(str::to_string),
+                start.map(str::to_string),
+                target.map(str::to_string),
+            )
+            .await;
+            // The dialog's held reason, word for word (ProjectStatusStrip.tsx).
+            assert!(matches!(
+                result,
+                Err(AppError::InvalidArgument(ref m))
+                    if m == "Keep a status, a note or a date on the update"
+            ));
+        }
+        // Any one field is enough content.
+        for fields in [
+            content(Some("ON_TRACK"), None, None, None),
+            content(None, Some("Note"), None, None),
+            content(None, None, Some("2026-09-01"), None),
+            content(None, None, None, Some("2026-10-08")),
+        ] {
+            assert!(fields.require_any().is_ok());
         }
     }
 

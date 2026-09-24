@@ -56,6 +56,13 @@ import {
   projectItemsRepoKey,
   subscribeBoardRereads,
 } from "./internal";
+import {
+  dropStatusUpdate,
+  insertNewestFirst,
+  mayPatchStatusCache,
+  prependStatusUpdate,
+  replaceStatusUpdate,
+} from "./project-status-cache";
 
 /** The GitHub Projects (v2) boards an item could join — repo-level plus the
  *  owner's. `retry: false` because the common failure is a missing `project`
@@ -2814,52 +2821,39 @@ interface StatusWriteScope {
   projectId: string;
 }
 
-/** `data` with `id`'s entry replaced by `next`'s answer, or `data` untouched when it
- *  no longer holds that entry. */
-function replaceStatusUpdate(
-  data: ProjectStatusUpdates | undefined,
-  id: string,
-  next: ProjectStatusUpdate,
-): ProjectStatusUpdates | undefined {
-  if (data === undefined || !data.updates.some((u) => u.id === id)) return data;
-  return {
-    ...data,
-    updates: data.updates.map((u) => (u.id === id ? next : u)),
-  };
+/** The key every status write carries. Its own prefix, never under `board-write`:
+ *  {@link usePendingBoardWrites} enumerates that prefix, and would start counting
+ *  these. Which repo and project a write addresses rides its VARIABLES, for the
+ *  reason {@link boardWriteKey} gives. */
+const STATUS_WRITE_KEY = ["project-status-write"] as const;
+
+/** Whether a mutation's variables address `scope`. The filter sees
+ *  `Mutation<any>`, so the fields are `typeof`-guarded rather than asserted. */
+function writesScope(
+  mutation: { state: { variables?: unknown } },
+  scope: StatusWriteScope,
+): boolean {
+  const vars = mutation.state.variables;
+  if (typeof vars !== "object" || vars === null) return false;
+  const { repo, projectId } = vars as Record<string, unknown>;
+  return repo === scope.repo && projectId === scope.projectId;
 }
 
-/** `data` without `id`'s entry, its count moved with it. A cache that no longer
- *  holds the entry is left alone, so a second removal can't take the count twice. */
-function dropStatusUpdate(
-  data: ProjectStatusUpdates | undefined,
-  id: string,
-): ProjectStatusUpdates | undefined {
-  if (data === undefined || !data.updates.some((u) => u.id === id)) return data;
-  return {
-    ...data,
-    updates: data.updates.filter((u) => u.id !== id),
-    totalCount: Math.max(0, data.totalCount - 1),
-  };
-}
-
-/** `updates` with `update` placed by its `createdAt`, newest first — the read's own
- *  order, which a rollback keeps even when entries landed above the slot it left.
- *  An unparseable timestamp sorts after every readable one. */
-function insertNewestFirst(
-  updates: ProjectStatusUpdate[],
-  update: ProjectStatusUpdate,
-): ProjectStatusUpdate[] {
-  const at = Date.parse(update.createdAt);
-  const index = updates.findIndex((u) => {
-    const other = Date.parse(u.createdAt);
-    return Number.isNaN(other) || (!Number.isNaN(at) && other < at);
-  });
-  return updates.toSpliced(index < 0 ? updates.length : index, 0, update);
-}
-
-/** Every status write settles by re-reading the project's updates: the patch is
- *  what the user sees at once, and the read is what GitHub now holds. */
+/** Settles a status write by re-reading the project's updates — but only from the
+ *  LAST write still pending on that project. A re-read landing while a sibling
+ *  write is out answers from before it, clobbering that write's patch until its own
+ *  settle; the sibling's settle re-reads for both. `> 1` because query-core awaits
+ *  `options.onSettled` BEFORE dispatching the settle (5.102.8 mutation.js
+ *  :109/:132), so the write calling this still counts as pending. The status
+ *  hooks' callbacks stay SYNCHRONOUS: each IPC reply settles in its own task
+ *  today, and an awaited callback could let two settles share a checkpoint,
+ *  each counting the other, so that both skip. */
 function settleStatusUpdates(queryClient: QueryClient, args: StatusWriteScope) {
+  const pending = queryClient.isMutating({
+    mutationKey: STATUS_WRITE_KEY,
+    predicate: (mutation) => writesScope(mutation, args),
+  });
+  if (pending > 1) return;
   void queryClient.invalidateQueries({
     queryKey: projectStatusUpdatesKey(args.repo, args.projectId),
   });
@@ -2879,6 +2873,7 @@ function settleStatusUpdates(queryClient: QueryClient, args: StatusWriteScope) {
 export function useCreateProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: STATUS_WRITE_KEY,
     mutationFn: (
       args: StatusWriteScope & {
         status: ProjectStatusValue;
@@ -2905,15 +2900,10 @@ export function useCreateProjectStatusUpdate() {
         createdAt: new Date().toISOString(),
         updatedAt: null,
       };
-      queryClient.setQueryData<ProjectStatusUpdates>(key, (current) =>
-        current === undefined
-          ? current
-          : {
-              ...current,
-              updates: [placeholder, ...current.updates],
-              totalCount: current.totalCount + 1,
-            },
-      );
+      if (mayPatchStatusCache(queryClient.getQueryState(key)))
+        queryClient.setQueryData<ProjectStatusUpdates>(key, (current) =>
+          prependStatusUpdate(current, placeholder),
+        );
       return { placeholderId: placeholder.id };
     },
     onSuccess: (created, args, ctx) => {
@@ -2944,6 +2934,7 @@ export function useCreateProjectStatusUpdate() {
 export function useUpdateProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: STATUS_WRITE_KEY,
     mutationFn: (
       args: StatusWriteScope & {
         statusUpdateId: string;
@@ -3000,6 +2991,7 @@ export function useUpdateProjectStatusUpdate() {
 export function useDeleteProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: STATUS_WRITE_KEY,
     mutationFn: (args: StatusWriteScope & { statusUpdateId: string }) =>
       api.ghDeleteProjectStatusUpdate(args.repo, args.statusUpdateId),
     onMutate: async (args) => {

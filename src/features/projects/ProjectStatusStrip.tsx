@@ -78,6 +78,7 @@ import {
   ScalarInput,
   scalarDraft,
 } from "./ProjectFieldControls";
+import { plainFirstLine } from "./status-summary";
 
 /** Every status this build names, in the order the editor offers them: the three
  *  health readings first, then the two that end or pause the work. */
@@ -149,51 +150,6 @@ function StatusChip({ status }: { status: string | null }) {
       {label}
     </span>
   );
-}
-
-// Markdown syntax the strip's one-line summary drops, since it renders plain text
-// at strip height. Hoisted: the summary is rebuilt on every render of the strip.
-const FENCE = /^\s*(`{3,}|~{3,})/;
-const RULE = /^\s*(?:[-*_]\s*){3,}$/;
-const BLOCK_PREFIX =
-  /^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/;
-const IMAGE = /!\[([^\]]*)\]\([^)]*\)/g;
-const LINK = /\[([^\]]*)\]\([^)]*\)/g;
-const HTML_TAG = /<[^>]+>/g;
-const EMPHASIS = /\*\*|__|~~|`|\*/g;
-
-/** The body's first line of PROSE with content, as plain text. Fenced code is
- *  passed over — a snippet of it reads as the update's point when it rarely is —
- *  unless the body holds nothing else, when its first code line is all there is. */
-function plainFirstLine(body: string | null): string {
-  if (body === null) return "";
-  // The open fence's marker run: a close needs the same character, at least as
-  // many of it, which is the CommonMark rule.
-  let fence: string | null = null;
-  let firstCode = "";
-  for (const raw of body.split(/\r?\n/)) {
-    const marker = FENCE.exec(raw)?.[1];
-    if (fence !== null) {
-      if (marker?.[0] === fence[0] && marker.length >= fence.length)
-        fence = null;
-      else if (firstCode === "" && raw.trim() !== "") firstCode = raw.trim();
-      continue;
-    }
-    if (marker !== undefined) {
-      fence = marker;
-      continue;
-    }
-    if (raw.trim() === "" || RULE.test(raw)) continue;
-    const line = raw
-      .replace(BLOCK_PREFIX, "")
-      .replace(IMAGE, (_m, alt: string) => alt)
-      .replace(LINK, (_m, text: string) => text)
-      .replace(HTML_TAG, "")
-      .replace(EMPHASIS, "")
-      .trim();
-    if (line !== "") return line;
-  }
-  return firstCode;
 }
 
 /** A status update date for display — the bare `YYYY-MM-DD` GitHub sends, read as
