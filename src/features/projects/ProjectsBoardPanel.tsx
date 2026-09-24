@@ -133,7 +133,9 @@ import {
   honouredSortKeys,
   ITEM_WRITE_REASON,
   type ItemNoun,
+  itemAtRowSlot,
   itemRowKey,
+  itemRowSlot,
   lensSorted,
   resolveTableCursor,
   SORTED_VIEW_REASON,
@@ -345,9 +347,10 @@ const FLAT_FALLBACK_NOTE: Partial<Record<ProjectViewDef["layout"], string>> = {
 const TABLE_GROUPING_REASON =
   "Table views keep the grouping they were saved with on GitHub";
 /** Why a bulk move is held on a table that draws no group sections: a move writes
- *  the grouping field, and an ungrouped table has no group to move rows into. */
+ *  the grouping field, and a table drawn flat has no group to move rows into, even
+ *  one whose view groups by a field that makes no sections here. */
 const TABLE_UNGROUPED_MOVE_REASON =
-  "This table isn't grouped, so there's no group to move rows to";
+  "This table isn't drawn in groups, so there's no group to move rows to";
 /** The strip's word on a table view whose ENTIRE sort this build can't honour —
  *  a partly honoured sort stays quiet, since its rows do follow the view. Keyed on
  *  WHY: a key whose field the board's field read didn't return (a capped or failed
@@ -1051,11 +1054,11 @@ export function ProjectsBoardPanel({
       tableSortKeys.length > 0
     )
       return null;
-    const loaded = tableView.sortBy.map((sort) =>
+    const defined = tableView.sortBy.map((sort) =>
       fieldDefs.some((f) => f.id === sort.fieldId),
     );
-    if (loaded.every(Boolean)) return TABLE_SORT_DROPPED_NOTE.unsortable;
-    if (!loaded.some(Boolean)) return TABLE_SORT_DROPPED_NOTE.unloaded;
+    if (defined.every(Boolean)) return TABLE_SORT_DROPPED_NOTE.unsortable;
+    if (!defined.some(Boolean)) return TABLE_SORT_DROPPED_NOTE.unloaded;
     return TABLE_SORT_DROPPED_NOTE.both;
   })();
   // The honest note for a table grouped by a field that makes no sections here.
@@ -1907,10 +1910,15 @@ export function ProjectsBoardPanel({
    *  (`peekGone` below), like the cell editor's session. */
   const [peekItemId, setPeekItemId] = useState<string | null>(null);
 
+  /** Whether a peek has anywhere to draw: a table's peek anchors to the Title cell,
+   *  so a view without that column has none. */
+  const canPeek =
+    tableView === null || tableCols.some((column) => column.title);
+
   /** A table row's peek: an issue or pull request's details, or a draft's notes,
    *  which the board shows from the card itself. A redacted row has none. */
   function peekRow(item: BoardItem) {
-    if (item.content.kind !== "redacted") setPeekItemId(item.itemId);
+    if (canPeek && item.content.kind !== "redacted") setPeekItemId(item.itemId);
   }
 
   /** What Enter or a click on the title does to a table row: open an issue or
@@ -2047,6 +2055,8 @@ export function ProjectsBoardPanel({
     itemId: string;
     col: number;
     idx: number;
+    /** The row's FLAT slot among the table's drawn item rows; null on the board. */
+    slot: number | null;
   } | null>(null);
   const retiredGone =
     retired !== null && findCard(columns, retired.itemId) === null;
@@ -2062,12 +2072,18 @@ export function ProjectsBoardPanel({
   // `setRetired` is useState's own, so the effect runs once and only its cleanup
   // does the work — the shape {@link MenuLatchRelease} uses for the menu's latches.
   useEffect(() => () => setRetired(null), []);
-  // Where focus goes once the card is gone: its own slot in the column it left,
-  // clamped to whatever still stands there, and the board's first card when that
-  // column emptied. Derived here so the effect's deps are the primitives that
-  // actually decide the landing, not a freshly built columns array.
+  // Where focus goes once the card is gone: on the board, its own slot in the
+  // column it left, clamped to whatever still stands there, and the board's first
+  // card when that column emptied. In the table, its FLAT slot among the drawn rows
+  // (`itemAtRowSlot`), since a section is a column and emptying one must hand on
+  // to the next section rather than jump to the top. Derived here so the effect's
+  // deps are the primitives that actually decide the landing, not a fresh array.
   const landing = (() => {
     if (!retiredGone || retired === null) return null;
+    if (retired.slot !== null) {
+      const itemId = itemAtRowSlot(tableEntries, retired.slot);
+      return itemId === null ? null : findCard(columns, itemId);
+    }
     const left = columns[retired.col]?.items.length ?? 0;
     return left > 0
       ? { col: retired.col, idx: Math.min(retired.idx, left - 1) }
@@ -2113,8 +2129,8 @@ export function ProjectsBoardPanel({
     setRetired(null);
     setCursor({ col: landingCol, idx: landingIdx });
     // A SLOT, not a card: the landing is wherever the departed card's place fell
-    // to, so the claim is index-only by design. The table keys its cursor on
-    // whichever row now fills that slot.
+    // to, so the claim is index-only by design. The table's slot is the flat one
+    // above, and its cursor keys on whichever row now fills it.
     setFocusItemId(null);
     if (landingItemId !== null)
       setTableCursor((prev) => ({
@@ -2443,7 +2459,19 @@ export function ProjectsBoardPanel({
         updates: entry === null ? [] : [entry.update],
         clears: entry === null ? [def.id] : [],
       });
-      reportBulk("fields", result, 1);
+      // One cell, so its own words rather than the bulk count's: the field it
+      // saved, or why it didn't.
+      const error =
+        result.outcomes.find((outcome) => outcome.error !== null)?.error ??
+        null;
+      if (error === null) {
+        announce(`Saved ${def.name}`);
+      } else {
+        announce(`Couldn't save ${def.name}`);
+        toast.error(
+          `Couldn't save ${def.name} — ${presentError(error).summary}`,
+        );
+      }
     } catch {
       // The mutation reported it. Nothing was patched, so the cell already shows
       // what the board really holds.
@@ -3108,7 +3136,18 @@ export function ProjectsBoardPanel({
     // nothing to follow and a latch that can never land would re-scan the columns
     // on every render until the tab went away.
     const leaves = action === "remove" || !showArchived;
-    setRetired(at === null || !leaves ? null : { itemId: item.itemId, ...at });
+    setRetired(
+      at === null || !leaves
+        ? null
+        : {
+            itemId: item.itemId,
+            ...at,
+            slot:
+              tableView === null
+                ? null
+                : itemRowSlot(tableEntries, item.itemId),
+          },
+    );
     // `wasArchived` rides the write because it is a COUNT axis the cache key can't
     // supply: a removal takes nothing from a live-only lens's total when the card had
     // already left that count at archive time. Read off the card the menu recorded,
@@ -3336,7 +3375,14 @@ export function ProjectsBoardPanel({
     setRetired(
       anchorAt === null || !leaves
         ? null
-        : { itemId: anchor.itemId, ...anchorAt },
+        : {
+            itemId: anchor.itemId,
+            ...anchorAt,
+            slot:
+              tableView === null
+                ? null
+                : itemRowSlot(tableEntries, anchor.itemId),
+          },
     );
     // `wasArchived` rides each item for the reason the single-card write carries
     // it: it is a COUNT axis no cache key supplies, and a mixed selection holds
@@ -3585,7 +3631,7 @@ export function ProjectsBoardPanel({
       // appended now would extend pages that don't show that write, and its success
       // would stamp them fresh. The refresh comes first (a FAILED one is below).
       case items.isFetching || rereadStall === "owed":
-        return "Refreshing the board…";
+        return `Refreshing the ${SURFACE[noun]}…`;
       // The mirror of the menu's own page-fetch hold, and the same mechanism read
       // from the other side: EVERY write here settles by cancelling this query's
       // family to force the reconciliation, and query-core's cancel REVERTS
@@ -3619,7 +3665,7 @@ export function ProjectsBoardPanel({
       // exactly the right move.
       case (items.isError && !items.isFetchNextPageError) ||
         rereadStall === "failed":
-        return "The board's last refresh failed. Retry the refresh before loading more.";
+        return `The ${SURFACE[noun]}'s last refresh failed. Retry the refresh before loading more.`;
       default:
         return undefined;
     }
@@ -3762,6 +3808,7 @@ export function ProjectsBoardPanel({
           <BoardCardMenuItems
             target={menuTarget}
             noun={noun}
+            canPeek={canPeek}
             bulk={menuBulk}
             // An ungrouped board has one column standing for the whole
             // board, which is no move target at all. A REDACTED card has none
@@ -4868,6 +4915,7 @@ export function ProjectsBoardPanel({
               seedTitle={editing.title}
               seedBody={editing.body}
               seedAssigneeLogins={editing.assigneeLogins}
+              noun={noun}
               onOpenChange={(o) => switchAddDialog(o ? "edit-draft" : null)}
               onSave={saveDraftEdit}
             />

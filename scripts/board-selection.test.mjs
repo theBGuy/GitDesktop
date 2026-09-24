@@ -21,7 +21,9 @@ import {
   columnValue,
   groupRowKey,
   honouredSortKeys,
+  itemAtRowSlot,
   itemRowKey,
+  itemRowSlot,
   resolveTableCursor,
   stepTableCursor,
   tableColumns,
@@ -293,6 +295,37 @@ test("ungrouped rows are the items alone, with no header", () => {
     [itemRowKey("x"), itemRowKey("y")],
   );
   assert.deepEqual(tableRows([column("all", [])], false, new Set()), []);
+});
+
+test("a removed row's landing is FLAT across sections: an emptied section hands on to the next one's first row", () => {
+  const before = tableRows(
+    [
+      column("todo", [item("t1"), item("t2")]),
+      column("doing", [item("g1")]),
+      column("done", [item("d1"), item("d2")]),
+    ],
+    true,
+    new Set(),
+  );
+  const slot = itemRowSlot(before, "g1");
+  assert.equal(slot, 2);
+  const after = tableRows(
+    [
+      column("todo", [item("t1"), item("t2")]),
+      column("doing", []),
+      column("done", [item("d1"), item("d2")]),
+    ],
+    true,
+    new Set(),
+  );
+  assert.equal(itemAtRowSlot(after, slot), "d1");
+  // The last row clamps to the new last; nothing drawn lands nowhere.
+  assert.equal(itemAtRowSlot(after, 9), "d2");
+  assert.equal(itemAtRowSlot([], 0), null);
+  // A collapsed section's rows are not drawn, so they hold no slot.
+  const folded = tableRows(sections(), true, new Set(["todo"]));
+  assert.equal(itemRowSlot(folded, "t1"), null);
+  assert.equal(itemRowSlot(folded, "d1"), 0);
 });
 
 test("the cursor resolves by row key, clamped to the columns there are", () => {

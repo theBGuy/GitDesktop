@@ -577,9 +577,13 @@ function CellEditor({
               // On a pick row, Enter saves the row under focus, walked-to or not,
               // as the hint promises; elsewhere it commits the draft.
               const optionId = optionAt(e.target);
+              // Only an ABSENT live read (a pick kind) falls back: its `null` is
+              // the clear.
+              const live = liveScalarDraft();
+              const scalar = live === undefined ? draft : live;
               finish(
                 optionId === undefined
-                  ? (liveScalarDraft() ?? draft)
+                  ? scalar
                   : (pickDraft(optionId) ?? draft),
               );
             }}

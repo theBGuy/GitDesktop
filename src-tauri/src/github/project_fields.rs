@@ -639,6 +639,11 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
     let field = &node["field"];
     let field_id = text(field, "id");
     let field_name = text(field, "name");
+    // Every rich read selects FIELD_COMMON, so a value with no field id is a node the
+    // lean selection left as a bare `__typename`, never a real value.
+    if field_id.is_empty() {
+        return ProjectFieldValue::Unknown { field_name };
+    }
     let bridge = node["__typename"] == "ProjectV2ItemIssueFieldValue";
     let is_issue_field = bridge || field["isIssueField"].as_bool().unwrap_or(false);
     let value = if bridge {
@@ -1604,6 +1609,12 @@ mod tests {
                 assert_eq!(wire["totalCount"], 0);
                 assert_eq!(wire[key], json!([]));
             }
+            // The lean selection omits these kinds' fragments, leaving a bare node.
+            let bare = parse_field_value(&json!({"__typename":typename}));
+            assert!(
+                matches!(bare, ProjectFieldValue::Unknown { .. }),
+                "{typename}"
+            );
         }
     }
 
@@ -1777,11 +1788,12 @@ mod tests {
     #[test]
     fn system_and_future_values_are_unknown() {
         for node in [
-            json!({"__typename":"ProjectV2ItemFieldTextValue","field":{"name":"Title","dataType":"TITLE"},"text":"An item's own title"}),
-            json!({"__typename":"FutureProjectValue","field":{"name":"Future"}}),
+            json!({"__typename":"ProjectV2ItemFieldLabelValue"}),
+            json!({"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"title","name":"Title","dataType":"TITLE"},"text":"An item's own title"}),
+            json!({"__typename":"FutureProjectValue","field":{"id":"future","name":"Future"}}),
             json!({"__typename":"FutureProjectValue"}),
-            json!({"__typename":"ProjectV2ItemIssueFieldValue","field":{"name":"Org"},"issueFieldValue":{"__typename":"FutureIssueValue"}}),
-            json!({"__typename":"ProjectV2ItemIssueFieldValue","field":{"name":"Priority","dataType":"TEXT"},"issueFieldValue":{"__typename":"IssueFieldSingleSelectValue","optionId":"high","name":"High","color":"RED"}}),
+            json!({"__typename":"ProjectV2ItemIssueFieldValue","field":{"id":"org","name":"Org"},"issueFieldValue":{"__typename":"FutureIssueValue"}}),
+            json!({"__typename":"ProjectV2ItemIssueFieldValue","field":{"id":"priority","name":"Priority","dataType":"TEXT"},"issueFieldValue":{"__typename":"IssueFieldSingleSelectValue","optionId":"high","name":"High","color":"RED"}}),
         ] {
             let expected_name = text(&node["field"], "name");
             assert_eq!(
@@ -1800,10 +1812,10 @@ mod tests {
                 "TEXT"
             };
             for field in [
-                json!({"name":"Custom","dataType":mismatched_type}),
-                json!({"name":"Custom","dataType":"FUTURE_TYPE"}),
-                json!({"name":"Custom","dataType":null}),
-                json!({"name":"Custom"}),
+                json!({"id":"custom","name":"Custom","dataType":mismatched_type}),
+                json!({"id":"custom","name":"Custom","dataType":"FUTURE_TYPE"}),
+                json!({"id":"custom","name":"Custom","dataType":null}),
+                json!({"id":"custom","name":"Custom"}),
             ] {
                 let mut node = node.clone();
                 node["field"] = field;
@@ -1930,7 +1942,7 @@ mod tests {
         }
         assert!(matches!(
             parse_field_value(
-                &json!({"__typename":"ProjectV2ItemFieldNumberValue","field":{"dataType":"NUMBER"},"number":null})
+                &json!({"__typename":"ProjectV2ItemFieldNumberValue","field":{"id":"points","dataType":"NUMBER"},"number":null})
             ),
             ProjectFieldValue::Unknown { .. }
         ));

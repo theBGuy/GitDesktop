@@ -215,6 +215,7 @@ export function BoardCardMenuItems({
   editHeldReason,
   reorderHeldReason,
   reorderPlans,
+  canPeek,
   actions,
 }: {
   target: BoardMenuTarget;
@@ -251,6 +252,9 @@ export function BoardCardMenuItems({
    *  (reason on the label) rather than hiding it, so the four keep their order as
    *  the card moves. */
   reorderPlans: Record<ReorderDirection, ReorderPlan>;
+  /** Whether the surface can draw a peek at all: a table view with no Title column
+   *  has no cell to anchor one to. */
+  canPeek: boolean;
   actions: BoardMenuActions;
 }) {
   if (target === null) return null;
@@ -409,7 +413,7 @@ export function BoardCardMenuItems({
           dates asks nothing of the board, so a viewer who can't change it still
           gets this one. `onClick`, never `onSelect` — Base UI's `onSelect` is the
           DOM text-selection event and never fires. */}
-      {isPeekable && (
+      {isPeekable && canPeek && (
         <>
           <ContextMenuItem onClick={actions.showDetails}>
             Show details

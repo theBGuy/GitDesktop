@@ -18,7 +18,7 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
-import { CARD_WRITE_REASON } from "./board-model";
+import { ITEM_WRITE_REASON, type ItemNoun } from "./board-model";
 
 /** Whether two login lists name the same people, order ignored. Set-equality rather
  *  than a dirty flag so opening the picker and closing it unchanged still counts as
@@ -45,6 +45,7 @@ export function BoardDraftEditDialog({
   seedTitle,
   seedBody,
   seedAssigneeLogins,
+  noun,
   onOpenChange,
   onSave,
 }: {
@@ -64,6 +65,8 @@ export function BoardDraftEditDialog({
    *  users surface answers in on GitHub — so a seeded chip and a picked one compare
    *  as the same person. */
   seedAssigneeLogins: string[];
+  /** What the item is called where the dialog opened: a board card or a table row. */
+  noun: ItemNoun;
   onOpenChange: (open: boolean) => void;
   /** Write the edit. The panel owns it — so the board can report a write this
    *  dialog was closed over, and so the CLOSE on success is decided by whoever knows
@@ -109,7 +112,7 @@ export function BoardDraftEditDialog({
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
       disabled: pending,
-      reason: CARD_WRITE_REASON,
+      reason: ITEM_WRITE_REASON[noun],
       title: SUBMIT_HINT,
     });
 

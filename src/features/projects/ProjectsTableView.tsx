@@ -180,9 +180,9 @@ export function ProjectsTableView({
   // scrolled past the overscan window, it would unmount with its row.
   const rangeExtractor = useCallback(
     (range: Range) => {
-      const window = defaultRangeExtractor(range);
-      if (tabStopRow === null || window.includes(tabStopRow)) return window;
-      return [...window, tabStopRow].sort((a, b) => a - b);
+      const drawn = defaultRangeExtractor(range);
+      if (tabStopRow === null || drawn.includes(tabStopRow)) return drawn;
+      return [...drawn, tabStopRow].sort((a, b) => a - b);
     },
     [tabStopRow],
   );

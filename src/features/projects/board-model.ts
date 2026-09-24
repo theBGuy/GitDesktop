@@ -53,8 +53,6 @@ export const ITEM_WRITE_REASON: Record<ItemNoun, string> = {
   card: "Finishing your last card change…",
   row: "Finishing your last row change…",
 };
-/** The edit dialog's footer, which the board and the table share. */
-export const CARD_WRITE_REASON = ITEM_WRITE_REASON.card;
 
 /** Why a card can't be repositioned under a saved view that sorts: the columns are
  *  drawn in the sort's order, so the board's own manual order — the only thing a
@@ -600,6 +598,27 @@ export function tableRows(
       rows.push({ kind: "item", key: itemRowKey(item.itemId), item });
   }
   return rows;
+}
+
+/** Where `itemId` sits among the DRAWN item rows, group headers and a collapsed
+ *  section's rows excluded, or null when it isn't drawn. */
+export function itemRowSlot(rows: TableEntry[], itemId: string): number | null {
+  let slot = 0;
+  for (const row of rows) {
+    if (row.kind !== "item") continue;
+    if (row.item.itemId === itemId) return slot;
+    slot += 1;
+  }
+  return null;
+}
+
+/** The item now filling a departed row's flat `slot`, clamped to the last drawn
+ *  item row, or null with none drawn. FLAT across sections: a section is a board
+ *  column, so the board's per-column slot would jump to the table's top whenever a
+ *  removal emptied one. */
+export function itemAtRowSlot(rows: TableEntry[], slot: number): string | null {
+  const items = rows.flatMap((row) => (row.kind === "item" ? [row.item] : []));
+  return items[Math.min(slot, items.length - 1)]?.itemId ?? null;
 }
 
 /** A table's keyboard cursor, by IDENTITY: the row's key and the column being
