@@ -29,6 +29,7 @@ import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
+import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import * as api from "@/lib/git/api";
 import {
@@ -73,7 +74,6 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -310,8 +310,9 @@ export function CreatePrDialog({
       try {
         await api.gitFetchRemote(repoPath, "upstream");
       } catch (e) {
-        // Keep going with the refs already on disk; report the fetch failure.
-        fetchError = errorMessage(e);
+        // Keep going with the refs already on disk; report the fetch failure as
+        // one line, since it renders inline under the picker.
+        fetchError = presentError(e).summary;
       }
       const remoteBranches = await api.gitRemoteBranches(repoPath);
       const upstreamNames = remoteBranches

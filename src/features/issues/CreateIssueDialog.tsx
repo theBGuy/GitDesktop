@@ -56,7 +56,6 @@ import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
@@ -295,7 +294,7 @@ export function CreateIssueDialog({
           });
         } catch (e) {
           const key = addProjectIds.length === 1 ? "project" : "projects";
-          failed.push(`${LINK_FAILED[key]}: ${errorMessage(e)}`);
+          failed.push(`${LINK_FAILED[key]}: ${presentError(e).summary}`);
         }
       }
       let subIssueLinked = false;
@@ -309,7 +308,9 @@ export function CreateIssueDialog({
           });
           subIssueLinked = true;
         } catch (e) {
-          failed.push(`${LINK_FAILED["sub-issue"]}: ${errorMessage(e)}`);
+          failed.push(
+            `${LINK_FAILED["sub-issue"]}: ${presentError(e).summary}`,
+          );
         }
       }
       // The toasts below name the origin repo when this settles elsewhere;

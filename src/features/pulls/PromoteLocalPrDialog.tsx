@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { presentError } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
@@ -31,7 +32,6 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /**
@@ -204,7 +204,7 @@ export function PromoteLocalPrDialog({
         live && ui.selectedPr?.kind === "local" && ui.selectedPr.id === pr.id;
       if (onThisPr) onOpenChange(false);
       toast.error(
-        `Created ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}, but ${failedStep} failed: ${presentError(e).summary}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },

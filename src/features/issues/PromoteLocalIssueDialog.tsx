@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { presentError } from "@/lib/error-summary";
 import { forgeIssueComment } from "@/lib/git/api";
 import {
   forgeFeatureReady,
@@ -30,7 +31,6 @@ import {
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { originNoteFor, repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -205,7 +205,7 @@ export function PromoteLocalIssueDialog({
         ui.selectedIssue.id === issue.id;
       if (onThisIssue) onOpenChange(false);
       toast.error(
-        `Created issue #${number}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },
@@ -264,7 +264,7 @@ export function PromoteLocalIssueDialog({
         ui.selectedIssue.id === issue.id;
       if (onThisIssue) onOpenChange(false);
       toast.error(
-        `Created ${key}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },

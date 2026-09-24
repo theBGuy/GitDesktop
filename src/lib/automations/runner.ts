@@ -21,6 +21,7 @@ import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { runCliStream } from "@/lib/ai/stream";
 import { safeSlice } from "@/lib/ai/truncate";
 import type { AiSettings, PromptProvider, ReviewMode } from "@/lib/ai/types";
+import { presentError } from "@/lib/error-summary";
 import {
   forgePrComment,
   forgePrDiff,
@@ -890,16 +891,18 @@ async function run(
           .then(() => true)
           .catch(() => false);
       }
-      toast.error(`AI ${label} failed: ${message}`);
-      // Inbox parity with manual runs (reviews.ts's notifyReviewDone): a genuine failure
-      // records a notification too, on whichever channels the automations source has.
-      // Carry the failure reason into the durable subtitle so the inbox row
-      // (and the OS ping) say WHY — subject-only when the reason is empty.
+      // The records written above and below keep `message` whole; one-line surfaces
+      // take the summary, since raw git/CLI output can run to many lines.
+      const summary = presentError(e).summary;
+      toast.error(`AI ${label} failed: ${summary}`);
+      // Inbox parity with manual runs (reviews.ts's notifyReviewDone): the subtitle and
+      // OS ping carry the one-line reason, the row's `detail` the full text, both under
+      // the same subject and only when there is a message at all.
       const subject =
         event.kind === "commit"
           ? `"${event.hash.slice(0, 7)}"`
           : `"${event.title}"`;
-      const reason = message.trim() ? `${subject} — ${message}` : subject;
+      const trimmed = message.trim();
       // Where the kept output waits differs by event: a PR partial is restored into
       // the review panel, a commit partial only through this row.
       const partialNote =
@@ -907,10 +910,18 @@ async function run(
           ? "Partial output is kept — open it from this notification."
           : "Partial output is kept under Previous reviews.";
       // The inbox row is where a kept partial gets discovered — a durable failure that
-      // doesn't mention it reads as a run with nothing to show for it.
-      const subtitle = keptPartial
-        ? `${reason}${reason.endsWith(".") ? "" : "."} ${partialNote}`
-        : reason;
+      // doesn't mention it reads as a run with nothing to show for it. Both texts carry
+      // the note: the dock's hover shows `detail` in place of the truncated subtitle.
+      const withPartialNote = (text: string) =>
+        keptPartial
+          ? `${text}${text.endsWith(".") ? "" : "."} ${partialNote}`
+          : text;
+      const subtitle = withPartialNote(
+        trimmed ? `${subject} — ${summary}` : subject,
+      );
+      const detail = trimmed
+        ? withPartialNote(`${subject} — ${trimmed}`)
+        : undefined;
       // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
       // `run` body sees the outer `action` fine, but aliasing keeps the object
       // literal (which also has a field named `action`) unambiguous to read.
@@ -939,6 +950,7 @@ async function run(
           tone: "danger",
           title: `AI ${label} failed`,
           subtitle,
+          detail,
           repoPath: event.repoPath,
           repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
           target,
@@ -1078,7 +1090,7 @@ export function rerunAutomation(
     } catch (e) {
       // A throw before/inside the loop (loadAutomations, store I/O) must not be swallowed —
       // surface it; the stopped row stays.
-      toast.error(`Couldn't re-run the ${label}: ${errorMessage(e)}`);
+      toast.error(`Couldn't re-run the ${label}: ${presentError(e).summary}`);
     }
   })();
 }
@@ -1318,7 +1330,7 @@ export function runAutomationNow(
       // attempted > 0: the dock's live row is the feedback — no toast.
     } catch (e) {
       toast.error(
-        `Couldn't run automations on this pull request: ${errorMessage(e)}`,
+        `Couldn't run automations on this pull request: ${presentError(e).summary}`,
       );
     } finally {
       runNowStarting.delete(latchKey);

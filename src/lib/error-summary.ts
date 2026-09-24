@@ -38,23 +38,49 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   timeout: "Timed out",
 };
 
-/** git's push header `To <remote>` (git 2.51.1.windows.1) opens its own report
- *  (sideband `remote:` lines may precede it); the reason follows below. One
- *  END-anchored token (scheme URL, scp, `host:path`), so spaced prose never
- *  matches; accepted residual: a lone `word:token` line (`To do:x`) is skipped.
- *  Windows drive-letter and `file://` remotes match too; POSIX, relative, UNC,
- *  IPv6-scp, and space-containing paths don't, and keep line one. */
+/** git's transfer headers (git 2.51.1.windows.1): `To <remote>` opens a push
+ *  report, `From <remote>` a fetch's or pull's (sideband `remote:` lines may
+ *  precede either); the reason follows below. One END-anchored token (scheme
+ *  URL, scp, `host:path`), so spaced prose never matches; accepted residual: a
+ *  lone `word:token` line (`To do:x`, `From word:x`) is skipped. Windows
+ *  drive-letter and `file://` remotes match too; POSIX, relative, UNC,
+ *  IPv6-scp, and space-containing paths don't, and keep line one. Both headers
+ *  and the two per-ref patterns below are pinned by the Rust canary
+ *  `transfer_report_stderr_still_matches_the_frontend_markers` (git/remote.rs)
+ *  — keep the two in step. */
 const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.+-]+:\S+$/;
+const FETCH_TRANSFER_HEADER = /^From (?:[\w.-]+@)?[\w.+-]+:\S+$/;
+
+/** A per-ref line of git's transfer report (git-push/git-fetch OUTPUT:
+ *  ` <flag> <summary> <from> -> <to> [(<reason>)]`), for every flag but `!`:
+ *  a `! [rejected]` line IS the failure's reason, while the others report
+ *  updates that succeeded or needed none. Tested on the untrimmed line, since
+ *  the fast-forward flag is a space; the summary must be a `[…]` status, a hex
+ *  range, or fetch's bare `branch`/`tag` word, and the arrow must follow, so
+ *  prose and echoed commit subjects can't match. Accepted residual: prose shaped
+ *  exactly like that grammar (a ` - [x] step -> next` task item) is skipped too,
+ *  and the next line summarizes instead. */
+const TRANSFER_REF_LINE =
+  /^ [ +\-*=t] (?:\[[^\]]+\]|[0-9a-f]+\.\.\.?[0-9a-f]+|branch|tag) +\S.* -> \S/;
+
+/** A push's deleted-ref line, the one per-ref shape with no arrow: git prints
+ *  only the remote refname, which can't contain a space, so the line is
+ *  end-anchored on that single token. */
+const TRANSFER_DELETED_LINE = /^ - \[deleted\] +\S+\r?$/;
 
 /** Lines that carry no signal for a one-line summary: git `hint:` guidance,
- *  `Rebasing (x/y)` progress counters, the push transfer header, and blanks.
- *  Matched against the trimmed line, which also drops a CRLF joint's `\r`. */
+ *  `Rebasing (x/y)` progress counters, the transfer headers and non-`!` per-ref
+ *  lines, and blanks. Matched against the trimmed line (dropping a CRLF
+ *  joint's `\r`), except the per-ref shapes, which start with their indent. */
 function isNoiseLine(line: string): boolean {
   const t = line.trim();
   if (t === "") return true;
   if (t.startsWith("hint:")) return true;
   if (/^Rebasing \(\d+\/\d+\)/.test(t)) return true;
   if (PUSH_TRANSFER_HEADER.test(t)) return true;
+  if (FETCH_TRANSFER_HEADER.test(t)) return true;
+  if (TRANSFER_REF_LINE.test(line)) return true;
+  if (TRANSFER_DELETED_LINE.test(line)) return true;
   return false;
 }
 

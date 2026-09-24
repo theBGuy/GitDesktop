@@ -1,8 +1,9 @@
-// Pins which line of a failed push the one-line error summary leads with. git's
-// own push report opens with a `To <remote>` transfer header (sideband `remote:`
-// lines can precede it) that names the destination, not the failure, so the
-// summarizer skips it as noise and lands on the next meaningful line. Matched and
-// unmatched shapes: see PUSH_TRANSFER_HEADER's doc in src/lib/error-summary.ts.
+// Pins which line of a failed push, fetch, or pull the one-line error summary
+// leads with. git's transfer report opens with a `To <remote>` / `From <remote>`
+// header (sideband `remote:` lines can precede it) and lists every ref it moved,
+// so the summarizer skips the header and the non-`!` per-ref lines as noise and
+// lands on git's reason. Matched and unmatched shapes: see PUSH_TRANSFER_HEADER
+// and TRANSFER_REF_LINE's docs in src/lib/error-summary.ts.
 //
 // `src/lib/error-summary.ts` carries an `@/` value import, which Node's type
 // stripping cannot resolve, so the shared src hooks go in first. The import is
@@ -183,4 +184,250 @@ test("a rollback verdict on line one stays the summary", () => {
     "hint: Resolve all conflicts manually, mark them as resolved with",
   ].join("\n");
   assert.equal(presentError(gitError(message)).summary, verdict);
+});
+
+// Transfer-report shapes measured on git 2.51.1.windows.1 with piped stderr, the
+// Rust runner's own context. Remote paths shortened; the column padding is git's.
+const LOCAL_ORIGIN = "C:/temp/w/origin";
+const NEW_TAG = " * [new tag]         v2 -> v2";
+const FF_TABLE = "   22952d8..c5bdbe9  main       -> origin/main";
+const DIVERGED_HINTS = [
+  "hint: Diverging branches can't be fast-forwarded, you need to either:",
+  "hint:",
+  "hint: \tgit merge --ff-only",
+  "hint:",
+  "hint: or:",
+  "hint:",
+  "hint: \tgit rebase",
+  "hint:",
+  'hint: Disable this message with "git config set advice.diverging false"',
+];
+const NOT_FF = "fatal: Not possible to fast-forward, aborting.";
+const TAG_CLOBBER =
+  " ! [rejected]        v1         -> v1  (would clobber existing tag)";
+
+/** A push carrying a rejected branch and a new tag (`push.followTags`): the tag's
+ *  success line comes first in git's report. */
+const multiRefPush = (eol) =>
+  [
+    `To ${LOCAL_ORIGIN}.git`,
+    NEW_TAG,
+    REJECTED,
+    `error: failed to push some refs to '${LOCAL_ORIGIN}.git'`,
+    ...HINTS,
+  ].join(eol);
+
+/** `pull --ff-only` on a diverged branch: the fetch half's report, then git's
+ *  refusal. */
+const ffOnlyPull = (eol) =>
+  [`From ${LOCAL_ORIGIN}`, FF_TABLE, ...DIVERGED_HINTS, NOT_FF].join(eol);
+
+/** A merge-mode pull conflict as `full_failure_text` folds it: stderr (the fetch
+ *  report) first, stdout (the merge verdict) below. */
+const pullConflictFold = (eol) =>
+  [
+    `From ${LOCAL_ORIGIN}`,
+    "   c4ff0f4..22952d8  main       -> origin/main",
+    "Auto-merging a.txt",
+    "CONFLICT (content): Merge conflict in a.txt",
+    "Automatic merge failed; fix conflicts and then commit the result.",
+  ].join(eol);
+
+/** `fetch --tags` refusing to move an existing tag. */
+const tagClobber = (eol) => [`From ${LOCAL_ORIGIN}`, TAG_CLOBBER].join(eol);
+
+/** A push deleting one ref and rejecting another: the deletion prints first, with
+ *  no arrow. */
+const DELETED = " - [deleted]         doomed";
+const deletionPush = (eol) =>
+  [
+    `To ${LOCAL_ORIGIN}.git`,
+    DELETED,
+    REJECTED,
+    `error: failed to push some refs to '${LOCAL_ORIGIN}.git'`,
+  ].join(eol);
+
+/** A fetch naming a branch (bare `branch` summary word) beside a tag refusal and
+ *  a forced update. */
+const FETCH_BRANCH = " * branch            main       -> FETCH_HEAD";
+const FORCED =
+  " + c5bdbe9...1d0d257 main       -> origin/main  (forced update)";
+const mixedFetch = (eol, lines) => [`From ${LOCAL_ORIGIN}`, ...lines].join(eol);
+
+/** The Rust serialization verbatim: `message` is the trimmed stderr, `stderr`
+ *  the raw blob with git's trailing newline. */
+const rawGitError = (text) => ({
+  kind: "git",
+  message: text.trim(),
+  code: 1,
+  stderr: `${text}\n`,
+});
+
+for (const [name, eol] of [
+  ["LF", "\n"],
+  ["CRLF", "\r\n"],
+]) {
+  test(`a multi-ref push leads with the rejection, not the new tag's line (${name})`, () => {
+    for (const make of [gitError, rawGitError]) {
+      const p = presentError(make(multiRefPush(eol)));
+      assert.equal(p.summary, REJECTED_SUMMARY);
+      assert.ok(
+        p.fullText.includes(NEW_TAG.trim()),
+        "fullText keeps the tag line",
+      );
+    }
+  });
+
+  test(`a refused ff-only pull leads with git's reason (${name})`, () => {
+    for (const make of [gitError, rawGitError]) {
+      const p = presentError(make(ffOnlyPull(eol)));
+      assert.equal(p.summary, "Not possible to fast-forward, aborting.");
+      assert.ok(
+        p.fullText.startsWith(`From ${LOCAL_ORIGIN}`),
+        "fullText keeps the fetch report",
+      );
+      assert.ok(p.fullText.includes(FF_TABLE), "fullText keeps the table line");
+    }
+  });
+
+  test(`a merge-mode pull conflict still reads as a paused merge (${name})`, () => {
+    const p = presentError(gitError(pullConflictFold(eol)));
+    assert.equal(
+      p.summary,
+      "Merge paused — resolve the conflicts, then commit.",
+    );
+  });
+
+  test(`a tag-clobber refusal keeps its ! line as the summary (${name})`, () => {
+    const p = presentError(gitError(tagClobber(eol)));
+    assert.equal(
+      p.summary,
+      "! [rejected] v1 -> v1 (would clobber existing tag)",
+    );
+  });
+
+  test(`a push deletion above a rejection is skipped (${name})`, () => {
+    for (const make of [gitError, rawGitError]) {
+      const p = presentError(make(deletionPush(eol)));
+      assert.equal(p.summary, REJECTED_SUMMARY);
+      assert.ok(p.fullText.includes(DELETED.trim()), "fullText keeps it");
+    }
+  });
+
+  test(`a fetch's branch and forced-update lines are noise, its ! line is not (${name})`, () => {
+    const measured = mixedFetch(eol, [FETCH_BRANCH, TAG_CLOBBER, FORCED]);
+    assert.equal(
+      presentError(gitError(measured)).summary,
+      "! [rejected] v1 -> v1 (would clobber existing tag)",
+    );
+    // Without the ! line the report is all noise, so the header summarizes: both
+    // remaining per-ref lines were skipped.
+    const noiseOnly = mixedFetch(eol, [FETCH_BRANCH, FORCED]);
+    assert.equal(
+      presentError(gitError(noiseOnly)).summary,
+      `From ${LOCAL_ORIGIN}`,
+    );
+  });
+}
+
+test("app prose in message still leads when the pull report rides stderr", () => {
+  const p = presentError({
+    kind: "git",
+    message: "Couldn't pull main.",
+    code: 128,
+    stderr: ffOnlyPull("\n"),
+  });
+  assert.equal(p.summary, "Couldn't pull main.");
+  assert.ok(
+    p.fullText.includes(NOT_FF),
+    "fullText appends the distinct stderr",
+  );
+});
+
+test("every per-ref flag but ! is noise", () => {
+  for (const line of [
+    FF_TABLE,
+    " + 22952d8...c5bdbe9 main       -> origin/main  (forced update)",
+    " - [deleted]         (none)     -> origin/gone",
+    NEW_TAG,
+    " * [new branch]      feat       -> origin/feat",
+    " = [up to date]      main       -> main",
+    " t [tag update]      v1         -> v1",
+    " * branch            main       -> FETCH_HEAD",
+    " * tag               v1         -> FETCH_HEAD",
+    // A push deletion prints no arrow, only the remote refname.
+    " - [deleted]         feat",
+  ]) {
+    const p = presentError(
+      gitError(`From ${LOCAL_ORIGIN}\n${line}\n${NOT_FF}`),
+    );
+    assert.equal(p.summary, "Not possible to fast-forward, aborting.", line);
+  }
+  for (const line of [
+    REJECTED,
+    " ! [remote rejected] main -> main (pre-receive hook declined)",
+  ]) {
+    const p = presentError(gitError(`To ${REMOTE}\n${line}\n${FAILED}`));
+    assert.equal(p.summary, line.trim().replace(/\s+/g, " "), line);
+  }
+});
+
+test("prose shaped near a per-ref line stays meaningful", () => {
+  for (const line of [
+    // The flag column without the arrow.
+    " - make sure the remote still exists",
+    // The deletion status followed by more than one refname-shaped token.
+    " - [deleted]         feat and the rest",
+    // An arrow mid-prose, without the flag column.
+    "Renamed main -> trunk on the remote.",
+    // A flag column whose summary is no `[…]` status, hex range, or bare
+    // `branch`/`tag` word.
+    "   Fix the parser -> faster builds",
+    " * note: main -> trunk",
+    " * branches main -> trunk",
+  ]) {
+    const p = presentError(
+      gitError(`From ${LOCAL_ORIGIN}\n${line}\n${NOT_FF}`),
+    );
+    assert.equal(p.summary, line.trim().replace(/\s+/g, " "), line);
+  }
+});
+
+test("a From header needs a remote token, like the To header", () => {
+  for (const first of [
+    "From /home/u/origin",
+    "From here on, retry the fetch.",
+  ]) {
+    const p = presentError(gitError(`${first}\n${NOT_FF}`));
+    assert.equal(p.summary, first);
+  }
+  for (const remote of [
+    "https://github.com/x/y.git",
+    "git@github.com:x/y.git",
+    "file:///C:/temp/origin",
+    "C:\\temp\\origin",
+  ]) {
+    const p = presentError(gitError(`From ${remote}\n${NOT_FF}`));
+    assert.equal(p.summary, "Not possible to fast-forward, aborting.", remote);
+  }
+});
+
+test("an all-noise report still summarizes its first non-empty line", () => {
+  // Header plus table: the header is the first non-empty line.
+  const headed = [`From ${LOCAL_ORIGIN}`, FF_TABLE, NEW_TAG].join("\n");
+  assert.equal(presentError(gitError(headed)).summary, `From ${LOCAL_ORIGIN}`);
+  // Table alone, indent intact (a plain Error is never trimmed upstream).
+  const tableOnly = ["", FF_TABLE, NEW_TAG].join("\n");
+  assert.equal(
+    presentError(new Error(tableOnly)).summary,
+    "22952d8..c5bdbe9 main -> origin/main",
+  );
+});
+
+test("empty messages fall through to a non-blank summary", () => {
+  assert.equal(
+    presentError({ kind: "git", message: "", code: 1, stderr: "" }).summary,
+    "Git error",
+  );
+  assert.equal(presentError(new Error("")).summary, "Unexpected error");
 });

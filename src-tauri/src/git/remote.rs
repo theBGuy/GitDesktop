@@ -2533,6 +2533,296 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
         }
     }
 
+    /// Mirror of `PUSH_TRANSFER_HEADER` / `FETCH_TRANSFER_HEADER`
+    /// (src/lib/error-summary.ts), on the trimmed line like the frontend: the
+    /// keyword, one space, then ONE token of an optional `[\w.-]+@`, a `[\w.+-]+`
+    /// run, `:`, and a non-empty tail. Each class excludes the separator after it,
+    /// so the first `@` and the first `:` are the only splits the regex can take.
+    fn is_transfer_header(line: &str, keyword: &str) -> bool {
+        fn run_then_tail(s: &str) -> bool {
+            s.split_once(':').is_some_and(|(run, tail)| {
+                !run.is_empty()
+                    && run
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
+                    && !tail.is_empty()
+            })
+        }
+        let Some(token) = line
+            .trim()
+            .strip_prefix(keyword)
+            .and_then(|r| r.strip_prefix(' '))
+        else {
+            return false;
+        };
+        !token.chars().any(char::is_whitespace)
+            && (run_then_tail(token)
+                || token.split_once('@').is_some_and(|(user, rest)| {
+                    !user.is_empty()
+                        && user
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+                        && run_then_tail(rest)
+                }))
+    }
+
+    /// Mirror of `TRANSFER_REF_LINE` (src/lib/error-summary.ts), on the UNTRIMMED
+    /// line: a space, any flag but `!`, a space, a `[…]` status, a lowercase hex
+    /// range (`..` or `...`), or a bare `branch`/`tag` word, a space run, then a
+    /// non-space character with a ` -> ` arrow somewhere after it that a non-space
+    /// character follows.
+    fn is_transfer_ref_noise(line: &str) -> bool {
+        let Some(rest) = line.strip_prefix(' ') else {
+            return false;
+        };
+        let mut chars = rest.chars();
+        if !chars.next().is_some_and(|flag| " +-*=t".contains(flag)) {
+            return false;
+        }
+        let Some(rest) = chars.as_str().strip_prefix(' ') else {
+            return false;
+        };
+        let tail = if let Some(status) = rest.strip_prefix('[') {
+            match status.split_once(']') {
+                Some((inner, tail)) if !inner.is_empty() => tail,
+                _ => return false,
+            }
+        } else {
+            let is_hex =
+                |s: &str| !s.is_empty() && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+            let (word, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
+            if word != "branch" && word != "tag" {
+                let Some((old, new)) = word.split_once("..") else {
+                    return false;
+                };
+                if !(is_hex(old) && is_hex(new.strip_prefix('.').unwrap_or(new))) {
+                    return false;
+                }
+            }
+            tail
+        };
+        let after = tail.trim_start_matches(' ');
+        let mut rest = after.chars();
+        after.len() < tail.len()
+            && rest.next().is_some_and(|c| !c.is_whitespace())
+            && rest.as_str().match_indices(" -> ").any(|(i, _)| {
+                rest.as_str()[i + 4..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_whitespace())
+            })
+    }
+
+    /// Mirror of `TRANSFER_DELETED_LINE` (src/lib/error-summary.ts), on the
+    /// UNTRIMMED line: ` - [deleted]`, a space run, then exactly one non-space
+    /// token (an optional trailing `\r` aside) running to the end.
+    fn is_transfer_deleted_noise(line: &str) -> bool {
+        let Some(rest) = line.strip_prefix(" - [deleted]") else {
+            return false;
+        };
+        let after = rest.trim_start_matches(' ');
+        let token = after.strip_suffix('\r').unwrap_or(after);
+        after.len() < rest.len() && !token.is_empty() && !token.chars().any(char::is_whitespace)
+    }
+
+    /// Mirror of `isNoiseLine` (src/lib/error-summary.ts), minus its
+    /// `Rebasing (x/y)` arm, which no transfer report carries.
+    fn is_summary_noise(line: &str) -> bool {
+        let t = line.trim();
+        t.is_empty()
+            || t.starts_with("hint:")
+            || is_transfer_header(t, "To")
+            || is_transfer_header(t, "From")
+            || is_transfer_ref_noise(line)
+            || is_transfer_deleted_noise(line)
+    }
+
+    /// The line `firstMeaningfulLine` would summarize, before its prefix strip and
+    /// space collapse.
+    fn first_meaningful(report: &str) -> Option<&str> {
+        report.lines().find(|l| !is_summary_noise(l))
+    }
+
+    /// `line` with git's column padding collapsed, as the summary shows it.
+    fn collapsed(line: &str) -> String {
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// stderr of a git call that must fail, run the way the app's runner runs it.
+    async fn failing_stderr(repo: &str, args: &[&str]) -> String {
+        match run_git(Some(repo), args, DEFAULT_TIMEOUT).await {
+            Err(AppError::Git { stderr, .. }) => stderr,
+            Err(other) => panic!("expected `git {args:?}` to fail with a git error, got {other:?}"),
+            Ok(_) => panic!("expected `git {args:?}` to fail, but it succeeded"),
+        }
+    }
+
+    /// Canary for the frontend's transfer-report noise family: `firstMeaningfulLine`
+    /// (src/lib/error-summary.ts) skips git's `To`/`From` headers and every per-ref
+    /// line but `!`, so a failed push, pull, or fetch summarizes git's reason
+    /// rather than a ref that moved fine. Real repos re-derive the measured shapes
+    /// against Rust mirrors of `PUSH_TRANSFER_HEADER`, `FETCH_TRANSFER_HEADER`,
+    /// `TRANSFER_REF_LINE`, and `TRANSFER_DELETED_LINE`, in both directions — keep
+    /// the two lists in step.
+    #[tokio::test]
+    async fn transfer_report_stderr_still_matches_the_frontend_markers() {
+        let (_guard, base, _origin_s, url) = seeded_origin("transfer-report").await;
+        let base_s = base.to_string_lossy().into_owned();
+        for name in ["clone1", "clone2"] {
+            run(
+                &base_s,
+                &["-c", "core.autocrlf=false", "clone", "-q", &url, name],
+            )
+            .await;
+            let c = base.join(name).to_string_lossy().into_owned();
+            run(&c, &["config", "core.autocrlf", "false"]).await;
+            run(&c, &["config", "user.email", "t@t.local"]).await;
+            run(&c, &["config", "user.name", "T"]).await;
+        }
+        let clone1 = base.join("clone1");
+        let clone2 = base.join("clone2");
+        let clone1_s = clone1.to_string_lossy().into_owned();
+        let clone2_s = clone2.to_string_lossy().into_owned();
+
+        // clone2 moves main, tags its new tip, and publishes a branch for clone1 to
+        // delete later; clone1 commits on the old tip, so the two have diverged.
+        std::fs::write(clone2.join("b.txt"), "theirs\n").unwrap();
+        run(&clone2_s, &["add", "-A"]).await;
+        run(&clone2_s, &["commit", "-qm", "from clone2"]).await;
+        run(&clone2_s, &["tag", "v1"]).await;
+        run(
+            &clone2_s,
+            &[
+                "push",
+                "-q",
+                "origin",
+                "main",
+                "v1",
+                "HEAD:refs/heads/doomed",
+            ],
+        )
+        .await;
+        std::fs::write(clone1.join("c.txt"), "mine\n").unwrap();
+        run(&clone1_s, &["add", "-A"]).await;
+        run(&clone1_s, &["commit", "-qm", "from clone1"]).await;
+
+        // The app's default pull mode, on its fall-through path: the fetch half's
+        // report leads, and git's refusal is the reason.
+        let pull = failing_stderr(&clone1_s, &["pull", "--ff-only"]).await;
+        assert!(
+            pull.trim()
+                .lines()
+                .next()
+                .is_some_and(|l| is_transfer_header(l, "From")),
+            "a refused pull no longer leads with the `From` header. Actual stderr:\n{pull}"
+        );
+        assert!(
+            pull.lines()
+                .any(|l| l.contains("-> origin/main") && is_transfer_ref_noise(l)),
+            "the pull's fast-forward table line is gone or no longer reads as noise. \
+             Actual stderr:\n{pull}"
+        );
+        assert!(
+            first_meaningful(&pull)
+                .is_some_and(|l| l.starts_with("fatal: Not possible to fast-forward")),
+            "the refused pull would no longer summarize git's reason. Actual stderr:\n{pull}"
+        );
+
+        // A local tag the remote's disagrees with: `fetch --tags` refuses to move it,
+        // and that `!` line is the reason. Naming `main` adds fetch's bare-word
+        // `* branch … -> FETCH_HEAD` line to the same report.
+        run(&clone1_s, &["tag", "-f", "v1"]).await;
+        let fetch = failing_stderr(&clone1_s, &["fetch", "--tags", "origin", "main"]).await;
+        assert!(
+            fetch
+                .trim()
+                .lines()
+                .next()
+                .is_some_and(|l| is_transfer_header(l, "From")),
+            "a refused fetch no longer leads with the `From` header. Actual stderr:\n{fetch}"
+        );
+        assert!(
+            fetch.lines().any(|l| l.starts_with(" * branch")
+                && collapsed(l).contains("main -> FETCH_HEAD")
+                && is_transfer_ref_noise(l)),
+            "the fetch's `* branch` line is gone or no longer reads as noise. \
+             Actual stderr:\n{fetch}"
+        );
+        assert!(
+            first_meaningful(&fetch).is_some_and(|l| {
+                l.trim_start().starts_with("! [rejected]")
+                    && collapsed(l).contains("v1 -> v1")
+                    && l.contains("(would clobber existing tag)")
+            }),
+            "the tag-clobber refusal would no longer summarize its `!` line. \
+             Actual stderr:\n{fetch}"
+        );
+
+        // A rejected branch pushed alongside a new tag and a deletion: neither success
+        // line may headline the failure.
+        run(&clone1_s, &["tag", "v2"]).await;
+        let push = failing_stderr(
+            &clone1_s,
+            &[
+                "push",
+                "origin",
+                ":refs/heads/doomed",
+                "main",
+                "refs/tags/v2",
+            ],
+        )
+        .await;
+        assert!(
+            push.trim()
+                .lines()
+                .next()
+                .is_some_and(|l| is_transfer_header(l, "To")),
+            "a rejected push no longer leads with the `To` header. Actual stderr:\n{push}"
+        );
+        assert!(
+            push.lines().any(|l| l.starts_with(" * [new tag]")
+                && collapsed(l).contains("v2 -> v2")
+                && is_transfer_ref_noise(l)),
+            "the new tag's report line is gone or no longer reads as noise. \
+             Actual stderr:\n{push}"
+        );
+        assert!(
+            push.lines().any(|l| l.starts_with(" - [deleted]")
+                && collapsed(l) == "- [deleted] doomed"
+                && is_transfer_deleted_noise(l)),
+            "the deletion's report line is gone or no longer reads as noise. \
+             Actual stderr:\n{push}"
+        );
+        assert!(
+            first_meaningful(&push).is_some_and(|l| {
+                l.trim_start().starts_with("! [rejected]")
+                    && collapsed(l).contains("main -> main")
+                    && l.contains("(non-fast-forward)")
+            }),
+            "the rejected push would no longer summarize its `!` line. Actual stderr:\n{push}"
+        );
+
+        // Shapes the mirrors refuse, as the frontend's own boundary tests do.
+        // Looser matching here would let the canary pass a report the frontend
+        // summarizes differently.
+        for line in [
+            " ! [rejected]        main -> main (non-fast-forward)",
+            " - make sure the remote still exists",
+            " - [deleted]         feat and the rest",
+            "Renamed main -> trunk on the remote.",
+            "   Fix the parser -> faster builds",
+            " * note: main -> trunk",
+            " * branches main -> trunk",
+            "From /home/u/origin",
+            "From here on, retry the fetch.",
+        ] {
+            assert!(
+                !is_summary_noise(line),
+                "`{line}` reads as noise here, but the frontend keeps it meaningful"
+            );
+        }
+    }
+
     /// The wire values the TS `PushGuard` union (src/lib/git/api/sync.ts) mirrors: the
     /// success toast keys on these exact strings, so a variant rename that skips
     /// the mirror would silently stop reporting a degraded force push.

@@ -23,6 +23,7 @@ import { forgeReady, forgeSupports, useForgeStatus } from "@/lib/git/queries";
 import type {
   CodeScanningAlertOut,
   CvssOut,
+  CweOut,
   DependabotAlertOut,
   ReferenceOut,
   RepoAdvisoryOut,
@@ -46,6 +47,7 @@ import {
 } from "@/lib/gitlab/security-findings";
 import { type SelectedFinding, useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
+import { cveUrl, cweUrl, ghsaUrl, repoAdvisoryGhsaUrl } from "./advisory-links";
 import {
   CodeScanningChip,
   CqChip,
@@ -194,6 +196,54 @@ function ReferencesSection({ references }: { references: ReferenceOut[] }) {
   );
 }
 
+/** A GHSA or CVE id as a link-out chip, in the same idiom as the GitLab
+ *  identifier chips; plain text when no URL could be built from it. */
+function AdvisoryIdValue({ id, url }: { id: string; url: string | null }) {
+  if (!url) return <span className="font-mono">{id}</span>;
+  return (
+    <button
+      type="button"
+      title={url}
+      onClick={() => openUrl(url)}
+      className="inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 hover:bg-muted/40"
+    >
+      <span className="font-mono whitespace-nowrap">{id}</span>
+      <ArrowSquareOutIcon className="size-3 text-muted-foreground" />
+    </button>
+  );
+}
+
+/** Id and name share ONE flex item as inline text: a space between two flex
+ *  items is dropped from layout and from the accessible name, while a space in
+ *  text flow survives both. The nowrap id can't split; only the name wraps. */
+function CweChip({ cwe }: { cwe: CweOut }) {
+  const url = cweUrl(cwe.cweId);
+  const content = (
+    <span className="min-w-0 wrap-break-word">
+      <span className="font-mono whitespace-nowrap">{cwe.cweId}</span>
+      {cwe.name ? ` ${cwe.name}` : null}
+    </span>
+  );
+  return url ? (
+    <button
+      type="button"
+      title={url}
+      onClick={() => openUrl(url)}
+      className="inline-flex max-w-full cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 text-left hover:bg-muted/40"
+    >
+      {content}
+      <ArrowSquareOutIcon className="size-3 shrink-0 text-muted-foreground" />
+    </button>
+  ) : (
+    <Badge
+      variant="outline"
+      className="h-auto max-w-full py-0.5 text-left font-normal whitespace-normal"
+    >
+      {content}
+    </Badge>
+  );
+}
+
 function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
   return (
     <DetailShell
@@ -221,12 +271,14 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
           <Row label="Manifest">
             <PathText path={alert.manifestPath} className="font-mono" />
           </Row>
+          {/* Always the global database: Dependabot alerts reference published
+              advisories. */}
           <Row label="GHSA">
-            <span className="font-mono">{alert.ghsaId}</span>
+            <AdvisoryIdValue id={alert.ghsaId} url={ghsaUrl(alert.ghsaId)} />
           </Row>
           {alert.cveId ? (
             <Row label="CVE">
-              <span className="font-mono">{alert.cveId}</span>
+              <AdvisoryIdValue id={alert.cveId} url={cveUrl(alert.cveId)} />
             </Row>
           ) : null}
           {/* Only when there's no CVSS section to carry the score — otherwise
@@ -246,13 +298,7 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
             <Row label="CWE">
               <span className="flex flex-wrap gap-1">
                 {alert.cwes.map((c) => (
-                  <Badge
-                    key={c.cweId}
-                    variant="outline"
-                    className="h-auto max-w-full py-0.5 text-left font-normal whitespace-normal"
-                  >
-                    <span className="font-mono">{c.cweId}</span> {c.name}
-                  </Badge>
+                  <CweChip key={c.cweId} cwe={c} />
                 ))}
               </span>
             </Row>
@@ -401,11 +447,17 @@ function AdvisoryDetail({ advisory }: { advisory: RepoAdvisoryOut }) {
       meta={
         <>
           <Row label="GHSA">
-            <span className="font-mono">{advisory.ghsaId}</span>
+            <AdvisoryIdValue
+              id={advisory.ghsaId}
+              url={repoAdvisoryGhsaUrl(advisory.ghsaId, advisory.htmlUrl)}
+            />
           </Row>
           {advisory.cveId ? (
             <Row label="CVE">
-              <span className="font-mono">{advisory.cveId}</span>
+              <AdvisoryIdValue
+                id={advisory.cveId}
+                url={cveUrl(advisory.cveId)}
+              />
             </Row>
           ) : null}
           <Row label="State">{advisory.state}</Row>
@@ -498,6 +550,7 @@ function GlPipelineRow({ data }: { data: GlFindingsOut }) {
     <Row label="Pipeline">
       <button
         type="button"
+        title={pipeline.webUrl}
         onClick={() => openUrl(pipeline.webUrl)}
         className="inline-flex cursor-pointer items-center gap-1 hover:underline"
       >
@@ -546,6 +599,7 @@ function GlSecureDetail({
                     <button
                       key={key}
                       type="button"
+                      title={url}
                       onClick={() => openUrl(url)}
                       className="inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 hover:bg-muted/40"
                     >
