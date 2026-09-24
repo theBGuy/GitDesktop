@@ -19,6 +19,7 @@ import { test } from "node:test";
 
 import {
   columnValue,
+  firstCardPosition,
   groupRowKey,
   honouredSortKeys,
   itemAtRowSlot,
@@ -326,6 +327,20 @@ test("a removed row's landing is FLAT across sections: an emptied section hands 
   const folded = tableRows(sections(), true, new Set(["todo"]));
   assert.equal(itemRowSlot(folded, "t1"), null);
   assert.equal(itemRowSlot(folded, "d1"), 0);
+  // Every section folded: no row holds a slot, but the first card still stands,
+  // and a cursor on it re-lands on its folded header (the panel composes these).
+  const allFolded = tableRows(sections(), true, new Set(["todo", "done"]));
+  assert.equal(itemAtRowSlot(allFolded, 0), null);
+  assert.deepEqual(firstCardPosition(sections()), { col: 0, idx: 0 });
+  assert.deepEqual(
+    resolveTableCursor(
+      allFolded,
+      sections(),
+      { rowKey: itemRowKey("t1"), colIndex: 0 },
+      3,
+    ),
+    { rowIndex: 0, colIndex: 0 },
+  );
 });
 
 test("the cursor resolves by row key, clamped to the columns there are", () => {

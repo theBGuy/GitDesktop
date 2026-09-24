@@ -639,8 +639,8 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
     let field = &node["field"];
     let field_id = text(field, "id");
     let field_name = text(field, "name");
-    // Every rich read selects FIELD_COMMON, so a value with no field id is a node the
-    // lean selection left as a bare `__typename`, never a real value.
+    // Every fragment either selection includes selects FIELD_COMMON, so a node with
+    // no field id matched no fragment (a bare `__typename`): nothing to parse.
     if field_id.is_empty() {
         return ProjectFieldValue::Unknown { field_name };
     }

@@ -42,8 +42,8 @@ export interface ProjectItemRemove {
 /** One project field's value on an item, tagged by the field's kind. `isIssueField`
  *  marks a value of an organization ISSUE field, owned on the issue itself and
  *  bridged onto the board, rather than a board-defined field — it rides the wire for
- *  the editor, which can't write those here. A kind this build doesn't know arrives as `unknown`,
- *  carrying only the name it was given. */
+ *  the editor, which can't write those here. A kind this build doesn't know arrives
+ *  as `unknown`, carrying only the name it was given. */
 export type ProjectFieldValue =
   | {
       kind: "singleSelect";

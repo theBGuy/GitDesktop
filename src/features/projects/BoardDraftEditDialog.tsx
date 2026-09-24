@@ -20,6 +20,12 @@ import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { ITEM_WRITE_REASON, type ItemNoun } from "./board-model";
 
+/** The Notes field's invitation, naming where the notes are read back. */
+const NOTES_PLACEHOLDER: Record<ItemNoun, string> = {
+  card: "Markdown, rendered on the card",
+  row: "Markdown, rendered in the row's details",
+};
+
 /** Whether two login lists name the same people, order ignored. Set-equality rather
  *  than a dirty flag so opening the picker and closing it unchanged still counts as
  *  untouched — what matters is whether the SET moved, not whether it was visited. */
@@ -181,7 +187,7 @@ export function BoardDraftEditDialog({
               {(field) => (
                 <field.MarkdownField
                   label="Notes"
-                  placeholder="Markdown, rendered on the card"
+                  placeholder={NOTES_PLACEHOLDER[noun]}
                   rows={8}
                   textareaClassName="max-h-72 min-h-24 resize-y font-mono"
                 />

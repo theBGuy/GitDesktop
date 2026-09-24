@@ -2076,13 +2076,17 @@ export function ProjectsBoardPanel({
   // column it left, clamped to whatever still stands there, and the board's first
   // card when that column emptied. In the table, its FLAT slot among the drawn rows
   // (`itemAtRowSlot`), since a section is a column and emptying one must hand on
-  // to the next section rather than jump to the top. Derived here so the effect's
-  // deps are the primitives that actually decide the landing, not a fresh array.
+  // to the next section rather than jump to the top; with no item row drawn at all
+  // (every section left folded), the first card, whose cursor re-lands on its
+  // folded header. Derived here so the effect's deps are the primitives that
+  // actually decide the landing, not a fresh array.
   const landing = (() => {
     if (!retiredGone || retired === null) return null;
     if (retired.slot !== null) {
       const itemId = itemAtRowSlot(tableEntries, retired.slot);
-      return itemId === null ? null : findCard(columns, itemId);
+      return itemId === null
+        ? firstCardPosition(columns)
+        : findCard(columns, itemId);
     }
     const left = columns[retired.col]?.items.length ?? 0;
     return left > 0
