@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
+  type ReactElement,
   type ReactNode,
   useCallback,
   useEffect,
@@ -69,6 +70,8 @@ import {
   useAddExistingToBoard,
   useArchiveBoardItem,
   useAvailableProjects,
+  useBoardRereading,
+  useBoardRereadStall,
   useBulkArchiveBoardItems,
   useBulkMoveBoardCards,
   useBulkRemoveBoardItems,
@@ -95,6 +98,7 @@ import {
   type ProjectFieldDef,
   type ProjectFieldValueUpdate,
   type ProjectViewDef,
+  type ProjectViewSort,
   providerLabel,
 } from "@/lib/git/types";
 import { eventToBinding, formatBinding, isMac } from "@/lib/hotkeys/binding";
@@ -115,20 +119,32 @@ import {
 import { BoardColumn } from "./BoardColumn";
 import { BoardDraftEditDialog } from "./BoardDraftEditDialog";
 import {
-  ARCHIVED_CARD_REASON,
+  ARCHIVED_ITEM_REASON,
   ARCHIVED_SHOWN_REASON,
   type BoardColumnModel,
   bucketIdFor,
   buildColumns,
-  CARD_WRITE_REASON,
   chipFieldDefs,
+  columnValue,
   firstCardPosition,
+  GROUPED_ROWS_REASON,
   type GroupField,
   groupableFields,
+  honouredSortKeys,
+  ITEM_WRITE_REASON,
+  type ItemNoun,
+  itemRowKey,
   lensSorted,
+  resolveTableCursor,
   SORTED_VIEW_REASON,
   sortColumnItems,
+  stepTableCursor,
+  type TableColumn,
+  type TableCursor,
+  type TableMove,
   TRUNCATED_ORDER_REASON,
+  tableColumns,
+  tableRows,
   UNSET_COLUMN_ID,
 } from "./board-model";
 import {
@@ -139,9 +155,21 @@ import {
 import {
   type BulkVerb,
   columnRange,
+  isMacSecondaryClick,
   partitionEligible,
   pruneSelection,
+  rowRange,
+  selectionMods,
 } from "./board-selection";
+import {
+  type FieldDraft,
+  INVALID_DRAFT,
+  ISSUE_FIELD_REASON,
+  isWritable,
+  valueKey,
+} from "./ProjectFieldControls";
+import { ProjectsTableView } from "./ProjectsTableView";
+import { cellEditHeld } from "./TableCell";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
  *  owns it in-app, and the web path a CROSS-REPO card falls back to (GitHub's own
@@ -159,13 +187,11 @@ const NO_GROUP_FIELDS_REASON =
   "This project has no single-select or iteration fields to group its board by";
 const LOADING_FIELDS_REASON = "Loading this project's fields…";
 const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
-/** The next three mirror the field editor's own wording verbatim: each surface
- *  gates on the same flag as the row it mirrors, and the two must not say it
- *  differently (ProjectFieldsEditor.tsx). */
+/** Mirrors the field editor's own wording verbatim: each surface gates on the
+ *  same flag as the row it mirrors, and the two must not say it differently
+ *  (ProjectFieldsEditor.tsx). The issue-field hold is the controls module's own. */
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
-const ISSUE_FIELD_REASON =
-  "Issue fields are edited on GitHub — board editing arrives later";
 const LOADING_VIEWS_REASON = "Loading this project's views…";
 /** The two holds the switcher takes on the SEED's input rather than on the views
  *  themselves: a pick seeds the grouping from the field definitions, so it waits
@@ -224,51 +250,63 @@ type BoardDialog = "existing" | "draft" | "edit-draft";
 /** Single-writer: two writes to one card's field settle in an order nothing
  *  promises, and an EARLIER move failing late puts the card back in a column a
  *  later write already moved it out of. */
-const MOVING_REASON = "Moving your last card…";
+const MOVING_REASON: Record<ItemNoun, string> = {
+  card: "Moving your last card…",
+  row: "Moving your last row…",
+};
+/** What the item leaves when it goes, in the words of the surface drawing it. */
+const SURFACE: Record<ItemNoun, string> = { card: "board", row: "table" };
 /** An archive is reversible and a removal is not, so the two prompts say different
  *  things, and a removal says a third for a draft, which lives on this project alone
  *  and has nowhere to survive. Every one names where the card goes rather than asking
  *  the user to infer it — which is why this one is keyed on whether archived cards
  *  are SHOWN: with the toggle off the card leaves the columns, with it on it stays
- *  put under an Archived badge. */
-const ARCHIVE_BODY: Record<"shown" | "hidden", string> = {
-  hidden:
-    "The card leaves the board. Bring it back any time from View options → Show archived cards.",
-  shown:
-    "The card stays in place, marked Archived, and leaves the board when you turn Show archived cards off. Restore card brings it back.",
+ *  put under an Archived badge. "Show archived cards" is the TOGGLE's name, so it
+ *  stays as it reads on screen whatever the item is called. */
+const ARCHIVE_BODY: Record<"shown" | "hidden", (noun: ItemNoun) => string> = {
+  hidden: (noun) =>
+    `The ${noun} leaves the ${SURFACE[noun]}. Bring it back any time from View options → Show archived cards.`,
+  shown: (noun) =>
+    `The ${noun} stays in place, marked Archived, and leaves the ${SURFACE[noun]} when you turn Show archived cards off. Restore ${noun} brings it back.`,
 };
-const REMOVE_BODY: Record<BoardItemContent["kind"], string> = {
-  draft:
+const REMOVE_BODY: Record<
+  BoardItemContent["kind"],
+  (noun: ItemNoun) => string
+> = {
+  draft: () =>
     "This deletes the draft permanently — drafts live on this project and nowhere else.",
-  issue:
-    "The card leaves this project. The issue itself is untouched, and you can add it back later.",
-  pullRequest:
-    "The card leaves this project. The pull request itself is untouched, and you can add it back later.",
-  redacted:
-    "The card leaves this project. The item itself is untouched, and you can add it back later.",
+  issue: (noun) =>
+    `The ${noun} leaves this project. The issue itself is untouched, and you can add it back later.`,
+  pullRequest: (noun) =>
+    `The ${noun} leaves this project. The pull request itself is untouched, and you can add it back later.`,
+  redacted: (noun) =>
+    `The ${noun} leaves this project. The item itself is untouched, and you can add it back later.`,
 };
 /** {@link ARCHIVE_BODY} for a SELECTION, keyed the same way and on the same fact:
  *  with the toggle off the cards leave the board, with it on they stay put under
  *  an Archived badge. An eligible set of one takes the single-card wording
  *  verbatim rather than a pluralized copy of it. */
-const BULK_ARCHIVE_BODY: Record<"shown" | "hidden", (n: number) => string> = {
-  hidden: (n) =>
+const BULK_ARCHIVE_BODY: Record<
+  "shown" | "hidden",
+  (n: number, noun: ItemNoun) => string
+> = {
+  hidden: (n, noun) =>
     n === 1
-      ? ARCHIVE_BODY.hidden
-      : `The ${n} cards leave the board. Bring them back any time from View options → Show archived cards.`,
-  shown: (n) =>
+      ? ARCHIVE_BODY.hidden(noun)
+      : `The ${n} ${noun}s leave the ${SURFACE[noun]}. Bring them back any time from View options → Show archived cards.`,
+  shown: (n, noun) =>
     n === 1
-      ? ARCHIVE_BODY.shown
-      : `The ${n} cards stay in place, marked Archived, and leave the board when you turn Show archived cards off. Restore card brings one back.`,
+      ? ARCHIVE_BODY.shown(noun)
+      : `The ${n} ${noun}s stay in place, marked Archived, and leave the ${SURFACE[noun]} when you turn Show archived cards off. Restore ${noun} brings one back.`,
 };
 
 /** {@link REMOVE_BODY} for a SELECTION. Keyed on how many DRAFTS it holds, which
  *  is the one thing a removal destroys outright: everything else is an unlink the
  *  user can undo by adding the item back. */
-function bulkRemoveBody(cards: BoardItem[]): string {
-  if (cards.length === 1) return REMOVE_BODY[cards[0].content.kind];
+function bulkRemoveBody(cards: BoardItem[], noun: ItemNoun): string {
+  if (cards.length === 1) return REMOVE_BODY[cards[0].content.kind](noun);
   const drafts = cards.filter((card) => card.content.kind === "draft").length;
-  const leaves = `The ${cards.length} cards leave this project.`;
+  const leaves = `The ${cards.length} ${noun}s leave this project.`;
   if (drafts === 0)
     return `${leaves} The items themselves are untouched, and you can add them back later.`;
   // Both arms built whole rather than stitched from shared fragments: "which
@@ -291,14 +329,72 @@ const NO_VIEW_ROW_ID = "__no_view__";
 /** One shared list for every render the definitions haven't arrived for. A fresh
  *  `[]` would re-mint the chip memo, and through it every mounted card. */
 const NO_FIELD_DEFS: ProjectFieldDef[] = [];
-/** What the board says about a view it is drawing in the only layout it has. A
- *  BOARD view needs no note, and an unrecognised layout names no shape it can't
- *  vouch for. */
+/** The column list of a render with no table view, shared for the same reason. */
+const NO_TABLE_COLUMNS: TableColumn[] = [];
+/** The sort keys of a render with no table view. */
+const NO_SORT_KEYS: ProjectViewSort[] = [];
+/** What the board says about a view it draws in a layout the view wasn't saved
+ *  in. Board and table views draw as themselves and need no note, and an
+ *  unrecognised layout names no shape it can't vouch for. */
 const FLAT_FALLBACK_NOTE: Partial<Record<ProjectViewDef["layout"], string>> = {
-  table: "Table view, shown as a board",
   roadmap: "Roadmap view, shown as a board",
   unknown: "Shown as a board",
 };
+/** Why View options' Group by holds under a table view: the view's own saved
+ *  grouping decides its sections, exactly as GitHub draws it. */
+const TABLE_GROUPING_REASON =
+  "Table views keep the grouping they were saved with on GitHub";
+/** Why a bulk move is held on a table that draws no group sections: a move writes
+ *  the grouping field, and an ungrouped table has no group to move rows into. */
+const TABLE_UNGROUPED_MOVE_REASON =
+  "This table isn't grouped, so there's no group to move rows to";
+/** The strip's word on a table view whose ENTIRE sort this build can't honour —
+ *  a partly honoured sort stays quiet, since its rows do follow the view. Keyed on
+ *  WHY: a key whose field the board's field read didn't return (a capped or failed
+ *  read) is a different statement from a field this build has no order for. */
+const TABLE_SORT_DROPPED_NOTE: Record<
+  "unsortable" | "unloaded" | "both",
+  string
+> = {
+  unsortable:
+    "Sorted on GitHub by fields this table can't order by, so rows keep the project order",
+  unloaded:
+    "Sorted on GitHub by fields this board didn't load, so rows keep the project order",
+  both: "Sorted on GitHub by fields this table can't order by or didn't load, so rows keep the project order",
+};
+/** The strip's word on a table grouped by a field that makes no sections here (a
+ *  multi-select, a field GitHub owns on the issue): every row is still drawn. */
+function tableUngroupedNote(fieldName: string | null): string {
+  return fieldName === null
+    ? "Grouped on GitHub by a field this board didn't load, shown here as one list"
+    : `Grouped by ${fieldName} on GitHub, shown here as one list`;
+}
+/** The table's cursor keys, by the canonical binding `eventToBinding` spells:
+ *  the bare arrows step, Home and End reach a row's ends, and `mod` with them
+ *  reaches the table's. */
+const TABLE_MOVES: Partial<Record<string, TableMove>> = {
+  up: "up",
+  down: "down",
+  left: "left",
+  right: "right",
+  home: "rowStart",
+  end: "rowEnd",
+  "mod+home": "first",
+  "mod+end": "last",
+  pageup: "pageUp",
+  pagedown: "pageDown",
+};
+/** Which of {@link TABLE_MOVES} change the ROW, and so carry the selection with
+ *  them the way the board's vertical keys do. Column moves leave it alone: the
+ *  selection is row-scoped. */
+const TABLE_ROW_MOVES: ReadonlySet<TableMove> = new Set([
+  "up",
+  "down",
+  "first",
+  "last",
+  "pageUp",
+  "pageDown",
+]);
 /** Zero-width space, built from its code point rather than written literally so no
  *  invisible byte sits in source. Toggled into the live region to force a
  *  textContent change when an announcement repeats. */
@@ -359,12 +455,22 @@ const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
 /** Why the Position section is held when the menu's card has left the board (a
  *  refetch dropped it while the menu was open). One held row, not four "already
  *  first"/"already last" rows that would contradict each other. */
-const CARD_GONE_REASON = "This card is no longer on the board";
+const CARD_GONE_REASON: Record<ItemNoun, string> = {
+  card: "This card is no longer on the board",
+  row: "This row is no longer in the table",
+};
 /** One shared id for every reorder-refusal toast: key auto-repeat drives the burst
  *  (no e.repeat gate), so a held direction would otherwise mint a fresh toast per
  *  repeat — sonner updates the one in place instead. Only one refusal is on screen
  *  at a time, so a single id is correct. */
 const REORDER_REFUSAL_TOAST_ID = "board-reorder-refused";
+/** The same one-toast-at-a-time id for a held cell editor asked for from the
+ *  keyboard, where no greyed control is on screen to say why. */
+const CELL_EDIT_REFUSAL_TOAST_ID = "board-cell-edit-refused";
+/** What the keyboard route says when Enter closes a cell editor over an entry the
+ *  field can't take (a half-typed number or date). */
+const CELL_INVALID_ENTRY_NOTE =
+  "Nothing saved: that entry isn't a complete value yet";
 
 /**
  * One card per membership, LAST occurrence winning, applied where the pages flatten
@@ -395,10 +501,30 @@ const NO_SELECTION: ReadonlySet<string> = new Set<string>();
  *  bulk fields dialog is memo-free but re-renders with the panel, and a fresh `[]`
  *  per render would re-mint every hint it draws. */
 const NO_CARDS: BoardItem[] = [];
-/** Why every bulk verb is held while one is still running. Single-writer for the
- *  same reason the single-card writes are: two writes to one card settle in an
- *  order nothing promises. */
+/** No table section collapsed — the state every project and view starts in. */
+const NO_COLLAPSED: ReadonlySet<string> = new Set<string>();
+/** Why every bulk verb (and every table cell) is held while a batch write is
+ *  still running. Single-writer for the same reason the single-card writes are: two
+ *  writes to one card settle in an order nothing promises. Worded by what IS
+ *  pending: a lone one-item field write is a cell edit, not a bulk change. */
 const BULK_PENDING_REASON = "Applying the last bulk change…";
+const FIELD_PENDING_REASON = "Still saving your last field change…";
+/** Why a table cell holds while a write's re-read is on its way — the slot's own
+ *  "Updating…" phase, said as a reason. */
+const UPDATING_REASON: Record<ItemNoun, string> = {
+  card: "Updating the board with your last change…",
+  row: "Updating the table with your last change…",
+};
+/** The strip's own line for that state, once the read's error has been cleared
+ *  by a later patch and there is no error left to present. */
+const REREAD_FAILED_NOTE =
+  "Couldn't refresh after your last change, so some values may be out of date";
+/** The same hold when that re-read failed: the strip above names the failure and
+ *  carries the Retry that clears it. */
+const REREAD_FAILED_REASON: Record<ItemNoun, string> = {
+  card: "The board didn't refresh after your last change. Retry above to edit again",
+  row: "The table didn't refresh after your last change. Retry above to edit again",
+};
 /** What the keyboard says when Shift is held across the board rather than down a
  *  column. A silent collapse under a held Shift is the outcome this refuses. */
 const SELECTION_SIDEWAYS_REASON = "Selection extends within a column";
@@ -422,7 +548,10 @@ const BULK_FAIL_WORD: Record<BulkVerb, string> = {
  *  different statement from every card being on the wrong side of the verb. Only
  *  a surface that outlives the bar can reach it — the bar stops rendering below
  *  two cards, where the bulk fields dialog stays up. */
-const BULK_NO_SELECTION_REASON = "No cards are selected";
+const BULK_NO_SELECTION_REASON: Record<ItemNoun, string> = {
+  card: "No cards are selected",
+  row: "No rows are selected",
+};
 /** Why a verb has nothing to do over THIS selection. Each names the state that
  *  put it there, since a mixed selection scopes a verb rather than blocking it —
  *  a held row here means every selected card is on the wrong side of it.
@@ -433,18 +562,18 @@ const BULK_NO_SELECTION_REASON = "No cards are selected";
  *  `Record<BulkVerb, …>` rather than narrowed with `Exclude`, so a sixth verb
  *  added later has to state its own sentence here instead of type-checking its
  *  way past a lookup that would return `undefined` at runtime. */
-const BULK_NOTHING_REASON: Record<BulkVerb, string> = {
-  move: "Every selected card is archived",
-  fields: "Every selected card is archived",
-  archive: "Every selected card is already archived",
-  restore: "No selected card is archived",
-  remove: "Select cards to remove",
+const BULK_NOTHING_REASON: Record<BulkVerb, (noun: ItemNoun) => string> = {
+  move: (noun) => `Every selected ${noun} is archived`,
+  fields: (noun) => `Every selected ${noun} is archived`,
+  archive: (noun) => `Every selected ${noun} is already archived`,
+  restore: (noun) => `No selected ${noun} is archived`,
+  remove: (noun) => `Select ${noun}s to remove`,
 };
 
-/** `n` cards, with the singular the eligible count really can land on: a mixed
- *  selection leaves one verb with a single card to act on. */
-function cardCount(n: number): string {
-  return `${n} ${n === 1 ? "card" : "cards"}`;
+/** `n` cards (or rows), with the singular the eligible count really can land on:
+ *  a mixed selection leaves one verb with a single card to act on. */
+function cardCount(n: number, noun: ItemNoun): string {
+  return `${n} ${n === 1 ? noun : `${noun}s`}`;
 }
 
 /** A view's filter as the board's LENS. GitHub reports an unfiltered view as
@@ -458,17 +587,46 @@ function lensFilter(view: ProjectViewDef | null): string | null {
 
 /** The one control that takes the board back to no lens, worded the same wherever
  *  it appears: the strip that announces the view, and the state its filter
- *  emptied. */
-function ClearViewButton({ onClear }: { onClear: () => void }) {
+ *  emptied. `landing` marks the notice's copy for {@link focusBodyLanding}. */
+function ClearViewButton({
+  onClear,
+  landing = false,
+}: {
+  onClear: () => void;
+  landing?: boolean;
+}) {
   return (
     <button
       type="button"
+      data-body-landing={landing ? "" : undefined}
       onClick={onClear}
       className="cursor-pointer underline hover:text-foreground"
     >
       Clear view
     </button>
   );
+}
+
+/** What a `[data-body-landing]` wrapper hands focus to: its first live control. */
+const BODY_LANDING_CONTROL = "button:not(:disabled), a[href]";
+
+/** THE focus landing, for every route that has nothing left to stand on — an
+ *  emptied board, an emptied table, a body arm swapped in under the table, board
+ *  or table alike. In order: the drawn body's own control (`[data-body-landing]`,
+ *  on the control itself or on a wrapper around a shared component whose first
+ *  live control it means), else the toolbar's Add item, where the board's own
+ *  recovery starts, else the panel root: a named region, so the landing is
+ *  announced rather than dropped silently to <body>. */
+function focusBodyLanding(root: HTMLElement | null) {
+  const marked = root?.querySelector<HTMLElement>("[data-body-landing]");
+  const control = marked?.matches(BODY_LANDING_CONTROL)
+    ? marked
+    : marked?.querySelector<HTMLElement>(BODY_LANDING_CONTROL);
+  (
+    control ??
+    root?.querySelector<HTMLElement>("[data-board-add-trigger]") ??
+    root
+  )?.focus();
 }
 
 /** Whether a card's issue or pull request opens IN-APP rather than in the browser.
@@ -593,7 +751,13 @@ function ErrorCard({ error, onRetry }: { error: Error; onRetry: () => void }) {
   return (
     <div className="px-3 py-4 text-xs">
       <p className="text-muted-foreground">{presentError(error).summary}</p>
-      <Button variant="outline" size="xs" className="mt-2" onClick={onRetry}>
+      <Button
+        variant="outline"
+        size="xs"
+        className="mt-2"
+        data-body-landing=""
+        onClick={onRetry}
+      >
         Retry
       </Button>
     </div>
@@ -711,10 +875,26 @@ export function ProjectsBoardPanel({
   // filter, sort and chips back on with no pick behind them and no grouping seed.
   // A SETTLED list is the only thing that may retire it, so a pending or failed
   // read touches nothing.
+  // A view the settled list no longer carries degrades to no lens the moment it
+  // arrives — for a TABLE view, the grid unmounts under the user in that same
+  // render, a route no picker covers. So the retirement takes the picker's
+  // handoff (`handOffLayoutFlip`); a board view keeps its bare retirement.
+  // `drawnLayoutRef` is the render BEFORE this one: its writer runs after this.
+  const drawnLayoutRef = useRef<{
+    viewId: string | null;
+    table: boolean;
+    cardId: string | null;
+  }>({ viewId: null, table: false, cardId: null });
+  const retireStaleView = useEffectEvent(() => {
+    if (drawnLayoutRef.current.table) {
+      handOffLayoutFlip(false, drawnLayoutRef.current.cardId);
+      clearSelection();
+    }
+    setActiveViewId(null);
+  });
   useEffect(() => {
     if (activeViewId === null || views.data === undefined) return;
-    if (!views.data.views.some((v) => v.id === activeViewId))
-      setActiveViewId(null);
+    if (!views.data.views.some((v) => v.id === activeViewId)) retireStaleView();
   }, [activeViewId, views.data]);
 
   // Transient like the grouping and the view above it: what a user looked at once
@@ -727,17 +907,50 @@ export function ProjectsBoardPanel({
     lensQuery,
     canRead && projectId !== null,
     showArchived,
+    // The RICH read (assignees, labels, reviewers, linked pull requests as field
+    // values) only where a table draws them: each costs rate limit per item, and a
+    // board renders none. The placeholder keeps the other read's cards up across
+    // a board↔table switch while this one lands.
+    view?.layout === "table",
   );
+  // The tail after a write settles and before the board shows what GitHub now
+  // holds: a re-read one of this repo's writes asked for, still running.
+  const refreshingAfterWrite = useBoardRereading(repoPath);
+  // Whether the on-screen lens has reconciled since the repo's last write: owed
+  // (the same "Updating…" hold, offline included) or failed.
+  const rereadStall = useBoardRereadStall(
+    repoPath,
+    projectId ?? "",
+    lensQuery,
+    showArchived,
+    view?.layout === "table",
+  );
+  const rereadFailed = rereadStall === "failed";
   // The cards on screen belong to the PREVIOUS lens until this clears, so every
   // claim derived from them waits: the count, Load more, and the move rows.
   const lensLoading = items.isPlaceholderData;
   const loaded = oneCardPerItem(
     items.data?.pages.flatMap((page) => page.items) ?? [],
   );
+  // A TABLE view draws its rows in sections of the view's own row grouping, where
+  // a board draws columns of the Group-by pick. A grouping outside the groupable
+  // set makes no sections: the table draws flat and the strip says so.
+  const tableView = view?.layout === "table" ? view : null;
+  const rowGroupId = tableView?.groupFieldIds[0];
+  const rowGroupField =
+    rowGroupId === undefined
+      ? null
+      : (groupFields.find((f) => f.id === rowGroupId) ?? null);
+  // The field whose buckets the drawn columns or row sections are — what a move
+  // writes, what the menu's Move to lists, and what a card's value is read
+  // against. On a board it is the Group-by pick, exactly as before.
+  const bucketField = tableView === null ? groupField : rowGroupField;
+  // What every message names an item: the words of the surface drawing it.
+  const noun: ItemNoun = tableView === null ? "card" : "row";
   // The view's sort orders cards WITHIN a column, so it applies after bucketing —
   // which column a card lands in is the grouping's answer alone. With no sort the
   // columns are untouched, board POSITION order and all.
-  const grouped = buildColumns(loaded, groupField, showArchived);
+  const grouped = buildColumns(loaded, bucketField, showArchived);
   const columns = lensSorted(view)
     ? grouped.map((column) => ({
         ...column,
@@ -787,13 +1000,144 @@ export function ProjectsBoardPanel({
     (col: number, idx: number) => setCursor({ col, idx }),
     [],
   );
-  // A cursor left over from another grouping (or a refetch that emptied its
-  // column) can't address a card, so the tab stop falls back to the first one.
-  const liveCursor =
-    cursor !== null && cursor.idx < (columns[cursor.col]?.items.length ?? 0)
-      ? cursor
+  // The table's own cursor, by IDENTITY — a row key and the column being walked —
+  // since a table re-sorts and re-sections under it. Retired on a project switch;
+  // re-anchored (row kept, column reset) on a view switch, so it maps by item id
+  // where the item survives; never retired on a refetch that drops its row,
+  // because the resolution below already falls back each render.
+  const [tableCursor, setTableCursor] = useState<TableCursor | null>(null);
+  // The card a table→board switch carries to the board's cursor, held until the
+  // board's own columns SETTLE (the lens may be loading) and then spent: found, it
+  // becomes the cursor; gone, the board keeps its first-card fallback.
+  const [boardCursorSeed, setBoardCursorSeed] = useState<{
+    /** Null when the cursor sat on a group header: no card to carry. */
+    itemId: string | null;
+    /** The table held focus at the switch, so the board takes it on arrival. */
+    claim: boolean;
+  } | null>(null);
+  // A board→table switch made while a board card held focus: the table claims its
+  // cursor cell once it has mounted. A nonce bumped in the switch itself would be
+  // the one the table MOUNTS with, which a claim never fires on.
+  const [tableFocusClaim, setTableFocusClaim] = useState(false);
+  // The one table cell whose editor is open, and which RUN of the editor it is.
+  // Retired — state cleared and token bumped, so a close arriving from a retired
+  // run can't write — at: a project switch (the picker, and the catalog's silent
+  // re-point), a view switch (`reanchorTable`), and refetch-absence of its row or
+  // its column (`cellEditGone` below). Nothing else closes it but the editor.
+  const [editingCell, setEditingCell] = useState<{
+    itemId: string;
+    fieldId: string;
+    session: number;
+  } | null>(null);
+  const cellEditSessionRef = useRef(0);
+  // The table's collapsed sections, by bucket id: transient like every layout
+  // choice here. Cleared on a project switch and a view switch (a different
+  // grouping's ids mean nothing); a refetch that empties a section just stops
+  // drawing its header, and the id waits harmlessly for the section to return.
+  const [collapsedGroups, setCollapsedGroups] =
+    useState<ReadonlySet<string>>(NO_COLLAPSED);
+  const tableCols =
+    tableView === null ? NO_TABLE_COLUMNS : tableColumns(tableView, fieldDefs);
+  // The sort keys the rows really follow — a header claims no key the sort
+  // dropped — and whether the view's whole sort was dropped, which the strip says.
+  const tableSortKeys =
+    tableView === null
+      ? NO_SORT_KEYS
+      : honouredSortKeys(tableView.sortBy, fieldDefs);
+  const tableSortDropped = (() => {
+    if (
+      tableView === null ||
+      tableView.sortBy.length === 0 ||
+      tableSortKeys.length > 0
+    )
+      return null;
+    const loaded = tableView.sortBy.map((sort) =>
+      fieldDefs.some((f) => f.id === sort.fieldId),
+    );
+    if (loaded.every(Boolean)) return TABLE_SORT_DROPPED_NOTE.unsortable;
+    if (!loaded.some(Boolean)) return TABLE_SORT_DROPPED_NOTE.unloaded;
+    return TABLE_SORT_DROPPED_NOTE.both;
+  })();
+  // The honest note for a table grouped by a field that makes no sections here.
+  // Only a SETTLED fields read may name the field as missing: while it loads,
+  // the panel draws its skeleton instead of any table.
+  const tableUngrouped =
+    rowGroupId !== undefined && rowGroupField === null
+      ? tableUngroupedNote(
+          fieldDefs.find((f) => f.id === rowGroupId)?.name ?? null,
+        )
       : null;
+  const tableEntries =
+    tableView === null
+      ? []
+      : tableRows(columns, rowGroupField !== null, collapsedGroups);
+  const tablePos = resolveTableCursor(
+    tableEntries,
+    columns,
+    tableCursor,
+    tableCols.length,
+  );
+  const tablePosEntry =
+    tablePos === null ? undefined : tableEntries[tablePos.rowIndex];
+  // A cursor left over from another grouping (or a refetch that emptied its
+  // column) can't address a card, so the tab stop falls back to the first one. On
+  // a table the card is wherever the cursor's ROW is now, and a group header is
+  // no card at all.
+  const liveCursor =
+    tableView !== null
+      ? tablePosEntry?.kind === "item"
+        ? findCard(columns, tablePosEntry.item.itemId)
+        : null
+      : cursor !== null && cursor.idx < (columns[cursor.col]?.items.length ?? 0)
+        ? cursor
+        : null;
   const tabStop = liveCursor ?? firstCardPosition(columns);
+  /**
+   * The layout swapped under the user with no picker in the route — the active view
+   * retired, or the SAME view's layout changed on a refetch. The grid or the board
+   * unmounted in the render that brought the change, so the picker's handoff runs
+   * off the previous render's record: its cursor card seeds the new layout's
+   * cursor, and focus that fell with it (to <body>) is claimed there.
+   */
+  function handOffLayoutFlip(toTable: boolean, cardId: string | null) {
+    // A peek anchored in the layout being left would reopen in the other unasked.
+    setPeekItemId(null);
+    const active = document.activeElement;
+    const held = active === null || active === document.body;
+    if (toTable) {
+      if (cardId !== null)
+        setTableCursor({ rowKey: itemRowKey(cardId), colIndex: 0 });
+      setTableFocusClaim(held);
+      return;
+    }
+    if (cardId !== null || held)
+      setBoardCursorSeed({ itemId: cardId, claim: held });
+    setCursor(null);
+  }
+  const flipLayout = useEffectEvent((toTable: boolean, cardId: string | null) =>
+    handOffLayoutFlip(toTable, cardId),
+  );
+  // Records the drawn layout for the next render, and hands off when the SAME view
+  // changed layout in place. Declared after the retirement's effect, so that one
+  // reads the previous render's record; a retired view resolves to no view here
+  // and is the retirement's to hand off.
+  const drawnCardId =
+    liveCursor === null
+      ? null
+      : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
+  // Read the previous record, hand off from IT, and only then record this render:
+  // the card to carry is the one the old layout drew.
+  useEffect(() => {
+    const prev = drawnLayoutRef.current;
+    const table = tableView !== null;
+    if (view !== null && prev.viewId === view.id && prev.table !== table)
+      flipLayout(table, prev.cardId);
+    drawnLayoutRef.current = {
+      viewId: view?.id ?? null,
+      table,
+      cardId: drawnCardId,
+    };
+  });
 
   // The board's selection, and the card a Shift range extends FROM. Beside the
   // cursor rather than derived from it: the two move together for every plain
@@ -833,6 +1177,64 @@ export function ProjectsBoardPanel({
    */
   const boardSettled =
     items.data !== undefined && !items.isFetching && !lensLoading;
+  // Spend a table→board seed once the board's columns have settled. Keyed on the
+  // primitives that decide it, not on the columns array.
+  const onBoard = tableView === null;
+  const seedPos =
+    boardCursorSeed === null || !onBoard
+      ? null
+      : boardCursorSeed.itemId === null
+        ? null
+        : findCard(columns, boardCursorSeed.itemId);
+  const seedCol = seedPos?.col ?? null;
+  const seedIdx = seedPos?.idx ?? null;
+  // The fallback landing when the seed's card isn't there (or there was none): the
+  // board's first card, the tab stop's own fallback.
+  const firstPos = firstCardPosition(columns);
+  const firstCol = firstPos?.col ?? null;
+  const firstIdx = firstPos?.idx ?? null;
+  const firstItemId =
+    firstPos === null
+      ? null
+      : (columns[firstPos.col]?.items[firstPos.idx]?.itemId ?? null);
+  useEffect(() => {
+    if (boardCursorSeed === null || !onBoard || !boardSettled) return;
+    const { itemId, claim } = boardCursorSeed;
+    setBoardCursorSeed(null);
+    if (seedCol !== null && seedIdx !== null) {
+      setCursor({ col: seedCol, idx: seedIdx });
+      if (!claim) return;
+      // The mounted columns claim on this bump, by index and by the card's id.
+      setFocusItemId(itemId);
+      setFocusNonce((n) => n + 1);
+      return;
+    }
+    if (!claim) return;
+    // No card to carry (a header held focus, or the card didn't survive): the
+    // board's first card, else the shared landing.
+    if (firstCol !== null && firstIdx !== null) {
+      setCursor({ col: firstCol, idx: firstIdx });
+      setFocusItemId(firstItemId);
+      setFocusNonce((n) => n + 1);
+      return;
+    }
+    focusBodyLanding(rootRef.current);
+  }, [
+    boardCursorSeed,
+    onBoard,
+    boardSettled,
+    seedCol,
+    seedIdx,
+    firstCol,
+    firstIdx,
+    firstItemId,
+  ]);
+  // Spent once the table is drawn; its nonce effect claims the cursor cell.
+  useEffect(() => {
+    if (!tableFocusClaim || onBoard) return;
+    setTableFocusClaim(false);
+    setFocusNonce((n) => n + 1);
+  }, [tableFocusClaim, onBoard]);
   const selectionDrifted =
     boardSettled && liveSelection.size !== selectedIds.size;
   const anchorGone =
@@ -866,10 +1268,10 @@ export function ProjectsBoardPanel({
     if (announcedSizeRef.current === selectionSize) return;
     const timer = setTimeout(() => {
       announcedSizeRef.current = selectionSize;
-      if (selectionSize >= 2) announce(`${selectionSize} cards selected`);
+      if (selectionSize >= 2) announce(`${selectionSize} ${noun}s selected`);
     }, 250);
     return () => clearTimeout(timer);
-  }, [selectionSize, announce]);
+  }, [selectionSize, announce, noun]);
 
   /** The selected cards themselves, in the board's own draw order — what every
    *  bulk verb partitions, read at FIRE time. */
@@ -932,8 +1334,20 @@ export function ProjectsBoardPanel({
    */
   function selectRange(itemId: string, seedAnchorId: string | null = null) {
     const anchorId = selectionAnchorId ?? seedAnchorId;
+    // A table's range runs over its VISIBLE rows, sections included; a board's
+    // stays inside one column.
     const ids =
-      anchorId === null ? null : columnRange(columns, anchorId, itemId);
+      anchorId === null
+        ? null
+        : tableView !== null
+          ? rowRange(
+              tableEntries.flatMap((entry) =>
+                entry.kind === "item" ? [entry.item] : [],
+              ),
+              anchorId,
+              itemId,
+            )
+          : columnRange(columns, anchorId, itemId);
     if (ids !== null) {
       setSelectedIds(new Set(ids));
       // A seeded anchor has to be RECORDED, or the next extension seeds again from
@@ -944,7 +1358,9 @@ export function ProjectsBoardPanel({
     // No anchor, or one the board no longer draws: nothing to extend from, so the
     // landed card becomes the selection and the new anchor (ChangesPanel's
     // hidden-anchor rule). A live anchor in ANOTHER column is the other null, and
-    // it toggle-adds — a kanban has no honest two-dimensional range.
+    // it toggle-adds — a kanban has no honest two-dimensional range. On a table
+    // that null is an anchor inside a COLLAPSED section, which a range may not
+    // select through.
     if (anchorId !== null && findCard(columns, anchorId) !== null)
       selectToggle(itemId, false);
     else selectOnly(itemId);
@@ -956,7 +1372,65 @@ export function ProjectsBoardPanel({
   function clearView() {
     setActiveViewId(null);
     setCursor(null);
+    seedBoardCursor(false);
+    reanchorTable();
     clearSelection();
+  }
+
+  /** Leaving a TABLE for a board keeps the cursor's card, the way arriving at one
+   *  does: the board's cursor is index-shaped and the columns it will index aren't
+   *  drawn yet, so the card id is held until they are (see `boardCursorSeed`). A
+   *  board-to-board switch keeps its own reset. Either direction also carries DOM
+   *  focus across when the layout being left held it. */
+  function seedBoardCursor(toTable: boolean) {
+    // Whether the layout being left holds DOM focus — the palette route, where the
+    // focused card or cell unmounts under it. The popover route holds focus in its
+    // own popup and hands nothing across.
+    const active = document.activeElement;
+    const held =
+      active instanceof Element &&
+      (rootRef.current?.contains(active) ?? false) &&
+      active.closest("[data-table-cell], [data-card-index]") !== null;
+    // A layout change retires the peek, as the flip handoff does.
+    if ((tableView !== null) !== toTable) setPeekItemId(null);
+    if (tableView === null) {
+      setTableFocusClaim(held && toTable);
+      return;
+    }
+    const itemId =
+      liveCursor === null
+        ? undefined
+        : columns[liveCursor.col]?.items[liveCursor.idx]?.itemId;
+    // Table to table re-anchors through `reanchorTable` alone; only a board
+    // arrival spends a seed.
+    setBoardCursorSeed(
+      toTable || (itemId === undefined && !held)
+        ? null
+        : { itemId: itemId ?? null, claim: held },
+    );
+  }
+
+  /** Close whatever cell editor is open without writing, retiring its run. */
+  function retireCellEditor() {
+    cellEditSessionRef.current += 1;
+    setEditingCell(null);
+  }
+
+  /** A view switch's retirement for the table's transient state: sections of the
+   *  previous grouping mean nothing under the next, and the table cursor re-anchors
+   *  on the CARD the cursor is on now, board or table, so it maps by item id
+   *  wherever that item survives the switch. Not its column: the next view lists
+   *  different ones. */
+  function reanchorTable() {
+    retireCellEditor();
+    setCollapsedGroups(NO_COLLAPSED);
+    const itemId =
+      liveCursor === null
+        ? undefined
+        : columns[liveCursor.col]?.items[liveCursor.idx]?.itemId;
+    setTableCursor(
+      itemId === undefined ? null : { rowKey: itemRowKey(itemId), colIndex: 0 },
+    );
   }
 
   /** Selecting a view is an EVENT, never an effect: the grouping seed fires once,
@@ -976,6 +1450,8 @@ export function ProjectsBoardPanel({
       setPickedFieldId(vgroup);
     // The columns are about to hold a different set of cards.
     setCursor(null);
+    seedBoardCursor(picked?.layout === "table");
+    reanchorTable();
     clearSelection();
   }
 
@@ -1045,6 +1521,167 @@ export function ProjectsBoardPanel({
     const idx = Number(card.dataset.cardIndex);
     const col = Number(column.dataset.columnIndex);
     return Number.isInteger(idx) && Number.isInteger(col) ? { col, idx } : null;
+  }
+
+  /** The card a TABLE row stands for, resolved off the row's `data-item-id` into
+   *  the same {col, idx} the shared machinery addresses — the row arm beside
+   *  {@link cardAt}. Null for a group header, which is no card. */
+  function rowAt(el: Element): { col: number; idx: number } | null {
+    const itemId = el.closest<HTMLElement>("[data-item-id]")?.dataset.itemId;
+    return itemId === undefined ? null : findCard(columns, itemId);
+  }
+
+  /** Where `el` sits in whichever layout is drawn. */
+  function positionAt(el: Element): { col: number; idx: number } | null {
+    return tableView !== null ? rowAt(el) : cardAt(el);
+  }
+
+  /** The node a press or a hand-off focuses in whichever layout is drawn: a card
+   *  on the board, a cell in the table. */
+  const focusableSelector =
+    tableView !== null ? "[data-table-cell]" : "[data-card-index]";
+
+  /** A table cell took focus: the cursor follows it. A group header reports no
+   *  column of its own, so a walk passing through it keeps the one it was on. */
+  const onTableCellFocus = useCallback(
+    (rowKey: string, colIndex: number | null) =>
+      setTableCursor((prev) => {
+        const col = colIndex ?? prev?.colIndex ?? 0;
+        return prev?.rowKey === rowKey && prev.colIndex === col
+          ? prev
+          : { rowKey, colIndex: col };
+      }),
+    [],
+  );
+
+  /** Collapse or expand one table section. A cursor inside it re-lands on its
+   *  header by resolution, so nothing here has to chase it. */
+  const toggleGroup = useCallback(
+    (bucketId: string) =>
+      setCollapsedGroups((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(bucketId)) next.add(bucketId);
+        return next;
+      }),
+    [],
+  );
+
+  /**
+   * The table's keyboard: the grid pattern's 2D walk, the board's reposition
+   * chords on an item row, and Enter/Space on the cell. Scoped by DOM containment
+   * like the board's handler, for the same portalled-popup reason. A ROW move
+   * carries the selection the way the board's vertical keys do — plain collapses
+   * to the landed row, Shift extends the range over the visible rows — while a
+   * column move leaves it alone, since the selection is row-scoped.
+   */
+  function onTableKeyDown(e: KeyboardEvent<HTMLDivElement>, pageSize: number) {
+    // A key typed inside a cell editor or a peek reaches here through React's
+    // component tree; its TARGET is the portalled popup, which the grid does not
+    // contain, and those keys are the popup's own.
+    if (!(e.target instanceof Node) || !e.currentTarget.contains(e.target))
+      return;
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !e.currentTarget.contains(focused))
+      return;
+    // The board's own Esc, gated at two for the board's reason.
+    if (e.key === "Escape") {
+      if (selectionSize < 2) return;
+      e.preventDefault();
+      clearSelection();
+      announce("Selection cleared");
+      return;
+    }
+    // Where the user IS: the focused cell, else the cursor — a bare Tab into the
+    // grid moves focus without a key the cursor heard.
+    const rowKey =
+      focused.closest<HTMLElement>("[data-row-key]")?.dataset.rowKey;
+    const at = tableEntries.findIndex((entry) => entry.key === rowKey);
+    const cellCol = Number(
+      focused.closest<HTMLElement>("[data-col-index]")?.dataset.colIndex,
+    );
+    const from =
+      at === -1
+        ? tablePos
+        : {
+            rowIndex: at,
+            colIndex:
+              tableEntries[at].kind === "item" && Number.isInteger(cellCol)
+                ? cellCol
+                : (tablePos?.colIndex ?? 0),
+          };
+    const entry = from === null ? undefined : tableEntries[from.rowIndex];
+    if (from === null || entry === undefined) return;
+    // The board's reposition chords, ahead of the plain keys they share, and on
+    // an item row only — a header is no card.
+    const chord = eventToBinding(e);
+    const direction = chord === null ? undefined : REORDER_CHORDS[chord];
+    if (direction !== undefined) {
+      e.preventDefault();
+      const card =
+        entry.kind === "item" ? findCard(columns, entry.item.itemId) : null;
+      if (card !== null) reorderCard(card, direction);
+      return;
+    }
+    if (e.altKey && ALT_SWALLOWED_KEYS.has(e.key)) {
+      e.preventDefault();
+      return;
+    }
+    // Enter and Space act on the cell: a header toggles its section, a board
+    // field's cell opens its editor (or says why it can't), and every other cell
+    // opens the item (Enter) or peeks at it (Space), as a board card does.
+    if (chord === "enter" || chord === "space") {
+      e.preventDefault();
+      const def = tableCols[from.colIndex]?.def;
+      if (entry.kind === "group") toggleGroup(entry.bucketId);
+      else if (def !== undefined && isWritable(def))
+        requestCellEdit(entry.item, def.id);
+      else if (chord === "space") peekRow(entry.item);
+      else activateRow(entry.item);
+      return;
+    }
+    // Shift rides the same keys to extend rather than move alone, so the move is
+    // read off the chord without it.
+    const move =
+      chord === null ? undefined : TABLE_MOVES[chord.replace("shift+", "")];
+    if (move === undefined) return;
+    // Swallowed whether or not anything moved: a focused grid must never scroll
+    // under a key it owns.
+    e.preventDefault();
+    const next = stepTableCursor(
+      tableEntries,
+      from,
+      move,
+      tableCols.length,
+      pageSize,
+    );
+    const landed = tableEntries[next.rowIndex];
+    if (
+      landed === undefined ||
+      (next.rowIndex === from.rowIndex && next.colIndex === from.colIndex)
+    )
+      return;
+    setTableCursor({ rowKey: landed.key, colIndex: next.colIndex });
+    setFocusNonce((n) => n + 1);
+    if (!TABLE_ROW_MOVES.has(move) || next.rowIndex === from.rowIndex) return;
+    // A header is no card: a plain move onto one leaves nothing selected, and a
+    // Shift-held one keeps the range until the next row it reaches.
+    if (landed.kind === "group") {
+      if (!e.shiftKey) clearSelection();
+      // A Shift-walk crossing a header keeps the row it started from: seed the
+      // anchor there now, or the next Shift-move would seed from the header and
+      // lose it. An existing anchor already holds the origin and is left alone.
+      else if (entry.kind === "item" && selectionAnchorId === null)
+        selectRange(entry.item.itemId, entry.item.itemId);
+      return;
+    }
+    // THE SEEDING SITE for a keyboard range on the table, the twin of the board's:
+    // the row the press started on is the anchor a first Shift+move means.
+    if (e.shiftKey)
+      selectRange(
+        landed.item.itemId,
+        entry.kind === "item" ? entry.item.itemId : null,
+      );
+    else selectOnly(landed.item.itemId);
   }
 
   /** The nearest column with a card in `step`'s direction, or -1. Empty columns
@@ -1230,6 +1867,17 @@ export function ProjectsBoardPanel({
   const bulkWritePending = pendingWrites.some(
     (w) => w.kind !== null && BULK_WRITE_KINDS.has(w.kind),
   );
+  // The one derivation every surface reads for that hold: a single field write
+  // over one item says so, anything wider keeps the bulk wording.
+  const bulkPendingWrites = pendingWrites.filter(
+    (w) => w.kind !== null && BULK_WRITE_KINDS.has(w.kind),
+  );
+  const bulkPendingReason =
+    bulkPendingWrites.length === 1 &&
+    bulkPendingWrites[0].kind === "bulk-fields" &&
+    bulkPendingWrites[0].count === 1
+      ? FIELD_PENDING_REASON
+      : BULK_PENDING_REASON;
   // The one bulk kind the CURSOR has to follow, and so the only one the chase
   // waits on: a bulk move re-buckets its cards into another column, where the
   // other three either leave them in place or take them off the board entirely.
@@ -1255,10 +1903,26 @@ export function ProjectsBoardPanel({
       ?.itemId ?? null;
   /** The card whose details peek is open, or null. Board-wide rather than per-card
    *  so only one is ever open, and held HERE because both routes into it are — the
-   *  card's own Space key, and the menu row the panel owns. A card that leaves the
-   *  board takes its popup with it (the popover renders inside the card), so a stale
-   *  id here draws nothing and the next peek replaces it. */
+   *  card's own Space key, and the menu row the panel owns. Retired with its anchor
+   *  (`peekGone` below), like the cell editor's session. */
   const [peekItemId, setPeekItemId] = useState<string | null>(null);
+
+  /** A table row's peek: an issue or pull request's details, or a draft's notes,
+   *  which the board shows from the card itself. A redacted row has none. */
+  function peekRow(item: BoardItem) {
+    if (item.content.kind !== "redacted") setPeekItemId(item.itemId);
+  }
+
+  /** What Enter or a click on the title does to a table row: open an issue or
+   *  pull request, and show a draft's notes — which is what its board card's click
+   *  does. */
+  const activateRow = useCallback(
+    (item: BoardItem) => {
+      if (item.content.kind === "draft") setPeekItemId(item.itemId);
+      else openItem(item);
+    },
+    [openItem],
+  );
   /** Which of the board's dialogs is open, or null for none. One at a time: they
    *  all write to the same board, and the toolbar and the card menu offer them as
    *  alternatives. */
@@ -1362,6 +2026,12 @@ export function ProjectsBoardPanel({
       setCursor({ col: chaseCol, idx: chaseIdx });
       // The chased card itself: the index came from finding it in these columns.
       setFocusItemId(chase);
+      // The table's cursor follows the same card by identity, into whatever
+      // section it landed in.
+      setTableCursor((prev) => ({
+        rowKey: itemRowKey(chase),
+        colIndex: prev?.colIndex ?? 0,
+      }));
       setFocusNonce((n) => n + 1);
       if (settled) setChase(null);
     });
@@ -1405,6 +2075,11 @@ export function ProjectsBoardPanel({
   })();
   const landingCol = landing?.col ?? null;
   const landingIdx = landing?.idx ?? null;
+  // The card standing in the landing slot, which is what the TABLE cursor keys on.
+  const landingItemId =
+    landing === null
+      ? null
+      : (columns[landing.col]?.items[landing.idx]?.itemId ?? null);
   useEffect(() => {
     if (!retiredGone && !retiredDead) return;
     if (!retiredGone) {
@@ -1416,10 +2091,9 @@ export function ProjectsBoardPanel({
       // emptied what this view's filter draws of it. The cursor has nothing to
       // address, and DOM focus has to be MOVED rather than merely released: the
       // confirm dialog restores focus to the row that fired it, which unmounted
-      // with the card, so leaving it alone drops a keyboard user to <body>. The
-      // toolbar's Add item is where the board's own recovery starts and is the
-      // nearest thing still standing, so focus lands there, a frame past the
-      // dialog's own restore.
+      // with the card, so leaving it alone drops a keyboard user to <body>. It
+      // takes the shared landing ({@link focusBodyLanding}: the filter-emptied
+      // notice's Clear view, else Add item), a frame past the dialog's restore.
       //
       // The latch is released INSIDE the frame, never beside it: `setRetired`
       // flips `retiredGone`, which is one of this effect's deps, so clearing it
@@ -1429,10 +2103,9 @@ export function ProjectsBoardPanel({
       // cancel for the cases it should: an unmount, an `<Activity>` hide, or a
       // card arriving that gives the cursor a real landing after all.
       setCursor(null);
+      setTableCursor(null);
       const frame = requestAnimationFrame(() => {
-        rootRef.current
-          ?.querySelector<HTMLElement>("[data-board-add-trigger]")
-          ?.focus();
+        focusBodyLanding(rootRef.current);
         setRetired(null);
       });
       return () => cancelAnimationFrame(frame);
@@ -1440,10 +2113,16 @@ export function ProjectsBoardPanel({
     setRetired(null);
     setCursor({ col: landingCol, idx: landingIdx });
     // A SLOT, not a card: the landing is wherever the departed card's place fell
-    // to, so the claim is index-only by design.
+    // to, so the claim is index-only by design. The table keys its cursor on
+    // whichever row now fills that slot.
     setFocusItemId(null);
+    if (landingItemId !== null)
+      setTableCursor((prev) => ({
+        rowKey: itemRowKey(landingItemId),
+        colIndex: prev?.colIndex ?? 0,
+      }));
     setFocusNonce((n) => n + 1);
-  }, [retiredGone, retiredDead, landingCol, landingIdx]);
+  }, [retiredGone, retiredDead, landingCol, landingIdx, landingItemId]);
 
   // The menu's own retirement site, the discipline the stale-view-id effect keeps:
   // a SETTLED list that no longer draws the recorded card is the only thing that
@@ -1493,6 +2172,8 @@ export function ProjectsBoardPanel({
     bulkFieldsSessionRef.current += 1;
     setBulkFieldsOpen(false);
     setBulkFieldCards(NO_CARDS);
+    // A cell editor is the same draft against the same board, retired the same way.
+    retireCellEditor();
   });
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
@@ -1512,24 +2193,24 @@ export function ProjectsBoardPanel({
         return NO_ACCESS_REASON;
       // Iteration fields have no issue-field arm at all — GitHub defines none at
       // the org level — so this asks only of the kind that can carry one.
-      case groupField?.kind === "singleSelect" && groupField.isIssueField:
+      case bucketField?.kind === "singleSelect" && bucketField.isIssueField:
         return ISSUE_FIELD_REASON;
       // Under the three arms above, which say a move is impossible HERE whatever the
       // card is: an archived card sits in no column, so a column pick has nothing to
       // write — and the restore row is what clears this one.
       case item.isArchived:
-        return ARCHIVED_CARD_REASON;
+        return ARCHIVED_ITEM_REASON[noun];
       // Above the two that clear on their own: the cards drawn while a lens loads
       // are the PREVIOUS view's, so the column a pick names isn't the one the board
       // is about to have.
       case lensLoading:
         return LENS_LOADING_REASON;
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case movePending:
-        return MOVING_REASON;
+        return MOVING_REASON[noun];
       case cardWritePending:
-        return CARD_WRITE_REASON;
+        return ITEM_WRITE_REASON[noun];
       // A move's own `cancelQueries` REVERTS an in-flight fetch (query-core cancels
       // with `revert: true` by default), so starting one now would silently undo
       // the page the user just asked for.
@@ -1555,11 +2236,11 @@ export function ProjectsBoardPanel({
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case movePending:
-        return MOVING_REASON;
+        return MOVING_REASON[noun];
       case cardWritePending:
-        return CARD_WRITE_REASON;
+        return ITEM_WRITE_REASON[noun];
       case items.isFetchingNextPage:
         return LOADING_PAGE_REASON;
       default:
@@ -1577,13 +2258,13 @@ export function ProjectsBoardPanel({
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
       case item.isArchived:
-        return ARCHIVED_CARD_REASON;
+        return ARCHIVED_ITEM_REASON[noun];
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case movePending:
-        return MOVING_REASON;
+        return MOVING_REASON[noun];
       case cardWritePending:
-        return CARD_WRITE_REASON;
+        return ITEM_WRITE_REASON[noun];
       case items.isFetchingNextPage:
         return LOADING_PAGE_REASON;
       default:
@@ -1614,7 +2295,7 @@ export function ProjectsBoardPanel({
       // An archived card holds no place in the project's order, so there is no slot
       // for a position write to move it between.
       case item.isArchived:
-        return ARCHIVED_CARD_REASON;
+        return ARCHIVED_ITEM_REASON[noun];
       // Every OTHER card is held too while archived ones are drawn: GitHub refuses
       // an archived item as a position anchor, so a card's drawn neighbour is not
       // necessarily one a write may land it after, and the plan the menu shows would
@@ -1625,14 +2306,19 @@ export function ProjectsBoardPanel({
       // position sequence — the only thing a position write addresses — isn't what
       // is on screen, and a card would land somewhere the user never saw.
       case lensSorted(view):
-        return SORTED_VIEW_REASON;
+        return SORTED_VIEW_REASON[noun];
+      // A table drawn in sections: each section is a slice of the project order
+      // rather than the order itself, so a row's drawn neighbour needn't be the
+      // one a position write would land it beside.
+      case tableView !== null && rowGroupField !== null:
+        return GROUPED_ROWS_REASON;
       case lensLoading:
         return LENS_LOADING_REASON;
       // Board-wide rather than per card, unlike the arm below it: a bulk write
       // addresses a LIST no `itemId` names, and its settle re-reads the order this
       // position write is computed against.
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case pendingWrites.some(
         (w) =>
           w.itemId === itemId &&
@@ -1640,7 +2326,7 @@ export function ProjectsBoardPanel({
           w.kind !== "reorder" &&
           CARD_WRITE_KINDS.has(w.kind),
       ):
-        return CARD_WRITE_REASON;
+        return ITEM_WRITE_REASON[noun];
       // A reposition settles through the same cancel every board write does, and
       // query-core's cancel REVERTS an in-flight fetch — so starting one now would
       // silently undo the page the user just asked for.
@@ -1665,20 +2351,192 @@ export function ProjectsBoardPanel({
       case lensLoading:
         return LENS_LOADING_REASON;
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case boardWritePending:
-        return CARD_WRITE_REASON;
+        return ITEM_WRITE_REASON[noun];
       case items.isFetchingNextPage:
         return LOADING_PAGE_REASON;
       default:
         return undefined;
     }
   })();
+  /** Open a table cell's editor, or say why it can't open. The hold is re-derived
+   *  here rather than trusted from the render that drew the cell, and it is the
+   *  SAME derivation the cell draws its reason from. */
+  function requestCellEdit(item: BoardItem, fieldId: string) {
+    const def = tableCols.find((column) => column.def.id === fieldId)?.def;
+    if (def === undefined || !isWritable(def)) return;
+    const held = cellEditHeld(cellBoardHeld, item, def);
+    if (held !== undefined) {
+      announce(held);
+      toast(held, { id: CELL_EDIT_REFUSAL_TOAST_ID });
+      return;
+    }
+    cellEditSessionRef.current += 1;
+    setEditingCell({
+      itemId: item.itemId,
+      fieldId,
+      session: cellEditSessionRef.current,
+    });
+  }
+
+  /**
+   * Write one cell's committed draft: the bulk fields write with a single item,
+   * so its pending line, its hold on every other cell and bulk verb, its settle
+   * re-read and its failure report are all the bulk family's own — no second kind.
+   * NO optimistic patch, for that family's reason: a field write can move the row
+   * between groups and through the sort, which only the server's re-read can say.
+   *
+   * Every read happens before the await. Nothing after it closes or re-points
+   * anything, so there is no stale-run hazard past the write itself.
+   */
+  async function commitCellEdit(
+    itemId: string,
+    fieldId: string,
+    entry: FieldDraft,
+  ) {
+    const run = editingCell;
+    // A close from a run that has since been retired (a project or view switch in
+    // the same tick) belongs to a draft nobody is looking at any more.
+    if (run === null || run.session !== cellEditSessionRef.current) return;
+    // Consuming the run SPENDS it: a second commit reaching this same render's
+    // closure finds a token that no longer matches, whatever the timing.
+    cellEditSessionRef.current += 1;
+    setEditingCell(null);
+    if (run.itemId !== itemId || run.fieldId !== fieldId) return;
+    // Enter on an entry the field can't take yet closes the editor having written
+    // nothing, which a keyboard user can't see from the unchanged cell.
+    if (entry === INVALID_DRAFT) {
+      announce(CELL_INVALID_ENTRY_NOTE);
+      return;
+    }
+    if (projectId === null) return;
+    const at = findCard(columns, itemId);
+    const item = at === null ? undefined : columns[at.col]?.items[at.idx];
+    const def = tableCols.find((column) => column.def.id === fieldId)?.def;
+    if (item === undefined || def === undefined || !isWritable(def)) return;
+    // The single-item editor's defensive twin: a number that can't be written is
+    // not a clear, and not a value either.
+    if (
+      entry !== null &&
+      entry.value.kind === "number" &&
+      !Number.isFinite(entry.value.number)
+    )
+      return;
+    // Unchanged is not sent: the same identity test the item editor's diff runs.
+    if (
+      valueKey(columnValue(item, def) ?? null) ===
+      valueKey(entry?.value ?? null)
+    )
+      return;
+    const held = cellEditHeld(cellBoardHeld, item, def);
+    if (held !== undefined) {
+      announce(held);
+      toast(held, { id: CELL_EDIT_REFUSAL_TOAST_ID });
+      return;
+    }
+    try {
+      const result = await bulkFields.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemIds: [itemId],
+        updates: entry === null ? [] : [entry.update],
+        clears: entry === null ? [def.id] : [],
+      });
+      reportBulk("fields", result, 1);
+    } catch {
+      // The mutation reported it. Nothing was patched, so the cell already shows
+      // what the board really holds.
+    }
+  }
+
+  // The cell handlers the memoized rows hold, identity-stable across renders: they
+  // call through a ref refreshed after every commit, so a row never re-renders
+  // for a handler change and never calls a stale one.
+  const cellHandlersRef = useRef({
+    request: requestCellEdit,
+    commit: commitCellEdit,
+  });
+  useEffect(() => {
+    cellHandlersRef.current = {
+      request: requestCellEdit,
+      commit: commitCellEdit,
+    };
+  });
+  const onEditCell = useCallback(
+    (item: BoardItem, fieldId: string) =>
+      cellHandlersRef.current.request(item, fieldId),
+    [],
+  );
+  const onCellCommit = useCallback(
+    (itemId: string, fieldId: string, entry: FieldDraft) =>
+      void cellHandlersRef.current.commit(itemId, fieldId, entry),
+    [],
+  );
+  // Spends the run like a commit does; a close from a run already retired or
+  // replaced is ignored, so it can't shut the editor open now.
+  const onCellCancel = useCallback((session: number) => {
+    if (session !== cellEditSessionRef.current) return;
+    cellEditSessionRef.current += 1;
+    setEditingCell(null);
+  }, []);
+  /** The emptied table's landing, identity-stable for the grid's prop. */
+  const focusLanding = useCallback(() => focusBodyLanding(rootRef.current), []);
+  // The editor's session retires the moment its cell stops being drawn — the row
+  // gone from the RENDERED rows (dropped by a read, or folded into a collapsed
+  // section, which unmounts the editor and its draft while the board still holds
+  // the item) or its column gone — so no editor reopens later that nobody asked for.
+  const cellEditGone =
+    editingCell !== null &&
+    (!tableEntries.some(
+      (entry) =>
+        entry.kind === "item" && entry.item.itemId === editingCell.itemId,
+    ) ||
+      !tableCols.some((column) => column.def.id === editingCell.fieldId));
+  useEffect(() => {
+    if (!cellEditGone) return;
+    cellEditSessionRef.current += 1;
+    setEditingCell(null);
+  }, [cellEditGone]);
+  // The peek retires the same way once its anchor stops being drawn: on the board
+  // the card gone from the columns, in the table its row gone from the rendered
+  // rows (a read, a collapsed section) or the view drawing no Title column. Left
+  // standing, the id would reopen the peek unasked when the row came back.
+  const peekGone =
+    peekItemId !== null &&
+    (onBoard
+      ? findCard(columns, peekItemId) === null
+      : !tableEntries.some(
+          (entry) => entry.kind === "item" && entry.item.itemId === peekItemId,
+        ) || !tableCols.some((column) => column.title));
+  useEffect(() => {
+    if (peekGone) setPeekItemId(null);
+  }, [peekGone]);
+
   // The same gate as of the last COMMIT, readable after an await. A handler's own
   // `bulkHeldReason` is the closure from the render that started it, so a verb the
   // user sat on a confirm prompt for would re-check an answer that predates the
   // prompt. Written from an effect rather than during render, which is the ref
   // write the React Compiler forbids.
+  // A table cell's board-wide hold: every bulk hold, plus the re-read a write
+  // asked for. Until that read lands the cells still show the values from BEFORE
+  // the write, and an editor opened on one would seed from them — a multi-select's
+  // commit replaces the whole set, silently undoing the edit that just landed.
+  //
+  // A re-read that FAILED leaves those same stale values up, so the hold stays,
+  // pointing at the strip's Retry, until a read of the board succeeds.
+  const cellBoardHeld = (() => {
+    switch (true) {
+      case bulkHeldReason !== undefined:
+        return bulkHeldReason;
+      case refreshingAfterWrite || rereadStall === "owed":
+        return UPDATING_REASON[noun];
+      case rereadFailed:
+        return REREAD_FAILED_REASON[noun];
+      default:
+        return undefined;
+    }
+  })();
   const bulkHeldRef = useRef(bulkHeldReason);
   useEffect(() => {
     bulkHeldRef.current = bulkHeldReason;
@@ -1697,30 +2555,39 @@ export function ProjectsBoardPanel({
     const cards = partitionEligible(verb, selected).eligible;
     const n = cards.length;
     const label = {
-      move: `Move ${cardCount(n)} to`,
-      fields: `Edit fields of ${cardCount(n)}…`,
-      archive: `Archive ${cardCount(n)}…`,
-      restore: `Restore ${cardCount(n)}`,
-      remove: `Remove ${cardCount(n)} from project…`,
+      move: `Move ${cardCount(n, noun)} to`,
+      fields: `Edit fields of ${cardCount(n, noun)}…`,
+      archive: `Archive ${cardCount(n, noun)}…`,
+      restore: `Restore ${cardCount(n, noun)}`,
+      remove: `Remove ${cardCount(n, noun)} from project…`,
     }[verb];
     // The board-wide hold first, then the one this verb has over this selection:
     // "every selected card is already archived" is a statement about the set, and
     // it would be misleading under a sign-in that can't write at all.
-    const reason =
-      bulkHeldReason ??
-      // A move needs a column to write, which two of the board's states don't
-      // offer — the same pair `moveHeldFor` refuses a single card for.
-      (verb === "move" && groupField === null
-        ? NO_GROUP_FIELDS_REASON
-        : verb === "move" &&
-            groupField?.kind === "singleSelect" &&
-            groupField.isIssueField
-          ? ISSUE_FIELD_REASON
-          : selected.length === 0
-            ? BULK_NO_SELECTION_REASON
-            : n === 0
-              ? BULK_NOTHING_REASON[verb]
-              : undefined);
+    const reason = (() => {
+      switch (true) {
+        case bulkHeldReason !== undefined:
+          return bulkHeldReason;
+        // A move needs a column to write, which two of the board's states don't
+        // offer — the same pair `moveHeldFor` refuses a single card for. A table
+        // says so in its own terms: its project may well have a field to group
+        // by, and it is the VIEW that draws no sections.
+        case verb === "move" && bucketField === null:
+          return tableView === null
+            ? NO_GROUP_FIELDS_REASON
+            : TABLE_UNGROUPED_MOVE_REASON;
+        case verb === "move" &&
+          bucketField?.kind === "singleSelect" &&
+          bucketField.isIssueField:
+          return ISSUE_FIELD_REASON;
+        case selected.length === 0:
+          return BULK_NO_SELECTION_REASON[noun];
+        case n === 0:
+          return BULK_NOTHING_REASON[verb](noun);
+        default:
+          return undefined;
+      }
+    })();
     return { cards, label, reason };
   }
 
@@ -1773,13 +2640,24 @@ export function ProjectsBoardPanel({
    *  and remove reach both off the membership's item id, which is a thing the
    *  viewer can do about a card whose content they may not even read. */
   function recordMenuTarget(el: Element | null): boolean {
-    const at = el === null ? null : cardAt(el);
+    const at = el === null ? null : positionAt(el);
     const item = at === null ? undefined : columns[at.col]?.items[at.idx];
     // The cursor moves to whatever was pressed, a suppressed menu included, so the
     // board's selection and the menu describe the same card (the Actions and
     // History lists select their pressed row the same way). The nonce stays put:
     // this sets where the arrows resume, never where focus goes.
-    if (at !== null && item !== undefined) setCursor(at);
+    if (at !== null && item !== undefined) {
+      setCursor(at);
+      if (tableView !== null) {
+        const cellCol = Number(
+          el?.closest<HTMLElement>("[data-col-index]")?.dataset.colIndex,
+        );
+        onTableCellFocus(
+          itemRowKey(item.itemId),
+          Number.isInteger(cellCol) ? cellCol : null,
+        );
+      }
+    }
     const next: BoardMenuTarget =
       at === null || item === undefined
         ? null
@@ -1790,9 +2668,9 @@ export function ProjectsBoardPanel({
             // defines names a column that isn't drawn, which is what leaves the
             // clear row live for the one card that needs it.
             valueColumnId:
-              groupField === null
+              bucketField === null
                 ? UNSET_COLUMN_ID
-                : (bucketIdFor(item, groupField) ?? UNSET_COLUMN_ID),
+                : (bucketIdFor(item, bucketField) ?? UNSET_COLUMN_ID),
           };
     menuTargetRef.current = next;
     setMenuTarget(next);
@@ -1811,7 +2689,7 @@ export function ProjectsBoardPanel({
     // card, and seeding from THAT would range a card to itself.
     //
     // Skipped for a mac Ctrl-click, which writes no selection state.
-    if (!isMacSecondaryClick(e))
+    if (!isMacSecondaryClick(e, isMac))
       prePressCardRef.current =
         liveCursor === null
           ? null
@@ -1820,45 +2698,6 @@ export function ProjectsBoardPanel({
     // menu gesture. The collapse-if-outside-the-selection decision belongs to the
     // context menu's open gate, exactly as it does for a right-click.
     recordMenuTarget(e.target instanceof Element ? e.target : null);
-  }
-
-  /** Whether a pointer event carries one of the two SELECTION modifiers, and which.
-   *  The toggle is `mod`: Cmd on macOS, Ctrl everywhere else, DERIVED from the
-   *  platform rather than accepting either flag.
-   *
-   *  Accepting both is wrong on macOS specifically: Ctrl-click there is the
-   *  SECONDARY-CLICK gesture, so the press the user means as "open the menu" would
-   *  read as a toggle — and WebKit may deliver it as `contextmenu` with no `click`
-   *  at all, which makes the ctrl arm either harmful or dead depending on the
-   *  route. Windows and Linux keep Ctrl, where it carries no such meaning. */
-  function selectionMods(e: {
-    ctrlKey: boolean;
-    metaKey: boolean;
-    shiftKey: boolean;
-  }) {
-    return { toggle: isMac ? e.metaKey : e.ctrlKey, range: e.shiftKey };
-  }
-
-  /**
-   * A macOS Ctrl-click: that platform's SECONDARY-CLICK gesture, not a selection
-   * modifier of any kind.
-   *
-   * WebKit can deliver a PRIMARY-button `mousedown` and a `click` for it ahead of
-   * the `contextmenu`, and with the toggle derived as Cmd on mac neither carries a
-   * modifier this panel reads. So both are named here: the mousedown is IGNORED
-   * (no selection write) and the click is SWALLOWED (no activation). Shift is no
-   * exemption — Ctrl+Shift-click is still a ctrl-click there.
-   *
-   * The two macOS outcomes this buys, both of them what a right-click already
-   * does: Ctrl-click on a selected issue card opens only the menu, and Ctrl-click
-   * on a multi-selection leaves it intact for the menu's bulk arm.
-   *
-   * What still runs is the menu machinery — the target recording, and the
-   * collapse-if-outside-the-selection rule the context menu's own open gate
-   * applies.
-   */
-  function isMacSecondaryClick(e: { ctrlKey: boolean }): boolean {
-    return isMac && e.ctrlKey;
   }
 
   /**
@@ -1877,14 +2716,26 @@ export function ProjectsBoardPanel({
   function handleCardMouseDown(e: MouseEvent) {
     // Ahead of the button test, which a mac Ctrl-click can pass: WebKit may report
     // it as the PRIMARY button. Nothing below may touch the selection for it.
-    if (isMacSecondaryClick(e)) return;
+    if (isMacSecondaryClick(e, isMac)) return;
     if (e.button !== 0) return;
-    const mods = selectionMods(e);
+    const mods = selectionMods(e, isMac);
     const el = e.target instanceof Element ? e.target : null;
-    const at = el === null ? null : cardAt(el);
+    const at = el === null ? null : positionAt(el);
     const item = at === null ? undefined : columns[at.col]?.items[at.idx];
-    // Board chrome and empty column space are nobody's business here.
-    if (item === undefined) return;
+    // Board chrome and empty column space make no selection, but a Shift press on
+    // them (a column or section header, the gap between rows) would still extend
+    // the browser's own text range across the page. DOM-contained only: a press in
+    // a portalled popup (a cell editor's input) reaches here through React's tree
+    // and keeps its native behaviour.
+    if (item === undefined) {
+      if (
+        mods.range &&
+        e.target instanceof Node &&
+        e.currentTarget.contains(e.target)
+      )
+        e.preventDefault();
+      return;
+    }
     if (!mods.toggle && !mods.range) {
       // A REDACTED card carries no handlers precisely so it can't be picked, so a
       // plain press on one leaves the selection exactly where it was.
@@ -1902,20 +2753,20 @@ export function ProjectsBoardPanel({
     // a first Shift+click covers start AND destination.
     if (mods.range) selectRange(item.itemId, prePressCardRef.current);
     else selectToggle(item.itemId);
-    el?.closest<HTMLElement>("[data-card-index]")?.focus();
+    el?.closest<HTMLElement>(focusableSelector)?.focus();
   }
 
   /** The other half of the modified-press intercept. Stopping mousedown leaves the
    *  click that follows it untouched, and that click is what would open the card —
    *  so a selection gesture swallows both. */
   function handleCardClickCapture(e: MouseEvent) {
-    const mods = selectionMods(e);
+    const mods = selectionMods(e, isMac);
     // A mac Ctrl-click is swallowed here too, not ignored: it carries no modifier
     // this panel reads, so without naming it the click would reach the card's own
     // opener and activate it alongside the menu — which a right-click never does.
-    if (!isMacSecondaryClick(e) && !mods.toggle && !mods.range) return;
+    if (!isMacSecondaryClick(e, isMac) && !mods.toggle && !mods.range) return;
     const el = e.target instanceof Element ? e.target : null;
-    if (el === null || cardAt(el) === null) return;
+    if (el === null || positionAt(el) === null) return;
     e.preventDefault();
     e.stopPropagation();
   }
@@ -1923,6 +2774,14 @@ export function ProjectsBoardPanel({
   /** The mouse and keyboard route. Re-records because Shift+F10 and the Menu key
    *  reach here with no pointerdown ahead of them. */
   function handleCardContextMenu(e: MouseEvent) {
+    // DOM-contained only: a portalled popup's content (a cell editor's input, a
+    // draft's notes peek) reaches here through React's tree and keeps its native
+    // menu. Propagation still stops, since Base UI's trigger handler prevents the
+    // default on every contextmenu that reaches it, which would swallow that menu.
+    if (!(e.target instanceof Node && e.currentTarget.contains(e.target))) {
+      e.stopPropagation();
+      return;
+    }
     // Element-wide, not HTMLElement: a card's state/draft/lock glyphs are SVG, and
     // a right-click landing on one is a right-click on the card — narrowing here
     // reads those hits as empty space and suppresses the menu over a real card.
@@ -1935,12 +2794,12 @@ export function ProjectsBoardPanel({
    *  rather than setting an option. */
   function moveCard(item: BoardItem, columnIndex: number) {
     const column = columns[columnIndex];
-    if (groupField === null || projectId === null || column === undefined)
+    if (bucketField === null || projectId === null || column === undefined)
       return;
     // Belt-and-braces with the rows' own `disabled`: the hold is derived at render,
     // and a pick racing the render that sets it must not get through either.
     if (moveHeldFor(item) !== undefined) return;
-    const bucket = moveBucketFor(groupField, column.id);
+    const bucket = moveBucketFor(bucketField, column.id);
     setChase(item.itemId);
     // The board AND the lens this move belongs to travel WITH it: an offline move
     // parks before the write and resumes on whatever render is current by then,
@@ -1950,10 +2809,11 @@ export function ProjectsBoardPanel({
       repo: repoPath,
       projectId,
       itemId: item.itemId,
-      field: groupField,
+      field: bucketField,
       bucket,
       query: lensQuery,
       archived: showArchived,
+      rich: tableView !== null,
     });
   }
 
@@ -2034,8 +2894,8 @@ export function ProjectsBoardPanel({
       return;
     }
     if (plan.kind === "held") {
-      announce(TRUNCATED_ORDER_REASON);
-      toast(TRUNCATED_ORDER_REASON, { id: REORDER_REFUSAL_TOAST_ID });
+      announce(TRUNCATED_ORDER_REASON[noun]);
+      toast(TRUNCATED_ORDER_REASON[noun], { id: REORDER_REFUSAL_TOAST_ID });
       return;
     }
     // The board and the lens this write belongs to travel WITH it, the rule
@@ -2048,6 +2908,7 @@ export function ProjectsBoardPanel({
       afterId: plan.afterId,
       query: lensQuery,
       archived: showArchived,
+      rich: tableView !== null,
     });
     // The cursor rides the card to where the optimistic splice puts it; the
     // column's own focus machinery does the rest off the nonce. The moved card's
@@ -2056,6 +2917,10 @@ export function ProjectsBoardPanel({
     const idx = REORDER_LANDING[direction](from.idx, column.items.length);
     setCursor({ col: from.col, idx });
     setFocusItemId(item.itemId);
+    setTableCursor((prev) => ({
+      rowKey: itemRowKey(item.itemId),
+      colIndex: prev?.colIndex ?? 0,
+    }));
     setFocusNonce((n) => n + 1);
     announce(
       `Moved to ${idx + 1} of ${column.items.length} in ${column.label}`,
@@ -2187,7 +3052,7 @@ export function ProjectsBoardPanel({
     const target = repoSlug ?? "this repository";
     const ok = await useConfirm.getState().ask({
       title: "Convert this draft to an issue?",
-      body: `Creates a real issue in ${target} from the draft's title and notes, and swaps the card over to it. The draft itself is gone once it lands.`,
+      body: `Creates a real issue in ${target} from the draft's title and notes, and swaps the ${noun} over to it. The draft itself is gone once it lands.`,
       confirmLabel: "Convert",
     });
     if (!ok) return;
@@ -2219,13 +3084,13 @@ export function ProjectsBoardPanel({
     // since a draft has nowhere else to survive.
     const prompt = {
       archive: {
-        title: "Archive this card?",
-        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"],
+        title: `Archive this ${noun}?`,
+        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"](noun),
         confirmLabel: "Archive",
       },
       remove: {
-        title: "Remove this card from the project?",
-        body: REMOVE_BODY[item.content.kind],
+        title: `Remove this ${noun} from the project?`,
+        body: REMOVE_BODY[item.content.kind](noun),
         confirmLabel: "Remove",
         confirmVariant: "destructive" as const,
       },
@@ -2312,13 +3177,13 @@ export function ProjectsBoardPanel({
     );
     const failed = errors.length;
     if (failed === 0) {
-      announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent)}`);
+      announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent, noun)}`);
       return;
     }
     // COUNT-ONLY on purpose: the live region is terse by design, and the toast
     // beside it carries the diagnosis. The reason lives in one place, not two.
     announce(
-      `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent)} — ${failed} failed`,
+      `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent, noun)} — ${failed} failed`,
     );
     // Distinct, in the order GitHub gave them (`Set` keeps insertion order), each
     // through the house presenter so a multi-line dump reads as its one
@@ -2328,7 +3193,7 @@ export function ProjectsBoardPanel({
     ];
     const more = reasons.length - 1;
     toast.error(
-      `${failed} of ${cardCount(sent)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
+      `${failed} of ${cardCount(sent, noun)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
         more > 0 ? ` (+${more} more ${more === 1 ? "reason" : "reasons"})` : ""
       }`,
     );
@@ -2345,7 +3210,7 @@ export function ProjectsBoardPanel({
     if (!(focused instanceof HTMLElement) || bar === null) return;
     if (!bar.contains(focused)) return;
     rootRef.current
-      ?.querySelector<HTMLElement>('[data-card-index][tabindex="0"]')
+      ?.querySelector<HTMLElement>(`${focusableSelector}[tabindex="0"]`)
       ?.focus();
   }
 
@@ -2357,11 +3222,11 @@ export function ProjectsBoardPanel({
     // rather than trusted from the render that disabled the control.
     const column = columns[columnIndex];
     const { cards, reason } = bulkState("move");
-    if (groupField === null || projectId === null || column === undefined)
+    if (bucketField === null || projectId === null || column === undefined)
       return;
     if (reason !== undefined || cards.length === 0) return;
     const itemIds = cards.map((card) => card.itemId);
-    const bucket = moveBucketFor(groupField, column.id);
+    const bucket = moveBucketFor(bucketField, column.id);
     // The cursor rides one of the moved cards into the destination column, the way
     // the single-card `moveCard` does. Without it the keyboard is left on a card
     // the optimistic re-bucketing is about to unmount from the column it is
@@ -2389,10 +3254,11 @@ export function ProjectsBoardPanel({
         repo: repoPath,
         projectId,
         itemIds,
-        field: groupField,
+        field: bucketField,
         bucket,
         query: lensQuery,
         archived: showArchived,
+        rich: tableView !== null,
       });
       reportBulk("move", result, itemIds.length);
     } catch {
@@ -2412,13 +3278,13 @@ export function ProjectsBoardPanel({
     const prompt =
       action === "archive"
         ? {
-            title: `Archive ${cardCount(n)}?`,
-            body: BULK_ARCHIVE_BODY[showArchived ? "shown" : "hidden"](n),
+            title: `Archive ${cardCount(n, noun)}?`,
+            body: BULK_ARCHIVE_BODY[showArchived ? "shown" : "hidden"](n, noun),
             confirmLabel: "Archive",
           }
         : {
-            title: `Remove ${cardCount(n)} from the project?`,
-            body: bulkRemoveBody(cards),
+            title: `Remove ${cardCount(n, noun)} from the project?`,
+            body: bulkRemoveBody(cards, noun),
             confirmLabel: "Remove",
             confirmVariant: "destructive" as const,
           };
@@ -2599,6 +3465,8 @@ export function ProjectsBoardPanel({
   const fieldsPending = canRead && projectId !== null && fields.isPending;
   const groupHeldReason = (() => {
     switch (true) {
+      case tableView !== null:
+        return TABLE_GROUPING_REASON;
       case fieldsPending:
         return LOADING_FIELDS_REASON;
       // Ahead of the settled-empty claim: a FAILED read is neither pending nor
@@ -2713,7 +3581,10 @@ export function ProjectsBoardPanel({
         return LENS_LOADING_REASON;
       case items.isFetchingNextPage:
         return "Loading more items…";
-      case items.isFetching:
+      // Also for a lens still owed its re-read since the last write: a page
+      // appended now would extend pages that don't show that write, and its success
+      // would stamp them fresh. The refresh comes first (a FAILED one is below).
+      case items.isFetching || rereadStall === "owed":
         return "Refreshing the board…";
       // The mirror of the menu's own page-fetch hold, and the same mechanism read
       // from the other side: EVERY write here settles by cancelling this query's
@@ -2723,11 +3594,11 @@ export function ProjectsBoardPanel({
       // extend. One arm per kind rather than one shared sentence: the wait is the
       // same, but what the user is waiting ON is not.
       case bulkWritePending:
-        return BULK_PENDING_REASON;
+        return bulkPendingReason;
       case movePending:
-        return "Finishing your last card move…";
+        return `Finishing your last ${noun} move…`;
       case cardWritePending:
-        return "Finishing your last card change…";
+        return ITEM_WRITE_REASON[noun];
       case addPending:
         return "Finishing your last add…";
       // The catch-all for the family, and the reason the sets above don't have
@@ -2746,7 +3617,8 @@ export function ProjectsBoardPanel({
       // clear it, which is why this points there. A failed CONTINUATION is
       // excluded: those pages were never invalidated, so retrying the page is
       // exactly the right move.
-      case items.isError && !items.isFetchNextPageError:
+      case (items.isError && !items.isFetchNextPageError) ||
+        rereadStall === "failed":
         return "The board's last refresh failed. Retry the refresh before loading more.";
       default:
         return undefined;
@@ -2788,11 +3660,17 @@ export function ProjectsBoardPanel({
         message: presentError(views.error).summary,
         retry: () => void views.refetch(),
       });
-    if (items.error !== null && !items.isFetchNextPageError)
+    // Also while a write's failed re-read still holds the table's cells, whose
+    // reason points here: a later optimistic patch can clear the read's error while
+    // the lens still shows the values from before that write.
+    if ((items.error !== null && !items.isFetchNextPageError) || rereadFailed)
       liveNotices.push({
         key: "items",
         what: "this board's items",
-        message: presentError(items.error).summary,
+        message:
+          items.error === null
+            ? REREAD_FAILED_NOTE
+            : presentError(items.error).summary,
         retry: () => void items.refetch(),
       });
   }
@@ -2809,7 +3687,7 @@ export function ProjectsBoardPanel({
     menuTarget === null
       ? undefined
       : menuPos === null
-        ? CARD_GONE_REASON
+        ? CARD_GONE_REASON[noun]
         : reorderHeldFor(menuTarget.item);
   // The menu's BULK arm, or null for the single-card one. Present exactly when the
   // card the menu opened on is one of SEVERAL selected — the open gate collapses
@@ -2834,6 +3712,175 @@ export function ProjectsBoardPanel({
             remove: () => void bulkRetireCards("remove"),
           },
         };
+
+  /**
+   * The board's ONE context menu, around whichever layout is drawn — one menu
+   * rather than a portal per card or row: a virtualized row that scrolls out
+   * would otherwise leave a popup anchored to a detached node. The capture
+   * handlers on `trigger` run before Base UI's own, so the target is recorded —
+   * or the menu suppressed — before it opens. Keyed by layout, so a board↔table
+   * swap remounts it and {@link MenuLatchRelease} releases the latch the old
+   * subtree held.
+   */
+  function boardMenu(
+    layout: "board" | "table",
+    trigger: ReactElement,
+    content: ReactNode,
+  ) {
+    return (
+      <ContextMenu
+        key={layout}
+        onOpenChange={(open, details) => {
+          // The one gate BOTH routes pass. A long press opens from the
+          // trigger's own timer and dispatches no `contextmenu`, so the
+          // capture-phase suppression can't reach it; `cancel()` refuses the
+          // change before Base UI mounts the popup, which is what keeps an
+          // empty one off the screen rather than flashing it closed. The mouse
+          // route never gets here — its suppression already stopped the event.
+          if (open && menuTargetRef.current === null) {
+            details.cancel();
+            return;
+          }
+          if (open) {
+            // The one gate both menu routes share, which is why the
+            // collapse lives here rather than on a pointer handler: a touch
+            // long press dispatches no `contextmenu` at all. A menu opened
+            // OUTSIDE the selection is a statement about that card, so the
+            // selection collapses onto it first (HistoryPanel's own rule);
+            // one opened inside it keeps the set the menu is about to act on.
+            const itemId = menuTargetRef.current?.item.itemId;
+            if (itemId !== undefined && !liveSelection.has(itemId))
+              selectOnly(itemId);
+            setMenuBusy(true);
+          }
+        }}
+        onOpenChangeComplete={setMenuBusy}
+      >
+        <MenuLatchRelease setMenuBusy={setMenuBusy} setChase={setChase} />
+        <ContextMenuTrigger render={trigger}>{content}</ContextMenuTrigger>
+        <ContextMenuContent className="min-w-56">
+          <BoardCardMenuItems
+            target={menuTarget}
+            noun={noun}
+            bulk={menuBulk}
+            // An ungrouped board has one column standing for the whole
+            // board, which is no move target at all. A REDACTED card has none
+            // either: its rows reach it by its place on the board, and a
+            // column pick is a claim about an item whose contents this viewer
+            // may not read.
+            columns={
+              bucketField === null ||
+              menuTarget?.item.content.kind === "redacted"
+                ? []
+                : columns
+            }
+            openLabel={openLabelFor(menuTarget?.item, repoSlug)}
+            heldReason={
+              menuTarget === null ? undefined : moveHeldFor(menuTarget.item)
+            }
+            actionHeldReason={cardActionHeldReason}
+            editHeldReason={
+              menuTarget === null ? undefined : cardEditHeldFor(menuTarget.item)
+            }
+            reorderHeldReason={reorderHeldReason}
+            reorderPlans={reorderPlans}
+            actions={{
+              open: () => {
+                if (menuTarget !== null) openItem(menuTarget.item);
+              },
+              showDetails: () => {
+                if (menuTarget !== null) setPeekItemId(menuTarget.item.itemId);
+              },
+              move: (columnIndex) => {
+                if (menuTarget !== null) moveCard(menuTarget.item, columnIndex);
+              },
+              // By POSITION, not by item: the reposition math addresses the
+              // card's slot in its column, which `menuPos` re-derives from the
+              // columns this render drew.
+              reorder: (direction) => {
+                if (menuPos !== null) reorderCard(menuPos, direction);
+              },
+              // Each reads `menuTarget` at CLICK time and hands the item down
+              // by value: the menu closes as it fires, and the prompt or dialog
+              // each of these raises outlives the target the latch is about to
+              // drop.
+              editDraft: () => {
+                if (menuTarget !== null) openDraftEdit(menuTarget.item);
+              },
+              convert: () => {
+                if (menuTarget !== null) void convertCard(menuTarget.item);
+              },
+              archive: () => {
+                if (menuTarget !== null)
+                  void retireCard(menuTarget.item, "archive");
+              },
+              restore: () => {
+                if (menuTarget !== null) void restoreCard(menuTarget.item);
+              },
+              remove: () => {
+                if (menuTarget !== null)
+                  void retireCard(menuTarget.item, "remove");
+              },
+            }}
+          />
+        </ContextMenuContent>
+      </ContextMenu>
+    );
+  }
+
+  // A filter that matched nothing, which the body answers with its own notice.
+  const filterEmpty =
+    view !== null &&
+    lensQuery !== null &&
+    !lensLoading &&
+    hasPages &&
+    loaded.length === 0;
+  // The TABLE-EXIT handoff: the body stops drawing the table while a cell held
+  // focus, and the grid's own recovery can't land it, having unmounted too. Read off
+  // the DOM the body really drew, never a copy of its arm ladder. Each arm lands per
+  // {@link focusBodyLanding}; the toolbar (Add item) is drawn only under
+  // `showBoardChrome`, GitHub with the scope and a project:
+  // - forge probe failed: Retry (marked).
+  // - forge detecting: skeleton, no chrome, no control: the panel root.
+  // - another provider: notice, no chrome, no control: the panel root.
+  // - forge not ready: the ladder's first live button (wrapper marked); its
+  //   "couldn't connect" arms have none, and no chrome: the panel root.
+  // - scope gap: Reconnect GitHub (wrapper marked); no chrome.
+  // - fatal read: Retry (marked).
+  // - loading: skeleton, chrome drawn with a project: Add item.
+  // - empty catalog (either wording): no project, so no chrome and no control —
+  //   unreachable here, since losing the project is a re-point, excluded below.
+  // - filter-empty: Clear view (marked).
+  // Excluded: a layout switch (the board drawn, or its cursor seed still waiting to
+  // claim), which has its own handoff, and a project or repository re-point, which
+  // hands focus nowhere by design. Only where focus fell to <body> (or to the panel
+  // root, where a press on empty space parks it), so focus the user put elsewhere
+  // is never taken.
+  const drewTableRef = useRef(false);
+  const bodyIdentityRef = useRef("");
+  useEffect(() => {
+    const root = rootRef.current;
+    const layout = root?.querySelector<HTMLElement>("[data-board-layout]")
+      ?.dataset.boardLayout;
+    const identity = JSON.stringify([repoPath, projectId]);
+    const wasTable = drewTableRef.current;
+    const repointed = bodyIdentityRef.current !== identity;
+    drewTableRef.current = layout === "table";
+    bodyIdentityRef.current = identity;
+    if (!wasTable || layout !== undefined || repointed) return;
+    if (boardCursorSeed !== null) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active !== root) return;
+    focusBodyLanding(root);
+  });
+  // An <Activity> hide runs effect cleanups, so a tab shown again claims nothing
+  // for a table it drew before the hide.
+  useEffect(
+    () => () => {
+      drewTableRef.current = false;
+    },
+    [],
+  );
 
   const body = (() => {
     switch (true) {
@@ -2862,7 +3909,11 @@ export function ProjectsBoardPanel({
       // it with the action that clears it, exactly as the Issues / Discussions /
       // Actions tabs do.
       case !forgeReady(gh.data):
-        return <ForgeNotReady repoPath={repoPath} feature="project boards" />;
+        return (
+          <div data-body-landing="">
+            <ForgeNotReady repoPath={repoPath} feature="project boards" />
+          </div>
+        );
       case scopeGap:
         return (
           // ScopeGapBlock carries POPUP padding (px-1 py-1) — it was written for
@@ -2870,7 +3921,7 @@ export function ProjectsBoardPanel({
           // site makes up the difference: px-2 py-3 here lands it on the px-3 py-4
           // the sibling arms use, without touching a component two other surfaces
           // share.
-          <div className="px-2 py-3">
+          <div className="px-2 py-3" data-body-landing="">
             <ScopeGapBlock
               host={host}
               onReconnect={() =>
@@ -2936,174 +3987,99 @@ export function ProjectsBoardPanel({
       // board, and only the settled read may make it — the cards standing while
       // a lens loads are the previous view's. An unfiltered view can't reach
       // here: its empty board is the board's own, and the columns say so.
-      case view !== null &&
-        lensQuery !== null &&
-        !lensLoading &&
-        hasPages &&
-        loaded.length === 0:
+      case filterEmpty:
         return (
           <BoardNotice>
             <p>No items match this view's filter.</p>
             <p className="font-mono break-all">{lensQuery}</p>
             <p>
-              <ClearViewButton onClear={clearView} />
+              <ClearViewButton onClear={clearView} landing />
             </p>
           </BoardNotice>
         );
+      // A saved TABLE view draws as a table, as GitHub draws it, under the same
+      // menu, selection and verbs as the board — after every arm above, so an
+      // empty catalog or a filter that matched nothing still says so.
+      case tableView !== null:
+        return boardMenu(
+          "table",
+          <div
+            data-board-layout="table"
+            className="flex min-h-0 flex-1 flex-col"
+            onPointerDownCapture={handleCardPointerDown}
+            onMouseDownCapture={handleCardMouseDown}
+            onClickCapture={handleCardClickCapture}
+            onContextMenuCapture={handleCardContextMenu}
+          />,
+          <ProjectsTableView
+            label={view?.name || UNTITLED_VIEW}
+            columns={tableCols}
+            rows={tableEntries}
+            sortKeys={tableSortKeys}
+            cursor={tablePos}
+            focusNonce={focusNonce}
+            selectedIds={selectedIds}
+            selectionSize={selectionSize}
+            busyItemId={busyItemId}
+            peekItemId={peekItemId}
+            onCellFocus={onTableCellFocus}
+            onToggleGroup={toggleGroup}
+            onActivate={activateRow}
+            onPeekChange={setPeekItemId}
+            editHeld={cellBoardHeld}
+            editingCell={editingCell}
+            onEditCell={onEditCell}
+            onCellCommit={onCellCommit}
+            onCellCancel={onCellCancel}
+            onFocusLost={focusLanding}
+            onKeyDown={onTableKeyDown}
+          />,
+        );
       default:
-        return (
-          // ONE menu for the whole board rather than a portal per card: a
-          // virtualized row that scrolls out would otherwise leave a popup
-          // anchored to a detached node. The capture handler runs before Base
-          // UI's own trigger handler, so the target is recorded — or the menu
-          // suppressed — before it opens.
-          <ContextMenu
-            onOpenChange={(open, details) => {
-              // The one gate BOTH routes pass. A long press opens from the
-              // trigger's own timer and dispatches no `contextmenu`, so the
-              // capture-phase suppression can't reach it; `cancel()` refuses the
-              // change before Base UI mounts the popup, which is what keeps an
-              // empty one off the screen rather than flashing it closed. The mouse
-              // route never gets here — its suppression already stopped the event.
-              if (open && menuTargetRef.current === null) {
-                details.cancel();
-                return;
-              }
-              if (open) {
-                // The one gate both menu routes share, which is why the
-                // collapse lives here rather than on a pointer handler: a touch
-                // long press dispatches no `contextmenu` at all. A menu opened
-                // OUTSIDE the selection is a statement about that card, so the
-                // selection collapses onto it first (HistoryPanel's own rule);
-                // one opened inside it keeps the set the menu is about to act on.
-                const itemId = menuTargetRef.current?.item.itemId;
-                if (itemId !== undefined && !liveSelection.has(itemId))
-                  selectOnly(itemId);
-                setMenuBusy(true);
-              }
-            }}
-            onOpenChangeComplete={setMenuBusy}
-          >
-            <MenuLatchRelease setMenuBusy={setMenuBusy} setChase={setChase} />
-            <ContextMenuTrigger
-              render={
-                // One horizontal scroll region for the whole board; each column
-                // owns its own vertical one.
-                <div
-                  className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
-                  onKeyDown={onBoardKeyDown}
-                  onPointerDownCapture={handleCardPointerDown}
-                  onMouseDownCapture={handleCardMouseDown}
-                  onClickCapture={handleCardClickCapture}
-                  onContextMenuCapture={handleCardContextMenu}
-                />
-              }
-            >
-              {columns.map((column, i) => (
-                <BoardColumn
-                  key={column.id}
-                  column={column}
-                  columnIndex={i}
-                  activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
-                  activeItemId={liveCursor?.col === i ? focusItemId : null}
-                  selectedIds={selectedIds}
-                  selectionSize={selectionSize}
-                  busyItemId={busyItemId}
-                  peekItemId={peekItemId}
-                  tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
-                  focusNonce={focusNonce}
-                  repoSlug={repoSlug}
-                  ghHost={ghHost}
-                  chipFields={chipFields}
-                  onCardFocus={onCardFocus}
-                  onPeekChange={setPeekItemId}
-                  onOpen={openItem}
-                />
-              ))}
-            </ContextMenuTrigger>
-            <ContextMenuContent className="min-w-56">
-              <BoardCardMenuItems
-                target={menuTarget}
-                bulk={menuBulk}
-                // An ungrouped board has one column standing for the whole
-                // board, which is no move target at all. A REDACTED card has none
-                // either: its rows reach it by its place on the board, and a
-                // column pick is a claim about an item whose contents this viewer
-                // may not read.
-                columns={
-                  groupField === null ||
-                  menuTarget?.item.content.kind === "redacted"
-                    ? []
-                    : columns
-                }
-                openLabel={openLabelFor(menuTarget?.item, repoSlug)}
-                heldReason={
-                  menuTarget === null ? undefined : moveHeldFor(menuTarget.item)
-                }
-                actionHeldReason={cardActionHeldReason}
-                editHeldReason={
-                  menuTarget === null
-                    ? undefined
-                    : cardEditHeldFor(menuTarget.item)
-                }
-                reorderHeldReason={reorderHeldReason}
-                reorderPlans={reorderPlans}
-                actions={{
-                  open: () => {
-                    if (menuTarget !== null) openItem(menuTarget.item);
-                  },
-                  showDetails: () => {
-                    if (menuTarget !== null)
-                      setPeekItemId(menuTarget.item.itemId);
-                  },
-                  move: (columnIndex) => {
-                    if (menuTarget !== null)
-                      moveCard(menuTarget.item, columnIndex);
-                  },
-                  // By POSITION, not by item: the reposition math addresses the
-                  // card's slot in its column, which `menuPos` re-derives from the
-                  // columns this render drew.
-                  reorder: (direction) => {
-                    if (menuPos !== null) reorderCard(menuPos, direction);
-                  },
-                  // Each reads `menuTarget` at CLICK time and hands the item down
-                  // by value: the menu closes as it fires, and the prompt or dialog
-                  // each of these raises outlives the target the latch is about to
-                  // drop.
-                  editDraft: () => {
-                    if (menuTarget !== null) openDraftEdit(menuTarget.item);
-                  },
-                  convert: () => {
-                    if (menuTarget !== null) void convertCard(menuTarget.item);
-                  },
-                  archive: () => {
-                    if (menuTarget !== null)
-                      void retireCard(menuTarget.item, "archive");
-                  },
-                  restore: () => {
-                    if (menuTarget !== null) void restoreCard(menuTarget.item);
-                  },
-                  remove: () => {
-                    if (menuTarget !== null)
-                      void retireCard(menuTarget.item, "remove");
-                  },
-                }}
-              />
-            </ContextMenuContent>
-          </ContextMenu>
+        return boardMenu(
+          "board",
+          // One horizontal scroll region for the whole board; each column
+          // owns its own vertical one.
+          <div
+            data-board-layout="board"
+            className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
+            onKeyDown={onBoardKeyDown}
+            onPointerDownCapture={handleCardPointerDown}
+            onMouseDownCapture={handleCardMouseDown}
+            onClickCapture={handleCardClickCapture}
+            onContextMenuCapture={handleCardContextMenu}
+          />,
+          columns.map((column, i) => (
+            <BoardColumn
+              key={column.id}
+              column={column}
+              columnIndex={i}
+              activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
+              activeItemId={liveCursor?.col === i ? focusItemId : null}
+              selectedIds={selectedIds}
+              selectionSize={selectionSize}
+              busyItemId={busyItemId}
+              peekItemId={peekItemId}
+              tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
+              focusNonce={focusNonce}
+              repoSlug={repoSlug}
+              ghHost={ghHost}
+              chipFields={chipFields}
+              onCardFocus={onCardFocus}
+              onPeekChange={setPeekItemId}
+              onOpen={openItem}
+            />
+          )),
         );
     }
   })();
 
-  // What the board is waiting on, ONE LINE PER IN-FLIGHT WRITE, read off each
+  // What the board is waiting on, one label per in-flight write, read off each
   // write's own variables so the copy names the thing rather than the operation.
-  // Only the kinds whose result lands LATER get a line: an archive and a removal
-  // patch the card out on the spot, so the card's absence is already their feedback.
-  //
-  // STACKED rather than pluralized, and per INVOCATION rather than per kind — two
-  // drafts really can be in flight at once (Esc over one, submit another), and two
-  // lines each naming their own item beat one that names neither. The mutation id
-  // keys them, since the labels themselves can be identical.
+  // Only the kinds whose result lands LATER get one: an archive and a removal patch
+  // the card out on the spot, so the card's absence is already their feedback. Per
+  // INVOCATION rather than per kind — two drafts really can be in flight at once —
+  // which is what the slot below counts when there is more than one.
   const pendingLines: { key: number; label: string }[] = [];
   for (const write of pendingWrites) {
     if (write.kind === "add-existing") {
@@ -3135,7 +4111,7 @@ export function ProjectsBoardPanel({
         label:
           write.count === null
             ? "Setting fields…"
-            : `Setting fields on ${cardCount(write.count)}…`,
+            : `Setting fields on ${cardCount(write.count, noun)}…`,
       });
     } else if (write.kind === "reorder") {
       // A line despite the splice already being on screen, unlike a move: a burst
@@ -3143,10 +4119,28 @@ export function ProjectsBoardPanel({
       // be reaching GitHub long after the card settled where the user left it.
       pendingLines.push({
         key: write.mutationId,
-        label: "Repositioning a card…",
+        label: `Repositioning a ${noun}…`,
       });
     }
   }
+
+  // The toolbar slot's words: a lone write names itself, several are counted, and
+  // once every write has settled the slot stays up through the re-read that
+  // repaints the board, since until it lands the cards still show the old values.
+  const writeIndicator = (() => {
+    switch (true) {
+      case pendingLines.length === 1:
+        return pendingLines[0].label;
+      case pendingLines.length > 1:
+        return `${pendingLines.length} changes on their way…`;
+      // An owed lens (offline included) is still waiting on its read, so the slot
+      // agrees with the cells' hold rather than going quiet.
+      case refreshingAfterWrite || rereadStall === "owed":
+        return `Updating the ${SURFACE[noun]}…`;
+      default:
+        return null;
+    }
+  })();
 
   const showBoardChrome = isGitHub && !scopeGap && projectId !== null;
   const cappedNotes: string[] = [];
@@ -3245,12 +4239,20 @@ export function ProjectsBoardPanel({
     // virtualizers rendering every row. `min-h-0 flex-1` is the SIDEBAR idiom
     // (that aside really is a flex column); the content-pane idiom is this one
     // (RemoteIssueView, RemotePrView, DiffViewer).
-    <div ref={rootRef} className="flex h-full flex-col p-2">
+    <div
+      ref={rootRef}
+      // The last-resort focus landing ({@link focusBodyLanding}): named, so focus
+      // parked here announces where it is.
+      role="region"
+      aria-label="Project board"
+      tabIndex={-1}
+      className="flex h-full flex-col p-2 outline-none"
+    >
       {project !== null && (
         <h2 className="sr-only">{project.title} project board</h2>
       )}
       {showBoardChrome && (
-        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
+        <div className="@container/toolbar mb-2 flex shrink-0 flex-wrap items-center gap-2">
           <Select
             items={projectTitles}
             value={projectId}
@@ -3265,6 +4267,11 @@ export function ProjectsBoardPanel({
               // WITHOUT the grouping seed, which only `pickView` performs.
               setActiveViewId(null);
               setCursor(null);
+              // The table's transient state belongs to the board it was built
+              // on: no row or section of it exists on the next one.
+              setTableCursor(null);
+              setCollapsedGroups(NO_COLLAPSED);
+              retireCellEditor();
               clearSelection();
             }}
           >
@@ -3314,16 +4321,38 @@ export function ProjectsBoardPanel({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {/* What the board is waiting on, as ONE slot in the toolbar rather than a
+              row of its own. In-flow rows govern PERSISTENT claims (the notices and
+              the lens strip below); a TRANSIENT, high-frequency indicator lives in
+              chrome that is always there instead, because a row mounting and
+              unmounting with every write is itself a disturbance about the thing it
+              narrates. The slot IS the row's slack: it grows into the space between
+              the left group and View options (`flex-1` on a zero basis, so it never
+              adds width that could re-wrap the row) and right-aligns its content, so
+              View options and the count stay flush right and a write starting,
+              growing or settling moves nothing. Out of room, the label truncates.
+              Below the container threshold only the spinner shows; the label stays
+              in the DOM (sr-only) as the status's words and rides the hover title. */}
+          <div
+            role="status"
+            title={writeIndicator ?? undefined}
+            className="flex h-5 min-w-3 flex-1 basis-0 items-center justify-end gap-1.5 text-[11px] text-muted-foreground"
+          >
+            {writeIndicator !== null && (
+              <>
+                <Spinner aria-hidden className="size-3 shrink-0" />
+                <span className="sr-only @3xl/toolbar:not-sr-only @3xl/toolbar:min-w-0 @3xl/toolbar:truncate">
+                  {writeIndicator}
+                </span>
+              </>
+            )}
+          </div>
           {/* Every control that shapes HOW the board is laid out lives behind
               this one trigger, so later slices add rows here rather than more
               toolbar chrome. The project switcher stays outside it: a project
               title already says what it is. */}
           <Popover.Root>
-            <Popover.Trigger
-              render={
-                <Button variant="outline" size="sm" className="ml-auto" />
-              }
-            >
+            <Popover.Trigger render={<Button variant="outline" size="sm" />}>
               <FadersHorizontalIcon data-icon="inline-start" />
               View options
             </Popover.Trigger>
@@ -3399,9 +4428,8 @@ export function ProjectsBoardPanel({
                                   {v.name === "" ? UNTITLED_VIEW : v.name}
                                 </span>
                                 {/* The layout the view was saved in, where it
-                                    isn't the one this board draws — the row says
-                                    so up front rather than leaving the strip to
-                                    explain it after the pick. */}
+                                    isn't a board — the row says up front what
+                                    a pick is about to draw. */}
                                 {VIEW_LAYOUT_WORD[v.layout] !== undefined && (
                                   <span className="shrink-0 text-muted-foreground">
                                     {VIEW_LAYOUT_WORD[v.layout]}
@@ -3542,7 +4570,12 @@ export function ProjectsBoardPanel({
                   // Belt-and-braces with the `disabled` above: the held state is
                   // derived at render, and a click racing the render that sets it
                   // must not get through either.
-                  if (items.isFetching || boardWritePending || lensLoading)
+                  if (
+                    items.isFetching ||
+                    boardWritePending ||
+                    lensLoading ||
+                    rereadStall !== null
+                  )
                     return;
                   void items.fetchNextPage();
                 }}
@@ -3554,10 +4587,11 @@ export function ProjectsBoardPanel({
         </div>
       )}
       {/* In the layout FLOW, pushing the board down — a persistent claim about
-          what this surface is showing must never float over its chrome. Failed
-          reads come first (they are actionable), then the caps; both caps can be
-          on at once and each names a different list, so they are joined rather
-          than ranked. */}
+          what this surface is showing must never float over its chrome (the
+          transient write indicator is the one exception, and lives in the toolbar
+          above for the reason given there). Failed reads come first (they are
+          actionable), then the caps; both caps can be on at once and each names a
+          different list, so they are joined rather than ranked. */}
       {showBoardChrome &&
         (liveNotices.length > 0 || cappedNotes.length > 0) && (
           <div className="mb-2 shrink-0 space-y-1 border-b pb-1.5 text-[11px]">
@@ -3597,6 +4631,8 @@ export function ProjectsBoardPanel({
           {FLAT_FALLBACK_NOTE[view.layout] !== undefined && (
             <span>{FLAT_FALLBACK_NOTE[view.layout]}</span>
           )}
+          {tableUngrouped !== null && <span>{tableUngrouped}</span>}
+          {tableSortDropped !== null && <span>{tableSortDropped}</span>}
           {lensQuery !== null && (
             <span className="flex min-w-0 items-center gap-1">
               Filter:
@@ -3609,26 +4645,6 @@ export function ProjectsBoardPanel({
             </span>
           )}
           <ClearViewButton onClear={clearView} />
-        </div>
-      )}
-      {/* What the board is waiting on, in the layout FLOW like every other strip
-          here — a status that floated over the chrome would cover the controls it
-          is about. Last of the three, against the columns it describes: a failed
-          read is actionable and the lens is a standing claim, where this is a
-          statement about right now. `role="status"` so it is announced without
-          taking focus; `aria-live` is polite by default there, which is what a
-          write the user just fired should be. */}
-      {showBoardChrome && pendingLines.length > 0 && (
-        <div
-          role="status"
-          className="mb-2 shrink-0 space-y-1 border-b pb-1.5 text-[11px] text-muted-foreground"
-        >
-          {pendingLines.map((pending) => (
-            <p key={pending.key} className="flex items-center gap-1.5">
-              <Spinner className="size-3 shrink-0" />
-              {pending.label}
-            </p>
-          ))}
         </div>
       )}
       {/* How to build a selection at all, until the user says they know. Gated on
@@ -3644,7 +4660,7 @@ export function ProjectsBoardPanel({
           <div className="mb-2 flex shrink-0 items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
             <InfoIcon className="size-3.5 shrink-0" />
             <span className="flex-1 leading-snug">
-              {formatBinding("mod")}-click to select cards individually,
+              {formatBinding("mod")}-click to select {noun}s individually,
               Shift-click for a range.
             </span>
             <button
@@ -3696,7 +4712,7 @@ export function ProjectsBoardPanel({
           className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-muted/40 px-2.5 py-1.5 text-[11px]"
         >
           <span className="mr-1 tabular-nums text-muted-foreground">
-            {cardCount(selectionSize)} selected
+            {cardCount(selectionSize, noun)} selected
           </span>
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -3834,6 +4850,7 @@ export function ProjectsBoardPanel({
             onRetryDefs={() => void fields.refetch()}
             pending={bulkWritePending}
             heldReason={bulkFieldsHeld}
+            noun={noun}
             onOpenChange={setBulkFieldsOpen}
             onApply={applyBulkFields}
           />

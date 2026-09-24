@@ -1,8 +1,7 @@
-import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import {
@@ -26,40 +24,29 @@ import type {
   ProjectFieldDef,
   ProjectFieldValue,
   ProjectFieldValueUpdate,
-  ProjectIterationDef,
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { cn } from "@/lib/utils";
+import type { ItemNoun } from "./board-model";
+import {
+  INVALID_DRAFT,
+  ISSUE_FIELD_REASON,
+  IterationRows,
+  isIssueFieldDef,
+  isWritable,
+  iterationDraft,
+  MultiSelectRows,
+  multiSelectDraft,
+  type ScalarDef,
+  ScalarInput,
+  SingleSelectRows,
+  scalarDraft,
+  singleSelectDraft,
+  valueKey,
+  type WritableFieldDef,
+} from "./ProjectFieldControls";
 
-/** Mirrors {@link ProjectFieldsEditor}'s exclusion, by KIND rather than by name:
- *  the built-ins GitHub owns on the issue/PR itself (title, assignees, labels,
- *  milestone, repository, reviewers, tracking) all arrive as `system`, and a
- *  name-based test would miss a renamed built-in and catch a custom field that
- *  borrowed its name. */
-type WritableFieldDef = Exclude<ProjectFieldDef, { kind: "system" }>;
-
-function isWritable(def: ProjectFieldDef): def is WritableFieldDef {
-  return def.kind !== "system";
-}
-
-/** The single-card editor's wording verbatim — the two surfaces hold the same rows
- *  for the same reason and must not say it differently. An org issue-field bridged
- *  onto a board is not written by `updateProjectV2ItemFieldValue`, so its row is
- *  held rather than hidden: a missing row would read as a broken render. */
-const ISSUE_FIELD_REASON =
-  "Issue fields are edited on GitHub — board editing arrives later";
-const NO_ITERATIONS_REASON =
-  "This board's iteration field has no iterations to pick from yet";
 const NOTHING_DRAFTED_REASON = "Nothing to apply yet";
-
-/** A control holding an entry the browser can't parse. Measured in Chromium: a
- *  half-typed exponent ("1e", "-") and an unfinished date segment all report
- *  `value === ""` with `validity.badInput`, which is indistinguishable from the
- *  emptied control that MEANS nothing-picked — hence a third state. A row in it
- *  contributes nothing to the payload and doesn't count as drafted. */
-const INVALID_DRAFT = "invalid";
 
 /** What one row will do to every eligible card. An absent key is the default,
  *  "Leave as is", which writes nothing at all — the property the whole dialog turns
@@ -67,6 +54,8 @@ const INVALID_DRAFT = "invalid";
 type RowDraft =
   | { mode: "set"; update: ProjectFieldValueUpdate }
   | { mode: "clear" }
+  // A row "Set to" nothing parseable yet: it contributes nothing to the payload
+  // and doesn't count as drafted.
   | typeof INVALID_DRAFT;
 
 /** Every drafted row, by field id. */
@@ -81,33 +70,6 @@ function rowMode(entry: RowDraft | undefined): RowMode {
   if (entry === undefined) return "keep";
   if (entry === INVALID_DRAFT) return "set";
   return entry.mode;
-}
-
-/** A value's identity for the AGREED-vs-MIXED test. Compares on what a write
- *  changes, so a multi-select the server reordered still reads as the same value
- *  and an iteration renamed on the board is still the same iteration. */
-function valueKey(value: ProjectFieldValue | undefined): string {
-  if (value === undefined) return "";
-  switch (value.kind) {
-    case "text":
-      return `text:${value.text}`;
-    case "number":
-      return `number:${value.number}`;
-    case "date":
-      return `date:${value.date}`;
-    case "singleSelect":
-      return `singleSelect:${value.optionId}`;
-    case "multiSelect":
-      return `multiSelect:${value.options
-        .map((option) => option.id)
-        .toSorted()
-        .join(",")}`;
-    case "iteration":
-      return `iteration:${value.iterationId}`;
-    // `unknown` carries no field id, so it never reaches this.
-    default:
-      return "";
-  }
 }
 
 /** One card's value for `fieldId`, matched on the field id alone — one field holds
@@ -185,6 +147,7 @@ export function BoardBulkFieldsDialog({
   onRetryDefs,
   pending,
   heldReason,
+  noun,
   onOpenChange,
   onApply,
 }: {
@@ -209,6 +172,8 @@ export function BoardBulkFieldsDialog({
   pending: boolean;
   /** Why Apply is held whatever the draft holds: the board-wide bulk ladder. */
   heldReason: string | undefined;
+  /** What the surface that opened this calls an item: a board card, a table row. */
+  noun: ItemNoun;
   onOpenChange: (open: boolean) => void;
   /** Write the draft. The panel owns it, so it can re-check its own gates, report
    *  the result, and decide whether this run is still the one on screen.
@@ -277,7 +242,7 @@ export function BoardBulkFieldsDialog({
         <DialogHeader>
           <DialogTitle id={titleId}>
             Edit fields on {eligibleCount}{" "}
-            {eligibleCount === 1 ? "card" : "cards"}
+            {eligibleCount === 1 ? noun : `${noun}s`}
           </DialogTitle>
           <DialogDescription>
             Every field starts at <strong>Leave as is</strong>. Only the rows
@@ -319,11 +284,13 @@ export function BoardBulkFieldsDialog({
               // Ranked below the board-wide hold, as the single-card editor ranks
               // its rows: an org issue-field has no write path here whatever the
               // sign-in can do.
+              // No multi-line hold here, unlike a table cell and the item
+              // editor: that hold exists because a single-line control would LOAD
+              // the value and flatten it, and "Set to" never loads one — it
+              // replaces the value wholesale with what the user typed.
               lockedReason={
                 heldReason ??
-                (def.kind !== "iteration" && def.isIssueField
-                  ? ISSUE_FIELD_REASON
-                  : undefined)
+                (isIssueFieldDef(def) ? ISSUE_FIELD_REASON : undefined)
               }
               onChange={(entry) => setRow(def.id, entry)}
             />
@@ -341,7 +308,7 @@ export function BoardBulkFieldsDialog({
           <span className="mr-auto self-center text-[11px] text-muted-foreground">
             {drafted === 0
               ? "No changes drafted"
-              : `${drafted} ${drafted === 1 ? "field" : "fields"} will be written to every eligible card`}
+              : `${drafted} ${drafted === 1 ? "field" : "fields"} will be written to every eligible ${noun}`}
           </span>
           <Button
             type="button"
@@ -539,7 +506,9 @@ function BulkFieldControl({
           id={inputId}
           def={def}
           lockedReason={lockedReason}
-          onChange={onChange}
+          onEdit={(raw, badInput) =>
+            onChange(bulkScalarDraft(def, raw, badInput))
+          }
         />
       </div>
     );
@@ -553,357 +522,75 @@ function BulkFieldControl({
       {def.kind === "singleSelect" && (
         <SingleSelectRows
           def={def}
-          update={update}
+          selectedId={update?.kind === "singleSelect" ? update.optionId : ""}
           lockedReason={lockedReason}
-          onChange={onChange}
+          ariaLabel={def.name}
+          onPick={(option) =>
+            onChange({
+              mode: "set",
+              update: singleSelectDraft(def, option).update,
+            })
+          }
         />
       )}
       {def.kind === "multiSelect" && (
         <MultiSelectRows
           def={def}
-          update={update}
+          chosenIds={
+            new Set(update?.kind === "multiSelect" ? update.optionIds : [])
+          }
           lockedReason={lockedReason}
-          onChange={onChange}
+          // The picked set REPLACES what every eligible card holds — a bulk write
+          // has no per-card set to add to. An emptied set is not a clear: this
+          // dialog's Clear arm is the way to unset a field, and an empty "Set to" is
+          // a pick not yet made.
+          onChoose={(options) =>
+            onChange(
+              options.length === 0
+                ? INVALID_DRAFT
+                : {
+                    mode: "set",
+                    update: multiSelectDraft(def, options).update,
+                  },
+            )
+          }
         />
       )}
       {def.kind === "iteration" && (
         <IterationRows
           def={def}
-          update={update}
+          selectedId={update?.kind === "iteration" ? update.iterationId : ""}
           lockedReason={lockedReason}
-          onChange={onChange}
+          ariaLabel={def.name}
+          onPick={(iteration) =>
+            onChange({
+              mode: "set",
+              update: iterationDraft(def, iteration).update,
+            })
+          }
         />
       )}
     </LabeledGroup>
   );
 }
 
-type ScalarDef = Extract<
-  WritableFieldDef,
-  { kind: "text" | "number" | "date" }
->;
-
-/** A scalar input's raw text as a draft. Empty is NOT a clear here, unlike the
- *  single-card editor: this dialog has an explicit Clear arm, so an empty control
- *  under "Set to" is simply a value not yet written.
- *
- *  `badInput` separates the two ways a control reads empty — the user emptied it, or
- *  the browser can't parse what's in it and reports `""` on their behalf. Both land
- *  in the same commit-nothing state here, which is what keeps the "1e" of "1e5" from
- *  ever reaching the wire. */
-function scalarDraft(def: ScalarDef, raw: string, badInput: boolean): RowDraft {
-  if (badInput) return INVALID_DRAFT;
-  if (def.kind === "number") {
-    // Trimmed only here: `Number("  ")` is 0, so whitespace would write a zero the
-    // user never typed. Text is NOT trimmed — the space that starts a word must not
-    // read as an empty control on the keystroke that typed it.
-    if (raw.trim() === "") return INVALID_DRAFT;
-    // Number(), not parseFloat(): "1.2.3" has to read as unparseable, and nothing
-    // here may re-round what was typed.
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) return INVALID_DRAFT;
-    return {
-      mode: "set",
-      update: { kind: "number", fieldId: def.id, number: parsed },
-    };
-  }
-  if (raw === "") return INVALID_DRAFT;
-  if (def.kind === "text")
-    return {
-      mode: "set",
-      update: { kind: "text", fieldId: def.id, text: raw },
-    };
-  // Every intermediate of a typed 4-digit year is a valid date with a 1-3 digit one
-  // ("2026-12-15" arrives as 0002-, 0020-, 0202- first), and no project dates year
-  // <1000 — so an unfinished year sits in the same commit-nothing state as an
-  // unparseable entry, where a valid-looking wrong date would otherwise be written.
-  if (!DATE_ONLY.test(raw) || Number(raw.split("-")[0]) < 1000)
+/** A scalar input's raw text as a bulk-model draft: the shared rule, read the
+ *  bulk way. Empty is NOT a clear here, unlike the seeded editors — this dialog has
+ *  an explicit Clear arm, so an empty control under "Set to" is simply a value not
+ *  yet written, the same commit-nothing state an unparseable entry sits in. The
+ *  finite-number and date-shape checks refuse, before the wire, a value the seeded
+ *  editors leave for the server to judge. */
+function bulkScalarDraft(
+  def: ScalarDef,
+  raw: string,
+  badInput: boolean,
+): RowDraft {
+  const entry = scalarDraft(def, raw, badInput);
+  if (entry === null || entry === INVALID_DRAFT) return INVALID_DRAFT;
+  const { update } = entry;
+  if (update.kind === "number" && !Number.isFinite(update.number))
     return INVALID_DRAFT;
-  return { mode: "set", update: { kind: "date", fieldId: def.id, date: raw } };
-}
-
-/** Text / number / date. UNCONTROLLED: a number or date input mid-entry reports its
- *  value as `""` while still showing what was typed, so re-driving it from the draft
- *  would blank the field under the user's cursor. The DOM keeps the text and the
- *  draft keeps the meaning. */
-function ScalarInput({
-  id,
-  def,
-  lockedReason,
-  onChange,
-}: {
-  id: string;
-  def: ScalarDef;
-  lockedReason?: string;
-  onChange: (entry: RowDraft) => void;
-}) {
-  const hostRef = useRef<HTMLSpanElement>(null);
-  const onEdit = useEffectEvent((el: HTMLInputElement) => {
-    onChange(scalarDraft(def, el.value, el.validity.badInput));
-  });
-  // A NATIVE listener, not React's `onChange`: React gates its synthetic change on
-  // the input's exposed value STRING (`updateValueIfChanged`, react-dom-client
-  // :1592), so an edit that leaves that string `""` is never delivered. Both such
-  // edits flip badInput and so decide whether this row commits anything — typing the
-  // "-" of "-5" into a just-emptied field, and deleting it again to recover.
-  // Measured in Chromium: the native `input` event fires for both and bubbles here.
-  useEffect(() => {
-    const host = hostRef.current;
-    if (host === null) return;
-    const handle = (e: Event) => {
-      if (e.target instanceof HTMLInputElement) onEdit(e.target);
-    };
-    host.addEventListener("input", handle);
-    return () => host.removeEventListener("input", handle);
-  }, []);
-  return (
-    // Owns the listener so the input's own ref-forwarding is never load-bearing;
-    // `block` keeps the input's full width in the row's column.
-    <span ref={hostRef} className="block">
-      <Input
-        id={id}
-        type={def.kind === "text" ? "text" : def.kind}
-        // `any` rather than the default step of 1: a board's number field takes
-        // fractions, and a stepped input reports those as invalid.
-        step={def.kind === "number" ? "any" : undefined}
-        // A native date input renders its own segment mask and ignores this.
-        placeholder={def.kind === "date" ? undefined : `Set ${def.name}…`}
-        className="h-7"
-        disabled={!!lockedReason}
-      />
-    </span>
-  );
-}
-
-const ROW_CLASS =
-  "flex cursor-pointer items-center gap-2 px-1 py-1 text-xs hover:bg-muted/60";
-
-/** A single-select field's options as a radio group — one choice, and the arrow-key
- *  navigation a radio group already is. */
-function SingleSelectRows({
-  def,
-  update,
-  lockedReason,
-  onChange,
-}: {
-  def: Extract<WritableFieldDef, { kind: "singleSelect" }>;
-  update: ProjectFieldValueUpdate | undefined;
-  lockedReason?: string;
-  onChange: (entry: RowDraft) => void;
-}) {
-  const picked = update?.kind === "singleSelect" ? update.optionId : "";
-  return (
-    // `gap-0` only: the rows carry their own padding, and the dialog body owns the
-    // scrolling — a cap here would nest a scrollbar inside that one.
-    <RadioGroup
-      className="gap-0"
-      aria-label={def.name}
-      value={picked}
-      onValueChange={(next) => {
-        if (typeof next !== "string") return;
-        const option = def.options.find((o) => o.id === next);
-        if (option === undefined) return;
-        onChange({
-          mode: "set",
-          update: {
-            kind: "singleSelect",
-            fieldId: def.id,
-            optionId: option.id,
-          },
-        });
-      }}
-    >
-      {def.options.map((option) => (
-        <label
-          key={option.id}
-          className={cn(ROW_CLASS, lockedReason && "cursor-not-allowed")}
-          // The board's own note on what the option means, where GitHub shows it —
-          // supplementary, so it stays off the row's visible chrome.
-          title={option.description || undefined}
-        >
-          <Radio value={option.id} disabled={!!lockedReason} />
-          <OptionValue name={option.name} color={option.color} />
-        </label>
-      ))}
-      {def.options.length === 0 && (
-        <p className="px-1 py-1 text-xs text-muted-foreground">
-          This field has no options.
-        </p>
-      )}
-    </RadioGroup>
-  );
-}
-
-/** A multi-select field's options as checkbox rows. The picked set REPLACES what
- *  every eligible card holds — a bulk write has no per-card set to add to. */
-function MultiSelectRows({
-  def,
-  update,
-  lockedReason,
-  onChange,
-}: {
-  def: Extract<WritableFieldDef, { kind: "multiSelect" }>;
-  update: ProjectFieldValueUpdate | undefined;
-  lockedReason?: string;
-  onChange: (entry: RowDraft) => void;
-}) {
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const picked = new Set(
-    update?.kind === "multiSelect" ? update.optionIds : [],
-  );
-  // Locked rows are skipped by the arrows rather than made focus black holes: a
-  // natively-disabled checkbox can't take focus.
-  const navRows = lockedReason ? [] : def.options;
-  const navIndexById = new Map(navRows.map((option, i) => [option.id, i]));
-  const activeIndex =
-    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
-  // Nothing active yet parks the single tab stop on the first row.
-  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
-  const onKeyDown = listKeyboardNav({
-    items: navRows,
-    activeIndex,
-    onActivate: (option) => setActiveId(option.id),
-    rowKey: (option) => option.id,
-  });
-
-  function toggle(optionId: string, on: boolean) {
-    const next = def.options
-      .filter(
-        (option) =>
-          (picked.has(option.id) || option.id === optionId) &&
-          (option.id !== optionId || on),
-      )
-      .map((option) => option.id);
-    // An emptied set is not a clear: this dialog's Clear arm is the way to unset a
-    // field, and an empty "Set to" is a pick not yet made.
-    if (next.length === 0) {
-      onChange(INVALID_DRAFT);
-      return;
-    }
-    onChange({
-      mode: "set",
-      update: { kind: "multiSelect", fieldId: def.id, optionIds: next },
-    });
-  }
-
-  return (
-    // Unstyled but NOT removable: it hosts the key handler, and `listKeyboardNav`
-    // finds the row to focus by querying within this element.
-    <div onKeyDown={onKeyDown}>
-      {def.options.map((option) => (
-        <label
-          key={option.id}
-          className={cn(
-            ROW_CLASS,
-            lockedReason && "cursor-not-allowed",
-            activeId === option.id && "bg-muted/60",
-          )}
-          title={option.description || undefined}
-        >
-          <Checkbox
-            data-row={option.id}
-            tabIndex={navIndexById.get(option.id) === focusIndex ? 0 : -1}
-            checked={picked.has(option.id)}
-            disabled={!!lockedReason}
-            onCheckedChange={(v) => toggle(option.id, v === true)}
-            onFocus={() => setActiveId(option.id)}
-          />
-          <OptionValue name={option.name} color={option.color} />
-        </label>
-      ))}
-      {def.options.length === 0 && (
-        <p className="px-1 py-1 text-xs text-muted-foreground">
-          This field has no options.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** An iteration field's iterations, current ones first and the completed ones under
- *  their own caption — assignable, but not what a board means by "the current one". */
-function IterationRows({
-  def,
-  update,
-  lockedReason,
-  onChange,
-}: {
-  def: Extract<WritableFieldDef, { kind: "iteration" }>;
-  update: ProjectFieldValueUpdate | undefined;
-  lockedReason?: string;
-  onChange: (entry: RowDraft) => void;
-}) {
-  const { iterations, completedIterations } = def;
-  const all = [...iterations, ...completedIterations];
-  // The reason IS the row's text: nothing here is focusable, so a tooltip or an
-  // aria-disabled flag would reach no one.
-  if (all.length === 0) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground">
-        {NO_ITERATIONS_REASON}
-      </p>
-    );
-  }
-  const picked = update?.kind === "iteration" ? update.iterationId : "";
-  return (
-    <RadioGroup
-      className="gap-0"
-      aria-label={def.name}
-      value={picked}
-      onValueChange={(next) => {
-        if (typeof next !== "string") return;
-        const iteration = all.find((it) => it.id === next);
-        if (iteration === undefined) return;
-        onChange({
-          mode: "set",
-          update: {
-            kind: "iteration",
-            fieldId: def.id,
-            iterationId: iteration.id,
-          },
-        });
-      }}
-    >
-      {iterations.map((iteration) => (
-        <IterationRow
-          key={iteration.id}
-          iteration={iteration}
-          lockedReason={lockedReason}
-        />
-      ))}
-      {completedIterations.length > 0 && (
-        <p className="px-1 pt-1.5 pb-0.5 text-[11px] text-muted-foreground">
-          Completed
-        </p>
-      )}
-      {completedIterations.map((iteration) => (
-        <IterationRow
-          key={iteration.id}
-          iteration={iteration}
-          lockedReason={lockedReason}
-        />
-      ))}
-    </RadioGroup>
-  );
-}
-
-function IterationRow({
-  iteration,
-  lockedReason,
-}: {
-  iteration: ProjectIterationDef;
-  lockedReason?: string;
-}) {
-  return (
-    <label className={cn(ROW_CLASS, lockedReason && "cursor-not-allowed")}>
-      <Radio value={iteration.id} disabled={!!lockedReason} />
-      <span className="min-w-0 truncate">
-        {iteration.title}
-        <IterationRange
-          startDate={iteration.startDate}
-          duration={iteration.duration}
-        />
-      </span>
-    </label>
-  );
+  if (update.kind === "date" && !DATE_ONLY.test(update.date))
+    return INVALID_DRAFT;
+  return { mode: "set", update };
 }

@@ -93,6 +93,101 @@ export const projectItemsRepoKey = (repo: string) =>
 export const pendingBoardWrites = new Map<string, number>();
 
 /**
+ * Board RE-READS a write asked for and that are still running, per repo — the
+ * refetching branch of {@link invalidateProjectBoards}, counted from the call until
+ * its refetch settles. The honest "a write's result is still on its way to the
+ * screen" signal: the app's window-focus invalidation, a background refetch, a
+ * stale mark and a page fetch all bypass this function, so none of them counts.
+ * Module-scoped with its own listeners for the reason {@link pendingBoardWrites} is:
+ * no query or mutation state carries WHY a fetch started.
+ */
+const boardRereads = new Map<string, number>();
+const boardRereadListeners = new Set<() => void>();
+
+function bumpBoardRereads(repo: string, delta: number): void {
+  const next = (boardRereads.get(repo) ?? 0) + delta;
+  if (next > 0) boardRereads.set(repo, next);
+  else boardRereads.delete(repo);
+  for (const listener of boardRereadListeners) listener();
+}
+
+export function subscribeBoardRereads(listener: () => void): () => void {
+  boardRereadListeners.add(listener);
+  return () => boardRereadListeners.delete(listener);
+}
+
+export function boardRereadsRunning(repo: string): boolean {
+  return (boardRereads.get(repo) ?? 0) > 0;
+}
+
+/**
+ * Board LENSES (by query hash) that have not reconciled since the last write on
+ * their repo, so they may still show what they showed before it:
+ *
+ * - OWED: every cached lens of the repo's boards, recorded when a write asks for
+ *   its re-read. A lens stays owed while that read is running, PAUSED offline
+ *   (board reads use the default `networkMode: "online"`, and query-core's
+ *   `refetchQueries` answers a paused fetch with `Promise.resolve()`, 5.102.8
+ *   queryClient.js, so the re-read count above cannot carry it), cancelled before
+ *   it landed, or not refetched at all because the lens was inactive.
+ * - FAILED: an owed lens whose read settled in error.
+ *
+ * Each clears on its OWN next network read that succeeds — the re-read itself, a
+ * resumed fetch, the strip's Retry, a remount, focus or staleTime refetch — never
+ * on another lens's. An owed lens that then fails becomes failed. An optimistic
+ * `setQueryData` is a success too, but a `manual` one that proves nothing about
+ * the server, so it doesn't count. A lens REMOVED from the cache drops its entry.
+ * One cache subscription, held only while something is recorded.
+ */
+const owedBoardReads = new Set<string>();
+const failedBoardReads = new Set<string>();
+let boardReadsWatch: (() => void) | null = null;
+
+function watchBoardReads(
+  queryClient: QueryClient,
+  owed: string[],
+  failed: string[],
+): void {
+  for (const hash of owed) owedBoardReads.add(hash);
+  for (const hash of failed) failedBoardReads.add(hash);
+  if (boardReadsWatch !== null) return;
+  boardReadsWatch = queryClient.getQueryCache().subscribe((event) => {
+    const hash = event.query.queryHash;
+    if (event.type === "removed") {
+      // A removed lens (garbage-collected, or cleared) has no read left to settle
+      // its entry, which would otherwise outlive it and keep this subscription held.
+      const had = owedBoardReads.delete(hash);
+      if (!failedBoardReads.delete(hash) && !had) return;
+    } else if (event.type === "updated" && event.action.type === "success") {
+      if (event.action.manual === true) return;
+      // A Load more append succeeds too, but only ADDS a page: the pages before it
+      // still hold what they held. query-core keeps the fetch's own meta on the
+      // state through its success, and a page fetch carries `fetchMore` there
+      // (5.102.8 infiniteQueryObserver.js); a refresh of the pages carries none.
+      if (event.query.state.fetchMeta?.fetchMore !== undefined) return;
+      const had = owedBoardReads.delete(hash);
+      if (!failedBoardReads.delete(hash) && !had) return;
+    } else if (event.type === "updated" && event.action.type === "error") {
+      if (!owedBoardReads.delete(hash)) return;
+      failedBoardReads.add(hash);
+    } else return;
+    if (owedBoardReads.size === 0 && failedBoardReads.size === 0) {
+      boardReadsWatch?.();
+      boardReadsWatch = null;
+    }
+    for (const listener of boardRereadListeners) listener();
+  });
+}
+
+export function boardReadOwed(queryHash: string): boolean {
+  return owedBoardReads.has(queryHash);
+}
+
+export function boardReadFailed(queryHash: string): boolean {
+  return failedBoardReads.has(queryHash);
+}
+
+/**
  * Mark every board this repo has opened stale, for any write that changes what a
  * board card SHOWS — its title, state glyph, assignees, membership, or the field
  * value that decides its column. Partial key on purpose: the caller is editing an
@@ -150,13 +245,36 @@ export function invalidateProjectBoards(
 ): void {
   const queryKey = projectItemsRepoKey(repo);
   const deferred = (pendingBoardWrites.get(repo) ?? 0) > 0;
+  // Only the refetching branch is a re-read in flight; the deferred one marks and
+  // leaves the read to the last write out, which counts it there.
+  if (!deferred) bumpBoardRereads(repo, 1);
   void queryClient
     .cancelQueries({ queryKey })
-    .then(() =>
-      queryClient.invalidateQueries(
+    .then(() => {
+      // EVERY cached lens of the repo's boards is owed from here, active or not:
+      // a lens that hasn't reconciled since this write still shows what it showed
+      // before it. Registered before the refetch starts, so the ledger's own
+      // transitions settle each one — its next non-manual success clears it, an
+      // error moves it to failed, and a pause, a cancel or an inactive lens that
+      // isn't refetched now simply stays owed until its own next read lands. The
+      // deferred branch records nothing: it refetches nothing, and the last write
+      // out records for both.
+      if (!deferred)
+        watchBoardReads(
+          queryClient,
+          queryClient
+            .getQueryCache()
+            .findAll({ queryKey })
+            .map((query) => query.queryHash),
+          [],
+        );
+      return queryClient.invalidateQueries(
         deferred ? { queryKey, refetchType: "none" } : { queryKey },
-      ),
-    );
+      );
+    })
+    .finally(() => {
+      if (!deferred) bumpBoardRereads(repo, -1);
+    });
 }
 
 /**

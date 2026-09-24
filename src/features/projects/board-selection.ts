@@ -42,6 +42,64 @@ export function columnRange(
 }
 
 /**
+ * The item ids from `anchorId` to `targetId` inclusive, over a table's VISIBLE
+ * rows in draw order, or null when either id is not among them.
+ *
+ * Flat rather than column-scoped: a table's rows ARE an ordering, groups
+ * included, so a range may run across group sections. `rows` holds only what is
+ * on screen, so a range never selects through a COLLAPSED group, and an anchor
+ * inside one answers null like an undrawn one — the caller then toggle-adds.
+ */
+export function rowRange(
+  rows: BoardItem[],
+  anchorId: string,
+  targetId: string,
+): string[] | null {
+  const from = rows.findIndex((item) => item.itemId === anchorId);
+  const to = rows.findIndex((item) => item.itemId === targetId);
+  if (from === -1 || to === -1) return null;
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  return rows
+    .slice(lo, hi + 1)
+    .filter(selectable)
+    .map((item) => item.itemId);
+}
+
+/** The modifier flags a pointer event carries, as this module reads them. */
+interface PointerMods {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
+/**
+ * Whether a pointer event carries one of the two SELECTION modifiers, and which.
+ * The toggle is `mod`: Cmd on macOS, Ctrl everywhere else, derived from the
+ * platform rather than accepting either flag — Ctrl-click on macOS is the
+ * SECONDARY-CLICK gesture, and WebKit may deliver it as `contextmenu` with no
+ * `click` at all. `mac` is a parameter so this module stays import-free.
+ */
+export function selectionMods(
+  e: PointerMods,
+  mac: boolean,
+): { toggle: boolean; range: boolean } {
+  return { toggle: mac ? e.metaKey : e.ctrlKey, range: e.shiftKey };
+}
+
+/**
+ * A macOS Ctrl-click: that platform's secondary-click gesture, not a selection
+ * modifier. WebKit can deliver a primary-button `mousedown` and a `click` for it
+ * ahead of the `contextmenu`, so callers IGNORE the mousedown and SWALLOW the
+ * click. Shift is no exemption — Ctrl+Shift-click is still a ctrl-click there.
+ */
+export function isMacSecondaryClick(
+  e: Pick<PointerMods, "ctrlKey">,
+  mac: boolean,
+): boolean {
+  return mac && e.ctrlKey;
+}
+
+/**
  * `selectedIds` narrowed to the cards the board currently DRAWS — the reading
  * every bulk action takes at fire time.
  *

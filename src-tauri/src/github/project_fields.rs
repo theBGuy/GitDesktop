@@ -12,6 +12,7 @@ use crate::github::project_item_edits::{
     bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, strip_gh_prefix, BulkDocument,
     BulkItemOutcomes, BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
 };
+use crate::github::project_items::AssigneeRef;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize)]
@@ -79,6 +80,46 @@ pub enum ProjectFieldValue {
         duration: u32,
         is_issue_field: bool,
     },
+    Users {
+        field_id: String,
+        field_name: String,
+        total_count: u64,
+        users: Vec<AssigneeRef>,
+        is_issue_field: bool,
+    },
+    Labels {
+        field_id: String,
+        field_name: String,
+        total_count: u64,
+        labels: Vec<LabelLite>,
+        is_issue_field: bool,
+    },
+    Milestone {
+        field_id: String,
+        field_name: String,
+        title: String,
+        is_issue_field: bool,
+    },
+    Repository {
+        field_id: String,
+        field_name: String,
+        name_with_owner: String,
+        is_issue_field: bool,
+    },
+    Reviewers {
+        field_id: String,
+        field_name: String,
+        total_count: u64,
+        reviewers: Vec<String>,
+        is_issue_field: bool,
+    },
+    PullRequests {
+        field_id: String,
+        field_name: String,
+        total_count: u64,
+        pull_requests: Vec<LinkedPrLite>,
+        is_issue_field: bool,
+    },
     Unknown {
         field_name: String,
     },
@@ -90,6 +131,20 @@ pub struct SelectOptionRef {
     pub id: String,
     pub name: String,
     pub color: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelLite {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedPrLite {
+    pub number: u64,
+    pub repo_name_with_owner: String,
 }
 
 #[derive(Serialize)]
@@ -503,7 +558,19 @@ const FIELD_COMMON: &str = "... on ProjectV2FieldCommon { id name dataType isIss
 // The IssueField*Value arms alias their `value` scalar (`text: value`, …) so
 // classic and bridge values parse by the same keys and String/Float response
 // names stay disjoint.
-pub(super) fn field_value_selection() -> String {
+pub(super) fn field_value_selection(rich: bool) -> String {
+    let connections = if rich {
+        format!(
+            "... on ProjectV2ItemFieldUserValue{{ field{{ {FIELD_COMMON} }} users(first:20){{ totalCount nodes{{ login avatarUrl }} }} }} \
+             ... on ProjectV2ItemFieldLabelValue{{ field{{ {FIELD_COMMON} }} labels(first:20){{ totalCount nodes{{ name color }} }} }} \
+             ... on ProjectV2ItemFieldReviewerValue{{ field{{ {FIELD_COMMON} }} reviewers(first:20){{ totalCount nodes{{ __typename \
+               ... on User{{ login }} ... on Team{{ name }} ... on Mannequin{{ login }} \
+               ... on Bot{{ login }} ... on EnterpriseTeam{{ name }} }} }} }} \
+             ... on ProjectV2ItemFieldPullRequestValue{{ field{{ {FIELD_COMMON} }} pullRequests(first:20){{ totalCount nodes{{ number repository{{ nameWithOwner }} }} }} }}"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "__typename \
          ... on ProjectV2ItemFieldSingleSelectValue{{ field{{ {FIELD_COMMON} }} name optionId color }} \
@@ -512,6 +579,9 @@ pub(super) fn field_value_selection() -> String {
          ... on ProjectV2ItemFieldNumberValue{{ field{{ {FIELD_COMMON} }} number }} \
          ... on ProjectV2ItemFieldDateValue{{ field{{ {FIELD_COMMON} }} date }} \
          ... on ProjectV2ItemFieldIterationValue{{ field{{ {FIELD_COMMON} }} iterationId title startDate duration }} \
+         ... on ProjectV2ItemFieldMilestoneValue{{ field{{ {FIELD_COMMON} }} milestone{{ title }} }} \
+         ... on ProjectV2ItemFieldRepositoryValue{{ field{{ {FIELD_COMMON} }} repository{{ nameWithOwner }} }} \
+         {connections} \
          ... on ProjectV2ItemIssueFieldValue{{ field{{ {FIELD_COMMON} }} issueFieldValue{{ __typename \
            ... on IssueFieldSingleSelectValue{{ name optionId color }} \
            ... on IssueFieldMultiSelectValue{{ options{{ id name color }} }} \
@@ -523,7 +593,7 @@ pub(super) fn field_value_selection() -> String {
 }
 
 fn item_field_values_query(field: &str) -> String {
-    let values = field_value_selection();
+    let values = field_value_selection(true);
     format!(
         "query($owner:String!,$name:String!,$number:Int!){{ \
          repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
@@ -646,6 +716,74 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
                 is_issue_field,
             }
         }
+        ("ProjectV2ItemFieldUserValue", _) => ProjectFieldValue::Users {
+            field_id,
+            field_name,
+            total_count: value["users"]["totalCount"].as_u64().unwrap_or(0),
+            users: array(&value["users"]["nodes"])
+                .filter_map(|user| {
+                    Some(AssigneeRef {
+                        login: user["login"].as_str()?.to_string(),
+                        avatar_url: text(user, "avatarUrl"),
+                    })
+                })
+                .collect(),
+            is_issue_field,
+        },
+        ("ProjectV2ItemFieldLabelValue", _) => ProjectFieldValue::Labels {
+            field_id,
+            field_name,
+            total_count: value["labels"]["totalCount"].as_u64().unwrap_or(0),
+            labels: array(&value["labels"]["nodes"])
+                .filter_map(|label| {
+                    Some(LabelLite {
+                        name: label["name"].as_str()?.to_string(),
+                        color: text(label, "color"),
+                    })
+                })
+                .collect(),
+            is_issue_field,
+        },
+        ("ProjectV2ItemFieldMilestoneValue", _) => ProjectFieldValue::Milestone {
+            field_id,
+            field_name,
+            title: text(&value["milestone"], "title"),
+            is_issue_field,
+        },
+        ("ProjectV2ItemFieldRepositoryValue", _) => ProjectFieldValue::Repository {
+            field_id,
+            field_name,
+            name_with_owner: text(&value["repository"], "nameWithOwner"),
+            is_issue_field,
+        },
+        ("ProjectV2ItemFieldReviewerValue", _) => ProjectFieldValue::Reviewers {
+            field_id,
+            field_name,
+            total_count: value["reviewers"]["totalCount"].as_u64().unwrap_or(0),
+            reviewers: array(&value["reviewers"]["nodes"])
+                .filter_map(|reviewer| match reviewer["__typename"].as_str()? {
+                    "User" | "Mannequin" | "Bot" => reviewer["login"].as_str(),
+                    "Team" | "EnterpriseTeam" => reviewer["name"].as_str(),
+                    _ => None,
+                })
+                .map(str::to_string)
+                .collect(),
+            is_issue_field,
+        },
+        ("ProjectV2ItemFieldPullRequestValue", _) => ProjectFieldValue::PullRequests {
+            field_id,
+            field_name,
+            total_count: value["pullRequests"]["totalCount"].as_u64().unwrap_or(0),
+            pull_requests: array(&value["pullRequests"]["nodes"])
+                .filter_map(|pr| {
+                    Some(LinkedPrLite {
+                        number: pr["number"].as_u64()?,
+                        repo_name_with_owner: text(&pr["repository"], "nameWithOwner"),
+                    })
+                })
+                .collect(),
+            is_issue_field,
+        },
         _ => ProjectFieldValue::Unknown { field_name },
     }
 }
@@ -1373,6 +1511,139 @@ mod tests {
     }
 
     #[test]
+    fn table_field_values_preserve_payloads_counts_and_wire_keys() {
+        let users: Vec<_> = (0..20)
+            .map(|n| json!({"login":format!("user{n}"),"avatarUrl":format!("https://avatars/{n}")}))
+            .collect();
+        let cases: [(&str, Value, Value, &[&str]); 6] = [
+            (
+                "ProjectV2ItemFieldUserValue",
+                json!({"users":{"totalCount":25,"nodes":users}}),
+                json!({"kind":"users","totalCount":25,"users":users}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "totalCount", "users"],
+            ),
+            (
+                "ProjectV2ItemFieldLabelValue",
+                json!({"labels":{"totalCount":3,"nodes":[{"name":"bug","color":"ff0000"}]}}),
+                json!({"kind":"labels","totalCount":3,"labels":[{"name":"bug","color":"ff0000"}]}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "labels", "totalCount"],
+            ),
+            (
+                "ProjectV2ItemFieldMilestoneValue",
+                json!({"milestone":{"title":"Release"}}),
+                json!({"kind":"milestone","title":"Release"}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "title"],
+            ),
+            (
+                "ProjectV2ItemFieldRepositoryValue",
+                json!({"repository":{"nameWithOwner":"org/repo"}}),
+                json!({"kind":"repository","nameWithOwner":"org/repo"}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "nameWithOwner"],
+            ),
+            (
+                "ProjectV2ItemFieldReviewerValue",
+                json!({"reviewers":{"totalCount":9,"nodes":[
+                    {"__typename":"User","login":"alice"},
+                    {"__typename":"Team","name":"Web"},
+                    {"__typename":"FutureReviewer","login":"skip","name":"Skip"},
+                    {"__typename":"Mannequin","login":"imported"},
+                    {"__typename":"Bot","login":"automation"},
+                    {"__typename":"EnterpriseTeam","name":"Platform"}
+                ]}}),
+                json!({"kind":"reviewers","totalCount":9,"reviewers":["alice","Web","imported","automation","Platform"]}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "reviewers", "totalCount"],
+            ),
+            (
+                "ProjectV2ItemFieldPullRequestValue",
+                json!({"pullRequests":{"totalCount":4,"nodes":[{"number":42,"repository":{"nameWithOwner":"org/repo"}}]}}),
+                json!({"kind":"pullRequests","totalCount":4,"pullRequests":[{"number":42,"repoNameWithOwner":"org/repo"}]}),
+                &["fieldId", "fieldName", "isIssueField", "kind", "pullRequests", "totalCount"],
+            ),
+        ];
+        for (typename, mut node, mut expected, keys) in cases {
+            node["__typename"] = json!(typename);
+            node["field"] = json!({"id":"field","name":"Field","isIssueField":true});
+            expected["fieldId"] = json!("field");
+            expected["fieldName"] = json!("Field");
+            expected["isIssueField"] = json!(true);
+            let wire = serde_json::to_value(parse_field_value(&node)).unwrap();
+            assert_keys(&wire, keys);
+            assert_eq!(wire, expected);
+            match wire["kind"].as_str().unwrap() {
+                "users" => {
+                    assert_eq!(wire["users"].as_array().unwrap().len(), 20);
+                    assert_keys(&wire["users"][0], &["avatarUrl", "login"]);
+                }
+                "labels" => assert_keys(&wire["labels"][0], &["color", "name"]),
+                "pullRequests" => {
+                    assert_keys(&wire["pullRequests"][0], &["number", "repoNameWithOwner"]);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn table_connections_tolerate_empty_absent_and_partial_nodes() {
+        for (typename, key) in [
+            ("ProjectV2ItemFieldUserValue", "users"),
+            ("ProjectV2ItemFieldLabelValue", "labels"),
+            ("ProjectV2ItemFieldReviewerValue", "reviewers"),
+            ("ProjectV2ItemFieldPullRequestValue", "pullRequests"),
+        ] {
+            for connection in [
+                json!({"totalCount":0,"nodes":[]}),
+                Value::Null,
+                json!({}),
+                json!({"nodes":[null, {}]}),
+            ] {
+                let mut node = json!({"__typename":typename,"field":{"id":"field","name":"Field"}});
+                node[key] = connection;
+                let wire = serde_json::to_value(parse_field_value(&node)).unwrap();
+                assert_eq!(wire["kind"], key);
+                assert_eq!(wire["totalCount"], 0);
+                assert_eq!(wire[key], json!([]));
+            }
+        }
+    }
+
+    #[test]
+    fn table_value_selection_pins_payloads_and_shared_page_caps() {
+        for rich in [false, true] {
+            let selection = field_value_selection(rich);
+            for (typename, payload, connection) in [
+                ("ProjectV2ItemFieldUserValue", "users(first:20){ totalCount nodes{ login avatarUrl } }", true),
+                ("ProjectV2ItemFieldLabelValue", "labels(first:20){ totalCount nodes{ name color } }", true),
+                ("ProjectV2ItemFieldMilestoneValue", "milestone{ title }", false),
+                ("ProjectV2ItemFieldRepositoryValue", "repository{ nameWithOwner }", false),
+                ("ProjectV2ItemFieldReviewerValue", "reviewers(first:20){ totalCount nodes{ __typename ... on User{ login } ... on Team{ name } ... on Mannequin{ login } ... on Bot{ login } ... on EnterpriseTeam{ name } } }", true),
+                ("ProjectV2ItemFieldPullRequestValue", "pullRequests(first:20){ totalCount nodes{ number repository{ nameWithOwner } } }", true),
+            ] {
+                if rich || !connection {
+                    assert!(selection.contains(&format!(
+                        "... on {typename}{{ field{{ {FIELD_COMMON} }} {payload} }}"
+                    )));
+                } else {
+                    assert!(
+                        !selection.contains(typename),
+                        "lean selection contains {typename}"
+                    );
+                }
+            }
+            let query = crate::github::project_items::board_item_selection(rich);
+            assert!(query.contains("fieldValues(first:50)"));
+            assert!(query.contains(&selection));
+        }
+        for query in [
+            item_field_values_query("issue"),
+            item_field_values_query("pullRequest"),
+        ] {
+            assert!(query.contains("fieldValues(first:50)"));
+            assert!(query.contains(&field_value_selection(true)));
+        }
+    }
+
+    #[test]
     fn field_definition_wrapper_reports_truncation_tolerantly() {
         for (page_info, truncated) in [
             (None, false),
@@ -1506,7 +1777,6 @@ mod tests {
     #[test]
     fn system_and_future_values_are_unknown() {
         for node in [
-            json!({"__typename":"ProjectV2ItemFieldLabelValue"}),
             json!({"__typename":"ProjectV2ItemFieldTextValue","field":{"name":"Title","dataType":"TITLE"},"text":"An item's own title"}),
             json!({"__typename":"FutureProjectValue","field":{"name":"Future"}}),
             json!({"__typename":"FutureProjectValue"}),

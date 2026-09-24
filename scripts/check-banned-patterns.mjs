@@ -934,9 +934,10 @@ export const CHECKS = [
     // form (a hardcoded platform modifier), and a wrapped pair must not read as
     // clean either.
     scan: perLine(/\b(?:ctrlKey|metaKey)\b/),
-    // FROZEN: the mod+Enter submit policy files (PR #202), the two MULTI-SELECT
-    // modifier readers (the file row, and the project board's card selection —
-    // both answer "did the pointer hold mod or Shift", which is a property of the
+    // FROZEN: the mod+Enter submit policy files (PR #202), the three MULTI-SELECT
+    // modifier readers (the file row, HistoryPanel's commit list, and the
+    // Projects selection module shared by the board and table layouts — each
+    // answers "did the pointer hold mod or Shift", which is a property of the
     // event rather than a binding the registry could own), and DiffViewer's
     // additive-drag capture listener (the vendored selection manager's callbacks
     // carry no event, so it reads the raw flags; the modifier itself stays
@@ -954,7 +955,7 @@ export const CHECKS = [
       "src/features/projects/BoardAddDialogs.tsx",
       "src/features/projects/BoardBulkFieldsDialog.tsx",
       "src/features/projects/BoardDraftEditDialog.tsx",
-      "src/features/projects/ProjectsBoardPanel.tsx",
+      "src/features/projects/board-selection.ts",
       "src/features/pulls/CommitComments.tsx",
       "src/features/pulls/CreateLocalPrDialog.tsx",
       "src/features/pulls/CreatePrDialog.tsx",

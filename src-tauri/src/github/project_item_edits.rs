@@ -371,17 +371,19 @@ fn position_input(project_id: &str, item_id: &str, after_id: Option<&str>) -> St
 }
 
 fn add_draft_mutation() -> String {
-    let item = board_item_selection();
+    // Per-item payloads stay rich at negligible cost so cache patches preserve table
+    // values while remaining safe for lean board caches.
+    let item = board_item_selection(true);
     format!("mutation($projectId:ID!,$title:String!,$body:String){{ addProjectV2DraftIssue(input:{{projectId:$projectId,title:$title,body:$body}}){{ projectItem{{ {item} }} }} }}")
 }
 
 fn add_item_mutation() -> String {
-    let item = board_item_selection();
+    let item = board_item_selection(true);
     format!("mutation($projectId:ID!,$contentId:ID!){{ addProjectV2ItemById(input:{{projectId:$projectId,contentId:$contentId}}){{ item{{ {item} }} }} }}")
 }
 
 fn convert_mutation() -> String {
-    let item = board_item_selection();
+    let item = board_item_selection(true);
     format!("mutation($itemId:ID!,$repositoryId:ID!){{ convertProjectV2DraftIssueItemToIssue(input:{{itemId:$itemId,repositoryId:$repositoryId}}){{ item{{ {item} content{{ ... on Issue {{ url }} }} }} }} }}")
 }
 
@@ -1316,7 +1318,7 @@ mod tests {
         }
         assert!(!add_draft_mutation().contains("assigneeIds"));
         for doc in [add_draft_mutation(), add_item_mutation(), convert_mutation()] {
-            assert!(doc.contains(&board_item_selection()));
+            assert!(doc.contains(&board_item_selection(true)));
         }
         let update: Value =
             serde_json::from_str(&update_draft_input("DI_one", "", "", Some(&[]))).unwrap();

@@ -93,6 +93,10 @@ export const ghProjectItems = (
   after: string | null,
   query: string | null,
   includeArchived: boolean,
+  /** Also read the connection-valued fields (users, labels, reviewers, linked
+   *  pull requests) — a table draws them, a board never does, and each one costs
+   *  rate limit per item. Omitted is the lean read. */
+  rich?: boolean,
 ) =>
   invoke<BoardItems>("gh_project_items", {
     repoPath,
@@ -100,6 +104,7 @@ export const ghProjectItems = (
     after,
     query,
     includeArchived,
+    rich,
   });
 
 /** One board's saved views — the lenses its owner set up on GitHub, read-only

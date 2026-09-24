@@ -613,7 +613,17 @@ along as lenses: pick one and GitHub filters the read for you, its sort
 orders the cards in each column (by **Title**, or by a text, number, date,
 single-select or iteration field), its visible fields ride along as chips on
 the cards, and its grouping seeds **Group by** while you stay free to
-regroup. Table and roadmap views are drawn as a board, and **Clear view**
+regroup. A view saved as a **table** opens as a table: a dense grid of the
+view's own columns (assignees, labels, milestone, repository, reviewers and
+linked pull requests among them, with a **+N** where a list runs long), a
+header row and a **Title** column that stay in place while you scroll, rows
+in the view's sort with each sorted column marked in its header, and the
+view's row grouping drawn as sections you can fold away. Arrow keys move
+cell by cell, rows take the same click and keyboard selection as cards, the
+row menu and the selection bar work as they do on the board, a
+board field's value can be edited right in its cell, and an unsorted,
+ungrouped table with archived cards hidden reorders rows with the same
+`Alt`/`⌥` keys. Roadmap views are drawn as a board, and **Clear view**
 brings the whole item set back in the board's own order with the chips off,
 leaving the grouping where you last put it. Nothing here writes to the view.
 Adding, moving, reordering, editing a draft, converting, archiving, restoring

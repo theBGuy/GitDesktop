@@ -39,25 +39,44 @@ export function groupableFields(fields: ProjectFieldDef[]): GroupField[] {
  *  value, which is what makes it the column a clear writes to. */
 export const UNSET_COLUMN_ID = "__unset__";
 
+/** What one board item is called where it is drawn: a card on the board, a row in
+ *  a table. Every string below that names the item is keyed on it, so the same
+ *  hold reads in the words of the surface the user is looking at. */
+export type ItemNoun = "card" | "row";
+
 /** Single-writer past the move, for the same reason and one step wider: an archive,
  *  a removal, a convert and a draft edit all change what the board draws, so a
  *  second write fired over one in flight would settle against a board neither of
  *  them saw. Lives here rather than in either surface because both the panel's hold
  *  and the edit dialog's footer say it, and a copy each is a copy that can drift. */
-export const CARD_WRITE_REASON = "Finishing your last card change…";
+export const ITEM_WRITE_REASON: Record<ItemNoun, string> = {
+  card: "Finishing your last card change…",
+  row: "Finishing your last row change…",
+};
+/** The edit dialog's footer, which the board and the table share. */
+export const CARD_WRITE_REASON = ITEM_WRITE_REASON.card;
 
 /** Why a card can't be repositioned under a saved view that sorts: the columns are
  *  drawn in the sort's order, so the board's own manual order — the only thing a
  *  position write addresses — isn't what is on screen. Shared by the menu's held
  *  row and the keyboard route's announcement, for the same reason
- *  `CARD_WRITE_REASON` lives here — one copy the two surfaces can't drift apart. */
-export const SORTED_VIEW_REASON = "This view orders cards by its sort";
+ *  `ITEM_WRITE_REASON` lives here — one copy the two surfaces can't drift apart. */
+export const SORTED_VIEW_REASON: Record<ItemNoun, string> = {
+  card: "This view orders cards by its sort",
+  row: "This view orders rows by its sort",
+};
+
+/** Why a table row can't be repositioned while the view groups its rows: the
+ *  menu's held row and the keyboard route's announcement, one copy for both. */
+export const GROUPED_ROWS_REASON = "Rows reposition only in an ungrouped view";
 
 /** Why a downward move is refused at the loaded end: more of the column may live
  *  in pages the board hasn't fetched, so the card's real neighbour there is
  *  unknown. The keyboard route's announcement, where a full sentence fits. */
-export const TRUNCATED_ORDER_REASON =
-  "Load more cards to move past the loaded end";
+export const TRUNCATED_ORDER_REASON: Record<ItemNoun, string> = {
+  card: "Load more cards to move past the loaded end",
+  row: "Load more rows to move past the loaded end",
+};
 
 /** The same refusal as a terse menu-row parenthetical. A menu label can't take the
  *  full {@link TRUNCATED_ORDER_REASON} sentence, so the two deliberately differ in
@@ -68,8 +87,11 @@ export const TRUNCATED_ROW_REASON = "load more first";
  *  archived card sits in no column and in none of the board's position order, so
  *  every write addressing either has nothing to address. Shared by the menu's held
  *  rows and the keyboard route's announcement, for the reason
- *  {@link CARD_WRITE_REASON} lives here — one copy the two surfaces can't drift. */
-export const ARCHIVED_CARD_REASON = "Restore this card to change it";
+ *  {@link ITEM_WRITE_REASON} lives here — one copy the two surfaces can't drift. */
+export const ARCHIVED_ITEM_REASON: Record<ItemNoun, string> = {
+  card: "Restore this card to change it",
+  row: "Restore this row to change it",
+};
 
 /** Why NO card can be repositioned while archived cards are drawn: GitHub refuses
  *  an archived item as a position anchor, so a card's drawn neighbour is not
@@ -204,8 +226,8 @@ type SortableDef = Extract<
 /** `def` as a sort key, or null where this build can't order by it. The `system`
  *  bucket is admitted for TITLE alone: a board sorted by its Title column orders
  *  by what the card already shows, where every other system field (assignees,
- *  labels, milestone, …) reaches an item as an `unknown` value with nothing to
- *  compare. Tested on `dataType`, never the name — the field is renamable. */
+ *  labels, milestone, …) is a list or a reference this build defines no order
+ *  for. Tested on `dataType`, never the name — the field is renamable. */
 function sortableDef(def: ProjectFieldDef | undefined): SortableDef | null {
   if (def === undefined) return null;
   switch (def.kind) {
@@ -350,6 +372,19 @@ export function sortColumnItems(
     .map((row) => row.item);
 }
 
+/** The keys of `sortBy` this build honours, in the view's order — the ones
+ *  {@link sortColumnItems} actually sorts by, and so the only ones a header may
+ *  claim. An empty result from a non-empty `sortBy` is a view whose whole sort
+ *  was dropped. */
+export function honouredSortKeys(
+  sortBy: ProjectViewSort[],
+  fields: ProjectFieldDef[],
+): ProjectViewSort[] {
+  return sortBy.filter(
+    (sort) => sortableDef(fields.find((f) => f.id === sort.fieldId)) !== null,
+  );
+}
+
 /** Whether `view` orders the cards itself. ONE reading for both consumers: the
  *  columns apply {@link sortColumnItems} exactly when this is true, and a
  *  reposition is refused exactly then — the board's own POSITION order is what a
@@ -365,8 +400,8 @@ export function lensSorted(
  * The fields a card shows as chips under `view`: the view's own visible fields,
  * in its order, minus what the card already carries. The whole `system` kind
  * drops — title and assignees are structural on the card, and GitHub owns the
- * rest of that bucket on the issue itself, so their values arrive as `unknown`
- * with nothing to render. Excluded by KIND, never by name, the same way the field
+ * rest of that bucket on the issue itself, which the card has no chip form
+ * for. Excluded by KIND, never by name, the same way the field
  * editor excludes them. The grouped field drops too: the column the card sits in
  * is already that value.
  */
@@ -394,4 +429,269 @@ export function firstCardPosition(
 ): { col: number; idx: number } | null {
   const col = columns.findIndex((column) => column.items.length > 0);
   return col === -1 ? null : { col, idx: 0 };
+}
+
+/** One column of a TABLE view: the field it reads, and whether it is the Title
+ *  column, which draws the item's own head line rather than a field value. */
+export interface TableColumn {
+  def: ProjectFieldDef;
+  title: boolean;
+}
+
+/** Title is a `system` field told apart by `dataType`, never by its renamable
+ *  name. */
+function isTitleDef(def: ProjectFieldDef): boolean {
+  return def.kind === "system" && def.dataType === "TITLE";
+}
+
+/** Stands in for a Title definition the board's field read didn't carry, so a
+ *  table always has a column that names its rows. */
+const FALLBACK_TITLE_DEF: ProjectFieldDef = {
+  kind: "system",
+  id: "__title__",
+  name: "Title",
+  dataType: "TITLE",
+};
+
+/**
+ * A table view's columns: its visible fields in the view's own order, system
+ * fields included, with Title moved first so it can stay pinned while the rest
+ * scroll. An id the field read didn't return is skipped — there is no name to
+ * head it with. A view that resolves to nothing still gets a Title column.
+ */
+export function tableColumns(
+  view: ProjectViewDef,
+  fields: ProjectFieldDef[],
+): TableColumn[] {
+  const byId = new Map(fields.map((field) => [field.id, field]));
+  const seen = new Set<string>();
+  const columns: TableColumn[] = [];
+  for (const id of view.visibleFieldIds) {
+    const def = byId.get(id);
+    if (def === undefined || seen.has(id)) continue;
+    seen.add(id);
+    columns.push({ def, title: isTitleDef(def) });
+  }
+  const at = columns.findIndex((column) => column.title);
+  if (at > 0) columns.unshift(...columns.splice(at, 1));
+  if (columns.length === 0)
+    return [
+      { def: fields.find(isTitleDef) ?? FALLBACK_TITLE_DEF, title: true },
+    ];
+  return columns;
+}
+
+/**
+ * What `item` holds for a table column, or undefined when it holds nothing
+ * renderable. A board-defined field's value must match the definition's kind (a
+ * wire shape that disagrees is not a value of this field); a `system` column
+ * takes whichever typed arm GitHub sent for it. Assignees and Repository fall
+ * back to the item's own content where the field value is absent, which is the
+ * same data the board card draws.
+ */
+export function columnValue(
+  item: BoardItem,
+  def: ProjectFieldDef,
+): ProjectFieldValue | undefined {
+  // A DRAFT's own assignees are authoritative over its typed value: they change
+  // only through this app's draft editor, whose write patches the content but
+  // whose answer carries no field values — so the typed copy is the stale one.
+  // An issue's or pull request's are edited on GitHub, where both copies go stale
+  // together and the typed one keeps its "+N".
+  if (
+    def.kind === "system" &&
+    def.dataType === "ASSIGNEES" &&
+    item.content.kind === "draft"
+  )
+    return item.content.assignees.length === 0
+      ? undefined
+      : {
+          kind: "users",
+          fieldId: def.id,
+          fieldName: def.name,
+          totalCount: item.content.assignees.length,
+          users: item.content.assignees,
+          isIssueField: false,
+        };
+  for (const value of item.fieldValues) {
+    if (value.kind === "unknown" || value.fieldId !== def.id) continue;
+    if (def.kind === "system" || value.kind === def.kind) return value;
+  }
+  if (def.kind !== "system") return undefined;
+  const content = item.content;
+  if (
+    def.dataType === "ASSIGNEES" &&
+    "assignees" in content &&
+    content.assignees.length > 0
+  )
+    return {
+      kind: "users",
+      fieldId: def.id,
+      fieldName: def.name,
+      totalCount: content.assignees.length,
+      users: content.assignees,
+      isIssueField: false,
+    };
+  if (def.dataType === "REPOSITORY" && "repoNameWithOwner" in content)
+    return {
+      kind: "repository",
+      fieldId: def.id,
+      fieldName: def.name,
+      nameWithOwner: content.repoNameWithOwner,
+      isIssueField: false,
+    };
+  return undefined;
+}
+
+/** A table row's identity. Prefixed per row kind so an item and a group header
+ *  can never share a key, in React or in the cursor. */
+const ITEM_ROW_PREFIX = "item:";
+
+export function itemRowKey(itemId: string): string {
+  return `${ITEM_ROW_PREFIX}${itemId}`;
+}
+
+export function groupRowKey(bucketId: string): string {
+  return `group:${bucketId}`;
+}
+
+/** One entry of a table's flat row list: a group section's header, or an item. */
+export type TableEntry =
+  | {
+      kind: "group";
+      key: string;
+      bucketId: string;
+      label: string;
+      color: string | null;
+      count: number;
+      expanded: boolean;
+    }
+  | { kind: "item"; key: string; item: BoardItem };
+
+/**
+ * The table's rows as one flat list: with `grouped`, each non-empty bucket as a
+ * header followed by its items, and a COLLAPSED bucket's items left out
+ * entirely — so the keyboard walk and a Shift range both skip them by
+ * construction. Without it, the single column's items alone. An empty bucket
+ * draws no header: it has nothing to collapse and nothing to count.
+ */
+export function tableRows(
+  columns: BoardColumnModel[],
+  grouped: boolean,
+  collapsed: ReadonlySet<string>,
+): TableEntry[] {
+  const rows: TableEntry[] = [];
+  for (const column of columns) {
+    if (grouped) {
+      if (column.items.length === 0) continue;
+      const expanded = !collapsed.has(column.id);
+      rows.push({
+        kind: "group",
+        key: groupRowKey(column.id),
+        bucketId: column.id,
+        label: column.label,
+        color: column.color,
+        count: column.items.length,
+        expanded,
+      });
+      if (!expanded) continue;
+    }
+    for (const item of column.items)
+      rows.push({ kind: "item", key: itemRowKey(item.itemId), item });
+  }
+  return rows;
+}
+
+/** A table's keyboard cursor, by IDENTITY: the row's key and the column being
+ *  walked. An index would name whichever row slid into the slot after a splice. */
+export interface TableCursor {
+  rowKey: string;
+  colIndex: number;
+}
+
+/** A cursor resolved against the rows drawn right now. `colIndex` is the column
+ *  being WALKED — a group header is one full-width cell and focuses that cell
+ *  whatever it says, so walking through a header keeps the column. */
+export interface TablePosition {
+  rowIndex: number;
+  colIndex: number;
+}
+
+/**
+ * Where `cursor` stands in `rows`, clamped to the columns there are. An item
+ * hidden inside a COLLAPSED group re-lands on that group's header rather than
+ * stranding; an item the board no longer holds resolves to null, and the caller
+ * falls back to the first row.
+ */
+export function resolveTableCursor(
+  rows: TableEntry[],
+  columns: BoardColumnModel[],
+  cursor: TableCursor | null,
+  colCount: number,
+): TablePosition | null {
+  if (cursor === null) return null;
+  const colIndex = Math.max(Math.min(cursor.colIndex, colCount - 1), 0);
+  const at = rows.findIndex((row) => row.key === cursor.rowKey);
+  if (at !== -1) return { rowIndex: at, colIndex };
+  for (const column of columns) {
+    if (!column.items.some((item) => itemRowKey(item.itemId) === cursor.rowKey))
+      continue;
+    const header = rows.findIndex((row) => row.key === groupRowKey(column.id));
+    return header === -1 ? null : { rowIndex: header, colIndex };
+  }
+  return null;
+}
+
+/** The ways the table's cursor moves: a row or column step, a row's ends, the
+ *  table's ends, and a viewport's worth of rows. */
+export type TableMove =
+  | "up"
+  | "down"
+  | "left"
+  | "right"
+  | "rowStart"
+  | "rowEnd"
+  | "first"
+  | "last"
+  | "pageUp"
+  | "pageDown";
+
+/** Where `move` takes the cursor at `from`. Column moves on a group header do
+ *  nothing: it has one cell. `pageSize` is how many rows a viewport holds. */
+export function stepTableCursor(
+  rows: TableEntry[],
+  from: TablePosition,
+  move: TableMove,
+  colCount: number,
+  pageSize: number,
+): TablePosition {
+  const lastRow = Math.max(rows.length - 1, 0);
+  const lastCol = Math.max(colCount - 1, 0);
+  const onGroup = rows[from.rowIndex]?.kind === "group";
+  const page = Math.max(pageSize, 1);
+  const { rowIndex, colIndex } = from;
+  switch (move) {
+    case "up":
+      return { rowIndex: Math.max(rowIndex - 1, 0), colIndex };
+    case "down":
+      return { rowIndex: Math.min(rowIndex + 1, lastRow), colIndex };
+    case "pageUp":
+      return { rowIndex: Math.max(rowIndex - page, 0), colIndex };
+    case "pageDown":
+      return { rowIndex: Math.min(rowIndex + page, lastRow), colIndex };
+    case "first":
+      return { rowIndex: 0, colIndex };
+    case "last":
+      return { rowIndex: lastRow, colIndex };
+    case "left":
+      return onGroup ? from : { rowIndex, colIndex: Math.max(colIndex - 1, 0) };
+    case "right":
+      return onGroup
+        ? from
+        : { rowIndex, colIndex: Math.min(colIndex + 1, lastCol) };
+    case "rowStart":
+      return onGroup ? from : { rowIndex, colIndex: 0 };
+    default:
+      return onGroup ? from : { rowIndex, colIndex: lastCol };
+  }
 }

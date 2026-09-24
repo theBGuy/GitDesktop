@@ -96,8 +96,8 @@ fn map_scope_error(e: AppError) -> AppError {
 
 pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:20){ nodes{ login avatarUrl } }";
 
-pub(crate) fn board_item_selection() -> String {
-    let values = field_value_selection();
+pub(crate) fn board_item_selection(rich: bool) -> String {
+    let values = field_value_selection(rich);
     format!(
         "id createdAt isArchived type content{{ __typename \
          ... on Issue {{ id number title state stateReason createdAt updatedAt \
@@ -109,8 +109,8 @@ pub(crate) fn board_item_selection() -> String {
     )
 }
 
-fn project_items_query(include_archived: bool) -> String {
-    let item = board_item_selection();
+fn project_items_query(include_archived: bool, rich: bool) -> String {
+    let item = board_item_selection(rich);
     let archived_states = if include_archived {
         "archivedStates:[ARCHIVED, NOT_ARCHIVED], "
     } else {
@@ -129,6 +129,7 @@ fn build_items_args(
     after: Option<&str>,
     query: Option<&str>,
     include_archived: Option<bool>,
+    rich: Option<bool>,
 ) -> Vec<String> {
     let mut args = vec![
         "api".to_string(),
@@ -136,7 +137,7 @@ fn build_items_args(
         "-f".to_string(),
         format!(
             "query={}",
-            project_items_query(include_archived.unwrap_or(false))
+            project_items_query(include_archived.unwrap_or(false), rich.unwrap_or(false))
         ),
         "-f".to_string(),
         format!("id={project_id}"),
@@ -372,6 +373,7 @@ async fn load_items<F, Fut>(
     mut after: Option<String>,
     query: Option<&str>,
     include_archived: Option<bool>,
+    rich: Option<bool>,
     mut fetch: F,
 ) -> AppResult<BoardItems>
 where
@@ -385,7 +387,7 @@ where
         end_cursor: None,
     };
     for _ in 0..PAGE_CAP {
-        let args = build_items_args(project_id, after.as_deref(), query, include_archived);
+        let args = build_items_args(project_id, after.as_deref(), query, include_archived, rich);
         let output = fetch(args).await.map_err(map_scope_error)?;
         let page = parse_page(&output)?;
         board.items.extend(page.items);
@@ -407,6 +409,7 @@ pub async fn gh_project_items(
     after: Option<String>,
     query: Option<String>,
     include_archived: Option<bool>,
+    rich: Option<bool>,
 ) -> AppResult<BoardItems> {
     let repo_path = &repo_path;
     load_items(
@@ -414,6 +417,7 @@ pub async fn gh_project_items(
         after,
         query.as_deref(),
         include_archived,
+        rich,
         |args| async move {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let out = run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
@@ -730,6 +734,7 @@ mod tests {
             Some("start".into()),
             Some("  status:Todo  "),
             Some(true),
+            Some(true),
             |args| {
                 requests.push(args);
                 ready(Ok(pages.next().expect("at most two pages")))
@@ -752,7 +757,7 @@ mod tests {
         assert!(requests[0].contains(&"after=start".into()));
         assert!(requests[1].contains(&"after=next".into()));
         for args in requests {
-            assert!(args.contains(&format!("query={}", project_items_query(true))));
+            assert!(args.contains(&format!("query={}", project_items_query(true, true))));
             assert!(args.contains(&"q=  status:Todo  ".into()));
         }
     }
@@ -761,7 +766,7 @@ mod tests {
     async fn five_page_cap_reports_more_remaining_or_exhaustion() {
         for more_remaining in [false, true] {
             let mut calls = 0;
-            let board = load_items("project", None, None, None, |args| {
+            let board = load_items("project", None, None, None, None, |args| {
                 if calls == 0 {
                     assert!(!args.iter().any(|arg| arg.starts_with("after=")));
                 } else {
@@ -810,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn empty_connection_stops_after_one_fetch() {
         let mut calls = 0;
-        let board = load_items("project", None, None, None, |_| {
+        let board = load_items("project", None, None, None, None, |_| {
             calls += 1;
             ready(Ok(page(json!([]), false, None)))
         })
@@ -825,27 +830,35 @@ mod tests {
     #[test]
     fn runtime_strings_are_raw_variables_and_optional_query_is_verbatim() {
         for include_archived in [None, Some(false), Some(true)] {
-            let query = project_items_query(include_archived.unwrap_or(false));
-            for filter in [
-                None,
-                Some(""),
-                Some("  unknown:qualifier \"quoted\"\n@file  "),
-            ] {
-                let args =
-                    build_items_args("@project", Some("@cursor\"}"), filter, include_archived);
-                assert_eq!(&args[..2], &["api", "graphql"]);
-                assert!(args.contains(&format!("query={query}")));
-                assert!(args.contains(&"id=@project".into()));
-                assert!(args.contains(&"after=@cursor\"}".into()));
-                assert_eq!(
-                    args.iter().filter(|arg| arg.starts_with("q=")).count(),
-                    usize::from(filter.is_some())
-                );
-                if let Some(filter) = filter {
-                    assert!(args.contains(&format!("q={filter}")));
-                }
-                for pair in args[2..].chunks_exact(2) {
-                    assert_eq!(pair[0], "-f");
+            for rich in [None, Some(false), Some(true)] {
+                let query =
+                    project_items_query(include_archived.unwrap_or(false), rich.unwrap_or(false));
+                for filter in [
+                    None,
+                    Some(""),
+                    Some("  unknown:qualifier \"quoted\"\n@file  "),
+                ] {
+                    let args = build_items_args(
+                        "@project",
+                        Some("@cursor\"}"),
+                        filter,
+                        include_archived,
+                        rich,
+                    );
+                    assert_eq!(&args[..2], &["api", "graphql"]);
+                    assert!(args.contains(&format!("query={query}")));
+                    assert!(args.contains(&"id=@project".into()));
+                    assert!(args.contains(&"after=@cursor\"}".into()));
+                    assert_eq!(
+                        args.iter().filter(|arg| arg.starts_with("q=")).count(),
+                        usize::from(filter.is_some())
+                    );
+                    if let Some(filter) = filter {
+                        assert!(args.contains(&format!("q={filter}")));
+                    }
+                    for pair in args[2..].as_chunks::<2>().0 {
+                        assert_eq!(pair[0], "-f");
+                    }
                 }
             }
         }
@@ -853,8 +866,8 @@ mod tests {
 
     #[test]
     fn query_pins_pointers_shared_selection_order_and_limits() {
-        let query = project_items_query(false);
-        let values = field_value_selection();
+        let query = project_items_query(false, false);
+        let values = field_value_selection(false);
         let expected = format!(
             "query($id:ID!,$after:String,$q:String){{ node(id:$id){{ ... on ProjectV2 {{ \
              items(first:100, after:$after, orderBy:{{field:POSITION,direction:ASC}}, query:$q){{ \
@@ -868,7 +881,7 @@ mod tests {
              fieldValues(first:50){{ nodes{{ {values} }} }} }} }} }} }} }}"
         );
         assert_eq!(query, expected);
-        let archived_query = project_items_query(true);
+        let archived_query = project_items_query(true, false);
         assert_eq!(
             archived_query,
             expected.replacen(
@@ -933,7 +946,7 @@ mod tests {
         assert_eq!(query.matches("updatedAt").count(), 3);
         assert!(query.contains(&format!(
             "fieldValues(first:50){{ nodes{{ {} }} }}",
-            field_value_selection()
+            field_value_selection(false)
         )));
         for typename in ["Issue", "PullRequest", "DraftIssue"] {
             assert!(query.contains(&format!("... on {typename} {{ id")));
@@ -946,7 +959,7 @@ mod tests {
             "GraphQL: Your token has not been granted the required scopes to execute this query.",
             "missing scope read:project",
         ] {
-            let result = load_items("project", None, None, None, |_| {
+            let result = load_items("project", None, None, None, None, |_| {
                 ready(Err(AppError::Gh(raw.into())))
             })
             .await;
@@ -983,9 +996,11 @@ mod tests {
                 false,
                 None,
             );
-            let board = load_items("project", None, None, None, |_| ready(Ok(output.clone())))
-                .await
-                .unwrap();
+            let board = load_items("project", None, None, None, None, |_| {
+                ready(Ok(output.clone()))
+            })
+            .await
+            .unwrap();
             assert_eq!(board.total_count, 612);
             assert_eq!(
                 board
@@ -1022,7 +1037,7 @@ mod tests {
             page(json!([]), true, None),
         ] {
             let result =
-                load_items("project", None, None, None, |_| ready(Ok(output.clone()))).await;
+                load_items("project", None, None, None, None, |_| ready(Ok(output.clone()))).await;
             let Err(AppError::Gh(message)) = result else {
                 panic!("expected unreadable error")
             };

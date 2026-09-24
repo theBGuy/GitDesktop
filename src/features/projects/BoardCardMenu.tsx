@@ -9,7 +9,11 @@ import {
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { BoardItem } from "@/lib/git/types";
-import { type BoardColumnModel, TRUNCATED_ROW_REASON } from "./board-model";
+import {
+  type BoardColumnModel,
+  type ItemNoun,
+  TRUNCATED_ROW_REASON,
+} from "./board-model";
 import type { ReorderDirection, ReorderPlan } from "./board-positioning";
 
 /** What the board's one shared context menu acts on, recorded on right-click or
@@ -30,7 +34,10 @@ export type BoardMenuTarget = {
  *  address a single membership by construction — a position is a slot, a draft
  *  edit is one note — so a bulk-looking menu must say so rather than quietly
  *  acting on the card under the pointer. */
-export const BULK_SINGLE_ONLY_REASON = "Acts on one card — clear the selection";
+export const BULK_SINGLE_ONLY_REASON: Record<ItemNoun, string> = {
+  card: "Acts on one card — clear the selection",
+  row: "Acts on one row — clear the selection",
+};
 
 /** A column value no board column carries, so the bulk "Move to" group draws its
  *  rows with none ticked: a selection spanning columns has no current value for
@@ -103,14 +110,18 @@ export interface BoardMenuActions {
 function BoardBulkMenuItems({
   bulk,
   isDraft,
+  noun,
 }: {
   bulk: BulkMenuState;
   isDraft: boolean;
+  noun: ItemNoun;
 }) {
   return (
     <>
       {isDraft && (
-        <ContextMenuItem disabled>{BULK_SINGLE_ONLY_REASON}</ContextMenuItem>
+        <ContextMenuItem disabled>
+          {BULK_SINGLE_ONLY_REASON[noun]}
+        </ContextMenuItem>
       )}
       {/* Above the two removals, where the single-card menu puts its own rewrites:
           a field write changes what the cards HOLD, which is a smaller step than
@@ -195,6 +206,7 @@ const REORDER_ROWS: {
  */
 export function BoardCardMenuItems({
   target,
+  noun,
   bulk,
   columns,
   openLabel,
@@ -206,6 +218,8 @@ export function BoardCardMenuItems({
   actions,
 }: {
   target: BoardMenuTarget;
+  /** What the item is called where the menu opened: a board card or a table row. */
+  noun: ItemNoun;
   /** The selection this menu acts on, when the card under the pointer is one of
    *  several selected — the whole write block then speaks for the SET, and the
    *  rows that can only mean one card say so. Null is the single-card menu. */
@@ -354,7 +368,9 @@ export function BoardCardMenuItems({
           // A position is one card's slot in the project's order, so a selection
           // has nothing for these four to address. Held with the reason rather
           // than silently acting on the card under the pointer.
-          <ContextMenuItem disabled>{BULK_SINGLE_ONLY_REASON}</ContextMenuItem>
+          <ContextMenuItem disabled>
+            {BULK_SINGLE_ONLY_REASON[noun]}
+          </ContextMenuItem>
         ) : reorderHeldReason === undefined ? (
           // All four rows ALWAYS render in their fixed order; a held one disables
           // in place with its reason parenthetically on the label (the only place a
@@ -409,7 +425,7 @@ export function BoardCardMenuItems({
         // reason has to BE the row.
         <ContextMenuItem disabled>{actionHeldReason}</ContextMenuItem>
       ) : bulk !== null ? (
-        <BoardBulkMenuItems bulk={bulk} isDraft={isDraft} />
+        <BoardBulkMenuItems bulk={bulk} isDraft={isDraft} noun={noun} />
       ) : (
         <>
           {/* Drafts only: an issue or pull request is already the thing a convert
@@ -436,11 +452,11 @@ export function BoardCardMenuItems({
               step that warns, and its reversal is what that warning promised. */}
           {isArchived ? (
             <ContextMenuItem onClick={actions.restore}>
-              Restore card
+              Restore {noun}
             </ContextMenuItem>
           ) : (
             <ContextMenuItem onClick={actions.archive}>
-              Archive card…
+              Archive {noun}…
             </ContextMenuItem>
           )}
           <ContextMenuItem variant="destructive" onClick={actions.remove}>

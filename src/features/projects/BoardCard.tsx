@@ -84,7 +84,7 @@ const PR_STATE: Record<string, StatePill | undefined> = {
   },
 };
 
-function prPill(state: string, isDraft: boolean): StatePill {
+export function prPill(state: string, isDraft: boolean): StatePill {
   if (isDraft && state === "OPEN")
     return {
       Icon: FileDashedIcon,
@@ -105,7 +105,10 @@ function prPill(state: string, isDraft: boolean): StatePill {
 /** State AND kind, since the card shows neither as text. A reason only qualifies
  *  a CLOSED issue: REOPENED rides an OPEN one, so a present reason is never on
  *  its own proof the issue is closed. */
-function issueStateWord(state: string, stateReason: string | null): string {
+export function issueStateWord(
+  state: string,
+  stateReason: string | null,
+): string {
   if (state !== "CLOSED") return "Open issue";
   if (stateReason === null) return "Closed issue";
   return CLOSED_REASON[stateReason] ?? "Closed issue";
@@ -415,7 +418,7 @@ function cardDates(item: BoardItem): CardDate[] {
  *  issue/pull request peek. Labelled every one: three relative times in a row say
  *  nothing about each other without the words. `RelativeTime` rides the shared
  *  ticker and carries the absolute local time as its own tooltip. */
-function CardDates({ item }: { item: BoardItem }) {
+export function CardDates({ item }: { item: BoardItem }) {
   const dates = cardDates(item);
   if (dates.length === 0) return null;
   return (
@@ -439,7 +442,7 @@ const CARD_CLASS =
  *  these only while **Show archived cards** is on, so the card has to say which one
  *  it is. The BADGE is what carries that — the quieter text around it is a hint for
  *  a sighted reader scanning a column, never the statement itself. */
-function ArchivedBadge() {
+export function ArchivedBadge() {
   return (
     <span className="flex items-center">
       <Badge variant="outline">Archived</Badge>

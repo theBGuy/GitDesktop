@@ -22,6 +22,7 @@ pub struct ProjectViewDef {
     pub name: String,
     pub layout: String,
     pub filter: Option<String>,
+    pub group_field_ids: Vec<String>,
     pub vertical_group_field_ids: Vec<String>,
     pub sort_by: Vec<ProjectViewSort>,
     pub visible_field_ids: Vec<String>,
@@ -53,6 +54,7 @@ fn project_views_query() -> &'static str {
     "query($id:ID!){ node(id:$id){ ... on ProjectV2 { \
      views(first:50){ pageInfo{hasNextPage} nodes{ \
      id name layout filter \
+     groupByFields(first:10){nodes{... on ProjectV2FieldCommon{id}}} \
      verticalGroupByFields(first:10){nodes{... on ProjectV2FieldCommon{id}}} \
      sortByFields(first:10){nodes{direction field{... on ProjectV2FieldCommon{id}}}} \
      fields(first:50){nodes{... on ProjectV2FieldCommon{id}}} \
@@ -96,6 +98,7 @@ fn parse_project_views(value: &Value) -> ProjectViews {
                 }
                 .to_string(),
                 filter: node["filter"].as_str().map(str::to_string),
+                group_field_ids: field_ids(&node["groupByFields"]),
                 vertical_group_field_ids: field_ids(&node["verticalGroupByFields"]),
                 sort_by: array(&node["sortByFields"]["nodes"])
                     .filter_map(|sort| {
@@ -162,9 +165,11 @@ mod tests {
                 "pageInfo":{"hasNextPage":truncated},
                 "nodes":[
                     {"id":"board","number":1,"name":"Board","layout":"BOARD_LAYOUT","filter":null,
+                        "groupByFields":{"nodes":[]},
                         "verticalGroupByFields":{"nodes":[]},
                         "sortByFields":{"nodes":[]},"fields":{"nodes":[]}},
                     {"id":"table","number":2,"name":"Table","layout":"TABLE_LAYOUT","filter":"  status:Todo  ",
+                        "groupByFields":{"nodes":[{"id":"team"},{"id":"priority"}]},
                         "verticalGroupByFields":{"nodes":[{"id":"status"},{"id":"team"}]},
                         "sortByFields":{"nodes":[
                             {"direction":"DESC","field":{"id":"priority"}},
@@ -172,6 +177,7 @@ mod tests {
                             {"direction":"FUTURE_DIRECTION","field":{"id":"estimate"}}]},
                         "fields":{"nodes":[{"id":"title"},{"id":"priority"}]}},
                     {"id":"roadmap","number":3,"name":"Roadmap","layout":"ROADMAP_LAYOUT","filter":"",
+                        "groupByFields":null,
                         "verticalGroupByFields":null,"sortByFields":null,"fields":null},
                     {"id":"future","number":4,"name":"Future","layout":"FUTURE_LAYOUT","filter":null}
                 ]
@@ -197,6 +203,7 @@ mod tests {
                         "name",
                         "layout",
                         "filter",
+                        "groupFieldIds",
                         "verticalGroupFieldIds",
                         "sortBy",
                         "visibleFieldIds",
@@ -213,11 +220,12 @@ mod tests {
             assert_eq!(views[2]["filter"], "");
             assert_eq!(views[3]["filter"], Value::Null);
             for index in [0, 2, 3] {
-                for key in ["verticalGroupFieldIds", "sortBy", "visibleFieldIds"] {
+                for key in ["groupFieldIds", "verticalGroupFieldIds", "sortBy", "visibleFieldIds"] {
                     assert_eq!(views[index][key], json!([]));
                 }
             }
             assert_eq!(views[1]["verticalGroupFieldIds"], json!(["status", "team"]));
+            assert_eq!(views[1]["groupFieldIds"], json!(["team", "priority"]));
             assert_eq!(views[1]["visibleFieldIds"], json!(["title", "priority"]));
             assert_eq!(
                 views[1]["sortBy"],
@@ -242,6 +250,7 @@ mod tests {
         ] {
             let response = json!({"data":{"node":{"views":{"nodes":[null, {}, {
                 "id":"partial","verticalGroupByFields":connection,
+                "groupByFields":connection,
                 "sortByFields":connection,"fields":connection
             }]}}}});
             let views = parse_project_views(&response);
@@ -251,6 +260,7 @@ mod tests {
             assert_eq!(view.layout, "unknown");
             assert!(view.filter.is_none());
             assert!(view.vertical_group_field_ids.is_empty());
+            assert!(view.group_field_ids.is_empty());
             assert!(view.sort_by.is_empty());
             assert!(view.visible_field_ids.is_empty());
         }
@@ -275,6 +285,7 @@ mod tests {
             "/nodes/name",
             "/nodes/layout",
             "/nodes/filter",
+            "/nodes/groupByFields/nodes/id",
             "/nodes/verticalGroupByFields/nodes/id",
             "/nodes/sortByFields/nodes/direction",
             "/nodes/sortByFields/nodes/field/id",
@@ -294,6 +305,7 @@ mod tests {
         assert!(query.contains("node(id:$id){ ... on ProjectV2 {"));
         assert!(query.contains("views(first:50){ pageInfo{hasNextPage} nodes{"));
         for selection in [
+            "groupByFields(first:10){nodes{... on ProjectV2FieldCommon{id}}}",
             "verticalGroupByFields(first:10){nodes{... on ProjectV2FieldCommon{id}}}",
             "sortByFields(first:10){nodes{direction field{... on ProjectV2FieldCommon{id}}}}",
             "fields(first:50){nodes{... on ProjectV2FieldCommon{id}}}",

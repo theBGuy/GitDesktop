@@ -14,6 +14,7 @@ import type {
   ProjectFieldValue,
   RemoteLens,
 } from "@/lib/git/types";
+import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { parseableDate } from "@/lib/time";
 import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
@@ -122,10 +123,41 @@ export function OptionValue({ name, color }: { name: string; color: string }) {
   );
 }
 
+/** A list-valued field: the names the read shipped, then "+N" for the ones its
+ *  page cap left behind — the count is the server's `totalCount`, so a capped list
+ *  never reads as the whole set. Null when there is nothing at all to say. */
+function listValueNode(names: string[], totalCount: number): ReactNode {
+  const shown = names.filter((name) => name !== "");
+  const more = Math.max(totalCount - shown.length, 0);
+  if (shown.length === 0 && more === 0) return null;
+  const joined = shown.join(", ");
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+      {shown.length > 0 && (
+        <span className="truncate" onMouseEnter={clipTitle(joined)}>
+          {joined}
+        </span>
+      )}
+      {more > 0 && (
+        <span className="shrink-0 tabular-nums text-muted-foreground">
+          {shown.length > 0 && <span className="sr-only">, </span>}+{more}
+          <span className="sr-only"> more</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** One field's value, or `null` when there's nothing to show — an unset field, or
  *  a kind this build has no rendering for. A name with no value beside it reads as
- *  a broken render, so both cases drop the whole entry rather than the value. */
-function fieldValueNode(value: ProjectFieldValue): ReactNode {
+ *  a broken render, so both cases drop the whole entry rather than the value.
+ *  Shared by the field rail and the Projects table's cells: one renderer per kind,
+ *  so the two can't drift. `ownRepo` is the item's own repository where the
+ *  caller knows it; null means unknown, never "different". */
+export function fieldValueNode(
+  value: ProjectFieldValue,
+  ownRepo: string | null = null,
+): ReactNode {
   switch (value.kind) {
     case "singleSelect":
       return value.name ? (
@@ -135,16 +167,47 @@ function fieldValueNode(value: ProjectFieldValue): ReactNode {
       const options = value.options.filter((option) => option.name);
       return options.length === 0 ? null : (
         <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-          {options.map((option) => (
-            <OptionValue
-              key={option.id}
-              name={option.name}
-              color={option.color}
-            />
+          {options.map((option, i) => (
+            <span key={option.id} className="inline-flex min-w-0 max-w-full">
+              {/* The gap is the visual separator; this one is for a reader and
+                  for the text a clipped cell's tooltip is built from. */}
+              {i > 0 && <span className="sr-only">, </span>}
+              <OptionValue name={option.name} color={option.color} />
+            </span>
           ))}
         </span>
       );
     }
+    case "users":
+      return listValueNode(
+        value.users.map((user) => user.login),
+        value.totalCount,
+      );
+    case "labels":
+      return listValueNode(
+        value.labels.map((label) => label.name),
+        value.totalCount,
+      );
+    case "reviewers":
+      return listValueNode(value.reviewers, value.totalCount);
+    case "pullRequests":
+      // A bare number names a pull request only in the item's own repository, so
+      // one from anywhere else carries its repository — and only where the item's
+      // own is KNOWN to differ, the board card's repository-label rule.
+      return listValueNode(
+        value.pullRequests.map((pr) =>
+          ownRepo !== null &&
+          pr.repoNameWithOwner !== "" &&
+          pr.repoNameWithOwner.toLowerCase() !== ownRepo.toLowerCase()
+            ? `${pr.repoNameWithOwner}#${pr.number}`
+            : `#${pr.number}`,
+        ),
+        value.totalCount,
+      );
+    case "milestone":
+      return value.title.trim() === "" ? null : value.title;
+    case "repository":
+      return value.nameWithOwner === "" ? null : value.nameWithOwner;
     case "text": {
       const text = value.text.trim();
       return text === "" ? null : (
@@ -191,10 +254,13 @@ function fieldValueNode(value: ProjectFieldValue): ReactNode {
 
 type FieldPart = { key: string; name: string; node: ReactNode };
 
-function renderableParts(entry: ItemProjectFieldValues): FieldPart[] {
+function renderableParts(
+  entry: ItemProjectFieldValues,
+  ownRepo: string | null,
+): FieldPart[] {
   const parts: FieldPart[] = [];
   for (const value of entry.values) {
-    const node = fieldValueNode(value);
+    const node = fieldValueNode(value, ownRepo);
     if (node === null) continue;
     // `unknown` is the only arm without a `fieldId`, and it always renders null —
     // the guard is here because TS can't narrow the union through that filter.
@@ -299,6 +365,10 @@ export function ProjectFieldValues({
   // case, so gating the values query here is also what keeps it from spawning a
   // `gh` call per issue nobody has put on a board.
   const boardsKnown = (memberships.data?.items.length ?? 0) > 0;
+  // The item's own repository — the repository the lens points at — which a
+  // linked pull request from elsewhere is told apart from. The same cached remote
+  // read the Projects surfaces already resolve under this lens.
+  const ownRepo = useRemoteSlug(repoPath, lens, canRead);
   const values = useItemFieldValues(
     repoPath,
     kind,
@@ -323,7 +393,7 @@ export function ProjectFieldValues({
       )
     : [];
   const lines = entries
-    .map((entry) => ({ entry, parts: renderableParts(entry) }))
+    .map((entry) => ({ entry, parts: renderableParts(entry, ownRepo) }))
     .filter((line) => line.parts.length > 0);
   // Counts LIVE boards, not lines: an item on three boards where only one has set
   // fields still needs that line named, and an unlinked board stops counting the

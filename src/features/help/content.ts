@@ -1787,7 +1787,9 @@ duplicates, and same-project mentions.
   created; if the issue opens but a board refuses it, the dialog closes and says which
   part didn't happen. Below the chips, one line per board reads out where
   the issue stands: **Status**, **Priority**, **Iteration** (with the dates it covers), plus
-  date, text, number, and multi-select fields, each named beside its value. A board is named
+  date, text, number, and multi-select fields, and the board's own reading of its assignees,
+  labels, milestone, repository, reviewers, and linked pull requests (a **+N** ends a list
+  GitHub sent only part of), each named beside its value. A board is named
   on its own line once the issue sits on more than one. The **Project fields** row itself is
   the trigger: it opens one popup holding every field you can set on every board the issue is
   on, filled in or not, and any field that already holds a value carries a **Clear** to empty
@@ -1998,14 +2000,17 @@ as **Add issue or pull request to board…** and **New board draft…**.
   copy — for the pages the board has loaded, which is why an item further down a big
   board can still be offered (adding it again changes nothing). The arrows walk the
   results, **Enter** adds the one you're on, and **Esc** ends the run — closing over an
-  add still in flight is fine, the board finishes it and says so above the columns.
+  add still in flight is fine, the board finishes it and says so in the toolbar.
 - **New draft…** writes a note that lives on this board and nowhere else. It takes a
   title and **Markdown** notes, kept exactly as you write them — the card's own popover
   renders them. {{key:mod+enter}} creates it from anywhere in the dialog.
 
-While any of this is on its way, a line above the columns says what the board is waiting
-on. The card is there as that line clears: the board draws it from GitHub's own answer to
-the write rather than waiting on a fresh read of the project. Under a saved view, the next
+While any of this is on its way, a spinner in the toolbar, just left of **View
+options**, says what the board is waiting on (the count, when there's more than one thing; the spinner alone, in a
+narrow window, with the words on hover). The card is there as that clears: the board
+draws it from GitHub's own answer to the write rather than waiting on a fresh read of the
+project. After a change the board has to re-read, the same spot says **Updating the
+board…** until the new read lands, so nothing looks finished before it is. Under a saved view, the next
 refresh settles whether that view's filter really keeps the item; **Clear view** shows the
 whole board either way.
 
@@ -2035,8 +2040,9 @@ Pick one and it becomes a lens over the board:
   Fields GitHub owns on the issue itself (labels, milestone) carry no chip either, and a
   field you haven't filled in draws nothing.
 
-A view saved as a **table** or a **roadmap** is drawn as a board here, and the strip above
-the columns says so. That strip names the view and its filter, and carries **Clear view**;
+A view saved as a **table** opens as a table (see *Working in the table*). One saved as a
+**roadmap** is drawn as a board here, and the strip above the columns says so. That strip
+names the view and its filter, and carries **Clear view**;
 the command palette's **Clear project view** does the same from the keyboard, and **No
 view** in the popover is the third route back. Views are read-only in GitDesktop: picking
 one changes what you see, never what GitHub has saved.
@@ -2045,6 +2051,61 @@ While a view's read is on its way, the board you were already looking at stays p
 the count, **Load more**, and the card menu's move rows held until the new one lands. A
 filter that matches nothing says so in place of the columns, and offers **Clear view**
 there too.
+
+## Working in the table
+
+A table view shows the board's items as rows and the view's **visible fields** as columns:
+**Title** first, then the rest in the view's saved order. Fields GitHub keeps on the issue itself get columns too:
+assignees, labels, milestone, repository, reviewers, and linked pull requests, each list
+ending in **+N** when GitHub sent only part of it. A field an item hasn't filled in leaves
+its cell empty, and hovering a cell that cuts its value short shows all of it. The header
+row stays put as you scroll down, and the **Title** column stays put as a wide table
+scrolls sideways. Each title carries the item's type and state glyph; with **Show archived
+cards** on, an archived row reads quietly and carries an **Archived** badge.
+
+The view's **sort** orders the rows, and each sorted column's header carries ▲ or ▼,
+numbered when the sort has several keys. A view sorted only by fields the table can't
+order (a multi-select, or assignees and labels) keeps the project order, and the strip
+says so. A view that groups its rows by a single-select or iteration field shows each
+value as a section headed by its count; click the header to fold the section away.
+Grouped by any other field, the table lists every row in one run and the strip names the
+field. **Group by** in **View options** belongs to boards: a table keeps the grouping it
+was saved with.
+
+{{key:up}} and {{key:down}} move between rows, skipping a folded section's rows,
+{{key:left}} and {{key:right}} move between cells, {{key:home}} and {{key:end}} reach a
+row's first and last cell, {{key:mod+home}} and {{key:mod+end}} the first and last row,
+and **Page Up** and **Page Down** move a screen at a time. On a board field's cell,
+{{key:enter}} and {{key:space}} edit it (below); on the title or any other cell,
+{{key:enter}} opens the item and {{key:space}} peeks at it, as on a card (a draft shows
+its notes either way); on a section header, either one folds or unfolds it. Clicking a
+title opens it too.
+
+A board field's cell (text, number, date, single-select, multi-select or iteration)
+edits in place: click it, or press {{key:enter}} or {{key:space}} on it, and a small
+editor opens over the cell. Type a text, number or date and press {{key:enter}} to save
+it; empty the box and {{key:enter}} clears the field, and an entry the field can't take
+yet (a half-typed number or date) saves nothing. A single-select or an iteration saves
+the option you pick, and **Clear** empties it; the arrow keys move the choice, and
+{{key:enter}} saves the one you're on. A multi-select saves when its editor closes.
+{{key:escape}} leaves without saving, and every way out puts you back on the cell. The
+write shows beside **View options** while it's on its way, then **Updating the
+table…** until the re-read lands, and the cell shows GitHub's answer when it does; if the view sorts or groups by that field, the row moves
+to where the new value puts it and your place goes with it. One cell saves at a time,
+so the next edit opens once the last one has landed. Fields GitHub keeps on the issue
+itself (assignees, labels, milestone and the rest) aren't edited here, and a cell that
+can't be edited says why when you try: a sign-in or access that can't change the
+board, an archived row, an organization's issue field, multi-line text, or another
+change still being written.
+
+Selecting rows works the way selecting cards does: {{key:mod}}-click, {{key:shift}}-click,
+or {{key:shift}} with the row keys. A range runs straight down the rows, across sections,
+and never into a folded one. The selection bar, the row menu ({{secondaryclick}}, or
+{{key:shift+f10}} on Windows and Linux) and every bulk verb are the board's own, worded
+for rows, and **Move N rows to** lists the sections of a grouped table. In a table that neither sorts
+nor groups its rows, with archived cards hidden, {{key:alt+up}} and {{key:alt+down}} move
+the row you're on through the project order and {{key:alt+home}} and {{key:alt+end}} send
+it to the top or bottom; otherwise the **Position** rows say what's holding them.
 
 ## Reading a card
 
@@ -2137,8 +2198,8 @@ Archived cards are skipped, so the count on the button is the number that will r
 be written. Fields GitHub owns on the issue itself (assignees, labels, milestone)
 carry no row here, and an org-level field bridged onto the board renders held with
 **Issue fields are edited on GitHub**. If a card refuses the write, the rest still land
-and a message says how many didn't. While the write is on its way, a line above the
-columns says so, whether or not you left the dialog open.
+and a message says how many didn't. While the write is on its way, the toolbar
+says so beside **View options**, whether or not you left the dialog open.
 
 ## Moving a card
 
@@ -2203,8 +2264,8 @@ ask first, and each prompt says where the card goes:
   only: an issue or a pull request is edited on its own tab.
 - **Convert to issue…** turns a **draft** into a real issue in this repository, and swaps
   the card over to it in place — the draft's title and notes become the issue's. The swap
-  lands when GitHub answers; until then the card itself dims and a line above the columns
-  says what's happening. Drafts only: anything else on the board is already an issue or a
+  lands when GitHub answers; until then the card itself dims and the toolbar says what's
+  happening beside **View options**. Drafts only: anything else on the board is already an issue or a
   pull request.
 - **Archive card…** takes the card out of the columns and leaves it on the project. Turn
   on **View options → Show archived cards** and it's back in front of you, with **Restore
@@ -2216,13 +2277,14 @@ ask first, and each prompt says where the card goes:
 
 When a card leaves the columns (any removal, or an archive while archived cards are
 hidden), your keyboard place lands on the card that took its slot, or on the board's first
-card when that column emptied. When nothing is left to stand on (an emptied board, or one
-this view's filter leaves empty), focus moves to **Add item** in the toolbar. Archiving
-with **Show archived cards** on moves nothing: the card keeps its slot under its new badge,
-and so do you. A card whose contents you don't have access to still carries **Remove from
-project…**, and **Archive card…** or **Restore card** according to which state it's in,
-since all of them reach it by its place on the board rather than by what's inside it;
-**Show details**, **Edit draft…** and **Convert to issue…** aren't offered there.
+card when that column emptied. When nothing is left to stand on, focus moves to
+**Add item** in the toolbar, or to the notice's **Clear view** when this view's filter is
+what left the board empty. Archiving with **Show archived cards** on moves nothing: the
+card keeps its slot under its new badge, and so do you. A card whose contents you don't
+have access to still carries **Remove from project…**, and **Archive card…** or **Restore
+card** according to which state it's in, since all of them reach it by its place on the
+board rather than by what's inside it; **Show details**, **Edit draft…** and **Convert to
+issue…** aren't offered there.
 
 **Edit draft…**, **Convert to issue…**, **Archive card…**, **Restore card** and **Remove
 from project…** are each held with their reason on them when your GitHub sign-in can read
