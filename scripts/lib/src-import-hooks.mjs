@@ -78,6 +78,8 @@ export function installSrcHooks() {
       return next(specifier, context);
     },
     load(url, context, next) {
+      // registerHooks load hooks are SYNCHRONOUS: next() returns the result
+      // object; module.register()'s nextLoad is the async one.
       const out = next(url, context);
       if (!url.includes("/src/") || !/\.tsx?$/.test(url) || !out.source) {
         return out;

@@ -19,8 +19,10 @@ export function notifyPrCreateFailed(input: {
   const { repoPath, head, noun, error } = input;
   const repoName = repoNameFromPath(repoPath);
   // Same one-liner the toast shows, so the visible row line and the OS body lead
-  // with the reason; the full text stays behind the toast's Details.
-  const reason = presentError(error).summary;
+  // with the reason; the full text rides the row's hover, since no other record of
+  // a failed create outlives the toast.
+  const presented = presentError(error);
+  const reason = presented.summary;
   const title = `The ${noun} for ${head} wasn't created`;
   emitNotification({
     source: "prCreate",
@@ -29,6 +31,7 @@ export function notifyPrCreateFailed(input: {
       tone: "danger",
       title,
       subtitle: reason,
+      detail: presented.fullText,
       repoPath,
       repoName,
       // No dedupeKey: each create settles once, so a second failure inside the

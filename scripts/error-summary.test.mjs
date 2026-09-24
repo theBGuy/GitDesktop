@@ -1,13 +1,8 @@
 // Pins which line of a failed push the one-line error summary leads with. git's
 // own push report opens with a `To <remote>` transfer header (sideband `remote:`
 // lines can precede it) that names the destination, not the failure, so the
-// summarizer skips it as noise and lands on the next meaningful line. The header
-// matcher is one end-anchored token: prose containing a space must keep its
-// current summary, a lone `word:token` line is the accepted residual, Windows
-// drive-letter and `file://` remotes are skipped like any other, POSIX and
-// relative paths keep line-one behavior, the picked line's whitespace runs
-// collapse, and the mapped families (force-push rejections, push protection) and
-// rollback verdicts must keep outranking the fall-through.
+// summarizer skips it as noise and lands on the next meaningful line. Matched and
+// unmatched shapes: see PUSH_TRANSFER_HEADER's doc in src/lib/error-summary.ts.
 //
 // `src/lib/error-summary.ts` carries an `@/` value import, which Node's type
 // stripping cannot resolve, so the shared src hooks go in first. The import is
@@ -80,6 +75,7 @@ test("scp-style and ssh remotes are skipped as the header too", () => {
     "github.com:user/repo.git",
     "git@github.com:user/repo.git",
     "ssh://git@example.com:2222/user/repo.git",
+    "git+ssh://git@example.com/user/repo.git",
     "http://example.com/user/repo.git",
   ]) {
     const p = presentError(gitError(`To ${remote}\n${REJECTED}\n${FAILED}`));

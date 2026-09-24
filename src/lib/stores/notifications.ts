@@ -99,6 +99,10 @@ export interface AppNotification {
   tone: NotificationTone;
   title: string;
   subtitle?: string;
+  /** Full text behind a one-line `subtitle` (a failure's whole reason), shown as
+   *  the row's hover title; the persisted row can be its only durable copy. Absent
+   *  on rows persisted before this field existed. */
+  detail?: string;
   /** Epoch ms. */
   ts: number;
   read: boolean;
@@ -176,6 +180,7 @@ function isValidNotification(x: unknown): x is AppNotification {
     // loading); present ones must be strings. `subtitle` renders as a React
     // child, so a non-string here would crash the row.
     (n.subtitle === undefined || typeof n.subtitle === "string") &&
+    (n.detail === undefined || typeof n.detail === "string") &&
     (n.repoId === undefined || typeof n.repoId === "string") &&
     (n.authorLogin === undefined || typeof n.authorLogin === "string") &&
     (n.authorAvatarUrl === undefined ||
@@ -328,6 +333,8 @@ export function pushNotification(input: {
   tone: NotificationTone;
   title: string;
   subtitle?: string;
+  /** See {@link AppNotification.detail}. */
+  detail?: string;
   repoPath: string;
   repoName: string;
   /** The repo's worktree-stable identity key (see {@link AppNotification.repoId});
@@ -357,6 +364,7 @@ export function pushNotification(input: {
     tone: input.tone,
     title: input.title,
     subtitle: input.subtitle,
+    detail: input.detail,
     ts: now,
     read: false,
     repoPath: input.repoPath,

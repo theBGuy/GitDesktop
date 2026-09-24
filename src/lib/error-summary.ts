@@ -38,16 +38,13 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   timeout: "Timed out",
 };
 
-/** git's push transfer header, `To <remote>` (git 2.51.1.windows.1), which opens
- *  git's own push report (sideband `remote:` lines can precede it) and names where
- *  the push went; the reason follows below on a `! [rejected]` or `error:` line.
- *  The remote is one END-anchored token (scheme URL, scp `user@host:path`,
- *  `host:path`), so prose containing a space never matches. Accepted residual: a
- *  lone `word:token` line (`To do:x`) is skipped too, and the all-noise fallback
- *  still keeps a summary from blanking. Windows drive-letter and `file://` remotes
- *  match (the same header, skipped as intended); POSIX, relative, UNC, IPv6-scp,
- *  and space-containing paths don't, and keep line-one behavior. */
-const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.-]+:\S+$/;
+/** git's push transfer header `To <remote>` (git 2.51.1.windows.1): it opens git's
+ *  own push report (sideband `remote:` lines may precede it); the reason follows below.
+ *  One END-anchored remote token (scheme URL, scp, `host:path`), so prose with a space
+ *  never matches; accepted residual: a lone `word:token` line (`To do:x`) is skipped.
+ *  Windows drive-letter and `file://` remotes match too (skipped as intended); POSIX,
+ *  relative, UNC, IPv6-scp, and space-containing paths don't and keep line one. */
+const PUSH_TRANSFER_HEADER = /^To (?:[\w.-]+@)?[\w.+-]+:\S+$/;
 
 /** Lines that carry no signal for a one-line summary: git `hint:` guidance,
  *  `Rebasing (x/y)` progress counters, the push transfer header, and blanks.

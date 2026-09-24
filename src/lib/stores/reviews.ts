@@ -363,6 +363,10 @@ function notifyReviewDone(
    *  a stale AiSettings snapshot, whereas the panel's Run button re-resolves fresh
    *  config. */
   error?: string,
+  /** The failure's full text, for the failed row's hover: a run that dies before
+   *  producing output saves no review record, so the persisted row is its only
+   *  durable copy. Ignored on success. */
+  detail?: string,
 ): void {
   try {
     const label = mode === "security" ? "security audit" : "review";
@@ -370,6 +374,8 @@ function notifyReviewDone(
     // A failed review carries its reason in the subtitle; success stays subject-only.
     const subtitle =
       !ok && error?.trim() ? `"${title}" — ${error}` : `"${title}"`;
+    const fullDetail =
+      !ok && detail?.trim() ? `"${title}" — ${detail}` : undefined;
     emitNotification({
       source: "reviews",
       row: {
@@ -377,6 +383,7 @@ function notifyReviewDone(
         tone: ok ? "success" : "danger",
         title: headline,
         subtitle,
+        detail: fullDetail,
         repoPath: target.repoPath,
         repoName: target.repoName,
         target: {
@@ -817,8 +824,8 @@ export async function startReview(
     if (!control.cancelled) {
       // CLI failures reject with a plain AppError object (not an Error), so `String(e)`
       // would print "[object Object]" — use the shared extractor. The store keeps the
-      // full text; the single-line subtitle gets the toast's one-liner, and only when
-      // there is a message at all (the summary never comes back empty).
+      // full text, as does the row's hover; the subtitle gets the toast's one-liner.
+      // Both only when there is a message at all (the summary never comes back empty).
       const message = errorMessage(e);
       patch({
         phase: "error",
@@ -832,6 +839,7 @@ export async function startReview(
         false,
         target,
         message.trim() ? presentError(e).summary : undefined,
+        message.trim() ? message : undefined,
       );
       // Whatever the run produced before it failed — this store is memory-only, so
       // without a record a timed-out 20-minute run is gone at the next restart. Saved
