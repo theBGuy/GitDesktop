@@ -64,7 +64,7 @@ export const NOTES_PLACEHOLDER: Record<ItemNoun, string> = {
 /** Why a search result can't be added: the surface already draws it. */
 export const ALREADY_DRAWN_REASON: Record<ItemNoun, string> = {
   card: "Already on this board",
-  row: "Already in this table",
+  row: "Already in this view",
 };
 
 /** Why a card can't be repositioned under a saved view that sorts: the columns are

@@ -119,6 +119,9 @@ export type ProjectFieldValue =
       fieldId: string;
       fieldName: string;
       title: string;
+      /** GitHub's ISO-8601 due timestamp verbatim, absent when the milestone has
+       *  no due date — never a filled-in one. Untrusted: validate before use. */
+      dueOn?: string;
       isIssueField: boolean;
     }
   | {

@@ -456,6 +456,27 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // A roadmap view's scale and its jump back to today. The zoom rows sit in View
+  // options and the Today button in the timeline's header, so these ship
+  // palette-only for the reason the View options rows above do.
+  {
+    id: "roadmap-zoom-in",
+    label: "Zoom roadmap in",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "roadmap-zoom-out",
+    label: "Zoom roadmap out",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "roadmap-jump-to-today",
+    label: "Jump roadmap to today",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // The board's bulk verbs, live only while it has a real selection on it. The
   // bar carries every one of them as a button, so these ship palette-only for the
   // reason the rows above do — and there is no bulk MOVE here, since picking a

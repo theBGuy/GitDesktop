@@ -2073,8 +2073,8 @@ Pick one and it becomes a lens over the board:
   Fields GitHub owns on the issue itself (labels, milestone) carry no chip either, and a
   field you haven't filled in draws nothing.
 
-A view saved as a **table** opens as a table (see *Working in the table*). One saved as a
-**roadmap** is drawn as a board here, and the strip above the columns says so. That strip
+A view saved as a **table** opens as a table (see *Working in the table*), and one saved as
+a **roadmap** opens as a timeline (see *Working in the roadmap*). The strip above the board
 names the view and its filter, and carries **Clear view**;
 the command palette's **Clear project view** does the same from the keyboard, and **No
 view** in the popover is the third route back. Views are read-only in GitDesktop: picking
@@ -2139,6 +2139,53 @@ for rows, and **Move N rows to** lists the sections of a grouped table. In a tab
 nor groups its rows, with archived cards hidden, {{key:alt+up}} and {{key:alt+down}} move
 the row you're on through the project order and {{key:alt+home}} and {{key:alt+end}} send
 it to the top or bottom; otherwise the **Position** rows say what's holding them.
+
+## Working in the roadmap
+
+A roadmap view lays the board's items along a timeline: each row keeps its title on the
+left, where it stays as you scroll sideways, and draws the item on its timeline to the
+right. An item with a start and a target date is a bar between them; one with a single
+date is a diamond on that day; one whose target comes before its start sits at the
+earlier date and says **Dates reversed**; one with neither says **No dates**. Placed by
+an iteration field, an item spans its whole iteration.
+
+GitHub doesn't say which fields a roadmap is drawn from, so **View options** does:
+**Start field** and **Target field** each list the project's date and iteration fields,
+plus **None**, and **Zoom** switches between **Month**, **Quarter** and **Year**. Picking
+the view fills the two fields in for you: the first two date fields the view shows, else
+the project's own, else an iteration field for both. Your picks and the zoom hold until
+you switch to another view; switching back fills them in afresh, at **Month**, and
+nothing is saved. With no field to draw from, a line above
+the timeline says so, beside a button that opens **View options**.
+
+The header's scale reads months over days at **Month**, months over weeks at **Quarter**
+and years over months at **Year**. A strip under it names what's drawn down the timeline:
+**Today** on its line, each iteration (of the iteration field placing the items, else the
+project's first; the current one shaded and marked **Current**), and each milestone due
+date on its line, several due the same day sharing one mark that names them all on
+hover. **Today** in the header's corner
+brings today back into view, and the command palette carries **Jump roadmap to today**,
+**Zoom roadmap in** and **Zoom roadmap out**. A timeline wider than five years is cut
+around today, and a line above it says so; a bar running past the cut shows an arrow at
+that edge.
+
+The keys are the table's: {{key:up}} and {{key:down}} move between rows, {{key:left}} and
+{{key:right}} between the title and the timeline, {{key:enter}} opens the item and
+{{key:space}} peeks at it. On the timeline, {{key:alt+left}} and {{key:alt+right}} move
+the item a day earlier or later (start and target together), or to the previous or next
+iteration when an iteration field places it, stopping at the first and last.
+{{key:alt+shift+left}} and {{key:alt+shift+right}} move the target date alone, never to
+before the start; an item placed by an iteration can't be resized that way. On the title
+cell these keys say to move to the timeline first. The bar moves as you press and the
+toolbar shows the write on its way; hold the keys down and GitDesktop keeps saving to
+catch up with the bar. A very long hold can stop short of it, and then the roadmap
+refreshes to show the dates GitHub saved. A write GitHub refuses puts the dates back and
+says why. When a shift can't happen (no dates to move, a sign-in or access that can't
+change the board, an archived row, an organization's issue field, another change still
+being written, or the roadmap still refreshing after one) the keys say why instead.
+
+Sections, selection, the row menu and the bulk bar work as they do in the table, and so
+do {{key:alt+up}} and {{key:alt+down}} for the project order.
 
 ## Reading a card
 

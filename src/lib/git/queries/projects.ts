@@ -12,7 +12,9 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useRef, useSyncExternalStore } from "react";
-import { toastError, toastErrorWithNote } from "@/lib/toast";
+import { toast } from "sonner";
+import { presentError } from "@/lib/error-summary";
+import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import * as api from "../api";
 import type {
   AssigneeRef,
@@ -387,6 +389,9 @@ export type BoardWriteKind =
    *  once, including the grouping field, so nothing about the board's shape
    *  afterwards is locally derivable. */
   | "bulk-fields"
+  /** One card's dates moved from the roadmap's keyboard: its date or iteration
+   *  fields rewritten in one write, coalescing a held key's repeats. */
+  | "shift-dates"
   /** Fired from the create-issue dialog rather than the board, and it draws no
    *  card of its own — but its settle invalidates the same board reads, so the
    *  board's pagination has to wait on it like any other write here. */
@@ -1596,6 +1601,288 @@ export function useReorderBoardCard() {
           );
         }
       }
+    },
+  });
+}
+
+/** The date-shift writes between their request and their answer, each with the
+ *  field ids its burst has touched and how many presses have folded into it.
+ *  Keyed by the CACHE a write chases (repo, board, lens, card) for the reason
+ *  {@link reorderingCards} is: a press under another lens patches a cache the
+ *  live write never re-reads, so it starts its own write rather than folding in. */
+const shiftingItems = new Map<
+  string,
+  { fieldIds: Set<string>; presses: number }
+>();
+
+/** How many FOLLOW-UP writes one shift burst may spend catching up with the
+ *  card's cached dates SINCE ITS LAST PRESS before the settle's re-read takes
+ *  over. A press folding in is new intent and restarts the count, so the cap
+ *  bounds one convergence attempt rather than how long the user keeps tapping. */
+const SHIFT_CHASE_LIMIT = 8;
+
+/** How one date-shift burst ended — {@link ReorderOutcome}'s grammar: a folded
+ *  press is reconciled by the write it joined, and an exhausted one by the
+ *  settle's re-read, carrying the follow-up's error when one failed. */
+type ShiftOutcome =
+  | { kind: "folded" }
+  | { kind: "converged" }
+  | { kind: "exhausted"; error?: unknown };
+
+/** One toast per card for its failed shifts: a held key's burst would otherwise
+ *  stack one per repeat, where sonner updates this one in place. */
+const shiftToastId = (itemId: string) => `board-shift-failed:${itemId}`;
+
+function toastShiftFailure(itemId: string, e: unknown) {
+  const presentation = presentError(e);
+  toast.error(presentation.summary, {
+    id: shiftToastId(itemId),
+    duration: 8000,
+    action: errorToastAction(presentation),
+  });
+}
+
+/** `values` with `next` replacing each field's entry in place, or appended where
+ *  the card held none — the rail's line order survives a shift. */
+function withFieldEntries(
+  values: ProjectFieldValue[],
+  next: ProjectFieldValue[],
+): ProjectFieldValue[] {
+  const fieldOf = (value: ProjectFieldValue) =>
+    value.kind === "unknown" ? null : value.fieldId;
+  const byField = new Map(next.map((value) => [fieldOf(value), value]));
+  const kept = values.map((value) => byField.get(fieldOf(value)) ?? value);
+  const held = new Set(values.map(fieldOf));
+  return [...kept, ...next.filter((value) => !held.has(fieldOf(value)))];
+}
+
+/** `values` with the `fieldIds` entries put back to `before` — dropped where the
+ *  card held none — and every other entry left alone: a rollback restores what
+ *  the patch touched and nothing more. */
+function restoreFieldEntries(
+  values: ProjectFieldValue[],
+  fieldIds: ReadonlySet<string>,
+  before: ProjectFieldValue[],
+): ProjectFieldValue[] {
+  const touched = (value: ProjectFieldValue) =>
+    value.kind !== "unknown" && fieldIds.has(value.fieldId);
+  return withFieldEntries(
+    values.filter((value) => !touched(value)),
+    before,
+  );
+}
+
+/** The wire updates for `fieldIds` as `values` hold them now, in a stable order,
+ *  plus a signature two reads compare by. Only date and iteration values: those
+ *  are the only kinds a shift writes, and a shift never clears. */
+function shiftUpdates(
+  values: ProjectFieldValue[],
+  fieldIds: ReadonlySet<string>,
+): { updates: ProjectFieldValueUpdate[]; signature: string } {
+  const updates: ProjectFieldValueUpdate[] = [];
+  for (const value of values) {
+    if (value.kind === "date" && fieldIds.has(value.fieldId))
+      updates.push({ kind: "date", fieldId: value.fieldId, date: value.date });
+    else if (value.kind === "iteration" && fieldIds.has(value.fieldId))
+      updates.push({
+        kind: "iteration",
+        fieldId: value.fieldId,
+        iterationId: value.iterationId,
+      });
+  }
+  updates.sort((a, b) => (a.fieldId < b.fieldId ? -1 : 1));
+  return { updates, signature: JSON.stringify(updates) };
+}
+
+/**
+ * Shift one card's dates — its date fields, or its iteration — from the roadmap's
+ * keyboard: ONE batch field write over the card, with an item-scoped optimistic
+ * patch of the lens it was fired from.
+ *
+ * COALESCED like {@link useReorderBoardCard}: one write per card per lens is in
+ * flight, and a press arriving meanwhile patches the cache and folds in. The live
+ * write re-reads the card's dates from that cache after each round trip (a
+ * CALL-TIME read, never a render closure) and writes again until the two agree,
+ * so a held key converges on where the bar is drawn. The write target rides the
+ * variables for the family's reason.
+ *
+ * The rollback is one card's touched fields wide. The settle is the field
+ * writes' own ({@link useBulkSetItemFieldValues}): the boards and the rail
+ * re-read, since a shifted date can move the card through a view's sort.
+ */
+export function useShiftItemDates() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("shift-dates"),
+    mutationFn: async (args: {
+      repo: string;
+      projectId: string;
+      /** The membership's item id on `projectId` — what the write addresses. */
+      itemId: string;
+      /** The date or iteration values this press lands on. */
+      values: ProjectFieldValue[];
+      /** The lens the roadmap was showing — the cache this write patches, rolls
+       *  back, and re-reads the card's dates from. */
+      query: string | null;
+      archived: boolean;
+      rich: boolean;
+    }): Promise<ShiftOutcome> => {
+      const fold = JSON.stringify([
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+        args.rich,
+        args.itemId,
+      ]);
+      const pressed = args.values.flatMap((value) =>
+        value.kind === "unknown" ? [] : [value.fieldId],
+      );
+      // The fold test and the registration below stay synchronous — no await
+      // between them — so two presses can never both start a write.
+      const live = shiftingItems.get(fold);
+      if (live !== undefined) {
+        for (const fieldId of pressed) live.fieldIds.add(fieldId);
+        live.presses += 1;
+        return { kind: "folded" };
+      }
+      const burst = { fieldIds: new Set(pressed), presses: 0 };
+      const fieldIds = burst.fieldIds;
+      shiftingItems.set(fold, burst);
+      try {
+        const key = projectItemsKey(
+          args.repo,
+          args.projectId,
+          args.query,
+          args.archived,
+          args.rich,
+        );
+        /** What the cache says the card's dates are now; null once the lens no
+         *  longer draws it, which reads as agreement — nothing left to chase. */
+        const cached = () => {
+          const at = findBoardItem(
+            queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(
+              key,
+            ),
+            args.itemId,
+          );
+          return at === null
+            ? null
+            : shiftUpdates(at.item.fieldValues, fieldIds);
+        };
+        const write = async (updates: ProjectFieldValueUpdate[]) => {
+          const result = await trackBoardWrite(args.repo, () =>
+            api.ghSetItemsFieldValues(
+              args.repo,
+              args.projectId,
+              [args.itemId],
+              updates,
+              [],
+            ),
+          );
+          // The batch command resolves with its refusal inside it; for one card
+          // that refusal IS the write failing.
+          const error = result.outcomes.find(
+            (outcome) => outcome.error !== null,
+          )?.error;
+          if (typeof error === "string") throw new Error(error);
+        };
+        let sent = cached() ?? shiftUpdates(args.values, fieldIds);
+        await write(sent.updates);
+        let rounds = 0;
+        let seenPresses = burst.presses;
+        for (;;) {
+          const next = cached();
+          if (next === null || next.signature === sent.signature)
+            return { kind: "converged" };
+          if (burst.presses !== seenPresses) {
+            seenPresses = burst.presses;
+            rounds = 0;
+          }
+          if (rounds >= SHIFT_CHASE_LIMIT) return { kind: "exhausted" };
+          rounds += 1;
+          try {
+            await write(next.updates);
+          } catch (e) {
+            return { kind: "exhausted", error: e };
+          }
+          sent = next;
+        }
+      } finally {
+        shiftingItems.delete(fold);
+      }
+    },
+    onMutate: async (args) => {
+      const key = projectItemsKey(
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+        args.rich,
+      );
+      await queryClient.cancelQueries({ queryKey: key });
+      const fieldIds = new Set(
+        args.values.flatMap((value) =>
+          value.kind === "unknown" ? [] : [value.fieldId],
+        ),
+      );
+      // The touched fields' values alone — all the rollback may carry.
+      const before = findBoardItem(
+        queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key),
+        args.itemId,
+      )?.item.fieldValues.filter(
+        (value) => value.kind !== "unknown" && fieldIds.has(value.fieldId),
+      );
+      if (before !== undefined)
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (data) => {
+            const at = findBoardItem(data, args.itemId);
+            return at === null
+              ? data
+              : patchBoardItem(
+                  data,
+                  args.itemId,
+                  withFieldEntries(at.item.fieldValues, args.values),
+                );
+          },
+        );
+      return { key, fieldIds, before };
+    },
+    // Reporting lives here for the family's reason; the per-card toast id keeps a
+    // held key's failures to one toast.
+    onError: (e, args, ctx) => {
+      if (ctx?.before !== undefined) {
+        const { key, fieldIds, before } = ctx;
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (data) => {
+            const at = findBoardItem(data, args.itemId);
+            return at === null
+              ? data
+              : patchBoardItem(
+                  data,
+                  args.itemId,
+                  restoreFieldEntries(at.item.fieldValues, fieldIds, before),
+                );
+          },
+        );
+      }
+      toastShiftFailure(args.itemId, e);
+    },
+    onSettled: (outcome, _e, args) => {
+      // The write this folded into owns the reconciliation for both.
+      if (outcome?.kind === "folded") return;
+      if (outcome?.kind === "exhausted" && outcome.error !== undefined)
+        toastShiftFailure(args.itemId, outcome.error);
+      invalidateProjectBoards(queryClient, args.repo);
+      void queryClient
+        .cancelQueries({ queryKey: itemFieldValuesFamilyKey(args.repo) })
+        .then(() =>
+          queryClient.invalidateQueries({
+            queryKey: itemFieldValuesFamilyKey(args.repo),
+          }),
+        );
     },
   });
 }

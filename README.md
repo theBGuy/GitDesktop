@@ -623,9 +623,15 @@ cell by cell, rows take the same click and keyboard selection as cards, the
 row menu and the selection bar work as they do on the board, a
 board field's value can be edited right in its cell, and an unsorted,
 ungrouped table with archived cards hidden reorders rows with the same
-`Alt`/`⌥` keys. Roadmap views are drawn as a board, and **Clear view**
-brings the whole item set back in the board's own order with the chips off,
-leaving the grouping where you last put it. Nothing here writes to the view.
+`Alt`/`⌥` keys. A view saved as a **roadmap** opens as a timeline: each
+item's bar runs from its start date to its target along a month, quarter
+or year axis, with a line for today, the current iteration shaded and named,
+and milestone due dates marked. **View options** picks the date or iteration
+fields that place the items (the view's own date fields come pre-picked),
+`Alt`/`⌥`+`←` and `→` shift the item you're on by a day (or an iteration),
+and adding `Shift` moves its target date alone. **Clear view** brings the
+whole item set back in the board's own order with the chips off, leaving the
+grouping where you last put it. Nothing here writes to the view.
 **Status updates** show the project's health at a glance: once a project
 has one, a strip above the board carries the latest status (**On track**,
 **At risk**, **Off track**, **Complete** or **Inactive**, always named as
@@ -634,10 +640,11 @@ ago it was posted. Press it to fold out the history, newest first, with
 each update's author, dates and Markdown note, and post a new one from
 **Add item → Post status update…** or the command palette. Updates you
 wrote can be edited or deleted from their own menu.
-Adding, moving, reordering, editing a draft, converting, archiving, restoring,
-removing and posting status updates all need write access to the board and
-the `project` sign-in scope; reading one needs only the `project` or
-`read:project` scope the Projects picker already asks for.
+Adding, moving, reordering, shifting roadmap dates, editing a draft,
+converting, archiving, restoring, removing and posting status updates all
+need write access to the board and the `project` sign-in scope; reading one
+needs only the `project` or `read:project` scope the Projects picker already
+asks for.
 
 ### Code TODOs
 

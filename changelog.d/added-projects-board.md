@@ -47,10 +47,10 @@
   one under **View options** and GitHub filters the read for you, its sort orders the
   cards in each column (by **Title**, or by a text, number, date, single-select or
   iteration field), its visible fields show as chips on the cards, and its grouping
-  seeds **Group by** while you stay free to regroup. Views saved as a roadmap are
-  drawn as a board, **Clear view** (or **Clear project view** in the command
-  palette) brings the whole item set back in the board's own order with the chips off,
-  leaving the grouping wherever you last put it, and nothing here writes to the view.
+  seeds **Group by** while you stay free to regroup. **Clear view** (or **Clear
+  project view** in the command palette) brings the whole item set back in the board's
+  own order with the chips off, leaving the grouping wherever you last put it, and
+  nothing here writes to the view.
   GitHub only; reading a board needs the same `project` or `read:project` sign-in scope
   the Projects picker already asks for, and every write here needs the `project` scope
   plus write access to the board.

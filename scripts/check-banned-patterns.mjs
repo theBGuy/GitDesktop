@@ -1267,8 +1267,8 @@ export const CHECKS = [
       // Same shape: a HARDCODED mod+enter submit chord on the status-update
       // dialog, not a user binding.
       "src/features/projects/ProjectStatusStrip.tsx",
-      // Its `eventToBinding` call tests four hardcoded Alt reorder chords
-      // against a fixed table, not a user binding, and the handler's DOM
+      // Its `eventToBinding` call tests hardcoded Alt chords (four reorder,
+      // four date-shift) against a fixed table, not a user binding, and the handler's DOM
       // containment check already pins focus to a board card — the board
       // holds no editable or typeahead targets for the guards to protect.
       "src/features/projects/ProjectsBoardPanel.tsx",

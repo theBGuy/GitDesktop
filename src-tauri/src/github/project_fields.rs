@@ -98,6 +98,10 @@ pub enum ProjectFieldValue {
         field_id: String,
         field_name: String,
         title: String,
+        /// GitHub's nullable `dueOn` timestamp verbatim; absent (not null) when the
+        /// milestone has no due date, so a reader never meets a fabricated one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        due_on: Option<String>,
         is_issue_field: bool,
     },
     Repository {
@@ -579,7 +583,7 @@ pub(super) fn field_value_selection(rich: bool) -> String {
          ... on ProjectV2ItemFieldNumberValue{{ field{{ {FIELD_COMMON} }} number }} \
          ... on ProjectV2ItemFieldDateValue{{ field{{ {FIELD_COMMON} }} date }} \
          ... on ProjectV2ItemFieldIterationValue{{ field{{ {FIELD_COMMON} }} iterationId title startDate duration }} \
-         ... on ProjectV2ItemFieldMilestoneValue{{ field{{ {FIELD_COMMON} }} milestone{{ title }} }} \
+         ... on ProjectV2ItemFieldMilestoneValue{{ field{{ {FIELD_COMMON} }} milestone{{ title dueOn }} }} \
          ... on ProjectV2ItemFieldRepositoryValue{{ field{{ {FIELD_COMMON} }} repository{{ nameWithOwner }} }} \
          {connections} \
          ... on ProjectV2ItemIssueFieldValue{{ field{{ {FIELD_COMMON} }} issueFieldValue{{ __typename \
@@ -753,6 +757,10 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
             field_id,
             field_name,
             title: text(&value["milestone"], "title"),
+            due_on: value["milestone"]["dueOn"]
+                .as_str()
+                .filter(|due| !due.is_empty())
+                .map(str::to_string),
             is_issue_field,
         },
         ("ProjectV2ItemFieldRepositoryValue", _) => ProjectFieldValue::Repository {
@@ -1535,9 +1543,9 @@ mod tests {
             ),
             (
                 "ProjectV2ItemFieldMilestoneValue",
-                json!({"milestone":{"title":"Release"}}),
-                json!({"kind":"milestone","title":"Release"}),
-                &["fieldId", "fieldName", "isIssueField", "kind", "title"],
+                json!({"milestone":{"title":"Release","dueOn":"2026-10-05T07:00:00Z"}}),
+                json!({"kind":"milestone","title":"Release","dueOn":"2026-10-05T07:00:00Z"}),
+                &["dueOn", "fieldId", "fieldName", "isIssueField", "kind", "title"],
             ),
             (
                 "ProjectV2ItemFieldRepositoryValue",
@@ -1589,6 +1597,28 @@ mod tests {
     }
 
     #[test]
+    fn milestone_without_a_due_date_omits_the_key() {
+        for milestone in [
+            json!({"title":"Someday"}),
+            json!({"title":"Someday","dueOn":null}),
+            json!({"title":"Someday","dueOn":""}),
+            json!({"title":"Someday","dueOn":42}),
+        ] {
+            let node = json!({
+                "__typename":"ProjectV2ItemFieldMilestoneValue",
+                "field":{"id":"field","name":"Milestone"},
+                "milestone":milestone,
+            });
+            let wire = serde_json::to_value(parse_field_value(&node)).unwrap();
+            assert_keys(
+                &wire,
+                &["fieldId", "fieldName", "isIssueField", "kind", "title"],
+            );
+            assert_eq!(wire["title"], "Someday");
+        }
+    }
+
+    #[test]
     fn table_connections_tolerate_empty_absent_and_partial_nodes() {
         for (typename, key) in [
             ("ProjectV2ItemFieldUserValue", "users"),
@@ -1625,7 +1655,7 @@ mod tests {
             for (typename, payload, connection) in [
                 ("ProjectV2ItemFieldUserValue", "users(first:20){ totalCount nodes{ login avatarUrl } }", true),
                 ("ProjectV2ItemFieldLabelValue", "labels(first:20){ totalCount nodes{ name color } }", true),
-                ("ProjectV2ItemFieldMilestoneValue", "milestone{ title }", false),
+                ("ProjectV2ItemFieldMilestoneValue", "milestone{ title dueOn }", false),
                 ("ProjectV2ItemFieldRepositoryValue", "repository{ nameWithOwner }", false),
                 ("ProjectV2ItemFieldReviewerValue", "reviewers(first:20){ totalCount nodes{ __typename ... on User{ login } ... on Team{ name } ... on Mannequin{ login } ... on Bot{ login } ... on EnterpriseTeam{ name } } }", true),
                 ("ProjectV2ItemFieldPullRequestValue", "pullRequests(first:20){ totalCount nodes{ number repository{ nameWithOwner } } }", true),

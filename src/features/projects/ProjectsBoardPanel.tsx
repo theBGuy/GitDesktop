@@ -89,6 +89,7 @@ import {
   useRemoveBoardItem,
   useReorderBoardCard,
   useRestoreBoardItem,
+  useShiftItemDates,
   useUpdateDraftItem,
 } from "@/lib/git/queries";
 import {
@@ -175,7 +176,21 @@ import {
   ProjectStatusSection,
   type StatusEditorState,
 } from "./ProjectStatusStrip";
+import { ProjectsRoadmapView } from "./ProjectsRoadmapView";
 import { ProjectsTableView } from "./ProjectsTableView";
+import {
+  type DateSource,
+  type DateSources,
+  iterationCalendars,
+  localDateISO,
+  NO_DATE_SOURCES,
+  planShift,
+  resolveDateSources,
+  seedDateSources,
+  spanText,
+  ZOOMS,
+  type Zoom,
+} from "./roadmap-model";
 import { cellEditHeld } from "./TableCell";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
@@ -234,6 +249,7 @@ const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "restore",
   "remove",
   "edit-draft",
+  "shift-dates",
 ]);
 const ADD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "add-existing",
@@ -261,8 +277,9 @@ const MOVING_REASON: Record<ItemNoun, string> = {
   card: "Moving your last card…",
   row: "Moving your last row…",
 };
-/** What the item leaves when it goes, in the words of the surface drawing it. */
-const SURFACE: Record<ItemNoun, string> = { card: "board", row: "table" };
+/** Which layout draws the board's items, and so what messages call the whole of
+ *  it: the item leaves the board, the table, or the roadmap. */
+type Surface = "board" | "table" | "roadmap";
 /** An archive is reversible and a removal is not, so the two prompts say different
  *  things, and a removal says a third for a draft, which lives on this project alone
  *  and has nowhere to survive. Every one names where the card goes rather than asking
@@ -270,11 +287,14 @@ const SURFACE: Record<ItemNoun, string> = { card: "board", row: "table" };
  *  are SHOWN: with the toggle off the card leaves the columns, with it on it stays
  *  put under an Archived badge. "Show archived cards" is the TOGGLE's name, so it
  *  stays as it reads on screen whatever the item is called. */
-const ARCHIVE_BODY: Record<"shown" | "hidden", (noun: ItemNoun) => string> = {
-  hidden: (noun) =>
-    `The ${noun} leaves the ${SURFACE[noun]}. Bring it back any time from View options → Show archived cards.`,
-  shown: (noun) =>
-    `The ${noun} stays in place, marked Archived, and leaves the ${SURFACE[noun]} when you turn Show archived cards off. Restore ${noun} brings it back.`,
+const ARCHIVE_BODY: Record<
+  "shown" | "hidden",
+  (noun: ItemNoun, surface: Surface) => string
+> = {
+  hidden: (noun, surface) =>
+    `The ${noun} leaves the ${surface}. Bring it back any time from View options → Show archived cards.`,
+  shown: (noun, surface) =>
+    `The ${noun} stays in place, marked Archived, and leaves the ${surface} when you turn Show archived cards off. Restore ${noun} brings it back.`,
 };
 const REMOVE_BODY: Record<
   BoardItemContent["kind"],
@@ -295,16 +315,16 @@ const REMOVE_BODY: Record<
  *  verbatim rather than a pluralized copy of it. */
 const BULK_ARCHIVE_BODY: Record<
   "shown" | "hidden",
-  (n: number, noun: ItemNoun) => string
+  (n: number, noun: ItemNoun, surface: Surface) => string
 > = {
-  hidden: (n, noun) =>
+  hidden: (n, noun, surface) =>
     n === 1
-      ? ARCHIVE_BODY.hidden(noun)
-      : `The ${n} ${noun}s leave the ${SURFACE[noun]}. Bring them back any time from View options → Show archived cards.`,
-  shown: (n, noun) =>
+      ? ARCHIVE_BODY.hidden(noun, surface)
+      : `The ${n} ${noun}s leave the ${surface}. Bring them back any time from View options → Show archived cards.`,
+  shown: (n, noun, surface) =>
     n === 1
-      ? ARCHIVE_BODY.shown(noun)
-      : `The ${n} ${noun}s stay in place, marked Archived, and leave the ${SURFACE[noun]} when you turn Show archived cards off. Restore ${noun} brings one back.`,
+      ? ARCHIVE_BODY.shown(noun, surface)
+      : `The ${n} ${noun}s stay in place, marked Archived, and leave the ${surface} when you turn Show archived cards off. Restore ${noun} brings one back.`,
 };
 
 /** {@link REMOVE_BODY} for a SELECTION. Keyed on how many DRAFTS it holds, which
@@ -341,21 +361,64 @@ const NO_TABLE_COLUMNS: TableColumn[] = [];
 /** The sort keys of a render with no table view. */
 const NO_SORT_KEYS: ProjectViewSort[] = [];
 /** What the board says about a view it draws in a layout the view wasn't saved
- *  in. Board and table views draw as themselves and need no note, and an
+ *  in. Board, table and roadmap views draw as themselves and need no note, and an
  *  unrecognised layout names no shape it can't vouch for. */
 const FLAT_FALLBACK_NOTE: Partial<Record<ProjectViewDef["layout"], string>> = {
-  roadmap: "Roadmap view, shown as a board",
   unknown: "Shown as a board",
 };
-/** Why View options' Group by holds under a table view: the view's own saved
- *  grouping decides its sections, exactly as GitHub draws it. */
-const TABLE_GROUPING_REASON =
-  "Table views keep the grouping they were saved with on GitHub";
-/** Why a bulk move is held on a table that draws no group sections: a move writes
- *  the grouping field, and a table drawn flat has no group to move rows into, even
- *  one whose view groups by a field that makes no sections here. */
-const TABLE_UNGROUPED_MOVE_REASON =
-  "This table isn't drawn in groups, so there's no group to move rows to";
+/** Why View options' Group by holds under a table or roadmap view: the view's
+ *  own saved grouping decides its sections, exactly as GitHub draws it. */
+const ROWS_GROUPING_REASON: Record<Exclude<Surface, "board">, string> = {
+  table: "Table views keep the grouping they were saved with on GitHub",
+  roadmap: "Roadmap views keep the grouping they were saved with on GitHub",
+};
+/** Why a bulk move is held on rows drawn with no group sections: a move writes
+ *  the grouping field, and rows drawn flat have no group to move into, even under
+ *  a view that groups by a field that makes no sections here. */
+const ROWS_UNGROUPED_MOVE_REASON: Record<Exclude<Surface, "board">, string> = {
+  table:
+    "This table isn't drawn in groups, so there's no group to move rows to",
+  roadmap:
+    "This roadmap isn't drawn in groups, so there's no group to move rows to",
+};
+/** The roadmap's scale, as its View options rows and announcements name it. */
+const ZOOM_LABEL: Record<Zoom, string> = {
+  month: "Month",
+  quarter: "Quarter",
+  year: "Year",
+};
+/** The date-source rows' "no field" row. Not a field id — it stands for the
+ *  ABSENCE of a source, the way the view switcher's No view row does. */
+const NO_SOURCE_ROW_ID = "__none__";
+/** Why the date-source rows hold. The zoom rows never do: they depend on no read. */
+const NO_DATE_FIELDS_REASON =
+  "This project has no date or iteration fields to place items with";
+/** The in-flow notice on a roadmap with no date source to place anything by. */
+const ROADMAP_NO_SOURCES_NOTE =
+  "Pick date fields for this roadmap in View options.";
+/** The zoom palette rows' answers at the scale's ends. */
+const ZOOM_END_REASON: Record<"in" | "out", string> = {
+  in: "Already zoomed in to months",
+  out: "Already zoomed out to years",
+};
+/** The roadmap's date-shift chords, as CANONICAL bindings (`eventToBinding`'s own
+ *  spelling). Alt+←/→ moves the whole span a day, Alt+Shift+←/→ moves its target
+ *  alone — Alt meaning "act on the item", as the reposition chords do. Feature-local
+ *  rather than registry bindings for their reason: only this grid knows focus is
+ *  on a lane. */
+const SHIFT_CHORDS: Partial<
+  Record<string, { mode: "move" | "resize"; dir: -1 | 1 }>
+> = {
+  "alt+left": { mode: "move", dir: -1 },
+  "alt+right": { mode: "move", dir: 1 },
+  "alt+shift+left": { mode: "resize", dir: -1 },
+  "alt+shift+right": { mode: "resize", dir: 1 },
+};
+/** One refusal toast for the shift chords at a time, the reorder chords' reason:
+ *  key auto-repeat would otherwise mint one per repeat. */
+const SHIFT_REFUSAL_TOAST_ID = "board-shift-refused";
+/** What a shift chord says on the title cell, where it doesn't apply. */
+const SHIFT_ON_TITLE_REASON = `Move to the timeline (${formatBinding("right")}) to shift this item's dates`;
 /** The strip's word on a table view whose ENTIRE sort this build can't honour —
  *  a partly honoured sort stays quiet, since its rows do follow the view. Keyed on
  *  WHY: a key whose field the board's field read didn't return (a capped or failed
@@ -365,10 +428,10 @@ const TABLE_SORT_DROPPED_NOTE: Record<
   string
 > = {
   unsortable:
-    "Sorted on GitHub by fields this table can't order by, so rows keep the project order",
+    "Sorted on GitHub by fields this view can't order by, so rows keep the project order",
   unloaded:
     "Sorted on GitHub by fields this board didn't load, so rows keep the project order",
-  both: "Sorted on GitHub by fields this table can't order by or didn't load, so rows keep the project order",
+  both: "Sorted on GitHub by fields this view can't order by or didn't load, so rows keep the project order",
 };
 /** The strip's word on a table grouped by a field that makes no sections here (a
  *  multi-select, a field GitHub owns on the issue): every row is still drawn. */
@@ -463,9 +526,10 @@ const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
 /** Why the Position section is held when the menu's card has left the board (a
  *  refetch dropped it while the menu was open). One held row, not four "already
  *  first"/"already last" rows that would contradict each other. */
-const CARD_GONE_REASON: Record<ItemNoun, string> = {
-  card: "This card is no longer on the board",
-  row: "This row is no longer in the table",
+const CARD_GONE_REASON: Record<Surface, string> = {
+  board: "This card is no longer on the board",
+  table: "This row is no longer in the table",
+  roadmap: "This row is no longer on the roadmap",
 };
 /** One shared id for every reorder-refusal toast: key auto-repeat drives the burst
  *  (no e.repeat gate), so a held direction would otherwise mint a fresh toast per
@@ -519,9 +583,10 @@ const BULK_PENDING_REASON = "Applying the last bulk change…";
 const FIELD_PENDING_REASON = "Still saving your last field change…";
 /** Why a table cell holds while a write's re-read is on its way — the slot's own
  *  "Updating…" phase, said as a reason. */
-const UPDATING_REASON: Record<ItemNoun, string> = {
-  card: "Updating the board with your last change…",
-  row: "Updating the table with your last change…",
+const UPDATING_REASON: Record<Surface, string> = {
+  board: "Updating the board with your last change…",
+  table: "Updating the table with your last change…",
+  roadmap: "Updating the roadmap with your last change…",
 };
 /** The strip's own line for that state, once the read's error has been cleared
  *  by a later patch and there is no error left to present. */
@@ -529,9 +594,13 @@ const REREAD_FAILED_NOTE =
   "Couldn't refresh after your last change, so some values may be out of date";
 /** The same hold when that re-read failed: the strip above names the failure and
  *  carries the Retry that clears it. */
-const REREAD_FAILED_REASON: Record<ItemNoun, string> = {
-  card: "The board didn't refresh after your last change. Retry above to edit again",
-  row: "The table didn't refresh after your last change. Retry above to edit again",
+const REREAD_FAILED_REASON: Record<Surface, string> = {
+  board:
+    "The board didn't refresh after your last change. Retry above to edit again",
+  table:
+    "The table didn't refresh after your last change. Retry above to edit again",
+  roadmap:
+    "The roadmap didn't refresh after your last change. Retry above to edit again",
 };
 /** What the keyboard says when Shift is held across the board rather than down a
  *  column. A silent collapse under a held Shift is the outcome this refuses. */
@@ -591,6 +660,14 @@ function cardCount(n: number, noun: ItemNoun): string {
 function lensFilter(view: ProjectViewDef | null): string | null {
   const filter = view?.filter ?? null;
   return filter === null || filter.trim() === "" ? null : filter;
+}
+
+/** The layout `view` draws in: a table or roadmap view as itself, and no view — or
+ *  one in a layout this build doesn't know — as the board. */
+function surfaceOf(view: ProjectViewDef | null): Surface {
+  return view?.layout === "table" || view?.layout === "roadmap"
+    ? view.layout
+    : "board";
 }
 
 /** The one control that takes the board back to no lens, worded the same wherever
@@ -782,6 +859,69 @@ function BoardNotice({ children }: { children: ReactNode }) {
   );
 }
 
+/** One end's date-source rows in View options: every date and iteration field,
+ *  then None. Radio rows, never a nested Select — the popover's documented shape.
+ *  Held with its reason in place of the rows, the Group-by section's shape. */
+function DateSourceRows({
+  labelId,
+  label,
+  heldReason,
+  fields,
+  value,
+  onPick,
+}: {
+  labelId: string;
+  label: string;
+  heldReason: string | undefined;
+  fields: Extract<ProjectFieldDef, { kind: "date" | "iteration" }>[];
+  value: DateSource | null;
+  onPick: (rowId: string) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <p id={labelId} className="px-1 text-xs text-muted-foreground">
+        {label}
+      </p>
+      {heldReason !== undefined ? (
+        <p className="px-1 py-1 text-xs text-muted-foreground">{heldReason}</p>
+      ) : (
+        <RadioGroup
+          className="gap-0"
+          aria-labelledby={labelId}
+          value={value?.fieldId ?? NO_SOURCE_ROW_ID}
+          onValueChange={(next) => {
+            // Base UI types the group's value as `any`.
+            if (typeof next === "string") onPick(next);
+          }}
+        >
+          {fields.map((f) => (
+            <label key={f.id} className={GROUP_ROW_CLASS}>
+              <Radio value={f.id} />
+              <span
+                className="min-w-0 truncate"
+                onMouseEnter={clipTitleFromText}
+              >
+                {f.name}
+              </span>
+              {/* The field's kind in words: an iteration spans each item across
+                  its iteration rather than naming one day. */}
+              {f.kind === "iteration" && (
+                <span className="shrink-0 text-muted-foreground">
+                  iteration
+                </span>
+              )}
+            </label>
+          ))}
+          <label className={GROUP_ROW_CLASS}>
+            <Radio value={NO_SOURCE_ROW_ID} />
+            <span className="min-w-0 truncate">None</span>
+          </label>
+        </RadioGroup>
+      )}
+    </div>
+  );
+}
+
 /**
  * The Projects tab: a kanban of one GitHub Project, grouped by one of the board's
  * single-select or iteration fields, with one write — a card's context menu moves it
@@ -884,17 +1024,17 @@ export function ProjectsBoardPanel({
   // A SETTLED list is the only thing that may retire it, so a pending or failed
   // read touches nothing.
   // A view the settled list no longer carries degrades to no lens the moment it
-  // arrives — for a TABLE view, the grid unmounts under the user in that same
-  // render, a route no picker covers. So the retirement takes the picker's
-  // handoff (`handOffLayoutFlip`); a board view keeps its bare retirement.
+  // arrives — for a TABLE or ROADMAP view, the grid unmounts under the user in
+  // that same render, a route no picker covers. So the retirement takes the
+  // picker's handoff (`handOffLayoutFlip`); a board view keeps its bare retirement.
   // `drawnLayoutRef` is the render BEFORE this one: its writer runs after this.
   const drawnLayoutRef = useRef<{
     viewId: string | null;
-    table: boolean;
+    layout: Surface;
     cardId: string | null;
-  }>({ viewId: null, table: false, cardId: null });
+  }>({ viewId: null, layout: "board", cardId: null });
   const retireStaleView = useEffectEvent(() => {
-    if (drawnLayoutRef.current.table) {
+    if (drawnLayoutRef.current.layout !== "board") {
       handOffLayoutFlip(false, drawnLayoutRef.current.cardId);
       clearSelection();
     }
@@ -940,11 +1080,17 @@ export function ProjectsBoardPanel({
   const loaded = oneCardPerItem(
     items.data?.pages.flatMap((page) => page.items) ?? [],
   );
-  // A TABLE view draws its rows in sections of the view's own row grouping, where
-  // a board draws columns of the Group-by pick. A grouping outside the groupable
-  // set makes no sections: the table draws flat and the strip says so.
+  // A TABLE or ROADMAP view draws its rows in sections of the view's own row
+  // grouping, where a board draws columns of the Group-by pick. A grouping outside
+  // the groupable set makes no sections: the rows draw flat and the strip says so.
+  // `rowView` is either — every row-shaped rule (sections, the row cursor, a
+  // row range) reads it; what only a table has (field columns, cell editing, the
+  // rich read) keeps reading `tableView`.
   const tableView = view?.layout === "table" ? view : null;
-  const rowGroupId = tableView?.groupFieldIds[0];
+  const roadmapView = view?.layout === "roadmap" ? view : null;
+  const rowView = tableView ?? roadmapView;
+  const surface = surfaceOf(view);
+  const rowGroupId = rowView?.groupFieldIds[0];
   const rowGroupField =
     rowGroupId === undefined
       ? null
@@ -952,9 +1098,9 @@ export function ProjectsBoardPanel({
   // The field whose buckets the drawn columns or row sections are — what a move
   // writes, what the menu's Move to lists, and what a card's value is read
   // against. On a board it is the Group-by pick, exactly as before.
-  const bucketField = tableView === null ? groupField : rowGroupField;
+  const bucketField = rowView === null ? groupField : rowGroupField;
   // What every message names an item: the words of the surface drawing it.
-  const noun: ItemNoun = tableView === null ? "card" : "row";
+  const noun: ItemNoun = rowView === null ? "card" : "row";
   // The view's sort orders cards WITHIN a column, so it applies after bucketing —
   // which column a card lands in is the grouping's answer alone. With no sort the
   // columns are untouched, board POSITION order and all.
@@ -1044,22 +1190,40 @@ export function ProjectsBoardPanel({
   // drawing its header, and the id waits harmlessly for the section to return.
   const [collapsedGroups, setCollapsedGroups] =
     useState<ReadonlySet<string>>(NO_COLLAPSED);
+  // The roadmap's own layout choices, transient like Group by: the fields that
+  // place an item, and the scale. Seeded by `pickView` alone and reset by every
+  // view pick; a picked field the definitions stop carrying reads as no source
+  // (`resolveDateSources`) rather than re-seeding behind the user.
+  const [datePicks, setDatePicks] = useState<DateSources>(NO_DATE_SOURCES);
+  const [zoom, setZoom] = useState<Zoom>("month");
+  // Bumped by the palette's jump to today; the roadmap scrolls on the bump.
+  const [todayNonce, setTodayNonce] = useState(0);
+  const dateSources = resolveDateSources(datePicks, fieldDefs);
+  const calendars = iterationCalendars(fieldDefs);
+  // What the roadmap's range spans: every drawn item, folded sections included.
+  const roadmapItems =
+    roadmapView === null ? NO_CARDS : columns.flatMap((column) => column.items);
+  // Controlled so the roadmap's "Pick date fields" notice can open it.
+  const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
   const tableCols =
     tableView === null ? NO_TABLE_COLUMNS : tableColumns(tableView, fieldDefs);
+  // How many cells the row cursor walks: a table's field columns, a roadmap's
+  // rail and lane.
+  const rowColCount = tableView !== null ? tableCols.length : 2;
   // The sort keys the rows really follow — a header claims no key the sort
   // dropped — and whether the view's whole sort was dropped, which the strip says.
-  const tableSortKeys =
-    tableView === null
+  const rowSortKeys =
+    rowView === null
       ? NO_SORT_KEYS
-      : honouredSortKeys(tableView.sortBy, fieldDefs);
-  const tableSortDropped = (() => {
+      : honouredSortKeys(rowView.sortBy, fieldDefs);
+  const rowSortDropped = (() => {
     if (
-      tableView === null ||
-      tableView.sortBy.length === 0 ||
-      tableSortKeys.length > 0
+      rowView === null ||
+      rowView.sortBy.length === 0 ||
+      rowSortKeys.length > 0
     )
       return null;
-    const defined = tableView.sortBy.map((sort) =>
+    const defined = rowView.sortBy.map((sort) =>
       fieldDefs.some((f) => f.id === sort.fieldId),
     );
     if (defined.every(Boolean)) return TABLE_SORT_DROPPED_NOTE.unsortable;
@@ -1076,14 +1240,14 @@ export function ProjectsBoardPanel({
         )
       : null;
   const tableEntries =
-    tableView === null
+    rowView === null
       ? []
       : tableRows(columns, rowGroupField !== null, collapsedGroups);
   const tablePos = resolveTableCursor(
     tableEntries,
     columns,
     tableCursor,
-    tableCols.length,
+    rowColCount,
   );
   const tablePosEntry =
     tablePos === null ? undefined : tableEntries[tablePos.rowIndex];
@@ -1092,7 +1256,7 @@ export function ProjectsBoardPanel({
   // a table the card is wherever the cursor's ROW is now, and a group header is
   // no card at all.
   const liveCursor =
-    tableView !== null
+    rowView !== null
       ? tablePosEntry?.kind === "item"
         ? findCard(columns, tablePosEntry.item.itemId)
         : null
@@ -1107,12 +1271,12 @@ export function ProjectsBoardPanel({
    * off the previous render's record: its cursor card seeds the new layout's
    * cursor, and focus that fell with it (to <body>) is claimed there.
    */
-  function handOffLayoutFlip(toTable: boolean, cardId: string | null) {
+  function handOffLayoutFlip(toRows: boolean, cardId: string | null) {
     // A peek anchored in the layout being left would reopen in the other unasked.
     setPeekItemId(null);
     const active = document.activeElement;
     const held = active === null || active === document.body;
-    if (toTable) {
+    if (toRows) {
       if (cardId !== null)
         setTableCursor({ rowKey: itemRowKey(cardId), colIndex: 0 });
       setTableFocusClaim(held);
@@ -1122,8 +1286,8 @@ export function ProjectsBoardPanel({
       setBoardCursorSeed({ itemId: cardId, claim: held });
     setCursor(null);
   }
-  const flipLayout = useEffectEvent((toTable: boolean, cardId: string | null) =>
-    handOffLayoutFlip(toTable, cardId),
+  const flipLayout = useEffectEvent((toRows: boolean, cardId: string | null) =>
+    handOffLayoutFlip(toRows, cardId),
   );
   // Records the drawn layout for the next render, and hands off when the SAME view
   // changed layout in place. Declared after the retirement's effect, so that one
@@ -1137,12 +1301,11 @@ export function ProjectsBoardPanel({
   // the card to carry is the one the old layout drew.
   useEffect(() => {
     const prev = drawnLayoutRef.current;
-    const table = tableView !== null;
-    if (view !== null && prev.viewId === view.id && prev.table !== table)
-      flipLayout(table, prev.cardId);
+    if (view !== null && prev.viewId === view.id && prev.layout !== surface)
+      flipLayout(surface !== "board", prev.cardId);
     drawnLayoutRef.current = {
       viewId: view?.id ?? null,
-      table,
+      layout: surface,
       cardId: drawnCardId,
     };
   });
@@ -1187,7 +1350,7 @@ export function ProjectsBoardPanel({
     items.data !== undefined && !items.isFetching && !lensLoading;
   // Spend a table→board seed once the board's columns have settled. Keyed on the
   // primitives that decide it, not on the columns array.
-  const onBoard = tableView === null;
+  const onBoard = rowView === null;
   const seedPos =
     boardCursorSeed === null || !onBoard
       ? null
@@ -1347,7 +1510,7 @@ export function ProjectsBoardPanel({
     const ids =
       anchorId === null
         ? null
-        : tableView !== null
+        : rowView !== null
           ? rowRange(
               tableEntries.flatMap((entry) =>
                 entry.kind === "item" ? [entry.item] : [],
@@ -1380,17 +1543,18 @@ export function ProjectsBoardPanel({
   function clearView() {
     setActiveViewId(null);
     setCursor(null);
-    seedBoardCursor(false);
+    seedBoardCursor("board");
     reanchorTable();
     clearSelection();
   }
 
-  /** Leaving a TABLE for a board keeps the cursor's card, the way arriving at one
-   *  does: the board's cursor is index-shaped and the columns it will index aren't
-   *  drawn yet, so the card id is held until they are (see `boardCursorSeed`). A
-   *  board-to-board switch keeps its own reset. Either direction also carries DOM
-   *  focus across when the layout being left held it. */
-  function seedBoardCursor(toTable: boolean) {
+  /** Leaving ROWS (a table or a roadmap) for a board keeps the cursor's card, the
+   *  way arriving at rows does: the board's cursor is index-shaped and the columns
+   *  it will index aren't drawn yet, so the card id is held until they are (see
+   *  `boardCursorSeed`). A board-to-board switch keeps its own reset. Every
+   *  direction that swaps the layout also carries DOM focus across when the layout
+   *  being left held it. */
+  function seedBoardCursor(to: Surface) {
     // Whether the layout being left holds DOM focus — the palette route, where the
     // focused card or cell unmounts under it. The popover route holds focus in its
     // own popup and hands nothing across.
@@ -1400,19 +1564,25 @@ export function ProjectsBoardPanel({
       (rootRef.current?.contains(active) ?? false) &&
       active.closest("[data-table-cell], [data-card-index]") !== null;
     // A layout change retires the peek, as the flip handoff does.
-    if ((tableView !== null) !== toTable) setPeekItemId(null);
-    if (tableView === null) {
-      setTableFocusClaim(held && toTable);
+    if (surface !== to) setPeekItemId(null);
+    if (rowView === null) {
+      setTableFocusClaim(held && to !== "board");
+      return;
+    }
+    // Rows to rows re-anchors through `reanchorTable` alone; only a board arrival
+    // spends a seed. A table↔roadmap switch swaps the grid itself, so the next one
+    // claims the focus the last one held.
+    if (to !== "board") {
+      setBoardCursorSeed(null);
+      setTableFocusClaim(held && to !== surface);
       return;
     }
     const itemId =
       liveCursor === null
         ? undefined
         : columns[liveCursor.col]?.items[liveCursor.idx]?.itemId;
-    // Table to table re-anchors through `reanchorTable` alone; only a board
-    // arrival spends a seed.
     setBoardCursorSeed(
-      toTable || (itemId === undefined && !held)
+      itemId === undefined && !held
         ? null
         : { itemId: itemId ?? null, claim: held },
     );
@@ -1456,9 +1626,18 @@ export function ProjectsBoardPanel({
     const vgroup = picked?.verticalGroupFieldIds[0];
     if (vgroup !== undefined && groupFields.some((f) => f.id === vgroup))
       setPickedFieldId(vgroup);
+    // A roadmap's date sources seed here for the grouping's reason, off the
+    // definitions as they are at the pick — the switcher holds its rows until
+    // they have arrived — and every pick starts again at Month.
+    setDatePicks(
+      picked?.layout === "roadmap"
+        ? seedDateSources(picked, fieldDefs)
+        : NO_DATE_SOURCES,
+    );
+    setZoom("month");
     // The columns are about to hold a different set of cards.
     setCursor(null);
-    seedBoardCursor(picked?.layout === "table");
+    seedBoardCursor(surfaceOf(picked));
     reanchorTable();
     clearSelection();
   }
@@ -1541,13 +1720,13 @@ export function ProjectsBoardPanel({
 
   /** Where `el` sits in whichever layout is drawn. */
   function positionAt(el: Element): { col: number; idx: number } | null {
-    return tableView !== null ? rowAt(el) : cardAt(el);
+    return rowView !== null ? rowAt(el) : cardAt(el);
   }
 
   /** The node a press or a hand-off focuses in whichever layout is drawn: a card
    *  on the board, a cell in the table. */
   const focusableSelector =
-    tableView !== null ? "[data-table-cell]" : "[data-card-index]";
+    rowView !== null ? "[data-table-cell]" : "[data-card-index]";
 
   /** A table cell took focus: the cursor follows it. A group header reports no
    *  column of its own, so a walk passing through it keeps the one it was on. */
@@ -1630,6 +1809,21 @@ export function ProjectsBoardPanel({
       if (card !== null) reorderCard(card, direction);
       return;
     }
+    // The roadmap's date-shift chords, on a lane cell alone; on the title cell
+    // they say where they work rather than being swallowed silently. Matched on
+    // the canonical binding, so AltGraph (character input) never reaches here.
+    const shift =
+      chord === null || roadmapView === null ? undefined : SHIFT_CHORDS[chord];
+    if (shift !== undefined && entry.kind === "item") {
+      e.preventDefault();
+      if (from.colIndex === 1)
+        shiftItemDates(entry.item, shift.mode, shift.dir);
+      else {
+        announce(SHIFT_ON_TITLE_REASON);
+        toast(SHIFT_ON_TITLE_REASON, { id: SHIFT_REFUSAL_TOAST_ID });
+      }
+      return;
+    }
     if (e.altKey && ALT_SWALLOWED_KEYS.has(e.key)) {
       e.preventDefault();
       return;
@@ -1659,15 +1853,25 @@ export function ProjectsBoardPanel({
       tableEntries,
       from,
       move,
-      tableCols.length,
+      rowColCount,
       pageSize,
     );
     const landed = tableEntries[next.rowIndex];
-    if (
-      landed === undefined ||
-      (next.rowIndex === from.rowIndex && next.colIndex === from.colIndex)
-    )
+    if (landed === undefined) return;
+    if (next.rowIndex === from.rowIndex && next.colIndex === from.colIndex) {
+      // A clamped move on a roadmap lane still re-claims it: the claim scrolls
+      // the item's mark into view, which is the way back to a bar left off
+      // screen by a jump or a Tab in.
+      if (
+        roadmapView !== null &&
+        entry.kind === "item" &&
+        from.colIndex === 1
+      ) {
+        setTableCursor({ rowKey: landed.key, colIndex: 1 });
+        setFocusNonce((n) => n + 1);
+      }
       return;
+    }
     setTableCursor({ rowKey: landed.key, colIndex: next.colIndex });
     setFocusNonce((n) => n + 1);
     if (!TABLE_ROW_MOVES.has(move) || next.rowIndex === from.rowIndex) return;
@@ -1824,6 +2028,8 @@ export function ProjectsBoardPanel({
   // repeated presses are the point, so the hook coalesces them per card rather
   // than the panel holding the route.
   const reorder = useReorderBoardCard();
+  // The roadmap's date shifts, which coalesce per card the same way.
+  const shiftWrite = useShiftItemDates();
   const convertDraft = useConvertDraftItem();
   const updateDraft = useUpdateDraftItem();
   const archiveItem = useArchiveBoardItem();
@@ -1916,7 +2122,7 @@ export function ProjectsBoardPanel({
   const [peekItemId, setPeekItemId] = useState<string | null>(null);
 
   /** Whether a peek has anywhere to draw: a table's peek anchors to the Title cell,
-   *  so a view without that column has none. */
+   *  so a view without that column has none. A roadmap's rail always is one. */
   const canPeek =
     tableView === null || tableCols.some((column) => column.title);
 
@@ -2349,7 +2555,7 @@ export function ProjectsBoardPanel({
       // A table drawn in sections: each section is a slice of the project order
       // rather than the order itself, so a row's drawn neighbour needn't be the
       // one a position write would land it beside.
-      case tableView !== null && rowGroupField !== null:
+      case rowView !== null && rowGroupField !== null:
         return GROUPED_ROWS_REASON;
       case lensLoading:
         return LENS_LOADING_REASON;
@@ -2559,7 +2765,7 @@ export function ProjectsBoardPanel({
       ? findCard(columns, peekItemId) === null
       : !tableEntries.some(
           (entry) => entry.kind === "item" && entry.item.itemId === peekItemId,
-        ) || !tableCols.some((column) => column.title));
+        ) || !canPeek);
   useEffect(() => {
     if (peekGone) setPeekItemId(null);
   }, [peekGone]);
@@ -2581,9 +2787,9 @@ export function ProjectsBoardPanel({
       case bulkHeldReason !== undefined:
         return bulkHeldReason;
       case refreshingAfterWrite || rereadStall === "owed":
-        return UPDATING_REASON[noun];
+        return UPDATING_REASON[surface];
       case rereadFailed:
-        return REREAD_FAILED_REASON[noun];
+        return REREAD_FAILED_REASON[surface];
       default:
         return undefined;
     }
@@ -2620,13 +2826,13 @@ export function ProjectsBoardPanel({
         case bulkHeldReason !== undefined:
           return bulkHeldReason;
         // A move needs a column to write, which two of the board's states don't
-        // offer — the same pair `moveHeldFor` refuses a single card for. A table
-        // says so in its own terms: its project may well have a field to group
-        // by, and it is the VIEW that draws no sections.
+        // offer — the same pair `moveHeldFor` refuses a single card for. Rows say
+        // so in their own terms: the project may well have a field to group by,
+        // and it is the VIEW that draws no sections.
         case verb === "move" && bucketField === null:
-          return tableView === null
+          return surface === "board"
             ? NO_GROUP_FIELDS_REASON
-            : TABLE_UNGROUPED_MOVE_REASON;
+            : ROWS_UNGROUPED_MOVE_REASON[surface];
         case verb === "move" &&
           bucketField?.kind === "singleSelect" &&
           bucketField.isIssueField:
@@ -2713,7 +2919,7 @@ export function ProjectsBoardPanel({
     // this sets where the arrows resume, never where focus goes.
     if (at !== null && item !== undefined) {
       setCursor(at);
-      if (tableView !== null) {
+      if (rowView !== null) {
         const cellCol = Number(
           el?.closest<HTMLElement>("[data-col-index]")?.dataset.colIndex,
         );
@@ -2992,6 +3198,125 @@ export function ProjectsBoardPanel({
     );
   }
 
+  /**
+   * Why a date shift can't write for `item` in `mode`, or undefined when it can.
+   * The in-cell editor's own derivation (`cellEditHeld`) over the fields this mode
+   * WRITES, under a board hold that skips this card's own shift in flight: the
+   * hook coalesces those, which is what lets a held key's burst land.
+   *
+   * The re-read arms are `cellBoardHeld`'s and for its reason: a shift is seeded
+   * from the cached dates, and until a write's re-read lands those can predate it
+   * (a bulk field edit patches nothing), so a shift would silently undo it. The
+   * reconciliation ledger doesn't say WHOSE write a lens owes, so a burst's own
+   * settle holds too: a key still held past it pauses until that re-read lands.
+   */
+  function shiftHeldFor(
+    item: BoardItem,
+    mode: "move" | "resize",
+  ): string | undefined {
+    const boardHeld = (() => {
+      switch (true) {
+        case projectScopeReadOnly(scopes.data):
+          return BOARD_READ_ONLY_SCOPE_REASON;
+        case project !== null && !project.viewerCanUpdate:
+          return NO_ACCESS_REASON;
+        case lensLoading:
+          return LENS_LOADING_REASON;
+        case bulkWritePending:
+          return bulkPendingReason;
+        case movePending:
+          return MOVING_REASON[noun];
+        case pendingWrites.some(
+          (w) =>
+            w.itemId === item.itemId &&
+            w.kind !== null &&
+            w.kind !== "shift-dates" &&
+            CARD_WRITE_KINDS.has(w.kind),
+        ):
+          return ITEM_WRITE_REASON[noun];
+        case items.isFetchingNextPage:
+          return LOADING_PAGE_REASON;
+        case refreshingAfterWrite || rereadStall === "owed":
+          return UPDATING_REASON[surface];
+        case rereadFailed:
+          return REREAD_FAILED_REASON[surface];
+        default:
+          return undefined;
+      }
+    })();
+    const written =
+      mode === "resize"
+        ? [dateSources.target]
+        : [dateSources.start, dateSources.target];
+    for (const source of written) {
+      const def =
+        source === null
+          ? undefined
+          : fieldDefs.find((f) => f.id === source.fieldId);
+      if (def === undefined || !isWritable(def)) continue;
+      const held = cellEditHeld(boardHeld, item, def);
+      if (held !== undefined) return held;
+    }
+    return boardHeld;
+  }
+
+  /**
+   * One date-shift chord on a roadmap lane: the item's span a day (or an
+   * iteration) either way, or its target alone. A refusal is announced AND
+   * toasted, the reorder chords' pair, since no greyed control is on screen to
+   * say why. The cursor rides the row by identity and re-claims its lane, since a
+   * view sorted by the shifted field moves the row.
+   */
+  function shiftItemDates(
+    item: BoardItem,
+    mode: "move" | "resize",
+    dir: -1 | 1,
+  ) {
+    if (projectId === null) return;
+    const held = shiftHeldFor(item, mode);
+    const plan =
+      held === undefined
+        ? planShift(item, dateSources, fieldDefs, calendars, mode, dir)
+        : ({ kind: "held", reason: held } as const);
+    if (plan.kind === "held") {
+      announce(plan.reason);
+      toast(plan.reason, { id: SHIFT_REFUSAL_TOAST_ID });
+      return;
+    }
+    const title =
+      item.content.kind === "redacted"
+        ? "Redacted item"
+        : item.content.title || "Draft item";
+    announce(`${title} — ${spanText(plan.span, localDateISO(Date.now()))}`);
+    setTableCursor({ rowKey: itemRowKey(item.itemId), colIndex: 1 });
+    setFocusNonce((n) => n + 1);
+    // The lens this write belongs to travels WITH it, the rule `moveCard` states.
+    void shiftWrite
+      .mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemId: item.itemId,
+        values: plan.values,
+        query: lensQuery,
+        archived: showArchived,
+        rich: tableView !== null,
+      })
+      .then(
+        (outcome) => {
+          if (outcome.kind !== "exhausted") return;
+          // Out of chase rounds with no failure: the press outran the writes, and
+          // the settle's re-read now shows the dates GitHub did save.
+          announce(
+            outcome.error === undefined
+              ? `Stopped saving ${title}'s dates partway; refreshing to show what GitHub saved`
+              : `Couldn't save all of ${title}'s dates`,
+          );
+        },
+        // The hook rolled the dates back and toasted why; this says so aloud.
+        () => announce(`Couldn't move ${title}, its dates are back`),
+      );
+  }
+
   /** Put one searched issue or pull request on the board. Owned here rather than in
    *  the dialog so the toolbar's write indicator can see it, and so the toast
    *  names the board from the same place every other message about it does.
@@ -3151,7 +3476,7 @@ export function ProjectsBoardPanel({
     const prompt = {
       archive: {
         title: `Archive this ${noun}?`,
-        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"](noun),
+        body: ARCHIVE_BODY[showArchived ? "shown" : "hidden"](noun, surface),
         confirmLabel: "Archive",
       },
       remove: {
@@ -3181,9 +3506,7 @@ export function ProjectsBoardPanel({
             itemId: item.itemId,
             ...at,
             slot:
-              tableView === null
-                ? null
-                : itemRowSlot(tableEntries, item.itemId),
+              rowView === null ? null : itemRowSlot(tableEntries, item.itemId),
           },
     );
     // `wasArchived` rides the write because it is a COUNT axis the cache key can't
@@ -3356,7 +3679,11 @@ export function ProjectsBoardPanel({
       action === "archive"
         ? {
             title: `Archive ${cardCount(n, noun)}?`,
-            body: BULK_ARCHIVE_BODY[showArchived ? "shown" : "hidden"](n, noun),
+            body: BULK_ARCHIVE_BODY[showArchived ? "shown" : "hidden"](
+              n,
+              noun,
+              surface,
+            ),
             confirmLabel: "Archive",
           }
         : {
@@ -3417,7 +3744,7 @@ export function ProjectsBoardPanel({
             itemId: anchor.itemId,
             ...anchorAt,
             slot:
-              tableView === null
+              rowView === null
                 ? null
                 : itemRowSlot(tableEntries, anchor.itemId),
           },
@@ -3549,8 +3876,8 @@ export function ProjectsBoardPanel({
   const fieldsPending = canRead && projectId !== null && fields.isPending;
   const groupHeldReason = (() => {
     switch (true) {
-      case tableView !== null:
-        return TABLE_GROUPING_REASON;
+      case surface !== "board":
+        return ROWS_GROUPING_REASON[surface];
       case fieldsPending:
         return LOADING_FIELDS_REASON;
       // Ahead of the settled-empty claim: a FAILED read is neither pending nor
@@ -3563,6 +3890,24 @@ export function ProjectsBoardPanel({
         return FIELDS_ERROR_REASON;
       case groupFields.length === 0:
         return NO_GROUP_FIELDS_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  // The roadmap's date-source rows, ranked like Group by's: an unsettled or failed
+  // read is not the settled claim that the project defines no such field.
+  const sourceFields = fieldDefs.filter(
+    (def): def is Extract<ProjectFieldDef, { kind: "date" | "iteration" }> =>
+      def.kind === "date" || def.kind === "iteration",
+  );
+  const dateSourceHeldReason = (() => {
+    switch (true) {
+      case fieldsPending:
+        return LOADING_FIELDS_REASON;
+      case fields.error !== null && sourceFields.length === 0:
+        return FIELDS_ERROR_REASON;
+      case sourceFields.length === 0:
+        return NO_DATE_FIELDS_REASON;
       default:
         return undefined;
     }
@@ -3604,6 +3949,39 @@ export function ProjectsBoardPanel({
   // reading, so no id on the control itself.
   const groupLabelId = useId();
   const viewLabelId = useId();
+  const startLabelId = useId();
+  const targetLabelId = useId();
+  const zoomLabelId = useId();
+
+  /** Pick one end's date source from View options. Built over the EFFECTIVE
+   *  sources, so a pick the definitions dropped isn't revived beside the new one. */
+  function pickDateSource(end: keyof DateSources, rowId: string) {
+    const def = sourceFields.find((f) => f.id === rowId);
+    const source: DateSource | null =
+      def === undefined ? null : { kind: def.kind, fieldId: def.id };
+    setDatePicks({ ...dateSources, [end]: source });
+  }
+
+  /** One step along Month ↔ Quarter ↔ Year; the ends say so rather than wrap. */
+  function stepZoom(dir: "in" | "out") {
+    const next = ZOOMS[ZOOMS.indexOf(zoom) + (dir === "in" ? -1 : 1)];
+    if (next === undefined) {
+      announce(ZOOM_END_REASON[dir]);
+      return;
+    }
+    setZoom(next);
+    announce(`Zoom: ${ZOOM_LABEL[next]}`);
+  }
+  // Palette-only, like every View options row: live wherever a roadmap view is
+  // on, each answering its own end.
+  const roadmapOn = active && roadmapView !== null;
+  useHotkeyAction("roadmap-zoom-in", () => stepZoom("in"), roadmapOn);
+  useHotkeyAction("roadmap-zoom-out", () => stepZoom("out"), roadmapOn);
+  useHotkeyAction(
+    "roadmap-jump-to-today",
+    () => setTodayNonce((n) => n + 1),
+    roadmapOn,
+  );
   const portalContainer = usePanelPortalContainer();
   const projectTitles: Record<string, string> = {};
   for (const p of openProjects) projectTitles[p.id] = p.title;
@@ -3669,7 +4047,7 @@ export function ProjectsBoardPanel({
       // appended now would extend pages that don't show that write, and its success
       // would stamp them fresh. The refresh comes first (a FAILED one is below).
       case items.isFetching || rereadStall === "owed":
-        return `Refreshing the ${SURFACE[noun]}…`;
+        return `Refreshing the ${surface}…`;
       // The mirror of the menu's own page-fetch hold, and the same mechanism read
       // from the other side: EVERY write here settles by cancelling this query's
       // family to force the reconciliation, and query-core's cancel REVERTS
@@ -3703,7 +4081,7 @@ export function ProjectsBoardPanel({
       // exactly the right move.
       case (items.isError && !items.isFetchNextPageError) ||
         rereadStall === "failed":
-        return `The ${SURFACE[noun]}'s last refresh failed. Retry the refresh before loading more.`;
+        return `The ${surface}'s last refresh failed. Retry the refresh before loading more.`;
       default:
         return undefined;
     }
@@ -3771,7 +4149,7 @@ export function ProjectsBoardPanel({
     menuTarget === null
       ? undefined
       : menuPos === null
-        ? CARD_GONE_REASON[noun]
+        ? CARD_GONE_REASON[surface]
         : reorderHeldFor(menuTarget.item);
   // The menu's BULK arm, or null for the single-card one. Present exactly when the
   // card the menu opened on is one of SEVERAL selected — the open gate collapses
@@ -3807,7 +4185,7 @@ export function ProjectsBoardPanel({
    * subtree held.
    */
   function boardMenu(
-    layout: "board" | "table",
+    layout: Surface,
     trigger: ReactElement,
     content: ReactNode,
   ) {
@@ -3920,11 +4298,12 @@ export function ProjectsBoardPanel({
     !lensLoading &&
     hasPages &&
     loaded.length === 0;
-  // The TABLE-EXIT handoff: the body stops drawing the table while a cell held
-  // focus, and the grid's own recovery can't land it, having unmounted too. Read off
-  // the DOM the body really drew, never a copy of its arm ladder. Each arm lands per
-  // {@link focusBodyLanding}; the toolbar (Add item) is drawn only under
-  // `showBoardChrome`, GitHub with the scope and a project:
+  // The TABLE-EXIT handoff: the body stops drawing the table (or the roadmap, the
+  // other row grid) while a cell held focus, and the grid's own recovery can't
+  // land it, having unmounted too. Read off the DOM the body really drew, never a
+  // copy of its arm ladder. Each arm lands per {@link focusBodyLanding}; the
+  // toolbar (Add item) is drawn only under `showBoardChrome`, GitHub with the
+  // scope and a project:
   // - forge probe failed: Retry (marked).
   // - forge detecting: skeleton, no chrome, no control: the panel root.
   // - another provider: notice, no chrome, no control: the panel root.
@@ -3950,7 +4329,7 @@ export function ProjectsBoardPanel({
     const identity = JSON.stringify([repoPath, projectId]);
     const wasTable = drewTableRef.current;
     const repointed = bodyIdentityRef.current !== identity;
-    drewTableRef.current = layout === "table";
+    drewTableRef.current = layout === "table" || layout === "roadmap";
     bodyIdentityRef.current = identity;
     if (!wasTable || layout !== undefined || repointed) return;
     if (boardCursorSeed !== null) return;
@@ -4100,7 +4479,7 @@ export function ProjectsBoardPanel({
             label={view?.name || UNTITLED_VIEW}
             columns={tableCols}
             rows={tableEntries}
-            sortKeys={tableSortKeys}
+            sortKeys={rowSortKeys}
             cursor={tablePos}
             focusNonce={focusNonce}
             selectedIds={selectedIds}
@@ -4119,6 +4498,58 @@ export function ProjectsBoardPanel({
             onFocusLost={focusLanding}
             onKeyDown={onTableKeyDown}
           />,
+        );
+      // A saved ROADMAP view draws as a timeline, under the table's own row
+      // grammar — the same menu, selection, verbs and keyboard walk, with a lane
+      // in place of the field columns.
+      case roadmapView !== null:
+        return boardMenu(
+          "roadmap",
+          <div
+            data-board-layout="roadmap"
+            className="flex min-h-0 flex-1 flex-col"
+            onPointerDownCapture={handleCardPointerDown}
+            onMouseDownCapture={handleCardMouseDown}
+            onClickCapture={handleCardClickCapture}
+            onContextMenuCapture={handleCardContextMenu}
+          />,
+          <>
+            {/* In the flow above the grid, never over it: with nothing to place
+                items by, every lane reads "No dates" and this says what to do. */}
+            {dateSources.start === null && dateSources.target === null && (
+              <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                <span>{ROADMAP_NO_SOURCES_NOTE}</span>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => setViewOptionsOpen(true)}
+                >
+                  View options
+                </Button>
+              </div>
+            )}
+            <ProjectsRoadmapView
+              label={view?.name || UNTITLED_VIEW}
+              rows={tableEntries}
+              cursor={tablePos}
+              focusNonce={focusNonce}
+              todayNonce={todayNonce}
+              selectedIds={selectedIds}
+              selectionSize={selectionSize}
+              busyItemId={busyItemId}
+              peekItemId={peekItemId}
+              items={roadmapItems}
+              sources={dateSources}
+              calendars={calendars}
+              zoom={zoom}
+              onCellFocus={onTableCellFocus}
+              onToggleGroup={toggleGroup}
+              onActivate={activateRow}
+              onPeekChange={setPeekItemId}
+              onFocusLost={focusLanding}
+              onKeyDown={onTableKeyDown}
+            />
+          </>,
         );
       default:
         return boardMenu(
@@ -4206,6 +4637,13 @@ export function ProjectsBoardPanel({
         key: write.mutationId,
         label: `Repositioning a ${noun}…`,
       });
+    } else if (write.kind === "shift-dates") {
+      // The reposition's reason: a held key's burst can still be reaching GitHub
+      // after the bar settled where the user left it.
+      pendingLines.push({
+        key: write.mutationId,
+        label: `Saving a ${noun}'s dates…`,
+      });
     }
   }
 
@@ -4221,7 +4659,7 @@ export function ProjectsBoardPanel({
       // An owed lens (offline included) is still waiting on its read, so the slot
       // agrees with the cells' hold rather than going quiet.
       case refreshingAfterWrite || rereadStall === "owed":
-        return `Updating the ${SURFACE[noun]}…`;
+        return `Updating the ${surface}…`;
       default:
         return null;
     }
@@ -4455,7 +4893,10 @@ export function ProjectsBoardPanel({
               this one trigger, so later slices add rows here rather than more
               toolbar chrome. The project switcher stays outside it: a project
               title already says what it is. */}
-          <Popover.Root>
+          <Popover.Root
+            open={viewOptionsOpen}
+            onOpenChange={setViewOptionsOpen}
+          >
             <Popover.Trigger render={<Button variant="outline" size="sm" />}>
               <FadersHorizontalIcon data-icon="inline-start" />
               View options
@@ -4553,6 +4994,55 @@ export function ProjectsBoardPanel({
                         </>
                       )}
                     </div>
+                    {/* A roadmap's own rows, present only while one is on: GitHub
+                        serves no date mapping for a roadmap view, so which fields
+                        place an item is picked here, seeded when the view is. */}
+                    {roadmapView !== null && (
+                      <>
+                        <DateSourceRows
+                          labelId={startLabelId}
+                          label="Start field"
+                          heldReason={dateSourceHeldReason}
+                          fields={sourceFields}
+                          value={dateSources.start}
+                          onPick={(rowId) => pickDateSource("start", rowId)}
+                        />
+                        <DateSourceRows
+                          labelId={targetLabelId}
+                          label="Target field"
+                          heldReason={dateSourceHeldReason}
+                          fields={sourceFields}
+                          value={dateSources.target}
+                          onPick={(rowId) => pickDateSource("target", rowId)}
+                        />
+                        <div className="space-y-1">
+                          <p
+                            id={zoomLabelId}
+                            className="px-1 text-xs text-muted-foreground"
+                          >
+                            Zoom
+                          </p>
+                          <RadioGroup
+                            className="gap-0"
+                            aria-labelledby={zoomLabelId}
+                            value={zoom}
+                            onValueChange={(next) => {
+                              const picked = ZOOMS.find((z) => z === next);
+                              if (picked !== undefined) setZoom(picked);
+                            }}
+                          >
+                            {ZOOMS.map((z) => (
+                              <label key={z} className={GROUP_ROW_CLASS}>
+                                <Radio value={z} />
+                                <span className="min-w-0 truncate">
+                                  {ZOOM_LABEL[z]}
+                                </span>
+                              </label>
+                            ))}
+                          </RadioGroup>
+                        </div>
+                      </>
+                    )}
                     <div className="space-y-1">
                       {/* Names the GROUP, which is what carries the meaning here:
                           the label plus the checked row reads as "Group by …,
@@ -4755,7 +5245,7 @@ export function ProjectsBoardPanel({
             <span>{FLAT_FALLBACK_NOTE[view.layout]}</span>
           )}
           {tableUngrouped !== null && <span>{tableUngrouped}</span>}
-          {tableSortDropped !== null && <span>{tableSortDropped}</span>}
+          {rowSortDropped !== null && <span>{rowSortDropped}</span>}
           {lensQuery !== null && (
             <span className="flex min-w-0 items-center gap-1">
               Filter:
