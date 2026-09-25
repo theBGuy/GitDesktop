@@ -451,8 +451,29 @@ export interface TableColumn {
 
 /** Title is a `system` field told apart by `dataType`, never by its renamable
  *  name. */
-function isTitleDef(def: ProjectFieldDef): boolean {
+export function isTitleDef(def: ProjectFieldDef): boolean {
   return def.kind === "system" && def.dataType === "TITLE";
+}
+
+/**
+ * A view's visible fields after the fields editor, in the project's FIELD-DEFINITION
+ * order: GitHub stores the checked set that way whatever order a write sends
+ * (measured live), so the optimistic patch matches the answer instead of
+ * reshuffling when it lands. Title always stays (a view hiding it is unprobed),
+ * and an id the editor never offered (a field past the definitions' cap) is kept
+ * after the rest, since nobody could have unchecked it.
+ */
+export function nextVisibleFieldIds(
+  currentIds: readonly string[],
+  defs: readonly ProjectFieldDef[],
+  checkedIds: ReadonlySet<string>,
+): string[] {
+  const offered = new Set(defs.map((def) => def.id));
+  const next = new Set<string>();
+  for (const def of defs)
+    if (checkedIds.has(def.id) || isTitleDef(def)) next.add(def.id);
+  for (const id of currentIds) if (!offered.has(id)) next.add(id);
+  return [...next];
 }
 
 /** Stands in for a Title definition the board's field read didn't carry, so a

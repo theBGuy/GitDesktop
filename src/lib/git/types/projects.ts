@@ -6,6 +6,12 @@ export interface ProjectV2Ref {
   closed: boolean;
   /** Whether the viewer may add/remove items — false rows stay visible but held. */
   viewerCanUpdate: boolean;
+  /** GitHub's own verdicts for closing and reopening, which gate apart from
+   *  `viewerCanUpdate`. False when a read didn't carry them. */
+  viewerCanClose: boolean;
+  viewerCanReopen: boolean;
+  /** The project's one-line description. ABSENT (not null) when it has none. */
+  shortDescription?: string;
 }
 
 /** One membership: the item's own node id on that board, plus the board. The
@@ -30,6 +36,22 @@ export interface AvailableProjects {
   /** The server capped the list, or one catalog arm didn't answer (denied);
    *  the UI says so rather than implying completeness. */
   truncated: boolean;
+  /** The node ids a new project is created under (the owner) and linked to (the
+   *  repository). Null when the repository arm didn't answer. */
+  repositoryId: string | null;
+  /** The names a create shows for those ids, each read from the same arm as its
+   *  id: the repository a new project is linked to, and the account it's under. */
+  repositoryNameWithOwner: string | null;
+  ownerId: string | null;
+  ownerLogin: string | null;
+}
+
+/** A project details write. An ABSENT key leaves that detail as it is; an empty
+ *  `shortDescription` clears it. */
+export interface ProjectPatch {
+  title?: string;
+  shortDescription?: string;
+  closed?: boolean;
 }
 
 /** An unlink target. Both ids are required: the mutation removes `itemId` from
@@ -268,6 +290,26 @@ export interface ProjectViewDef {
 export interface ProjectViews {
   views: ProjectViewDef[];
   truncated: boolean;
+}
+
+/** A layout a view can be WRITTEN in — `unknown` is a read-side fallback only. */
+export type ProjectViewLayout = Exclude<ProjectViewDef["layout"], "unknown">;
+
+/** A saved view write. An ABSENT key leaves that part of the view as it is.
+ *  There is no filter here: the app never composes one. */
+export interface ProjectViewPatch {
+  name?: string;
+  layout?: ProjectViewLayout;
+  visibleFieldIds?: string[];
+}
+
+/** What a duplicate copies from its source. Grouping and sort aren't here:
+ *  GitHub's view writes have no input for either. */
+export interface DuplicateViewSource {
+  name: string;
+  layout: ProjectViewLayout;
+  filter: string | null;
+  visibleFieldIds: string[];
 }
 
 /** The status values GitHub offers a project status update today — the ones this

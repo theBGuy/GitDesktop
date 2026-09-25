@@ -412,6 +412,40 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // The project board's container verbs, palette-only because their menu sits one
+  // Tab from the project picker. Registered by ProjectsBoardPanel.
+  {
+    id: "new-project",
+    label: "New project…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "edit-project-details",
+    label: "Edit project details…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  // One row for both directions: a palette label can't follow the board's state,
+  // so it names the toggle the way "Show or hide archived cards" does.
+  {
+    id: "close-reopen-project",
+    label: "Close or reopen project",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "delete-project",
+    label: "Delete project…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "new-project-view",
+    label: "New project view…",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // Registered by ProjectsPopover and ProjectFieldsEditor themselves — they mount
   // on the issue rail and the PR header alike, and the dispatcher runs whichever
   // registrant is enabled. Filed here rather than under Pull requests because

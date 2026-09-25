@@ -1946,11 +1946,14 @@ without leaving the app, and move a card along its columns without switching to 
 
 ## Picking a board and its columns
 
-The toolbar above the board holds your choices, all of them for this visit only — nothing is
-saved:
+The toolbar above the board holds your choices. Which board, which view, how it's grouped
+and whether archived cards show are for this visit only, so looking around saves nothing.
+Adding items and the project and view actions do change what's on GitHub:
 
-- **Project** lists the open boards this repository and its owner have, the repository's own
-  first. Closed boards aren't listed.
+- **Project** lists the boards this repository and its owner have, the repository's own
+  first. Closed ones follow in their own **Closed** group, each marked **(closed)**, and
+  open and work like any other board. The **⋯** menu beside it manages the project itself
+  (see *Managing projects and views*).
 - **Add item** puts work on the board (below).
 - **View options** gathers the controls for how the board is laid out. **View** picks one of
   the board's saved views as a lens over it (below). **Group by** picks which of the board's
@@ -2053,7 +2056,8 @@ GitHub.
 
 ## Saved views
 
-The views a board's owner set up on GitHub are listed under **View** in **View options**.
+A board's saved views, whether they were set up on GitHub or here, are listed under
+**View** in **View options**.
 Pick one and it becomes a lens over the board:
 
 - Its **filter** travels to GitHub with the read, so the columns and the count are the
@@ -2077,13 +2081,52 @@ A view saved as a **table** opens as a table (see *Working in the table*), and o
 a **roadmap** opens as a timeline (see *Working in the roadmap*). The strip above the board
 names the view and its filter, and carries **Clear view**;
 the command palette's **Clear project view** does the same from the keyboard, and **No
-view** in the popover is the third route back. Views are read-only in GitDesktop: picking
-one changes what you see, never what GitHub has saved.
+view** in the popover is the third route back. Picking a view changes what you see, never
+what GitHub has saved; changing the view itself is covered next.
 
 While a view's read is on its way, the board you were already looking at stays put, with
 the count, **Load more**, and the card menu's move rows held until the new one lands. A
 filter that matches nothing says so in place of the columns, and offers **Clear view**
 there too.
+
+## Managing projects and views
+
+The **⋯** menu beside **Project** looks after the project itself:
+
+- **New project…** creates one under this repository's owner and puts it on screen. It
+  is linked to this repository whenever GitDesktop could read the repository; the dialog
+  names the repository it links to, or says the project will be created unlinked under the
+  owner's account. It starts with a single table view and GitHub's default fields. A
+  repository with no projects offers **New project…** in place of the board.
+- **Edit details…** changes the title and the short description.
+- **Close project…** asks first, then files the project under **Closed** in the list; it
+  stays on screen and keeps working. **Reopen project** brings it back straight away.
+- **Delete project…** asks first, naming the project. Its items, fields, views and status
+  updates go with it, for everyone, and there's no undo. Draft items live only in the
+  project and go with it too; the issues and pull requests on it stay in their
+  repositories.
+
+Under the **View** list in **View options**, **New view…** adds a saved view with the name
+and layout (table, board or roadmap) you give it, and picks it. The rest act on the view the
+list has picked:
+
+- **Rename…** changes its name for everyone.
+- **Duplicate** makes **Copy of** the view, with its layout, filter and shown fields, and
+  picks the copy. The copy's shown fields follow the project's own field order, and GitHub
+  offers no way to write a view's grouping or sort, so the copy starts without them.
+- **Fields…** picks which of the project's fields the view shows. **Title** always stays,
+  and the shown fields follow the project's own field order.
+- **Delete…** asks first, naming the view. GitHub can't bring a deleted view back, and a
+  project always keeps one view, so Delete is held on its last.
+
+These project and view actions all need the \`project\` sign-in scope, and all but **New
+project…** also need write access to the project itself; a menu row or button that can't
+act says why. The command palette carries **New project…**, **Edit project details…**,
+**Close or reopen project**, **Delete project…** and **New project view…**.
+
+With a view on, **Layout** switches between table, board and roadmap for this visit only.
+Once the layout differs from the saved one, **Save layout to view** writes it to the view,
+which takes the same write access.
 
 ## Working in the table
 

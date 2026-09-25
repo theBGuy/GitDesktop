@@ -18,11 +18,13 @@ import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import * as api from "../api";
 import type {
   AssigneeRef,
+  AvailableProjects,
   BoardItem,
   BoardItemContent,
   BoardItems,
   BoardOrder,
   BulkItemOutcomes,
+  DuplicateViewSource,
   ItemFieldValues,
   ItemProjects,
   ProjectFieldDef,
@@ -31,11 +33,16 @@ import type {
   ProjectFieldValueUpdate,
   ProjectItemRemove,
   ProjectIterationDef,
+  ProjectPatch,
   ProjectStatusContent,
   ProjectStatusUpdate,
   ProjectStatusUpdates,
   ProjectStatusValue,
   ProjectV2Ref,
+  ProjectViewDef,
+  ProjectViewLayout,
+  ProjectViewPatch,
+  ProjectViews,
   RemoteLens,
 } from "../types";
 import {
@@ -66,6 +73,14 @@ import {
   replaceStatusUpdate,
 } from "./project-status-cache";
 
+/** Every lens's project catalog in one repo — the prefix
+ *  {@link projectsAvailableKey} extends, which a project write's settle re-reads. */
+const projectsAvailableFamilyKey = (repo: string) =>
+  ["repo", repo, "projects-available"] as const;
+
+const projectsAvailableKey = (repo: string, lens: RemoteLens) =>
+  [...projectsAvailableFamilyKey(repo), lens] as const;
+
 /** The GitHub Projects (v2) boards an item could join — repo-level plus the
  *  owner's. `retry: false` because the common failure is a missing `project`
  *  token scope, which no retry can fix; the picker renders the hint instead. */
@@ -75,7 +90,7 @@ export function useAvailableProjects(
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "projects-available", lens] as const,
+    queryKey: projectsAvailableKey(repo, lens),
     queryFn: () => api.ghProjectsAvailable(repo, lens),
     enabled,
     staleTime: 5 * 60_000,
@@ -3319,5 +3334,510 @@ export function useDeleteProjectStatusUpdate() {
       toastError(e);
     },
     onSettled: (_d, _e, args) => settleStatusUpdates(queryClient, args),
+  });
+}
+
+/** What a project write addresses: the repo it runs from and the catalog LENS a
+ *  create lands in. Call-time VARIABLES, as the status writes keep them, so a repo
+ *  switch mid-flight can't retarget the write or its patch. */
+interface ProjectWriteScope {
+  repo: string;
+  lens: RemoteLens;
+}
+
+/** What a saved-view write addresses: the repo and the project whose views it
+ *  patches, as variables for {@link ProjectWriteScope}'s reason. */
+interface ViewWriteScope {
+  repo: string;
+  projectId: string;
+}
+
+/** The keys the project and view writes carry. Prefixes of their own, never under
+ *  `board-write` or the status writes' key, for the reason {@link STATUS_WRITE_KEY}
+ *  gives; which project or repo a write addresses rides its variables. */
+const PROJECT_WRITE_KEY = ["project-write"] as const;
+const VIEW_WRITE_KEY = ["project-view-write"] as const;
+
+/** How many container settles are still waiting out the replica lag, per query
+ *  key hash. A read fired inside that window can answer from before the write,
+ *  undoing the answer the write patched in, so an on-demand refresh waits it out. */
+const lagWindowSettles = new Map<string, number>();
+
+/**
+ * Settles a project or view write by re-reading `queryKeys`: after GitHub's
+ * replicas have caught up (the item reads' measured margin; these container reads
+ * are unmeasured, so they take the same one). Each write's own answer is already
+ * in the cache, so an earlier read could only put back what it replaced: a new
+ * view vanishing retires the pick made on it. So a settle reads only when it is
+ * the LAST to close its scope's lag window and no sibling write is still out; any
+ * other settle leaves the read to that last one, which covers the same keys.
+ */
+function settleContainerWrite(
+  queryClient: QueryClient,
+  mutationKey: QueryKey,
+  inScope: (vars: Record<string, unknown>) => boolean,
+  queryKeys: QueryKey[],
+) {
+  const hashes = queryKeys.map((queryKey) => hashKey(queryKey));
+  for (const hash of hashes)
+    lagWindowSettles.set(hash, (lagWindowSettles.get(hash) ?? 0) + 1);
+  setTimeout(() => {
+    let siblingWindowOpen = false;
+    for (const hash of hashes) {
+      const left = (lagWindowSettles.get(hash) ?? 1) - 1;
+      if (left > 0) {
+        lagWindowSettles.set(hash, left);
+        siblingWindowOpen = true;
+      } else lagWindowSettles.delete(hash);
+    }
+    // A sibling's window is still open: its settle closes last and reads for both.
+    if (siblingWindowOpen) return;
+    const pending = queryClient.isMutating({
+      mutationKey,
+      predicate: (mutation) => {
+        const vars = mutation.state.variables;
+        return (
+          typeof vars === "object" &&
+          vars !== null &&
+          inScope(vars as Record<string, unknown>)
+        );
+      },
+    });
+    if (pending > 0) return;
+    for (const queryKey of queryKeys)
+      void queryClient.invalidateQueries({ queryKey });
+  }, REPLICA_LAG_MS);
+}
+
+/** A project write's settle: the catalog, and the membership reads the issue and
+ *  pull request rails show a project's title and state through. EVERY project
+ *  write re-reads all three, a create included: a settle skipped for a sibling
+ *  still in flight leaves the survivor to re-read for it, so each one must cover
+ *  every key any sibling would have. */
+function settleProjectWrite(queryClient: QueryClient, repo: string) {
+  settleContainerWrite(
+    queryClient,
+    PROJECT_WRITE_KEY,
+    (vars) => vars.repo === repo,
+    [
+      projectsAvailableFamilyKey(repo),
+      itemProjectsFamilyKey(repo),
+      itemFieldValuesFamilyKey(repo),
+    ],
+  );
+}
+
+function settleViewWrite(queryClient: QueryClient, scope: ViewWriteScope) {
+  settleContainerWrite(
+    queryClient,
+    VIEW_WRITE_KEY,
+    (vars) => vars.repo === scope.repo && vars.projectId === scope.projectId,
+    [projectViewsKey(scope.repo, scope.projectId)],
+  );
+}
+
+/**
+ * Re-reads one project's saved views on demand, so a view edited on GitHub shows
+ * without waiting out the 5-minute staleTime. Skipped while a view write on that
+ * project is in flight or its settle is still inside the replica lag: either way
+ * the cache holds a write's own answer, which an early read would undo.
+ */
+export function useRefreshProjectViews() {
+  const queryClient = useQueryClient();
+  return useCallback(
+    (repo: string, projectId: string) => {
+      const key = projectViewsKey(repo, projectId);
+      if (lagWindowSettles.has(hashKey(key))) return;
+      const writing = queryClient.isMutating({
+        mutationKey: VIEW_WRITE_KEY,
+        predicate: (mutation) => {
+          const vars = mutation.state.variables;
+          if (typeof vars !== "object" || vars === null) return false;
+          const scope = vars as Record<string, unknown>;
+          return scope.repo === repo && scope.projectId === projectId;
+        },
+      });
+      if (writing > 0) return;
+      void queryClient.invalidateQueries({ queryKey: key });
+    },
+    [queryClient],
+  );
+}
+
+/**
+ * Cancels `queryKey`'s in-flight reads before a write patches the cache, and
+ * names the ones that were FIRST loads: query-core's cancel reverts those to no
+ * data at all, and nothing but the lagged settle would fetch them again. The
+ * write re-fetches them itself (see {@link refetchStranded}).
+ */
+async function cancelForWrite(
+  queryClient: QueryClient,
+  queryKey: QueryKey,
+): Promise<QueryKey[]> {
+  const stranded = queryClient
+    .getQueryCache()
+    .findAll({ queryKey })
+    .filter(
+      (query) =>
+        query.state.data === undefined &&
+        query.state.fetchStatus === "fetching",
+    )
+    .map((query) => query.queryKey);
+  await queryClient.cancelQueries({ queryKey });
+  return stranded;
+}
+
+/** Re-fetches the first loads {@link cancelForWrite} cancelled, at once. */
+function refetchStranded(
+  queryClient: QueryClient,
+  stranded: QueryKey[] | undefined,
+) {
+  for (const queryKey of stranded ?? [])
+    void queryClient.invalidateQueries({ queryKey, exact: true });
+}
+
+function patchCatalog(
+  data: AvailableProjects | undefined,
+  patch: (projects: ProjectV2Ref[]) => ProjectV2Ref[],
+): AvailableProjects | undefined {
+  return data === undefined
+    ? data
+    : { ...data, projects: patch(data.projects) };
+}
+
+/** `project` with `patch` applied the way GitHub applies it: absent keys keep
+ *  their value, and an emptied description reads as none. */
+function patchedProject(
+  project: ProjectV2Ref,
+  patch: ProjectPatch,
+): ProjectV2Ref {
+  const next: ProjectV2Ref = {
+    ...project,
+    title: patch.title ?? project.title,
+    closed: patch.closed ?? project.closed,
+  };
+  if (patch.shortDescription !== undefined) {
+    if (patch.shortDescription === "") delete next.shortDescription;
+    else next.shortDescription = patch.shortDescription;
+  }
+  return next;
+}
+
+/**
+ * Creates a project under the catalog's owner, linked to this repository when a
+ * repository id is given. The answer joins the lens's catalog at once, first in
+ * the list (linked or not), since GitHub's reads can lag the write; the settle's
+ * re-read puts it where GitHub files it once they have caught up.
+ *
+ * Reporting is the hook's, never the caller's `mutate` options: the dialog that
+ * fires this can be closed over the write, and react-query drops mutate-scoped
+ * callbacks once the observer loses its listeners.
+ */
+export function useCreateProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: PROJECT_WRITE_KEY,
+    mutationFn: (
+      args: ProjectWriteScope & {
+        ownerId: string;
+        repositoryId: string | null;
+        title: string;
+      },
+    ) =>
+      api.ghCreateProject(
+        args.repo,
+        args.ownerId,
+        args.title,
+        args.repositoryId,
+      ),
+    onMutate: async (args) => ({
+      stranded: await cancelForWrite(
+        queryClient,
+        projectsAvailableKey(args.repo, args.lens),
+      ),
+    }),
+    onSuccess: (created, args) => {
+      queryClient.setQueryData<AvailableProjects>(
+        projectsAvailableKey(args.repo, args.lens),
+        (current) =>
+          patchCatalog(current, (projects) => [
+            created,
+            ...projects.filter((p) => p.id !== created.id),
+          ]),
+      );
+    },
+    onError: (e) => toastError(e),
+    onSettled: (_d, _e, args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      settleProjectWrite(queryClient, args.repo);
+    },
+  });
+}
+
+/**
+ * Renames, describes, closes or reopens a project. OPTIMISTIC in every lens's
+ * catalog: the picker reads the change at once, then GitHub's answer; a failure
+ * puts back that ONE project as it was.
+ */
+export function useUpdateProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: PROJECT_WRITE_KEY,
+    mutationFn: (
+      args: ProjectWriteScope & { projectId: string; patch: ProjectPatch },
+    ) => api.ghUpdateProject(args.repo, args.projectId, args.patch),
+    onMutate: async (args) => {
+      const family = projectsAvailableFamilyKey(args.repo);
+      const stranded = await cancelForWrite(queryClient, family);
+      const prev = queryClient
+        .getQueriesData<AvailableProjects>({ queryKey: family })
+        .flatMap(([, data]) => data?.projects ?? [])
+        .find((p) => p.id === args.projectId);
+      if (prev !== undefined)
+        queryClient.setQueriesData<AvailableProjects>(
+          { queryKey: family },
+          (current) =>
+            patchCatalog(current, (projects) =>
+              projects.map((p) =>
+                p.id === args.projectId ? patchedProject(p, args.patch) : p,
+              ),
+            ),
+        );
+      return { prev, stranded };
+    },
+    onSuccess: (updated, args) => {
+      queryClient.setQueriesData<AvailableProjects>(
+        { queryKey: projectsAvailableFamilyKey(args.repo) },
+        (current) =>
+          patchCatalog(current, (projects) =>
+            projects.map((p) => (p.id === updated.id ? updated : p)),
+          ),
+      );
+    },
+    onError: (e, args, ctx) => {
+      const prev = ctx?.prev;
+      if (prev !== undefined)
+        queryClient.setQueriesData<AvailableProjects>(
+          { queryKey: projectsAvailableFamilyKey(args.repo) },
+          (current) =>
+            patchCatalog(current, (projects) =>
+              projects.map((p) => (p.id === prev.id ? prev : p)),
+            ),
+        );
+      toastError(e);
+    },
+    onSettled: (_d, _e, args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      settleProjectWrite(queryClient, args.repo);
+    },
+  });
+}
+
+/** Deletes a project. Settle-driven rather than optimistic: the project leaves
+ *  every catalog once GitHub confirms, since there is no undelete to roll back to. */
+export function useDeleteProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: PROJECT_WRITE_KEY,
+    mutationFn: (args: ProjectWriteScope & { projectId: string }) =>
+      api.ghDeleteProject(args.repo, args.projectId),
+    onMutate: async (args) => ({
+      stranded: await cancelForWrite(
+        queryClient,
+        projectsAvailableFamilyKey(args.repo),
+      ),
+    }),
+    onSuccess: (_d, args) => {
+      queryClient.setQueriesData<AvailableProjects>(
+        { queryKey: projectsAvailableFamilyKey(args.repo) },
+        (current) =>
+          patchCatalog(current, (projects) =>
+            projects.filter((p) => p.id !== args.projectId),
+          ),
+      );
+    },
+    onError: (e) => toastError(e),
+    onSettled: (_d, _e, args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      settleProjectWrite(queryClient, args.repo);
+    },
+  });
+}
+
+function patchViews(
+  data: ProjectViews | undefined,
+  patch: (views: ProjectViewDef[]) => ProjectViewDef[],
+): ProjectViews | undefined {
+  return data === undefined ? data : { ...data, views: patch(data.views) };
+}
+
+/** `view` joined to the END of the list (where GitHub adds a new view), or put in
+ *  its own place when the list already carries it. For CREATES only. */
+function withView(views: ProjectViewDef[], view: ProjectViewDef) {
+  return views.some((v) => v.id === view.id)
+    ? views.map((v) => (v.id === view.id ? view : v))
+    : [...views, view];
+}
+
+/** `view` in its own place, and nothing when the list no longer carries it: an
+ *  update answering after a delete must not bring the deleted view back. */
+function replaceView(views: ProjectViewDef[], view: ProjectViewDef) {
+  return views.some((v) => v.id === view.id)
+    ? views.map((v) => (v.id === view.id ? view : v))
+    : views;
+}
+
+/** Joins a created view to its project's cached list. With NO list cached (the
+ *  write's own cancel reverted a first load) the answer seeds a one-view list,
+ *  marked TRUNCATED since it holds only what this write knows: a read fired now
+ *  could lag the write and come back without the new view, retiring the pick
+ *  made on it, so the settle's re-read replaces the seed. */
+function joinCreatedView(
+  queryClient: QueryClient,
+  scope: ViewWriteScope,
+  created: ProjectViewDef,
+) {
+  const key = projectViewsKey(scope.repo, scope.projectId);
+  if (queryClient.getQueryData<ProjectViews>(key) === undefined) {
+    queryClient.setQueryData<ProjectViews>(key, {
+      views: [created],
+      truncated: true,
+    });
+    return;
+  }
+  queryClient.setQueryData<ProjectViews>(key, (current) =>
+    patchViews(current, (views) => withView(views, created)),
+  );
+}
+
+/** Adds a saved view. GitHub's answer joins the switcher at once, for the lag
+ *  {@link useCreateProject} describes, so the caller can pick it straight away. */
+export function useCreateProjectView() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: VIEW_WRITE_KEY,
+    mutationFn: (
+      args: ViewWriteScope & { name: string; layout: ProjectViewLayout },
+    ) => api.ghCreateView(args.repo, args.projectId, args.name, args.layout),
+    onMutate: async (args) => ({
+      stranded: await cancelForWrite(
+        queryClient,
+        projectViewsKey(args.repo, args.projectId),
+      ),
+    }),
+    onSuccess: (created, args) => joinCreatedView(queryClient, args, created),
+    onError: (e, _args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      toastError(e);
+    },
+    onSettled: (_d, _e, args) => settleViewWrite(queryClient, args),
+  });
+}
+
+/** Copies a saved view: its layout, filter and visible fields. The copy joins the
+ *  switcher as {@link useCreateProjectView}'s does. A failure after the copy was
+ *  created says so, and the settle's re-read brings that copy in. */
+export function useDuplicateProjectView() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: VIEW_WRITE_KEY,
+    mutationFn: (args: ViewWriteScope & { source: DuplicateViewSource }) =>
+      api.ghDuplicateView(args.repo, args.projectId, args.source),
+    onMutate: async (args) => ({
+      stranded: await cancelForWrite(
+        queryClient,
+        projectViewsKey(args.repo, args.projectId),
+      ),
+    }),
+    onSuccess: (created, args) => joinCreatedView(queryClient, args, created),
+    onError: (e, _args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      toastError(e);
+    },
+    onSettled: (_d, _e, args) => settleViewWrite(queryClient, args),
+  });
+}
+
+/**
+ * Renames a view, changes its layout, or sets its visible fields. OPTIMISTIC: the
+ * view reads as edited at once, then as GitHub's answer; a failure puts back that
+ * ONE view as it was, onto the current cache.
+ */
+export function useUpdateProjectView() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: VIEW_WRITE_KEY,
+    mutationFn: (
+      args: ViewWriteScope & { viewId: string; patch: ProjectViewPatch },
+    ) => api.ghUpdateView(args.repo, args.viewId, args.patch),
+    onMutate: async (args) => {
+      const key = projectViewsKey(args.repo, args.projectId);
+      const stranded = await cancelForWrite(queryClient, key);
+      const prev = queryClient
+        .getQueryData<ProjectViews>(key)
+        ?.views.find((v) => v.id === args.viewId);
+      if (prev !== undefined)
+        queryClient.setQueryData<ProjectViews>(key, (current) =>
+          patchViews(current, (views) =>
+            views.map((v) => (v.id === prev.id ? { ...v, ...args.patch } : v)),
+          ),
+        );
+      return { prev, stranded };
+    },
+    onSuccess: (updated, args) => {
+      queryClient.setQueryData<ProjectViews>(
+        projectViewsKey(args.repo, args.projectId),
+        (current) =>
+          patchViews(current, (views) => replaceView(views, updated)),
+      );
+    },
+    onError: (e, args, ctx) => {
+      const prev = ctx?.prev;
+      if (prev !== undefined)
+        queryClient.setQueryData<ProjectViews>(
+          projectViewsKey(args.repo, args.projectId),
+          (current) =>
+            patchViews(current, (views) =>
+              views.map((v) => (v.id === prev.id ? prev : v)),
+            ),
+        );
+      toastError(e);
+    },
+    onSettled: (_d, _e, args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      settleViewWrite(queryClient, args);
+    },
+  });
+}
+
+/** Deletes a saved view. Settle-driven for {@link useDeleteProject}'s reason: the
+ *  view leaves the switcher once GitHub confirms, and a board drawn under it falls
+ *  back to no view the way any vanished view does. */
+export function useDeleteProjectView() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: VIEW_WRITE_KEY,
+    mutationFn: (args: ViewWriteScope & { viewId: string }) =>
+      api.ghDeleteView(args.repo, args.viewId),
+    onMutate: async (args) => ({
+      stranded: await cancelForWrite(
+        queryClient,
+        projectViewsKey(args.repo, args.projectId),
+      ),
+    }),
+    onSuccess: (_d, args) => {
+      queryClient.setQueryData<ProjectViews>(
+        projectViewsKey(args.repo, args.projectId),
+        (current) =>
+          patchViews(current, (views) =>
+            views.filter((v) => v.id !== args.viewId),
+          ),
+      );
+    },
+    onError: (e) => toastError(e),
+    onSettled: (_d, _e, args, ctx) => {
+      refetchStranded(queryClient, ctx?.stranded);
+      settleViewWrite(queryClient, args);
+    },
   });
 }

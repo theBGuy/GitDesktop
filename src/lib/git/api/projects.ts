@@ -8,15 +8,21 @@ import type {
   BoardOrder,
   BulkItemOutcomes,
   ConvertedDraft,
+  DuplicateViewSource,
   ItemFieldValues,
   ItemProjects,
   ProjectFieldDefs,
   ProjectFieldValueUpdate,
   ProjectItemRemove,
+  ProjectPatch,
   ProjectStatusContent,
   ProjectStatusUpdate,
   ProjectStatusUpdates,
   ProjectStatusValue,
+  ProjectV2Ref,
+  ProjectViewDef,
+  ProjectViewLayout,
+  ProjectViewPatch,
   ProjectViews,
   RemoteLens,
 } from "../types";
@@ -111,11 +117,75 @@ export const ghProjectItems = (
     rich,
   });
 
-/** One board's saved views — the lenses its owner set up on GitHub, read-only
- *  here. Board state like the field definitions, so no lens; capped server-side,
- *  which is what `truncated` reports. */
+/** One board's saved views — the lenses its owner set up on GitHub. Board state
+ *  like the field definitions, so no lens; capped server-side, which is what
+ *  `truncated` reports. */
 export const ghProjectViews = (repoPath: string, projectId: string) =>
   invoke<ProjectViews>("gh_project_views", { repoPath, projectId });
+
+/** Creates a project under `ownerId`, linked to `repositoryId` when one is given,
+ *  and answers with it as GitHub stored it. The project write family needs the
+ *  `project` token scope. */
+export const ghCreateProject = (
+  repoPath: string,
+  ownerId: string,
+  title: string,
+  repositoryId: string | null,
+) =>
+  invoke<ProjectV2Ref>("gh_create_project", {
+    repoPath,
+    ownerId,
+    title,
+    repositoryId,
+  });
+
+/** Renames, describes, closes or reopens a project. Only the patch's PRESENT keys
+ *  are written; answers with the project as GitHub now holds it. */
+export const ghUpdateProject = (
+  repoPath: string,
+  projectId: string,
+  patch: ProjectPatch,
+) => invoke<ProjectV2Ref>("gh_update_project", { repoPath, projectId, patch });
+
+/** Deletes a project and every item on it. GitHub has no undelete. */
+export const ghDeleteProject = (repoPath: string, projectId: string) =>
+  invoke<void>("gh_delete_project", { repoPath, projectId });
+
+/** Adds a saved view in `layout` and answers with it as GitHub stored it. */
+export const ghCreateView = (
+  repoPath: string,
+  projectId: string,
+  name: string,
+  layout: ProjectViewLayout,
+) =>
+  invoke<ProjectViewDef>("gh_create_view", {
+    repoPath,
+    projectId,
+    name,
+    layout,
+  });
+
+/** Renames a view, changes its layout, or sets its visible fields. Only the
+ *  patch's PRESENT keys are written. */
+export const ghUpdateView = (
+  repoPath: string,
+  viewId: string,
+  patch: ProjectViewPatch,
+) => invoke<ProjectViewDef>("gh_update_view", { repoPath, viewId, patch });
+
+/** Deletes a saved view. GitHub has no undelete for views. */
+export const ghDeleteView = (repoPath: string, viewId: string) =>
+  invoke<void>("gh_delete_view", { repoPath, viewId });
+
+/** Copies a view as "Copy of <name>": its layout, filter and visible fields. Two
+ *  writes backend-side, since GitHub has no copy mutation; a failure between them
+ *  rejects with an error saying the copy exists without its filter and fields. */
+export const ghDuplicateView = (
+  repoPath: string,
+  projectId: string,
+  source: DuplicateViewSource,
+) =>
+  invoke<ProjectViewDef>("gh_duplicate_view", { repoPath, projectId, source });
 
 /** One project's status updates, newest first — the first page only, which is
  *  what `truncated` reports. Project state like the saved views, so no lens. */

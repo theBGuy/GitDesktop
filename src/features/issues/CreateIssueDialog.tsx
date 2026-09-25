@@ -188,8 +188,8 @@ export function CreateIssueDialog({
     lens,
   );
   const addToProjects = useAddIssueToProjects();
-  // Closed boards are out for the same reason the board's own switcher drops them:
-  // a board nobody is working stands between the user and the one they came for.
+  // Closed boards stay out of this short picker: a board nobody is working stands
+  // between the user and the one a new issue is meant for.
   const openProjects = (projects.data?.projects ?? []).filter((p) => !p.closed);
   // Picked boards leave the list — the band already shows them, and a row that
   // can't change anything is noise in a popover this short. (LinkedIssuesField's

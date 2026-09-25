@@ -1267,6 +1267,8 @@ export const CHECKS = [
       // Same shape: a HARDCODED mod+enter submit chord on the status-update
       // dialog, not a user binding.
       "src/features/projects/ProjectStatusStrip.tsx",
+      // Same shape again: the project and view dialogs' mod+enter submit chord.
+      "src/features/projects/ProjectLifecycleDialogs.tsx",
       // Its two `eventToBinding` calls (the board's handler and the
       // table/roadmap grid's) test fixed tables, never a user binding: the
       // hardcoded Alt chords (four reorder, four date-shift) and the grid's own

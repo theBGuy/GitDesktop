@@ -2,13 +2,14 @@
 //! forge routing, since GitLab/Bitbucket have no equivalent resource.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
-use crate::github::runner::{run_gh, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
+use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 
 /// A project the signed-in user can see. `viewer_can_update` decides whether the
 /// picker may offer it as a link target; closed projects are returned too so the
@@ -21,6 +22,15 @@ pub struct ProjectV2Ref {
     pub number: u64,
     pub closed: bool,
     pub viewer_can_update: bool,
+    /// GitHub's own verdicts for the close and reopen writes, which gate apart
+    /// from `viewer_can_update`. False when a read didn't carry them.
+    pub viewer_can_close: bool,
+    pub viewer_can_reopen: bool,
+    /// Absent (not null) when the project has none, so a descriptionless project
+    /// keeps its wire shape. `PROJECT_FIELDS` is shared, so the membership reads
+    /// carry it too when present; their consumers accept the extra key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
 }
 
 /// One membership: the project plus the ITEM id inside it, which
@@ -49,6 +59,29 @@ pub struct AvailableProjects {
     /// fetched, or one arm didn't answer at all (denied). The picker says so
     /// rather than implying these are all of them.
     pub truncated: bool,
+    /// The repository's and its owner's node ids, which a create addresses: the
+    /// owner holds the new project and the repository is linked to it. The
+    /// repository id is None when its arm didn't answer; the owner id falls back to
+    /// the owner arm's, and is None only when neither arm named it.
+    pub repository_id: Option<String>,
+    /// The names a create dialog shows for those two ids, each from the same arm
+    /// as its id.
+    pub repository_name_with_owner: Option<String>,
+    pub owner_id: Option<String>,
+    pub owner_login: Option<String>,
+}
+
+/// The editable details of a project. Every field is optional and an absent one
+/// is OMITTED from the mutation, which GitHub reads as "leave it".
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -92,18 +125,32 @@ pub(super) fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
             .get("viewerCanUpdate")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        viewer_can_close: node
+            .get("viewerCanClose")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        viewer_can_reopen: node
+            .get("viewerCanReopen")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        short_description: node
+            .get("shortDescription")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
     })
 }
 
-pub(super) const PROJECT_FIELDS: &str = "id title number closed viewerCanUpdate";
+pub(super) const PROJECT_FIELDS: &str =
+    "id title number closed viewerCanUpdate viewerCanClose viewerCanReopen shortDescription";
 
 /// `repositoryOwner` resolves a User or an Organization and both implement
 /// `ProjectV2Owner`, so one inline fragment covers owner-level projects for either.
 fn available_query() -> String {
     format!(
         "query($owner:String!,$name:String!){{ \
-         repository(owner:$owner,name:$name){{ projectsV2(first:50){{ pageInfo{{ hasNextPage }} nodes{{ {PROJECT_FIELDS} }} }} }} \
-         repositoryOwner(login:$owner){{ ... on ProjectV2Owner{{ projectsV2(first:50){{ pageInfo{{ hasNextPage }} nodes{{ {PROJECT_FIELDS} }} }} }} }} \
+         repository(owner:$owner,name:$name){{ id nameWithOwner owner{{ id login }} projectsV2(first:50){{ pageInfo{{ hasNextPage }} nodes{{ {PROJECT_FIELDS} }} }} }} \
+         repositoryOwner(login:$owner){{ id login ... on ProjectV2Owner{{ projectsV2(first:50){{ pageInfo{{ hasNextPage }} nodes{{ {PROJECT_FIELDS} }} }} }} }} \
          }}"
     )
 }
@@ -159,9 +206,30 @@ fn merge_available(value: &Value) -> AvailableProjects {
         .chain(owner_level)
         .filter(|p| seen.insert(p.id.clone()))
         .collect();
+    let id_at = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    };
+    // The repository arm's owner first; the owner arm's own id keeps a create
+    // possible when only the repository arm was denied. The login rides with the
+    // id from the SAME arm, so the name a dialog shows is the account written to.
+    let (owner_id, owner_login) = match id_at("/data/repository/owner/id") {
+        Some(id) => (Some(id), id_at("/data/repository/owner/login")),
+        None => (
+            id_at("/data/repositoryOwner/id"),
+            id_at("/data/repositoryOwner/login"),
+        ),
+    };
     AvailableProjects {
         projects,
         truncated: repo_more || owner_more || half_answered,
+        repository_id: id_at("/data/repository/id"),
+        repository_name_with_owner: id_at("/data/repository/nameWithOwner"),
+        owner_id,
+        owner_login,
     }
 }
 
@@ -365,6 +433,160 @@ pub async fn gh_edit_item_projects(
     .await
     .map_err(map_scope_error)?;
     Ok(())
+}
+
+const CREATE_PROJECT_POINTER: &str = "/data/createProjectV2/projectV2";
+const UPDATE_PROJECT_POINTER: &str = "/data/updateProjectV2/projectV2";
+const DELETE_PROJECT_POINTER: &str = "/data/deleteProjectV2";
+
+/// One project or view write, sent over stdin: titles and names ride as JSON
+/// variables, never through argv or spliced into the document.
+pub(super) async fn project_write(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> {
+    let out = run_gh_input(
+        Some(repo_path),
+        &GRAPHQL_INPUT_ARGS,
+        input,
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(map_scope_error)?;
+    serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
+}
+
+/// A title or name the server would refuse as blank, refused here in the
+/// dialog's own words. Trimmed, since a padded name is never what was meant.
+pub(super) fn required_text(value: &str, reason: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidArgument(reason.to_string()));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Creating under the owner AND linking the repository in one call, so the new
+/// board lands in this repository's catalog arm.
+fn create_project_input(
+    owner_id: &str,
+    title: &str,
+    repository_id: Option<&str>,
+) -> AppResult<String> {
+    let mut input = json!({
+        "ownerId": owner_id,
+        "title": required_text(title, "Give the project a title")?,
+    });
+    if let Some(repository_id) = repository_id.filter(|id| !id.is_empty()) {
+        input["repositoryId"] = json!(repository_id);
+    }
+    Ok(graphql_input(
+        &format!(
+            "mutation($input:CreateProjectV2Input!){{ createProjectV2(input:$input){{ projectV2{{ {PROJECT_FIELDS} }} }} }}"
+        ),
+        json!({ "input": input }),
+    ))
+}
+
+/// Only the patch's PRESENT fields reach the mutation. A patch with none of them
+/// is refused: an all-absent update is unprobed, and it would change nothing.
+fn update_project_input(project_id: &str, patch: ProjectPatch) -> AppResult<String> {
+    let patch = ProjectPatch {
+        title: patch
+            .title
+            .map(|t| required_text(&t, "Give the project a title"))
+            .transpose()?,
+        short_description: patch.short_description.map(|d| d.trim().to_string()),
+        closed: patch.closed,
+    };
+    if patch.title.is_none() && patch.short_description.is_none() && patch.closed.is_none() {
+        return Err(AppError::InvalidArgument(
+            "Nothing to change on the project".into(),
+        ));
+    }
+    let mut input = serde_json::to_value(&patch)
+        .map_err(|e| AppError::InvalidArgument(format!("unserializable project patch: {e}")))?;
+    input["projectId"] = json!(project_id);
+    Ok(graphql_input(
+        &format!(
+            "mutation($input:UpdateProjectV2Input!){{ updateProjectV2(input:$input){{ projectV2{{ {PROJECT_FIELDS} }} }} }}"
+        ),
+        json!({ "input": input }),
+    ))
+}
+
+fn delete_project_input(project_id: &str) -> String {
+    graphql_input(
+        "mutation($input:DeleteProjectV2Input!){ deleteProjectV2(input:$input){ clientMutationId } }",
+        json!({ "input": { "projectId": project_id } }),
+    )
+}
+
+fn response_project(value: &Value, pointer: &str, surface: &str) -> AppResult<ProjectV2Ref> {
+    value
+        .pointer(pointer)
+        .and_then(project_ref)
+        .ok_or_else(|| gh_unreadable(surface, format!("missing project at {pointer}")))
+}
+
+/// A create that timed out may still have landed on GitHub, so its error says so
+/// rather than inviting a retry that would make a second one. Any other error
+/// passes through untouched.
+pub(super) fn create_outcome_unknown(e: AppError, what: &str) -> AppError {
+    if matches!(e, AppError::Timeout(_)) {
+        return AppError::Gh(format!(
+            "GitHub didn't answer in time, so the {what} may still have been created. Check for it before trying again.\n{e}"
+        ));
+    }
+    e
+}
+
+/// Creates a project under `owner_id`, linked to `repository_id` when one is
+/// given, and answers with it as GitHub stored it.
+#[tauri::command]
+pub async fn gh_create_project(
+    repo_path: String,
+    owner_id: String,
+    title: String,
+    repository_id: Option<String>,
+) -> AppResult<ProjectV2Ref> {
+    let input = create_project_input(&owner_id, &title, repository_id.as_deref())?;
+    let value = project_write(&repo_path, &input, "the new project")
+        .await
+        .map_err(|e| create_outcome_unknown(e, "project"))?;
+    response_project(&value, CREATE_PROJECT_POINTER, "the new project")
+}
+
+/// Renames, describes, closes or reopens a project; absent patch fields are left
+/// as they are.
+#[tauri::command]
+pub async fn gh_update_project(
+    repo_path: String,
+    project_id: String,
+    patch: ProjectPatch,
+) -> AppResult<ProjectV2Ref> {
+    let input = update_project_input(&project_id, patch)?;
+    let value = project_write(&repo_path, &input, "the updated project").await?;
+    response_project(&value, UPDATE_PROJECT_POINTER, "the updated project")
+}
+
+/// Deletes a project and every item on it. GitHub has no undelete.
+#[tauri::command]
+pub async fn gh_delete_project(repo_path: String, project_id: String) -> AppResult<()> {
+    let value = project_write(
+        &repo_path,
+        &delete_project_input(&project_id),
+        "the deleted project",
+    )
+    .await?;
+    if value
+        .pointer(DELETE_PROJECT_POINTER)
+        .is_some_and(Value::is_object)
+    {
+        return Ok(());
+    }
+    Err(gh_unreadable(
+        "the deleted project",
+        format!("missing payload at {DELETE_PROJECT_POINTER}"),
+    ))
 }
 
 #[cfg(test)]
@@ -740,5 +962,261 @@ mod tests {
         let out = parse_item_projects(&value, "issue");
         assert!(out.items.is_empty());
         assert!(!out.truncated);
+    }
+
+    fn assert_keys(value: &Value, expected: &[&str]) {
+        let mut actual: Vec<_> = value
+            .as_object()
+            .expect("wire object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    fn input_json(input: &str) -> Value {
+        serde_json::from_str(input).expect("input is JSON")
+    }
+
+    #[test]
+    fn the_catalog_carries_the_ids_a_create_addresses() {
+        let merged = |raw: &str| {
+            serde_json::to_value(merge_available(
+                &serde_json::from_str::<Value>(raw).expect("valid JSON"),
+            ))
+            .expect("serializes")
+        };
+        const KEYS: &[&str] = &[
+            "projects",
+            "truncated",
+            "repositoryId",
+            "repositoryNameWithOwner",
+            "ownerId",
+            "ownerLogin",
+        ];
+        // Both arms answer: the repository arm's owner wins over the owner arm's,
+        // and its login rides with it.
+        let wire = merged(
+            r#"{"data":{
+                "repository":{"id":"R_repo","nameWithOwner":"octo/app",
+                    "owner":{"id":"U_owner","login":"octo"},
+                    "projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}},
+                "repositoryOwner":{"id":"U_other","login":"other",
+                    "projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}}
+            }}"#,
+        );
+        assert_keys(&wire, KEYS);
+        assert_eq!(wire["repositoryId"], "R_repo");
+        assert_eq!(wire["repositoryNameWithOwner"], "octo/app");
+        assert_eq!(wire["ownerId"], "U_owner");
+        assert_eq!(wire["ownerLogin"], "octo");
+        // A denied repository arm: the owner arm's own id and login keep a create
+        // possible, while the repository stays unknown rather than guessed.
+        let wire = merged(
+            r#"{"data":{"repository":null,
+                "repositoryOwner":{"id":"U_owner","login":"octo",
+                    "projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}"#,
+        );
+        assert_keys(&wire, KEYS);
+        assert_eq!(wire["repositoryId"], Value::Null);
+        assert_eq!(wire["repositoryNameWithOwner"], Value::Null);
+        assert_eq!(wire["ownerId"], "U_owner");
+        assert_eq!(wire["ownerLogin"], "octo");
+        // Neither arm names them: every key still PRESENT, as explicit nulls.
+        for raw in [
+            r#"{"data":{"repository":null,"repositoryOwner":null}}"#,
+            r#"{"data":{"repository":{"id":"","owner":null},"repositoryOwner":{"id":""}}}"#,
+        ] {
+            let wire = merged(raw);
+            assert_keys(&wire, KEYS);
+            for key in [
+                "repositoryId",
+                "repositoryNameWithOwner",
+                "ownerId",
+                "ownerLogin",
+            ] {
+                assert!(wire[key].is_null(), "{key} in {raw}");
+            }
+        }
+        let query = available_query();
+        assert!(query.contains(
+            "repository(owner:$owner,name:$name){ id nameWithOwner owner{ id login } projectsV2("
+        ));
+        assert!(query.contains("repositoryOwner(login:$owner){ id login ... on ProjectV2Owner{"));
+    }
+
+    #[test]
+    fn a_short_description_rides_only_when_the_project_has_one() {
+        let described = project_ref(&serde_json::json!({
+            "id":"PVT_a","title":"Roadmap","number":1,"closed":false,
+            "viewerCanUpdate":true,"shortDescription":"Q3 launch"
+        }))
+        .expect("has an id");
+        let wire = serde_json::to_value(&described).expect("serializes");
+        assert_eq!(wire["shortDescription"], "Q3 launch");
+        for node in [
+            serde_json::json!({"id":"PVT_b","shortDescription":null}),
+            serde_json::json!({"id":"PVT_c","shortDescription":""}),
+            serde_json::json!({"id":"PVT_d"}),
+        ] {
+            let wire =
+                serde_json::to_value(project_ref(&node).expect("has an id")).expect("serializes");
+            assert_keys(
+                &wire,
+                &[
+                    "id",
+                    "title",
+                    "number",
+                    "closed",
+                    "viewerCanUpdate",
+                    "viewerCanClose",
+                    "viewerCanReopen",
+                ],
+            );
+        }
+        assert!(PROJECT_FIELDS.split(' ').any(|f| f == "shortDescription"));
+    }
+
+    #[test]
+    fn close_and_reopen_verdicts_ride_as_github_sends_them() {
+        for field in ["viewerCanClose", "viewerCanReopen"] {
+            assert!(PROJECT_FIELDS.split(' ').any(|f| f == field));
+        }
+        let node = serde_json::json!({"id":"PVT_a","viewerCanUpdate":true,
+            "viewerCanClose":true,"viewerCanReopen":false});
+        let project = project_ref(&node).expect("has an id");
+        assert!(project.viewer_can_close);
+        assert!(!project.viewer_can_reopen);
+        // A read that didn't carry them holds both verbs rather than offering them.
+        let bare = project_ref(&serde_json::json!({"id":"PVT_b"})).expect("has an id");
+        assert!(!bare.viewer_can_close && !bare.viewer_can_reopen);
+    }
+
+    #[test]
+    fn create_links_the_repository_when_given_one() {
+        let input = input_json(
+            &create_project_input("U_owner", "  Launch  ", Some("R_repo")).expect("valid"),
+        );
+        assert_eq!(
+            input["variables"],
+            serde_json::json!({"input":{"ownerId":"U_owner","title":"Launch","repositoryId":"R_repo"}})
+        );
+        let document = input["query"].as_str().unwrap();
+        assert!(document.starts_with(
+            "mutation($input:CreateProjectV2Input!){ createProjectV2(input:$input){ projectV2{ "
+        ));
+        assert!(document.contains(PROJECT_FIELDS));
+        // No repository: the key is ABSENT, never a null or an empty id.
+        for repository_id in [None, Some("")] {
+            let input = input_json(
+                &create_project_input("U_owner", "Launch", repository_id).expect("valid"),
+            );
+            assert_keys(&input["variables"]["input"], &["ownerId", "title"]);
+        }
+        for title in ["", "   "] {
+            assert!(matches!(
+                create_project_input("U_owner", title, None),
+                Err(AppError::InvalidArgument(ref m)) if m == "Give the project a title"
+            ));
+        }
+    }
+
+    #[test]
+    fn update_sends_only_the_present_fields() {
+        let input = |patch: ProjectPatch| {
+            input_json(&update_project_input("PVT_one", patch).expect("valid patch"))
+        };
+        let closed = input(ProjectPatch {
+            closed: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(
+            closed["variables"],
+            serde_json::json!({"input":{"projectId":"PVT_one","closed":true}})
+        );
+        let details = input(ProjectPatch {
+            title: Some(" Renamed ".into()),
+            short_description: Some("".into()),
+            closed: None,
+        });
+        // An emptied description is a present field that CLEARS, never an omission.
+        assert_eq!(
+            details["variables"],
+            serde_json::json!({"input":{"projectId":"PVT_one","title":"Renamed","shortDescription":""}})
+        );
+        assert_keys(
+            &details["variables"]["input"],
+            &["projectId", "title", "shortDescription"],
+        );
+        assert!(details["query"].as_str().unwrap().starts_with(
+            "mutation($input:UpdateProjectV2Input!){ updateProjectV2(input:$input){ projectV2{ "
+        ));
+        // The frontend's patch deserializes with missing keys as absent.
+        let patch: ProjectPatch = serde_json::from_str(r#"{"closed":false}"#).expect("parses");
+        assert_keys(&serde_json::to_value(&patch).unwrap(), &["closed"]);
+    }
+
+    #[test]
+    fn an_empty_or_blank_titled_update_is_refused() {
+        assert!(matches!(
+            update_project_input("PVT_one", ProjectPatch::default()),
+            Err(AppError::InvalidArgument(ref m)) if m == "Nothing to change on the project"
+        ));
+        assert!(matches!(
+            update_project_input(
+                "PVT_one",
+                ProjectPatch {
+                    title: Some("  ".into()),
+                    ..Default::default()
+                }
+            ),
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn a_timed_out_create_says_it_may_have_landed() {
+        let AppError::Gh(message) = create_outcome_unknown(AppError::Timeout(120), "project")
+        else {
+            panic!("expected the Gh variant");
+        };
+        assert!(message.starts_with(
+            "GitHub didn't answer in time, so the project may still have been created."
+        ));
+        // Anything else is the write's own failure, and keeps its own words.
+        assert!(matches!(
+            create_outcome_unknown(AppError::Gh("denied".into()), "project"),
+            AppError::Gh(ref m) if m == "denied"
+        ));
+    }
+
+    #[test]
+    fn delete_addresses_the_project_by_variable() {
+        let input = input_json(&delete_project_input("PVT_\"x"));
+        assert_eq!(
+            input["variables"],
+            serde_json::json!({"input":{"projectId":"PVT_\"x"}})
+        );
+        assert!(!input["query"].as_str().unwrap().contains("PVT_"));
+    }
+
+    #[test]
+    fn mutation_answers_parse_or_fail_closed() {
+        let value = serde_json::json!({"data":{"createProjectV2":{"projectV2":{
+            "id":"PVT_new","title":"Launch","number":14,"closed":false,"viewerCanUpdate":true
+        }}}});
+        let project = response_project(&value, CREATE_PROJECT_POINTER, "x").expect("parses");
+        assert_eq!(project.id, "PVT_new");
+        assert_eq!(project.number, 14);
+        for value in [
+            serde_json::json!({"data":{"createProjectV2":{"projectV2":null}}}),
+            serde_json::json!({"data":{"createProjectV2":{"projectV2":{"title":"no id"}}}}),
+            serde_json::json!({"data":null}),
+        ] {
+            assert!(response_project(&value, CREATE_PROJECT_POINTER, "x").is_err());
+        }
     }
 }

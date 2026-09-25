@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import {
   CaretDownIcon,
+  DotsThreeIcon,
   FadersHorizontalIcon,
   InfoIcon,
   PlusIcon,
@@ -42,7 +43,9 @@ import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -79,6 +82,11 @@ import {
   useBulkRestoreBoardItems,
   useBulkSetItemFieldValues,
   useConvertDraftItem,
+  useCreateProject,
+  useCreateProjectView,
+  useDeleteProject,
+  useDeleteProjectView,
+  useDuplicateProjectView,
   useForgeStatus,
   useGhScopes,
   useMoveBoardCard,
@@ -86,11 +94,14 @@ import {
   useProjectFields,
   useProjectItems,
   useProjectViews,
+  useRefreshProjectViews,
   useRemoveBoardItem,
   useReorderBoardCard,
   useRestoreBoardItem,
   useShiftItemDates,
   useUpdateDraftItem,
+  useUpdateProject,
+  useUpdateProjectView,
 } from "@/lib/git/queries";
 import {
   type BoardCandidate,
@@ -99,7 +110,10 @@ import {
   type BulkItemOutcomes,
   type ProjectFieldDef,
   type ProjectFieldValueUpdate,
+  type ProjectPatch,
+  type ProjectV2Ref,
   type ProjectViewDef,
+  type ProjectViewLayout,
   type ProjectViewSort,
   providerLabel,
 } from "@/lib/git/types";
@@ -111,6 +125,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
 import { BoardBulkFieldsDialog } from "./BoardBulkFieldsDialog";
 import {
@@ -172,6 +187,14 @@ import {
   isWritable,
   valueKey,
 } from "./ProjectFieldControls";
+import {
+  EditProjectDialog,
+  NewProjectDialog,
+  VIEW_LAYOUT_LABEL,
+  VIEW_LAYOUTS,
+  ViewFieldsDialog,
+  ViewNameDialog,
+} from "./ProjectLifecycleDialogs";
 import {
   ProjectStatusSection,
   type StatusEditorState,
@@ -269,6 +292,47 @@ const BULK_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
 /** The board's dialogs, one open at a time. Two put work ON the board; the third
  *  rewrites a draft already there, and is reached from that card's menu. */
 type BoardDialog = "existing" | "draft" | "edit-draft";
+
+/** A project or saved-view dialog, with what it was opened on recorded at the
+ *  click: the dialogs stay mounted across open and close, so a seed they worked
+ *  out for themselves would describe whatever they last saw. */
+type LifecycleDialog =
+  | { kind: "new-project" }
+  | {
+      kind: "edit-project";
+      projectId: string;
+      title: string;
+      description: string;
+    }
+  | { kind: "new-view"; projectId: string }
+  | { kind: "rename-view"; projectId: string; view: ProjectViewDef }
+  | { kind: "view-fields"; projectId: string; view: ProjectViewDef };
+
+/** The shared empty id list, for a fields dialog with no view behind it. */
+const NO_FIELD_IDS: readonly string[] = [];
+
+/** The project and view verbs that write without a dialog of their own, and so
+ *  need their own single-flight guard. */
+type InFlightVerb =
+  | "close-reopen"
+  | "delete-project"
+  | "duplicate-view"
+  | "delete-view"
+  | "save-layout";
+
+/** Why no project can be created: the catalog named no owner to create it under. */
+const OWNER_UNKNOWN_REASON =
+  "Couldn't read who owns this repository, and a new project is created under that account";
+
+/** GitHub refuses to delete a project's last remaining view (probed live). */
+const LAST_VIEW_REASON =
+  "A project keeps its last view, so GitHub won't delete this one";
+/** Held while the open-time re-read of the views is on its way, so a copy or a
+ *  fields edit starts from what GitHub holds now. */
+const VIEWS_REFRESHING_REASON = "Refreshing this project's views…";
+
+const UNKNOWN_LAYOUT_REASON =
+  "This view is saved in a layout GitDesktop can't show, so it can't be copied or saved over here";
 
 /** Single-writer: two writes to one card's field settle in an order nothing
  *  promises, and an EARLIER move failing late puts the card back in a column a
@@ -967,20 +1031,25 @@ export function ProjectsBoardPanel({
   const saveSettings = useSaveSettings();
 
   const projects = useAvailableProjects(repoPath, canRead, lens);
-  // Closed boards are out in v1: they still hold items, but a board nobody is
-  // working stands between the user and the one they came for.
-  const openProjects = (projects.data?.projects ?? []).filter((p) => !p.closed);
+  // Open boards first, then the closed ones as their own group: a closed board
+  // still holds its items and stays fully workable, but a board nobody is working
+  // shouldn't stand between the user and the one they came for.
+  const catalog = projects.data?.projects ?? [];
+  const openProjects = catalog.filter((p) => !p.closed);
+  const closedProjects = catalog.filter((p) => p.closed);
+  const listedProjects = [...openProjects, ...closedProjects];
   const [pickedProjectId, setPickedProjectId] = useState<string | null>(null);
   // Derived, not stored: the catalog arrives after the first render and can
-  // change under the user, and a chosen board that has since closed or gone must
-  // fall back rather than leave the board reading an id nothing serves. The
-  // catalog's own order puts the repo's boards ahead of the owner's, so the
-  // fallback IS "first repo-linked, else first owner".
+  // change under the user, and a chosen board that has since gone must fall back
+  // rather than leave the board reading an id nothing serves. The catalog's own
+  // order puts the repo's boards ahead of the owner's, so the fallback IS "first
+  // open repo-linked, else first open owner", and a closed one only when that is
+  // all there is.
   const projectId =
-    openProjects.find((p) => p.id === pickedProjectId)?.id ??
-    openProjects[0]?.id ??
+    listedProjects.find((p) => p.id === pickedProjectId)?.id ??
+    listedProjects[0]?.id ??
     null;
-  const project = openProjects.find((p) => p.id === projectId) ?? null;
+  const project = listedProjects.find((p) => p.id === projectId) ?? null;
 
   const fields = useProjectFields(
     repoPath,
@@ -1015,7 +1084,34 @@ export function ProjectsBoardPanel({
   // lens, where a stored snapshot would keep filtering by something nothing
   // serves.
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
-  const view = viewList.find((v) => v.id === activeViewId) ?? null;
+  const savedView = viewList.find((v) => v.id === activeViewId) ?? null;
+  // Bumped by every deliberate board or view pick (`pickView`, `clearView`,
+  // `switchProject`). A write's continuation captures it when it fires and only
+  // picks for itself if nothing was picked since, so a late answer never
+  // overrides a choice the user made while it was out.
+  const pickGenerationRef = useRef(0);
+  // A layout picked in View options for the view on screen, transient until
+  // "Save layout to view" writes it. Keyed on the view it was picked for, and
+  // cleared by every view pick, so it never follows the user to another view.
+  const [layoutPick, setLayoutPick] = useState<{
+    viewId: string;
+    layout: ProjectViewLayout;
+  } | null>(null);
+  // The view AS DRAWN: the saved one, with a transient layout laid over it. One
+  // injection point, so every layout rule below (and the same-view flip handoff)
+  // reads the pick exactly as it would a layout GitHub changed. Memoized for the
+  // chips' memo, which keys on this object's identity.
+  const view = useMemo(
+    () =>
+      savedView !== null &&
+      layoutPick !== null &&
+      layoutPick.viewId === savedView.id &&
+      layoutPick.layout !== surfaceOf(savedView)
+        ? { ...savedView, layout: layoutPick.layout }
+        : savedView,
+    [savedView, layoutPick],
+  );
+  const layoutUnsaved = view !== savedView;
   const lensQuery = lensFilter(view);
   // Imperative, because no render-derivable signal tells "this view is GONE" from
   // "this read hasn't carried it yet": the lens above degrades either way, but a
@@ -1039,6 +1135,7 @@ export function ProjectsBoardPanel({
       clearSelection();
     }
     setActiveViewId(null);
+    setLayoutPick(null);
   });
   useEffect(() => {
     if (activeViewId === null || views.data === undefined) return;
@@ -1196,6 +1293,11 @@ export function ProjectsBoardPanel({
   // into a roadmap in place. A picked field the definitions stop carrying reads as
   // no source (`resolveDateSources`) rather than re-seeding behind the user.
   const [datePicks, setDatePicks] = useState<DateSources>(NO_DATE_SOURCES);
+  // Whether the view on screen has had its roadmap seed since it was picked. A
+  // flag rather than a test on `datePicks`: a project with no date or iteration
+  // fields seeds to NO_DATE_SOURCES itself, so the object can't tell "never
+  // seeded" from "seeded to nothing". Set by the seeding sites, reset by picks.
+  const datesSeededRef = useRef(false);
   const [zoom, setZoom] = useState<Zoom>("month");
   // Bumped by the palette's jump to today; the roadmap scrolls on the bump.
   const [todayNonce, setTodayNonce] = useState(0);
@@ -1206,6 +1308,13 @@ export function ProjectsBoardPanel({
     roadmapView === null ? NO_CARDS : columns.flatMap((column) => column.items);
   // Controlled so the roadmap's "Pick date fields" notice can open it.
   const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
+  // Every open of View options re-reads the project's views, on the open
+  // transition alone: it is the one place a view edited on GitHub would be
+  // looked for, and Duplicate copies from what it lists.
+  const refreshProjectViews = useRefreshProjectViews();
+  useSeedOnOpen(viewOptionsOpen, () => {
+    if (canRead && projectId !== null) refreshProjectViews(repoPath, projectId);
+  });
   const tableCols =
     tableView === null ? NO_TABLE_COLUMNS : tableColumns(tableView, fieldDefs);
   // How many cells the row cursor walks: a table's field columns, a roadmap's
@@ -1292,7 +1401,11 @@ export function ProjectsBoardPanel({
   // every picked view itself, and a pick changes the view id, which this path
   // never fires on.
   const flipLayout = useEffectEvent((to: Surface, cardId: string | null) => {
-    if (to === "roadmap" && view !== null) {
+    // Seeded only on the FIRST roadmap arrival since the view was picked: after
+    // that, the date picks and zoom are this visit's own, and a flip back must
+    // not discard them.
+    if (to === "roadmap" && view !== null && !datesSeededRef.current) {
+      datesSeededRef.current = true;
       setDatePicks(seedDateSources(view, fieldDefs));
       setZoom("month");
     }
@@ -1550,7 +1663,9 @@ export function ProjectsBoardPanel({
    *  no chips. The GROUPING stays where it is — a view seeds it once, and what
    *  the user has in front of them is their own pick from then on. */
   function clearView() {
+    pickGenerationRef.current += 1;
     setActiveViewId(null);
+    setLayoutPick(null);
     setCursor(null);
     seedBoardCursor("board");
     reanchorTable();
@@ -1622,11 +1737,16 @@ export function ProjectsBoardPanel({
 
   /** Selecting a view is an EVENT, never an effect: the grouping seed fires once,
    *  here, so a Group-by change made UNDER an active view stands rather than being
-   *  re-seeded on the next render. */
-  function pickView(nextId: string | null) {
+   *  re-seeded on the next render. `known` is a view this render's list can't hold
+   *  yet — one a write just created, picked from that write's continuation. */
+  function pickView(nextId: string | null, known?: ProjectViewDef) {
+    pickGenerationRef.current += 1;
     setActiveViewId(nextId);
+    setLayoutPick(null);
     const picked =
-      nextId === null ? null : (viewList.find((v) => v.id === nextId) ?? null);
+      nextId === null
+        ? null
+        : (viewList.find((v) => v.id === nextId) ?? known ?? null);
     // Seeded only from a grouping this board can actually draw, off the same
     // `groupableFields` set the Group-by rows offer — which is the board's
     // single-selects AND its iteration fields, so a view grouped either way seeds.
@@ -1638,6 +1758,7 @@ export function ProjectsBoardPanel({
     // A roadmap's date sources seed here for the grouping's reason, off the
     // definitions as they are at the pick — the switcher holds its rows until
     // they have arrived — and every pick starts again at Month.
+    datesSeededRef.current = picked?.layout === "roadmap";
     setDatePicks(
       picked?.layout === "roadmap"
         ? seedDateSources(picked, fieldDefs)
@@ -1658,6 +1779,29 @@ export function ProjectsBoardPanel({
   function setArchivedShown(next: boolean) {
     setShowArchived(next);
     setCursor(null);
+    clearSelection();
+  }
+
+  /** Put a different board on screen — the picker's pick, a project just
+   *  created, or null for the catalog's own fallback after a delete. */
+  function switchProject(nextId: string | null) {
+    pickGenerationRef.current += 1;
+    setPickedProjectId(nextId);
+    // The new board defines its own fields, and the cursor addresses columns that
+    // are about to be replaced.
+    setPickedFieldId(null);
+    // A lens belongs to the board it was picked on. Leaving the id set reads as
+    // "no view" on any other board, but returning to this one would find it again
+    // and re-apply its filter, sort and chips WITHOUT the grouping seed, which
+    // only `pickView` performs.
+    setActiveViewId(null);
+    setLayoutPick(null);
+    setCursor(null);
+    // The table's transient state belongs to the board it was built on: no row or
+    // section of it exists on the next one.
+    setTableCursor(null);
+    setCollapsedGroups(NO_COLLAPSED);
+    retireCellEditor();
     clearSelection();
   }
 
@@ -2428,6 +2572,9 @@ export function ProjectsBoardPanel({
     // A status post would land on the re-pointed project under the old one's
     // title, and an edit names an entry the new project doesn't hold.
     setStatusEditor(null);
+    // The project and view dialogs address the board they opened on. A new
+    // project addresses none, and its own success is one of the re-points.
+    if (lifecycleOpen && lifecycle?.kind !== "new-project") closeLifecycle();
   });
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
@@ -2912,6 +3059,499 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
+  /** The same two holds as full sentences, for the view buttons in View options,
+   *  which carry theirs as a tooltip rather than beside a label. */
+  const projectWriteReason = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  /** Why a new project can't be created: the scope, or a catalog that never
+   *  named the owner a project is created under. Short for the menu row, full
+   *  for the empty state's button. */
+  const newProjectHeld = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return {
+          short: "needs the project scope",
+          full: BOARD_READ_ONLY_SCOPE_REASON,
+        };
+      case !projects.data?.ownerId:
+        return {
+          short: "owner unknown",
+          full: OWNER_UNKNOWN_REASON,
+        };
+      default:
+        return undefined;
+    }
+  })();
+  // Both no-board arms offer it: an empty catalog and a cut-short one alike.
+  const newProjectButton = (
+    <DisabledReasonButton
+      variant="outline"
+      size="xs"
+      disabled={newProjectHeld !== undefined}
+      reason={newProjectHeld?.full}
+      onClick={openNewProject}
+    >
+      <PlusIcon data-icon="inline-start" />
+      New project…
+    </DisabledReasonButton>
+  );
+
+  // One mutation instance per VERB, never shared: each surface's pending state
+  // (a dialog's "Saving…", a row's hold) must describe its own write alone.
+  const createProject = useCreateProject();
+  const editProjectDetails = useUpdateProject();
+  const closeProject = useUpdateProject();
+  const deleteProject = useDeleteProject();
+  const createView = useCreateProjectView();
+  const renameView = useUpdateProjectView();
+  const setViewFields = useUpdateProjectView();
+  const saveViewLayout = useUpdateProjectView();
+  const deleteView = useDeleteProjectView();
+  const duplicateView = useDuplicateProjectView();
+  /** The project or view dialog on screen. Kept through the close — only
+   *  `lifecycleOpen` drops — so a dialog's title and seeds hold still while it
+   *  animates out. */
+  const [lifecycle, setLifecycle] = useState<LifecycleDialog | null>(null);
+  const [lifecycleOpen, setLifecycleOpen] = useState(false);
+  /** Which run of a lifecycle dialog is current, the contract
+   *  {@link dialogSessionRef} keeps for the board's own dialogs: a write that
+   *  outlives its dialog may close only the run that fired it. */
+  const lifecycleSessionRef = useRef(0);
+  function openLifecycle(next: LifecycleDialog) {
+    lifecycleSessionRef.current += 1;
+    setLifecycle(next);
+    setLifecycleOpen(true);
+    // Its popover closes first: the dialog is modal, and the popover's rows
+    // would otherwise sit under its backdrop.
+    setViewOptionsOpen(false);
+  }
+  function closeLifecycle() {
+    lifecycleSessionRef.current += 1;
+    setLifecycleOpen(false);
+  }
+  // A repo switch closes every one of them, New project included: that dialog
+  // creates under the catalog's owner, which the switch just replaced. The board
+  // re-point retirement (`retireBoardDialogs`) keeps New project open, since a
+  // re-point inside one repo changes nothing it writes to. Ref-compared, so an
+  // `<Activity>` replay with the same repo does nothing.
+  const lifecycleRepoRef = useRef(repoPath);
+  const retireLifecycleOnRepoSwitch = useEffectEvent(() => {
+    if (lifecycleOpen) closeLifecycle();
+  });
+  useEffect(() => {
+    if (lifecycleRepoRef.current === repoPath) return;
+    lifecycleRepoRef.current = repoPath;
+    retireLifecycleOnRepoSwitch();
+  }, [repoPath]);
+  /** Whether a write's continuation still speaks for the screen: the same repo
+   *  (the panel outlives a repo switch) and, when given, the same board. */
+  function stillShowing(repo: string, boardId: string | null): boolean {
+    if (useUiStore.getState().repoPath !== repo) return false;
+    return boardId === null || dialogProjectRef.current === boardId;
+  }
+  // A view a write just created, picked once the render that holds it runs:
+  // `pickView` reads this render's lists, which the continuation's closure can't.
+  const [pendingViewPick, setPendingViewPick] = useState<ProjectViewDef | null>(
+    null,
+  );
+  const consumeViewPick = useEffectEvent((def: ProjectViewDef) =>
+    pickView(def.id, def),
+  );
+  useEffect(() => {
+    if (pendingViewPick === null) return;
+    setPendingViewPick(null);
+    consumeViewPick(pendingViewPick);
+  }, [pendingViewPick]);
+
+  function openNewProject() {
+    if (newProjectHeld !== undefined) return;
+    openLifecycle({ kind: "new-project" });
+  }
+
+  async function submitNewProject(title: string): Promise<void> {
+    const ownerId = projects.data?.ownerId;
+    // Belt-and-braces: the dialog's Create is held with OWNER_UNKNOWN_REASON then.
+    if (!ownerId) return;
+    const session = lifecycleSessionRef.current;
+    const generation = pickGenerationRef.current;
+    const repo = repoPath;
+    // Pinned while the create is out: the answer joins the catalog FIRST, and a
+    // board shown only as the fallback would otherwise re-point to it (and retire
+    // the view on screen) even when this continuation is voided below. The
+    // settle's re-read can't reorder a pinned board away either.
+    if (pickedProjectId === null && projectId !== null)
+      setPickedProjectId(projectId);
+    let created: ProjectV2Ref;
+    try {
+      created = await createProject.mutateAsync({
+        repo,
+        lens,
+        ownerId,
+        repositoryId: projects.data?.repositoryId ?? null,
+        title,
+      });
+    } catch {
+      // Reported by the hook; the dialog stays open with the title in it.
+      return;
+    }
+    toast.success(`Created ${created.title}`);
+    if (session === lifecycleSessionRef.current) closeLifecycle();
+    if (stillShowing(repo, null) && generation === pickGenerationRef.current)
+      switchProject(created.id);
+  }
+
+  function openEditProject() {
+    if (project === null || statusWriteHeld !== undefined) return;
+    openLifecycle({
+      kind: "edit-project",
+      projectId: project.id,
+      title: project.title,
+      description: project.shortDescription ?? "",
+    });
+  }
+
+  async function saveProjectDetails(patch: ProjectPatch): Promise<void> {
+    const run = lifecycle;
+    if (run?.kind !== "edit-project") return;
+    const session = lifecycleSessionRef.current;
+    try {
+      await editProjectDetails.mutateAsync({
+        repo: repoPath,
+        lens,
+        projectId: run.projectId,
+        patch,
+      });
+    } catch {
+      return;
+    }
+    if (session === lifecycleSessionRef.current) closeLifecycle();
+  }
+
+  /** The no-dialog verbs in flight, from the click (confirm included) until the
+   *  write settles. Read at FIRE time: a render's `isPending` is a snapshot, and
+   *  a second click or palette run queued behind the first would otherwise fire
+   *  the write twice (two "Copy of" views, a second delete). */
+  const verbsInFlightRef = useRef(new Set<InFlightVerb>());
+  async function runVerbOnce(
+    verb: InFlightVerb,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const inFlight = verbsInFlightRef.current;
+    if (inFlight.has(verb)) return;
+    inFlight.add(verb);
+    try {
+      await run();
+    } finally {
+      inFlight.delete(verb);
+    }
+  }
+  // The render-time half of the same guard, as the held rows' parentheticals.
+  // Close and reopen gate on GitHub's own per-verb verdicts rather than on
+  // `viewerCanUpdate`, which Edit details and Delete keep (no finer flag exists).
+  // Pending ranks first: mid-write the optimistic patch has already flipped
+  // `closed`, so a permission arm would describe the verb the row is about to
+  // offer rather than the write still going.
+  const closeReopenHeld = (() => {
+    switch (true) {
+      case closeProject.isPending:
+        return "saving…";
+      case projectScopeReadOnly(scopes.data):
+        return "needs the project scope";
+      case project?.closed === true && !project.viewerCanReopen:
+        return "no permission to reopen";
+      case project?.closed === false && !project.viewerCanClose:
+        return "no permission to close";
+      default:
+        return undefined;
+    }
+  })();
+  const deleteProjectHeld =
+    statusWriteHeld ?? (deleteProject.isPending ? "deleting…" : undefined);
+  // Close asks first, so it carries the ellipsis; a held row drops it for the
+  // reason, the grammar the other held rows keep.
+  const closeReopenLabel = project?.closed
+    ? "Reopen project"
+    : closeReopenHeld === undefined
+      ? "Close project…"
+      : "Close project";
+  /** Close asks first (reversible, but it changes the whole project for everyone);
+   *  reopen doesn't. The board stays on screen either way: a closed project is
+   *  still fully workable, and the picker files it under Closed. */
+  function toggleProjectClosed(): Promise<void> {
+    return runVerbOnce("close-reopen", async () => {
+      if (project === null || closeReopenHeld !== undefined) return;
+      const target = project;
+      const repo = repoPath;
+      if (!target.closed) {
+        const ok = await useConfirm.getState().ask({
+          title: `Close ${target.title}?`,
+          body: "It keeps its items, views and fields, and you can still work on it here. It moves to the Closed group of the project list until you reopen it.",
+          confirmLabel: "Close project",
+        });
+        if (!ok) return;
+      }
+      // Pinned BEFORE the optimistic patch: the catalog files a closed project
+      // under Closed, and a board shown only as the fallback would otherwise jump
+      // to whichever project leads the reordered list.
+      if (stillShowing(repo, target.id)) setPickedProjectId(target.id);
+      try {
+        await closeProject.mutateAsync({
+          repo,
+          lens,
+          projectId: target.id,
+          patch: { closed: !target.closed },
+        });
+      } catch {
+        // Reported by the hook, which also puts the project back as it was.
+        return;
+      }
+      toast.success(
+        target.closed ? `Reopened ${target.title}` : `Closed ${target.title}`,
+      );
+    });
+  }
+
+  function removeProject(): Promise<void> {
+    return runVerbOnce("delete-project", async () => {
+      if (project === null || deleteProjectHeld !== undefined) return;
+      const target = project;
+      const repo = repoPath;
+      const ok = await useConfirm.getState().ask({
+        title: "Delete project?",
+        body: `${target.title} is deleted for everyone, with its items, views, fields and status updates. Draft items live only in the project and are deleted with it; its issues and pull requests stay in their repositories. This can't be undone.`,
+        confirmLabel: "Delete project",
+        confirmVariant: "destructive",
+      });
+      if (!ok) return;
+      const generation = pickGenerationRef.current;
+      try {
+        await deleteProject.mutateAsync({ repo, lens, projectId: target.id });
+      } catch {
+        return;
+      }
+      toast.success(`Deleted ${target.title}`);
+      if (
+        stillShowing(repo, target.id) &&
+        generation === pickGenerationRef.current
+      )
+        switchProject(null);
+    });
+  }
+
+  /** Why a view action is held, as a tooltip: the project's write holds, then
+   *  (for the actions on the view on screen) having no view picked. */
+  function viewActionReason(needsView: boolean): string | undefined {
+    if (projectWriteReason !== undefined) return projectWriteReason;
+    if (needsView && savedView === null) return "Pick a view above first";
+    return undefined;
+  }
+  // A layout this build reads as `unknown` can't be written back: a copy would
+  // need it, and saving over it would replace a layout nobody here can see.
+  const unknownLayoutHeld =
+    savedView?.layout === "unknown" ? UNKNOWN_LAYOUT_REASON : undefined;
+  const viewsRefreshing = views.isFetching
+    ? VIEWS_REFRESHING_REASON
+    : undefined;
+  // A layout save in flight has patched the source's layout optimistically, and
+  // a copy taken now would keep that layout even if the save then failed.
+  const duplicateViewReason =
+    viewActionReason(true) ??
+    unknownLayoutHeld ??
+    viewsRefreshing ??
+    (saveViewLayout.isPending ? "Saving this view's layout…" : undefined) ??
+    (duplicateView.isPending ? "Duplicating a view…" : undefined);
+  const viewFieldsReason = viewActionReason(true) ?? viewsRefreshing;
+  const lastView =
+    views.data !== undefined &&
+    !views.data.truncated &&
+    views.data.views.length === 1;
+  const deleteViewReason =
+    viewActionReason(true) ??
+    (lastView ? LAST_VIEW_REASON : undefined) ??
+    (deleteView.isPending ? "Deleting a view…" : undefined);
+  const saveLayoutReason =
+    viewActionReason(true) ??
+    unknownLayoutHeld ??
+    (saveViewLayout.isPending ? "Saving the layout…" : undefined);
+
+  function openNewView() {
+    if (projectId === null || viewActionReason(false) !== undefined) return;
+    openLifecycle({ kind: "new-view", projectId });
+  }
+
+  function openRenameView() {
+    if (projectId === null || savedView === null) return;
+    if (viewActionReason(true) !== undefined) return;
+    openLifecycle({ kind: "rename-view", projectId, view: savedView });
+  }
+
+  function openViewFields() {
+    if (projectId === null || savedView === null) return;
+    if (viewFieldsReason !== undefined) return;
+    openLifecycle({ kind: "view-fields", projectId, view: savedView });
+  }
+
+  async function submitViewName(
+    name: string,
+    layout: ProjectViewLayout,
+  ): Promise<void> {
+    const run = lifecycle;
+    const session = lifecycleSessionRef.current;
+    const generation = pickGenerationRef.current;
+    const repo = repoPath;
+    if (run?.kind === "new-view") {
+      let created: ProjectViewDef;
+      try {
+        created = await createView.mutateAsync({
+          repo,
+          projectId: run.projectId,
+          name,
+          layout,
+        });
+      } catch {
+        return;
+      }
+      if (session === lifecycleSessionRef.current) closeLifecycle();
+      if (
+        stillShowing(repo, run.projectId) &&
+        generation === pickGenerationRef.current
+      )
+        setPendingViewPick(created);
+      return;
+    }
+    if (run?.kind !== "rename-view") return;
+    try {
+      await renameView.mutateAsync({
+        repo,
+        projectId: run.projectId,
+        viewId: run.view.id,
+        patch: { name },
+      });
+    } catch {
+      return;
+    }
+    if (session === lifecycleSessionRef.current) closeLifecycle();
+  }
+
+  async function saveViewFields(visibleFieldIds: string[]): Promise<void> {
+    const run = lifecycle;
+    if (run?.kind !== "view-fields") return;
+    const session = lifecycleSessionRef.current;
+    try {
+      await setViewFields.mutateAsync({
+        repo: repoPath,
+        projectId: run.projectId,
+        viewId: run.view.id,
+        patch: { visibleFieldIds },
+      });
+    } catch {
+      return;
+    }
+    if (session === lifecycleSessionRef.current) closeLifecycle();
+  }
+
+  /** Copies the view on screen as it is SAVED — a transient layout pick isn't
+   *  part of it — and picks the copy. No confirm: it adds, and changes nothing. */
+  function duplicateCurrentView(): Promise<void> {
+    return runVerbOnce("duplicate-view", async () => {
+      if (projectId === null || savedView === null) return;
+      if (duplicateViewReason !== undefined) return;
+      const source = savedView;
+      // `unknown` is already held above; the narrowing makes it a type fact.
+      const layout = VIEW_LAYOUTS.find((l) => l === source.layout);
+      if (layout === undefined) return;
+      const board = projectId;
+      const repo = repoPath;
+      const generation = pickGenerationRef.current;
+      let created: ProjectViewDef;
+      try {
+        created = await duplicateView.mutateAsync({
+          repo,
+          projectId: board,
+          source: {
+            name: source.name,
+            layout,
+            filter: source.filter,
+            visibleFieldIds: source.visibleFieldIds,
+          },
+        });
+      } catch {
+        return;
+      }
+      if (stillShowing(repo, board) && generation === pickGenerationRef.current)
+        setPendingViewPick(created);
+    });
+  }
+
+  function removeCurrentView(): Promise<void> {
+    return runVerbOnce("delete-view", async () => {
+      if (projectId === null || savedView === null) return;
+      if (deleteViewReason !== undefined) return;
+      const target = savedView;
+      const board = projectId;
+      setViewOptionsOpen(false);
+      const ok = await useConfirm.getState().ask({
+        title: "Delete view?",
+        body: `${target.name || UNTITLED_VIEW} is deleted for everyone on the project. GitHub can't bring a deleted view back, so this can't be undone.`,
+        confirmLabel: "Delete view",
+        confirmVariant: "destructive",
+      });
+      if (!ok) return;
+      // A board drawn under it falls back to no view once the switcher stops
+      // listing it, the way any vanished view does.
+      try {
+        await deleteView.mutateAsync({
+          repo: repoPath,
+          projectId: board,
+          viewId: target.id,
+        });
+      } catch {
+        // Reported by the hook.
+        return;
+      }
+      toast.success(`Deleted ${target.name || UNTITLED_VIEW}`);
+    });
+  }
+
+  /** Writes the transient layout onto the view on screen. The optimistic patch
+   *  makes the saved layout equal the pick at once, which already stops the
+   *  override; the pick itself is cleared once GitHub confirms, and only if it is
+   *  still the exact pick that was saved (a later pick survives). A failure rolls
+   *  the saved layout back, so the kept pick shows as unsaved again. */
+  function saveLayout(): Promise<void> {
+    return runVerbOnce("save-layout", async () => {
+      if (projectId === null || savedView === null || view === null) return;
+      if (!layoutUnsaved || saveLayoutReason !== undefined) return;
+      const layout = VIEW_LAYOUTS.find((l) => l === view.layout);
+      if (layout === undefined) return;
+      const viewId = savedView.id;
+      try {
+        await saveViewLayout.mutateAsync({
+          repo: repoPath,
+          projectId,
+          viewId,
+          patch: { layout },
+        });
+      } catch {
+        return;
+      }
+      setLayoutPick((current) =>
+        current !== null &&
+        current.viewId === viewId &&
+        current.layout === layout
+          ? null
+          : current,
+      );
+    });
+  }
 
   /** Record what a menu opened over `el` would act on, and report whether that is
    *  anything at all. Null — and so no menu — for board chrome and empty column
@@ -3958,6 +4598,7 @@ export function ProjectsBoardPanel({
   // reading, so no id on the control itself.
   const groupLabelId = useId();
   const viewLabelId = useId();
+  const layoutLabelId = useId();
   const startLabelId = useId();
   const targetLabelId = useId();
   const zoomLabelId = useId();
@@ -3993,7 +4634,9 @@ export function ProjectsBoardPanel({
   );
   const portalContainer = usePanelPortalContainer();
   const projectTitles: Record<string, string> = {};
-  for (const p of openProjects) projectTitles[p.id] = p.title;
+  // The trigger's label is the bare title: its "(closed)" marker is a sibling
+  // that survives the title's truncation. The popup rows spell it into the text.
+  for (const p of listedProjects) projectTitles[p.id] = p.title;
 
   // Cards already on screen outlive a failed read. A next-page failure, a failed
   // refetch, or a fields read that died after the board painted all leave the
@@ -4437,10 +5080,11 @@ export function ProjectsBoardPanel({
         return (
           <BoardNotice>
             <p>
-              No open project came back for this repository or its owner, but
-              the list was cut short, so there may be more.
+              No project came back for this repository or its owner, but the
+              list was cut short, so there may be more.
             </p>
             <p>Open the owner's Projects page on GitHub to see all of them.</p>
+            <p data-body-landing="">{newProjectButton}</p>
           </BoardNotice>
         );
       case projectId === null:
@@ -4451,9 +5095,9 @@ export function ProjectsBoardPanel({
               (from this repository and others) into columns you define.
             </p>
             <p>
-              Neither this repository nor its owner has an open one yet. Start
-              one on GitHub and it appears here.
+              Neither this repository nor its owner has one yet. Start one here.
             </p>
+            <p data-body-landing="">{newProjectButton}</p>
           </BoardNotice>
         );
       // A filter that matched nothing is a different statement from an empty
@@ -4707,6 +5351,30 @@ export function ProjectsBoardPanel({
       statusWriteHeld === undefined &&
       statusEditor === null,
   );
+  // The project verbs, palette-only like the menu rows they mirror, and under the
+  // same holds. New project is live without a board too (the empty state offers
+  // it); every one is dead while a project or view dialog is open, since the
+  // palette reaches over its modal and swapping the run would carry its draft.
+  const lifecycleIdle = active && !lifecycleOpen;
+  useHotkeyAction(
+    "new-project",
+    openNewProject,
+    lifecycleIdle && isGitHub && !scopeGap && newProjectHeld === undefined,
+  );
+  const projectVerbsLive =
+    lifecycleIdle && showBoardChrome && statusWriteHeld === undefined;
+  useHotkeyAction("edit-project-details", openEditProject, projectVerbsLive);
+  useHotkeyAction(
+    "close-reopen-project",
+    () => void toggleProjectClosed(),
+    lifecycleIdle && showBoardChrome && closeReopenHeld === undefined,
+  );
+  useHotkeyAction(
+    "delete-project",
+    () => void removeProject(),
+    projectVerbsLive,
+  );
+  useHotkeyAction("new-project-view", openNewView, projectVerbsLive);
   // The four reposition rows, from the palette. Palette-ONLY on purpose: the chord
   // that drives these lives on the board itself, because "focus is on a card" is a
   // DOM question the global binding layer can't ask. Live wherever the keyboard
@@ -4801,35 +5469,94 @@ export function ProjectsBoardPanel({
             items={projectTitles}
             value={projectId}
             onValueChange={(v) => {
-              setPickedProjectId(v);
-              // The new board defines its own fields, and the cursor addresses
-              // columns that are about to be replaced.
-              setPickedFieldId(null);
-              // A lens belongs to the board it was picked on. Leaving the id set
-              // reads as "no view" on any other board, but returning to this one
-              // would find it again and re-apply its filter, sort and chips
-              // WITHOUT the grouping seed, which only `pickView` performs.
-              setActiveViewId(null);
-              setCursor(null);
-              // The table's transient state belongs to the board it was built
-              // on: no row or section of it exists on the next one.
-              setTableCursor(null);
-              setCollapsedGroups(NO_COLLAPSED);
-              retireCellEditor();
-              clearSelection();
+              if (typeof v === "string") switchProject(v);
             }}
           >
             <SelectTrigger size="sm" aria-label="Project" className="max-w-64">
-              <SelectValue onMouseEnter={clipTitleFromText} />
+              {/* An ellipsis where the title is cut, so a cut on a word boundary
+                  never reads as the whole title. `block!` because the trigger
+                  styles its value as a flex line-clamp, which clips without one. */}
+              <SelectValue
+                className="block! min-w-0 truncate"
+                onMouseEnter={clipTitleFromText}
+              />
+              {project?.closed === true && (
+                <span className="shrink-0 text-muted-foreground">(closed)</span>
+              )}
             </SelectTrigger>
             <SelectContent>
               {openProjects.map((p) => (
                 <SelectItem key={p.id} value={p.id}>
-                  <SelectClipText>{p.title}</SelectClipText>
+                  <SelectClipText>
+                    {projectTitles[p.id] ?? p.title}
+                  </SelectClipText>
                 </SelectItem>
               ))}
+              {/* Closed boards as their own group, after the open ones. Each row
+                  says "closed" in words as well, so the state never rides the
+                  grouping alone, and the trigger names it once one is picked. */}
+              {closedProjects.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>Closed</SelectLabel>
+                  {closedProjects.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      <SelectClipText>{`${p.title} (closed)`}</SelectClipText>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
             </SelectContent>
           </Select>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Project actions"
+                  title="Project actions"
+                />
+              }
+            >
+              <DotsThreeIcon weight="bold" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-52">
+              <DropdownMenuItem
+                disabled={newProjectHeld !== undefined}
+                onClick={openNewProject}
+              >
+                {newProjectHeld === undefined
+                  ? "New project…"
+                  : `New project (${newProjectHeld.short})`}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={statusWriteHeld !== undefined}
+                onClick={openEditProject}
+              >
+                {statusWriteHeld === undefined
+                  ? "Edit details…"
+                  : `Edit details (${statusWriteHeld})`}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={closeReopenHeld !== undefined}
+                onClick={() => void toggleProjectClosed()}
+              >
+                {closeReopenHeld === undefined
+                  ? closeReopenLabel
+                  : `${closeReopenLabel} (${closeReopenHeld})`}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={deleteProjectHeld !== undefined}
+                onClick={() => void removeProject()}
+              >
+                {deleteProjectHeld === undefined
+                  ? "Delete project…"
+                  : `Delete project (${deleteProjectHeld})`}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Two ways in rather than a per-column add: what a card joins is the
               BOARD, and which column it lands in is the grouping's answer — the
               same answer a move writes. Held with its reason rather than hidden,
@@ -5002,7 +5729,124 @@ export function ProjectsBoardPanel({
                           )}
                         </>
                       )}
+                      {/* The views' own verbs, under the list they act on and
+                          outside its held branch: a project with no views yet is
+                          exactly where New view is wanted. Two even rows on a
+                          six-column grid: the verbs that ADD a view, then the
+                          three that change the view the radio has picked. */}
+                      <div className="grid grid-cols-6 gap-1 px-0.5 pt-1">
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          wrapperClassName="col-span-3"
+                          className="w-full"
+                          disabled={viewActionReason(false) !== undefined}
+                          reason={viewActionReason(false)}
+                          onClick={openNewView}
+                        >
+                          New view…
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          wrapperClassName="col-span-3"
+                          className="w-full"
+                          disabled={duplicateViewReason !== undefined}
+                          reason={duplicateViewReason}
+                          onClick={() => void duplicateCurrentView()}
+                        >
+                          Duplicate
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          wrapperClassName="col-span-2"
+                          className="w-full"
+                          disabled={viewActionReason(true) !== undefined}
+                          reason={viewActionReason(true)}
+                          onClick={openRenameView}
+                        >
+                          Rename…
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          wrapperClassName="col-span-2"
+                          className="w-full"
+                          disabled={viewFieldsReason !== undefined}
+                          reason={viewFieldsReason}
+                          onClick={openViewFields}
+                        >
+                          Fields…
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          wrapperClassName="col-span-2"
+                          className="w-full text-destructive hover:text-destructive"
+                          disabled={deleteViewReason !== undefined}
+                          reason={deleteViewReason}
+                          onClick={() => void removeCurrentView()}
+                        >
+                          Delete…
+                        </DisabledReasonButton>
+                      </div>
                     </div>
+                    {/* The layout the view on screen draws in, changeable for the
+                        visit and saved onto the view only when asked. Present only
+                        with a view on: no view is always the board. */}
+                    {savedView !== null && (
+                      <div className="space-y-1">
+                        <p
+                          id={layoutLabelId}
+                          className="px-1 text-xs text-muted-foreground"
+                        >
+                          Layout
+                        </p>
+                        <RadioGroup
+                          className="gap-0"
+                          aria-labelledby={layoutLabelId}
+                          value={surface}
+                          onValueChange={(next) => {
+                            const picked = VIEW_LAYOUTS.find((l) => l === next);
+                            if (picked === undefined) return;
+                            // Back to the saved layout clears the pick: a stored
+                            // equal pick would re-activate on a later remote
+                            // layout change.
+                            setLayoutPick(
+                              picked === surfaceOf(savedView)
+                                ? null
+                                : { viewId: savedView.id, layout: picked },
+                            );
+                          }}
+                        >
+                          {VIEW_LAYOUTS.map((l) => (
+                            <label key={l} className={GROUP_ROW_CLASS}>
+                              <Radio value={l} />
+                              <span className="min-w-0 truncate">
+                                {VIEW_LAYOUT_LABEL[l]}
+                              </span>
+                            </label>
+                          ))}
+                        </RadioGroup>
+                        {layoutUnsaved && (
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1">
+                            <span className="text-[11px] text-muted-foreground">
+                              For this visit only.
+                            </span>
+                            <DisabledReasonButton
+                              variant="outline"
+                              size="xs"
+                              disabled={saveLayoutReason !== undefined}
+                              reason={saveLayoutReason}
+                              onClick={() => void saveLayout()}
+                            >
+                              Save layout to view
+                            </DisabledReasonButton>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* A roadmap's own rows, present only while one is on: GitHub
                         serves no date mapping for a roadmap view, so which fields
                         place an item is picked here, seeded when the view is. */}
@@ -5499,6 +6343,81 @@ export function ProjectsBoardPanel({
           )}
         </>
       )}
+      {/* The project and view dialogs. Mounted with or without a board: New
+          project is how an empty catalog gets its first one. Each reads what it
+          was opened on from `lifecycle`, which outlives the close. */}
+      <NewProjectDialog
+        open={lifecycleOpen && lifecycle?.kind === "new-project"}
+        pending={createProject.isPending}
+        target={{
+          repository: projects.data?.repositoryId
+            ? (projects.data.repositoryNameWithOwner ?? null)
+            : null,
+          owner: projects.data?.ownerLogin ?? null,
+        }}
+        ownerHeldReason={
+          projects.data?.ownerId ? undefined : OWNER_UNKNOWN_REASON
+        }
+        onOpenChange={(o) => {
+          if (!o) closeLifecycle();
+        }}
+        onCreate={submitNewProject}
+      />
+      <EditProjectDialog
+        open={lifecycleOpen && lifecycle?.kind === "edit-project"}
+        pending={editProjectDetails.isPending}
+        seedTitle={lifecycle?.kind === "edit-project" ? lifecycle.title : ""}
+        seedDescription={
+          lifecycle?.kind === "edit-project" ? lifecycle.description : ""
+        }
+        onOpenChange={(o) => {
+          if (!o) closeLifecycle();
+        }}
+        onSave={saveProjectDetails}
+      />
+      <ViewNameDialog
+        mode={lifecycle?.kind === "rename-view" ? "rename" : "create"}
+        open={
+          lifecycleOpen &&
+          (lifecycle?.kind === "new-view" || lifecycle?.kind === "rename-view")
+        }
+        pending={
+          lifecycle?.kind === "rename-view"
+            ? renameView.isPending
+            : createView.isPending
+        }
+        seedName={lifecycle?.kind === "rename-view" ? lifecycle.view.name : ""}
+        onOpenChange={(o) => {
+          if (!o) closeLifecycle();
+        }}
+        onSubmit={submitViewName}
+      />
+      <ViewFieldsDialog
+        open={lifecycleOpen && lifecycle?.kind === "view-fields"}
+        pending={setViewFields.isPending}
+        viewName={
+          lifecycle?.kind === "view-fields"
+            ? lifecycle.view.name || UNTITLED_VIEW
+            : UNTITLED_VIEW
+        }
+        currentIds={
+          lifecycle?.kind === "view-fields"
+            ? lifecycle.view.visibleFieldIds
+            : NO_FIELD_IDS
+        }
+        defs={fieldDefs}
+        defsHeldReason={
+          fieldsPending
+            ? LOADING_FIELDS_REASON
+            : fields.data === undefined
+              ? FIELDS_ERROR_REASON
+              : undefined
+        }
+        onOpenChange={(o) => {
+          if (!o) closeLifecycle();
+        }}
+        onSave={saveViewFields}
+      />
     </div>
   );
 }

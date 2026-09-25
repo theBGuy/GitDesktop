@@ -562,8 +562,9 @@ mentions.
 ### Project boards
 
 A tab that shows a **GitHub Project** as a live kanban board, so you can see
-where a whole piece of work stands without leaving the app. Pick any open
-board the repository or its owner has, and pick which of its single-select
+where a whole piece of work stands without leaving the app. Pick any board
+the repository or its owner has (closed ones sit in their own group and stay
+fully workable), and pick which of its single-select
 **or iteration** fields makes the columns (**Status** to start with), with a
 trailing column for anything the field doesn't cover. Grouping by an iteration
 gives you a sprint board: a column per iteration the field defines, plus
@@ -631,7 +632,19 @@ fields that place the items (the view's own date fields come pre-picked),
 `Alt`/`⌥`+`←` and `→` shift the item you're on by a day (or an iteration),
 and adding `Shift` moves its target date alone. **Clear view** brings the
 whole item set back in the board's own order with the chips off, leaving the
-grouping where you last put it. Nothing here writes to the view.
+grouping where you last put it. Picking a view and regrouping the board
+never change what GitHub has saved.
+**Create projects and manage saved views** from the board too. The menu
+beside the project picker starts a **new project** (linked to this
+repository whenever it can be read; the dialog says which), edits a
+project's title and short description, closes or
+reopens it, and deletes it after asking. **View options** adds a view in the
+layout you pick, renames, duplicates or deletes the one on screen, and picks
+which **fields** it shows; switch the view's **layout** for a look and
+**Save layout to view** when it should stick. A duplicate copies the view's
+layout, filter and shown fields, in the project's field order (GitHub offers
+no way to copy its grouping or sort). An empty catalog offers **New
+project…** in place of the board.
 **Status updates** show the project's health at a glance: once a project
 has one, a strip above the board carries the latest status (**On track**,
 **At risk**, **Off track**, **Complete** or **Inactive**, always named as
@@ -641,8 +654,9 @@ each update's author, dates and Markdown note, and post a new one from
 **Add item → Post status update…** or the command palette. Updates you
 wrote can be edited or deleted from their own menu.
 Adding, moving, reordering, shifting roadmap dates, editing a draft,
-converting, archiving, restoring, removing and posting status updates all
-need write access to the board and the `project` sign-in scope; reading one
+converting, archiving, restoring, removing, posting status updates and
+managing projects and views all need write access to the board and the
+`project` sign-in scope (a new project needs the scope alone); reading one
 needs only the `project` or `read:project` scope the Projects picker already
 asks for.
 

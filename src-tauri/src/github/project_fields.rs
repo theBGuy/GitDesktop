@@ -1880,7 +1880,15 @@ mod tests {
             assert_keys(&wire, &["itemId", "project", "values"]);
             assert_keys(
                 &wire["project"],
-                &["closed", "id", "number", "title", "viewerCanUpdate"],
+                &[
+                    "closed",
+                    "id",
+                    "number",
+                    "title",
+                    "viewerCanClose",
+                    "viewerCanReopen",
+                    "viewerCanUpdate",
+                ],
             );
         }
     }
