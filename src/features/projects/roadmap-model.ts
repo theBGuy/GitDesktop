@@ -147,14 +147,27 @@ export function shortDate(iso: string, refYear?: number): string {
 
 /** The words in a date field's name that say which end it is. A view listing
  *  `Target` before `Start` is common, so column order alone can't orient a
- *  pair. Matched as whole WORDS, so "Weekend" and "Ends" say nothing. */
-const START_WORDS: ReadonlySet<string> = new Set(["start", "begin"]);
+ *  pair. Matched as whole WORDS, plural and verb forms listed, so "Ends" and
+ *  "Started" count while "Weekend" and "Restart" say nothing. */
+const START_WORDS: ReadonlySet<string> = new Set([
+  "start",
+  "starts",
+  "started",
+  "begin",
+  "begins",
+]);
 const TARGET_WORDS: ReadonlySet<string> = new Set([
   "target",
+  "targets",
   "end",
+  "ends",
+  "ended",
   "due",
   "finish",
+  "finishes",
+  "finished",
   "deadline",
+  "deadlines",
 ]);
 
 /** A field name's words, lower-cased. Any non-letter separates words, and so

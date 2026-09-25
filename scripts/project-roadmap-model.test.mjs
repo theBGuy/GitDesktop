@@ -185,12 +185,25 @@ test("seeding: orientation reads each end's words, and neutral names keep order"
   );
   // A word inside another word is not that word.
   const weekend = dateDef("weekend", "Weekend");
-  const ends = dateDef("ends", "Ends");
-  for (const inner of [weekend, ends])
+  const restart = dateDef("restart", "Restart");
+  for (const inner of [weekend, restart])
     assert.deepEqual(
       seedDateSources(view([]), [inner, kickoff]),
       pair(inner.id, "kickoff"),
     );
+  // Plural and verb forms orient like the base words.
+  const ends = dateDef("ends", "Ends");
+  const starts = dateDef("starts", "Starts");
+  assert.deepEqual(
+    seedDateSources(view([]), [ends, starts]),
+    pair("starts", "ends"),
+  );
+  const finished = dateDef("finished", "Finished");
+  const started = dateDef("started", "Started");
+  assert.deepEqual(
+    seedDateSources(view([]), [finished, started]),
+    pair("started", "finished"),
+  );
   // API-created spellings split into words too: snake, SCREAMING and camel case.
   for (const [s, t] of [
     ["start_date", "due_date"],
