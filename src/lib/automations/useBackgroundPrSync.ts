@@ -23,12 +23,14 @@ import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
  * active-repo-gated, so this hook covers the gap.
  *
  * Cost bound: one forge poll per rule-bearing recent repo per minute, plus one
- * batched readiness call that probes GitHub auth once per host — the loop only
- * polls repos that carry an explicit pr-sync rule (an opt-in), so a user with no
- * automations makes no background calls here. React Query runs the first
- * tick immediately on mount (app startup), so the initial settings/automations
- * read happens once at launch; it stays cheap because every forge call is gated
- * behind an explicit rule and an empty-recents early-exit.
+ * batched readiness call that probes GitHub auth once per tick for registered
+ * hosts (a repo on an unmapped host spelling pays a per-repo status probe each
+ * tick) — the loop only polls repos that carry an explicit pr-sync rule (an
+ * opt-in), so a user with no automations makes no background calls here. React
+ * Query runs the first tick immediately on mount (app startup), so the initial
+ * settings/automations read happens once at launch; it stays cheap because
+ * every forge call is gated behind an explicit rule and an empty-recents
+ * early-exit.
  *
  * Active-repo exclusion: the repo open in the app is SKIPPED, because
  * RepositoryView's `usePrNotifications` poller already covers it (with the OS

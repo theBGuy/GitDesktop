@@ -1,6 +1,7 @@
 //! Batch forge readiness for the background PR-sync poller: one call per tick
-//! answers "which of these repos can be polled for PRs right now", resolving gh
-//! auth with one probe per tick instead of once per repo.
+//! answers "which of these repos can be polled for PRs right now". gh auth for
+//! registered hosts takes one probe per tick instead of one per repo; an unmapped
+//! host spelling pays the per-repo `resolve_status` probe every tick.
 
 use std::collections::HashMap;
 
@@ -15,21 +16,12 @@ use crate::forge::session::{github_host_for_repo, github_hosts_health_for_poller
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundRepoStatus {
     pub path: String,
-    /// `"github"` | `"gitlab"` | `"bitbucket"`.
-    pub provider: String,
+    pub provider: Provider,
     pub host: Option<String>,
     /// Whether this repo's PRs can be polled this tick.
     pub ready: bool,
     /// The signed-in login on the repo's host — the pr-open catch-up's viewer.
     pub login: Option<String>,
-}
-
-fn provider_tag(provider: Provider) -> &'static str {
-    match provider {
-        Provider::GitHub => "github",
-        Provider::GitLab => "gitlab",
-        Provider::Bitbucket => "bitbucket",
-    }
 }
 
 /// One repo's route: `(path, provider, host)`. `host` is `None` only for a GitHub
@@ -48,40 +40,18 @@ fn needs_github_probe(routes: &[Route]) -> bool {
 }
 
 /// A GitHub route's `(ready, login)` from the tick's host verdicts, or `None` to take
-/// the per-repo `resolve_status` probe instead. No host → not ready. An empty map →
-/// `None`: it can't tell "no host signed in" from an unreadable probe (old gh without
-/// `--json`), and the per-repo probe answers both correctly. A host gh has registered
-/// → that host's own verdict, so a broken account on one host never gates another's.
-///
-/// A host gh doesn't key (an ssh-config alias like `github.com-work`, `www.github.com`)
-/// falls back to any healthy host: `gh_pr_poll` resolves only the slug and queries
-/// gh's default host, so the alias spelling never reaches gh. The login is an
-/// approximation of that default host's viewer — github.com's when healthy, else the
-/// first healthy host by name. The pr-open catch-up only matches it against PR
-/// authors, so a wrong login makes it skip PRs and a null one disables it.
+/// the per-repo `resolve_status` probe instead. No host → not ready. A host gh has
+/// registered → that host's own verdict, so a broken account on one host never gates
+/// another's. Any other host (an ssh alias, `www.`, an unregistered Enterprise host)
+/// → `None`, as is every host over an empty map: it can't tell "no host signed in"
+/// from an unreadable probe (old gh without `--json`), and the per-repo probe answers
+/// both correctly.
 fn github_verdict(host: Option<&str>, verdicts: &HostVerdicts) -> Option<(bool, Option<String>)> {
     let Some(host) = host else {
         return Some((false, None));
     };
-    if verdicts.is_empty() {
-        return None;
-    }
-    if let Some(verdict) = verdicts.get(host) {
-        return Some(verdict.clone());
-    }
-    let fallback = verdicts
-        .get_key_value("github.com")
-        .filter(|(_, (healthy, _))| *healthy)
-        .or_else(|| {
-            verdicts
-                .iter()
-                .filter(|(_, (healthy, _))| *healthy)
-                .min_by(|a, b| a.0.cmp(b.0))
-        });
-    Some(match fallback {
-        Some((_, (_, login))) => (true, login.clone()),
-        None => (false, None),
-    })
+    // Unmapped → per-repo probe; readiness is never borrowed from another host.
+    verdicts.get(host).cloned()
 }
 
 /// The Rust twin of `forgeFeatureReady(status, "pullRequests")` in
@@ -94,23 +64,14 @@ fn pull_requests_ready(status: &ForgeStatus) -> bool {
         && status.implemented.pull_requests
 }
 
-/// Background PR-sync readiness for many repos at once.
-///
-/// GitHub readiness is deliberately looser than `forge_status`: no `gh repo view`,
-/// because `gh_pr_poll` derives the slug itself and fails loudly per repo, and the
-/// caller already skips a repo whose poll fails. Auth takes one poller-lite probe per
-/// tick covering every known host (no expiry or rate-limit reads), and each repo reads
-/// its own host's verdict, so a broken account on an unrelated host no longer marks
-/// every repo unready; unknown host spellings fall back to any-host auth (see
-/// [`github_verdict`]). An empty probe map means either no host is signed in or the
-/// probe couldn't read gh (old gh, gh missing, inconclusive), so GitHub repos then take
-/// the per-repo `resolve_status` probe. A repo whose `origin` host is unreadable (no
-/// origin, a local-path remote) is not ready: `gh_pr_poll` needs that origin, and
+/// Background PR-sync readiness for many repos at once. On a host the batch probe
+/// answers, readiness skips `gh repo view`: `gh_pr_poll` derives the slug itself and
+/// fails loudly per repo. A repo whose `origin` host is unreadable (no origin, a
+/// local-path remote) is not ready: `gh_pr_poll` needs that origin, and
 /// `github_host_for_repo`'s github.com default would otherwise read it as ready.
-///
-/// GitLab, Bitbucket, and any other non-GitHub provider the detect chain yields keep
-/// the per-repo `resolve_status` probe; a failed probe reads as not-ready rather than
-/// failing the batch.
+/// Non-GitHub repos, and GitHub hosts the batch probe can't answer (see
+/// [`github_verdict`]), take the per-repo `resolve_status` probe; a failed probe reads
+/// as not-ready rather than failing the batch.
 #[tauri::command]
 pub async fn forge_background_statuses(paths: Vec<String>) -> AppResult<Vec<BackgroundRepoStatus>> {
     let mut routes: Vec<Route> = Vec::with_capacity(paths.len());
@@ -166,7 +127,7 @@ pub async fn forge_background_statuses(paths: Vec<String>) -> AppResult<Vec<Back
         };
         out.push(BackgroundRepoStatus {
             path,
-            provider: provider_tag(provider).to_string(),
+            provider,
             host,
             ready,
             login,
@@ -251,37 +212,22 @@ mod tests {
     }
 
     #[test]
-    fn an_alias_host_falls_back_to_any_healthy_host() {
+    fn an_unknown_host_defers_to_the_per_repo_probe() {
+        // A healthy host in the map never lends readiness to a spelling gh doesn't key.
         let v = verdicts(&[
             ("ghe.corp", true, Some("corp-me")),
             ("github.com", true, Some("octo")),
         ]);
-        // github.com is gh's default host, so its login wins the approximation.
-        assert_eq!(
-            github_verdict(Some("github.com-work"), &v),
-            Some((true, Some("octo".into())))
-        );
-        let no_default = verdicts(&[
-            ("zeta.corp", true, Some("z")),
-            ("alpha.corp", true, Some("a")),
-            ("github.com", false, Some("octo")),
-        ]);
-        assert_eq!(
-            github_verdict(Some("www.github.com"), &no_default),
-            Some((true, Some("a".into())))
-        );
-        let none_healthy = verdicts(&[("github.com", false, Some("octo"))]);
-        assert_eq!(
-            github_verdict(Some("github.com-work"), &none_healthy),
-            Some((false, None))
-        );
+        assert_eq!(github_verdict(Some("github.com-work"), &v), None);
+        assert_eq!(github_verdict(Some("www.github.com"), &v), None);
+        assert_eq!(github_verdict(Some("ghe.unregistered.corp"), &v), None);
     }
 
     #[test]
     fn wire_shape_is_camel_case_with_null_options() {
         let absent = BackgroundRepoStatus {
             path: "/r".into(),
-            provider: "github".into(),
+            provider: Provider::GitHub,
             host: None,
             ready: false,
             login: None,
@@ -294,7 +240,7 @@ mod tests {
         );
         let present = BackgroundRepoStatus {
             path: "/r".into(),
-            provider: "gitlab".into(),
+            provider: Provider::GitLab,
             host: Some("gitlab.com".into()),
             ready: true,
             login: Some("octo".into()),

@@ -269,43 +269,19 @@ fn needs_reprobe(state: SessionState) -> bool {
     state == SessionState::Broken
 }
 
-/// Classify the account list for one host into a state (no re-probe here — the
-/// caller owns the anti-flap re-probe). Picks the active account, else the first.
+/// Classify the account list for one host into a state (no re-probe here — whether
+/// to re-probe is the caller's policy). Picks the active account, else the first.
 fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
     // The `host` field is filled by the caller; this pure classifier leaves it "".
     let chosen = accounts
         .iter()
         .find(|a| a.active)
         .or_else(|| accounts.first());
-    let Some(acct) = chosen else {
+    match chosen {
+        Some(acct) => gh_account_health("", acct),
         // No entries for this host → not connected.
-        return SessionHealth::new("github", "", SessionState::NotConnected);
-    };
-    // Mirrored in `gh_account_health` — keep the two arms identical.
-    let state = match acct.state.as_str() {
-        "success" => SessionState::Healthy,
-        "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
-        // A transient failure — the caller confirms with a re-probe before Broken.
-        "error" => SessionState::Broken,
-        // Never Broken: an inconclusive probe.
-        "timeout" => SessionState::Offline,
-        // Unknown/empty state → treat as inconclusive, never a false alarm.
-        _ => SessionState::Offline,
-    };
-    let mut h = SessionHealth::new("github", "", state);
-    h.login = acct.login.clone().filter(|s| !s.is_empty());
-    h.active = Some(acct.active);
-    if matches!(
-        state,
-        SessionState::Broken | SessionState::RateLimited | SessionState::Offline
-    ) {
-        h.detail = acct
-            .error
-            .as_ref()
-            .map(|e| sanitize_detail(e))
-            .filter(|s| !s.is_empty());
+        None => SessionHealth::new("github", "", SessionState::NotConnected),
     }
-    h
 }
 
 /// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`, plus the
@@ -354,11 +330,10 @@ async fn github_health(host: &str) -> SessionHealth {
 
 /// Every known gh host's health from ONE `gh auth status --json hosts` spawn, keyed
 /// by host as gh spells it (the active account per host, else the first). For the
-/// background-sync poller, which gates each tick on it: probing per remote host
-/// misreads an ssh-alias host (`github.com-work`) as signed out, since gh answers an
-/// unknown `--hostname` with an empty hosts map. Poller-lite: no expiry read, no
-/// reset fetch, no anti-flap re-probe — a transient misread costs one skipped tick
-/// and heals on the next. An empty map means unknown (old gh without `--json`, gh
+/// background-sync poller, which gates each tick on it: one spawn per tick covers
+/// every host gh has registered, instead of one probe per remote host. Poller-lite:
+/// no expiry read, no reset fetch, no anti-flap re-probe — a transient misread costs
+/// one skipped tick and heals on the next. An empty map means unknown (old gh without `--json`, gh
 /// missing, an inconclusive probe, or no host signed in); callers fall back rather
 /// than read it as a verdict.
 pub(crate) async fn github_hosts_health_for_poller() -> HashMap<String, SessionHealth> {
@@ -518,14 +493,19 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
     out
 }
 
-/// One account's entry for the accounts-scoped list (no re-probe, no expiry).
+/// One gh account's health — the single classifier behind the per-repo path and the
+/// poller's hosts map (both via `classify_gh_host`) and the accounts-scoped list. No
+/// re-probe, no expiry: those are each caller's own policy.
 fn gh_account_health(host: &str, acct: &GhJsonAccount) -> SessionHealth {
-    // Mirrors `classify_gh_host` — keep the two arms identical.
     let state = match acct.state.as_str() {
         "success" => SessionState::Healthy,
         "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
+        // Possibly transient: the per-repo and accounts paths confirm it with a
+        // re-probe; the poller takes it as-is and re-reads next tick.
         "error" => SessionState::Broken,
+        // Never Broken: an inconclusive probe.
         "timeout" => SessionState::Offline,
+        // Unknown/empty state → treat as inconclusive, never a false alarm.
         _ => SessionState::Offline,
     };
     let mut h = SessionHealth::new("github", host, state);
@@ -743,9 +723,10 @@ fn glab_rate_limited(host: &str, combined: &str) -> SessionHealth {
     h
 }
 
-/// A ≤200-char, sanitized, single-line detail from glab output.
-fn glab_broken_detail(stderr: &str) -> Option<String> {
-    let msg = stderr.trim();
+/// A ≤200-char, sanitized, single-line detail from glab `output`: stderr for a Broken
+/// session, the combined stdout + stderr the classifier matched for a RateLimited one.
+fn glab_broken_detail(output: &str) -> Option<String> {
+    let msg = output.trim();
     if msg.is_empty() {
         return None;
     }

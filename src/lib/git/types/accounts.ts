@@ -47,7 +47,7 @@ export interface SessionHealth {
   daysLeft: number | null;
   /** `rateLimited` only: when the limit resets, in epoch SECONDS (GitHub's
    *  `x-ratelimit-reset` header). The backend sends null when unknown. */
-  resetAt?: number | null;
+  resetAt: number | null;
 }
 
 /** The local clock time a rate limit lifts ("2:45 PM"), or null when the reset
