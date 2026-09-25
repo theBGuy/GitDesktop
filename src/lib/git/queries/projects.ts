@@ -1690,7 +1690,9 @@ function shiftUpdates(
         iterationId: value.iterationId,
       });
   }
-  updates.sort((a, b) => (a.fieldId < b.fieldId ? -1 : 1));
+  updates.sort((a, b) =>
+    a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0,
+  );
   return { updates, signature: JSON.stringify(updates) };
 }
 
@@ -1804,6 +1806,10 @@ export function useShiftItemDates() {
           try {
             await write(next.updates);
           } catch (e) {
+            // Earlier rounds LANDED, so the onMutate snapshot is stale — recovery
+            // is the settle's re-read (which also toasts this error), never the
+            // onError rollback. A first-write failure (it throws) rolls back the
+            // owner press's fields; the settle's re-read covers the rest.
             return { kind: "exhausted", error: e };
           }
           sent = next;

@@ -145,12 +145,39 @@ export function shortDate(iso: string, refYear?: number): string {
     : `${label}, ${yearOf(iso)}`;
 }
 
+/** The words in a date field's name that say which end it is. A view listing
+ *  `Target` before `Start` is common, so column order alone can't orient a
+ *  pair. Matched as whole WORDS, so "Weekend" and "Ends" say nothing. */
+const START_WORDS: ReadonlySet<string> = new Set(["start", "begin"]);
+const TARGET_WORDS: ReadonlySet<string> = new Set([
+  "target",
+  "end",
+  "due",
+  "finish",
+  "deadline",
+]);
+
+/** A field name's words, lower-cased. Any non-letter separates words, and so
+ *  does a lower-to-upper step, so `start_date`, `START_DATE` and `startDate`
+ *  (the spellings API-created fields use) read like "Start date". */
+function nameWords(name: string): string[] {
+  return name
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z]+/)
+    .filter((word) => word !== "")
+    .map((word) => word.toLowerCase());
+}
+
 /**
- * The seed a roadmap view's pick starts from. The first and second DATE fields
- * among the view's visible fields, in the view's order, become start and target;
- * short of two, the project's other DATE fields fill in, in definition order. A
- * single date field places items as points. None at all falls to the first
- * ITERATION field for both ends, which spans each item across its iteration.
+ * The seed a roadmap view's pick starts from. The first two DATE fields among
+ * the view's visible fields, in the view's order, are the pair; short of two, the
+ * project's other DATE fields fill in, in definition order. The pair is then
+ * ORIENTED by name: a field named like a start (`Start`, `Begin`) goes first and
+ * one named like an end (`Target`, `End`, `Due`, `Finish`, `Deadline`) second,
+ * wherever the other field doesn't claim the same end; neutral or conflicting
+ * names keep that order. A single date field places items as points, on the
+ * target end when its name says so. None at all falls to the first ITERATION
+ * field for both ends, which spans each item across its iteration.
  */
 export function seedDateSources(
   view: ProjectViewDef,
@@ -166,12 +193,27 @@ export function seedDateSources(
     if (picked.length >= 2) break;
     if (def.kind === "date" && !picked.includes(def.id)) picked.push(def.id);
   }
-  if (picked.length > 0)
-    return {
-      start: { kind: "date", fieldId: picked[0] },
-      target:
-        picked[1] === undefined ? null : { kind: "date", fieldId: picked[1] },
-    };
+  const nameOf = (id: string | undefined) =>
+    fieldDefs.find((def) => def.id === id)?.name ?? "";
+  const says = (id: string | undefined, words: ReadonlySet<string>) =>
+    nameWords(nameOf(id)).some((word) => words.has(word));
+  const startish = (id: string | undefined) => says(id, START_WORDS);
+  const targetish = (id: string | undefined) => says(id, TARGET_WORDS);
+  const date = (id: string): DateSource => ({ kind: "date", fieldId: id });
+  const [a, b] = picked;
+  if (a !== undefined && b === undefined)
+    return targetish(a) && !startish(a)
+      ? { start: null, target: date(a) }
+      : { start: date(a), target: null };
+  if (a !== undefined && b !== undefined) {
+    const backwards =
+      (startish(b) && !startish(a)) || (targetish(a) && !targetish(b));
+    const forwards =
+      (startish(a) && !startish(b)) || (targetish(b) && !targetish(a));
+    return backwards && !forwards
+      ? { start: date(b), target: date(a) }
+      : { start: date(a), target: date(b) };
+  }
   const iteration = fieldDefs.find((def) => def.kind === "iteration");
   if (iteration === undefined) return NO_DATE_SOURCES;
   const source: DateSource = { kind: "iteration", fieldId: iteration.id };
@@ -422,10 +464,9 @@ function nextMonday(day: string): string {
 
 /**
  * The axis's two tiers. The top tier names months, each with its year; Year
- * zoom's top tier names the years
- * themselves, since its lower tier is already months. The lower tier is days at
- * Month zoom (Mondays emphasized), Monday-started weeks labelled by their Monday
- * at Quarter, and months at Year.
+ * zoom's top tier names the years themselves, since its lower tier is already
+ * months. The lower tier is days at Month zoom (Mondays emphasized),
+ * Monday-started weeks labelled by their Monday at Quarter, and months at Year.
  */
 export function axisSegments(
   min: string,

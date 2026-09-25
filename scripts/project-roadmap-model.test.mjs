@@ -120,11 +120,12 @@ const DEFS = [TITLE, STATUS, START, TARGET, SPRINT];
 const CALENDARS = iterationCalendars(DEFS);
 const TODAY = "2026-09-24";
 
-test("seeding: the view's visible date fields come first, in the view's order", () => {
-  assert.deepEqual(seedDateSources(view(["title", "target", "start"]), DEFS), {
-    start: { kind: "date", fieldId: "target" },
-    target: { kind: "date", fieldId: "start" },
-  });
+test("seeding: the view's visible date fields come first, oriented by name", () => {
+  // Target listed before Start still seeds Start as the start.
+  assert.deepEqual(
+    seedDateSources(view(["title", "target", "start"]), DEFS),
+    DATES,
+  );
   // A repeated id is one field.
   assert.deepEqual(
     seedDateSources(view(["start", "start", "status"]), DEFS).target,
@@ -133,17 +134,86 @@ test("seeding: the view's visible date fields come first, in the view's order", 
 });
 
 test("seeding: short of two visible dates, the project's own fill in", () => {
-  assert.deepEqual(seedDateSources(view(["target"]), DEFS), {
-    start: { kind: "date", fieldId: "target" },
-    target: { kind: "date", fieldId: "start" },
-  });
+  // Only Target shown: Start fills in from the project, and goes first.
+  assert.deepEqual(seedDateSources(view(["target"]), DEFS), DATES);
   assert.deepEqual(seedDateSources(view([]), DEFS), DATES);
+});
+
+const dateDef = (id, name) => ({ kind: "date", id, name, isIssueField: false });
+
+test("seeding: orientation reads each end's words, and neutral names keep order", () => {
+  const due = dateDef("due", "Due date");
+  const begin = dateDef("begin", "Begin");
+  const kickoff = dateDef("kickoff", "Kickoff");
+  const ship = dateDef("ship", "Ship");
+  const pair = (s, t) => ({
+    start: { kind: "date", fieldId: s },
+    target: { kind: "date", fieldId: t },
+  });
+  // An end-worded field first, a start-worded one second: swapped.
+  assert.deepEqual(
+    seedDateSources(view([]), [due, begin]),
+    pair("begin", "due"),
+  );
+  // One side's word alone decides: Due first beside a neutral name moves last.
+  assert.deepEqual(
+    seedDateSources(view([]), [due, kickoff]),
+    pair("kickoff", "due"),
+  );
+  assert.deepEqual(
+    seedDateSources(view([]), [kickoff, begin]),
+    pair("begin", "kickoff"),
+  );
+  // Neutral names keep the view's order, then the definitions'.
+  assert.deepEqual(
+    seedDateSources(view(["ship", "kickoff"]), [kickoff, ship]),
+    pair("ship", "kickoff"),
+  );
+  assert.deepEqual(
+    seedDateSources(view([]), [kickoff, ship]),
+    pair("kickoff", "ship"),
+  );
+  // Both ends claimed by both names: ambiguous, so order stands.
+  const both1 = dateDef("x", "Start to end");
+  const both2 = dateDef("y", "Start or end");
+  assert.deepEqual(seedDateSources(view([]), [both1, both2]), pair("x", "y"));
+  // One side both backwards AND forwards (it says start and end): the
+  // conflict keeps the order rather than swapping.
+  assert.deepEqual(
+    seedDateSources(view([]), [kickoff, both1]),
+    pair("kickoff", "x"),
+  );
+  // A word inside another word is not that word.
+  const weekend = dateDef("weekend", "Weekend");
+  const ends = dateDef("ends", "Ends");
+  for (const inner of [weekend, ends])
+    assert.deepEqual(
+      seedDateSources(view([]), [inner, kickoff]),
+      pair(inner.id, "kickoff"),
+    );
+  // API-created spellings split into words too: snake, SCREAMING and camel case.
+  for (const [s, t] of [
+    ["start_date", "due_date"],
+    ["START_DATE", "DUE_DATE"],
+    ["startDate", "dueDate"],
+    ["StartDate", "TargetDate"],
+  ])
+    assert.deepEqual(
+      seedDateSources(view([]), [dateDef("t", t), dateDef("s", s)]),
+      pair("s", "t"),
+      `${s} / ${t}`,
+    );
 });
 
 test("seeding: one date field places points; none falls to an iteration", () => {
   assert.deepEqual(seedDateSources(view([]), [TITLE, START, SPRINT]), {
     start: { kind: "date", fieldId: "start" },
     target: null,
+  });
+  // A lone end-worded field is the target end, so a resize moves it.
+  assert.deepEqual(seedDateSources(view([]), [TITLE, TARGET]), {
+    start: null,
+    target: { kind: "date", fieldId: "target" },
   });
   assert.deepEqual(seedDateSources(view([]), [TITLE, SPRINT]), ITERATIONS);
   assert.deepEqual(seedDateSources(view(["status"]), [TITLE, STATUS]), {

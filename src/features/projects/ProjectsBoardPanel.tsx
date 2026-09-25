@@ -486,14 +486,14 @@ const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
   "alt+home": "top",
   "alt+end": "bottom",
 };
-/** Every key the board answers with Alt held: {@link REORDER_CHORDS}' own four,
- *  plus ← and → which it deliberately answers with NOTHING. An Alt-modified press
- *  on any of them that is not a bare reposition chord (Alt+Shift+Arrow, say) is
- *  swallowed rather than falling through to the cursor-and-selection arm, which
- *  would answer one keystroke with two unrelated actions.
- *
- *  ← and → are swallowed too: Alt means "act on the card" on this board, so it
- *  never degrades to plain navigation. */
+/** Every key the board, the table and the roadmap answer with Alt held. The
+ *  chords that use them are matched first: {@link REORDER_CHORDS} everywhere, and
+ *  {@link SHIFT_CHORDS} on any roadmap item row (shifting on its lane, saying why
+ *  not on its title). Any other Alt press on these keys (Alt+Shift+↑ anywhere,
+ *  Alt+← on a board card or a table cell) is swallowed rather than falling
+ *  through to the cursor-and-selection arm, which would answer one keystroke with
+ *  two unrelated actions. Alt means "act on the item", so it never degrades to
+ *  plain navigation. */
 const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
   "ArrowUp",
   "ArrowDown",
@@ -1191,9 +1191,10 @@ export function ProjectsBoardPanel({
   const [collapsedGroups, setCollapsedGroups] =
     useState<ReadonlySet<string>>(NO_COLLAPSED);
   // The roadmap's own layout choices, transient like Group by: the fields that
-  // place an item, and the scale. Seeded by `pickView` alone and reset by every
-  // view pick; a picked field the definitions stop carrying reads as no source
-  // (`resolveDateSources`) rather than re-seeding behind the user.
+  // place an item, and the scale. Seeded (zoom reset to Month) at two sites only:
+  // `pickView` on every view pick, and `flipLayout` when the view on screen turns
+  // into a roadmap in place. A picked field the definitions stop carrying reads as
+  // no source (`resolveDateSources`) rather than re-seeding behind the user.
   const [datePicks, setDatePicks] = useState<DateSources>(NO_DATE_SOURCES);
   const [zoom, setZoom] = useState<Zoom>("month");
   // Bumped by the palette's jump to today; the roadmap scrolls on the bump.
@@ -1286,9 +1287,17 @@ export function ProjectsBoardPanel({
       setBoardCursorSeed({ itemId: cardId, claim: held });
     setCursor(null);
   }
-  const flipLayout = useEffectEvent((toRows: boolean, cardId: string | null) =>
-    handOffLayoutFlip(toRows, cardId),
-  );
+  // A flip INTO a roadmap is a view nobody re-picked, so it seeds the roadmap's
+  // date sources and zoom the way `pickView` would. Only here: `pickView` seeds
+  // every picked view itself, and a pick changes the view id, which this path
+  // never fires on.
+  const flipLayout = useEffectEvent((to: Surface, cardId: string | null) => {
+    if (to === "roadmap" && view !== null) {
+      setDatePicks(seedDateSources(view, fieldDefs));
+      setZoom("month");
+    }
+    handOffLayoutFlip(to !== "board", cardId);
+  });
   // Records the drawn layout for the next render, and hands off when the SAME view
   // changed layout in place. Declared after the retirement's effect, so that one
   // reads the previous render's record; a retired view resolves to no view here
@@ -1302,7 +1311,7 @@ export function ProjectsBoardPanel({
   useEffect(() => {
     const prev = drawnLayoutRef.current;
     if (view !== null && prev.viewId === view.id && prev.layout !== surface)
-      flipLayout(surface !== "board", prev.cardId);
+      flipLayout(surface, prev.cardId);
     drawnLayoutRef.current = {
       viewId: view?.id ?? null,
       layout: surface,
