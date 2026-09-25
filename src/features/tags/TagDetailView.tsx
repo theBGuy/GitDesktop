@@ -34,6 +34,7 @@ import {
   checkoutDetachedConfirm,
   checkoutTagSuccessToast,
 } from "@/features/history/commit-confirms";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { formatBytes } from "@/features/repository/insights/primitives";
 import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
@@ -58,6 +59,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -231,6 +233,11 @@ export function TagDetailView({
       .getState()
       .ask(checkoutDetachedConfirm("tag", tag));
     if (!ok) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await checkout.mutateAsync(target);
     } catch (e) {

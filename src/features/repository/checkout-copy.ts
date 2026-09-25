@@ -1,6 +1,6 @@
-// Shared by every branch-row surface (the switcher, the compare picker, the
-// base picker), so it lives apart from all three: hosting it in one of them
-// would make the other two import a component module to read copy.
+// Checkout copy shared across features: branch-row naming for every branch
+// picker, and the refusal every HEAD-moving surface shows. Import-free and apart
+// from any component, so pulls/tags/history/compare can read it without a cycle.
 
 /** Last path segment (folder name). Git reports worktree paths forward-slashed
  *  on every platform (`UserWorktree.path`), and a backslash is a legal
@@ -44,3 +44,9 @@ export const ROW_CHECKOUT_COPY = {
 /** Which {@link ROW_CHECKOUT_COPY} arm a listed worktree speaks in. */
 export const rowCheckoutCopy = (isMain: boolean | undefined) =>
   ROW_CHECKOUT_COPY[isMain ? "main" : "linked"];
+
+/** Every HEAD-moving surface's fire-time refusal while `promotionBlocksCheckout`
+ *  holds: the promote ends on its own checkout in the main workspace, and a
+ *  concurrent one would race it for that HEAD. */
+export const PROMOTION_BLOCKS_CHECKOUT =
+  "A worktree is being promoted to your main workspace. Try again once it finishes.";

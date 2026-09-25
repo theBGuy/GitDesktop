@@ -82,5 +82,7 @@ export function useUnpushedMessages(
     },
     enabled: enabled && base !== "",
     staleTime: 0,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }

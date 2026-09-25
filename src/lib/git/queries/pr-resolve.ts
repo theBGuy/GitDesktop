@@ -139,5 +139,7 @@ export function useConflictPreview(
     queryFn: () => api.gitConflictPreview(repo, base, head),
     enabled: enabled && base !== "" && head !== "",
     staleTime: 15_000,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }

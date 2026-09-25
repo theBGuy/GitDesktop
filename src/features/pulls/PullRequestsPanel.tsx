@@ -9,7 +9,13 @@ import {
   XCircleIcon,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -522,6 +528,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     !alignDetails.isPlaceholderData &&
     !alignDetails.isFetching;
   const alignRemoteState = alignDetails.data?.state;
+  // The `data-row` key an align still owes a scroll to, consumed once the settled
+  // tab draws that row. Only `settleAlign` sets it, so plain clicks and arrow-key
+  // nav (which scrolls on its own) never gain a scroll from it.
+  const [alignScrollRow, setAlignScrollRow] = useState<string | null>(null);
   // The tab and the archived toggle are READ here rather than depended on: the align
   // is keyed on the PR's state landing, not on the state it is correcting.
   const settleAlign = useEffectEvent(
@@ -530,6 +540,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       // throw away however deep the user had loaded the list.
       if (target !== stateFilter) onStateFilter(target);
       if (revealArchived && !showArchived) setShowArchived(true);
+      if (selectedPr) setAlignScrollRow(`${selectedPr.kind}:${selectedPr.id}`);
       clearPendingPrAlign();
     },
   );
@@ -817,6 +828,43 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           })),
         ]),
   ];
+
+  // The align's scroll lands when `navTargets` (the rows the list draws) holds its
+  // row, and retires unscrolled once the list settles without it (filtered out,
+  // collapsed, past the loaded page) or any other selection lands. Remote rows
+  // count only off a placeholder page: that page is the previous tab's, and a
+  // stale copy of the row there is about to move. A held row is never placeholder.
+  const selectedRowKey = selectedPr
+    ? `${selectedPr.kind}:${selectedPr.id}`
+    : null;
+  const alignScrollDrawn =
+    alignScrollRow !== null &&
+    navTargets.some((t) => `${t.kind}:${t.id}` === alignScrollRow) &&
+    (selectedPr?.kind === "local" ||
+      !prList.isPlaceholderData ||
+      heldRows.some((c) => `remote:${c.number}` === alignScrollRow));
+  const alignScrollSettled =
+    selectedPr?.kind === "local" ||
+    prList.isError ||
+    (prList.isSuccess && !prList.isPlaceholderData && !prList.isFetching);
+  useLayoutEffect(() => {
+    if (alignScrollRow === null) return;
+    if (alignScrollRow !== selectedRowKey) {
+      setAlignScrollRow(null);
+      return;
+    }
+    if (alignScrollDrawn) {
+      // A held strip can share its row's key; the list row renders after the
+      // pinned slot, so the last match is the one to reveal.
+      const rows = panelRef.current?.querySelectorAll<HTMLElement>(
+        `[data-row="${CSS.escape(alignScrollRow)}"]`,
+      );
+      rows?.[rows.length - 1]?.scrollIntoView({ block: "nearest" });
+      setAlignScrollRow(null);
+    } else if (alignScrollSettled) {
+      setAlignScrollRow(null);
+    }
+  }, [alignScrollRow, selectedRowKey, alignScrollDrawn, alignScrollSettled]);
 
   // One spelling for "this number is the selection", shared by the real rows and
   // the held rows standing in for them — the swap only carries the selection

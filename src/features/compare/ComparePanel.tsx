@@ -41,6 +41,7 @@ import {
   createRefFromCommitFormOpts,
 } from "@/features/history/HistoryDialogs";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
 import {
@@ -65,6 +66,7 @@ import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -180,6 +182,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     ...createRefFromCommitFormOpts,
     onSubmit: async ({ value }) => {
       if (!branchHash) return;
+      // This create always checks the branch out, so it moves HEAD.
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       const name = sanitizeRefName(value.name);
       try {
         await createBranch.mutateAsync({
@@ -214,6 +221,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // pose a different question than its twin.
   async function doCheckoutCommit(hash: string) {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     checkoutCommit.mutate(hash, {
       onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
       onError,

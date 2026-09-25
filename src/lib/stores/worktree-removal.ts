@@ -166,6 +166,13 @@ export function isMainPromoting(path: string): boolean {
   return promotingMains.has(normPath(path));
 }
 
+/** Fire-time gate for any HEAD-moving op in `repoPath`: refuses both while a
+ *  promote targets it as the main workspace and while it is the promote's source
+ *  worktree (active until the promote's `openRepo` moves the app off it). */
+export function promotionBlocksCheckout(repoPath: string): boolean {
+  return isMainPromoting(repoPath) || isWorktreePromoting(repoPath);
+}
+
 /** The refusal every surface shows for a worktree a promote has claimed — one
  *  spelling, so the store's refusals and the callers' can't drift apart. */
 export const WORKTREE_PROMOTING_MESSAGE = "This worktree is being promoted.";

@@ -26,6 +26,9 @@ export function useTagList(repo: string) {
     queryKey: ["repo", repo, "tags"] as const,
     queryFn: () => api.gitListTags(repo),
     staleTime: 30_000,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -40,6 +43,7 @@ export function useRecentCommits(
     queryFn: () => api.gitRecentCommits(repo, limit),
     enabled,
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 

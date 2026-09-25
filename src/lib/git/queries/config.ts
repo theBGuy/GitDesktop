@@ -5,6 +5,9 @@ export function useGlobalIdentity() {
   return useQuery({
     queryKey: ["global-identity"] as const,
     queryFn: api.gitGlobalIdentity,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -24,6 +27,7 @@ export function useGlobalDefaultBranch() {
   return useQuery({
     queryKey: ["global-default-branch"] as const,
     queryFn: api.gitGlobalDefaultBranch,
+    networkMode: "always",
   });
 }
 
@@ -42,6 +46,7 @@ export function useGlobalAutocrlf() {
   return useQuery({
     queryKey: ["global-autocrlf"] as const,
     queryFn: api.gitGlobalAutocrlf,
+    networkMode: "always",
   });
 }
 
@@ -59,6 +64,7 @@ export function useUserIdentity(repo: string) {
     queryKey: ["repo", repo, "user-identity"] as const,
     queryFn: () => api.gitUserIdentity(repo),
     staleTime: 5 * 60_000,
+    networkMode: "always",
   });
 }
 
@@ -67,6 +73,7 @@ export function useLocalIdentity(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "local-identity"] as const,
     queryFn: () => api.gitLocalIdentity(repo),
+    networkMode: "always",
   });
 }
 

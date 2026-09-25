@@ -103,5 +103,7 @@ export function useGitInstalled() {
       : api.checkGitInstalled,
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
+    // A local probe: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }

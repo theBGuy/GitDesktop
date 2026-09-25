@@ -203,6 +203,11 @@ export function LocalPrView({
     if (pr) update.mutate({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
+  // Close/Reopen's and the review post's single-flight holds: the pinned update
+  // mutation detaches on a repo switch, so `update.isPending` alone can go idle
+  // while the write runs on. The panel's `post` gates re-entry on `posting`.
+  const [settingStatus, setSettingStatus] = useState(false);
+  const [postingReview, setPostingReview] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
   // A local PR's body and comments autolink the forge's references like any other
@@ -402,8 +407,9 @@ export function LocalPrView({
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
-    if (!pr || update.isPending) return;
+    if (!pr || update.isPending || settingStatus) return;
     const note = comment.trim();
+    setSettingStatus(true);
     try {
       await update.mutateAsync({
         id: pr.id,
@@ -428,6 +434,8 @@ export function LocalPrView({
       // Nothing was written, the note included — say so rather than leave a
       // silent no-op behind a button that promised to post it.
       toastError(e);
+    } finally {
+      setSettingStatus(false);
     }
   }
 
@@ -831,11 +839,12 @@ export function LocalPrView({
                 files: d.files,
               })),
           }}
-          posting={update.isPending}
+          posting={update.isPending || postingReview}
           // The body arrives pre-branded from the panel; stamp the synthetic
           // author so it renders as a GitDesktop-posted review, not authorless.
           // `opts` (asBot) is a remote-forge concern — ignored for local PRs.
           onPost={async (body) => {
+            setPostingReview(true);
             try {
               await update.mutateAsync({
                 id: pr.id,
@@ -855,6 +864,8 @@ export function LocalPrView({
             } catch (e) {
               toastError(e);
               throw e; // let the panel skip its success toast / text clear
+            } finally {
+              setPostingReview(false);
             }
           }}
         />
@@ -1112,7 +1123,7 @@ export function LocalPrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending}
+              disabled={update.isPending || settingStatus}
               reason="Saving…"
               onClick={() => void setStatus("closed")}
               title={
@@ -1216,7 +1227,7 @@ export function LocalPrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending}
+              disabled={update.isPending || settingStatus}
               reason="Saving…"
               onClick={() => void setStatus("open")}
               title={

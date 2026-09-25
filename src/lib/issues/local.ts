@@ -134,7 +134,10 @@ export async function updateLocalIssue(
     const key = await keyFor(repo);
     const all = await readByKey(key);
     const idx = all.findIndex((i) => i.id === id);
-    if (idx === -1) throw new Error(`no local issue with id ${id}`);
+    if (idx === -1)
+      throw new Error(
+        `no local issue with id ${id} — it may have been deleted or belong to a different repository`,
+      );
     const next = [...all];
     next[idx] = mutate(all[idx]);
     await writeAll(key, next);

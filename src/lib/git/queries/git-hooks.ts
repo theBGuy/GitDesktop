@@ -8,6 +8,9 @@ export function useHooks(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "hooks"] as const,
     queryFn: () => api.gitHooksList(repo),
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -17,6 +20,7 @@ export function useHookContent(repo: string, name: string | null) {
     queryKey: ["repo", repo, "hook", name] as const,
     queryFn: () => api.gitHookRead(repo, name ?? ""),
     enabled: name !== null,
+    networkMode: "always",
   });
 }
 

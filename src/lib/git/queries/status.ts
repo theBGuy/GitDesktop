@@ -24,6 +24,7 @@ export function useWorkingLineStats(repo: string, enabled: boolean) {
     queryKey: [...repoKeys.status(repo), "line-stats"],
     queryFn: () => api.gitWorkingLineStats(repo),
     enabled,
+    networkMode: "always",
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
   });
@@ -40,6 +41,7 @@ export function useUnpushedCount(repo: string, enabled: boolean) {
     queryFn: () => api.gitUnpushedCount(repo),
     enabled: enabled && Boolean(repo),
     staleTime: 10_000,
+    networkMode: "always",
   });
 }
 
@@ -54,5 +56,6 @@ export function useRepoOwners(paths: string[]) {
     // gcTime: Infinity — keep owners warm across popover opens so refreshes stay
     // instant (the stored owner on each RecentRepo is the primary anti-reflow path).
     gcTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
 }

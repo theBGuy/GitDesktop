@@ -108,6 +108,9 @@ export function LocalIssueView({
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
+  // Close/Reopen's single-flight hold: the pinned update mutation detaches on a
+  // repo switch, so `update.isPending` alone can go idle while the write runs on.
+  const [settingStatus, setSettingStatus] = useState(false);
   const portalContainer = usePanelPortalContainer();
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
@@ -161,8 +164,9 @@ export function LocalIssueView({
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
-    if (!issue || update.isPending) return;
+    if (!issue || update.isPending || settingStatus) return;
     const note = comment.trim();
+    setSettingStatus(true);
     try {
       await update.mutateAsync({
         id: issue.id,
@@ -187,6 +191,8 @@ export function LocalIssueView({
       // silent no-op behind a button that promised to post it.
       toastError(e);
       return;
+    } finally {
+      setSettingStatus(false);
     }
     setComment("");
   }
@@ -457,7 +463,7 @@ export function LocalIssueView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending}
+              disabled={update.isPending || settingStatus}
               reason="Saving…"
               onClick={() => void setStatus("closed")}
               title={
@@ -474,7 +480,7 @@ export function LocalIssueView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={update.isPending}
+            disabled={update.isPending || settingStatus}
             reason="Saving…"
             onClick={() => void setStatus("open")}
             title={

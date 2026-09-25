@@ -1,5 +1,6 @@
 import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent, useId, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,6 +18,7 @@ import { useCreateBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
@@ -24,6 +26,7 @@ import {
   useHasBaseOptions,
   useSeedBase,
 } from "./BaseBranchCombobox";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   GenerateBranchNameButton,
   useBranchNameGenerateAction,
@@ -110,6 +113,11 @@ export function CreateBranchDialog({
   const createForm = useAppForm({
     defaultValues: { name: "", base: "" },
     onSubmit: async ({ value }) => {
+      // This create always checks the branch out, so it moves HEAD.
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       // Hoisted out of the try: a `||` value block inside try/catch bails the
       // whole component out of the React Compiler.
       const startPoint = value.base || undefined;

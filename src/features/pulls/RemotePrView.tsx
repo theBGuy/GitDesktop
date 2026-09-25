@@ -73,6 +73,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { prOpenEligible } from "@/lib/automations/sync";
@@ -180,6 +181,7 @@ import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { queuedMergeKey, useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -2266,6 +2268,11 @@ export function RemotePrView({
   }
 
   async function checkoutHead(headRefName: string) {
+    // Read at fire time: the promote's claim never re-renders anything.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await checkout.mutateAsync(number);
       toast.success(`Checked out ${headRefName}`);

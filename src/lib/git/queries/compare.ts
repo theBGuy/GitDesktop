@@ -11,6 +11,7 @@ export function useCompareBranches(
     queryKey: repoKeys.compare(repo, base ?? "", compare ?? ""),
     queryFn: () => api.gitCompareBranches(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
+    networkMode: "always",
   });
 }
 
@@ -25,6 +26,7 @@ export function useBranchAhead(
     queryKey: repoKeys.branchAhead(repo, base ?? "", compare ?? ""),
     queryFn: () => api.gitBranchAhead(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
+    networkMode: "always",
   });
 }
 
@@ -39,6 +41,7 @@ export function useBranchAheadCount(
     queryKey: repoKeys.branchAheadCount(repo, base ?? "", compare ?? ""),
     queryFn: () => api.gitBranchAheadCount(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
+    networkMode: "always",
   });
 }
 
@@ -52,6 +55,7 @@ export function useBranchDiffFiles(
     queryFn: () => api.gitBranchDiffFiles(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -80,6 +84,7 @@ export function useBranchFileDiff(
       base !== compare &&
       file !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -97,6 +102,7 @@ export function useMergeBase(
     queryFn: () => api.gitMergeBase(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -113,6 +119,7 @@ export function useObjectsPresent(repo: string | null, oids: string[]) {
     queryFn: () => api.gitObjectsPresent(repo ?? "", oids),
     enabled: repo !== null && oids.length > 0,
     refetchOnMount: "always",
+    networkMode: "always",
   });
 }
 

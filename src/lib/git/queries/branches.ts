@@ -9,6 +9,9 @@ export function useBranches(repo: string) {
   return useQuery({
     queryKey: repoKeys.branches(repo),
     queryFn: () => api.gitBranches(repo),
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -21,6 +24,7 @@ export function useRemoteBranches(repo: string, enabled = true) {
     queryFn: () => api.gitRemoteBranches(repo),
     enabled: enabled && Boolean(repo),
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 
@@ -65,6 +69,7 @@ export function useDefaultBranch(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "default-branch"] as const,
     queryFn: () => api.gitDefaultBranch(repo),
+    networkMode: "always",
   });
 }
 
@@ -153,6 +158,7 @@ export function useMergePreview(
     queryFn: () => api.gitMergePreview(repo, branch, strategy),
     enabled: enabled && branch !== "",
     staleTime: 15_000,
+    networkMode: "always",
   });
 }
 

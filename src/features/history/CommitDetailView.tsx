@@ -27,6 +27,7 @@ import {
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
@@ -49,6 +50,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
@@ -252,6 +254,11 @@ export function CommitDetailView({
   // menu. All three act on the `hash` PROP for the same reason `copyHash` does.
   async function doCheckoutCommit() {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await checkoutCommit.mutateAsync(hash);
     } catch (e) {

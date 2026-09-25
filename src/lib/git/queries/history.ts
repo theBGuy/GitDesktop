@@ -16,6 +16,9 @@ export function useLog(repo: string) {
   return useInfiniteQuery({
     queryKey: repoKeys.log(repo),
     queryFn: ({ pageParam }) => api.gitLog(repo, HISTORY_PAGE_SIZE, pageParam),
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
     initialPageParam: 0,
     // The next page skips everything loaded so far; a short page means
     // history is exhausted.
@@ -34,6 +37,7 @@ export function useCommitSearch(repo: string, query: string) {
     queryFn: ({ pageParam }) =>
       api.gitLog(repo, HISTORY_PAGE_SIZE, pageParam, q),
     enabled: q.length > 0,
+    networkMode: "always",
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) =>
       lastPage.length < HISTORY_PAGE_SIZE
@@ -49,6 +53,7 @@ const commitDetailsOptions = (repo: string, hash: string) =>
     queryKey: repoKeys.commitDetails(repo, hash),
     queryFn: () => api.gitCommitDetails(repo, hash),
     staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
 
 const commitFilesOptions = (repo: string, hash: string) =>
@@ -56,6 +61,7 @@ const commitFilesOptions = (repo: string, hash: string) =>
     queryKey: repoKeys.commitFiles(repo, hash),
     queryFn: () => api.gitCommitFiles(repo, hash),
     staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
 
 const commitFileDiffOptions = (repo: string, hash: string, file: string) =>
@@ -63,6 +69,7 @@ const commitFileDiffOptions = (repo: string, hash: string, file: string) =>
     queryKey: repoKeys.commitFileDiff(repo, hash, file),
     queryFn: () => api.gitCommitFileDiff(repo, hash, file),
     staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
 
 export function useCommitDetails(repo: string, hash: string | null) {
@@ -152,6 +159,7 @@ export function useFileLog(repo: string, path: string | null) {
     queryFn: ({ pageParam }) =>
       api.gitFileLog(repo, path ?? "", HISTORY_PAGE_SIZE, pageParam),
     enabled: path !== null && path !== "",
+    networkMode: "always",
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) =>
       lastPage.length < HISTORY_PAGE_SIZE
@@ -171,6 +179,7 @@ export function useBlame(
     queryFn: () => api.gitBlame(repo, path ?? "", rev),
     enabled: path !== null && path !== "",
     staleTime: 60_000,
+    networkMode: "always",
   });
 }
 
@@ -184,6 +193,7 @@ export function useFileText(repo: string, path: string, enabled: boolean) {
     queryFn: () => api.readTextFile(`${repo}/${path}`),
     enabled: Boolean(repo) && path !== "" && enabled,
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 
@@ -192,6 +202,7 @@ export function useCommitAuthors(repo: string) {
     queryKey: ["repo", repo, "commit-authors"] as const,
     queryFn: () => api.gitCommitAuthors(repo),
     staleTime: 60_000,
+    networkMode: "always",
   });
 }
 
@@ -210,6 +221,7 @@ export function useTodoScan(
     queryFn: () => api.gitTodoScan(repo, markers, maxHits),
     enabled: Boolean(repo) && enabled,
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 

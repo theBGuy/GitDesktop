@@ -100,6 +100,7 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
+  promotionBlocksCheckout,
   useWorktreeRemovalStore,
   useWorktreeRemovals,
   WORKTREE_PROMOTING_MESSAGE,
@@ -122,7 +123,11 @@ import {
   worktreeCheckStateFrom,
 } from "./CleanupBranchesDialog";
 import { CreateBranchDialog } from "./CreateBranchDialog";
-import { baseName, rowCheckoutCopy } from "./checkout-copy";
+import {
+  baseName,
+  PROMOTION_BLOCKS_CHECKOUT,
+  rowCheckoutCopy,
+} from "./checkout-copy";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { OperationHistoryDialog } from "./OperationHistoryDialog";
@@ -781,6 +786,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     target: { name: string; remote: string | null },
     opts?: { onError?: (e: unknown) => void },
   ) {
+    // Read at fire time: the promote's claim never re-renders anything.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       if (target.remote) {
         await checkoutRemote.mutateAsync({
@@ -911,6 +921,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   function bringAndSwitch() {
     if (!switchTarget) return;
+    // Ahead of closing the dialog, so a refusal keeps it; `runCheckout` re-checks.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const target = switchTarget;
     // Captured with the target: the refusal branch below runs after an await and
     // must decide from the touched flag as it stood when THIS switch started — a
@@ -941,6 +956,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // for both checkbox states — the unchecked path just skips the pop.
   async function stashAndSwitch() {
     if (!switchTarget) return;
+    // Ahead of every state write, so a refusal keeps the dialog and its choices.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const target = switchTarget;
     const reapply = reapplyOnSwitch;
     setSwitchTarget(null);
@@ -1036,6 +1056,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             "Can't switch off this branch — every other branch is checked out in a worktree.",
           );
           setDeleteTarget(null);
+          return;
+        }
+        // Below the occupancy await, so a promote that started meanwhile counts;
+        // nothing has been written yet, so the delete is refused whole.
+        if (promotionBlocksCheckout(repoPath)) {
+          toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
         await checkout.mutateAsync(fallback);

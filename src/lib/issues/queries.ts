@@ -18,18 +18,17 @@ export function useLocalIssues(repo: string) {
   });
 }
 
-/** `identity` pins the mutation key, so a repo switch mid-flight detaches the write
- *  instead of retargeting it and its invalidation (gd-conventions). Opt-in rather
- *  than automatic: the update/delete hooks' callers read `isPending` as a re-entry
- *  guard, and a detach would silently open it. */
+/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of
+ *  retargeting it and its invalidation (gd-conventions). The detached observer goes
+ *  idle, so callers keep re-entry protection in local flags, never `isPending`. */
 function useLocalIssueMutation<TArgs, TData>(
   repo: string,
+  op: "create" | "update" | "delete",
   fn: (args: TArgs) => Promise<TData>,
-  identity?: readonly unknown[],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    ...(identity ? { mutationKey: identity } : {}),
+    mutationKey: ["local-issue", op, repo],
     mutationFn: fn,
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: localIssueKey(repo) }),
@@ -39,17 +38,15 @@ function useLocalIssueMutation<TArgs, TData>(
 export function useCreateLocalIssue(repo: string) {
   return useLocalIssueMutation(
     repo,
+    "create",
     (input: { title: string; body: string }) => createLocalIssue(repo, input),
-    // Pinned: the create and the list invalidation close over `repo`, and the
-    // dialog survives a repo switch — its only caller awaits the promise and
-    // reads no observer state.
-    ["local-issue", "create", repo],
   );
 }
 
 export function useUpdateLocalIssue(repo: string) {
   return useLocalIssueMutation(
     repo,
+    "update",
     ({
       id,
       mutate,
@@ -61,7 +58,7 @@ export function useUpdateLocalIssue(repo: string) {
 }
 
 export function useDeleteLocalIssue(repo: string) {
-  return useLocalIssueMutation(repo, (id: string) =>
+  return useLocalIssueMutation(repo, "delete", (id: string) =>
     deleteLocalIssue(repo, id),
   );
 }

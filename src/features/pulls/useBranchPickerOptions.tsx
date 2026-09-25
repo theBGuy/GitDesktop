@@ -1,5 +1,6 @@
 import { ArchiveIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { type ReactNode, useMemo } from "react";
+import { rowCheckoutCopy } from "@/features/repository/checkout-copy";
 import { normPath } from "@/lib/git/path";
 import { useBranches, useUserWorktrees } from "@/lib/git/queries";
 
@@ -17,8 +18,8 @@ export interface BranchPickerOptions {
 /**
  * Branch options for the PR branch pickers — create's head/base pair and the
  * edit dialog's base picker: the filtered name list, the value→label map, and
- * per-branch status chips (checked out in another worktree) rendered after each
- * option.
+ * per-branch status chips (checked out in another worktree or the main
+ * workspace) rendered after each option.
  *
  * Agent-session branches (`gd/session/*`) are always excluded — they're
  * app-internal and submitting one would push it — and **archived** branches are
@@ -37,14 +38,15 @@ export function useBranchPickerOptions(
   const worktrees = useUserWorktrees(repoPath, enabled);
   const activeNorm = normPath(repoPath);
 
-  // Branches checked out in *another* worktree → that worktree's path. Git
-  // forbids a branch in two worktrees, so this is informational in the picker;
-  // the active repo's own checkout is excluded (it's just the current branch).
+  // Branches checked out in *another* checkout → that checkout. Git forbids a
+  // branch in two worktrees, so this is informational in the picker; the active
+  // repo's own checkout is excluded (it's just the current branch). The main
+  // workspace stays IN — git counts it as a worktree, and `isMain` names it.
   const worktreeByBranch = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { path: string; isMain: boolean }>();
     for (const w of worktrees.data ?? []) {
       if (w.branch && normPath(w.path) !== activeNorm)
-        map.set(w.branch, w.path);
+        map.set(w.branch, { path: w.path, isMain: w.isMain });
     }
     return map;
   }, [worktrees.data, activeNorm]);
@@ -64,19 +66,21 @@ export function useBranchPickerOptions(
     const items = Object.fromEntries(names.map((n) => [n, n]));
     const annotations: Record<string, ReactNode> = {};
     for (const b of list) {
-      const wtPath = worktreeByBranch.get(b.name);
-      if (!wtPath && !b.archived) continue;
-      // Muted meta chips, matching BranchSwitcher's worktree idiom; text (not
-      // color) carries the meaning, so it survives WCAG AA / color-blindness.
+      const wt = worktreeByBranch.get(b.name);
+      if (!wt && !b.archived) continue;
+      // Muted meta chips named through the shared branch-row copy, so a main
+      // workspace reads as one; text (not color) carries the meaning, so it
+      // survives WCAG AA / color-blindness.
+      const copy = rowCheckoutCopy(wt?.isMain);
       annotations[b.name] = (
         <>
-          {wtPath && (
+          {wt && (
             <span
               className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-              title={`Checked out in another worktree (${wtPath})`}
+              title={copy.blockedTitle(wt.path)}
             >
               <TreeStructureIcon className="size-3" weight="bold" />
-              worktree
+              {copy.noun}
             </span>
           )}
           {b.archived && (

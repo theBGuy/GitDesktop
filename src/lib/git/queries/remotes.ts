@@ -7,6 +7,9 @@ export function useRemotes(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "remotes"] as const,
     queryFn: () => api.gitRemotes(repo),
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -69,6 +72,7 @@ export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
     // external `git remote set-url` is picked up promptly, and in-app edits invalidate
     // this key eagerly (useSetRemoteUrl).
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 

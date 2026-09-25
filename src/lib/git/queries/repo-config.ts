@@ -110,6 +110,9 @@ export function useDependabotConfig(repo: string, enabled: boolean) {
     queryFn: () => api.dependabotGet(repo),
     enabled,
     retry: false,
+    // Local file reads must not park on react-query's default "online" mode
+    // offline; the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -140,6 +143,7 @@ export function useFunding(repo: string, enabled: boolean) {
     queryFn: () => api.fundingGet(repo),
     enabled,
     retry: false,
+    networkMode: "always",
   });
 }
 

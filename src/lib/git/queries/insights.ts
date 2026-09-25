@@ -8,6 +8,9 @@ export function useRepoStats(repo: string, enabled: boolean) {
     queryFn: () => api.gitRepoStats(repo),
     enabled,
     staleTime: 5 * 60_000,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -22,6 +25,7 @@ export function useBranchStats(
     queryFn: () => api.gitBranchStats(repo, branch ?? "", base ?? ""),
     enabled: enabled && branch !== null && base !== null && branch !== base,
     staleTime: 60_000,
+    networkMode: "always",
   });
 }
 
@@ -39,6 +43,7 @@ export function useContributorActivity(
     queryFn: () => api.gitContributorActivity(repo, weeks),
     enabled,
     staleTime: 5 * 60_000,
+    networkMode: "always",
   });
 }
 
@@ -52,6 +57,7 @@ export function useCommitActivity(
     queryFn: () => api.gitCommitActivity(repo, weeks),
     enabled,
     staleTime: 5 * 60_000,
+    networkMode: "always",
   });
 }
 
@@ -65,6 +71,7 @@ export function useCodeFrequency(
     queryFn: () => api.gitCodeFrequency(repo, weeks),
     enabled,
     staleTime: 5 * 60_000,
+    networkMode: "always",
   });
 }
 
@@ -74,6 +81,7 @@ export function usePunchCard(repo: string, weeks: number, enabled: boolean) {
     queryFn: () => api.gitPunchCard(repo, weeks),
     enabled,
     staleTime: 5 * 60_000,
+    networkMode: "always",
   });
 }
 

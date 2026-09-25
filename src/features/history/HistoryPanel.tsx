@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
@@ -62,6 +63,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -174,6 +176,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     ...createRefFromCommitFormOpts,
     onSubmit: async ({ value }) => {
       if (!branchHash) return;
+      // This create always checks the branch out, so it moves HEAD.
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       const name = sanitizeRefName(value.name);
       try {
         await createBranch.mutateAsync({
@@ -264,6 +271,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // the single-commit menu can't diverge on whether they ask.
   async function doCheckoutCommit(hash: string) {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await checkoutCommit.mutateAsync(hash);
     } catch (e) {

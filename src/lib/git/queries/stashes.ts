@@ -7,6 +7,9 @@ export function useStashCount(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "stash-count"] as const,
     queryFn: () => api.gitStashCount(repo),
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -41,6 +44,7 @@ export function useStashList(repo: string, enabled = false) {
     queryKey: ["repo", repo, "stashes"] as const,
     queryFn: () => api.gitStashList(repo),
     enabled,
+    networkMode: "always",
   });
 }
 
@@ -50,6 +54,7 @@ export function useStashFiles(repo: string, index: number | null) {
     queryFn: () => api.gitStashFiles(repo, index ?? 0),
     enabled: index !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -69,6 +74,7 @@ export function useStashFileDiff(
     queryFn: () => api.gitStashFileDiff(repo, index ?? 0, filePath ?? ""),
     enabled: index !== null && filePath !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -97,6 +103,7 @@ export function useOrphanedStashes(repo: string, enabled = false) {
     // spinner.
     staleTime: 60_000,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -106,6 +113,7 @@ export function useOrphanedStashFiles(repo: string, sha: string | null) {
     queryFn: () => api.gitOrphanedStashFiles(repo, sha ?? ""),
     enabled: sha !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -126,6 +134,7 @@ export function useOrphanedStashFileDiff(
       api.gitOrphanedStashFileDiff(repo, sha ?? "", filePath ?? ""),
     enabled: sha !== null && filePath !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 
@@ -145,6 +154,7 @@ export function useOplogCheck(repo: string, enabled = true) {
     queryFn: () => api.gitOplogCheck(repo),
     enabled,
     staleTime: 30_000,
+    networkMode: "always",
   });
 }
 
@@ -157,6 +167,7 @@ export function useOplogHistory(repo: string, enabled = false) {
     enabled,
     staleTime: 30_000,
     placeholderData: keepPreviousDataForRepo(repo),
+    networkMode: "always",
   });
 }
 

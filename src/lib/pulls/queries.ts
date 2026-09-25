@@ -35,18 +35,17 @@ export function useLocalPrs(repo: string) {
   });
 }
 
-/** `identity` pins the mutation key, so a repo switch mid-flight detaches the write
- *  instead of retargeting it and its invalidation (gd-conventions). Opt-in rather
- *  than automatic: the update/delete hooks' callers read `isPending` as a re-entry
- *  guard, and a detach would silently open it. */
+/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of
+ *  retargeting it and its invalidation (gd-conventions). The detached observer goes
+ *  idle, so callers keep re-entry protection in local flags, never `isPending`. */
 function useLocalPrMutation<TArgs, TData>(
   repo: string,
+  op: "create" | "update" | "delete",
   fn: (args: TArgs) => Promise<TData>,
-  identity?: readonly unknown[],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    ...(identity ? { mutationKey: identity } : {}),
+    mutationKey: ["local-pr", op, repo],
     mutationFn: fn,
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: localPrKey(repo) }),
@@ -56,25 +55,25 @@ function useLocalPrMutation<TArgs, TData>(
 export function useCreateLocalPr(repo: string) {
   return useLocalPrMutation(
     repo,
+    "create",
     (input: { title: string; body: string; base: string; head: string }) =>
       createLocalPr(repo, input),
-    // Pinned: the create and the list invalidation close over `repo`, and the
-    // dialog survives a repo switch — its only caller awaits the promise and
-    // reads no observer state.
-    ["local-pr", "create", repo],
   );
 }
 
 export function useUpdateLocalPr(repo: string) {
   return useLocalPrMutation(
     repo,
+    "update",
     ({ id, mutate }: { id: string; mutate: (pr: LocalPr) => LocalPr }) =>
       updateLocalPr(repo, id, mutate),
   );
 }
 
 export function useDeleteLocalPr(repo: string) {
-  return useLocalPrMutation(repo, (id: string) => deleteLocalPr(repo, id));
+  return useLocalPrMutation(repo, "delete", (id: string) =>
+    deleteLocalPr(repo, id),
+  );
 }
 
 type PrKind = "remote" | "local";
