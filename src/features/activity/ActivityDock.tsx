@@ -606,8 +606,8 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
           ref={listRef}
           className="max-h-80 overflow-y-auto outline-none"
           onKeyDown={(e) => {
-            // An expanded detail block is a focusable scroller: its arrows scroll
-            // the text rather than move between rows.
+            // Keys from inside an expanded detail block belong to that scroller;
+            // list nav ignores every one of them.
             if (
               e.target instanceof Element &&
               e.target.closest("[data-notification-detail]")

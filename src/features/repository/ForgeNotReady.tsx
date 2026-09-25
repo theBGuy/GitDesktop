@@ -398,9 +398,10 @@ function RateLimitedNotice({
   const now = useRelativeNow();
   const label = providerLabel(provider);
   const resumesAt = rateLimitResetTime(resetAt, now);
-  // ONE re-read of this repo's forge status and session health once the reset
-  // passes, so the panel recovers without a restart. A reset already in the past
-  // arms nothing: re-arming on it could loop against a skewed clock.
+  // ONE re-read of this repo's forge status and session health, plus the accounts
+  // list behind Settings' "rate limited" badge, once the reset passes, so neither
+  // surface stays stuck without a restart. A reset already in the past arms
+  // nothing: re-arming on it could loop against a skewed clock.
   useEffect(() => {
     if (typeof resetAt !== "number") return;
     const delay = resetAt * 1000 - Date.now();
@@ -412,6 +413,7 @@ function RateLimitedNotice({
       queryClient.invalidateQueries({
         queryKey: ["repo", repoPath, "forge-session-health"],
       });
+      queryClient.invalidateQueries({ queryKey: ["accounts-health"] });
     }, delay + RESET_GRACE_MS);
     return () => clearTimeout(timer);
   }, [resetAt, repoPath, queryClient]);

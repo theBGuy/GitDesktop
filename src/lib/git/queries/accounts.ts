@@ -284,7 +284,8 @@ export function forgeSupports(
 /** Whether a hosted *feature* is usable here: the integration is ready AND GitDesktop
  *  has built that feature for this provider. Exactly `forgeReady` on GitHub; false on a
  *  *ready* GitLab/Bitbucket repo whose panel isn't wired yet, so it shows "coming
- *  soon". */
+ *  soon". Its `"pullRequests"` reading (with `forgeReady`) has a Rust twin,
+ *  `pull_requests_ready` in src-tauri/src/forge/background.rs — change both together. */
 export function forgeFeatureReady(
   status: ForgeStatus | undefined | null,
   feature: keyof ForgeImplemented,

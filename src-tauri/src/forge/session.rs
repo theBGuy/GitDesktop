@@ -4,8 +4,8 @@
 //! Anti-flap is load-bearing: a transiently-failing keyring/API makes `gh auth status`
 //! report "token invalid" for a minute and then heal, so a `gh` `timeout` state is
 //! NEVER Broken and a `gh` `error` must be confirmed by a second probe (~1.5s later);
-//! the GitLab arm mirrors that. A rate-limit error is its own state and is never
-//! re-probed: another probe spends quota and can only confirm it. No probe reads a
+//! the GitLab arm mirrors that. A rate-limit error is its own state and never
+//! triggers a re-probe: another probe spends quota and can only confirm it. No probe reads a
 //! credential value, and the reconnect driver truncates + redacts every line it
 //! forwards.
 
@@ -310,54 +310,19 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
 
 /// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`, plus the
 /// token expiry (Healthy) or rate-limit reset time (RateLimited).
-pub(crate) async fn github_health(host: &str) -> SessionHealth {
-    let (mut health, from_json) = github_health_probe(host).await;
-    if !from_json {
-        return health;
-    }
-    if health.state == SessionState::Healthy {
-        apply_gh_expiry(&mut health, host).await;
-    }
-    if health.state == SessionState::RateLimited {
-        health.reset_at = gh_rate_limit_reset(host).await;
-    }
-    health
-}
-
-/// `github_health` without the expiry and reset-time extras — same probe, same
-/// classification. For the background-sync poller, which runs per host every tick
-/// and reads only the state: each extra is another `gh api` call, and on a
-/// rate-limited host the reset fetch would be spent every tick.
-pub(crate) async fn github_health_for_poller(host: &str) -> SessionHealth {
-    github_health_probe(host).await.0
-}
-
-/// The shared core of `github_health`: probe, classify, and anti-flap re-probe. The
-/// flag is `false` when the old-gh text fallback answered, which never takes the
-/// extras.
-async fn github_health_probe(host: &str) -> (SessionHealth, bool) {
+async fn github_health(host: &str) -> SessionHealth {
     let json = match gh_status_json(Some(host)).await {
         Ok(GhJsonProbe::Parsed(map)) => map,
-        Ok(GhJsonProbe::UnknownFlag) => {
-            return (github_health_text_fallback(Some(host)).await, false)
-        }
+        Ok(GhJsonProbe::UnknownFlag) => return github_health_text_fallback(Some(host)).await,
         Ok(GhJsonProbe::Inconclusive(detail)) => {
             let mut h = SessionHealth::new("github", host, SessionState::Offline);
             h.detail = detail;
-            return (h, true);
+            return h;
         }
         Err(AppError::GhNotFound) => {
-            return (
-                SessionHealth::new("github", host, SessionState::CliMissing),
-                true,
-            )
+            return SessionHealth::new("github", host, SessionState::CliMissing)
         }
-        Err(_) => {
-            return (
-                SessionHealth::new("github", host, SessionState::Offline),
-                true,
-            )
-        }
+        Err(_) => return SessionHealth::new("github", host, SessionState::Offline),
     };
     let accounts = json.get(host).map(Vec::as_slice).unwrap_or(&[]);
     let mut health = classify_gh_host(accounts);
@@ -377,7 +342,42 @@ async fn github_health_probe(host: &str) -> (SessionHealth, bool) {
         // A failed re-probe (Err/None) leaves the first Broken standing — the
         // credential really was rejected and we couldn't disprove it.
     }
-    (health, true)
+
+    if health.state == SessionState::Healthy {
+        apply_gh_expiry(&mut health, host).await;
+    }
+    if health.state == SessionState::RateLimited {
+        health.reset_at = gh_rate_limit_reset(host).await;
+    }
+    health
+}
+
+/// Every known gh host's health from ONE `gh auth status --json hosts` spawn, keyed
+/// by host as gh spells it (the active account per host, else the first). For the
+/// background-sync poller, which gates each tick on it: probing per remote host
+/// misreads an ssh-alias host (`github.com-work`) as signed out, since gh answers an
+/// unknown `--hostname` with an empty hosts map. Poller-lite: no expiry read, no
+/// reset fetch, no anti-flap re-probe — a transient misread costs one skipped tick
+/// and heals on the next. An empty map means unknown (old gh without `--json`, gh
+/// missing, an inconclusive probe, or no host signed in); callers fall back rather
+/// than read it as a verdict.
+pub(crate) async fn github_hosts_health_for_poller() -> HashMap<String, SessionHealth> {
+    match gh_status_json(None).await {
+        Ok(GhJsonProbe::Parsed(map)) => gh_hosts_health(&map),
+        _ => HashMap::new(),
+    }
+}
+
+/// One entry per host in a `gh auth status --json hosts` reading, classified like the
+/// per-repo path (active account, else the first) but without any follow-up probe.
+fn gh_hosts_health(map: &HashMap<String, Vec<GhJsonAccount>>) -> HashMap<String, SessionHealth> {
+    map.iter()
+        .map(|(host, accounts)| {
+            let mut health = classify_gh_host(accounts);
+            health.host = host.clone();
+            (host.clone(), health)
+        })
+        .collect()
 }
 
 /// When the rate limit on `host` resets (epoch seconds), from the headers of
@@ -1761,6 +1761,34 @@ mod tests {
             serde_json::to_string(GH_401).unwrap(),
         );
         assert!(gh_accounts_need_reprobe(&parse_hosts(&json)));
+    }
+
+    #[test]
+    fn poller_hosts_map_has_one_entry_per_host_from_its_active_account() {
+        // The shape the default-host probe returns: every known host at once.
+        let json = format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"error","active":false,"login":"alt","error":{}}},{{"state":"success","active":true,"login":"main"}}],"ghes.example":[{{"state":"error","active":true,"login":"b","error":{}}}],"ghes.other":[{{"state":"error","active":true,"login":"c","error":{}}}]}}}}"#,
+            serde_json::to_string(GH_401).unwrap(),
+            serde_json::to_string(GH_403_PRIMARY).unwrap(),
+            serde_json::to_string(GH_401).unwrap(),
+        );
+        let health = gh_hosts_health(&parse_hosts(&json));
+        assert_eq!(health.len(), 3);
+        let main = &health["github.com"];
+        assert_eq!(main.host, "github.com");
+        assert_eq!(main.state, SessionState::Healthy);
+        assert_eq!(main.login.as_deref(), Some("main"));
+        // Poller-lite: classified as-is, with no reset fetch and no expiry read.
+        let limited = &health["ghes.example"];
+        assert_eq!(limited.state, SessionState::RateLimited);
+        assert_eq!(limited.reset_at, None);
+        assert_eq!(health["ghes.other"].state, SessionState::Broken);
+        assert_eq!(main.method, None);
+    }
+
+    #[test]
+    fn poller_hosts_map_is_empty_when_no_host_is_known() {
+        assert!(gh_hosts_health(&parse_hosts(r#"{"hosts":{}}"#)).is_empty());
     }
 
     #[test]
