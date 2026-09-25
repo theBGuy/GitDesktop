@@ -34,6 +34,8 @@ export function useWatchPrHeads(repoPath: string) {
     enabled: Boolean(repoPath) && headBranches.length > 0 && aiEnabled,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
+    // A local git read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 
   useEffect(() => {

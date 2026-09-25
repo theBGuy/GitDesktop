@@ -285,6 +285,8 @@ function CliProviderConfig({
     queryFn: () => detectAgentCli(kind!, value.cliPath),
     enabled: Boolean(kind),
     staleTime: 60_000,
+    // A local CLI probe: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
   const info = detect.data;
   const version = info?.version ? ` (${info.version})` : "";

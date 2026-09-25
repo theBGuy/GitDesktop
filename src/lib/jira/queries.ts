@@ -61,6 +61,9 @@ export function useJiraLink(repo: string) {
   return useQuery({
     queryKey: jiraLinkKey(repo),
     queryFn: () => getJiraLink(repo),
+    // Local reads (the link store, the OS keychain) must not park on react-query's
+    // default "online" mode offline; the same holds for every `networkMode` here.
+    networkMode: "always",
   });
 }
 
@@ -126,6 +129,7 @@ export function useJiraAccount(site: string) {
     queryKey: ["jira-account", site] as const,
     queryFn: () => jiraAccount(site),
     enabled: site.length > 0,
+    networkMode: "always",
   });
 }
 

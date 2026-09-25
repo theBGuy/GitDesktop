@@ -81,6 +81,8 @@ export function RepoJiraDialog({
     queryKey: ["bb-account"] as const,
     queryFn: () => forgeBbAccount(),
     enabled: open,
+    // A keychain read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 
   // ── Connect step ──────────────────────────────────────────────────────────

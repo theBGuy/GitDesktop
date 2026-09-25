@@ -52,6 +52,8 @@ export const TerminalSection = withForm({
       queryKey: ["detected-terminals"],
       queryFn: detectTerminals,
       staleTime: 5 * 60 * 1000,
+      // A local probe: react-query's default "online" mode would park it offline.
+      networkMode: "always",
     });
 
     const terminal = useSelector(form.store, (s) => s.values.terminal);

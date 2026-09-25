@@ -19,6 +19,8 @@ export function useSharedSyntax(repo: string | null) {
     enabled: Boolean(repo),
     // The file can change under us (pull, branch switch); refetch on focus.
     staleTime: 30_000,
+    // A local file read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }
 

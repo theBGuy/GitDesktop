@@ -30,6 +30,8 @@ export function useReconcileLocalPrs(repo: string) {
         open.map((p) => ({ base: p.base, head: p.head })),
       ),
     enabled: open.length > 0,
+    // A local git read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 
   // Guard against re-marking the same PR before the list refetch lands.

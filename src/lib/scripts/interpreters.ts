@@ -25,6 +25,9 @@ export function useDetectedInterpreters() {
       return new Map(list.map((d) => [d.id, d]));
     },
     staleTime: 5 * 60 * 1000,
+    // Local PATH probes must not park on react-query's default "online" mode
+    // offline; the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -46,5 +49,6 @@ export function useResolvedInterpreter(key: Interpreter, enabled: boolean) {
     queryFn: () => resolveTaskInterpreter(key),
     enabled,
     staleTime: 5 * 60 * 1000,
+    networkMode: "always",
   });
 }

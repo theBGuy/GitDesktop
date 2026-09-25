@@ -122,6 +122,8 @@ export function useSubmodules(repo: string) {
     queryKey: ["repo", repo, "submodules"] as const,
     queryFn: () => api.gitSubmodules(repo),
     staleTime: 30_000,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }
 

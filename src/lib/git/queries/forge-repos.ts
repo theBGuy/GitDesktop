@@ -94,6 +94,9 @@ const myWorkSourcesOptions = () =>
       : () => api.forgeMyWorkSources(),
     staleTime: 5 * 60_000,
     retry: false,
+    // Local reads (CLI config files, keychain) must not park on react-query's
+    // default "online" mode offline; the same holds for every `networkMode` here.
+    networkMode: "always",
   });
 
 /** Which providers the work inbox can fetch from, probed once when it opens so
@@ -154,6 +157,7 @@ export function useForgeProviderFeatures(provider: ForgeProvider) {
     queryFn: () => api.forgeProviderFeatures(provider),
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
+    networkMode: "always",
   });
 }
 

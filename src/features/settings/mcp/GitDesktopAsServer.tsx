@@ -108,6 +108,9 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     queryKey: ["path-launcher-status"],
     queryFn: pathLauncherStatus,
     enabled: open,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
   const [pathBusy, setPathBusy] = useState(false);
   // The command is the managed MCP launcher — an update-safe copy of the app that isn't
@@ -122,6 +125,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     queryFn: mcpLauncherPath,
     staleTime: Number.POSITIVE_INFINITY,
     enabled: open,
+    networkMode: "always",
   });
   // Per-client global-install state (Claude Code / Copilot): is `gitdesktop` in that client's
   // user config, and does it point at the CURRENT launcher? A read-only probe of the config
@@ -130,6 +134,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     queryKey: ["mcp-global-status"],
     queryFn: mcpGlobalStatus,
     enabled: open,
+    networkMode: "always",
   });
   // Actionable message when the launcher can't be prepared (e.g. antivirus
   // quarantine) — surface it, never emit a config against a wrong/absent path.

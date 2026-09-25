@@ -352,6 +352,9 @@ function CustomImageSection({
     queryKey: ["agentCustomImage", repoPath],
     queryFn: () => customImageStatus(repoPath),
     staleTime: 30_000,
+    // A local file + container-runtime probe: react-query's default "online" mode
+    // would park it offline.
+    networkMode: "always",
   });
   const [busy, setBusy] = useState<"scaffold" | "build" | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);

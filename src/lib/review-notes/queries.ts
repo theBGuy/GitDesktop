@@ -12,6 +12,8 @@ export function useReviewNote(repo: string, branch: string | null) {
     // Only runs when enabled, so `branch` is guaranteed a non-empty string.
     queryFn: () => getReviewNote(repo, branch as string),
     enabled: Boolean(branch),
+    // A local store read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }
 

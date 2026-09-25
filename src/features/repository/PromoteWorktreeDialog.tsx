@@ -12,8 +12,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { gitOpState, gitStatus } from "@/lib/git/api";
-import { repoKeys, useUserWorktrees } from "@/lib/git/queries";
+import {
+  opStateOptions,
+  repoStatusOptions,
+  useUserWorktrees,
+} from "@/lib/git/queries";
 import type { UserWorktree } from "@/lib/git/worktree";
 import { useWorktreeRemovalStore } from "@/lib/stores/worktree-removal";
 
@@ -81,24 +84,18 @@ function PromoteBody({
   // status cache (same query key): the worktree must be clean, and we detect the
   // main workspace's own WIP so we can offer to stash it first. Main is gated on
   // its path resolving from the worktree list.
-  const wStatus = useQuery({
-    queryKey: repoKeys.status(worktree.path),
-    queryFn: () => gitStatus(worktree.path),
-  });
+  const wStatus = useQuery(repoStatusOptions(worktree.path));
   const mStatus = useQuery({
-    queryKey: repoKeys.status(mainPath ?? "__pending__"),
-    queryFn: () => gitStatus(mainPath as string),
+    ...repoStatusOptions(mainPath ?? "__pending__"),
     enabled: Boolean(mainPath),
   });
   // Main's in-progress merge/rebase/cherry-pick/revert: the backend refuses to
   // stash over one, and the stash here runs AFTER the worktree is removed — so it
-  // has to be a precondition, not an error past the point of no return. Inline
-  // rather than via `useOpState` (which takes no `enabled`) because mainPath
-  // resolves a tick later from the worktree list; the shared key keeps one cache
-  // entry either way.
+  // has to be a precondition, not an error past the point of no return. The shared
+  // options rather than `useOpState` (which takes no `enabled`), because mainPath
+  // resolves a tick later from the worktree list.
   const mOpState = useQuery({
-    queryKey: repoKeys.opState(mainPath ?? "__pending__"),
-    queryFn: () => gitOpState(mainPath as string),
+    ...opStateOptions(mainPath ?? "__pending__"),
     enabled: Boolean(mainPath),
   });
 

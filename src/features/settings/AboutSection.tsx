@@ -245,6 +245,8 @@ export function AboutSection() {
       tauri: await getTauriVersion(),
     }),
     staleTime: Number.POSITIVE_INFINITY,
+    // A local read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 
   const sys = health.data?.system;

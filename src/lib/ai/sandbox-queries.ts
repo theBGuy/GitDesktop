@@ -40,5 +40,8 @@ export function useContainerStatus({
       return d?.ready && d.imagePresent ? false : 15_000;
     },
     enabled,
+    // A local container-runtime probe: react-query's default "online" mode would
+    // park it offline.
+    networkMode: "always",
   });
 }

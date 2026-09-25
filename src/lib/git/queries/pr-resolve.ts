@@ -122,6 +122,9 @@ export function useFindRemotePrResolve(
     queryFn: () => api.gitFindRemotePrResolve(repo, number ?? 0, lens),
     enabled: enabled && number !== null,
     staleTime: 5_000,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -139,7 +142,6 @@ export function useConflictPreview(
     queryFn: () => api.gitConflictPreview(repo, base, head),
     enabled: enabled && base !== "" && head !== "",
     staleTime: 15_000,
-    // A local read: react-query's default "online" mode would park it offline.
     networkMode: "always",
   });
 }

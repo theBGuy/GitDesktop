@@ -200,6 +200,8 @@ export function useReviewDrafts(
     queryKey: reviewDraftsKey(repo, lens, number),
     queryFn: () => listDrafts(repo, lens, number),
     staleTime: Number.POSITIVE_INFINITY,
+    // A local store read: react-query's default "online" mode would park it offline.
+    networkMode: "always",
   });
 }
 

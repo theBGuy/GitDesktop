@@ -624,6 +624,8 @@ export function useCommitOnRemote(repo: string, sha: string | null) {
     queryFn: () => api.commitOnRemote(repo, sha ?? ""),
     enabled: sha !== null,
     staleTime: 30_000,
+    // A local `git for-each-ref` read: the default "online" mode would park it.
+    networkMode: "always",
   });
 }
 

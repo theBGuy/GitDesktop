@@ -40,6 +40,9 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
     queryKey: ["session-worktree-status", repoPath] as const,
     queryFn: () => gitStatus(repoPath),
     refetchInterval: 1500,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
   // Anything the agent touched: it writes into the working tree (unstaged) and
   // creates new (untracked) files; it never stages, but include staged
@@ -70,6 +73,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
     queryFn: () => gitDiffFile(repoPath, deferredPath ?? "", false, untracked),
     enabled: deferredPath !== null,
     refetchInterval: 1500,
+    networkMode: "always",
   });
 
   if (status.isPending) {

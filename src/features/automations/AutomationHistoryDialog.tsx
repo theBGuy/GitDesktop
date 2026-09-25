@@ -477,6 +477,9 @@ function AutomationHistoryBody({
     queryKey: automationHistoryKey(repoPath),
     queryFn: () => listAutomationHistory(repoPath),
     enabled: open,
+    // Local reads must not park on react-query's default "online" mode offline;
+    // the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
   const [focusedId, setFocusedId] = useState<string | null>(null);
 
@@ -540,6 +543,7 @@ function AutomationHistoryBody({
       return resolved.filter((r) => r.identity === mine).map((r) => r.key);
     },
     enabled: open,
+    networkMode: "always",
   }).data;
   // Set built here, not returned from the query: structural sharing only
   // recurses plain objects and arrays.

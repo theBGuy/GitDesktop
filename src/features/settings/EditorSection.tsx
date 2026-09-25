@@ -35,6 +35,8 @@ export const EditorSection = withForm({
       queryKey: ["detected-editors"],
       queryFn: detectEditors,
       staleTime: 5 * 60 * 1000,
+      // A local probe: react-query's default "online" mode would park it offline.
+      networkMode: "always",
     });
     // "Custom…" picked while a detected editor is still set: reveal the path
     // input without changing the form values yet.

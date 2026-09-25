@@ -108,12 +108,18 @@ export function useStage(repo: string) {
   });
 }
 
-export function useOpState(repo: string) {
-  return useQuery({
+/** Shared so every observer of a repo's op-state key fetches under the same
+ *  options: the fetch takes them from whichever observer starts it. */
+export function opStateOptions(repo: string) {
+  return {
     queryKey: repoKeys.opState(repo),
     queryFn: () => api.gitOpState(repo),
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+  };
+}
+
+export function useOpState(repo: string) {
+  return useQuery(opStateOptions(repo));
 }
 
 export function useOpAbort(repo: string) {

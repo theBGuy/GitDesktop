@@ -1,3 +1,3 @@
 - The Changes view and diffs, commit history, branches and comparisons,
-  stashes, and the local insight charts load and refresh with no network
-  connection.
+  stashes, the local insight charts, local pull requests and issues, and
+  your settings load and refresh with no network connection.

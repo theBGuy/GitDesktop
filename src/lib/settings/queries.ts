@@ -27,6 +27,10 @@ export function useSettings() {
     queryKey: settingsKeys.settings,
     queryFn: loadSettings,
     staleTime: Number.POSITIVE_INFINITY,
+    // Local reads (the settings store, the OS keychain) must not park on
+    // react-query's default "online" mode offline; the same holds for every
+    // `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -227,5 +231,6 @@ export function useSecretPreview(provider: AiProviderId) {
       const suffix = value.length > 12 ? value.slice(-4) : "";
       return { length: value.length, masked: `${prefix}…${suffix}` };
     },
+    networkMode: "always",
   });
 }

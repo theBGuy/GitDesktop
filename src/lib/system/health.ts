@@ -110,5 +110,8 @@ export function useSystemHealth() {
     queryKey: ["system-health"] as const,
     queryFn: () => invoke<SystemHealth>("system_health"),
     staleTime: 30_000,
+    // Local CLI probes: react-query's default "online" mode would park them
+    // offline, which is exactly when this diagnostics screen is wanted.
+    networkMode: "always",
   });
 }

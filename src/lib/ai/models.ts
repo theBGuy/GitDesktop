@@ -6,6 +6,7 @@ import { providerErrorMessage } from "./provider-error";
 import {
   GOOGLE_AI_STUDIO_BASE_URL,
   isCliProvider,
+  isLocalProvider,
   MODEL_SUGGESTIONS,
   OLLAMA_CLOUD_HOST,
   OPENAI_COMPATIBLE_PRESETS,
@@ -305,6 +306,9 @@ export function useAvailableModels(
     // refetch must not re-run the CLI. HTTP providers keep both defaults.
     refetchOnWindowFocus: !isCliProvider(settings.provider),
     refetchOnReconnect: !isCliProvider(settings.provider),
+    // Keyed on LOCALITY, not process-spawning: a local Ollama server answers
+    // offline too, so it must not park on the default "online" mode either.
+    networkMode: isLocalProvider(settings.provider) ? "always" : "online",
   });
 }
 
@@ -351,6 +355,8 @@ export function useAgentModels(
     // refetch must not re-run the CLI.
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+    // Same reason: a local process must not park on the default "online" mode.
+    networkMode: "always",
   });
 }
 

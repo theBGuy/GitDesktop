@@ -2343,9 +2343,10 @@ test("mutation-identity-pinning stops at its documented boundary", () => {
 });
 
 test("mutation-identity-pinning requires the identity ARGUMENT at a conditionally-keyed delegation", () => {
-  // The local PR/issue wrappers' shape. `MUTATION_KEYED_RE` sees the spread and
-  // reads the wrapper as pinned however it is called, so the obligation is the
-  // delegating call's: without this the key can be dropped and checks stay green.
+  // A conditionally-keyed delegation shape (no live instance in src today).
+  // `MUTATION_KEYED_RE` sees the spread and reads the wrapper as pinned however
+  // it is called, so the obligation is the delegating call's: without this the
+  // key can be dropped and checks stay green.
   const mod = (identityArg) =>
     [
       "function useLocalPrMutation<TArgs, TData>(",

@@ -39,6 +39,9 @@ export function useBbAccount() {
     queryFn: api.forgeBbAccount,
     staleTime: 60_000,
     retry: false,
+    // Keychain reads must not park on react-query's default "online" mode
+    // offline; the same holds for every `networkMode` in this file.
+    networkMode: "always",
   });
 }
 
@@ -130,6 +133,7 @@ export function useGitlabReviewBotStatus() {
     queryFn: api.forgeGitlabReviewTokenStatus,
     staleTime: 60_000,
     retry: false,
+    networkMode: "always",
   });
 }
 

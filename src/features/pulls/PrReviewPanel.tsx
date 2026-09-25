@@ -175,6 +175,9 @@ export function PrReviewPanel({
     queryKey: reviewPartialKey(context.repoPath, context.lens, prKind, prRef),
     queryFn: () =>
       getLatestPartialReview(context.repoPath, context.lens, prKind, prRef),
+    // Local reads (app-data store, CLI probes) must not park on react-query's
+    // default "online" mode offline; the same holds for every `networkMode` here.
+    networkMode: "always",
   });
   const keptPartial = useMemo(() => {
     const record = partialRun.data;
@@ -257,6 +260,7 @@ export function PrReviewPanel({
     queryFn: () => detectAgentCli(cliKind!, reviewAi?.cliPath),
     enabled: Boolean(cliKind),
     staleTime: 60_000,
+    networkMode: "always",
   });
   // Viewing a PR expresses no model-config intent, so the provider catalog is
   // fetched only once the user reaches the picker — sticky, so the list stays put
@@ -313,6 +317,7 @@ export function PrReviewPanel({
     queryFn: () => detectAgentCli(secCliKind!, securityReviewAi?.cliPath),
     enabled: Boolean(secCliKind) && (providerDiffers || cliPathDiffers),
     staleTime: 60_000,
+    networkMode: "always",
   });
 
   function updateReview(patch: Partial<NonNullable<typeof reviewAi>>) {
