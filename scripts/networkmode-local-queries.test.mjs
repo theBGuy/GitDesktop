@@ -381,9 +381,9 @@ function scanSource(source, file) {
     if (!(e instanceof ScanError)) throw e;
     return { keys, sites, offenders, ambiguities: [`${file}: ${e.message}`] };
   }
-  // A renamed import hides a local callee from the name match: `* as x` of an api
-  // module, or `{ gitStatus as s }`. Read from the SOURCE (the mask blanks the module
-  // path), keeping only imports the mask shows as code.
+  // A renamed import hides a local callee from the name match: `* as x` of a
+  // first-party module, or `{ gitStatus as s }`. Read from the SOURCE (the mask blanks
+  // the module path), keeping only imports the mask shows as code.
   for (const m of source.matchAll(
     /\bimport\s+(?!type\b)([^;]*?)\s+from\s+["']([^"']+)["']/g,
   )) {
@@ -391,9 +391,9 @@ function scanSource(source, file) {
     const [, clause, from] = m;
     const at = `${file}:${lineOf(source, m.index)}`;
     const ns = /\*\s*as\s+([\w$]+)/.exec(clause);
-    if (ns && ns[1] !== "api" && /(^|\/)api(\/|$)/.test(from))
+    if (ns && ns[1] !== "api" && /^(\.|@\/)/.test(from))
       ambiguities.push(
-        `${at}: imports an api module as \`${ns[1]}\` — only \`* as api\` is visible to this scan`,
+        `${at}: imports the first-party module "${from}" as namespace \`${ns[1]}\` — its calls are invisible to this scan; import the names, or use \`* as api\``,
       );
     for (const r of clause.matchAll(/([\w$]+)\s+as\s+([\w$]+)/g))
       if (r[1] !== r[2] && NAMED_LOCAL_RE.test(r[1]))
@@ -645,6 +645,8 @@ test("shapes the scan can't read fail closed", () => {
       'useQuery({ queryFn: () => invoke<Record<string, X>>("brand_new_cmd"), enabled });',
     "renamed local callee": 'import { gitStatus as s } from "@/lib/git/api";',
     "other api alias": 'import * as git from "../api";',
+    "first-party namespace":
+      'import * as store from "@/lib/pulls/local";\nuseQuery({ queryFn: () => store.listLocalPrs(repo) });',
   };
   for (const [name, src] of Object.entries(cases)) {
     const r = scanSource(src, "fixture.ts");

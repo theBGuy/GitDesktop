@@ -40,7 +40,7 @@ export function useLocalPrs(repo: string) {
 
 /** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of
  *  retargeting it and its invalidation (gd-conventions). The detached observer goes
- *  idle, so callers keep re-entry protection in local flags, never `isPending`. */
+ *  idle, so callers never rely on `isPending` alone for re-entry protection. */
 function useLocalPrMutation<TArgs, TData>(
   repo: string,
   op: "create" | "update" | "delete",
