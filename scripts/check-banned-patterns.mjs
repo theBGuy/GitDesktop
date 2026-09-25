@@ -958,6 +958,10 @@ export const CHECKS = [
     // list for these.
     allowlist: [
       "src/components/markdown-editor.tsx",
+      // The notification row's ArrowRight/Left disclosure accelerators fire
+      // only on an unmodified press — every modifier excluded symmetrically,
+      // not a platform-modifier read the registry could own.
+      "src/features/activity/ActivityDock.tsx",
       "src/features/conversations/CommentComposer.tsx",
       "src/features/conversations/CommentEditor.tsx",
       "src/features/conversations/EditTitleBodyDialog.tsx",
