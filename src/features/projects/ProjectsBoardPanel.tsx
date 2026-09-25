@@ -3360,13 +3360,19 @@ export function ProjectsBoardPanel({
   const viewsRefreshing = views.isFetching
     ? VIEWS_REFRESHING_REASON
     : undefined;
-  // A layout save in flight has patched the source's layout optimistically, and
-  // a copy taken now would keep that layout even if the save then failed.
+  // Any update to the SOURCE view in flight (layout, fields or name) has patched
+  // it optimistically, and a copy taken now would keep those values even if the
+  // write then failed. Scoped to the source: a write to another view holds nothing.
+  const sourceWriteOut =
+    savedView !== null &&
+    [saveViewLayout, setViewFields, renameView].some(
+      (m) => m.isPending && m.variables?.viewId === savedView.id,
+    );
   const duplicateViewReason =
     viewActionReason(true) ??
     unknownLayoutHeld ??
     viewsRefreshing ??
-    (saveViewLayout.isPending ? "Saving this view's layout…" : undefined) ??
+    (sourceWriteOut ? "Saving this view…" : undefined) ??
     (duplicateView.isPending ? "Duplicating a view…" : undefined);
   const viewFieldsReason = viewActionReason(true) ?? viewsRefreshing;
   const lastView =
@@ -5372,7 +5378,7 @@ export function ProjectsBoardPanel({
   useHotkeyAction(
     "delete-project",
     () => void removeProject(),
-    projectVerbsLive,
+    lifecycleIdle && showBoardChrome && deleteProjectHeld === undefined,
   );
   useHotkeyAction("new-project-view", openNewView, projectVerbsLive);
   // The four reposition rows, from the palette. Palette-ONLY on purpose: the chord
@@ -5487,9 +5493,7 @@ export function ProjectsBoardPanel({
             <SelectContent>
               {openProjects.map((p) => (
                 <SelectItem key={p.id} value={p.id}>
-                  <SelectClipText>
-                    {projectTitles[p.id] ?? p.title}
-                  </SelectClipText>
+                  <SelectClipText>{p.title}</SelectClipText>
                 </SelectItem>
               ))}
               {/* Closed boards as their own group, after the open ones. Each row

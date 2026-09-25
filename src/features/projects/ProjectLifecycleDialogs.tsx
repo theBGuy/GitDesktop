@@ -1,5 +1,10 @@
 import { useSelector } from "@tanstack/react-store";
-import { type ReactNode, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useState,
+} from "react";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -97,6 +102,31 @@ function HeldFooter({
 }
 
 /**
+ * The submit wiring every dialog here shares: mod+enter from anywhere in the
+ * dialog, and the form's own submit (Enter in a field), both refused while the
+ * footer's hold stands. The chord rides DialogContent rather than the <form>:
+ * the X close is the form's SIBLING, so a form-level handler would miss the
+ * chord pressed there.
+ */
+function heldSubmitHandlers(
+  form: { handleSubmit: () => unknown },
+  heldReason: string | null,
+) {
+  return {
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if (eventToBinding(e) !== "mod+enter") return;
+      e.preventDefault();
+      if (heldReason === null) form.handleSubmit();
+    },
+    onSubmit: (e: FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      if (heldReason !== null) return;
+      form.handleSubmit();
+    },
+  };
+}
+
+/**
  * A new project, created under the catalog's owner and linked to this repository
  * when the catalog could read it; the description names which, so the dialog
  * never promises a link the write won't make. Title only, as GitHub's own create
@@ -138,26 +168,13 @@ export function NewProjectDialog({
   );
   const heldReason =
     pending || submitting ? SAVING_REASON : (ownerHeldReason ?? null);
+  const submit = heldSubmitHandlers(form, heldReason);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="sm:max-w-lg"
-        // On DialogContent rather than the <form>: the X close is the form's
-        // SIBLING, so a form-level handler would miss the chord pressed there.
-        onKeyDown={(e) => {
-          if (eventToBinding(e) === "mod+enter") {
-            e.preventDefault();
-            if (heldReason === null) form.handleSubmit();
-          }
-        }}
-      >
+      <DialogContent className="sm:max-w-lg" onKeyDown={submit.onKeyDown}>
         <form
           className="flex min-w-0 flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (heldReason !== null) return;
-            form.handleSubmit();
-          }}
+          onSubmit={submit.onSubmit}
         >
           <DialogHeader>
             <DialogTitle>New project</DialogTitle>
@@ -248,24 +265,13 @@ export function EditProjectDialog({
         return null;
     }
   })();
+  const submit = heldSubmitHandlers(form, heldReason);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="sm:max-w-lg"
-        onKeyDown={(e) => {
-          if (eventToBinding(e) === "mod+enter") {
-            e.preventDefault();
-            if (heldReason === null) form.handleSubmit();
-          }
-        }}
-      >
+      <DialogContent className="sm:max-w-lg" onKeyDown={submit.onKeyDown}>
         <form
           className="flex min-w-0 flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (heldReason !== null) return;
-            form.handleSubmit();
-          }}
+          onSubmit={submit.onSubmit}
         >
           <DialogHeader>
             <DialogTitle>Edit project details</DialogTitle>
@@ -346,24 +352,13 @@ export function ViewNameDialog({
         return null;
     }
   })();
+  const submit = heldSubmitHandlers(form, heldReason);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="sm:max-w-lg"
-        onKeyDown={(e) => {
-          if (eventToBinding(e) === "mod+enter") {
-            e.preventDefault();
-            if (heldReason === null) form.handleSubmit();
-          }
-        }}
-      >
+      <DialogContent className="sm:max-w-lg" onKeyDown={submit.onKeyDown}>
         <form
           className="flex min-w-0 flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (heldReason !== null) return;
-            form.handleSubmit();
-          }}
+          onSubmit={submit.onSubmit}
         >
           <DialogHeader>
             <DialogTitle>
@@ -471,24 +466,16 @@ export function ViewFieldsDialog({
   if (pending || submitting) heldReason = SAVING_REASON;
   else if (defsHeldReason !== undefined) heldReason = defsHeldReason;
   else if (unchanged) heldReason = "Check or uncheck a field to save";
+  const submit = heldSubmitHandlers(form, heldReason);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="flex max-h-[85vh] min-w-0 flex-col sm:max-w-lg"
-        onKeyDown={(e) => {
-          if (eventToBinding(e) === "mod+enter") {
-            e.preventDefault();
-            if (heldReason === null) form.handleSubmit();
-          }
-        }}
+        onKeyDown={submit.onKeyDown}
       >
         <form
           className="flex min-h-0 min-w-0 flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (heldReason !== null) return;
-            form.handleSubmit();
-          }}
+          onSubmit={submit.onSubmit}
         >
           <DialogHeader>
             <DialogTitle>Fields in {viewName}</DialogTitle>
