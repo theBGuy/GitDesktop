@@ -7,6 +7,7 @@
 //! command dispatches on the detected provider; which features are wired per
 //! provider is declared in `model.rs::Implemented`.
 
+pub mod background;
 pub mod bitbucket;
 pub mod bitbucket_findings;
 pub mod github;

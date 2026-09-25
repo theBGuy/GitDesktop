@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef } from "react";
 import { PathText } from "@/components/path-text";
+import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { openInTerminal } from "@/lib/git/api";
 import {
@@ -17,6 +18,7 @@ import {
   usePathPresent,
   useRemotes,
 } from "@/lib/git/queries";
+import { providerLabel, rateLimitResetTime } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -46,7 +48,9 @@ const ATLASSIAN_TOKEN_URL =
  * in), then — if glab is ready but the repo still isn't resolvable to a GitLab
  * project — points at `glab auth status`; Bitbucket walks the connect-account
  * ladder — no saved Atlassian API token → connect one, a saved token that won't
- * authenticate → update it — both deep-linking to Settings → Accounts.
+ * authenticate → update it — both deep-linking to Settings → Accounts. A
+ * rate-limited GitHub or GitLab session outranks each ladder's sign-in arms,
+ * which a rate limit would otherwise trip.
  */
 export function ForgeNotReady({
   repoPath,
@@ -88,6 +92,10 @@ export function ForgeNotReady({
   const health = useForgeSessionHealth(repoPath);
   const sessionBroken = health.data?.state === "broken";
   const healthLogin = health.data?.login ?? null;
+  // Health outranks forge-status here: under a rate limit `gh auth status` exits
+  // non-zero, which reads as signed out, so the sign-in arms would misdirect.
+  const rateLimitedProvider =
+    health.data?.state === "rateLimited" ? health.data.provider : null;
 
   const provider = forge.data?.provider;
   const installed = Boolean(forge.data?.installed);
@@ -153,6 +161,16 @@ export function ForgeNotReady({
             Install the GitLab CLI
           </Button>
         </div>
+      );
+    }
+    if (rateLimitedProvider === "gitlab") {
+      return (
+        <RateLimitedNotice
+          repoPath={repoPath}
+          provider="gitlab"
+          feature={feature}
+          resetAt={health.data?.resetAt}
+        />
       );
     }
     if (!forge.data?.authenticated) {
@@ -272,6 +290,17 @@ export function ForgeNotReady({
     );
   }
 
+  if (rateLimitedProvider === "github") {
+    return (
+      <RateLimitedNotice
+        repoPath={repoPath}
+        provider="github"
+        feature={feature}
+        resetAt={health.data?.resetAt}
+      />
+    );
+  }
+
   // GitHub: nothing can publish this repo, so walk the gh setup ladder
   // (install → sign in), then — if gh is ready but the repo still isn't
   // resolvable (an origin gh can't identify, or the targets probe found
@@ -342,6 +371,60 @@ export function ForgeNotReady({
           terminal to check the connection.
         </p>
       )}
+    </div>
+  );
+}
+
+/** A reset further out than this gets no timer: health's own 5-minute staleTime
+ *  re-reads it on remount or focus long before then. */
+const MAX_RESET_WAIT_MS = 2 * 60 * 60_000;
+/** Slack past the reset second, so the re-read doesn't land a hair early. */
+const RESET_GRACE_MS = 5_000;
+
+/** The rate-limited arm. Deliberately no Reconnect: the credential is fine, and a
+ *  fresh sign-in draws on the same exhausted quota. */
+function RateLimitedNotice({
+  repoPath,
+  provider,
+  feature,
+  resetAt,
+}: {
+  repoPath: string;
+  provider: "github" | "gitlab";
+  feature: string;
+  resetAt: number | null | undefined;
+}) {
+  const queryClient = useQueryClient();
+  const now = useRelativeNow();
+  const label = providerLabel(provider);
+  const resumesAt = rateLimitResetTime(resetAt, now);
+  // ONE re-read of this repo's forge status and session health once the reset
+  // passes, so the panel recovers without a restart. A reset already in the past
+  // arms nothing: re-arming on it could loop against a skewed clock.
+  useEffect(() => {
+    if (typeof resetAt !== "number") return;
+    const delay = resetAt * 1000 - Date.now();
+    if (delay <= 0 || delay > MAX_RESET_WAIT_MS) return;
+    const timer = setTimeout(() => {
+      queryClient.invalidateQueries({
+        queryKey: ["repo", repoPath, "forge-status"],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["repo", repoPath, "forge-session-health"],
+      });
+    }, delay + RESET_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [resetAt, repoPath, queryClient]);
+  return (
+    <div className="space-y-1.5 px-3 py-4 text-xs text-muted-foreground">
+      <p className="font-medium text-foreground">
+        {label} API rate limit reached
+      </p>
+      <p>
+        {`${label}'s API rate limit is in effect${
+          resumesAt ? ` — access resumes at ${resumesAt}` : ""
+        }. You don't need to sign in again: ${feature} will load once it lifts.`}
+      </p>
     </div>
   );
 }

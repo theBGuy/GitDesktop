@@ -4,8 +4,10 @@
 //! Anti-flap is load-bearing: a transiently-failing keyring/API makes `gh auth status`
 //! report "token invalid" for a minute and then heal, so a `gh` `timeout` state is
 //! NEVER Broken and a `gh` `error` must be confirmed by a second probe (~1.5s later);
-//! the GitLab arm mirrors that. No probe reads a credential value, and the reconnect
-//! driver truncates + redacts every line it forwards.
+//! the GitLab arm mirrors that. A rate-limit error is its own state and is never
+//! re-probed: another probe spends quota and can only confirm it. No probe reads a
+//! credential value, and the reconnect driver truncates + redacts every line it
+//! forwards.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,6 +52,9 @@ pub enum SessionState {
     CliMissing,
     /// The probe was inconclusive (network/timeout). The frontend never alarms on this.
     Offline,
+    /// The forge's API rate limit is in effect. The credential itself is not in
+    /// question, so reconnecting cannot help; access resumes at `reset_at` when known.
+    RateLimited,
 }
 
 /// One session's health. Provider-neutral; the frontend keys labels on `provider`.
@@ -69,6 +74,9 @@ pub struct SessionHealth {
     pub method: Option<String>,
     pub expires_at: Option<String>,
     pub days_left: Option<i64>,
+    /// RateLimited only: when the limit resets, in epoch seconds (GitHub's
+    /// `x-ratelimit-reset` header); `None` when unknown.
+    pub reset_at: Option<i64>,
 }
 
 impl SessionHealth {
@@ -84,6 +92,7 @@ impl SessionHealth {
             method: None,
             expires_at: None,
             days_left: None,
+            reset_at: None,
         }
     }
 }
@@ -137,7 +146,7 @@ pub async fn forge_session_health(repo_path: String) -> AppResult<SessionHealth>
 /// authority gh registered it under. Deliberately no `gh repo view` — that's a network
 /// round-trip this cheap health check must avoid; the extra probe on a ported remote is
 /// gh's local-only, memoized `auth token`.
-async fn github_host_for_repo(repo_path: &str) -> String {
+pub(crate) async fn github_host_for_repo(repo_path: &str) -> String {
     let Ok(url) =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await
     else {
@@ -241,6 +250,25 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
     Ok(GhJsonProbe::Parsed(parsed.hosts))
 }
 
+/// Whether a gh account's `error` text names a rate limit (primary or secondary, or
+/// older GHES's "abuse detection" wording for the latter), or is a 429. Substring
+/// matches, not exact ones: go-gh wraps the API message as
+/// `HTTP <code>: <message> (<url>)`, and the message wording varies by limit kind.
+fn gh_error_is_rate_limit(error: Option<&str>) -> bool {
+    error.is_some_and(|e| {
+        let e = e.to_lowercase();
+        e.contains("rate limit") || e.contains("abuse detection") || e.contains("http 429:")
+    })
+}
+
+/// Whether a reading, on its own, earns the anti-flap re-probe: only Broken does. A
+/// RateLimited reading never triggers one (it would spend another call against the
+/// exhausted quota), though the accounts path's SHARED re-probe, fired by another
+/// account's Broken, still re-reads every account on it.
+fn needs_reprobe(state: SessionState) -> bool {
+    state == SessionState::Broken
+}
+
 /// Classify the account list for one host into a state (no re-probe here — the
 /// caller owns the anti-flap re-probe). Picks the active account, else the first.
 fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
@@ -253,8 +281,10 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
         // No entries for this host → not connected.
         return SessionHealth::new("github", "", SessionState::NotConnected);
     };
+    // Mirrored in `gh_account_health` — keep the two arms identical.
     let state = match acct.state.as_str() {
         "success" => SessionState::Healthy,
+        "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
         // A transient failure — the caller confirms with a re-probe before Broken.
         "error" => SessionState::Broken,
         // Never Broken: an inconclusive probe.
@@ -265,7 +295,10 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
     let mut h = SessionHealth::new("github", "", state);
     h.login = acct.login.clone().filter(|s| !s.is_empty());
     h.active = Some(acct.active);
-    if matches!(state, SessionState::Broken | SessionState::Offline) {
+    if matches!(
+        state,
+        SessionState::Broken | SessionState::RateLimited | SessionState::Offline
+    ) {
         h.detail = acct
             .error
             .as_ref()
@@ -275,20 +308,56 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
     h
 }
 
-/// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`.
-async fn github_health(host: &str) -> SessionHealth {
+/// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`, plus the
+/// token expiry (Healthy) or rate-limit reset time (RateLimited).
+pub(crate) async fn github_health(host: &str) -> SessionHealth {
+    let (mut health, from_json) = github_health_probe(host).await;
+    if !from_json {
+        return health;
+    }
+    if health.state == SessionState::Healthy {
+        apply_gh_expiry(&mut health, host).await;
+    }
+    if health.state == SessionState::RateLimited {
+        health.reset_at = gh_rate_limit_reset(host).await;
+    }
+    health
+}
+
+/// `github_health` without the expiry and reset-time extras — same probe, same
+/// classification. For the background-sync poller, which runs per host every tick
+/// and reads only the state: each extra is another `gh api` call, and on a
+/// rate-limited host the reset fetch would be spent every tick.
+pub(crate) async fn github_health_for_poller(host: &str) -> SessionHealth {
+    github_health_probe(host).await.0
+}
+
+/// The shared core of `github_health`: probe, classify, and anti-flap re-probe. The
+/// flag is `false` when the old-gh text fallback answered, which never takes the
+/// extras.
+async fn github_health_probe(host: &str) -> (SessionHealth, bool) {
     let json = match gh_status_json(Some(host)).await {
         Ok(GhJsonProbe::Parsed(map)) => map,
-        Ok(GhJsonProbe::UnknownFlag) => return github_health_text_fallback(Some(host)).await,
+        Ok(GhJsonProbe::UnknownFlag) => {
+            return (github_health_text_fallback(Some(host)).await, false)
+        }
         Ok(GhJsonProbe::Inconclusive(detail)) => {
             let mut h = SessionHealth::new("github", host, SessionState::Offline);
             h.detail = detail;
-            return h;
+            return (h, true);
         }
         Err(AppError::GhNotFound) => {
-            return SessionHealth::new("github", host, SessionState::CliMissing)
+            return (
+                SessionHealth::new("github", host, SessionState::CliMissing),
+                true,
+            )
         }
-        Err(_) => return SessionHealth::new("github", host, SessionState::Offline),
+        Err(_) => {
+            return (
+                SessionHealth::new("github", host, SessionState::Offline),
+                true,
+            )
+        }
     };
     let accounts = json.get(host).map(Vec::as_slice).unwrap_or(&[]);
     let mut health = classify_gh_host(accounts);
@@ -297,7 +366,7 @@ async fn github_health(host: &str) -> SessionHealth {
     // ANTI-FLAP: a single `error` never yields Broken. Re-probe once ~1.5s later; the
     // re-probe's state wins (so a healed session reads Healthy). Only a confirmed
     // second error stays Broken.
-    if health.state == SessionState::Broken {
+    if needs_reprobe(health.state) {
         tokio::time::sleep(REPROBE_DELAY).await;
         if let Ok(GhJsonProbe::Parsed(map2)) = gh_status_json(Some(host)).await {
             let accounts2 = map2.get(host).map(Vec::as_slice).unwrap_or(&[]);
@@ -308,17 +377,44 @@ async fn github_health(host: &str) -> SessionHealth {
         // A failed re-probe (Err/None) leaves the first Broken standing — the
         // credential really was rejected and we couldn't disprove it.
     }
+    (health, true)
+}
 
-    if health.state == SessionState::Healthy {
-        apply_gh_expiry(&mut health, host).await;
+/// When the rate limit on `host` resets (epoch seconds), from the headers of
+/// `gh api -i rate_limit`. That endpoint doesn't count against the primary limit,
+/// and the headers are authoritative over the body, whose reset can disagree.
+/// Headers are read even on a non-zero exit (gh prints them before erroring); any
+/// failure yields `None`, never an error.
+async fn gh_rate_limit_reset(host: &str) -> Option<i64> {
+    let mut args: Vec<&str> = vec!["api", "-i", "rate_limit"];
+    if !host.is_empty() && host != "github.com" {
+        args.push("--hostname");
+        args.push(host);
     }
-    health
+    let out = run_gh_raw(None, &args, GH_TIMEOUT).await.ok()?;
+    rate_limit_reset_header(&out.stdout_lossy())
+}
+
+/// The `x-ratelimit-reset` header as positive epoch seconds, kept ONLY when
+/// `x-ratelimit-remaining` is exactly `0`: the headers describe the core window, and
+/// a secondary limit or 429 with core quota left isn't tied to that reset. `None`
+/// when either header is absent or unparseable.
+fn rate_limit_reset_header(body: &str) -> Option<i64> {
+    if response_header_value(body, "x-ratelimit-remaining").as_deref() != Some("0") {
+        return None;
+    }
+    response_header_value(body, "x-ratelimit-reset")?
+        .parse::<i64>()
+        .ok()
+        .filter(|t| *t > 0)
 }
 
 /// Degraded GitHub health via plain `gh auth status` (old gh without `--json`). Exit
 /// 0 → Healthy (login via `parse_auth_accounts`); non-zero with no parsed accounts →
 /// NotConnected; non-zero with accounts → Broken. No Offline detection is possible
-/// here — plain text can't distinguish a transient failure from a real one.
+/// here — plain text can't distinguish a transient failure from a real one — and no
+/// RateLimited either: gh's text renderer prints the same token-invalid line for
+/// every error, so no rate-limit signal exists to read.
 async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     let host_str = host.unwrap_or("github.com");
     let mut args: Vec<&str> = vec!["auth", "status"];
@@ -356,7 +452,7 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
 }
 
 /// Account-scoped GitHub health — one entry PER account across all hosts. Uses ONE
-/// shared re-probe (not per account) when any account reports `error`.
+/// shared re-probe (not per account) when any account reads Broken.
 async fn github_accounts_health() -> Vec<SessionHealth> {
     let map = match gh_status_json(None).await {
         Ok(GhJsonProbe::Parsed(m)) => m,
@@ -387,9 +483,8 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
         }
     };
 
-    let any_error = map.values().flatten().any(|a| a.state.as_str() == "error");
     // ONE shared re-probe when anything looked transiently broken.
-    let map = if any_error {
+    let map = if gh_accounts_need_reprobe(&map) {
         tokio::time::sleep(REPROBE_DELAY).await;
         match gh_status_json(None).await {
             Ok(GhJsonProbe::Parsed(m2)) => m2,
@@ -407,30 +502,55 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
     for host in hosts {
         let accounts = &map[host];
         for acct in accounts {
-            let state = match acct.state.as_str() {
-                "success" => SessionState::Healthy,
-                "error" => SessionState::Broken,
-                "timeout" => SessionState::Offline,
-                _ => SessionState::Offline,
-            };
-            let mut h = SessionHealth::new("github", host.clone(), state);
-            h.login = acct.login.clone().filter(|s| !s.is_empty());
-            h.active = Some(acct.active);
-            if matches!(state, SessionState::Broken | SessionState::Offline) {
-                h.detail = acct
-                    .error
-                    .as_ref()
-                    .map(|e| sanitize_detail(e))
-                    .filter(|s| !s.is_empty());
-            }
+            let mut h = gh_account_health(host, acct);
             // Expiry only for the active Healthy account on this host.
-            if state == SessionState::Healthy && acct.active {
+            if h.state == SessionState::Healthy && acct.active {
                 apply_gh_expiry(&mut h, host).await;
+            }
+            // Reset time only for the active account too: `gh api` spends the host's
+            // ACTIVE token, so another account's reading would be the wrong quota.
+            if h.state == SessionState::RateLimited && acct.active {
+                h.reset_at = gh_rate_limit_reset(host).await;
             }
             out.push(h);
         }
     }
     out
+}
+
+/// One account's entry for the accounts-scoped list (no re-probe, no expiry).
+fn gh_account_health(host: &str, acct: &GhJsonAccount) -> SessionHealth {
+    // Mirrors `classify_gh_host` — keep the two arms identical.
+    let state = match acct.state.as_str() {
+        "success" => SessionState::Healthy,
+        "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
+        "error" => SessionState::Broken,
+        "timeout" => SessionState::Offline,
+        _ => SessionState::Offline,
+    };
+    let mut h = SessionHealth::new("github", host, state);
+    h.login = acct.login.clone().filter(|s| !s.is_empty());
+    h.active = Some(acct.active);
+    if matches!(
+        state,
+        SessionState::Broken | SessionState::RateLimited | SessionState::Offline
+    ) {
+        h.detail = acct
+            .error
+            .as_ref()
+            .map(|e| sanitize_detail(e))
+            .filter(|s| !s.is_empty());
+    }
+    h
+}
+
+/// Whether any account in an accounts-scoped reading earns the shared re-probe.
+fn gh_accounts_need_reprobe(map: &HashMap<String, Vec<GhJsonAccount>>) -> bool {
+    map.iter().any(|(host, accounts)| {
+        accounts
+            .iter()
+            .any(|a| needs_reprobe(gh_account_health(host, a).state))
+    })
 }
 
 /// Fill `method`/`expires_at`/`days_left` for a Healthy gh session by scanning the
@@ -462,18 +582,21 @@ async fn apply_gh_expiry(health: &mut SessionHealth, host: &str) {
 }
 
 /// The value of the `GitHub-Authentication-Token-Expiration` header from an
-/// `gh api -i` response (headers precede the JSON body, ending at the first blank
-/// line — same idiom as `github::auth::gh_token_scopes`). Case-insensitive.
+/// `gh api -i` response.
 fn expiration_header_value(body: &str) -> Option<String> {
+    response_header_value(body, "github-authentication-token-expiration")
+}
+
+/// A response header's value from `gh api -i` output (headers precede the JSON body,
+/// ending at the first blank line — same idiom as `github::auth::gh_token_scopes`).
+/// The name compare is case-insensitive.
+fn response_header_value(body: &str, header: &str) -> Option<String> {
     for line in body.lines() {
         if line.trim().is_empty() {
             break; // end of headers.
         }
         if let Some((name, value)) = line.split_once(':') {
-            if name
-                .trim()
-                .eq_ignore_ascii_case("github-authentication-token-expiration")
-            {
+            if name.trim().eq_ignore_ascii_case(header) {
                 let v = value.trim();
                 if !v.is_empty() {
                     return Some(v.to_string());
@@ -491,6 +614,8 @@ fn expiration_header_value(body: &str) -> Option<String> {
 enum GlabFailure {
     NotConnected,
     Offline,
+    /// Never re-probed: another probe spends quota and can only confirm it.
+    RateLimited,
     /// Neither clearly not-connected nor network-ish → needs the confirming re-probe;
     /// still failing → Broken with the carried detail.
     Broken,
@@ -502,13 +627,32 @@ enum GlabFailure {
 fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
     const NETWORKISH: [&str; 6] = ["timeout", "connection", "dial", "lookup", "network", "tls"];
-    if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
+    // Checked first as the most specific signal. glab's exact wording is unmeasured, so
+    // it matches the phrases a GitLab throttle can carry (a 429 answers "Too Many
+    // Requests" / "Retry later", with no "rate limit" in it).
+    if combined_lower.contains("rate limit")
+        || combined_lower.contains("too many requests")
+        || has_standalone_429(combined_lower)
+    {
+        GlabFailure::RateLimited
+    } else if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
         GlabFailure::NotConnected
     } else if NETWORKISH.iter().any(|n| combined_lower.contains(n)) {
         GlabFailure::Offline
     } else {
         GlabFailure::Broken
     }
+}
+
+/// Whether `429` appears as a standalone token — no ASCII letter or digit on either
+/// side — so a hash, id, or port that merely contains the digits doesn't match.
+fn has_standalone_429(text: &str) -> bool {
+    text.match_indices("429").any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + 3..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric())
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+    })
 }
 
 /// Parse a `Logged in to <host> as <login>` line from `glab auth status` output,
@@ -550,10 +694,11 @@ async fn gitlab_health(host: &str) -> SessionHealth {
         apply_glab_expiry(&mut h, host).await;
         return h;
     }
-    let combined = format!("{}\n{}", out.stdout_lossy(), out.stderr).to_lowercase();
-    match classify_glab_failure(&combined) {
+    let raw = format!("{}\n{}", out.stdout_lossy(), out.stderr);
+    match classify_glab_failure(&raw.to_lowercase()) {
         GlabFailure::NotConnected => SessionHealth::new("gitlab", host, SessionState::NotConnected),
         GlabFailure::Offline => SessionHealth::new("gitlab", host, SessionState::Offline),
+        GlabFailure::RateLimited => glab_rate_limited(host, &raw),
         GlabFailure::Broken => {
             // ANTI-FLAP: confirm an ambiguous failure with a second probe before Broken.
             tokio::time::sleep(REPROBE_DELAY).await;
@@ -566,14 +711,15 @@ async fn gitlab_health(host: &str) -> SessionHealth {
                     h
                 }
                 Ok(o2) => {
-                    let combined2 = format!("{}\n{}", o2.stdout_lossy(), o2.stderr).to_lowercase();
-                    match classify_glab_failure(&combined2) {
+                    let raw2 = format!("{}\n{}", o2.stdout_lossy(), o2.stderr);
+                    match classify_glab_failure(&raw2.to_lowercase()) {
                         GlabFailure::NotConnected => {
                             SessionHealth::new("gitlab", host, SessionState::NotConnected)
                         }
                         GlabFailure::Offline => {
                             SessionHealth::new("gitlab", host, SessionState::Offline)
                         }
+                        GlabFailure::RateLimited => glab_rate_limited(host, &raw2),
                         GlabFailure::Broken => {
                             let mut h = SessionHealth::new("gitlab", host, SessionState::Broken);
                             h.detail = glab_broken_detail(&o2.stderr);
@@ -588,7 +734,16 @@ async fn gitlab_health(host: &str) -> SessionHealth {
     }
 }
 
-/// A ≤200-char, sanitized detail from glab stderr for a Broken session.
+/// A RateLimited GitLab session. The detail comes from `combined` (stdout + stderr),
+/// the same text the classifier matched, so the reason shown is the one that fired.
+/// `reset_at` stays `None`: GitLab's reset time is not probed.
+fn glab_rate_limited(host: &str, combined: &str) -> SessionHealth {
+    let mut h = SessionHealth::new("gitlab", host, SessionState::RateLimited);
+    h.detail = glab_broken_detail(combined);
+    h
+}
+
+/// A ≤200-char, sanitized, single-line detail from glab output.
 fn glab_broken_detail(stderr: &str) -> Option<String> {
     let msg = stderr.trim();
     if msg.is_empty() {
@@ -1509,23 +1664,164 @@ mod tests {
         assert_eq!(health.active, Some(true));
     }
 
+    /// One `gh auth status --json hosts` reading for github.com whose single active
+    /// account carries `state` and (when given) `error`.
+    fn one_account(state: &str, error: Option<&str>) -> HashMap<String, Vec<GhJsonAccount>> {
+        let error = error
+            .map(|e| format!(r#","error":{}"#, serde_json::to_string(e).unwrap()))
+            .unwrap_or_default();
+        parse_hosts(&format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"{state}","active":true,"host":"github.com","login":"theBGuy"{error}}}]}}}}"#
+        ))
+    }
+
+    /// Both classifier paths — per-repo and accounts-scoped — for one reading, with
+    /// each path's re-probe decision.
+    fn classify_both(map: &HashMap<String, Vec<GhJsonAccount>>) -> [(SessionHealth, bool); 2] {
+        let accounts = &map["github.com"];
+        let repo = classify_gh_host(accounts);
+        let repo_reprobe = needs_reprobe(repo.state);
+        let acct = gh_account_health("github.com", &accounts[0]);
+        [(repo, repo_reprobe), (acct, gh_accounts_need_reprobe(map))]
+    }
+
+    // go-gh renders an API failure as `HTTP %d: %s (%s)`. The 401 wording is gh's
+    // real output; the rate-limit wordings are GitHub's documented messages, not
+    // observed through gh live, which is why the classifier matches a substring.
+    const GH_401: &str = "HTTP 401: Bad credentials (https://api.github.com/)";
+    const GH_403_PRIMARY: &str =
+        "HTTP 403: API rate limit exceeded for user ID 12345 (https://api.github.com/)";
+    const GH_403_SECONDARY: &str = "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/)";
+    const GH_429: &str = "HTTP 429: Too Many Requests (https://api.github.com/)";
+    /// Older GHES's wording for a secondary limit.
+    const GH_403_ABUSE: &str = "HTTP 403: You have triggered an abuse detection mechanism. Please wait a few minutes before you try again. (https://ghes.example/api/v3/)";
+
     #[test]
     fn gh_json_error_is_broken_before_reprobe() {
-        let json = r#"{"hosts":{"github.com":[{"state":"error","active":true,"host":"github.com","login":"theBGuy","error":"token invalid"}]}}"#;
-        let hosts = parse_hosts(json);
-        let health = classify_gh_host(&hosts["github.com"]);
-        // The classifier maps error→Broken; the anti-flap re-probe lives in the async
-        // caller (never yields Broken without a confirming second probe).
-        assert_eq!(health.state, SessionState::Broken);
-        assert_eq!(health.detail.as_deref(), Some("token invalid"));
+        let map = one_account("error", Some(GH_401));
+        for (health, reprobe) in classify_both(&map) {
+            // error→Broken, and the async callers confirm it with the anti-flap
+            // re-probe before it stands.
+            assert_eq!(health.state, SessionState::Broken);
+            assert_eq!(health.detail.as_deref(), Some(GH_401));
+            assert!(reprobe, "a Broken reading must earn the re-probe");
+        }
+    }
+
+    #[test]
+    fn gh_json_rate_limit_is_rate_limited_without_reprobe() {
+        for error in [GH_403_PRIMARY, GH_403_SECONDARY, GH_429, GH_403_ABUSE] {
+            let map = one_account("error", Some(error));
+            for (health, reprobe) in classify_both(&map) {
+                assert_eq!(health.state, SessionState::RateLimited, "{error}");
+                assert_eq!(health.detail.as_deref(), Some(error));
+                assert_eq!(health.login.as_deref(), Some("theBGuy"));
+                // A re-probe spends another call against the exhausted quota.
+                assert!(!reprobe, "RateLimited must not re-probe: {error}");
+                assert_eq!(health.reset_at, None, "the pure classifier never fetches");
+            }
+        }
+    }
+
+    #[test]
+    fn gh_json_rate_limit_match_is_case_insensitive() {
+        let map = one_account("error", Some("HTTP 403: API RATE LIMIT EXCEEDED"));
+        for (health, _) in classify_both(&map) {
+            assert_eq!(health.state, SessionState::RateLimited);
+        }
+    }
+
+    #[test]
+    fn gh_json_error_without_detail_stays_broken() {
+        let map = one_account("error", None);
+        for (health, reprobe) in classify_both(&map) {
+            assert_eq!(health.state, SessionState::Broken);
+            assert_eq!(health.detail, None);
+            assert!(reprobe);
+        }
     }
 
     #[test]
     fn gh_json_timeout_is_offline_never_broken() {
         let json = r#"{"hosts":{"github.com":[{"state":"timeout","active":true,"host":"github.com","error":"context deadline exceeded"}]}}"#;
-        let hosts = parse_hosts(json);
-        let health = classify_gh_host(&hosts["github.com"]);
-        assert_eq!(health.state, SessionState::Offline);
+        let map = parse_hosts(json);
+        for (health, reprobe) in classify_both(&map) {
+            assert_eq!(health.state, SessionState::Offline);
+            assert!(!reprobe);
+        }
+    }
+
+    #[test]
+    fn gh_accounts_reprobe_fires_when_any_account_is_broken() {
+        // One rate-limited host beside one broken host: the Broken one still earns
+        // the shared re-probe.
+        let json = format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"error","active":true,"login":"a","error":{}}}],"ghes.example":[{{"state":"error","active":true,"login":"b","error":{}}}]}}}}"#,
+            serde_json::to_string(GH_403_PRIMARY).unwrap(),
+            serde_json::to_string(GH_401).unwrap(),
+        );
+        assert!(gh_accounts_need_reprobe(&parse_hosts(&json)));
+    }
+
+    #[test]
+    fn session_health_wire_shape_pins_rate_limited() {
+        let mut h = SessionHealth::new("github", "github.com", SessionState::RateLimited);
+        h.reset_at = Some(1_790_000_000);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["state"], "rateLimited");
+        assert_eq!(v["resetAt"], 1_790_000_000_i64);
+        assert!(v.get("reset_at").is_none(), "fields serialize camelCase");
+        // Absent reset time: the key is still present, as null (like `expiresAt`).
+        let bare = serde_json::to_value(SessionHealth::new(
+            "gitlab",
+            "gitlab.com",
+            SessionState::RateLimited,
+        ))
+        .unwrap();
+        assert_eq!(bare["state"], "rateLimited");
+        assert!(bare.get("resetAt").is_some());
+        assert_eq!(bare["resetAt"], serde_json::Value::Null);
+        assert_eq!(bare["expiresAt"], serde_json::Value::Null);
+    }
+
+    // ── rate-limit reset header ──
+    #[test]
+    fn rate_limit_reset_from_header() {
+        let out = "HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: 1790000000\r\n\r\n{\"resources\":{}}";
+        assert_eq!(rate_limit_reset_header(out), Some(1_790_000_000));
+        // Lowercase (HTTP/2) spelling, as printed ahead of a failing request.
+        let lower = "HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 1790000123\n\n{\"message\":\"API rate limit exceeded\"}";
+        assert_eq!(rate_limit_reset_header(lower), Some(1_790_000_123));
+    }
+
+    #[test]
+    fn rate_limit_reset_needs_an_exhausted_core_window() {
+        // Core quota left means the limit in force is a secondary one or a 429, which
+        // this reset doesn't describe.
+        let left =
+            "HTTP/2.0 200 OK\nx-ratelimit-remaining: 4000\nx-ratelimit-reset: 1790000000\n\n{}";
+        assert_eq!(rate_limit_reset_header(left), None);
+        let missing = "HTTP/2.0 200 OK\nx-ratelimit-reset: 1790000000\n\n{}";
+        assert_eq!(rate_limit_reset_header(missing), None);
+        let exhausted =
+            "HTTP/2.0 200 OK\nx-ratelimit-reset: 1790000000\nx-ratelimit-remaining: 0\n\n{}";
+        assert_eq!(rate_limit_reset_header(exhausted), Some(1_790_000_000));
+    }
+
+    #[test]
+    fn rate_limit_reset_ignores_the_body() {
+        // The body's reset is never read — only the header is authoritative.
+        let out = "HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 0\r\nContent-Type: application/json\r\n\r\n{\"rate\":{\"reset\":1790000000}}\nx-ratelimit-reset: 1790000000";
+        assert_eq!(rate_limit_reset_header(out), None);
+    }
+
+    #[test]
+    fn rate_limit_reset_garbage_is_none() {
+        assert_eq!(rate_limit_reset_header(""), None);
+        for reset in ["soon", "-5", "0", ""] {
+            let out = format!("x-ratelimit-remaining: 0\nx-ratelimit-reset: {reset}\n\n");
+            assert_eq!(rate_limit_reset_header(&out), None, "{reset:?}");
+        }
     }
 
     #[test]
@@ -1631,6 +1927,48 @@ mod tests {
             classify_glab_failure("something we've never seen"),
             GlabFailure::Broken
         );
+        // SYNTHETIC fixtures: glab's real throttle wording is unmeasured, so these pin
+        // the phrases the arm keys on, not a captured glab line. The arm wins over the
+        // network-ish words a throttle message may share a line with.
+        for throttled in [
+            "get https://gitlab.com/api/v4/user: 429 rate limit exceeded",
+            "retry later: connection rate limited",
+            "get https://gitlab.com/api/v4/user: 429 {message: retry later}",
+            "api call failed: too many requests",
+            "http 429",
+            "status (429)",
+        ] {
+            assert_eq!(
+                classify_glab_failure(throttled),
+                GlabFailure::RateLimited,
+                "{throttled}"
+            );
+        }
+        // `429` inside a hash, id, or port is not a status code.
+        for not_throttled in [
+            "token a429f0 rejected: 401 unauthorized",
+            "project 14290 not found",
+            "dial tcp 10.0.0.1:4290: refused",
+        ] {
+            assert_ne!(
+                classify_glab_failure(not_throttled),
+                GlabFailure::RateLimited,
+                "{not_throttled}"
+            );
+        }
+    }
+
+    #[test]
+    fn glab_rate_limited_detail_comes_from_the_matched_text() {
+        // The arm matched stdout here, so the detail must carry it even though stderr
+        // holds only the generic trailer.
+        let combined =
+            "GET https://gitlab.com/api/v4/user: 429 Too Many Requests\nerror: request failed";
+        let h = glab_rate_limited("gitlab.com", combined);
+        assert_eq!(h.state, SessionState::RateLimited);
+        assert_eq!(h.reset_at, None);
+        let detail = h.detail.expect("a detail");
+        assert!(detail.contains("429 Too Many Requests"), "{detail}");
     }
 
     #[test]

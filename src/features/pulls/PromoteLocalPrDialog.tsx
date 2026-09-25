@@ -203,7 +203,9 @@ export function PromoteLocalPrDialog({
       toastComposedError({
         title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        view: { url },
+        // Named only once the forge status has answered: `providerLabel`
+        // defaults to GitHub, and nothing gates this flow on the status.
+        view: { url, label: forge.data && `View on ${remoteLabel}` },
         duration: 10000,
       });
     } finally {

@@ -976,6 +976,8 @@ already updated your view of the remote. On a Git older than 2.30, or a branch w
 reflog for the check to read, the push falls back to \`--force-with-lease\` alone, and the
 success toast says so. When the remote has moved since your last look, the blocked
 push explains it in plain words, with Git's full output one click away under **Details**.
+(Anywhere a failure toast also offers to open what was created, such as **View on
+GitHub** after a promote whose follow-up step failed, **Details** carries that link too.)
 And when it's the **remote** that was rewritten (a server-side rebase, like GitHub's
 *Update branch → rebase*) and every commit of yours already landed upstream under new
 ids, the force-push confirmation warns that pushing would put the old history back,
@@ -1025,9 +1027,11 @@ The **Pull Requests** tab ({{kbd:tab-pulls}}) manages GitHub PRs, GitLab merge r
 and local PRs. (Hosted PRs/MRs need the matching CLI — \`gh\` or \`glab\` — installed and
 authenticated; when you're not signed in the tab shows a **Sign in** button that runs the
 sign-in in-app, and if a session **expired or was revoked** it becomes **Reconnect**
-instead of a dead end.) When a token is within a week of expiring, a quiet **dismissible
-notice** at the top of this tab (and the Issues tab) reminds you to reconnect before it
-lapses.
+instead of a dead end. When GitHub's **API rate limit** is in effect, the tab says so,
+with the time access resumes when GitHub reports it; your sign-in is untouched, so
+there's nothing to reconnect. GitLab does the same when its CLI names the limit.) When a
+token is within a week of expiring, a quiet **dismissible notice** at the top of this
+tab (and the Issues tab) reminds you to reconnect before it lapses.
 
 What you can *do* here follows your access on the repository: when you lack the access an
 action needs — push access to **merge** or to flip a pull request between **draft** and
@@ -2167,8 +2171,9 @@ the option you pick, and **Clear** empties it; the arrow keys move the choice, a
 {{key:escape}} leaves without saving, and every way out puts you back on the cell. The
 write shows beside **View options** while it's on its way, then **Updating the
 table…** until the re-read lands, and the cell shows GitHub's answer when it does; if the view sorts or groups by that field, the row moves
-to where the new value puts it and your place goes with it. One cell saves at a time,
-so the next edit opens once the last one has landed. Fields GitHub keeps on the issue
+to where the new value puts it and your place goes with it. A cell that won't save says
+why in a toast, with **Details** or **Copy** for GitHub's full answer. One cell saves at
+a time, so the next edit opens once the last one has landed. Fields GitHub keeps on the issue
 itself (assignees, labels, milestone and the rest) aren't edited here, and a cell that
 can't be edited says why when you try: a sign-in or access that can't change the
 board, an archived row, an organization's issue field, multi-line text, or another
@@ -2294,6 +2299,10 @@ first, so the menu and the board always agree about what a click will do.
 A card that leaves the board leaves the selection with it, whatever took it away — the
 archived toggle, a view's filter, a refresh, or another change. The verbs act on what
 the board is drawing, never on what it was drawing when you picked.
+
+When some cards refuse a move, archive, restore, remove, or field edit, the toast counts
+them and names the first reason GitHub gave, and **Details** lists each refused card by
+title with GitHub's full answer, even when only one card refused.
 
 ## Setting fields on several cards
 
@@ -3458,7 +3467,12 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   The bell is a persistent, click-to-open history (it survives a restart) so a finished
   review or a PR update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump
-  to it, arrow-key through the list, and clear items or mark all read. A
+  to it, arrow-key through the list, and clear items or mark all read. An entry that
+  carries a longer reason, such as a failed pull request create{{ai}} or a failed AI
+  review{{/ai}}, has a **Show full text** caret beside it: press it, or {{key:right}} on
+  the row ({{key:left}} folds it again), to unfold the full text beneath the row. When
+  that text runs long, **Open in Details** shows it in the full error viewer with
+  **Copy**. A
   pull-request entry opens that PR on the tab its event happened on, under the
   fork/upstream view it belongs to, so a new comment or approval lands on
   **Conversation** — and a review entry scrolls to the review itself. The
@@ -3487,7 +3501,11 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   open a browser itself, GitLab's dialog shows its link the same way. Each signed-in
   account lists here, and a **session that expired or was revoked** shows a *session
   expired* badge with a one-click **Reconnect** (GitHub reconnects the active account;
-  switch first if it's another one). GitDesktop also **warns before a token lapses**: a
+  switch first if it's another one). A GitHub account that hit the API rate limit shows
+  a *rate limited* badge instead, with no Reconnect since signing in again can't lift
+  it; hover the badge for GitHub's message and, on the active account, when access
+  resumes if GitHub reports it. A GitLab host gets the same badge when \`glab\` names
+  the limit. GitDesktop also **warns before a token lapses**: a
   GitLab personal-access-token session shows *token expires in N days* once it's within
   two weeks (browser/OAuth sessions renew themselves, so they carry no warning — the
   reason the sign-in flow recommends the browser option), and a GitHub PAT's expiry is

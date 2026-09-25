@@ -1,5 +1,6 @@
 import {
   BellIcon,
+  CaretDownIcon,
   CaretRightIcon,
   CaretUpIcon,
   ChatCircleIcon,
@@ -30,6 +31,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
 import { openAutomationResult } from "@/lib/automations/results";
+import { presentError } from "@/lib/error-summary";
 import { validateRepo } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { normPath } from "@/lib/git/path";
@@ -40,6 +42,7 @@ import type { PrSection } from "@/lib/pulls/pr-section";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { useErrorDialog } from "@/lib/stores/error-dialog";
 import {
   AI_NOTIFICATION_KINDS,
   type AppNotification,
@@ -498,6 +501,18 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // Close FIRST, as Automation history does: the popover's focus return to its
+  // trigger would otherwise steal focus from the dialog opening over it.
+  const openDetails = (n: AppNotification, detail: string) => {
+    onClose();
+    useErrorDialog.getState().open({
+      label: null,
+      summary: n.title,
+      fullText: detail,
+      long: true,
+    });
+  };
+
   const onListKeyDown = listKeyboardNav({
     items: visible,
     activeIndex: focusedId ? visible.findIndex((n) => n.id === focusedId) : -1,
@@ -590,7 +605,16 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         <div
           ref={listRef}
           className="max-h-80 overflow-y-auto outline-none"
-          onKeyDown={onListKeyDown}
+          onKeyDown={(e) => {
+            // An expanded detail block is a focusable scroller: its arrows scroll
+            // the text rather than move between rows.
+            if (
+              e.target instanceof Element &&
+              e.target.closest("[data-notification-detail]")
+            )
+              return;
+            onListKeyDown(e);
+          }}
         >
           {visible.map((n) => (
             <NotificationRow
@@ -598,6 +622,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
               n={n}
               onNavigate={() => navigate(n)}
               onDelete={() => handleDelete(n.id)}
+              onOpenDetails={(detail) => openDetails(n, detail)}
             />
           ))}
         </div>
@@ -751,134 +776,189 @@ function NotificationRow({
   n,
   onNavigate,
   onDelete,
+  onOpenDetails,
 }: {
   n: AppNotification;
   onNavigate: () => void;
   /** Keyboard delete — restores focus to a neighbour (unlike the mouse clear). */
   onDelete: () => void;
+  /** Show a long detail in the ErrorDialog. */
+  onOpenDetails: (detail: string) => void;
 }) {
   const Glyph = glyphFor(n);
   const detailId = useId();
   // A one-line failure's full text IS its subtitle, already in the accessible name.
   const detail = n.detail !== n.subtitle ? n.detail : undefined;
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="flex items-stretch not-last:border-b hover:bg-muted/60">
-      <button
-        type="button"
-        data-row={n.id}
-        aria-describedby={detail ? detailId : undefined}
-        onClick={onNavigate}
-        onKeyDown={(e) => {
-          if (e.key === "Delete" || e.key === "Backspace") {
-            e.preventDefault();
-            onDelete();
-          }
-        }}
-        className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2 text-left outline-none focus-visible:bg-muted"
-      >
-        <span className="relative mt-0.5 shrink-0">
-          <Glyph className={cn("size-4", TONE_CLASS[n.tone])} weight="fill" />
-          {!n.read && (
-            <span
-              aria-hidden
-              className="absolute -top-1 -left-1 size-1.5 rounded-full bg-primary ring-2 ring-popover"
-            />
-          )}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span
-            className={cn(
-              "block truncate text-xs",
-              n.read ? "font-normal text-muted-foreground" : "font-medium",
+    <div className="not-last:border-b">
+      <div className="flex items-stretch hover:bg-muted/60">
+        <button
+          type="button"
+          data-row={n.id}
+          aria-describedby={detail ? detailId : undefined}
+          onClick={onNavigate}
+          onKeyDown={(e) => {
+            if (e.key === "Delete" || e.key === "Backspace") {
+              e.preventDefault();
+              onDelete();
+              return;
+            }
+            // Tree-row accelerators for the disclosure beside the row; the list's
+            // own nav takes only ArrowUp/ArrowDown, so these are free here.
+            const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+            if (
+              detail &&
+              plain &&
+              (e.key === "ArrowRight" || e.key === "ArrowLeft")
+            ) {
+              e.preventDefault();
+              setExpanded(e.key === "ArrowRight");
+            }
+          }}
+          className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2 text-left outline-none focus-visible:bg-muted"
+        >
+          <span className="relative mt-0.5 shrink-0">
+            <Glyph className={cn("size-4", TONE_CLASS[n.tone])} weight="fill" />
+            {!n.read && (
+              <span
+                aria-hidden
+                className="absolute -top-1 -left-1 size-1.5 rounded-full bg-primary ring-2 ring-popover"
+              />
             )}
-            title={n.title}
-          >
-            {n.title}
           </span>
-          {n.subtitle && (
+          <span className="min-w-0 flex-1">
             <span
-              className="mt-0.5 block truncate text-[11px] text-muted-foreground"
-              title={detail ?? n.subtitle}
+              className={cn(
+                "block truncate text-xs",
+                n.read ? "font-normal text-muted-foreground" : "font-medium",
+              )}
+              title={n.title}
             >
-              {n.subtitle}
+              {n.title}
+            </span>
+            {n.subtitle && (
+              <span
+                className="mt-0.5 block truncate text-[11px] text-muted-foreground"
+                title={detail ?? n.subtitle}
+              >
+                {n.subtitle}
+              </span>
+            )}
+            {/* Meta line: repo (always) · author (when known). The inbox is global,
+                so the repo name orients rows from any repo; the author renders with a
+                small bot-aware avatar. */}
+            <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+              {/* min-w-0 defeats flex's default min-width:auto so truncate engages;
+                  repoName (flex-1) shrinks first, the author name keeps a capped
+                  share so both stay visible when the row is tight. `title` keeps a
+                  clipped value readable on hover. */}
+              <span className="min-w-0 flex-1 truncate" title={n.repoName}>
+                {n.repoName}
+              </span>
+              {n.authorLogin && (
+                <>
+                  <span aria-hidden>·</span>
+                  <ForgeUserAvatar
+                    login={n.authorLogin}
+                    avatarUrl={n.authorAvatarUrl}
+                    ghHost={n.authorGhHost}
+                    size="sm"
+                    className="size-4"
+                    decorative
+                  />
+                  <span
+                    className="min-w-0 max-w-[45%] shrink-0 truncate"
+                    title={displayLogin(n.authorLogin)}
+                  >
+                    {displayLogin(n.authorLogin)}
+                  </span>
+                </>
+              )}
+            </span>
+          </span>
+          {/* A stamp read back from notifications.json only had to be a `number`
+              to hydrate, and `toISOString` throws outside Date's range — which
+              here would take down the whole dock. Drop the cell, keep the row. */}
+          {validEpochMs(n.ts) && (
+            <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+              <RelativeTime date={new Date(n.ts).toISOString()} />
             </span>
           )}
-          {/* Meta line: repo (always) · author (when known). The inbox is global,
-              so the repo name orients rows from any repo; the author renders with a
-              small bot-aware avatar. */}
-          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
-            {/* min-w-0 defeats flex's default min-width:auto so truncate engages;
-                repoName (flex-1) shrinks first, the author name keeps a capped
-                share so both stay visible when the row is tight. `title` keeps a
-                clipped value readable on hover. */}
-            <span className="min-w-0 flex-1 truncate" title={n.repoName}>
-              {n.repoName}
-            </span>
-            {n.authorLogin && (
-              <>
-                <span aria-hidden>·</span>
-                <ForgeUserAvatar
-                  login={n.authorLogin}
-                  avatarUrl={n.authorAvatarUrl}
-                  ghHost={n.authorGhHost}
-                  size="sm"
-                  className="size-4"
-                  decorative
-                />
-                <span
-                  className="min-w-0 max-w-[45%] shrink-0 truncate"
-                  title={displayLogin(n.authorLogin)}
-                >
-                  {displayLogin(n.authorLogin)}
-                </span>
-              </>
-            )}
-          </span>
-        </span>
-        {/* A stamp read back from notifications.json only had to be a `number`
-            to hydrate, and `toISOString` throws outside Date's range — which
-            here would take down the whole dock. Drop the cell, keep the row. */}
-        {validEpochMs(n.ts) && (
-          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-            <RelativeTime date={new Date(n.ts).toISOString()} />
-          </span>
+        </button>
+        {detail && (
+          // A sibling, never nested: the row is itself a button.
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="my-1.5 shrink-0 self-start text-muted-foreground"
+            aria-expanded={expanded}
+            aria-controls={detailId}
+            aria-label={`Full text — ${n.title}`}
+            title={expanded ? "Hide full text" : "Show full text"}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            <CaretDownIcon
+              className={cn(
+                "transition-transform duration-200 ease-out motion-reduce:transition-none",
+                expanded && "rotate-180",
+              )}
+            />
+          </Button>
         )}
-      </button>
-      {/* The full text is otherwise only in the subtitle's hover title, which
-          assistive tech never reads; aria-describedby resolves hidden targets. */}
-      {detail && (
-        <span id={detailId} hidden>
-          {detail}
-        </span>
-      )}
-      {n.action && (
+        {n.action && (
+          <Button
+            variant="ghost"
+            size="xs"
+            className="my-1.5 shrink-0 self-start"
+            // Self-contained: a row is ambiguous by its action label alone.
+            aria-label={`${n.action.label} — ${n.title}`}
+            onClick={() => {
+              // Mark read (it's now acted on) then fire — but keep the popover open
+              // and the row in place: the fresh run registers an "In progress" row in
+              // this same panel (that's the feedback), and the notification is history.
+              markNotificationRead(n.id);
+              n.action?.run();
+            }}
+          >
+            {n.action.label}
+          </Button>
+        )}
         <Button
           variant="ghost"
-          size="xs"
-          className="my-1.5 shrink-0 self-start"
-          // Self-contained: a row is ambiguous by its action label alone.
-          aria-label={`${n.action.label} — ${n.title}`}
-          onClick={() => {
-            // Mark read (it's now acted on) then fire — but keep the popover open
-            // and the row in place: the fresh run registers an "In progress" row in
-            // this same panel (that's the feedback), and the notification is history.
-            markNotificationRead(n.id);
-            n.action?.run();
-          }}
+          size="icon-xs"
+          className="mt-0 my-1.5 mr-1 shrink-0 self-start text-muted-foreground"
+          aria-label={`Clear "${n.title}"`}
+          onClick={() => clearNotification(n.id)}
         >
-          {n.action.label}
+          <XIcon />
         </Button>
+      </div>
+      {detail && (
+        // Also the row's aria-describedby target in both states, since
+        // describedby resolves a hidden element's text; the subtitle's hover
+        // title alone is unreachable by touch, keyboard, and assistive tech.
+        <pre
+          id={detailId}
+          data-notification-detail
+          hidden={!expanded}
+          className="mr-3 mb-2 ml-9 max-h-40 overflow-y-auto bg-muted/50 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap wrap-anywhere select-text motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 motion-safe:duration-200 motion-safe:ease-out"
+        >
+          {detail}
+        </pre>
       )}
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        className="mt-0 my-1.5 mr-1 shrink-0 self-start text-muted-foreground"
-        aria-label={`Clear "${n.title}"`}
-        onClick={() => clearNotification(n.id)}
-      >
-        <XIcon />
-      </Button>
+      {detail && expanded && presentError(detail).long && (
+        <div className="-mt-1 mb-1.5 ml-7">
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => onOpenDetails(detail)}
+          >
+            Open in Details
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

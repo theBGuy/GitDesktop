@@ -38,7 +38,9 @@
   every eligible card, with each row reporting what the selection holds today: the
   value where the cards agree, **(mixed)** where they don't. Every count on the bar
   shows exactly what that verb will reach (archived cards sit out a field edit, for
-  instance), and the prompts say where the cards go, drafts included.
+  instance), and the prompts say where the cards go, drafts included. When some
+  cards refuse a change, the toast leads with the reason and **Details** lists
+  each refused card by title with GitHub's full answer.
   The card menu speaks for the selection too, the palette carries Edit fields,
   Archive, Restore, Remove and Clear, and **Esc** drops the whole thing. Cards that
   leave the board leave the selection with them.

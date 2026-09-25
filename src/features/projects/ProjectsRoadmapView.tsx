@@ -22,6 +22,7 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import type { BoardItem, ProjectIterationDef } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 import type { TableEntry, TablePosition } from "./board-model";
+import { itemTitle } from "./item-title";
 import {
   addDays,
   type DateSources,
@@ -63,13 +64,6 @@ function labelWidth(text: string): number {
 /** What a press inside the grid may move focus to — the table's own set. */
 const IN_GRID_FOCUSABLE =
   "[tabindex], button, a[href], input, select, textarea";
-
-/** The item's head line as the lane repeats it beside its bar. */
-function itemTitle(item: BoardItem): string {
-  const content = item.content;
-  if (content.kind === "redacted") return "Redacted item";
-  return content.title === "" ? "Draft item" : content.title;
-}
 
 /** Where a span draws on the lane, in pixels, clamped into it at both ends. */
 function spanBox(from: string, to: string, timeline: RoadmapTimeline) {

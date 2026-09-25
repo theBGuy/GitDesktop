@@ -323,6 +323,7 @@ pub fn run() {
             git::compare::git_review_worktree,
             git::compare::git_remove_worktree,
             forge::forge_status,
+            forge::background::forge_background_statuses,
             forge::forge_bb_set_account,
             forge::forge_bb_clear_account,
             forge::forge_bb_account,

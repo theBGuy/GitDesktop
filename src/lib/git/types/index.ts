@@ -3,6 +3,7 @@
 // replaced; every module in the directory is re-exported here.
 
 export * from "./accounts";
+export * from "./background-status";
 export * from "./branches";
 export * from "./discussions";
 export * from "./forge";

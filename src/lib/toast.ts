@@ -17,7 +17,13 @@ export function errorToastAction(presentation: ErrorPresentation) {
   return presentation.long
     ? {
         label: "Details",
-        onClick: () => useErrorDialog.getState().open(presentation),
+        onClick: (event: { currentTarget: HTMLElement }) => {
+          // sonner's toaster refocuses the pre-toast element when focus leaves it,
+          // which would pull focus back out of the dialog. Blurring first runs that
+          // restore synchronously (React's onBlur rides focusout), before the open.
+          event.currentTarget.blur();
+          useErrorDialog.getState().open(presentation);
+        },
       }
     : {
         label: "Copy",
@@ -49,6 +55,8 @@ export function toastErrorWithNote(e: unknown, note: string) {
  * ("Created issue #12, but adding it to a project failed: …"). Details/Copy
  * (`errorToastAction`) rides the cancel slot when `view` holds the action,
  * else it IS the action; the dialog content is `composedErrorPresentation`'s.
+ * sonner's cancel slot always dismisses the toast, so `view` also rides into the
+ * dialog as its `link` — Details must never cost the user the View route.
  */
 export function toastComposedError(opts: {
   /** The composed headline (already carries summaries where it wants them). */
@@ -60,22 +68,25 @@ export function toastComposedError(opts: {
   headings?: readonly string[];
   /** Toast description (origin note, or a one-line reason) — free text. */
   description?: string;
-  /** Primary View action for the created entity, when one exists. */
-  view?: { url: string };
+  /** Primary View action for the created entity, when one exists. `label`
+   *  names the provider where the call site knows it ("View on GitHub");
+   *  defaults to "View". */
+  view?: { url: string; label?: string };
   /** Defaults to 8000, matching `showErrorToast`. */
   duration?: number;
 }): void {
   const { title, errors, headings, description, view, duration } = opts;
+  const link = view && { url: view.url, label: view.label ?? "View" };
   const details = errorToastAction(
-    composedErrorPresentation(title, errors, headings),
+    composedErrorPresentation(title, errors, headings, link),
   );
   toast.error(title, {
     description,
     duration: duration ?? 8000,
-    action: view
-      ? { label: "View", onClick: () => openUrl(view.url) }
+    action: link
+      ? { label: link.label, onClick: () => openUrl(link.url) }
       : details,
-    cancel: view ? details : undefined,
+    cancel: link ? details : undefined,
   });
 }
 

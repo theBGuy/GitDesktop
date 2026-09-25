@@ -546,6 +546,100 @@ test("a composed presentation sections several errors under their headings", () 
   );
 });
 
+test("a composed presentation carries the toast's View link into Details", () => {
+  const link = {
+    url: "https://github.com/o/r/issues/12",
+    label: "View on GitHub",
+  };
+  const one = gitError("fatal: first failure");
+  const single = composedErrorPresentation(
+    "Created issue #12, but it failed.",
+    [one],
+    undefined,
+    link,
+  );
+  assert.deepEqual(single.link, link);
+  // The link rides along; the single-error headline contract is unchanged.
+  assert.equal(single.summary, "Created issue #12, but it failed.");
+  assert.equal(single.fullText, presentError(one).fullText);
+  const several = composedErrorPresentation(
+    "Created issue #12, but two steps failed.",
+    [one, new Error("second failure")],
+    ["Adding to project", "Setting labels"],
+    link,
+  );
+  assert.deepEqual(several.link, link);
+  assert.equal(several.long, true);
+});
+
+test("a composed presentation without a link has no link key, and presentError never sets one", () => {
+  const error = gitError("fatal: first failure");
+  assert.equal("link" in composedErrorPresentation("t", [error]), false);
+  assert.equal(
+    "link" in composedErrorPresentation("t", [error, new Error("second")]),
+    false,
+  );
+  assert.equal("link" in presentError(error), false);
+});
+
+test("a lone error with a heading becomes one headed section and routes through Details", () => {
+  // Short on purpose: bare, this presents as `long: false` (Copy, no heading).
+  const error = "Field is read-only";
+  assert.equal(presentError(error).long, false);
+  const p = composedErrorPresentation(
+    "1 of 5 cards failed to move — Field is read-only",
+    [error],
+    ["Zebra card"],
+  );
+  assert.deepEqual(p, {
+    label: null,
+    summary: "1 of 5 cards failed to move — Field is read-only",
+    fullText: "Zebra card\nField is read-only",
+    long: true,
+  });
+  // Same section format as one entry of the multi branch.
+  const multi = composedErrorPresentation(
+    "t",
+    [error, "other"],
+    ["Zebra card", "Alpha card"],
+  );
+  assert.ok(multi.fullText.startsWith(`${p.fullText}\n\n`));
+  // An AppError keeps its own kind label under the heading.
+  const git = gitError("fatal: first failure");
+  const headed = composedErrorPresentation("t", [git], ["Adding to project"]);
+  assert.equal(headed.label, "Git error");
+  assert.equal(headed.fullText, "Adding to project\nfatal: first failure");
+  assert.equal(headed.long, true);
+});
+
+test("a lone error without a heading is exactly its own presentation under the title", () => {
+  for (const error of [
+    "Field is read-only",
+    gitError("fatal: first failure"),
+    gitError(sshNoAccess("gitlab.com")),
+    new Error("second failure\nwith detail"),
+  ]) {
+    const expected = { ...presentError(error), summary: "t" };
+    assert.deepEqual(composedErrorPresentation("t", [error]), expected);
+    assert.deepEqual(composedErrorPresentation("t", [error], []), expected);
+    // An empty heading reads as none, as it does in the multi branch.
+    assert.deepEqual(composedErrorPresentation("t", [error], [""]), expected);
+  }
+});
+
+test("per-item sections keep the order their headings were given in", () => {
+  const p = composedErrorPresentation(
+    "3 of 5 cards failed to move — Field is read-only",
+    ["Field is read-only", "Resource not accessible", "Field is read-only"],
+    ["Zebra card", "Alpha card", "Middle card"],
+  );
+  assert.equal(
+    p.fullText,
+    "Zebra card\nField is read-only\n\nAlpha card\nResource not accessible\n\nMiddle card\nField is read-only",
+  );
+  assert.equal(p.summary, "3 of 5 cards failed to move — Field is read-only");
+});
+
 test("ssh's key refusal after other text on its line falls through", () => {
   const line = "warning: git@gitlab.com: Permission denied (publickey).";
   const p = presentError(gitError(line));

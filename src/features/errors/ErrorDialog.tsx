@@ -1,4 +1,5 @@
-import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, CheckIcon, CopyIcon } from "@phosphor-icons/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ export function ErrorDialog() {
   // Copy → Close → reopen → Copy sequence lets the first dialog's orphaned
   // timer fire mid-window and prematurely hide the new "Copied" feedback.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   // Reset copy feedback when the presentation identity changes — open() called
   // while the dialog is already open swaps `presentation` without ever passing
@@ -43,6 +45,7 @@ export function ErrorDialog() {
 
   // Copy must hand over exactly what the pane shows, so both read the snapshot.
   const fullText = shownPresentation?.fullText ?? "";
+  const link = shownPresentation?.link;
 
   // Controlled Base UI dialogs don't fire onOpenChange when `open` flips via the
   // prop, so the Close button clears `copied` itself — otherwise a Copy → Close
@@ -76,7 +79,12 @@ export function ErrorDialog() {
         if (!open) handleClose();
       }}
     >
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        // Close, not the first tabbable: the link-out leads the footer in DOM
+        // order too, and opening a dialog must never arm an external navigation.
+        initialFocus={() => closeRef.current}
+      >
         <DialogHeader>
           <div className="flex items-center gap-2">
             <DialogTitle className="min-w-0 wrap-break-word">
@@ -92,8 +100,19 @@ export function ErrorDialog() {
         <pre className="max-h-[60vh] min-w-0 overflow-y-auto font-mono text-sm whitespace-pre-wrap [overflow-wrap:anywhere] select-text">
           {fullText}
         </pre>
-        <DialogFooter>
-          <Button variant="outline" onClick={handleClose}>
+        <DialogFooter className="items-center">
+          {link && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="cursor-pointer text-muted-foreground sm:mr-auto"
+              onClick={() => openUrl(link.url)}
+            >
+              <ArrowSquareOutIcon data-icon="inline-start" />
+              {link.label}
+            </Button>
+          )}
+          <Button ref={closeRef} variant="outline" onClick={handleClose}>
             Close
           </Button>
           <Button variant="secondary" onClick={copy}>

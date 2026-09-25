@@ -124,7 +124,7 @@ import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastComposedError, toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
 import { BoardBulkFieldsDialog } from "./BoardBulkFieldsDialog";
@@ -180,6 +180,7 @@ import {
   rowRange,
   selectionMods,
 } from "./board-selection";
+import { itemTitle } from "./item-title";
 import {
   type FieldDraft,
   INVALID_DRAFT,
@@ -2853,9 +2854,10 @@ export function ProjectsBoardPanel({
         announce(`Saved ${def.name}`);
       } else {
         announce(`Couldn't save ${def.name}`);
-        toast.error(
-          `Couldn't save ${def.name} — ${presentError(error).summary}`,
-        );
+        toastComposedError({
+          title: `Couldn't save ${def.name} — ${presentError(error).summary}`,
+          errors: [error],
+        });
       }
     } catch {
       // The mutation reported it. Nothing was patched, so the cell already shows
@@ -4218,18 +4220,23 @@ export function ProjectsBoardPanel({
    * and throws it away — a missing `project` scope, a dead connection and a
    * rejected field value would all read identically.
    *
-   * DISPOSITION (settled): the per-item reasons are summarized, not enumerated.
-   * A bulk failure is homogeneous in practice — one scope error across every
-   * card, one transport error across a chunk — so the first distinct reason is
-   * the actionable one and the rest are a count. The reversal, if a per-card
-   * breakdown is ever wanted, is a results section inside the bulk dialog fed by
-   * these same outcomes; it is deliberately not built here, where a toast has to
-   * stay terminal.
+   * The title summarizes (first distinct reason plus a count); Details enumerates,
+   * one section per failed card in card order under its title, so WHICH card
+   * failed survives. `cards` are the ones the caller sent, read before its await.
    */
-  function reportBulk(verb: BulkVerb, result: BulkItemOutcomes, sent: number) {
-    const errors = result.outcomes.flatMap((outcome) =>
-      outcome.error === null ? [] : [outcome.error],
+  function reportBulk(
+    verb: BulkVerb,
+    result: BulkItemOutcomes,
+    sent: number,
+    cards: BoardItem[],
+  ) {
+    const byId = new Map(cards.map((card) => [card.itemId, card]));
+    const failures = result.outcomes.flatMap((outcome) =>
+      outcome.error === null
+        ? []
+        : [{ error: outcome.error, card: byId.get(outcome.itemId) }],
     );
+    const errors = failures.map((failure) => failure.error);
     const failed = errors.length;
     if (failed === 0) {
       announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent, noun)}`);
@@ -4247,11 +4254,17 @@ export function ProjectsBoardPanel({
       ...new Set(errors.map((error) => presentError(error).summary)),
     ];
     const more = reasons.length - 1;
-    toast.error(
-      `${failed} of ${cardCount(sent, noun)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
+    toastComposedError({
+      title: `${failed} of ${cardCount(sent, noun)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
         more > 0 ? ` (+${more} more ${more === 1 ? "reason" : "reasons"})` : ""
       }`,
-    );
+      errors,
+      // Outcomes arrive in request order, which is card order. An unmatched id
+      // (never expected) leaves its section unheaded rather than misnamed.
+      headings: failures.map((failure) =>
+        failure.card === undefined ? "" : itemTitle(failure.card),
+      ),
+    });
   }
 
   /** Hand focus out of the selection bar before the bar leaves the tree. The card
@@ -4315,7 +4328,7 @@ export function ProjectsBoardPanel({
         archived: showArchived,
         rich: tableView !== null,
       });
-      reportBulk("move", result, itemIds.length);
+      reportBulk("move", result, itemIds.length, cards);
     } catch {
       // The mutation reported it and rolled every card back to its old column.
     }
@@ -4419,7 +4432,7 @@ export function ProjectsBoardPanel({
         projectId,
         items,
       });
-      reportBulk(action, result, items.length);
+      reportBulk(action, result, items.length, cards);
     } catch {
       // The mutation reported it and its rollback put every card back.
     }
@@ -4441,7 +4454,7 @@ export function ProjectsBoardPanel({
         projectId,
         itemIds,
       });
-      reportBulk("restore", result, itemIds.length);
+      reportBulk("restore", result, itemIds.length, cards);
     } catch {
       // The mutation reported it, and its rollback put the cards back under the
       // Archived badges they came in with.
@@ -4501,7 +4514,7 @@ export function ProjectsBoardPanel({
       });
       // Reported whatever run this was: the message describes a write the user
       // really fired, and is true wherever they have since got to.
-      reportBulk("fields", result, itemIds.length);
+      reportBulk("fields", result, itemIds.length, cards);
       // Only the run still on screen may close anything. A stale token means the
       // user cancelled over this write and opened the editor again (or switched
       // board), and the close below is a PANEL setter every run shares — so a

@@ -9,11 +9,17 @@ import type {
   ReconnectEvent,
   SessionHealth,
 } from "../types";
+import type { BackgroundRepoStatus } from "../types/background-status";
 
 /** Provider-neutral hosted-integration status (GitHub, GitLab, Bitbucket) — the gate
  *  hosted panels read for any provider. */
 export const forgeStatus = (repoPath: string) =>
   invoke<ForgeStatus>("forge_status", { repoPath });
+
+/** Background PR-sync readiness for many repos in one call, in input order —
+ *  GitHub auth is probed once per host, not once per repo. */
+export const forgeBackgroundStatuses = (paths: string[]) =>
+  invoke<BackgroundRepoStatus[]>("forge_background_statuses", { paths });
 
 // ── Bitbucket account (Atlassian API token) ──────────────────────────────────
 //

@@ -338,7 +338,9 @@ export function CreateIssueDialog({
             (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
           ),
           description: originNote,
-          view: { url },
+          // Named only once the forge status has answered; a bare "View" beats
+          // the GitHub default `remoteLabel` falls back to.
+          view: { url, label: forge.data && `View on ${remoteLabel}` },
           duration: 10000,
         });
         // The issue EXISTS whatever the links did, so it still opens — the same

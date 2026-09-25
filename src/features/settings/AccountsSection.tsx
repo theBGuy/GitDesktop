@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { useRelativeNow } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +32,11 @@ import {
   useSetGitlabReviewToken,
   useSwitchAccount,
 } from "@/lib/git/queries";
-import type { GhAccount, SessionHealth } from "@/lib/git/types";
+import {
+  type GhAccount,
+  rateLimitResetTime,
+  type SessionHealth,
+} from "@/lib/git/types";
 import { setBitbucketTokenExpiresAt } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -87,6 +92,20 @@ function formatDate(date: string): string {
   });
 }
 
+/** A rate-limited row's tooltip: the forge's own message, then when access
+ *  resumes. No Reconnect rides this state — the credential is fine. */
+function rateLimitTitle(
+  health: SessionHealth,
+  now: number,
+): string | undefined {
+  const resumesAt = rateLimitResetTime(health.resetAt, now);
+  const lines = [
+    health.detail,
+    resumesAt ? `Access resumes at ${resumesAt}` : null,
+  ].filter((line): line is string => Boolean(line));
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
 /** Whether this gh supports multiple accounts (`gh auth switch`, 2.40+). */
 function supportsSwitching(version: string): boolean {
   const [major = 0, minor = 0] = version.split(".").map(Number);
@@ -119,14 +138,15 @@ function GitHubAccounts() {
   const switchAccount = useSwitchAccount();
   const health = useAccountsHealth();
   const openReconnect = useUiStore((s) => s.openReconnect);
+  const now = useRelativeNow();
 
   const version = accounts.data?.version ?? "";
   const canSwitch = supportsSwitching(version);
   const list = accounts.data?.accounts ?? [];
 
-  // Merge the health probe onto each account by host+login. Only a `broken`
-  // state surfaces (silence is health — no "ok" chip); "offline" and everything
-  // else read as fine, so a network blip never badges a good account.
+  // Merge the health probe onto each account by host+login. Only `broken` and
+  // `rateLimited` surface (silence is health — no "ok" chip); "offline" and
+  // everything else read as fine, so a network blip never badges a good account.
   const healthByKey = useMemo(() => {
     const map = new Map<string, SessionHealth>();
     for (const h of health.data ?? []) {
@@ -190,12 +210,11 @@ function GitHubAccounts() {
                   )}
                   <div className="space-y-px border">
                     {hostAccounts.map((account) => {
-                      const broken =
-                        healthByKey.get(`${account.host}/${account.login}`)
-                          ?.state === "broken";
-                      const brokenDetail = healthByKey.get(
+                      const rowHealth = healthByKey.get(
                         `${account.host}/${account.login}`,
-                      )?.detail;
+                      );
+                      const broken = rowHealth?.state === "broken";
+                      const brokenDetail = rowHealth?.detail;
                       return (
                         <div
                           key={`${account.host}/${account.login}`}
@@ -218,6 +237,15 @@ function GitHubAccounts() {
                               }
                             >
                               session expired
+                            </Badge>
+                          )}
+                          {rowHealth?.state === "rateLimited" && (
+                            <Badge
+                              variant="outline"
+                              className="text-warning"
+                              title={rateLimitTitle(rowHealth, now)}
+                            >
+                              rate limited
                             </Badge>
                           )}
                           <span className="flex-1" />
@@ -334,13 +362,15 @@ function GitHubAccounts() {
 /**
  * The GitLab day-to-day sign-in block (distinct from the review-bot token below):
  * the `glab` accounts known to the CLI, with a "session expired" badge + Reconnect
- * on a broken one, and a warning before a knowable PAT expiry. OAuth sessions
+ * on a broken one, a "rate limited" badge (no Reconnect) on a rate-limited one,
+ * and a warning before a knowable PAT expiry. OAuth sessions
  * renew themselves, so they carry no expiry chip. Sourced from the accounts-health
  * probe. cliMissing → an install affordance; no signed-in host → a sign-in button.
  */
 function GitLabSignInBlock() {
   const health = useAccountsHealth();
   const openReconnect = useUiStore((s) => s.openReconnect);
+  const now = useRelativeNow();
 
   const gitlab = (health.data ?? []).filter((h) => h.provider === "gitlab");
   const cliMissing = gitlab.some((h) => h.state === "cliMissing");
@@ -417,6 +447,15 @@ function GitLabSignInBlock() {
                     title={h.detail ?? undefined}
                   >
                     session expired
+                  </Badge>
+                )}
+                {h.state === "rateLimited" && (
+                  <Badge
+                    variant="outline"
+                    className="ml-auto shrink-0 text-warning"
+                    title={rateLimitTitle(h, now)}
+                  >
+                    rate limited
                   </Badge>
                 )}
                 {warnExpiry && (

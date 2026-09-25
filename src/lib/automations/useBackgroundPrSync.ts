@@ -2,8 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { loadAutomations, repoAutomationsFor } from "@/lib/automations/store";
 import { maybeCatchUpMissedOpen, maybeFireSync } from "@/lib/automations/sync";
 import { effectiveActions } from "@/lib/automations/types";
-import { forgePrPoll, forgeStatus } from "@/lib/git/api";
-import { forgeFeatureReady } from "@/lib/git/queries";
+import { forgeBackgroundStatuses, forgePrPoll } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { loadSettings } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
@@ -23,9 +22,10 @@ import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
  * module-level dedup map deliberately survives unmounts. Only the TRIGGER was
  * active-repo-gated, so this hook covers the gap.
  *
- * Cost bound: one forge poll per rule-bearing recent repo per minute — the loop
- * only polls repos that carry an explicit pr-sync rule (an opt-in), so a user
- * with no automations makes no background calls here. React Query runs the first
+ * Cost bound: one forge poll per rule-bearing recent repo per minute, plus one
+ * batched readiness call that probes GitHub auth once per host — the loop only
+ * polls repos that carry an explicit pr-sync rule (an opt-in), so a user with no
+ * automations makes no background calls here. React Query runs the first
  * tick immediately on mount (app startup), so the initial settings/automations
  * read happens once at launch; it stays cheap because every forge call is gated
  * behind an explicit rule and an empty-recents early-exit.
@@ -67,7 +67,11 @@ export function useBackgroundPrSync(): void {
       const activeRepo = useUiStore.getState().repoPath;
       const activeIdentity = activeRepo ? await repoIdentity(activeRepo) : null;
 
-      let polled = 0;
+      const targets: {
+        path: string;
+        hasPrSync: boolean;
+        hasPrOpen: boolean;
+      }[] = [];
       for (const repo of settings.recentRepos) {
         const path = repo.path;
         // The active repo is covered by usePrNotifications (with notifications).
@@ -89,12 +93,27 @@ export function useBackgroundPrSync(): void {
           // already warmed this path's memoized identity, so it's a cache hit.
           if (activeIdentity && (await repoIdentity(path)) === activeIdentity)
             continue;
+          targets.push({ path, hasPrSync, hasPrOpen });
+        } catch {
+          // One bad repo (deleted/moved path) must not sink the batch.
+        }
+      }
+      if (targets.length === 0) return { polled: 0 };
 
-          // Forge-ready gate: skip repos whose hosted integration isn't wired up
-          // for PRs (unauth'd, non-hosted, or a provider we haven't built yet).
-          const status = await forgeStatus(path);
-          if (!forgeFeatureReady(status, "pullRequests")) continue;
+      // Forge-ready gate, one call for the whole batch: skips repos whose hosted
+      // integration isn't wired up for PRs (unauth'd on their host, non-hosted,
+      // or a provider we haven't built yet).
+      const statuses = await forgeBackgroundStatuses(
+        targets.map((t) => t.path),
+      ).catch(() => null);
+      if (!statuses) return { polled: 0 };
+      const readiness = new Map(statuses.map((s) => [s.path, s]));
 
+      let polled = 0;
+      for (const { path, hasPrSync, hasPrOpen } of targets) {
+        const status = readiness.get(path);
+        if (!status?.ready) continue;
+        try {
           const prs = await forgePrPoll(path);
           polled++;
           if (hasPrSync) {
@@ -115,7 +134,7 @@ export function useBackgroundPrSync(): void {
             }
           }
           // pr-open catch-up for PRs opened outside the app — the viewer login
-          // comes from the forge status already fetched above.
+          // comes from the batch readiness status above.
           if (hasPrOpen) {
             const candidates = prs
               .filter((pr) => pr.state === "OPEN" && pr.headSha)
@@ -132,7 +151,7 @@ export function useBackgroundPrSync(): void {
             maybeCatchUpMissedOpen(
               path,
               candidates,
-              status.login ?? null,
+              status.login,
               settings.reviewDraftPrs,
             );
           }

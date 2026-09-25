@@ -938,11 +938,14 @@ the palette; no dropping to a terminal for github.com and gitlab.com (a
 self-managed GitLab host needs `glab auth login --hostname …` once, in a
 terminal).
 GitDesktop tells an **expired-or-revoked session** apart from
-never-signed-in and network blips, badges the affected account with
-one-click **Reconnect**, and **warns before a token lapses**: GitLab and
-GitHub PAT expiry, plus an optional Bitbucket **expiry date** you supply.
-For GitLab it nudges the **browser (OAuth)** option, whose sessions renew
-themselves instead of expiring.
+never-signed-in, network blips, and a **GitHub API rate limit** (GitLab's
+too, when its CLI names the limit). An expired session gets a badge with
+one-click **Reconnect**; a rate limit gets its own badge, with the time
+access resumes when GitHub reports it and nothing to reconnect. It also
+**warns before a token lapses**: GitLab and GitHub PAT expiry, plus an
+optional Bitbucket **expiry date** you supply. For GitLab it nudges the
+**browser (OAuth)** option, whose sessions renew themselves instead of
+expiring.
 
 ### Coding agent sessions
 

@@ -13,6 +13,9 @@ export interface ErrorPresentation {
   fullText: string;
   /** Whether the error is long enough to route the toast through Details. */
   long: boolean;
+  /** The composed toast's View target, carried so Details can still offer it:
+   *  the toast is dismissed the moment Details opens. Never set by `presentError`. */
+  link?: { url: string; label: string };
 }
 
 /** Human labels for every AppError kind (mirrors the union in tauri/invoke.ts). */
@@ -599,14 +602,30 @@ export function presentError(e: unknown): ErrorPresentation {
  * the composed `title` headlines the dialog so its context outlives the toast.
  * One error keeps its own label and full text; several become one section per
  * failure, each under its `headings[i]` when given, separated by a blank line.
+ * A lone error WITH a heading becomes that one section and always routes through
+ * Details, since the heading (which card, which step) exists only there.
+ * `link` rides through untouched, for the dialog's own View button.
  */
 export function composedErrorPresentation(
   title: string,
   errors: readonly unknown[],
   headings?: readonly string[],
+  link?: { url: string; label: string },
 ): ErrorPresentation {
-  if (errors.length === 1)
-    return { ...presentError(errors[0]), summary: title };
+  const linked = link === undefined ? {} : { link };
+  if (errors.length === 1) {
+    const own = presentError(errors[0]);
+    const heading = headings?.[0];
+    return heading
+      ? {
+          ...own,
+          summary: title,
+          fullText: `${heading}\n${own.fullText}`,
+          long: true,
+          ...linked,
+        }
+      : { ...own, summary: title, ...linked };
+  }
   return {
     label: null,
     summary: title,
@@ -618,5 +637,6 @@ export function composedErrorPresentation(
       })
       .join("\n\n"),
     long: true,
+    ...linked,
   };
 }

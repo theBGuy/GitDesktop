@@ -198,7 +198,9 @@ export function PromoteLocalIssueDialog({
       toastComposedError({
         title: `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        view: { url },
+        // `canPublishForge` gated this run on a resolved forge status, so the
+        // label names the real provider.
+        view: { url, label: `View on ${remoteLabel}` },
         duration: 10000,
       });
     }
@@ -256,7 +258,7 @@ export function PromoteLocalIssueDialog({
       toastComposedError({
         title: `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        view: { url },
+        view: { url, label: "View in Jira" },
         duration: 10000,
       });
     }

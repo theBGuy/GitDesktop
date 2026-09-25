@@ -1,3 +1,4 @@
+import { validEpochMs } from "@/lib/time";
 import type { ForgeProvider } from "./forge";
 
 export interface GhAccount {
@@ -16,13 +17,16 @@ export interface GhAccounts {
 
 /** The health of a forge sign-in session (gh/glab account, or a Bitbucket token).
  *  `"offline"` means the probe was inconclusive (a network blip) — treated as
- *  "unchanged": it must never flip any UI, so nothing regresses on a bad network. */
+ *  "unchanged": it must never flip any UI, so nothing regresses on a bad network.
+ *  `"rateLimited"` means the forge's API rate limit is in effect: the credential
+ *  is fine, so no surface offers a reconnect for it. */
 export type SessionState =
   | "healthy"
   | "broken"
   | "notConnected"
   | "cliMissing"
-  | "offline";
+  | "offline"
+  | "rateLimited";
 
 /** One forge session's health, provider-neutral. Populated by `forge_session_health`
  *  (this repo's session) and `forge_accounts_health` (every known account). */
@@ -41,6 +45,25 @@ export interface SessionHealth {
   expiresAt: string | null;
   /** Whole days until `expiresAt` (may be negative/0); null when not knowable. */
   daysLeft: number | null;
+  /** `rateLimited` only: when the limit resets, in epoch SECONDS (GitHub's
+   *  `x-ratelimit-reset` header). The backend sends null when unknown. */
+  resetAt?: number | null;
+}
+
+/** The local clock time a rate limit lifts ("2:45 PM"), or null when the reset
+ *  time is unknown, not a usable epoch, or already past `now` (epoch ms — pass
+ *  the shared ticker's `useRelativeNow()`, never a render-time clock read). */
+export function rateLimitResetTime(
+  resetAt: number | null | undefined,
+  now: number,
+): string | null {
+  if (typeof resetAt !== "number") return null;
+  const ms = resetAt * 1000;
+  if (!validEpochMs(ms) || ms <= now) return null;
+  return new Date(ms).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 /** A streaming event from a `forge_reconnect` flow, delivered over a Channel.
