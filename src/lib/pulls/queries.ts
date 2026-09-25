@@ -32,6 +32,9 @@ export function useLocalPrs(repo: string) {
   return useQuery({
     queryKey: localPrKey(repo),
     queryFn: () => listLocalPrs(repo),
+    // Local app-data reads must not park on the default "online" mode; applies
+    // to every networkMode in this file (the forge-backed queries carry none).
+    networkMode: "always",
   });
 }
 
@@ -89,6 +92,7 @@ export function useReviewHistory(
   return useQuery({
     queryKey: reviewHistoryKey(repo, lens, kind, ref),
     queryFn: () => listReviews(repo, lens, kind, ref),
+    networkMode: "always",
   });
 }
 
@@ -105,6 +109,7 @@ export function useReviewPartials(
   return useQuery({
     queryKey: reviewPartialsKey(repo, lens, kind, ref),
     queryFn: () => listPartialReviews(repo, lens, kind, ref),
+    networkMode: "always",
   });
 }
 

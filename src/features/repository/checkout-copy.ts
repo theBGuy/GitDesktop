@@ -1,6 +1,6 @@
 // Checkout copy shared across features: branch-row naming for every branch
-// picker, and the refusal every HEAD-moving surface shows. Import-free and apart
-// from any component, so pulls/tags/history/compare can read it without a cycle.
+// picker, and the refusal the app's HEAD-moving surfaces show. Import-free and
+// component-free, so pulls/tags/history/compare read it without a cycle.
 
 /** Last path segment (folder name). Git reports worktree paths forward-slashed
  *  on every platform (`UserWorktree.path`), and a backslash is a legal
@@ -45,8 +45,8 @@ export const ROW_CHECKOUT_COPY = {
 export const rowCheckoutCopy = (isMain: boolean | undefined) =>
   ROW_CHECKOUT_COPY[isMain ? "main" : "linked"];
 
-/** Every HEAD-moving surface's fire-time refusal while `promotionBlocksCheckout`
- *  holds: the promote ends on its own checkout in the main workspace, and a
- *  concurrent one would race it for that HEAD. */
+/** The in-app HEAD-moving surfaces' refusal while `promotionBlocksCheckout`
+ *  holds: in the main workspace a checkout would race the promote's own final
+ *  one, and in the promote's source worktree the folder is being removed. */
 export const PROMOTION_BLOCKS_CHECKOUT =
   "A worktree is being promoted to your main workspace. Try again once it finishes.";

@@ -15,6 +15,8 @@ export function useLocalIssues(repo: string) {
   return useQuery({
     queryKey: localIssueKey(repo),
     queryFn: () => listLocalIssues(repo),
+    // A local app-data read, so it must not park on the default "online" mode.
+    networkMode: "always",
   });
 }
 

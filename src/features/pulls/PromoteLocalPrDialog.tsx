@@ -76,8 +76,8 @@ export function PromoteLocalPrDialog({
   // case: promote claims the lane synchronously, so a phase is
   // also present during this dialog's own run, where `pending` is what to show —
   // up to a cross-repo navigation that re-renders this view in place, which
-  // detaches the pinned create mutation: `pending` goes idle there while the
-  // promote runs on, and the phase read here is the new repo's.
+  // detaches both pinned mutations (the create and the local close): `pending`
+  // goes idle while the promote runs on, and the phase read is the new repo's.
   const lanePhase = usePrCreatePhase(repoPath, pr.head);
   const creatingElsewhere = lanePhase !== null && !pending;
   const laneHint = creatingElsewhere
