@@ -509,7 +509,9 @@ export const BoardCard = memo(function BoardCard({
    *  identity-stable by the panel: this component is memoized, and a fresh array
    *  every render would re-render every mounted card. */
   chipFields: ProjectFieldDef[];
-  onFocus: (columnIndex: number, index: number) => void;
+  /** The card took focus: where it sits, and WHICH card it is — the cursor's
+   *  identity, which the slot alone can't carry through a reorder. */
+  onFocus: (columnIndex: number, index: number, itemId: string) => void;
   /** Which card's peek is open, by item id — null closes. Board-wide state so only
    *  one is ever open, the shape `busy` already keeps. */
   onPeekChange: (itemId: string | null) => void;
@@ -541,7 +543,7 @@ export const BoardCard = memo(function BoardCard({
     // valid but says something on every card on the board, where the attribute is
     // only meaningful on the one being written.
     "aria-busy": busy || undefined,
-    onFocus: () => onFocus(columnIndex, index),
+    onFocus: () => onFocus(columnIndex, index, item.itemId),
   } as const;
   const toneClass = selected && "bg-accent text-accent-foreground";
   // Lighter than the app's 50% disabled dim on purpose: this card is BUSY, not

@@ -10,6 +10,6 @@
   that won't save says why, with **Details** or **Copy** for GitHub's full answer. The
   arrow keys move cell by cell and **Page Up / Page Down** a screen at a time, rows take
   the same selection, menu and bulk bar as cards on the board, and in a table that
-  neither sorts nor groups its rows, with archived cards hidden, **Alt/Option+↑ / ↓**
-  move the row you're on through the project order. The **Project fields** line on an
-  issue or pull request reads those same fields too.
+  neither sorts nor groups its rows, **Alt/Option+↑ / ↓** move the row you're on
+  through the project order. The **Project fields** line on an issue or pull request
+  reads those same fields too.

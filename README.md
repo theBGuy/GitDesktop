@@ -604,10 +604,11 @@ column, `Alt`/`⌥`+`Home` and `Alt`/`⌥`+`End` send it to that column's top or
 bottom, and the card's menu and the command palette carry the same four
 moves. That order is the project's own, so it's the order GitHub shows
 everyone; hold the keys down and the board keeps up, writing where the card
-finally lands. A saved view that sorts says so instead, since its columns
-are drawn in the sort's order rather than the board's, and so does a board
-showing its archived cards — GitHub won't position a card against one of
-those, so the rows say which switch brings the order back.
+finally lands. With archived cards shown, the same moves work, each landing
+beside a card that isn't archived: down goes just below the next one, and up
+goes above the previous one, usually above the archived cards directly over
+it too. A saved view that sorts says so instead, since its columns are drawn
+in the sort's order rather than the board's.
 Creating an issue puts it straight on a board too: the **New issue** dialog
 carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort
@@ -621,19 +622,18 @@ header row and a **Title** column that stay in place while you scroll, rows
 in the view's sort with each sorted column marked in its header, and the
 view's row grouping drawn as sections you can fold away. Arrow keys move
 cell by cell, rows take the same click and keyboard selection as cards, the
-row menu and the selection bar work as they do on the board, a
-board field's value can be edited right in its cell, and an unsorted,
-ungrouped table with archived cards hidden reorders rows with the same
-`Alt`/`⌥` keys. A view saved as a **roadmap** opens as a timeline: each
-item's bar runs from its start date to its target along a month, quarter
-or year axis, with a line for today, the current iteration shaded and named,
-and milestone due dates marked. **View options** picks the date or iteration
-fields that place the items (the view's own date fields come pre-picked),
-`Alt`/`⌥`+`←` and `→` shift the item you're on by a day (or an iteration),
-and adding `Shift` moves its target date alone. **Clear view** brings the
-whole item set back in the board's own order with the chips off, leaving the
-grouping where you last put it. Picking a view and regrouping the board
-never change what GitHub has saved.
+row menu and the selection bar work as they do on the board, a board field's
+value can be edited right in its cell, and an unsorted, ungrouped table
+reorders rows with the same `Alt`/`⌥` keys. A view saved as a **roadmap**
+opens as a timeline: each item's bar runs from its start date to its target
+along a month, quarter or year axis, with a line for today, the current
+iteration shaded and named, and milestone due dates marked. **View options**
+picks the date or iteration fields that place the items (the view's own date
+fields come pre-picked), `Alt`/`⌥`+`←` and `→` shift the item you're on by a
+day (or an iteration), and adding `Shift` moves its target date alone.
+**Clear view** brings the whole item set back in the board's own order with
+the chips off, leaving the grouping where you last put it. Picking a view
+and regrouping the board never change what GitHub has saved.
 **Create projects and manage saved views** from the board too. The menu
 beside the project picker starts a **new project** (linked to this
 repository whenever it can be read; the dialog says which), edits a

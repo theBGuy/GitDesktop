@@ -1,7 +1,8 @@
 // Pins the cache-shape helpers behind a Projects-board reposition: reading where a
-// card sits, splicing it, and re-asserting GitHub's answered order. The bugs these
-// guard against are silent — a wrong predecessor writes an afterId GitHub rejects,
-// a lingering duplicate leaves the board drawing a stale slot — so each is a case.
+// card sits, splicing it, re-asserting GitHub's answered order, and judging a
+// write that reported failure. The bugs these guard against are silent — a wrong
+// predecessor writes an afterId GitHub rejects, a lingering duplicate leaves the
+// board drawing a stale slot — so each is a case.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6): stripping ERASES types rather than compiling them and
@@ -17,10 +18,15 @@ import {
   applyBoardOrder,
   boardItemPredecessor,
   captureRemovedCard,
+  failedRepositionTarget,
   insertBoardCardAfter,
+  REPOSITION_SETTLE_SLACK_MS,
   rechunkPages,
   reorderBoardItem,
+  repositionVerdict,
   resolveUndoAnchor,
+  stepRepositionWatch,
+  watchReposition,
 } from "../src/lib/git/queries/board-order.ts";
 
 /** A removal's undo entry for `id`, as the rollback builds it. `counted` is
@@ -540,5 +546,195 @@ test("resolveUndoAnchor stops at a sibling this rollback already restored", () =
       chainOf([capB, "b"], [capC, "c"]),
     ),
     "b",
+  );
+});
+
+// ------------------------------------------------------- repositionVerdict
+
+// GitHub's position endpoint can answer an error WHILE COMMITTING the write, so a
+// reposition that reported failure is judged by a read of the board. Only a read
+// STARTED past the replica window decides, either way.
+
+test("repositionVerdict: a settled read with the card at the target means it committed", () => {
+  const data = pagesOf([mk("a"), mk("c"), mk("b")]);
+  assert.equal(repositionVerdict(data, "c", "a", true), "committed");
+});
+
+test("repositionVerdict: a hit inside the replica window proves nothing yet", () => {
+  // c moved away from a, then a move back to after a failed. A lagged read still
+  // serving the order from before the first move shows c after a: a hit the
+  // failed write never made.
+  const data = pagesOf([mk("a"), mk("c"), mk("b")]);
+  assert.equal(repositionVerdict(data, "c", "a", false), "pending");
+});
+
+test("repositionVerdict: a null target is the top of the board, a real answer", () => {
+  const data = pagesOf([mk("c"), mk("a"), mk("b")]);
+  assert.equal(repositionVerdict(data, "c", null, true), "committed");
+  assert.equal(repositionVerdict(data, "c", null, false), "pending");
+  // Not at the top: a miss, never confused with "no anchor".
+  const moved = pagesOf([mk("a"), mk("c"), mk("b")]);
+  assert.equal(repositionVerdict(moved, "c", null, true), "failed");
+});
+
+test("repositionVerdict: the target is read past archived cards, as the write anchors", () => {
+  // The write anchored on a (it can't name the archived z); a card sitting right
+  // after z is at that target.
+  const data = pagesOf([mk("a"), mk("z", true), mk("c"), mk("b")]);
+  assert.equal(repositionVerdict(data, "c", "a", true), "committed");
+});
+
+test("repositionVerdict: a miss inside the replica window proves nothing yet", () => {
+  // Card still at its pre-write place: the read may predate the commit.
+  const data = pagesOf([mk("a"), mk("b"), mk("c")]);
+  assert.equal(repositionVerdict(data, "c", "a", false), "pending");
+});
+
+test("repositionVerdict: a miss past the replica window is a real failure", () => {
+  const data = pagesOf([mk("a"), mk("b"), mk("c")]);
+  assert.equal(repositionVerdict(data, "c", "a", true), "failed");
+});
+
+test("repositionVerdict: a lens that doesn't draw the card can't vouch for the write", () => {
+  // Undefined anchor — the card is filtered out, or past the loaded pages.
+  const data = pagesOf([mk("a"), mk("b")]);
+  assert.equal(repositionVerdict(data, "c", "a", false), "pending");
+  assert.equal(repositionVerdict(data, "c", "a", true), "failed");
+  assert.equal(repositionVerdict(undefined, "c", null, true), "failed");
+});
+
+test("boardItemPredecessor (positionable) walks a whole RUN of archived cards", () => {
+  const data = pagesOf(
+    [mk("a"), mk("z", true), mk("y", true)],
+    [mk("x", true), mk("b")],
+  );
+  assert.equal(boardItemPredecessor(data, "b", true), "a");
+  // A run reaching the head of the board is no anchor at all.
+  const head = pagesOf([mk("z", true), mk("y", true), mk("x", true), mk("b")]);
+  assert.equal(boardItemPredecessor(head, "b", true), null);
+});
+
+// Probe 3 (measured 2026-09-26 with archived-inclusive reads): GitHub places a
+// moved card right after its afterId, at the front for null, and every archived
+// item keeps its slot relative to everything else. The optimistic splice has to
+// be exactly that, or the board draws an order the server never settles on.
+test("reorderBoardItem matches the server's measured placement around an archived card", () => {
+  const board = () => pagesOf([mk("A"), mk("Z", true), mk("B"), mk("C")]);
+  assert.deepEqual(ids(reorderBoardItem(board(), "C", "A")), [
+    "A",
+    "C",
+    "Z",
+    "B",
+  ]);
+  assert.deepEqual(ids(reorderBoardItem(board(), "C", null)), [
+    "C",
+    "A",
+    "Z",
+    "B",
+  ]);
+});
+
+// ------------------------------------------------- failedRepositionTarget
+
+test("failedRepositionTarget prefers the newest folded target, null included", () => {
+  assert.equal(failedRepositionTarget(undefined, "a"), "a");
+  assert.equal(failedRepositionTarget("b", "a"), "b");
+  // A folded press to the TOP is a real target, never "nothing folded".
+  assert.equal(failedRepositionTarget(null, "a"), null);
+  assert.equal(failedRepositionTarget(undefined, null), null);
+});
+
+// ---------------------------------------------------- stepRepositionWatch
+
+const LAG = 8_000;
+/** A watch begun at t=0 for card c, whose failed write targeted after a. */
+const watch0 = () => watchReposition("c", "a", 0, LAG);
+const atTarget = pagesOf([mk("a"), mk("c"), mk("b")]);
+const offTarget = pagesOf([mk("a"), mk("b"), mk("c")]);
+const read = (data, extra = {}) => ({
+  type: "success",
+  manual: false,
+  fetchMore: false,
+  data,
+  ...extra,
+});
+/** Feeds `events` in order; the last step, or the first that ends the watch. */
+const run = (...events) => {
+  let watch = watch0();
+  let step = { kind: "wait", watch };
+  for (const event of events) {
+    step = stepRepositionWatch(watch, event);
+    if (step.kind !== "wait") return step.kind;
+    watch = step.watch;
+  }
+  return step.kind;
+};
+const SETTLED = LAG; // a fetch started here is past the window
+
+test("stepRepositionWatch: the gate sits a clock-slack short of the replica window", () => {
+  assert.equal(watch0().settledAt, LAG - REPOSITION_SETTLE_SLACK_MS);
+  assert.ok(
+    REPOSITION_SETTLE_SLACK_MS > 0 && REPOSITION_SETTLE_SLACK_MS < 1_000,
+  );
+  // A read the recovery timer starts a coarsened tick early still counts.
+  assert.equal(run({ type: "fetch", at: LAG - 1 }, read(atTarget)), "silent");
+});
+
+test("stepRepositionWatch: a read started past the window decides both ways", () => {
+  assert.equal(run({ type: "fetch", at: SETTLED }, read(atTarget)), "silent");
+  assert.equal(run({ type: "fetch", at: SETTLED }, read(offTarget)), "report");
+});
+
+test("stepRepositionWatch: settledness is the FETCH START, not when the read lands", () => {
+  // Started inside the window: whatever it shows and however late it lands (the
+  // stamp is all the step sees), it decides nothing.
+  assert.equal(run({ type: "fetch", at: 1_000 }, read(offTarget)), "wait");
+  assert.equal(run({ type: "fetch", at: 1_000 }, read(atTarget)), "wait");
+  // A read already running when the watch began never stamped a start.
+  assert.equal(run(read(offTarget)), "wait");
+});
+
+test("stepRepositionWatch: a landed read's stamp is spent, so the next needs its own", () => {
+  // The first read started early and landed; a second success with no fetch event
+  // of its own must not borrow a later stamp it never had.
+  assert.equal(
+    run({ type: "fetch", at: 1_000 }, read(offTarget), read(offTarget)),
+    "wait",
+  );
+  // ...and a later settled start decides as usual.
+  assert.equal(
+    run(
+      { type: "fetch", at: 1_000 },
+      read(offTarget),
+      { type: "fetch", at: SETTLED },
+      read(offTarget),
+    ),
+    "report",
+  );
+});
+
+test("stepRepositionWatch: optimistic patches and Load more appends are skipped", () => {
+  const settledStart = { type: "fetch", at: SETTLED };
+  assert.equal(run(settledStart, read(offTarget, { manual: true })), "wait");
+  assert.equal(run(settledStart, read(offTarget, { fetchMore: true })), "wait");
+  // Skipping keeps the stamp: the real read after them still decides.
+  assert.equal(
+    run(settledStart, read(atTarget, { manual: true }), read(offTarget)),
+    "report",
+  );
+});
+
+test("stepRepositionWatch: every way no read can decide reports the error", () => {
+  assert.equal(run({ type: "error" }), "report");
+  assert.equal(run({ type: "bound" }), "report");
+  assert.equal(run({ type: "inactive" }), "report");
+  assert.equal(run({ type: "contested" }), "report");
+});
+
+test("stepRepositionWatch: the same card moved again releases the report silently", () => {
+  assert.equal(run({ type: "superseded" }), "silent");
+  assert.equal(
+    run({ type: "fetch", at: 1_000 }, { type: "superseded" }),
+    "silent",
   );
 });
