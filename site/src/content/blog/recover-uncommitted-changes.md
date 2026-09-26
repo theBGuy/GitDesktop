@@ -63,10 +63,12 @@ def load_env(text):
 Take stock. `env.py` is back to the committed version. `defaults.env`
 is not just unstaged, it's gone from disk: staging a new file makes it
 a tracked file, and `--hard` rewrites tracked files to match the
-commit, which doesn't have it. And `try.py` survived untouched,
-because untracked files are outside a reset's jurisdiction entirely.
-The command with the fiercest reputation in Git deleted your staged
-defaults file and politely stepped around your scratch script.
+commit, which doesn't have it. And `try.py` survived, because a
+reset rewrites only the paths the target commit or the index tracks,
+and `try.py` is on neither list. (An untracked file that is at such
+a path gets overwritten without a word.) The command with the
+fiercest reputation in Git deleted your staged defaults file and
+politely stepped around your scratch script.
 
 [Last time](/blog/undo-a-hard-reset/) this series hit a hard reset,
 the reflog was the whole answer. Try it:
@@ -81,8 +83,8 @@ The reset was recorded. Both lines name the same commit, because the
 reflog tracks where HEAD points, and a reset to HEAD moves it from
 8db09dc to 8db09dc. There is no earlier position to return to. Your
 morning's work was never a commit, so no ref ever pointed at it, and
-the reflog records nothing but refs. This is the incident that lives
-outside its jurisdiction too.
+the reflog records nothing but refs. This is the incident none of
+that machinery can see.
 
 ## What `git add` writes down
 
@@ -106,11 +108,12 @@ dangling blob fb3598d186d0c49d0d9b0612c5aa850a49362b04
 
 A dangling object is one the database still holds though nothing
 claims it anymore. Nothing claims these three: no commit contains
-them, no ref resolves to them, and since the reset the index no longer
-lists them. One blob for each piece of content this repository ever
-staged and never committed — the fix, the rework midpoint, and the
-defaults file, sitting in the object store, orphaned by the reset that
-was supposed to have destroyed them.
+them, no ref resolves to them, and the index no longer lists them.
+One blob for each piece of content this repository ever staged and
+never committed: the fix, the rework midpoint, and the defaults
+file, all still on disk. The second `git add` orphaned the fix
+before the reset ever ran; the reset orphaned the other two; nothing
+deleted a byte.
 
 ## Content with no name
 
@@ -166,8 +169,8 @@ redirect replaces the working copy, and if you've re-typed anything
 into the file since the reset, that copy is those edits' only home —
 move it aside first. And run the redirect from a shell that passes
 bytes through raw: Windows PowerShell re-encodes what `>` writes,
-which corrupts the blob on the way to disk. Git Bash and PowerShell 7
-both leave it alone.
+which corrupts the blob on the way to disk. Git Bash and PowerShell
+7.4 or later both leave it alone.
 
 ```sh
 $ git show 2865c08 > env.py
@@ -208,42 +211,45 @@ dangling blob c3c5a5708ebb2258dc763c326ee5b40de99e2081
 dangling blob fb3598d186d0c49d0d9b0612c5aa850a49362b04
 ```
 
-Two things on that screen. Bare `git clean` refuses to run — of all
-Git's destructive commands, this is the one that ships with the safety
-engaged, and `-n` will name its targets first. And after `-f`, read
-the fsck listing again: `try.py` does not join the dangling list. It
-was never staged, so the object store holds no copy to orphan. A
-cleaned untracked file leaves nothing behind inside `.git` at all.
+Bare `git clean` refuses to run — of all Git's destructive commands,
+this is the one that ships with the safety engaged, and `-n` will
+name its targets first. And after `-f`, read the fsck listing again:
+`try.py` does not join the dangling list. It was never staged, so the
+object store holds no copy to orphan. A cleaned untracked file leaves
+nothing behind inside `.git` at all.
 (The fix's blob has left the list too, for the opposite reason: the
 index claims it again, so it no longer dangles.)
 
 One more edge: dangling blobs wait on a clock. Garbage collection
 eventually sweeps unreachable objects (two weeks old by default), and
-[the dropped-stash post](/blog/recover-a-dropped-git-stash/) walks
-that clock in detail. Run your `fsck` before gc runs.
+[the dropped-stash post](/blog/recover-a-dropped-git-stash/) covers
+when a sweep can start on its own. Run your `fsck` first.
 
 ## Or don't do any of this
 
 A Git client has to pick a policy for the working tree, because it's
 the one place Git's own undo machinery doesn't cover. The policy
-[GitDesktop](/features/) landed on leans on the asymmetry you just
-watched: trust the object store where it holds a copy, and refuse or
-reroute where it doesn't.
+[GitDesktop](/features/) landed on runs on one distinction: refuse
+when tree loss would be a side effect of something else you asked
+for, and when discarding is the thing you asked for, save what can
+be saved and confirm the rest.
 
 Ask the app for a hard reset to a commit and it refuses while any
 tracked change is outstanding, staged or not: *"the working tree has
 uncommitted changes — commit or stash them first"*. A confirm dialog
-wasn't enough there, because past that dialog sits the one loss Git
-cannot walk back: no reflog entry, and no dangling blob for whatever
-never got staged. Untracked files don't block the reset, for the
-reason you watched above: `--hard` was never going to touch them.
+wasn't enough there because the loss would be collateral: you asked
+to move a branch, and what sits past that dialog is the one damage
+Git cannot walk back — no reflog entry, no dangling blob for
+whatever never got staged.
 
 Discarding is allowed, but routed. Discard an untracked file and the
 app moves it to the OS recycle bin rather than deleting it, because of
 what the clean demo showed: Git holds no copy of untracked content, so
-the app borrows a safety net from the operating system. Discarding a
-single tracked file's edits runs `git restore` from the index
-(the same staged copies this post has been fishing out), and
-every discard asks first.
+the app borrows a safety net from the operating system. (The one name
+class the recycle bin refuses, a Windows-reserved filename like `nul`,
+is deleted outright, and the app's confirm says so.) Discarding a
+tracked file's edits runs `git restore` from the index: what you
+staged survives, what you never staged is gone for good, and every
+discard asks first.
 
 Stage like it's a save button. Some days it is.
