@@ -5,9 +5,9 @@
 //! report "token invalid" for a minute and then heal, so a `gh` `timeout` state is
 //! NEVER Broken and a `gh` `error` must be confirmed by a second probe (~1.5s later);
 //! the GitLab arm mirrors that. A rate-limit error is its own state and never
-//! triggers a re-probe: another probe spends quota and can only confirm it. No probe reads a
-//! credential value, and the reconnect driver truncates + redacts every line it
-//! forwards.
+//! triggers a re-probe: another probe spends quota and can only confirm it. No
+//! probe reads a credential value, and the reconnect driver truncates + redacts
+//! every line it forwards.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -333,9 +333,9 @@ async fn github_health(host: &str) -> SessionHealth {
 /// background-sync poller, which gates each tick on it: one spawn per tick covers
 /// every host gh has registered, instead of one probe per remote host. Poller-lite:
 /// no expiry read, no reset fetch, no anti-flap re-probe — a transient misread costs
-/// one skipped tick and heals on the next. An empty map means unknown (old gh without `--json`, gh
-/// missing, an inconclusive probe, or no host signed in); callers fall back rather
-/// than read it as a verdict.
+/// one skipped tick and heals on the next. An empty map means unknown (old gh
+/// without `--json`, gh missing, an inconclusive probe, or no host signed in);
+/// callers fall back rather than read it as a verdict.
 pub(crate) async fn github_hosts_health_for_poller() -> HashMap<String, SessionHealth> {
     match gh_status_json(None).await {
         Ok(GhJsonProbe::Parsed(map)) => gh_hosts_health(&map),

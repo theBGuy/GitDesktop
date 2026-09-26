@@ -381,7 +381,7 @@ export function ForgeNotReady({
 const RESET_GRACE_MS = 5_000;
 /** The longest a rate-limited panel waits after the last health read before
  *  checking again, whatever the reset says (null, past, or far out). */
-const UNKNOWN_RESET_RECHECK_MS = 2 * 60_000;
+const RATE_LIMIT_RECHECK_MS = 2 * 60_000;
 
 /** The rate-limited arm. Deliberately no Reconnect: the credential is fine, and a
  *  fresh sign-in draws on the same exhausted quota. */
@@ -406,14 +406,12 @@ function RateLimitedNotice({
   // Re-read this repo's forge status and session health, plus the accounts list
   // behind Settings' "rate limited" badge, so no surface stays stuck without a
   // restart. The timer fires at whichever comes first: just past a known future
-  // reset, or UNKNOWN_RESET_RECHECK_MS after the last health read — so every
-  // mounted rate-limited panel re-checks within that window, and no reset state
-  // (null, past, far out) is left uncovered. A stale `checkedAt` fires at once;
-  // that stays bounded, since each re-arm needs a fresh successful health read to
-  // move `checkedAt`, never a tight loop.
+  // reset, or RATE_LIMIT_RECHECK_MS after the last health read. A stale
+  // `checkedAt` fires at once, which stays bounded: each re-arm needs a fresh
+  // successful health read to move `checkedAt`, never a tight loop.
   useEffect(() => {
     const nowMs = Date.now();
-    const recheck = Math.max(0, checkedAt + UNKNOWN_RESET_RECHECK_MS - nowMs);
+    const recheck = Math.max(0, checkedAt + RATE_LIMIT_RECHECK_MS - nowMs);
     const resetMs = typeof resetAt === "number" ? resetAt * 1000 : null;
     const delay =
       resetMs !== null && resetMs > nowMs
