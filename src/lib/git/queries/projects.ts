@@ -2,6 +2,7 @@ import {
   hashKey,
   type InfiniteData,
   notifyManager,
+  partialMatchKey,
   type Query,
   type QueryClient,
   type QueryKey,
@@ -1372,11 +1373,11 @@ const reorderingBoards = new Map<string, number>();
 const reorderBoardKey = (args: { repo: string; projectId: string }) =>
   JSON.stringify([args.repo, args.projectId]);
 
-/** How long a FOLLOW-UP write waits before each re-attempt — one entry per
- *  re-attempt, so the list's length is the retry budget. Long enough to clear the
- *  server-side contention a burst creates, short enough that a hard failure still
- *  reaches the user in about a second. Chase rounds count writes, never attempts:
- *  a retried write is the same round trying again. */
+/** How long any position write, the initial one or a follow-up, waits before each
+ *  re-attempt — one entry per re-attempt, so the list's length is the retry
+ *  budget. Room for a transient 500 to clear, short enough that a hard failure
+ *  still reaches the verdict in about a second. Chase rounds count writes, never
+ *  attempts: a retried write is the same round trying again. */
 const REORDER_RETRY_WAITS_MS = [300, 800];
 
 /** How one reposition burst ended. A FOLDED press is reconciled by the write it
@@ -1471,13 +1472,14 @@ function deferRepositionToast(
   pendingRepositionVerdicts.get(verdictKey)?.settle({ type: "superseded" });
   const cache = queryClient.getQueryCache();
   const pressedKey = failure.watchKey ?? ctx.key;
+  const family = projectItemsFamilyKey(ctx.repo, ctx.projectId);
   // Where the user last pressed, else the burst's own lens, else any other lens of
-  // the board — one that still draws the card, as a lens filtering it out would
-  // judge a landed move as failed. A view switch lands the watch on the new lens.
+  // the board — one that can judge the move ({@link pickWatchLens}). A view
+  // switch lands the watch on the new lens.
   const findLens = () => {
-    const board = cache.findAll({
-      queryKey: projectItemsFamilyKey(ctx.repo, ctx.projectId),
-    }) as Query<InfiniteData<BoardItems, string | null>>[];
+    const board = cache.findAll({ queryKey: family }) as Query<
+      InfiniteData<BoardItems, string | null>
+    >[];
     const byKey = (key: QueryKey) =>
       board.filter((lens) => lens.queryHash === hashKey(key));
     return pickWatchLens(
@@ -1487,8 +1489,14 @@ function deferRepositionToast(
         data: lens.state.data,
       })),
       ctx.itemId,
+      failure.afterId,
     )?.lens;
   };
+  // When each lens of the board last started a read, as this watch saw it. A view
+  // switch starts the new lens's read in the same call that leaves the old one
+  // (query-core's observer `setOptions`), a microtask before the watch moves, so
+  // the move carries that start rather than losing it.
+  const fetchStarts = new Map<string, number>();
   let query = findLens();
   const report = (restore: boolean) => {
     if (restore) {
@@ -1553,9 +1561,24 @@ function deferRepositionToast(
       return;
     }
     query = next;
-    apply({ type: "retarget" });
+    // Only a read still running is carried: the start recorded is the one that
+    // set it fetching, and a landed read has already been missed.
+    apply({
+      type: "retarget",
+      fetchStartedAt:
+        next.state.fetchStatus === "fetching"
+          ? fetchStarts.get(next.queryHash)
+          : undefined,
+    });
   };
   const unsubscribe = cache.subscribe((event) => {
+    const at = performance.now();
+    if (
+      event.type === "updated" &&
+      event.action.type === "fetch" &&
+      partialMatchKey(event.query.queryKey, family)
+    )
+      fetchStarts.set(event.query.queryHash, at);
     const watched = query;
     if (watched === undefined || event.query !== watched) return;
     if (event.type === "removed") {
@@ -1576,7 +1599,7 @@ function deferRepositionToast(
     if (event.type !== "updated") return;
     switch (event.action.type) {
       case "fetch":
-        apply({ type: "fetch", at: performance.now() });
+        apply({ type: "fetch", at });
         return;
       case "error":
         apply({ type: "error" });

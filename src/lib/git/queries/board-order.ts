@@ -226,9 +226,10 @@ export interface RepositionWatch {
   failedAfterId: string | null;
   /** The earliest FETCH START a deciding read may have. */
   settledAt: number;
-  /** When the watched lens's latest read STARTED; undefined before one starts on
-   *  it (a read already running when the watch began or moved never stamps), and
-   *  once a read has landed. A read CANCELLED mid-flight keeps its stamp: the
+  /** When the watched lens's read in flight STARTED; undefined before one starts
+   *  (a read already running when the watch began never stamps) and once a read
+   *  has landed. A move to another lens carries THAT lens's own read in flight, if
+   *  the watch saw it start. A read CANCELLED mid-flight keeps its stamp: the
    *  revert reaches the watch as no event it reads. */
   fetchStartedAt: number | undefined;
   /** Whether the bound has already waited once for a deciding read in flight. */
@@ -256,29 +257,46 @@ const decidingRead = (watch: RepositionWatch) =>
   watch.fetchStartedAt !== undefined && watch.fetchStartedAt >= watch.settledAt;
 
 /** The lens a reposition verdict can be judged on: the first ACTIVE candidate, in
- *  the caller's preference order, whose cache draws the card — a lens that
- *  doesn't draw it would judge a landed move as failed. */
+ *  the caller's preference order, whose cache draws both the card and the anchor
+ *  it is judged against — a lens missing either would read a landed move as
+ *  failed. The anchor counts as drawn the way {@link boardAnchorId} can read it:
+ *  a copy that isn't archived. A null anchor needs no containment: each lens keeps
+ *  the project's order, so a card at the top of the project leads every lens that
+ *  draws it. */
 export function pickWatchLens<
   T extends {
     active: boolean;
     data: InfiniteData<BoardItems, string | null> | undefined;
   },
->(candidates: readonly T[], itemId: string): T | undefined {
+>(
+  candidates: readonly T[],
+  itemId: string,
+  anchorId: string | null,
+): T | undefined {
   return candidates.find(
     (lens) =>
-      lens.active && boardPredecessorId(lens.data, itemId) !== undefined,
+      lens.active &&
+      boardPredecessorId(lens.data, itemId) !== undefined &&
+      (anchorId === null ||
+        lens.data?.pages.some((page) =>
+          page.items.some(
+            (item) => item.itemId === anchorId && !item.isArchived,
+          ),
+        ) === true),
   );
 }
 
 /** What can happen to a watched lens, or to the watch itself. `inactive`: no
  *  active lens of the board draws the card, so no re-read will judge it.
- *  `retarget`: the watch moved to another lens of the board. `bound`: the wait
+ *  `retarget`: the watch moved to another lens of the board, whose read in flight
+ *  started at `fetchStartedAt` (undefined when the watch didn't see one start;
+ *  never another lens's read). `bound`: the wait
  *  ran out of time. `superseded`: the same card was repositioned again.
  *  `contested`: another write changed what the project's order or archived flags
  *  say, so the card's place proves nothing. */
 export type RepositionWatchEvent =
   | { type: "fetch"; at: number }
-  | { type: "retarget" }
+  | { type: "retarget"; fetchStartedAt: number | undefined }
   | {
       type: "success";
       /** An optimistic `setQueryData`, which says nothing about the server. */
@@ -323,9 +341,13 @@ export function stepRepositionWatch(
   switch (event.type) {
     case "fetch":
       return { kind: "wait", watch: { ...watch, fetchStartedAt: event.at } };
-    // The stamp was the old lens's read; the window and the bound carry over.
+    // The old lens's stamp goes and the new lens's own comes; the window and the
+    // bound carry over.
     case "retarget":
-      return { kind: "wait", watch: { ...watch, fetchStartedAt: undefined } };
+      return {
+        kind: "wait",
+        watch: { ...watch, fetchStartedAt: event.fetchStartedAt },
+      };
     case "success": {
       if (event.manual || event.fetchMore) return { kind: "wait", watch };
       const verdict = repositionVerdict(

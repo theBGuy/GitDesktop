@@ -824,22 +824,24 @@ test("stepRepositionWatch: the bound waits once for a deciding read in flight", 
   );
 });
 
+/** A move to a lens whose read the watch didn't see start. */
+const MOVED_UNSTAMPED = { type: "retarget", fetchStartedAt: undefined };
+
 test("stepRepositionWatch: moving to another lens drops the old lens's stamp only", () => {
-  const moved = run({ type: "fetch", at: SETTLED }, { type: "retarget" });
+  const moved = run({ type: "fetch", at: SETTLED }, MOVED_UNSTAMPED);
   assert.equal(moved.kind, "wait");
   assert.equal(moved.watch.fetchStartedAt, undefined);
   assert.equal(moved.watch.settledAt, watch0().settledAt);
   // The old lens's read no longer decides, so a read landing unstamped waits...
   assert.equal(
-    run({ type: "fetch", at: SETTLED }, { type: "retarget" }, read(offTarget))
-      .kind,
+    run({ type: "fetch", at: SETTLED }, MOVED_UNSTAMPED, read(offTarget)).kind,
     "wait",
   );
   // ...while the new lens's own settled read does.
   assert.deepEqual(
     run(
       { type: "fetch", at: SETTLED },
-      { type: "retarget" },
+      MOVED_UNSTAMPED,
       { type: "fetch", at: SETTLED },
       read(atTarget),
     ),
@@ -850,7 +852,7 @@ test("stepRepositionWatch: moving to another lens drops the old lens's stamp onl
     run(
       { type: "fetch", at: SETTLED },
       { type: "bound" },
-      { type: "retarget" },
+      MOVED_UNSTAMPED,
       { type: "fetch", at: SETTLED },
       { type: "bound" },
     ),
@@ -858,13 +860,31 @@ test("stepRepositionWatch: moving to another lens drops the old lens's stamp onl
   );
   // With no stamp after the move, the bound has nothing to wait for.
   assert.deepEqual(
-    run(
-      { type: "fetch", at: SETTLED },
-      { type: "retarget" },
-      { type: "bound" },
-    ),
+    run({ type: "fetch", at: SETTLED }, MOVED_UNSTAMPED, { type: "bound" }),
     RESTORE,
   );
+});
+
+test("stepRepositionWatch: a move carries the new lens's own read in flight", () => {
+  // The view switch started the new lens's read past the window, before the
+  // watch moved: that read landing decides, both ways.
+  const carried = { type: "retarget", fetchStartedAt: SETTLED };
+  assert.equal(run(carried).watch.fetchStartedAt, SETTLED);
+  assert.deepEqual(run(carried, read(atTarget)), SILENT);
+  assert.deepEqual(run(carried, read(offTarget)), NO_RESTORE);
+  // It replaces the old lens's stamp, whichever way that one leaned.
+  assert.deepEqual(
+    run({ type: "fetch", at: 1_000 }, carried, read(atTarget)),
+    SILENT,
+  );
+  // A carried start INSIDE the window decides nothing, like any other.
+  const early = { type: "retarget", fetchStartedAt: 1_000 };
+  assert.equal(
+    run({ type: "fetch", at: SETTLED }, early, read(atTarget)).kind,
+    "wait",
+  );
+  // The bound waits for a carried deciding read the way it waits for its own.
+  assert.equal(run(carried, { type: "bound" }).kind, "wait");
 });
 
 test("stepRepositionWatch: the same card moved again releases the report silently", () => {
@@ -1053,7 +1073,7 @@ test("pickWatchLens: the first active lens in preference order that draws the ca
   const draws = pagesOf([mk("a"), mk("c")]);
   const hides = pagesOf([mk("a"), mk("b")]);
   const lens = (name, active, data) => ({ name, active, data });
-  const pick = (...lenses) => pickWatchLens(lenses, "c")?.name;
+  const pick = (...lenses) => pickWatchLens(lenses, "c", "a")?.name;
   // Preference order holds among eligible lenses.
   assert.equal(
     pick(lens("pressed", true, draws), lens("own", true, draws)),
@@ -1077,6 +1097,26 @@ test("pickWatchLens: the first active lens in preference order that draws the ca
     undefined,
   );
   assert.equal(pick(), undefined);
+});
+
+test("pickWatchLens: the lens must draw the anchor the move is judged against too", () => {
+  const lens = (name, data) => ({ name, active: true, data });
+  const pick = (anchorId, ...lenses) =>
+    pickWatchLens(lenses, "c", anchorId)?.name;
+  // Draws the card but filters its anchor out: a landed move would read failed.
+  const hidesAnchor = lens("hides", pagesOf([mk("b"), mk("c")]));
+  const drawsAnchor = lens("draws", pagesOf([mk("a"), mk("b"), mk("c")]));
+  assert.equal(pick("a", hidesAnchor, drawsAnchor), "draws");
+  assert.equal(pick("a", hidesAnchor), undefined);
+  // An anchor present only as an archived copy can't be read back as one.
+  assert.equal(
+    pick("a", lens("archived", pagesOf([mk("a", true), mk("c")]))),
+    undefined,
+  );
+  // A top-of-board target needs no anchor: the card leads every lens drawing it.
+  assert.equal(pick(null, hidesAnchor, drawsAnchor), "hides");
+  // The card is still required, whatever the anchor.
+  assert.equal(pick(null, lens("no-card", pagesOf([mk("a")]))), undefined);
 });
 
 // ------------------------------------------------- repositionRestoreTarget

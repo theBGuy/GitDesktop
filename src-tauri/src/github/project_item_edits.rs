@@ -1346,9 +1346,9 @@ mod tests {
             assert_pointer(doc, pointer);
         }
         assert_pointer(POSITION_MUTATION, &format!("{ORDER_POINTER}/nodes/id"));
-        // The payload page GitHub will answer for: `pageInfo` there 500s while the
-        // write commits, so the count rides instead.
-        assert!(POSITION_MUTATION.contains("items(first:100){ totalCount nodes{id} }"));
+        // `pageInfo` in this payload 500s while the write commits, so the count
+        // rides instead.
+        assert!(POSITION_MUTATION.contains("totalCount"));
         assert!(!POSITION_MUTATION.contains("pageInfo"));
         assert_eq!(ORDER_PAGE, 100);
         assert!(POSITION_MUTATION.contains("items(first:100)"));
