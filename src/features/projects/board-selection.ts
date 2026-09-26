@@ -131,8 +131,8 @@ export type BulkVerb = "move" | "fields" | "archive" | "restore" | "remove";
  * never BLOCK a verb — they scope it: archiving a selection that already holds
  * archived cards archives the rest, and the label counts only what will move.
  *
- * A move, a field write and an archive all need a live card (an archived one sits
- * in no column and is in no state to be rewritten); a restore needs an archived
+ * A move and a field write act on live cards only, so an archived one is restored
+ * first; an archive needs a card not archived yet; a restore needs an archived
  * one; a removal reaches every card by its membership alone.
  */
 export function partitionEligible(

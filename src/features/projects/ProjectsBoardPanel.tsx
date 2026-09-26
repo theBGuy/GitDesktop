@@ -2579,8 +2579,8 @@ export function ProjectsBoardPanel({
       case bucketField?.kind === "singleSelect" && bucketField.isIssueField:
         return ISSUE_FIELD_REASON;
       // Under the three arms above, which say a move is impossible HERE whatever the
-      // card is: an archived card sits in no column, so a column pick has nothing to
-      // write — and the restore row is what clears this one.
+      // card is: a column pick writes a live card's field, so the restore row is
+      // what clears this one.
       case item.isArchived:
         return ARCHIVED_ITEM_REASON[noun];
       // Above the two that clear on their own: the cards drawn while a lens loads
@@ -2676,8 +2676,8 @@ export function ProjectsBoardPanel({
         return BOARD_READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
-      // Position writes act on live cards (GitHub won't anchor on an archived one
-      // either), and Restore is the one step an archived card takes.
+      // Position writes are for live cards (GitHub won't anchor on an archived one
+      // either), so an archived card is restored before it can be repositioned.
       case item.isArchived:
         return ARCHIVED_ITEM_REASON[noun];
       // A sorted view draws the columns in the SORT's order, so the board's own

@@ -1990,8 +1990,8 @@ GitDesktop keeps the answer the write gave rather than asking again. Under a sav
 the card is back straight away too, and the next refresh settles whether that view's
 filter keeps it. **Remove from project…** is still there too, and still confirms. Four
 rows would change what the card IS: **Move to**, **Position**, **Edit draft…** and
-**Convert to issue…**. Each of them says **Restore this card to change it** instead: the
-board's writes act on live cards, and restoring is the one step an archived card takes.
+**Convert to issue…**. Each of them says **Restore this card to change it** instead,
+since those four work only on a live card; restoring comes first.
 
 Every other card can still be repositioned while archived cards are shown, and the
 archived ones never move on their own account. GitHub won't place a card against an

@@ -94,10 +94,11 @@ export const TRUNCATED_ORDER_REASON: Record<ItemNoun, string> = {
  *  register: the row hints, the announcement explains. */
 export const TRUNCATED_ROW_REASON = "load more first";
 
-/** Why a card's placement and content rows are held while it is ARCHIVED: the
- *  board's writes act on live cards, and Restore is the one step an archived card
- *  takes. Shared by the menu's held rows and the keyboard route's announcement,
- *  for the reason {@link ITEM_WRITE_REASON} lives here — one copy, no drift. */
+/** Why an ARCHIVED card's placement and content writes are held — a column pick,
+ *  a reposition, a draft edit or convert, a table cell's field: those act on live
+ *  cards only, so Restore comes first (a removal needs none). Shared by the menu's
+ *  held rows and the keyboard route's announcement, for the reason
+ *  {@link ITEM_WRITE_REASON} lives here — one copy, no drift. */
 export const ARCHIVED_ITEM_REASON: Record<ItemNoun, string> = {
   card: "Restore this card to change it",
   row: "Restore this row to change it",
