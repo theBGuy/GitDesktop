@@ -30,6 +30,7 @@ export const BoardColumn = memo(function BoardColumn({
   columnIndex,
   activeIndex,
   activeItemId,
+  cursorItemId,
   selectedIds,
   selectionSize,
   busyItemId,
@@ -45,7 +46,8 @@ export const BoardColumn = memo(function BoardColumn({
 }: {
   column: BoardColumnModel;
   columnIndex: number;
-  /** The keyboard cursor's row in THIS column, or null when it sits elsewhere. */
+  /** The keyboard cursor's row in THIS column, or null when it sits elsewhere:
+   *  the slot a focus claim scrolls to and focuses. */
   activeIndex: number | null;
   /** WHICH card {@link activeIndex} means, when the caller can say. A focus claim
    *  resolves the index against the DOM, and an optimistic reorder lands a frame
@@ -53,6 +55,10 @@ export const BoardColumn = memo(function BoardColumn({
    *  neighbour the moved card just swapped past. Null keeps the index-only
    *  behaviour for callers whose cursor moves are pure navigation. */
   activeItemId: string | null;
+  /** The cursor's card when it is in THIS column, by identity — what wears the
+   *  accent with nothing selected. Apart from {@link activeIndex} because a
+   *  rollback can slide a neighbour into the cursor's slot. */
+  cursorItemId: string | null;
   /** The board's selection, by item id. The RAW set rather than the pruned one:
    *  a card this column draws is in one exactly when it is in the other, and the
    *  raw set keeps a stable identity between selection changes, which is what this
@@ -79,7 +85,7 @@ export const BoardColumn = memo(function BoardColumn({
   /** The active view's visible fields, passed straight to the cards; empty with
    *  no view. Identity-stable, like every other prop this memoized column takes. */
   chipFields: ProjectFieldDef[];
-  onCardFocus: (columnIndex: number, index: number) => void;
+  onCardFocus: (columnIndex: number, index: number, itemId: string) => void;
   onPeekChange: (itemId: string | null) => void;
   onOpen: (item: BoardItem) => void;
 }) {
@@ -239,7 +245,8 @@ export const BoardColumn = memo(function BoardColumn({
               const selectable = items[vi.index].content.kind !== "redacted";
               const selected =
                 (selectable && selectedIds.has(items[vi.index].itemId)) ||
-                (selectionSize === 0 && vi.index === activeIndex);
+                (selectionSize === 0 &&
+                  items[vi.index].itemId === cursorItemId);
               return (
                 <div
                   key={items[vi.index].itemId}

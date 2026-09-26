@@ -16,12 +16,22 @@ import { test } from "node:test";
 
 import { planReorder } from "../src/features/projects/board-positioning.ts";
 
+/** Cards as the planner reads them. An id ending in `*` is ARCHIVED (the star is
+ *  stripped from the id), so a fixture reads the way the board draws it. */
+const cards = (...ids) =>
+  ids.map((id) =>
+    id.endsWith("*")
+      ? { itemId: id.slice(0, -1), isArchived: true }
+      : { itemId: id, isArchived: false },
+  );
+
 // A board whose three columns INTERLEAVE in the project's own order, which is the
 // shape that makes a card's global neighbour belong to another column.
-const ORDER = ["a1", "b1", "a2", "c1", "b2", "a3", "c2", "b3"];
-const COL_A = ["a1", "a2", "a3"];
-const COL_B = ["b1", "b2", "b3"];
-const COL_C = ["c1", "c2"];
+const ORDER_IDS = ["a1", "b1", "a2", "c1", "b2", "a3", "c2", "b3"];
+const ORDER = cards(...ORDER_IDS);
+const COL_A = cards("a1", "a2", "a3");
+const COL_B = cards("b1", "b2", "b3");
+const COL_C = cards("c1", "c2");
 
 /** One plan off the interleaved board, fully loaded unless a case says otherwise. */
 const plan = (column, index, direction, extra = {}) =>
@@ -115,8 +125,8 @@ test("to bottom on the column's last card is HELD while pages are unloaded", () 
 });
 
 test("to bottom on a NON-last card is HELD on a truncated board", () => {
-  // The true bottom lives past the loaded end, so column[last] would land the card
-  // mid-column after Load more — held regardless of the card's index.
+  // The true bottom lives past the loaded end, so the last loaded card would land
+  // the card mid-column after Load more — held regardless of the card's index.
   assert.deepEqual(plan(COL_A, 0, "bottom", { truncated: true }), {
     kind: "held",
     reason: "truncated",
@@ -130,7 +140,7 @@ test("a single-card column has nowhere to go in any direction", () => {
     assert.deepEqual(
       planReorder({
         order: ORDER,
-        column: ["a1"],
+        column: cards("a1"),
         index: 0,
         direction,
         truncated: false,
@@ -148,7 +158,7 @@ test("a single-card column still HOLDS downward moves on a truncated board", () 
     assert.deepEqual(
       planReorder({
         order: ORDER,
-        column: ["a1"],
+        column: cards("a1"),
         index: 0,
         direction,
         truncated: true,
@@ -161,6 +171,7 @@ test("a single-card column still HOLDS downward moves on a truncated board", () 
 
 test("an index the column doesn't hold plans nothing", () => {
   assert.deepEqual(plan(COL_A, 3, "up"), { kind: "noop" });
+  assert.deepEqual(plan(COL_A, -1, "down"), { kind: "noop" });
   assert.deepEqual(plan([], 0, "down"), { kind: "noop" });
 });
 
@@ -170,7 +181,7 @@ test("a neighbour the flatten doesn't hold plans nothing rather than guessing", 
   // showed.
   assert.deepEqual(
     planReorder({
-      order: ["x1", "x2"],
+      order: cards("x1", "x2"),
       column: COL_A,
       index: 1,
       direction: "up",
@@ -223,11 +234,11 @@ test("an ungrouped board's one column IS the project's order", () => {
 test("under a filtered lens the plan is exact in the view and approximate in global interleave", () => {
   // The lens loaded only these three; the board's real order has hidden items
   // between them, and those end up BELOW the moved card. The accepted edge.
-  const lensOrder = ["b1", "a2", "a3"];
+  const lensOrder = cards("b1", "a2", "a3");
   assert.deepEqual(
     planReorder({
       order: lensOrder,
-      column: ["a2", "a3"],
+      column: cards("a2", "a3"),
       index: 1,
       direction: "up",
       truncated: false,
@@ -237,7 +248,7 @@ test("under a filtered lens the plan is exact in the view and approximate in glo
   assert.deepEqual(
     planReorder({
       order: lensOrder,
-      column: ["a2", "a3"],
+      column: cards("a2", "a3"),
       index: 1,
       direction: "top",
       truncated: false,
@@ -246,40 +257,16 @@ test("under a filtered lens the plan is exact in the view and approximate in glo
   );
 });
 
-// ------------------------------------------------------ archived neighbours
-
-test("an archived neighbour is filtered out of order, so the anchor is one GitHub accepts", () => {
-  // GitHub refuses an archived item as a position anchor: updateProjectV2ItemPosition
-  // answers VALIDATION, "The item to be positioned after is archived and cannot be
-  // used to update the position of this item" (measured 2026-09-19). The caller hands
-  // in the POSITIONABLE sequence, which walks the landing back to the nearest live
-  // predecessor — the same slot the board draws, archived cards being invisible there.
-  const withArchived = ["a1", "b1", "z1", "a2", "a3"];
-  const positionable = withArchived.filter((id) => id !== "z1");
-  const upFromA3 = (order) =>
-    planReorder({
-      order,
-      column: COL_A,
-      index: 2,
-      direction: "up",
-      truncated: false,
-    });
-  assert.deepEqual(upFromA3(positionable), { kind: "move", afterId: "b1" });
-  // The premise the filter exists for: unfiltered, a2's global predecessor IS the
-  // archived card, and that is the anchor the server rejects.
-  assert.deepEqual(upFromA3(withArchived), { kind: "move", afterId: "z1" });
-});
-
 // ------------------------------------------------- drafts and redacted cards
 
 test("a draft or a redacted neighbour is just an id", () => {
   // Neither carries content the plan reads: a position is a membership fact, and
   // an item the viewer can't see still holds a place in the project's order.
-  const order = ["redacted-1", "draft-1", "issue-1"];
+  const order = cards("redacted-1", "draft-1", "issue-1");
   assert.deepEqual(
     planReorder({
       order,
-      column: ["draft-1", "issue-1"],
+      column: cards("draft-1", "issue-1"),
       index: 1,
       direction: "up",
       truncated: false,
@@ -289,11 +276,291 @@ test("a draft or a redacted neighbour is just an id", () => {
   assert.deepEqual(
     planReorder({
       order,
-      column: ["draft-1", "issue-1"],
+      column: cards("draft-1", "issue-1"),
       index: 0,
       direction: "down",
       truncated: false,
     }),
     { kind: "move", afterId: "issue-1" },
   );
+});
+
+// ------------------------------------------- equivalence with no archived cards
+
+/** The planner as it stood before archived cards could be drawn under a move:
+ *  string ids, `order` pre-filtered to live cards by the caller. Frozen here so
+ *  the live-subset contract is pinned to byte-identical plans wherever no
+ *  archived card is involved. */
+const legacyPlan = ({ order, column, index, direction, truncated }) => {
+  const last = column.length - 1;
+  if (index < 0 || index > last) return { kind: "noop" };
+  const landBefore = (beforeId) => {
+    const at = order.indexOf(beforeId);
+    if (at === -1) return { kind: "noop" };
+    return { kind: "move", afterId: at === 0 ? null : order[at - 1] };
+  };
+  switch (direction) {
+    case "down":
+      if (index === last)
+        return truncated
+          ? { kind: "held", reason: "truncated" }
+          : { kind: "noop" };
+      return { kind: "move", afterId: column[index + 1] };
+    case "bottom":
+      if (truncated) return { kind: "held", reason: "truncated" };
+      if (index === last) return { kind: "noop" };
+      return { kind: "move", afterId: column[last] };
+    case "up":
+      if (index === 0) return { kind: "noop" };
+      return landBefore(column[index - 1]);
+    default:
+      if (index === 0) return { kind: "noop" };
+      return landBefore(column[0]);
+  }
+};
+
+test("with no archived card anywhere, every plan is the pre-lift plan", () => {
+  // Exhaustive over the interleaved board, the ungrouped column, a filtered lens
+  // and a flatten that disagrees with the column, every index in and just out of
+  // range, all four directions, loaded and truncated.
+  const boards = [
+    { order: ORDER_IDS, columns: [COL_A, COL_B, COL_C, ORDER, []] },
+    { order: ["b1", "a2", "a3"], columns: [cards("a2", "a3")] },
+    { order: ["x1", "x2"], columns: [COL_A] },
+  ];
+  let checked = 0;
+  for (const { order, columns } of boards)
+    for (const column of columns)
+      for (let index = -1; index <= column.length; index += 1)
+        for (const direction of ["up", "down", "top", "bottom"])
+          for (const truncated of [false, true]) {
+            const args = { index, direction, truncated };
+            assert.deepEqual(
+              planReorder({ ...args, order: cards(...order), column }),
+              legacyPlan({
+                ...args,
+                order,
+                column: column.map((card) => card.itemId),
+              }),
+              JSON.stringify({ ...args, column: column.map((c) => c.itemId) }),
+            );
+            checked += 1;
+          }
+  assert.ok(checked > 200, `swept ${checked} plans`);
+});
+
+// ------------------------------------------------ archived cards interleaved
+//
+// GitHub refuses an archived item as a position anchor: updateProjectV2ItemPosition
+// answers VALIDATION, "The item to be positioned after is archived and cannot be
+// used to update the position of this item" (measured 2026-09-19, re-measured
+// 2026-09-26). It also keeps archived items in their slots around a moved card,
+// exactly as the cache splice does. So every verb works on the LIVE cards, and no
+// plan below may name an archived id.
+
+test("down past an archived neighbour lands after the next LIVE card", () => {
+  const column = cards("b", "z*", "c");
+  assert.deepEqual(
+    planReorder({
+      order: column,
+      column,
+      index: 0,
+      direction: "down",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "c" },
+  );
+});
+
+test("down with only archived cards below is the column's end", () => {
+  const column = cards("a", "b", "z*", "y*");
+  const args = { order: column, column, index: 1, direction: "down" };
+  assert.deepEqual(planReorder({ ...args, truncated: false }), {
+    kind: "noop",
+  });
+  assert.deepEqual(planReorder({ ...args, truncated: true }), {
+    kind: "held",
+    reason: "truncated",
+  });
+});
+
+test("up with an archived card above moves past it rather than stopping", () => {
+  // The drawn neighbour above b is archived; the live one is a, which is the
+  // board's first card, so b lands at the top.
+  const column = cards("a", "z*", "b");
+  assert.deepEqual(
+    planReorder({
+      order: column,
+      column,
+      index: 2,
+      direction: "up",
+      truncated: false,
+    }),
+    { kind: "move", afterId: null },
+  );
+});
+
+test("up lands before the live neighbour, anchored on ITS nearest live predecessor", () => {
+  // a2's global predecessor is the archived z; the anchor walks past it to b1.
+  const order = cards("a1", "b1", "z*", "a2", "a3");
+  assert.deepEqual(
+    planReorder({
+      order,
+      column: cards("a1", "a2", "a3"),
+      index: 2,
+      direction: "up",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "b1" },
+  );
+});
+
+test("up and top reach the front when only archived cards precede the landing", () => {
+  const order = cards("z*", "y*", "a", "b");
+  for (const direction of ["up", "top"])
+    assert.deepEqual(
+      planReorder({
+        order,
+        column: order,
+        index: 3,
+        direction,
+        truncated: false,
+      }),
+      { kind: "move", afterId: null },
+      direction,
+    );
+});
+
+test("an archived-LEADING column: the first live card is already at the top", () => {
+  const column = cards("z*", "a", "b");
+  const at = (index, direction) =>
+    planReorder({ order: column, column, index, direction, truncated: false });
+  assert.deepEqual(at(1, "top"), { kind: "noop" });
+  assert.deepEqual(at(1, "up"), { kind: "noop" });
+  // b to the top lands before a, and nothing live precedes a.
+  assert.deepEqual(at(2, "top"), { kind: "move", afterId: null });
+});
+
+test("an archived-TRAILING column: the last live card is already at the bottom", () => {
+  const column = cards("a", "b", "z*");
+  const at = (index, direction) =>
+    planReorder({ order: column, column, index, direction, truncated: false });
+  assert.deepEqual(at(1, "bottom"), { kind: "noop" });
+  assert.deepEqual(at(1, "down"), { kind: "noop" });
+  assert.deepEqual(at(0, "bottom"), { kind: "move", afterId: "b" });
+});
+
+test("an all-archived gap between live cards is stepped over in both directions", () => {
+  const column = cards("a", "z*", "y*", "x*", "b");
+  const at = (index, direction) =>
+    planReorder({ order: column, column, index, direction, truncated: false });
+  assert.deepEqual(at(0, "down"), { kind: "move", afterId: "b" });
+  assert.deepEqual(at(0, "bottom"), { kind: "move", afterId: "b" });
+  assert.deepEqual(at(4, "up"), { kind: "move", afterId: null });
+  assert.deepEqual(at(4, "top"), { kind: "move", afterId: null });
+});
+
+test("an archived card is never a move's subject", () => {
+  // Restore is its action; the panel's hold says so before the planner is asked.
+  const column = cards("a", "z*", "b");
+  for (const direction of ["up", "down", "top", "bottom"])
+    assert.deepEqual(
+      planReorder({
+        order: column,
+        column,
+        index: 1,
+        direction,
+        truncated: false,
+      }),
+      { kind: "noop" },
+      direction,
+    );
+});
+
+test("no plan ever names an archived anchor", () => {
+  // Every live card of a column mixing archived cards at the edges and between
+  // live ones, every direction, loaded and truncated.
+  const order = cards("z*", "a", "q", "y*", "b", "x*", "w*", "c", "v*");
+  const column = cards("z*", "a", "y*", "b", "x*", "w*", "c", "v*");
+  const archived = new Set(
+    order.filter((card) => card.isArchived).map((card) => card.itemId),
+  );
+  let moves = 0;
+  for (let index = 0; index < column.length; index += 1)
+    for (const direction of ["up", "down", "top", "bottom"])
+      for (const truncated of [false, true]) {
+        const got = planReorder({
+          order,
+          column,
+          index,
+          direction,
+          truncated,
+        });
+        if (got.kind !== "move") continue;
+        moves += 1;
+        assert.equal(
+          archived.has(got.afterId),
+          false,
+          `${column[index].itemId} ${direction}: ${got.afterId}`,
+        );
+      }
+  // Not vacuous: a, b and c plan 3, 7 and 4 moves across the sweep, so a planner
+  // that never moved fails here instead of passing every assertion above.
+  assert.equal(moves, 14);
+});
+
+test("the anchor walk passes a whole RUN of archived cards to reach a live one", () => {
+  // Three archived cards in a row, from another column, between b1 and a1: a2 up
+  // and to the top both land after b1, never on the run.
+  const order = cards("b1", "z*", "y*", "x*", "a1", "a2");
+  const column = cards("a1", "a2");
+  for (const direction of ["up", "top"])
+    assert.deepEqual(
+      planReorder({ order, column, index: 1, direction, truncated: false }),
+      { kind: "move", afterId: "b1" },
+      direction,
+    );
+  // The same run drawn in the column itself, stepped over going down.
+  const drawn = cards("a", "z*", "y*", "x*", "b");
+  for (const direction of ["down", "bottom"])
+    assert.deepEqual(
+      planReorder({
+        order: drawn,
+        column: drawn,
+        index: 0,
+        direction,
+        truncated: false,
+      }),
+      { kind: "move", afterId: "b" },
+      direction,
+    );
+});
+
+test("up/top anchors walk past an archived card from ANOTHER column", () => {
+  // Column A draws [a1, a2]; the archived z belongs to another column and sits
+  // between b1 and a1 in the project's order. a2 up and a2 to the top both land
+  // before a1, whose global predecessor is z, so the anchor walks on to b1.
+  const order = cards("b1", "z*", "a1", "a2");
+  const column = cards("a1", "a2");
+  for (const direction of ["up", "top"])
+    assert.deepEqual(
+      planReorder({ order, column, index: 1, direction, truncated: false }),
+      { kind: "move", afterId: "b1" },
+      direction,
+    );
+  // With nothing live ahead of the other column's archived card, the walk runs
+  // off the front: the head of the board.
+  const headOrder = cards("z*", "a1", "a2");
+  for (const direction of ["up", "top"])
+    assert.deepEqual(
+      planReorder({
+        order: headOrder,
+        column,
+        index: 1,
+        direction,
+        truncated: false,
+      }),
+      { kind: "move", afterId: null },
+      direction,
+    );
 });

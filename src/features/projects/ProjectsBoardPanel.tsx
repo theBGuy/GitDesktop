@@ -137,12 +137,12 @@ import { BoardColumn } from "./BoardColumn";
 import { BoardDraftEditDialog } from "./BoardDraftEditDialog";
 import {
   ARCHIVED_ITEM_REASON,
-  ARCHIVED_SHOWN_REASON,
-  type BoardColumnModel,
+  type BoardCursor,
   bucketIdFor,
   buildColumns,
   chipFieldDefs,
   columnValue,
+  findCard,
   firstCardPosition,
   GROUPED_ROWS_REASON,
   type GroupField,
@@ -154,6 +154,8 @@ import {
   itemRowKey,
   itemRowSlot,
   lensSorted,
+  reorderLanding,
+  resolveBoardCursor,
   resolveTableCursor,
   SORTED_VIEW_REASON,
   sortColumnItems,
@@ -167,6 +169,7 @@ import {
   UNSET_COLUMN_ID,
 } from "./board-model";
 import {
+  type PositionedCard,
   planReorder,
   type ReorderDirection,
   type ReorderPlan,
@@ -567,18 +570,6 @@ const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
   "Home",
   "End",
 ]);
-/** Where the optimistic splice leaves the card, as an index in its own column: the
- *  grouping field is untouched by a reposition, so the card never changes column
- *  and the landing is arithmetic rather than a search. */
-const REORDER_LANDING: Record<
-  ReorderDirection,
-  (index: number, count: number) => number
-> = {
-  up: (index) => index - 1,
-  down: (index) => index + 1,
-  top: () => 0,
-  bottom: (_index, count) => count - 1,
-};
 /** Placeholder plans for a menu whose card the board no longer draws — never
  *  rendered, since that case shows the single {@link CARD_GONE_REASON} held row
  *  instead of the per-direction rows, but the prop is a total Record. */
@@ -824,20 +815,6 @@ function moveBucketFor(field: GroupField, columnId: string): BoardMoveBucket {
     (i) => i.id === columnId,
   );
   return iteration === undefined ? null : { kind: "iteration", iteration };
-}
-
-/** Where `itemId` sits in the freshly derived columns, or null when the board no
- *  longer draws it — which a move's own patch can never cause, but a refetch
- *  landing mid-chase can. */
-function findCard(
-  columns: BoardColumnModel[],
-  itemId: string,
-): { col: number; idx: number } | null {
-  for (const [col, column] of columns.entries()) {
-    const idx = column.items.findIndex((item) => item.itemId === itemId);
-    if (idx !== -1) return { col, idx };
-  }
-  return null;
 }
 
 /**
@@ -1226,10 +1203,9 @@ export function ProjectsBoardPanel({
 
   // The keyboard cursor, plus a nonce that bumps ONLY on an arrow press — the
   // columns move DOM focus off the nonce, never off the cursor, so a click or a
-  // tab into the board can set the cursor without yanking focus around.
-  const [cursor, setCursor] = useState<{ col: number; idx: number } | null>(
-    null,
-  );
+  // tab into the board can set the cursor without yanking focus around. The card
+  // it names is the identity; its slot is the focus claim's hint (`BoardCursor`).
+  const [cursor, setCursor] = useState<BoardCursor | null>(null);
   const [focusNonce, setFocusNonce] = useState(0);
   // WHICH card the current nonce means, or null where the claim is about a SLOT
   // rather than a card (the landing after a card leaves the board). Set at every
@@ -1249,7 +1225,8 @@ export function ProjectsBoardPanel({
     [],
   );
   const onCardFocus = useCallback(
-    (col: number, idx: number) => setCursor({ col, idx }),
+    (col: number, idx: number, itemId: string) =>
+      setCursor({ itemId, col, idx }),
     [],
   );
   // The table's own cursor, by IDENTITY — a row key and the column being walked —
@@ -1362,18 +1339,17 @@ export function ProjectsBoardPanel({
   );
   const tablePosEntry =
     tablePos === null ? undefined : tableEntries[tablePos.rowIndex];
-  // A cursor left over from another grouping (or a refetch that emptied its
-  // column) can't address a card, so the tab stop falls back to the first one. On
-  // a table the card is wherever the cursor's ROW is now, and a group header is
-  // no card at all.
-  const liveCursor =
-    rowView !== null
-      ? tablePosEntry?.kind === "item"
-        ? findCard(columns, tablePosEntry.item.itemId)
-        : null
-      : cursor !== null && cursor.idx < (columns[cursor.col]?.items.length ?? 0)
-        ? cursor
-        : null;
+  // The card the cursor names, wherever the columns draw it NOW — a rollback or a
+  // settle can slide a neighbour into its old slot, and acting on that neighbour
+  // is the one wrong answer. A card the board stopped drawing addresses nothing,
+  // so the tab stop falls back to the first one. On a table the card is wherever
+  // the cursor's ROW is now, and a group header is no card at all.
+  const liveCursor = (() => {
+    if (rowView === null) return resolveBoardCursor(columns, cursor);
+    return tablePosEntry?.kind === "item"
+      ? findCard(columns, tablePosEntry.item.itemId)
+      : null;
+  })();
   const tabStop = liveCursor ?? firstCardPosition(columns);
   /**
    * The layout swapped under the user with no picker in the route — the active view
@@ -1495,8 +1471,8 @@ export function ProjectsBoardPanel({
     if (boardCursorSeed === null || !onBoard || !boardSettled) return;
     const { itemId, claim } = boardCursorSeed;
     setBoardCursorSeed(null);
-    if (seedCol !== null && seedIdx !== null) {
-      setCursor({ col: seedCol, idx: seedIdx });
+    if (itemId !== null && seedCol !== null && seedIdx !== null) {
+      setCursor({ itemId, col: seedCol, idx: seedIdx });
       if (!claim) return;
       // The mounted columns claim on this bump, by index and by the card's id.
       setFocusItemId(itemId);
@@ -1506,8 +1482,8 @@ export function ProjectsBoardPanel({
     if (!claim) return;
     // No card to carry (a header held focus, or the card didn't survive): the
     // board's first card, else the shared landing.
-    if (firstCol !== null && firstIdx !== null) {
-      setCursor({ col: firstCol, idx: firstIdx });
+    if (firstItemId !== null && firstCol !== null && firstIdx !== null) {
+      setCursor({ itemId: firstItemId, col: firstCol, idx: firstIdx });
       setFocusItemId(firstItemId);
       setFocusNonce((n) => n + 1);
       return;
@@ -1674,9 +1650,9 @@ export function ProjectsBoardPanel({
   }
 
   /** Leaving ROWS (a table or a roadmap) for a board keeps the cursor's card, the
-   *  way arriving at rows does: the board's cursor is index-shaped and the columns
-   *  it will index aren't drawn yet, so the card id is held until they are (see
-   *  `boardCursorSeed`). A board-to-board switch keeps its own reset. Every
+   *  way arriving at rows does: the board's cursor carries a slot, and the columns
+   *  that slot lives in aren't drawn yet, so the card id is held until they are
+   *  (see `boardCursorSeed`). A board-to-board switch keeps its own reset. Every
    *  direction that swaps the layout also carries DOM focus across when the layout
    *  being left held it. */
   function seedBoardCursor(to: Surface) {
@@ -2153,14 +2129,14 @@ export function ProjectsBoardPanel({
     // sideways or jump to the page's end under a key it owns.
     e.preventDefault();
     if (next.col === from.col && next.idx === from.idx) return;
-    setCursor(next);
-    const landed = columns[next.col].items[next.idx];
-    setFocusItemId(landed?.itemId ?? null);
+    const landed = columns[next.col]?.items[next.idx];
+    if (landed === undefined) return;
+    setCursor({ itemId: landed.itemId, col: next.col, idx: next.idx });
+    setFocusItemId(landed.itemId);
     setFocusNonce((n) => n + 1);
     // The selection follows the cursor: a plain move collapses to the card it
     // landed on, a Shift-held one extends the range from the anchor. Same split
     // the pointer keeps, so the two routes can't drift.
-    if (landed === undefined) return;
     // THE SEEDING SITE for a keyboard range. `from` is the card the press started
     // on, which is the anchor a first Shift+Arrow means — the pure helper can't
     // supply it, since "there is no anchor yet" is panel state rather than a
@@ -2407,7 +2383,7 @@ export function ProjectsBoardPanel({
     // the focus return rather than under it.
     const frame = requestAnimationFrame(() => {
       chasedRef.current = stamp;
-      setCursor({ col: chaseCol, idx: chaseIdx });
+      setCursor({ itemId: chase, col: chaseCol, idx: chaseIdx });
       // The chased card itself: the index came from finding it in these columns.
       setFocusItemId(chase);
       // The table's cursor follows the same card by identity, into whatever
@@ -2507,10 +2483,15 @@ export function ProjectsBoardPanel({
       return () => cancelAnimationFrame(frame);
     }
     setRetired(null);
-    setCursor({ col: landingCol, idx: landingIdx });
+    setCursor(
+      landingItemId === null
+        ? null
+        : { itemId: landingItemId, col: landingCol, idx: landingIdx },
+    );
     // A SLOT, not a card: the landing is wherever the departed card's place fell
-    // to, so the claim is index-only by design. The table's slot is the flat one
-    // above, and its cursor keys on whichever row now fills it.
+    // to, so the CLAIM is index-only by design, while the cursor names the card
+    // filling that slot now. The table's slot is the flat one above, and its
+    // cursor keys on whichever row now fills it.
     setFocusItemId(null);
     if (landingItemId !== null)
       setTableCursor((prev) => ({
@@ -2682,11 +2663,12 @@ export function ProjectsBoardPanel({
    *  No selection-size arm, deliberately: chords and palette rows reposition the
    *  CURSOR card with the selection intact (Alt means "act on the card"); only the
    *  menu holds its Position rows, because a menu opened on a selection reads as
-   *  acting on all of it.
+   *  acting on all of it. No arm for drawn archived cards either: the plan steps
+   *  past them (`planReorder`).
    *
    *  Ranked like the card actions: the permission arms first (true whatever is on
-   *  screen), then the three ways the drawn column isn't the board's own order, then
-   *  the two that clear on their own. */
+   *  screen), then the archived card itself, then the two ways the drawn column
+   *  isn't the board's own order, then the ones that clear on their own. */
   function reorderHeldFor(item: BoardItem): string | undefined {
     const itemId = item.itemId;
     switch (true) {
@@ -2698,12 +2680,6 @@ export function ProjectsBoardPanel({
       // for a position write to move it between.
       case item.isArchived:
         return ARCHIVED_ITEM_REASON[noun];
-      // Every OTHER card is held too while archived ones are drawn: GitHub refuses
-      // an archived item as a position anchor, so a card's drawn neighbour is not
-      // necessarily one a write may land it after, and the plan the menu shows would
-      // be computed against a column the board can't address.
-      case showArchived:
-        return ARCHIVED_SHOWN_REASON;
       // A sorted view draws the columns in the SORT's order, so the board's own
       // position sequence — the only thing a position write addresses — isn't what
       // is on screen, and a card would land somewhere the user never saw.
@@ -3575,7 +3551,7 @@ export function ProjectsBoardPanel({
     // History lists select their pressed row the same way). The nonce stays put:
     // this sets where the arrows resume, never where focus goes.
     if (at !== null && item !== undefined) {
-      setCursor(at);
+      setCursor({ itemId: item.itemId, col: at.col, idx: at.idx });
       if (rowView !== null) {
         const cellCol = Number(
           el?.closest<HTMLElement>("[data-col-index]")?.dataset.colIndex,
@@ -3745,32 +3721,42 @@ export function ProjectsBoardPanel({
     });
   }
 
-  /** The ids the position math reads: the project's own global order as the board
-   *  has loaded it, minus the ARCHIVED cards. GitHub refuses an archived item as a
-   *  position anchor ("The item to be positioned after is archived and cannot be
-   *  used to update the position of this item", VALIDATION, measured 2026-09-19),
-   *  and archived cards interleave freely on a real board — so filtering here is
-   *  what makes every anchor the plan can emit positionable by construction. The
-   *  landing then walks back to the nearest non-archived predecessor, which is the
-   *  same slot the board and github.com both draw. */
-  function loadedOrder(): string[] {
-    return loaded.filter((card) => !card.isArchived).map((card) => card.itemId);
-  }
-
   /** The last loaded page's own flag: with more pages behind it, the column's real
    *  tail may not be on screen. */
   function pagesTruncated(): boolean {
     return items.data?.pages.at(-1)?.truncated ?? false;
   }
 
-  /** What each direction would do to the card at `from`, for the menu's rows. */
+  /** `cards` as the planner reads them, a card with a RESTORE in flight counted
+   *  archived: the board already draws it live, but GitHub still refuses it as an
+   *  anchor until the unarchive lands. A bulk restore needs no arm here — it holds
+   *  every reposition while it runs. */
+  function positionable(
+    cards: readonly BoardItem[],
+  ): readonly PositionedCard[] {
+    const restoring = new Set(
+      pendingWrites.flatMap((w) =>
+        w.kind === "restore" && w.itemId !== null ? [w.itemId] : [],
+      ),
+    );
+    if (restoring.size === 0) return cards;
+    return cards.map((card) =>
+      restoring.has(card.itemId)
+        ? { itemId: card.itemId, isArchived: true }
+        : card,
+    );
+  }
+
+  /** What each direction would do to the card at `from`, for the menu's rows. The
+   *  plan reads the loaded project order archived cards included, which the
+   *  planner steps past itself. */
   function reorderPlansFor(from: {
     col: number;
     idx: number;
   }): Record<ReorderDirection, ReorderPlan> {
     const shared = {
-      order: loadedOrder(),
-      column: columns[from.col]?.items.map((card) => card.itemId) ?? [],
+      order: positionable(loaded),
+      column: positionable(columns[from.col]?.items ?? []),
       index: from.idx,
       truncated: pagesTruncated(),
     };
@@ -3804,8 +3790,8 @@ export function ProjectsBoardPanel({
       return;
     }
     const plan = planReorder({
-      order: loadedOrder(),
-      column: column.items.map((card) => card.itemId),
+      order: positionable(loaded),
+      column: positionable(column.items),
       index: from.idx,
       direction,
       truncated: pagesTruncated(),
@@ -3838,12 +3824,20 @@ export function ProjectsBoardPanel({
       archived: showArchived,
       rich: tableView !== null,
     });
-    // The cursor rides the card to where the optimistic splice puts it; the
-    // column's own focus machinery does the rest off the nonce. The moved card's
-    // id travels with it — that splice lands a frame or two later, so until it
-    // does the new index still resolves to the neighbour being swapped past.
-    const idx = REORDER_LANDING[direction](from.idx, column.items.length);
-    setCursor({ col: from.col, idx });
+    // The cursor rides the card to where the optimistic splice puts it — derived
+    // from that same splice, since archived cards it steps past make the drawn
+    // index no arithmetic — and the column's own focus machinery does the rest off
+    // the nonce. The moved card's id travels with it: the splice lands a frame or
+    // two later, and until it does the new index still resolves to the neighbour
+    // being swapped past. A reposition never changes a card's column.
+    const landing = reorderLanding(
+      loaded,
+      bucketField,
+      showArchived,
+      item.itemId,
+      plan.afterId,
+    ) ?? { ...from, count: column.items.length };
+    setCursor({ itemId: item.itemId, col: landing.col, idx: landing.idx });
     setFocusItemId(item.itemId);
     setTableCursor((prev) => ({
       rowKey: itemRowKey(item.itemId),
@@ -3851,7 +3845,7 @@ export function ProjectsBoardPanel({
     }));
     setFocusNonce((n) => n + 1);
     announce(
-      `Moved to ${idx + 1} of ${column.items.length} in ${column.label}`,
+      `Moved to ${landing.idx + 1} of ${landing.count} in ${column.label}`,
     );
   }
 
@@ -5242,8 +5236,14 @@ export function ProjectsBoardPanel({
               key={column.id}
               column={column}
               columnIndex={i}
-              activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
-              activeItemId={liveCursor?.col === i ? focusItemId : null}
+              // The claim's target is the STORED slot, never the re-found one:
+              // mid-reorder the card still sits at its old index, and a claim
+              // index that changed under a pending frame would cancel it.
+              activeIndex={cursor?.col === i ? cursor.idx : null}
+              activeItemId={cursor?.col === i ? focusItemId : null}
+              cursorItemId={
+                liveCursor?.col === i ? (cursor?.itemId ?? null) : null
+              }
               selectedIds={selectedIds}
               selectionSize={selectionSize}
               busyItemId={busyItemId}

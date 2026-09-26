@@ -104,13 +104,6 @@ export const ARCHIVED_ITEM_REASON: Record<ItemNoun, string> = {
   row: "Restore this row to change it",
 };
 
-/** Why NO card can be repositioned while archived cards are drawn: GitHub refuses
- *  an archived item as a position anchor, so a card's drawn neighbour is not
- *  necessarily one a write may land it after. Naming the control that clears it,
- *  since the state is the user's own toggle rather than the board's. */
-export const ARCHIVED_SHOWN_REASON =
-  "Turn off Show archived cards to reposition";
-
 /** The bucket a board item sits in for `field`, or null when the field is unset on
  *  it: a single-select's `optionId`, an iteration field's `iterationId`. Matched on
  *  the id, never the name — options are renamable and an iteration's title and dates
@@ -224,6 +217,50 @@ export function buildColumns(
       items: unset,
     },
   ];
+}
+
+/** `itemId` moved to directly after `afterId` (the front for null) in a deduped
+ *  flatten — the flat twin of the cache splice `reorderBoardItem`, archived cards
+ *  keeping their slots. An anchor the list doesn't hold leaves it unchanged, as the
+ *  splice does. Exported for the test that holds the two twins to one answer. */
+export function spliceAfter(
+  items: readonly BoardItem[],
+  itemId: string,
+  afterId: string | null,
+): readonly BoardItem[] {
+  const moved = items.findLast((item) => item.itemId === itemId);
+  if (moved === undefined) return items;
+  const rest = items.filter((item) => item.itemId !== itemId);
+  let to = 0;
+  if (afterId !== null) {
+    const anchor = rest.findLastIndex((item) => item.itemId === afterId);
+    if (anchor === -1) return items;
+    to = anchor + 1;
+  }
+  return [...rest.slice(0, to), moved, ...rest.slice(to)];
+}
+
+/**
+ * Where a reposition's optimistic splice leaves `itemId` in the drawn columns, and
+ * how many cards its column draws: the splice simulated on `items` (the board's
+ * deduped flatten) and the columns rebuilt from it. Derived rather than counted,
+ * because archived cards interleave the drawn column and a move steps past them.
+ * Null when the columns don't draw the card.
+ */
+export function reorderLanding(
+  items: readonly BoardItem[],
+  field: GroupField | null,
+  includeArchived: boolean,
+  itemId: string,
+  afterId: string | null,
+): (CardPosition & { count: number }) | null {
+  const columns = buildColumns(
+    [...spliceAfter(items, itemId, afterId)],
+    field,
+    includeArchived,
+  );
+  const at = findCard(columns, itemId);
+  return at === null ? null : { ...at, count: columns[at.col].items.length };
 }
 
 /** The field kinds a saved view's sort can be honoured on. A key over any other
@@ -433,13 +470,55 @@ export function chipFieldDefs(
   return chips;
 }
 
+/** A card's slot in the drawn columns: which column, and where in it. */
+export interface CardPosition {
+  col: number;
+  idx: number;
+}
+
 /** Where the board's single tab stop parks when the user hasn't moved it: the
  *  first card of the first column that has one. Null on an empty board. */
 export function firstCardPosition(
   columns: BoardColumnModel[],
-): { col: number; idx: number } | null {
+): CardPosition | null {
   const col = columns.findIndex((column) => column.items.length > 0);
   return col === -1 ? null : { col, idx: 0 };
+}
+
+/** Where `itemId` sits in the freshly derived columns, or null when the board no
+ *  longer draws it — which a move's own patch can never cause, but a refetch
+ *  landing mid-chase can. */
+export function findCard(
+  columns: BoardColumnModel[],
+  itemId: string,
+): CardPosition | null {
+  for (const [col, column] of columns.entries()) {
+    const idx = column.items.findIndex((item) => item.itemId === itemId);
+    if (idx !== -1) return { col, idx };
+  }
+  return null;
+}
+
+/** The board's keyboard cursor: WHICH card, plus the slot it was last seen or
+ *  predicted at. The slot is only a hint for the columns' focus claim; everything
+ *  that acts on the cursor's card re-finds it by id, since a rollback or a settle
+ *  can slide a neighbour into the slot. */
+export interface BoardCursor extends CardPosition {
+  itemId: string;
+}
+
+/** `cursor` re-found by identity in `columns`, or null when the board no longer
+ *  draws its card — never the card now filling its old slot. The same object
+ *  back when its slot still holds, so an unmoved cursor keeps its identity. */
+export function resolveBoardCursor(
+  columns: BoardColumnModel[],
+  cursor: BoardCursor | null,
+): BoardCursor | null {
+  if (cursor === null) return null;
+  if (columns[cursor.col]?.items[cursor.idx]?.itemId === cursor.itemId)
+    return cursor;
+  const at = findCard(columns, cursor.itemId);
+  return at === null ? null : { itemId: cursor.itemId, ...at };
 }
 
 /** One column of a TABLE view: the field it reads, and whether it is the Title

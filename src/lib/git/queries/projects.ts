@@ -51,9 +51,13 @@ import {
   boardAnchorId,
   boardPredecessorId,
   captureRemovedCard,
+  failedRepositionTarget,
   insertBoardCardAfter,
+  type RepositionWatchEvent,
   reorderBoardItem,
   resolveUndoAnchor,
+  stepRepositionWatch,
+  watchReposition,
 } from "./board-order";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
 import {
@@ -1363,13 +1367,164 @@ const REORDER_RETRY_WAITS_MS = [300, 800];
  *  server ended up is no longer something this cache can say, so only a re-read is
  *  honest (patching would snap the card backwards, rolling back would erase a write
  *  that stuck) — but differ on feedback: a follow-up that FAILED every retry
- *  carries its `error`, which the settle toasts (matching the initial write's
+ *  carries its `failure` (the error, and the target it was writing), which the
+ *  settle reports once a read says it didn't land (matching the initial write's
  *  throw), while running out of chase rounds is not a failure (the user out-pressed
  *  the chase) and carries none. */
 type ReorderOutcome =
   | { kind: "folded" }
   | { kind: "converged"; order: BoardOrder }
-  | { kind: "exhausted"; error?: unknown };
+  | {
+      kind: "exhausted";
+      failure?: { error: unknown; afterId: string | null };
+    };
+
+/** How long a failed reposition's report may wait for a read to judge it before it
+ *  is shown anyway: past the recovery re-read's replica window with room for it to
+ *  be deferred once by a write still settling. */
+const REORDER_VERDICT_BOUND_MS = 20_000;
+
+/** One failed reposition whose error report waits on a board read: the board it
+ *  belongs to, and the way to end the wait from outside it. */
+interface PendingRepositionVerdict {
+  repo: string;
+  projectId: string;
+  settle: (event: { type: "superseded" } | { type: "contested" }) => void;
+}
+
+/** Failed repositions waiting on a board read, keyed by card (repo + board +
+ *  item). Module scope for the reason {@link reorderingCards} is. */
+const pendingRepositionVerdicts = new Map<string, PendingRepositionVerdict>();
+
+const repositionVerdictKey = (args: {
+  repo: string;
+  projectId: string;
+  itemId: string;
+}) => JSON.stringify([args.repo, args.projectId, args.itemId]);
+
+/** The newest target a press FOLDED into a live reposition asked for, by fold key
+ *  ({@link reorderFoldKey}). Such a press is only ever sent by the chase, so a
+ *  write that fails before chasing it would otherwise be judged against the older
+ *  target alone. Cleared wherever the write adopts the cache's target — its start
+ *  and each chase read, which already carry every splice folded so far — and when
+ *  its failure is judged. */
+const foldedRepositionTargets = new Map<string, string | null>();
+
+/**
+ * Report every failed reposition still waiting on a read of this board, NOW: a
+ * write to ANOTHER card is about to change the project's order or its archived
+ * flags, and after that a card's place proves nothing either way — it could read
+ * as a false failure, or sit at the failed target by someone else's hand. Called
+ * from the onMutate of a reorder (after its own card's silent supersede), an
+ * archive, a restore and a removal, single and bulk. Field moves are deliberately
+ * not callers: a column change rewrites a value, never the order or the flags.
+ */
+function releaseProjectRepositionVerdicts(repo: string, projectId: string) {
+  for (const pending of [...pendingRepositionVerdicts.values()])
+    if (pending.repo === repo && pending.projectId === projectId)
+      pending.settle({ type: "contested" });
+}
+
+/**
+ * Report a failed reposition only once a read of its lens STARTED past the replica
+ * window says the move did NOT land: the endpoint can error while committing, and a
+ * toast fired at settle would be a false failure. The settle's own immediate re-read
+ * decides nothing; the recovery re-read it arms does. Reported straight away where
+ * no read can judge — the lens has no active observer, at registration or later (a
+ * hidden tab, a view or repo switched away) — and when a read of it FAILS, another
+ * card's write contests it, or none decides within {@link REORDER_VERDICT_BOUND_MS}.
+ * The decision itself is {@link stepRepositionWatch}; this is its wiring. Deferred
+ * rather than retracted after the fact because the error toast would have
+ * auto-closed by verdict time.
+ */
+function deferRepositionToast(
+  queryClient: QueryClient,
+  ctx: { key: QueryKey; itemId: string; repo: string; projectId: string },
+  failedAfterId: string | null,
+  error: unknown,
+): void {
+  const verdictKey = repositionVerdictKey(ctx);
+  pendingRepositionVerdicts.get(verdictKey)?.settle({ type: "superseded" });
+  const cache = queryClient.getQueryCache();
+  const query = cache.find<InfiniteData<BoardItems, string | null>>({
+    queryKey: ctx.key,
+    exact: true,
+  });
+  if (query === undefined || !query.isActive()) {
+    toastError(error);
+    return;
+  }
+  // Monotonic, and stamped before the recovery re-read's timer is armed, so that
+  // read's fetch start clears the gate.
+  let watch = watchReposition(
+    ctx.itemId,
+    failedAfterId,
+    performance.now(),
+    REPLICA_LAG_MS,
+  );
+  let done = false;
+  const apply = (event: RepositionWatchEvent) => {
+    if (done) return;
+    const step = stepRepositionWatch(watch, event);
+    if (step.kind === "wait") {
+      watch = step.watch;
+      return;
+    }
+    done = true;
+    unsubscribe();
+    clearTimeout(bound);
+    if (pendingRepositionVerdicts.get(verdictKey) === pending)
+      pendingRepositionVerdicts.delete(verdictKey);
+    if (step.kind === "report") toastError(error);
+  };
+  const pending: PendingRepositionVerdict = {
+    repo: ctx.repo,
+    projectId: ctx.projectId,
+    settle: apply,
+  };
+  const unsubscribe = cache.subscribe((event) => {
+    if (event.query !== query) return;
+    if (event.type === "removed") {
+      apply({ type: "inactive" });
+      return;
+    }
+    // Checked a microtask on, so a remount in the same commit (cleanup, then the
+    // new observer) never reads as the lens going away.
+    if (
+      event.type === "observerRemoved" ||
+      event.type === "observerOptionsUpdated"
+    ) {
+      queueMicrotask(() => {
+        if (!query.isActive()) apply({ type: "inactive" });
+      });
+      return;
+    }
+    if (event.type !== "updated") return;
+    switch (event.action.type) {
+      case "fetch":
+        apply({ type: "fetch", at: performance.now() });
+        return;
+      case "error":
+        apply({ type: "error" });
+        return;
+      case "success":
+        apply({
+          type: "success",
+          manual: event.action.manual === true,
+          fetchMore: query.state.fetchMeta?.fetchMore !== undefined,
+          data: query.state.data,
+        });
+        return;
+      default:
+        return;
+    }
+  });
+  const bound = setTimeout(
+    () => apply({ type: "bound" }),
+    REORDER_VERDICT_BOUND_MS,
+  );
+  pendingRepositionVerdicts.set(verdictKey, pending);
+}
 
 /**
  * Reposition one card inside the project's own item order, with an optimistic
@@ -1413,9 +1568,8 @@ export function useReorderBoardCard() {
        *  write patches, rolls back, and re-reads the card's place from. */
       query: string | null;
       /** Whether that lens was drawing archived cards — the other half of the key.
-       *  The board holds every reposition while they are shown (an archived card is
-       *  not a legal position anchor), so this is false in practice; it rides the
-       *  variables anyway, since the key is built from them and nothing else. */
+       *  The splice, the rollback and the chase all run on that lens's cache, which
+       *  holds the archived cards the board draws. */
       archived: boolean;
       /** Whether that lens was the rich read — its key's last axis. */
       rich: boolean;
@@ -1423,8 +1577,12 @@ export function useReorderBoardCard() {
       const fold = reorderFoldKey(args);
       // Folded into the write already chasing THIS cache: its own loop below picks
       // this press's splice up, so a second request would only race it.
-      if (reorderingCards.has(fold)) return { kind: "folded" };
+      if (reorderingCards.has(fold)) {
+        foldedRepositionTargets.set(fold, args.afterId);
+        return { kind: "folded" };
+      }
       reorderingCards.add(fold);
+      foldedRepositionTargets.delete(fold);
       // A write that ACTUALLY starts (never a fold) counts against its board, so a
       // converged settle can see a concurrent reorder of another card still in
       // flight and defer the board-wide re-assert to that write's settle.
@@ -1503,13 +1661,24 @@ export function useReorderBoardCard() {
         let order = first;
         for (let chase = 0; chase < REORDER_CHASE_LIMIT; chase += 1) {
           const at = cached();
+          foldedRepositionTargets.delete(fold);
           if (at === afterId) return { kind: "converged", order };
           afterId = at;
           const next = await retryWrite();
-          // A follow-up that failed every attempt carries its error so the settle
-          // can toast it — silently succeeding would be inconsistent with the
-          // initial write, which throws the same failure.
-          if (next === null) return { kind: "exhausted", error: lastError };
+          // A follow-up that failed every attempt carries its error and its target
+          // so the settle can report it — silently succeeding would be
+          // inconsistent with the initial write, which throws the same failure.
+          if (next === null) {
+            const newest = foldedRepositionTargets.get(fold);
+            foldedRepositionTargets.delete(fold);
+            return {
+              kind: "exhausted",
+              failure: {
+                error: lastError,
+                afterId: failedRepositionTarget(newest, afterId),
+              },
+            };
+          }
           order = next;
         }
         // Out of rounds — the user out-pressed the chase, NOT a failure, so no
@@ -1534,6 +1703,13 @@ export function useReorderBoardCard() {
         args.archived,
         args.rich,
       );
+      // The user moved this card again: a failure report still waiting on a read
+      // is moot, and this write moving the card would poison its anchor check. Any
+      // OTHER card's waiting report goes out now, since this move shifts its order.
+      pendingRepositionVerdicts
+        .get(repositionVerdictKey(args))
+        ?.settle({ type: "superseded" });
+      releaseProjectRepositionVerdicts(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey: key });
       const before = boardPredecessorId(
         queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key),
@@ -1560,15 +1736,30 @@ export function useReorderBoardCard() {
     // The rollback target predates any chase rounds that already landed on GitHub,
     // so it describes a board the server may have moved past — the settle's
     // invalidation is what corrects both the cache and that lie.
-    onError: (e, _args, ctx) => {
-      if (ctx !== undefined && ctx.before !== undefined) {
+    onError: (e, args, ctx) => {
+      if (ctx === undefined) {
+        toastError(e);
+        return;
+      }
+      if (ctx.before !== undefined) {
         const { key, itemId, before } = ctx;
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           key,
           (data) => reorderBoardItem(data, itemId, before),
         );
       }
-      toastError(e);
+      // Judged against the newest press folded into this write, if any: those were
+      // never sent. Registered before the settle arms its recovery re-read, the
+      // read that decides it.
+      const fold = reorderFoldKey(args);
+      const newest = foldedRepositionTargets.get(fold);
+      foldedRepositionTargets.delete(fold);
+      deferRepositionToast(
+        queryClient,
+        ctx,
+        failedRepositionTarget(newest, args.afterId),
+        e,
+      );
     },
     onSettled: (outcome, e, _args, ctx) => {
       if (ctx === undefined) return;
@@ -1586,13 +1777,19 @@ export function useReorderBoardCard() {
           return;
         // The burst stopped short with writes already landed, so neither the
         // payload nor the rollback describes the board: a re-read is the answer. A
-        // follow-up that FAILED every retry also toasts it, matching the initial
-        // write's throw; running out of chase rounds carries no error and stays
-        // silent.
+        // follow-up that FAILED every retry is reported as the initial write's
+        // throw is, once a read says it didn't land; running out of chase rounds
+        // carries no failure and stays silent.
         case "exhausted":
-          if (outcome.error !== undefined) toastError(outcome.error);
+          if (outcome.failure !== undefined)
+            deferRepositionToast(
+              queryClient,
+              ctx,
+              outcome.failure.afterId,
+              outcome.failure.error,
+            );
           invalidateProjectBoards(queryClient, ctx.repo);
-          if (outcome.error !== undefined)
+          if (outcome.failure !== undefined)
             scheduleOwedReread(queryClient, ctx.repo, true);
           return;
         // Board-wide: the payload describes the PROJECT's order, which every cached
@@ -2242,6 +2439,7 @@ function useBoardItemRemoval(
     mutationKey: boardWriteKey(kind),
     mutationFn: call,
     onMutate: async (args: BoardItemRemoval) => {
+      releaseProjectRepositionVerdicts(args.repo, args.projectId);
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey });
       const undo: BoardItemUndo[] = [];
@@ -2331,6 +2529,7 @@ export function useRestoreBoardItem() {
         api.ghUnarchiveBoardItem(args.repo, args.projectId, args.itemId),
       ),
     onMutate: async (args) => {
+      releaseProjectRepositionVerdicts(args.repo, args.projectId);
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey });
       const flipped: QueryKey[] = [];
@@ -2468,6 +2667,7 @@ function useBulkBoardRemoval(
     mutationKey: boardWriteKey(kind),
     mutationFn: call,
     onMutate: async (args: BulkBoardRemoval) => {
+      releaseProjectRepositionVerdicts(args.repo, args.projectId);
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey });
       const undo: BoardItemUndo[] = [];
@@ -2581,6 +2781,7 @@ export function useBulkRestoreBoardItems() {
         api.ghUnarchiveBoardItems(args.repo, args.projectId, args.itemIds),
       ),
     onMutate: async (args) => {
+      releaseProjectRepositionVerdicts(args.repo, args.projectId);
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey });
       const flipped: { key: QueryKey; itemIds: string[] }[] = [];

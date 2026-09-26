@@ -1994,10 +1994,13 @@ rows would change what the card IS: **Move to**, **Position**, **Edit draft…**
 because an archived card holds no column and no place in the project's order, so there's
 nothing for those writes to address.
 
-While archived cards are shown, **no** card can be repositioned: GitHub refuses an archived
-item as the anchor a position write needs, so the card below the one you're on isn't
-necessarily somewhere a write could land it. The **Position** rows say **Turn off Show
-archived cards to reposition**, and turning it off brings the project order back.
+Every other card can still be repositioned while archived cards are shown, and the
+archived ones never move on their own account. GitHub won't place a card against an
+archived one, so each move anchors on the nearest card that isn't archived. **Move down**
+lands the card just below the next live card. **Move up** lands it above the previous
+live card, and usually above the archived cards directly over that one too. **Move to
+top** likewise lands above any archived cards heading the column. The order you see is
+the order GitHub keeps.
 
 ## Adding items
 
@@ -2183,10 +2186,10 @@ Selecting rows works the way selecting cards does: {{key:mod}}-click, {{key:shif
 or {{key:shift}} with the row keys. A range runs straight down the rows, across sections,
 and never into a folded one. The selection bar, the row menu ({{secondaryclick}}, or
 {{key:shift+f10}} on Windows and Linux) and every bulk verb are the board's own, worded
-for rows, and **Move N rows to** lists the sections of a grouped table. In a table that neither sorts
-nor groups its rows, with archived cards hidden, {{key:alt+up}} and {{key:alt+down}} move
-the row you're on through the project order and {{key:alt+home}} and {{key:alt+end}} send
-it to the top or bottom; otherwise the **Position** rows say what's holding them.
+for rows, and **Move N rows to** lists the sections of a grouped table. In a table that
+neither sorts nor groups its rows, {{key:alt+up}} and {{key:alt+down}} move the row
+you're on through the project order and {{key:alt+home}} and {{key:alt+end}} send it to
+the top or bottom; otherwise the **Position** rows say what's holding them.
 
 ## Working in the roadmap
 
@@ -2368,19 +2371,23 @@ follows the card each time, and the board says where it landed.
 
 Hold the keys down and the board keeps up: the cards move as fast as you press, and
 GitDesktop writes where the card finally rests rather than every step it passed through.
-If GitHub refuses the write, the card goes back and a message says why.
+If GitHub refuses the write, the card goes back. GitHub sometimes reports a failure for a
+move it did make, so while the board is on screen GitDesktop reads it again before saying
+anything: a move that landed after all ends up where you put it with no message, and one
+that didn't gets a message saying why. The message still comes if no fresh read arrives
+in time, and straight away when you had already left the board.
 
-A row that would change nothing is greyed out — the top card can't go up, the bottom one
-can't go down. On a board that's still paging in, **Move to bottom** is greyed with
+A row that would change nothing is greyed out, and the keyboard says **Already first** or
+**Already last** instead. Only cards that aren't archived count toward a column's ends:
+the first of them can't go up, and the last can't go down, whatever archived cards sit
+beyond it. On a board that's still paging in, **Move to bottom** is greyed with
 **(load more first)**, and so is **Move down** on the column's last card: the rest of the
 column may be in a page that hasn't arrived, so moving it past the loaded end would be a
 guess. The keyboard route says the same in full — **Load more cards to move past the
 loaded end**. Under a saved view that
 **sorts**, the whole section says **This view orders cards by its sort** — the columns are
 drawn in the sort's order there, not the board's own, so **Clear view** (or a view without
-a sort) is what brings the project order back. While **Show archived cards** is on it says
-**Turn off Show archived cards to reposition** for the same kind of reason (above).
-Reordering needs the same write access and
+a sort) is what brings the project order back. Reordering needs the same write access and
 \`project\` scope every other board write does, and waits the same way while another change
 to that card, or a **Load more** page, is still finishing.
 

@@ -80,11 +80,137 @@ export const boardPredecessorId = (
 
 /** The id a WRITE may anchor this card to: the nearest non-archived predecessor,
  *  null when only archived cards precede it. Also what the chase compares against,
- *  so the comparison and the next anchor are the same reading of the cache. */
+ *  so the comparison and the next anchor are the same reading of the cache, and
+ *  what {@link repositionVerdict} reads a failed write's target back with. */
 export const boardAnchorId = (
   data: InfiniteData<BoardItems, string | null> | undefined,
   itemId: string,
 ) => boardItemPredecessor(data, itemId, true);
+
+/**
+ * What a board read says about a reposition write that reported failure. GitHub's
+ * position endpoint can error WHILE COMMITTING, so the read decides:
+ * `"committed"` when the card sits at the target the write asked for,
+ * `"failed"` when it doesn't, `"pending"` when the read proves nothing yet.
+ *
+ * Only a `settled` read — one STARTED past the replica window — decides either
+ * way. An earlier one can serve an order from before the write, and that order
+ * can hold the card at the target too (moved away, then failing to move back), so
+ * a hit proves no more than a miss does. A lens that doesn't draw the card at all
+ * is a miss: nothing says the write stuck.
+ */
+export function repositionVerdict(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+  failedAfterId: string | null,
+  settled: boolean,
+): "committed" | "failed" | "pending" {
+  if (!settled) return "pending";
+  return boardAnchorId(data, itemId) === failedAfterId ? "committed" : "failed";
+}
+
+/** The target a failed reposition burst is judged against: the newest one a press
+ *  FOLDED into it asked for, over the one the write itself last tried. A fold is a
+ *  later wish the write never sent, so a card sitting at the tried target alone
+ *  means the burst did not fully land. `folded` is undefined when nothing folded —
+ *  null being a real target, the top of the board. */
+export function failedRepositionTarget(
+  folded: string | null | undefined,
+  tried: string | null,
+): string | null {
+  return folded === undefined ? tried : folded;
+}
+
+/** Clock slack under the settled gate. `performance.now()` is coarsened (~100µs,
+ *  more under cross-origin isolation) and the recovery re-read is armed with
+ *  exactly the replica window, so a read it starts could stamp a hair short of it;
+ *  100ms is noise beside a window that is itself a margin over ~6s of measured lag. */
+export const REPOSITION_SETTLE_SLACK_MS = 100;
+
+/** A failed reposition waiting on a read of its lens to judge it. */
+export interface RepositionWatch {
+  itemId: string;
+  failedAfterId: string | null;
+  /** The earliest FETCH START a deciding read may have. */
+  settledAt: number;
+  /** When the lens's current read started; undefined for one already running when
+   *  the watch began, or once a read has landed. */
+  fetchStartedAt: number | undefined;
+}
+
+export function watchReposition(
+  itemId: string,
+  failedAfterId: string | null,
+  now: number,
+  replicaLagMs: number,
+): RepositionWatch {
+  return {
+    itemId,
+    failedAfterId,
+    settledAt: now + replicaLagMs - REPOSITION_SETTLE_SLACK_MS,
+    fetchStartedAt: undefined,
+  };
+}
+
+/** What can happen to a watched lens, or to the watch itself. `inactive`: the lens
+ *  lost its last enabled observer, so no re-read will reach it. `superseded`: the
+ *  same card was repositioned again. `contested`: another write changed what the
+ *  project's order or archived flags say, so the card's place proves nothing. */
+export type RepositionWatchEvent =
+  | { type: "fetch"; at: number }
+  | {
+      type: "success";
+      /** An optimistic `setQueryData`, which says nothing about the server. */
+      manual: boolean;
+      /** A Load more append, which re-reads none of the pages before it. */
+      fetchMore: boolean;
+      data: InfiniteData<BoardItems, string | null> | undefined;
+    }
+  | { type: "error" }
+  | { type: "inactive" }
+  | { type: "bound" }
+  | { type: "superseded" }
+  | { type: "contested" };
+
+export type RepositionWatchStep =
+  | { kind: "wait"; watch: RepositionWatch }
+  | { kind: "silent" }
+  | { kind: "report" };
+
+/**
+ * The deferred failure report's whole decision, one event at a time. Only a read
+ * that STARTED past the replica window decides, since a paged refetch begun inside
+ * it can land late with stale pages; any other read, an optimistic patch and a
+ * Load more leave it waiting. It never swallows a real error: a failed read, a
+ * lens nothing will re-read, the bound running out and a contested order all
+ * report. Only a committed verdict or the user moving the card again is silent.
+ */
+export function stepRepositionWatch(
+  watch: RepositionWatch,
+  event: RepositionWatchEvent,
+): RepositionWatchStep {
+  switch (event.type) {
+    case "fetch":
+      return { kind: "wait", watch: { ...watch, fetchStartedAt: event.at } };
+    case "success": {
+      if (event.manual || event.fetchMore) return { kind: "wait", watch };
+      const started = watch.fetchStartedAt;
+      const verdict = repositionVerdict(
+        event.data,
+        watch.itemId,
+        watch.failedAfterId,
+        started !== undefined && started >= watch.settledAt,
+      );
+      if (verdict === "committed") return { kind: "silent" };
+      if (verdict === "failed") return { kind: "report" };
+      return { kind: "wait", watch: { ...watch, fetchStartedAt: undefined } };
+    }
+    case "superseded":
+      return { kind: "silent" };
+    default:
+      return { kind: "report" };
+  }
+}
 
 /**
  * How one cached lens was patched for ONE card of a removal, so the rollback can
