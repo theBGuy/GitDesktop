@@ -58,14 +58,6 @@ fn needs_github_probe(routes: &[Route]) -> bool {
         .any(|(_, provider, host)| *provider == Provider::GitHub && host.is_some())
 }
 
-/// Whether any route needs a glab probe: a GitLab route whose host resolves. The
-/// rest take the per-repo probe, so a batch of only those spends no batched spawn.
-fn needs_gitlab_probe(routes: &[Route], gitlab_hosts: &GitlabHosts) -> bool {
-    routes
-        .iter()
-        .any(|(path, provider, _)| *provider == Provider::GitLab && gitlab_hosts.contains_key(path))
-}
-
 /// Whether any route needs the Bitbucket account probe.
 fn needs_bitbucket_probe(routes: &[Route]) -> bool {
     routes
@@ -75,6 +67,8 @@ fn needs_bitbucket_probe(routes: &[Route]) -> bool {
 
 /// One `(host, repo path)` per distinct GitLab host in the batch, first-seen order:
 /// the tick spends one probe on each, addressed through the first repo on that host.
+/// Repos without a resolved host are absent and take the per-repo probe, so a batch
+/// of only those spends no batched spawn.
 fn gitlab_probe_targets<'a>(
     routes: &'a [Route],
     gitlab_hosts: &'a GitlabHosts,
@@ -222,12 +216,10 @@ pub async fn forge_background_statuses(paths: Vec<String>) -> AppResult<Vec<Back
             })
             .collect();
     }
-    if needs_gitlab_probe(&routes, &gitlab_hosts) {
-        for (host, path) in gitlab_probe_targets(&routes, &gitlab_hosts) {
-            let status = Box::pin(crate::forge::gitlab::host_status(path, host)).await;
-            tick.gitlab
-                .insert(host.to_string(), status_verdict(Some(&status)));
-        }
+    for (host, path) in gitlab_probe_targets(&routes, &gitlab_hosts) {
+        let status = Box::pin(crate::forge::gitlab::host_status(path, host)).await;
+        tick.gitlab
+            .insert(host.to_string(), status_verdict(Some(&status)));
     }
     if needs_bitbucket_probe(&routes) {
         // A failed probe still fills the map: every repo on the account would fail the
@@ -435,7 +427,6 @@ mod tests {
         let hosts: GitlabHosts = (0..5)
             .map(|i| (format!("/g{i}"), "gitlab.com".to_string()))
             .collect();
-        assert!(needs_gitlab_probe(&routes, &hosts));
         assert_eq!(
             gitlab_probe_targets(&routes, &hosts),
             vec![("gitlab.com", "/g0")]
@@ -489,7 +480,7 @@ mod tests {
             None
         );
         // A batch of only unresolvable repos spends no batched spawn.
-        assert!(!needs_gitlab_probe(&routes[..1], &hosts));
+        assert!(gitlab_probe_targets(&routes[..1], &hosts).is_empty());
     }
 
     #[test]
@@ -621,17 +612,17 @@ mod tests {
 
         let all = vec![github.clone(), gitlab.clone(), bitbucket.clone()];
         assert!(needs_github_probe(&all));
-        assert!(needs_gitlab_probe(&all, &hosts));
+        assert!(!gitlab_probe_targets(&all, &hosts).is_empty());
         assert!(needs_bitbucket_probe(&all));
 
         let no_bitbucket = vec![github.clone(), gitlab.clone()];
         assert!(!needs_bitbucket_probe(&no_bitbucket));
         let only_bitbucket = vec![bitbucket];
         assert!(!needs_github_probe(&only_bitbucket));
-        assert!(!needs_gitlab_probe(&only_bitbucket, &hosts));
+        assert!(gitlab_probe_targets(&only_bitbucket, &hosts).is_empty());
         assert!(needs_bitbucket_probe(&only_bitbucket));
         let only_github = vec![github];
-        assert!(!needs_gitlab_probe(&only_github, &hosts));
+        assert!(gitlab_probe_targets(&only_github, &hosts).is_empty());
 
         // Each provider reads its own map: a GitLab host present only in the gh map
         // is a miss, never a borrowed verdict.

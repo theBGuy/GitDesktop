@@ -25,7 +25,7 @@ import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
  * Cost bound: one forge poll per rule-bearing recent repo per minute, plus one
  * batched readiness call that probes auth once per provider host per tick (gh's
  * registered hosts, each GitLab host, the Bitbucket account; a repo whose host
- * that probe can't key pays a per-repo status probe each tick) — the loop only
+ * the probe can't key pays a per-repo status probe each tick) — the loop only
  * polls repos that carry an explicit pr-sync rule (an opt-in), so a user with
  * no automations makes no background calls here. React Query runs the first
  * tick immediately on mount (app startup), so the initial settings/automations
