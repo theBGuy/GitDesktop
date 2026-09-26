@@ -113,30 +113,40 @@ impl Forge for BitbucketForge {
             .await
             .ok()
             .map(|(w, s)| format!("{w}/{s}"));
+        let account = account_status(&self.host).await?;
+        Ok(ForgeStatus { repo, ..account })
+    }
+}
 
-        // No token stored → installed:false and NO network call at all.
-        let creds = match http::load_credentials().await {
-            Ok(c) => c,
-            Err(AppError::BitbucketNotConfigured) => {
-                return Ok(bitbucket_status(false, false, &self.host, repo, None));
-            }
-            Err(e) => return Err(e),
-        };
+/// What [`account_status`] returns when no token is stored: not installed, no login.
+pub(crate) fn no_token_status(host: &str) -> ForgeStatus {
+    bitbucket_status(false, false, host, None, None)
+}
 
-        // Token present. Probe `/user`; a success authenticates and yields the login.
-        match http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read).await {
-            Ok(user) => {
-                let login = user.username.or(user.display_name);
-                Ok(bitbucket_status(true, true, &self.host, repo, login))
-            }
-            // A stored-but-invalid/expired token: installed (we have one) but not
-            // authenticated. Fall back to the stored username for the login label.
-            Err(AppError::Bitbucket(_)) => {
-                let login = read_stored_username().await;
-                Ok(bitbucket_status(true, false, &self.host, repo, login))
-            }
-            Err(e) => Err(e),
+/// The stored account's half of [`BitbucketForge::status`], with `repo` unset.
+/// Bitbucket Cloud keeps one account for every repo, so the background tick probes
+/// it once and shares the verdict across the batch.
+pub(crate) async fn account_status(host: &str) -> AppResult<ForgeStatus> {
+    // No token stored → installed:false and NO network call at all.
+    let creds = match http::load_credentials().await {
+        Ok(c) => c,
+        Err(AppError::BitbucketNotConfigured) => return Ok(no_token_status(host)),
+        Err(e) => return Err(e),
+    };
+
+    // Token present. Probe `/user`; a success authenticates and yields the login.
+    match http::bb_get_json::<BbUser>(&creds, "user", "user", BbOpKind::Read).await {
+        Ok(user) => {
+            let login = user.username.or(user.display_name);
+            Ok(bitbucket_status(true, true, host, None, login))
         }
+        // A stored-but-invalid/expired token: installed (we have one) but not
+        // authenticated. Fall back to the stored username for the login label.
+        Err(AppError::Bitbucket(_)) => {
+            let login = read_stored_username().await;
+            Ok(bitbucket_status(true, false, host, None, login))
+        }
+        Err(e) => Err(e),
     }
 }
 

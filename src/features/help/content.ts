@@ -3524,7 +3524,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   an optional **Token expires on** date so GitDesktop can warn you before it lapses.
   Everything here is stored in the OS keychain, replaceable or removable in place, and
   the **Reconnect forge session** command in the palette opens the same sign-in dialog
-  from anywhere.{{ai}} A separate **GitLab review-bot** block takes an optional **project
+  from anywhere. While a GitHub or GitLab API rate limit is in effect, the command steps
+  aside, since reconnecting can't lift a rate limit; it returns once GitDesktop sees the
+  limit clear.{{ai}} A separate **GitLab review-bot** block takes an optional **project
   or group access token** so your AI reviews post as that project's bot rather than your
   signed-in \`glab\` account (also OS-keychain-stored, connect or disconnect here).{{/ai}}
 - **Git** — the default branch name for new repos, your global identity, a per-repository

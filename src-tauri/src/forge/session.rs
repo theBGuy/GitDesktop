@@ -355,6 +355,51 @@ fn gh_hosts_health(map: &HashMap<String, Vec<GhJsonAccount>>) -> HashMap<String,
         .collect()
 }
 
+/// One gh host's sign-in verdict for `gh_status`: whether the host's session reads
+/// Healthy, and its active login.
+pub(crate) struct GhHostAuth {
+    pub authenticated: bool,
+    pub login: Option<String>,
+}
+
+/// Per-host gh auth verdict for `host`, or `None` when per-host truth is unavailable
+/// (old gh without `--json`, an inconclusive probe, or `host` absent from the map) —
+/// the caller then falls back to the host-less exit-code probe. No anti-flap re-probe:
+/// this backs a hot UI probe, and a transient Broken heals on its next refetch.
+pub(crate) async fn github_auth_on_host(host: &str) -> Option<GhHostAuth> {
+    gh_host_auth_from_result(gh_status_json(Some(host)).await, host)
+}
+
+/// A probe that failed to run at all (timeout, spawn error) reads signed-out rather
+/// than `None`: the fallback probe is network-bound too, so a hung network would pay
+/// the gh timeout twice on this hot path.
+fn gh_host_auth_from_result(probe: AppResult<GhJsonProbe>, host: &str) -> Option<GhHostAuth> {
+    match probe {
+        Ok(probe) => gh_host_auth(&probe, host),
+        Err(_) => Some(GhHostAuth {
+            authenticated: false,
+            login: None,
+        }),
+    }
+}
+
+/// The pure step behind [`github_auth_on_host`]. Only `host`'s own entry answers —
+/// never another host's, as in background.rs `github_verdict` — because in `--json`
+/// mode an absent key is the only "unknown host" signal (gh still exits 0). Only
+/// Healthy authenticates: a RateLimited host reads false so the UI's rate-limit arm,
+/// not every panel's 403s, owns that state.
+fn gh_host_auth(probe: &GhJsonProbe, host: &str) -> Option<GhHostAuth> {
+    let GhJsonProbe::Parsed(map) = probe else {
+        return None;
+    };
+    // A present key with no accounts classifies NotConnected, so it reads false.
+    let health = classify_gh_host(map.get(host)?);
+    Some(GhHostAuth {
+        authenticated: health.state == SessionState::Healthy,
+        login: health.login,
+    })
+}
+
 /// When the rate limit on `host` resets (epoch seconds), from the headers of
 /// `gh api -i rate_limit`. That endpoint doesn't count against the primary limit,
 /// and the headers are authoritative over the body, whose reset can disagree.
@@ -606,7 +651,20 @@ enum GlabFailure {
 /// still surfaces as an actionable "reconnect" rather than being swallowed.
 fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
-    const NETWORKISH: [&str; 6] = ["timeout", "connection", "dial", "lookup", "network", "tls"];
+    // "deadline exceeded" is an exhausted context budget, never a credential verdict.
+    // Source-derived, not live-reproduced: glab 1.105.0's client-go (v2.40.1) retries a
+    // 429 until its Ratelimit-Reset inside that budget, so a long throttle can surface as
+    // Go's bare "context deadline exceeded" with no rate-limit wording or status digits.
+    // Offline rather than RateLimited: a genuine network hang surfaces the same words.
+    const NETWORKISH: [&str; 7] = [
+        "timeout",
+        "connection",
+        "dial",
+        "lookup",
+        "network",
+        "tls",
+        "deadline exceeded",
+    ];
     // Checked first as the most specific signal. glab's exact wording is unmeasured, so
     // it matches the phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
@@ -1767,6 +1825,96 @@ mod tests {
         assert_eq!(main.method, None);
     }
 
+    // ── gh_status's per-host auth read ──
+    fn host_auth(json: &str, host: &str) -> Option<GhHostAuth> {
+        gh_host_auth(&GhJsonProbe::Parsed(parse_hosts(json)), host)
+    }
+
+    #[test]
+    fn host_auth_reads_the_repo_host_despite_a_broken_other_host() {
+        let json = format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"success","active":true,"login":"main"}}],"ghes.example":[{{"state":"error","active":true,"login":"b","error":{}}}]}}}}"#,
+            serde_json::to_string(GH_401).unwrap(),
+        );
+        let auth = host_auth(&json, "github.com").expect("github.com is in the map");
+        assert!(auth.authenticated);
+        assert_eq!(auth.login.as_deref(), Some("main"));
+        // The broken host still reads false for its own repos.
+        let other = host_auth(&json, "ghes.example").expect("ghes.example is in the map");
+        assert!(!other.authenticated);
+        assert_eq!(other.login.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn host_auth_rate_limited_reads_false() {
+        // Deliberate: the UI's rate-limit arm owns this state; reading true would mount
+        // every GitHub panel straight into 403s.
+        let auth = host_auth_of(one_account("error", Some(GH_403_PRIMARY)));
+        assert!(!auth.authenticated);
+        assert_eq!(auth.login.as_deref(), Some("theBGuy"));
+    }
+
+    #[test]
+    fn host_auth_broken_timeout_and_empty_accounts_read_false() {
+        assert!(!host_auth_of(one_account("error", Some(GH_401))).authenticated);
+        assert!(!host_auth_of(one_account("timeout", None)).authenticated);
+        let empty = host_auth(r#"{"hosts":{"github.com":[]}}"#, "github.com")
+            .expect("a present key answers even with no accounts");
+        assert!(!empty.authenticated);
+        assert_eq!(empty.login, None);
+    }
+
+    /// `gh_host_auth` for github.com over a reading that contains it.
+    fn host_auth_of(map: HashMap<String, Vec<GhJsonAccount>>) -> GhHostAuth {
+        gh_host_auth(&GhJsonProbe::Parsed(map), "github.com").expect("github.com is in the map")
+    }
+
+    #[test]
+    fn host_auth_is_unknown_when_the_host_is_absent() {
+        let json = r#"{"hosts":{"github.com":[{"state":"success","active":true,"login":"main"}]}}"#;
+        assert!(host_auth(json, "ghes.example").is_none());
+    }
+
+    #[test]
+    fn host_auth_is_unknown_over_an_empty_map() {
+        // gh prints this for an unregistered `--hostname` and still exits 0.
+        assert!(host_auth(r#"{"hosts":{}}"#, "github.com").is_none());
+    }
+
+    #[test]
+    fn host_auth_is_unknown_on_old_gh() {
+        assert!(gh_host_auth(&GhJsonProbe::UnknownFlag, "github.com").is_none());
+    }
+
+    #[test]
+    fn host_auth_probe_error_reads_signed_out_without_a_fallback() {
+        for err in [
+            AppError::Timeout(15),
+            AppError::Io(std::io::Error::other("spawn failed")),
+            AppError::GhNotFound,
+        ] {
+            let auth = gh_host_auth_from_result(Err(err), "github.com")
+                .expect("a failed probe answers, so the fallback never spawns");
+            assert!(!auth.authenticated);
+            assert_eq!(auth.login, None);
+        }
+        // An Ok probe with no per-host truth still defers to the fallback.
+        assert!(gh_host_auth_from_result(Ok(GhJsonProbe::UnknownFlag), "github.com").is_none());
+        let healthy = gh_host_auth_from_result(
+            Ok(GhJsonProbe::Parsed(one_account("success", None))),
+            "github.com",
+        )
+        .expect("github.com is in the map");
+        assert!(healthy.authenticated);
+    }
+
+    #[test]
+    fn host_auth_is_unknown_on_an_inconclusive_probe() {
+        let probe = GhJsonProbe::Inconclusive(Some("could not read config".into()));
+        assert!(gh_host_auth(&probe, "github.com").is_none());
+        assert!(gh_host_auth(&GhJsonProbe::Inconclusive(None), "github.com").is_none());
+    }
+
     #[test]
     fn poller_hosts_map_is_empty_when_no_host_is_known() {
         assert!(gh_hosts_health(&parse_hosts(r#"{"hosts":{}}"#)).is_empty());
@@ -1963,6 +2111,23 @@ mod tests {
                 classify_glab_failure(not_throttled),
                 GlabFailure::RateLimited,
                 "{not_throttled}"
+            );
+        }
+    }
+
+    #[test]
+    fn glab_deadline_exceeded_is_offline_never_broken() {
+        // SYNTHETIC fixture: Go's context-budget wording, not a captured glab line. It
+        // carries none of the network-ish words, so only its own match keeps it out of
+        // Broken.
+        for timed_out in [
+            "get https://gitlab.com/api/v4/user: context deadline exceeded",
+            "Context Deadline Exceeded",
+        ] {
+            assert_eq!(
+                classify_glab_failure(&timed_out.to_lowercase()),
+                GlabFailure::Offline,
+                "{timed_out}"
             );
         }
     }

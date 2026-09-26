@@ -70,14 +70,25 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         Ok(_) => {}
     }
 
-    // `gh auth status` exits 0 only when a host is logged in. Its report
-    // (stderr on old gh, stdout on newer) names the account(s) per host.
-    let (authenticated, accounts) = match run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await {
-        Ok(out) => {
-            let report = format!("{}\n{}", out.stdout_lossy(), out.stderr);
-            (out.code == 0, parse_auth_accounts(&report))
-        }
-        Err(_) => (false, Vec::new()),
+    // Sign-in is judged on the repo's own host, so a broken account on another gh
+    // host can't gate this repo. The hint only keys the auth read — `host` below
+    // stays canonical from the view URL.
+    let host_hint = crate::forge::session::github_host_for_repo(&repo_path).await;
+    let host_auth = crate::forge::session::github_auth_on_host(&host_hint).await;
+
+    // Fallback when per-host truth is unavailable (old gh without `--json`, an
+    // inconclusive probe, an unregistered host): `gh auth status` exits non-zero when
+    // ANY host's account errors, so this arm deliberately keeps the host-global gate.
+    // Its report (stderr on old gh, stdout on newer) names the account(s) per host.
+    let (authenticated, accounts) = match &host_auth {
+        Some(auth) => (auth.authenticated, Vec::new()),
+        None => match run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await {
+            Ok(out) => {
+                let report = format!("{}\n{}", out.stdout_lossy(), out.stderr);
+                (out.code == 0, parse_auth_accounts(&report))
+            }
+            Err(_) => (false, Vec::new()),
+        },
     };
 
     // Pin the origin slug POSITIONALLY (`gh repo view <slug>` — the `repo` family
@@ -104,12 +115,17 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     let host = view.as_ref().and_then(|v| host_from_url(&v.url));
 
     // The active login on the repo's host (each host has its own active
-    // account); fall back to any active account when the host is unknown.
-    let login = accounts
-        .iter()
-        .find(|a| a.active && host.as_deref() == Some(a.host.as_str()))
-        .or_else(|| accounts.iter().find(|a| a.active))
-        .map(|a| a.login.clone());
+    // account); the text fallback takes any active account when the host is unknown.
+    // The JSON arm keys on `host_hint`, not the view-URL `host`, so under a
+    // GH_HOST-style override the login and `host` can name different hosts.
+    let login = match host_auth {
+        Some(auth) => auth.login,
+        None => accounts
+            .iter()
+            .find(|a| a.active && host.as_deref() == Some(a.host.as_str()))
+            .or_else(|| accounts.iter().find(|a| a.active))
+            .map(|a| a.login.clone()),
+    };
 
     Ok(GhStatus {
         installed: true,

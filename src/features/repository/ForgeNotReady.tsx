@@ -92,8 +92,9 @@ export function ForgeNotReady({
   const health = useForgeSessionHealth(repoPath);
   const sessionBroken = health.data?.state === "broken";
   const healthLogin = health.data?.login ?? null;
-  // Health outranks forge-status here: under a rate limit `gh auth status` exits
-  // non-zero, which reads as signed out, so the sign-in arms would misdirect.
+  // Health outranks forge-status here: a rate-limited host reads as signed out (the
+  // per-host probe authenticates only Healthy; old gh's global exit code agrees), so
+  // the sign-in arms would misdirect.
   const rateLimitedProvider =
     health.data?.state === "rateLimited" ? health.data.provider : null;
 
