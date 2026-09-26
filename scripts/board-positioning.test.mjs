@@ -14,7 +14,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { planReorder } from "../src/features/projects/board-positioning.ts";
+import {
+  plannerCards,
+  planReorder,
+} from "../src/features/projects/board-positioning.ts";
 
 /** Cards as the planner reads them. An id ending in `*` is ARCHIVED (the star is
  *  stripped from the id), so a fixture reads the way the board draws it. */
@@ -563,4 +566,60 @@ test("up/top anchors walk past an archived card from ANOTHER column", () => {
       { kind: "move", afterId: null },
       direction,
     );
+});
+
+// ---------------------------------------------- a restore still in flight
+
+test("a card with a restore in flight is never named as an anchor", () => {
+  // r is drawn live the moment Restore is pressed, but GitHub refuses it as an
+  // anchor until the unarchive lands, so the planner reads it as archived.
+  const restoring = new Set(["r"]);
+  const raw = cards("a", "r", "b", "c");
+  const order = plannerCards(raw, restoring);
+  assert.deepEqual(
+    order.map((card) => card.isArchived),
+    [false, true, false, false],
+  );
+  let moves = 0;
+  for (const index of [0, 2, 3])
+    for (const direction of ["up", "down", "top", "bottom"]) {
+      const got = planReorder({
+        order,
+        column: order,
+        index,
+        direction,
+        truncated: false,
+      });
+      if (got.kind !== "move") continue;
+      moves += 1;
+      assert.notEqual(got.afterId, "r", `${raw[index].itemId} ${direction}`);
+    }
+  assert.ok(moves > 0);
+  // b up steps past r to land above a, where the raw cards would anchor on r's slot.
+  assert.deepEqual(
+    planReorder({
+      order,
+      column: order,
+      index: 2,
+      direction: "up",
+      truncated: false,
+    }),
+    { kind: "move", afterId: null },
+  );
+  // a down steps past r to b.
+  assert.deepEqual(
+    planReorder({
+      order,
+      column: order,
+      index: 0,
+      direction: "down",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "b" },
+  );
+});
+
+test("plannerCards hands the same cards back when nothing is restoring", () => {
+  const raw = cards("a", "b");
+  assert.equal(plannerCards(raw, new Set()), raw);
 });

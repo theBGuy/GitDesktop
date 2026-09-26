@@ -390,6 +390,26 @@ test("an anchor the flatten doesn't hold leaves the card where it is, as the spl
   assert.equal(reorderLanding(items, null, false, "gone", null), null);
 });
 
+test("to top can land BELOW a leading archived card when another column's card sits between", () => {
+  // Global order Z (archived, Todo), x (Done), a, b (Todo): Todo draws [Z, a, b].
+  // b to the top lands before a, whose nearest live predecessor is x, so the
+  // write anchors on x and Todo redraws [Z, b, a] with b at index 1, not 0.
+  const field = selectField([option("O_1", "Todo"), option("O_2", "Done")]);
+  const todo = (id, archived = false) =>
+    item(id, [selectValue("F_sel", "O_1")], archived);
+  const items = [
+    todo("Z", true),
+    item("x", [selectValue("F_sel", "O_2")]),
+    todo("a"),
+    todo("b"),
+  ];
+  assert.deepEqual(land(items, field, true, "b", "top"), {
+    col: 0,
+    idx: 1,
+    count: 3,
+  });
+});
+
 // ------------------------------------------------ (8) the board's cursor
 
 /** The one column of an ungrouped board holding `ids` in order. */

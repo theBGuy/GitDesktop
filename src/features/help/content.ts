@@ -1990,17 +1990,16 @@ GitDesktop keeps the answer the write gave rather than asking again. Under a sav
 the card is back straight away too, and the next refresh settles whether that view's
 filter keeps it. **Remove from project…** is still there too, and still confirms. Four
 rows would change what the card IS: **Move to**, **Position**, **Edit draft…** and
-**Convert to issue…**. Each of them says **Restore this card to change it** instead,
-because an archived card holds no column and no place in the project's order, so there's
-nothing for those writes to address.
+**Convert to issue…**. Each of them says **Restore this card to change it** instead: the
+board's writes act on live cards, and restoring is the one step an archived card takes.
 
 Every other card can still be repositioned while archived cards are shown, and the
 archived ones never move on their own account. GitHub won't place a card against an
 archived one, so each move anchors on the nearest card that isn't archived. **Move down**
 lands the card just below the next live card. **Move up** lands it above the previous
 live card, and usually above the archived cards directly over that one too. **Move to
-top** likewise lands above any archived cards heading the column. The order you see is
-the order GitHub keeps.
+top** lands it above the column's first live card, and usually above any archived cards
+heading the column as well. The order you see is the order GitHub keeps.
 
 ## Adding items
 
@@ -2375,7 +2374,8 @@ If GitHub refuses the write, the card goes back. GitHub sometimes reports a fail
 move it did make, so while the board is on screen GitDesktop reads it again before saying
 anything: a move that landed after all ends up where you put it with no message, and one
 that didn't gets a message saying why. The message still comes if no fresh read arrives
-in time, and straight away when you had already left the board.
+in time, and straight away when you had already left the board, or when another card on
+it is repositioned, archived, restored or removed before the read.
 
 A row that would change nothing is greyed out, and the keyboard says **Already first** or
 **Already last** instead. Only cards that aren't archived count toward a column's ends:

@@ -121,8 +121,8 @@ export function failedRepositionTarget(
   return folded === undefined ? tried : folded;
 }
 
-/** Clock slack under the settled gate. `performance.now()` is coarsened (~100µs,
- *  more under cross-origin isolation) and the recovery re-read is armed with
+/** Clock slack under the settled gate. `performance.now()` is coarsened (100µs-class
+ *  on WebView2, ~1ms on WebKit) and the recovery re-read is armed with
  *  exactly the replica window, so a read it starts could stamp a hair short of it;
  *  100ms is noise beside a window that is itself a margin over ~6s of measured lag. */
 export const REPOSITION_SETTLE_SLACK_MS = 100;

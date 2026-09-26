@@ -169,7 +169,7 @@ import {
   UNSET_COLUMN_ID,
 } from "./board-model";
 import {
-  type PositionedCard,
+  plannerCards,
   planReorder,
   type ReorderDirection,
   type ReorderPlan,
@@ -2676,8 +2676,8 @@ export function ProjectsBoardPanel({
         return BOARD_READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
-      // An archived card holds no place in the project's order, so there is no slot
-      // for a position write to move it between.
+      // Position writes act on live cards (GitHub won't anchor on an archived one
+      // either), and Restore is the one step an archived card takes.
       case item.isArchived:
         return ARCHIVED_ITEM_REASON[noun];
       // A sorted view draws the columns in the SORT's order, so the board's own
@@ -3727,23 +3727,14 @@ export function ProjectsBoardPanel({
     return items.data?.pages.at(-1)?.truncated ?? false;
   }
 
-  /** `cards` as the planner reads them, a card with a RESTORE in flight counted
-   *  archived: the board already draws it live, but GitHub still refuses it as an
-   *  anchor until the unarchive lands. A bulk restore needs no arm here — it holds
+  /** The cards with a single-card RESTORE in flight, which the planner may not
+   *  anchor on yet (`plannerCards`). A bulk restore needs no arm here — it holds
    *  every reposition while it runs. */
-  function positionable(
-    cards: readonly BoardItem[],
-  ): readonly PositionedCard[] {
-    const restoring = new Set(
+  function restoringIds(): ReadonlySet<string> {
+    return new Set(
       pendingWrites.flatMap((w) =>
         w.kind === "restore" && w.itemId !== null ? [w.itemId] : [],
       ),
-    );
-    if (restoring.size === 0) return cards;
-    return cards.map((card) =>
-      restoring.has(card.itemId)
-        ? { itemId: card.itemId, isArchived: true }
-        : card,
     );
   }
 
@@ -3754,9 +3745,10 @@ export function ProjectsBoardPanel({
     col: number;
     idx: number;
   }): Record<ReorderDirection, ReorderPlan> {
+    const restoring = restoringIds();
     const shared = {
-      order: positionable(loaded),
-      column: positionable(columns[from.col]?.items ?? []),
+      order: plannerCards(loaded, restoring),
+      column: plannerCards(columns[from.col]?.items ?? [], restoring),
       index: from.idx,
       truncated: pagesTruncated(),
     };
@@ -3789,9 +3781,10 @@ export function ProjectsBoardPanel({
       toast(held, { id: REORDER_REFUSAL_TOAST_ID });
       return;
     }
+    const restoring = restoringIds();
     const plan = planReorder({
-      order: positionable(loaded),
-      column: positionable(column.items),
+      order: plannerCards(loaded, restoring),
+      column: plannerCards(column.items, restoring),
       index: from.idx,
       direction,
       truncated: pagesTruncated(),

@@ -28,6 +28,21 @@ export interface PositionedCard {
   isArchived: boolean;
 }
 
+/** `cards` as the planner reads them, a card with a RESTORE in flight counted
+ *  archived: the board already draws it live, but GitHub still refuses it as an
+ *  anchor until the unarchive lands. The same array back when nothing restores. */
+export function plannerCards(
+  cards: readonly PositionedCard[],
+  restoringIds: ReadonlySet<string>,
+): readonly PositionedCard[] {
+  if (restoringIds.size === 0) return cards;
+  return cards.map((card) =>
+    restoringIds.has(card.itemId)
+      ? { itemId: card.itemId, isArchived: true }
+      : card,
+  );
+}
+
 /**
  * The card lands immediately BEFORE `beforeId`, which the position mutation can
  * only say as "after whatever comes before it" — so the answer is that neighbour's
