@@ -111,9 +111,9 @@ claims it anymore. Nothing claims these three: no commit contains
 them, no ref resolves to them, and the index no longer lists them.
 One blob for each piece of content this repository ever staged and
 never committed: the fix, the rework midpoint, and the defaults
-file, all still on disk. The second `git add` orphaned the fix
-before the reset ever ran; the reset orphaned the other two; nothing
-deleted a byte.
+file, all still in `.git/objects`. The second `git add` orphaned the
+fix before the reset ever ran; the reset orphaned the other two;
+neither one deleted a blob.
 
 ## Content with no name
 
@@ -216,9 +216,9 @@ this is the one that ships with the safety engaged, and `-n` will
 name its targets first. And after `-f`, read the fsck listing again:
 `try.py` does not join the dangling list. It was never staged, so the
 object store holds no copy to orphan. A cleaned untracked file leaves
-nothing behind inside `.git` at all.
-(The fix's blob has left the list too, for the opposite reason: the
-index claims it again, so it no longer dangles.)
+nothing behind inside `.git` at all. (The fix's blob has left the
+list too, for the opposite reason: the index claims it again, so it
+no longer dangles.)
 
 One more edge: dangling blobs wait on a clock. Garbage collection
 eventually sweeps unreachable objects (two weeks old by default), and
@@ -228,26 +228,26 @@ when a sweep can start on its own. Run your `fsck` first.
 ## Or don't do any of this
 
 A Git client has to pick a policy for the working tree, because it's
-the one place Git's own undo machinery doesn't cover. The policy
-[GitDesktop](/features/) landed on runs on one distinction: refuse
-when tree loss would be a side effect of something else you asked
-for, and when discarding is the thing you asked for, save what can
-be saved and confirm the rest.
+the one place Git's own undo machinery doesn't cover. One distinction
+drives [GitDesktop](/features/)'s policy: refuse when losing tracked
+edits would be a side effect of something else you asked for, and
+when discarding is the thing you asked for, save what can be saved
+and confirm the rest.
 
 Ask the app for a hard reset to a commit and it refuses while any
 tracked change is outstanding, staged or not: *"the working tree has
 uncommitted changes — commit or stash them first"*. A confirm dialog
 wasn't enough there because the loss would be collateral: you asked
-to move a branch, and what sits past that dialog is the one damage
-Git cannot walk back — no reflog entry, no dangling blob for
+to move a branch, and what sits past that dialog is the one kind of
+damage Git cannot walk back — no reflog entry, no dangling blob for
 whatever never got staged.
 
 Discarding is allowed, but routed. Discard an untracked file and the
 app moves it to the OS recycle bin rather than deleting it, because of
 what the clean demo showed: Git holds no copy of untracked content, so
-the app borrows a safety net from the operating system. (The one name
-class the recycle bin refuses, a Windows-reserved filename like `nul`,
-is deleted outright, and the app's confirm says so.) Discarding a
+the app borrows a safety net from the operating system. (Files whose
+names the recycle bin refuses, Windows-reserved ones like `nul`, are
+deleted outright, and the app's confirm says so.) Discarding a
 tracked file's edits runs `git restore` from the index: what you
 staged survives, what you never staged is gone for good, and every
 discard asks first.
