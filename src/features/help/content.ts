@@ -2374,10 +2374,11 @@ The card holds its new spot until GitHub's answer is known. GitHub sometimes rep
 failure for a move it did make, so while the board is on screen GitDesktop reads it again
 before saying anything: a move that landed stays where you put it with no message, and one
 GitHub refused goes back, with a message saying why. It goes back with that message too
-if no fresh read arrives in time, or straight away once no view on screen can show the
-card: you left the board, or switched to a view that hides it or hasn't loaded yet. If
-another card on the board is repositioned, archived, restored or removed before the read,
-the message comes at once, and the board's next read from GitHub settles where it sits.
+if no fresh read arrives in time, or straight away once no view on screen can check the
+move: you left the board, or switched to a view that hides the card or the one it was
+moved after, or one that hasn't loaded yet. If another card on the board is repositioned,
+archived, restored or removed before the read, the message comes at once, and the board's
+next read from GitHub settles where it sits.
 
 A row that would change nothing is greyed out, and the keyboard says **Already first** or
 **Already last** instead. Only cards that aren't archived count toward a column's ends:

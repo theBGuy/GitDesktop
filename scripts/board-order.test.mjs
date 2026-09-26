@@ -30,6 +30,8 @@ import {
   repositionRestoreTarget,
   repositionVerdict,
   resolveUndoAnchor,
+  routeRepositionPress,
+  staleRepositionPress,
   stepRepositionWatch,
   watchReposition,
 } from "../src/lib/git/queries/board-order.ts";
@@ -1030,6 +1032,53 @@ test("nextChaseTarget: the chase budget counts writes, never reset by a new pres
   const caughtUp = presses.slice(0, REORDER_CHASE_LIMIT);
   caughtUp.push([{ afterId: `t${REORDER_CHASE_LIMIT - 1}`, key: KEY_A }]);
   assert.equal(chase(caughtUp).end, "converge");
+});
+
+// ------------------------------------------------ press order (stale presses)
+
+test("staleRepositionPress: only a press older than the card's newest is stale", () => {
+  assert.equal(staleRepositionPress(2, 1), true);
+  assert.equal(staleRepositionPress(2, 2), false);
+  // Nothing newer recorded: never stale.
+  assert.equal(staleRepositionPress(undefined, 1), false);
+  assert.equal(staleRepositionPress(1, 2), false);
+});
+
+test("routeRepositionPress: a stale press is dropped whether or not a write is in flight", () => {
+  assert.equal(routeRepositionPress(2, 1, true), "drop");
+  assert.equal(routeRepositionPress(2, 1, false), "drop");
+  // The newest press folds into a live write, or runs its own.
+  assert.equal(routeRepositionPress(2, 2, true), "fold");
+  assert.equal(routeRepositionPress(2, 2, false), "run");
+  assert.equal(routeRepositionPress(undefined, 1, false), "run");
+});
+
+test("routeRepositionPress: presses that overtake each other still land the newest target", () => {
+  // Press 1 (to "old") and press 2 (to "new") on one card; press 2's cancel
+  // finishes first, so it reaches its write first. Driven the way the hook
+  // drives the route and the waiting slot.
+  const newest = 2;
+  const slots = new Map();
+  let live = null;
+  const arrive = (press, target) => {
+    const route = routeRepositionPress(newest, press, live !== null);
+    if (route === "fold") slots.set("card", { afterId: target, key: KEY_A });
+    if (route === "run") live = target;
+    return route;
+  };
+  assert.equal(arrive(2, "new"), "run");
+  // The overtaken press arrives while press 2 is writing: dropped, and it never
+  // reaches the slot the chase would send next.
+  assert.equal(arrive(1, "old"), "drop");
+  assert.equal(slots.size, 0);
+  assert.deepEqual(nextChaseTarget(slots.get("card"), live, 8), {
+    action: "converge",
+    consumed: false,
+  });
+  // Arriving after press 2's write finished, it still can't start one of its own.
+  live = null;
+  assert.equal(arrive(1, "old"), "drop");
+  assert.equal(live, null);
 });
 
 // ---------------------------------------------------------- repositionFailure

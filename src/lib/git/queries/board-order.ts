@@ -135,6 +135,30 @@ export interface DesiredRepositionTarget {
  *  one, and the settle answers it with a re-read instead of a patch. */
 export const REORDER_CHASE_LIMIT = 8;
 
+/** Whether a reposition press is OLDER than the newest one made on its card.
+ *  Presses are stamped in the order the user made them, but each one's
+ *  `onMutate` awaits a cancel before it paints or writes, and a cancel that tears
+ *  down a read in flight settles later than one that finds nothing — so a later
+ *  press can overtake an earlier one there, and the earlier must then give way. */
+export function staleRepositionPress(
+  newest: number | undefined,
+  press: number,
+): boolean {
+  return newest !== undefined && newest > press;
+}
+
+/** Where a press goes once it reaches its write: DROPPED when a newer press on
+ *  the card exists (that one runs or folds on its own, and this one would steer
+ *  the card back), else FOLDED into the card's write in flight, else RUN. */
+export function routeRepositionPress(
+  newest: number | undefined,
+  press: number,
+  inFlight: boolean,
+): "drop" | "fold" | "run" {
+  if (staleRepositionPress(newest, press)) return "drop";
+  return inFlight ? "fold" : "run";
+}
+
 /** What a live reposition does after a write lands. `consumed` says whether the
  *  waiting press is spent by this decision, so the caller clears it. */
 export type ChaseStep =
@@ -287,13 +311,13 @@ export function pickWatchLens<
 }
 
 /** What can happen to a watched lens, or to the watch itself. `inactive`: no
- *  active lens of the board draws the card, so no re-read will judge it.
- *  `retarget`: the watch moved to another lens of the board, whose read in flight
- *  started at `fetchStartedAt` (undefined when the watch didn't see one start;
- *  never another lens's read). `bound`: the wait
- *  ran out of time. `superseded`: the same card was repositioned again.
- *  `contested`: another write changed what the project's order or archived flags
- *  say, so the card's place proves nothing. */
+ *  active lens of the board can judge the move ({@link pickWatchLens}), so no
+ *  re-read will. `retarget`: the watch moved to another lens of the board, whose
+ *  read in flight started at `fetchStartedAt` (undefined when the watch didn't see
+ *  one start; never another lens's read). `bound`: the wait ran out of time.
+ *  `superseded`: the same card was repositioned again. `contested`: another write
+ *  changed what the project's order or archived flags say, so the card's place
+ *  proves nothing. */
 export type RepositionWatchEvent =
   | { type: "fetch"; at: number }
   | { type: "retarget"; fetchStartedAt: number | undefined }

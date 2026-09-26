@@ -62,6 +62,8 @@ import {
   repositionFailure,
   repositionRestoreTarget,
   resolveUndoAnchor,
+  routeRepositionPress,
+  staleRepositionPress,
   stepRepositionWatch,
   watchReposition,
 } from "./board-order";
@@ -1358,6 +1360,21 @@ const reorderCardKey = (args: {
 }) => JSON.stringify([args.repo, args.projectId, args.itemId]);
 
 /**
+ * Reposition presses in the order the user made them. Stamped in `onMutate`'s
+ * synchronous prefix, which query-core runs inside `mutate()` itself, so stamp
+ * order IS press order; everything after its first await can finish out of order
+ * ({@link staleRepositionPress}). Each stamp is kept by the press's variables
+ * object, the one query-core hands both `onMutate` and `mutationFn`.
+ */
+let repositionPresses = 0;
+const repositionPressOf = new WeakMap<object, number>();
+
+/** The newest press stamp per card ({@link reorderCardKey}): one number for each
+ *  card repositioned this session, kept so an older press arriving late can
+ *  always tell it was overtaken. */
+const newestRepositionPress = new Map<string, number>();
+
+/**
  * How many reposition writes are in flight against each BOARD, keyed
  * LENS-AGNOSTICALLY (repo + board, no query). A converged settle re-asserts its
  * payload over EVERY cached item of the board ({@link applyBoardOrder} is
@@ -1381,7 +1398,8 @@ const reorderBoardKey = (args: { repo: string; projectId: string }) =>
 const REORDER_RETRY_WAITS_MS = [300, 800];
 
 /** How one reposition burst ended. A FOLDED press is reconciled by the write it
- *  folded into; a CONVERGED one patches the payload's order over the cache. An
+ *  folded into, a STALE one by the newer press that overtook it; a CONVERGED one
+ *  patches the payload's order over the cache. An
  *  EXHAUSTED burst stopped short, and where the server ended up is no longer
  *  something this cache can say, so only a read is honest — patching would snap
  *  the card backwards. A write that FAILED every retry, the initial one or a
@@ -1390,6 +1408,7 @@ const REORDER_RETRY_WAITS_MS = [300, 800];
  *  the chase) and carries none. */
 type ReorderOutcome =
   | { kind: "folded" }
+  | { kind: "stale" }
   | { kind: "converged"; order: BoardOrder }
   | { kind: "exhausted"; failure?: RepositionFailure };
 
@@ -1454,8 +1473,9 @@ function releaseProjectRepositionVerdicts(repo: string, projectId: string) {
  * recovery re-read), holding the card where the user put it until then, since the
  * endpoint can error while committing. Committed stays put silently; refused
  * reports over the order that read drew. With no read to judge by — no active lens
- * of the board draws the card, a read FAILS, the bound runs out — it reports and
- * puts the card back ({@link repositionRestoreTarget}); CONTESTED reports only.
+ * of the board can judge the move ({@link pickWatchLens}), a read FAILS, the bound
+ * runs out — it reports and puts the card back ({@link repositionRestoreTarget});
+ * CONTESTED reports only.
  */
 function deferRepositionToast(
   queryClient: QueryClient,
@@ -1552,8 +1572,8 @@ function deferRepositionToast(
     projectId: ctx.projectId,
     settle: apply,
   };
-  // The watched lens left the screen: judge on another lens of the board that
-  // still draws the card, or report when none does.
+  // The watched lens left the screen: judge on another lens of the board that can
+  // still judge the move, or report when none can.
   const lensGone = () => {
     const next = findLens();
     if (next === undefined) {
@@ -1675,10 +1695,18 @@ export function useReorderBoardCard() {
       rich: boolean;
     }): Promise<ReorderOutcome> => {
       const card = reorderCardKey(args);
+      // `onMutate` always runs first and stamps every press; unstamped would mean
+      // no press to be older than.
+      const route = routeRepositionPress(
+        newestRepositionPress.get(card),
+        repositionPressOf.get(args) ?? Number.POSITIVE_INFINITY,
+        reorderingCards.has(card),
+      );
+      if (route === "drop") return { kind: "stale" };
       // This card already has a write in flight, under this lens or another: the
       // newest target waits for that write's chase, since a second request would
       // race it to the server.
-      if (reorderingCards.has(card)) {
+      if (route === "fold") {
         desiredRepositionTargets.set(card, {
           afterId: args.afterId,
           key: projectItemsKey(
@@ -1789,6 +1817,12 @@ export function useReorderBoardCard() {
       }
     },
     onMutate: async (args) => {
+      // Stamped before any await, so the stamp is this press's place in the order
+      // the user pressed.
+      const press = ++repositionPresses;
+      const card = reorderCardKey(args);
+      repositionPressOf.set(args, press);
+      newestRepositionPress.set(card, press);
       // Derived from the variables, like every other target here.
       const key = projectItemsKey(
         args.repo,
@@ -1800,19 +1834,21 @@ export function useReorderBoardCard() {
       // The user moved this card again: a failure report still waiting on a read
       // is moot, and this write moving the card would poison its anchor check. Any
       // OTHER card's waiting report goes out now, since this move shifts its order.
-      pendingRepositionVerdicts
-        .get(reorderCardKey(args))
-        ?.settle({ type: "superseded" });
+      pendingRepositionVerdicts.get(card)?.settle({ type: "superseded" });
       releaseProjectRepositionVerdicts(args.repo, args.projectId);
       await queryClient.cancelQueries({ queryKey: key });
       const before = boardPredecessorId(
         queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key),
         args.itemId,
       );
-      queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-        key,
-        (data) => reorderBoardItem(data, args.itemId, args.afterId),
-      );
+      // A newer press on this card that overtook this one across the await has
+      // painted already; this older splice landing over it would show the card
+      // where the user no longer wants it.
+      if (!staleRepositionPress(newestRepositionPress.get(card), press))
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (data) => reorderBoardItem(data, args.itemId, args.afterId),
+        );
       // The settle handlers read these rather than their own scope: they run on
       // the latest render's options, so a mid-flight repo or board switch would
       // otherwise patch the new board's cache with the old board's answer.
@@ -1840,8 +1876,10 @@ export function useReorderBoardCard() {
         return;
       }
       switch (outcome.kind) {
-        // The write this folded into owns the reconciliation for both of them.
+        // The write this folded into, or the newer press that overtook a stale
+        // one, owns the reconciliation.
         case "folded":
+        case "stale":
           return;
         // The burst stopped short, so the payload doesn't describe the board. A
         // FAILED write holds its board, card included, for its verdict. Out of
