@@ -247,9 +247,11 @@ app moves it to the OS recycle bin rather than deleting it, because of
 what the clean demo showed: Git holds no copy of untracked content, so
 the app borrows a safety net from the operating system. (Files whose
 names the recycle bin refuses, Windows-reserved ones like `nul`, are
-deleted outright, and the app's confirm says so.) Discarding a
-tracked file's edits runs `git restore` from the index: what you
-staged survives, what you never staged is gone for good, and every
+deleted outright, and the app's confirm says so.) Discarding
+selected tracked files runs `git restore` from the index: what you
+staged survives, what you never staged is gone for good. *Discard
+all changes* instead resets to the last commit, staged work
+included; its staged blobs join the dangling list above. Every
 discard asks first.
 
 Stage like it's a save button. Some days it is.
