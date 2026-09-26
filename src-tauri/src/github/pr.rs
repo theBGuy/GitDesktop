@@ -77,9 +77,9 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     let host_auth = crate::forge::session::github_auth_on_host(&host_hint).await;
 
     // Fallback when per-host truth is unavailable (old gh without `--json`, an
-    // inconclusive probe, an unregistered host): `gh auth status` exits 0 only when
-    // SOME host is logged in, and its report (stderr on old gh, stdout on newer)
-    // names the account(s) per host.
+    // inconclusive probe, an unregistered host): `gh auth status` exits non-zero when
+    // ANY host's account errors, so this arm deliberately keeps the host-global gate.
+    // Its report (stderr on old gh, stdout on newer) names the account(s) per host.
     let (authenticated, accounts) = match &host_auth {
         Some(auth) => (auth.authenticated, Vec::new()),
         None => match run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await {

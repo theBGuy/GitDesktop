@@ -167,11 +167,11 @@ fn pull_requests_ready(status: &ForgeStatus) -> bool {
 
 /// Background PR-sync readiness for many repos at once. Each provider's map is built
 /// once per tick, and only when the batch holds a repo that can read it: one gh probe
-/// for its registered hosts, one glab auth probe (plus a two-minute-cached login) per
-/// GitLab host, one `/user` read for the Bitbucket account. On a host its probe
-/// answers, readiness skips the repo slug: the PR poll derives it and fails loudly
-/// per repo. A GitHub repo whose `origin` host is unreadable (no origin, a local-path
-/// remote) is not ready: `gh_pr_poll` needs that origin, and
+/// for its registered hosts, one glab auth probe (plus a login lookup, cached two
+/// minutes on success) per GitLab host, one `/user` read for the Bitbucket account.
+/// On a host its probe answers, readiness skips the repo slug: the PR poll derives it
+/// and fails loudly per repo. A GitHub repo whose `origin` host is unreadable (no
+/// origin, a local-path remote) is not ready: `gh_pr_poll` needs that origin, and
 /// `github_host_for_repo`'s github.com default would otherwise read it as ready. A
 /// repo its provider's map can't key (see [`route_verdict`]) takes the per-repo
 /// `resolve_status` probe; a failed probe reads as not-ready rather than failing the

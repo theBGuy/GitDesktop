@@ -655,6 +655,7 @@ fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     // Source-derived, not live-reproduced: glab 1.105.0's client-go (v2.40.1) retries a
     // 429 until its Ratelimit-Reset inside that budget, so a long throttle can surface as
     // Go's bare "context deadline exceeded" with no rate-limit wording or status digits.
+    // Offline rather than RateLimited: a genuine network hang surfaces the same words.
     const NETWORKISH: [&str; 7] = [
         "timeout",
         "connection",
