@@ -238,7 +238,7 @@ pub struct ConvertedDraft {
 pub struct BoardOrder {
     /// Item ids in the board's new project-global order, first page (100).
     pub item_ids: Vec<String>,
-    /// True when the project holds more items than the payload page carries.
+    /// True when the project may hold more items than the payload page carries.
     pub truncated: bool,
 }
 
@@ -254,7 +254,12 @@ const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ rep
 const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const UNARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ unarchiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
-const POSITION_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!,$afterId:ID){ updateProjectV2ItemPosition(input:{projectId:$projectId,itemId:$itemId,afterId:$afterId}){ items(first:100){ pageInfo{hasNextPage} nodes{id} } } }";
+// No `pageInfo` in this payload: GitHub answers a 500 for it here while still
+// committing the write (probed 2026-09-26: 8/8 on a fixture project, 2/2 on a fresh
+// two-draft one), where `totalCount` and query-side `pageInfo` are served fine.
+const POSITION_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!,$afterId:ID){ updateProjectV2ItemPosition(input:{projectId:$projectId,itemId:$itemId,afterId:$afterId}){ items(first:100){ totalCount nodes{id} } } }";
+/// The payload's page size, which `truncated` is derived against.
+const ORDER_PAGE: usize = 100;
 
 const SEARCH_POINTER: &str = "/data/search";
 const CANDIDATE_REPOSITORY_POINTER: &str = "/repository/nameWithOwner";
@@ -578,25 +583,24 @@ fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
 fn parse_board_order(value: &Value) -> AppResult<BoardOrder> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct PageInfo {
-        has_next_page: bool,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
     struct Page {
         nodes: Option<Vec<Value>>,
-        page_info: PageInfo,
+        total_count: u64,
     }
     let page: Page =
         serde_json::from_value(value.pointer(ORDER_POINTER).cloned().unwrap_or(Value::Null))
             .map_err(|e| {
                 gh_unreadable("the board's new order", format!("could not parse items: {e}"))
             })?;
+    let nodes = page.nodes.unwrap_or_default();
+    // A full page counts as possibly more whatever `totalCount` says: that count can
+    // lag bulk deletes and re-adds by 15+ minutes (P10b probe). The frontend never
+    // reads this flag; `applyBoardOrder` leaves any lens holding an id the payload
+    // lacks, which is the guard a wrong `false` would fall back on.
+    let truncated = page.total_count > nodes.len() as u64 || nodes.len() >= ORDER_PAGE;
     Ok(BoardOrder {
-        item_ids: page
-            .nodes
+        item_ids: nodes
             .into_iter()
-            .flatten()
             .filter_map(|node| {
                 node["id"]
                     .as_str()
@@ -604,7 +608,7 @@ fn parse_board_order(value: &Value) -> AppResult<BoardOrder> {
                     .map(str::to_string)
             })
             .collect(),
-        truncated: page.page_info.has_next_page,
+        truncated,
     })
 }
 
@@ -1173,9 +1177,9 @@ mod tests {
         json!({"data":{"search":{"nodes":nodes,"pageInfo":{"hasNextPage":truncated}}}})
     }
 
-    fn order_page(nodes: Value, truncated: bool) -> Value {
+    fn order_page(nodes: Value, total_count: u64) -> Value {
         json!({"data":{"updateProjectV2ItemPosition":{"items":{
-            "nodes":nodes,"pageInfo":{"hasNextPage":truncated}
+            "nodes":nodes,"totalCount":total_count
         }}}})
     }
 
@@ -1194,13 +1198,45 @@ mod tests {
     }
 
     #[test]
-    fn board_order_preserves_payload_order_and_truncation() {
-        for truncated in [false, true] {
-            let value = order_page(json!([{"id":"PVTI_two"}, {"id":"PVTI_one"}]), truncated);
-            let order = parse_board_order(&value).unwrap();
-            assert_eq!(order.item_ids, ["PVTI_two", "PVTI_one"]);
-            assert_eq!(order.truncated, truncated);
-        }
+    fn board_order_preserves_payload_order() {
+        let value = order_page(json!([{"id":"PVTI_two"}, {"id":"PVTI_one"}]), 2);
+        let order = parse_board_order(&value).unwrap();
+        assert_eq!(order.item_ids, ["PVTI_two", "PVTI_one"]);
+        assert!(!order.truncated);
+    }
+
+    #[test]
+    fn board_order_truncation_is_derived_from_the_count_and_a_full_page() {
+        let nodes = |n: usize| {
+            json!((0..n)
+                .map(|i| json!({"id": format!("PVTI_{i}")}))
+                .collect::<Vec<_>>())
+        };
+        // The count reaching past the page: more items than the payload carries.
+        assert!(
+            parse_board_order(&order_page(nodes(2), 3))
+                .unwrap()
+                .truncated
+        );
+        // A full page, even under a count claiming it's everything (a lagging
+        // `totalCount`), may have more behind it.
+        let full = parse_board_order(&order_page(nodes(ORDER_PAGE), ORDER_PAGE as u64)).unwrap();
+        assert_eq!(full.item_ids.len(), ORDER_PAGE);
+        assert!(full.truncated);
+        // An exact count short of a full page is the whole board.
+        assert!(
+            !parse_board_order(&order_page(nodes(ORDER_PAGE - 1), (ORDER_PAGE - 1) as u64))
+                .unwrap()
+                .truncated
+        );
+        assert!(
+            !parse_board_order(&order_page(nodes(0), 0))
+                .unwrap()
+                .truncated
+        );
+        // The derivation counts what GitHub SENT, malformed nodes included.
+        let sent = json!([{"id":"PVTI_one"}, null]);
+        assert!(!parse_board_order(&order_page(sent, 2)).unwrap().truncated);
     }
 
     #[test]
@@ -1208,12 +1244,12 @@ mod tests {
         let order = parse_board_order(&order_page(
             json!([{"id":"PVTI_two"}, null, {}, {"id":42}, {"id":" "},
                 "bad", {"id":"PVTI_one"}]),
-            false,
+            7,
         ))
         .unwrap();
         assert_eq!(order.item_ids, ["PVTI_two", "PVTI_one"]);
         for nodes in [json!([]), Value::Null] {
-            assert!(parse_board_order(&order_page(nodes, false))
+            assert!(parse_board_order(&order_page(nodes, 0))
                 .unwrap()
                 .item_ids
                 .is_empty());
@@ -1221,13 +1257,16 @@ mod tests {
     }
 
     #[test]
-    fn board_order_requires_items_and_page_info() {
+    fn board_order_requires_items_and_total_count() {
         for value in [
             Value::Null,
             json!({"data":{"updateProjectV2ItemPosition":{}}}),
             json!({"data":{"updateProjectV2ItemPosition":{"items":null}}}),
             json!({"data":{"updateProjectV2ItemPosition":{"items":{"nodes":[]}}}}),
-            order_page(json!({"bad":"shape"}), false),
+            json!({"data":{"updateProjectV2ItemPosition":{"items":{
+                "nodes":[],"pageInfo":{"hasNextPage":false}
+            }}}}),
+            order_page(json!({"bad":"shape"}), 0),
         ] {
             let error = parse_board_order(&value).err().unwrap();
             assert_single_read_error(&error, "the board's new order");
@@ -1306,9 +1345,12 @@ mod tests {
         ] {
             assert_pointer(doc, pointer);
         }
-        for suffix in ["/nodes/id", "/pageInfo/hasNextPage"] {
-            assert_pointer(POSITION_MUTATION, &format!("{ORDER_POINTER}{suffix}"));
-        }
+        assert_pointer(POSITION_MUTATION, &format!("{ORDER_POINTER}/nodes/id"));
+        // The payload page GitHub will answer for: `pageInfo` there 500s while the
+        // write commits, so the count rides instead.
+        assert!(POSITION_MUTATION.contains("items(first:100){ totalCount nodes{id} }"));
+        assert!(!POSITION_MUTATION.contains("pageInfo"));
+        assert_eq!(ORDER_PAGE, 100);
         assert!(POSITION_MUTATION.contains("items(first:100)"));
         assert!(POSITION_MUTATION.contains("afterId:$afterId"));
         assert!(!POSITION_MUTATION.contains("orderBy"));

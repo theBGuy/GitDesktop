@@ -2370,12 +2370,14 @@ follows the card each time, and the board says where it landed.
 
 Hold the keys down and the board keeps up: the cards move as fast as you press, and
 GitDesktop writes where the card finally rests rather than every step it passed through.
-If GitHub refuses the write, the card goes back. GitHub sometimes reports a failure for a
-move it did make, so while the board is on screen GitDesktop reads it again before saying
-anything: a move that landed after all ends up where you put it with no message, and one
-that didn't gets a message saying why. The message still comes if no fresh read arrives
-in time, and straight away when you had already left the board, or when another card on
-it is repositioned, archived, restored or removed before the read.
+The card holds its new spot until GitHub's answer is known. GitHub sometimes reports a
+failure for a move it did make, so while the board is on screen GitDesktop reads it again
+before saying anything: a move that landed stays where you put it with no message, and one
+GitHub refused goes back, with a message saying why. It goes back with that message too
+if no fresh read arrives in time, or straight away once no view on screen can show the
+card: you left the board, or switched to a view that hides it or hasn't loaded yet. If
+another card on the board is repositioned, archived, restored or removed before the read,
+the message comes at once, and the board's next read from GitHub settles where it sits.
 
 A row that would change nothing is greyed out, and the keyboard says **Already first** or
 **Already last** instead. Only cards that aren't archived count toward a column's ends:

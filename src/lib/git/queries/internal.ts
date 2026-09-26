@@ -180,6 +180,25 @@ function watchBoardReads(
   });
 }
 
+/** Record every cached board lens under `queryKey` (a board's family, or a repo's
+ *  boards) as OWED a re-read, without starting one — for a settle that holds those
+ *  boards as they are until a later read. Notifies directly, since no re-read count
+ *  moves to do it. */
+export function oweBoardReads(
+  queryClient: QueryClient,
+  queryKey: QueryKey,
+): void {
+  watchBoardReads(
+    queryClient,
+    queryClient
+      .getQueryCache()
+      .findAll({ queryKey })
+      .map((query) => query.queryHash),
+    [],
+  );
+  for (const listener of boardRereadListeners) listener();
+}
+
 export function boardReadOwed(queryHash: string): boolean {
   return owedBoardReads.has(queryHash);
 }
@@ -218,9 +237,11 @@ export function boardReadFailed(queryHash: string): boolean {
  * costs nothing while the last write out is one of THESE —
  * projects.ts's `trackBoardWrite` decrements before any `onSettled` runs, so it sees a
  * clear count and performs the one real refetch. The gap: when the last one out
- * settles through `markProjectBoardsStale` (also projects.ts) instead, nothing
- * refetches at all. That is the point of that mode — its own patch is already on
- * screen, and the boards stay marked stale for the next natural read. A write under
+ * settles through `markProjectBoardsStale` or `holdBoardsForVerdict` (both
+ * projects.ts) instead, nothing refetches at once. That is the point of those
+ * modes — the first's own patch is already on screen, and the boards stay marked
+ * stale for the next natural read; the second records its board's lenses owed,
+ * and its caller arms the full re-read that judges the failed reposition. A write under
  * the shield (writeThroughBoards' `markStale: false`) marks only the FILTERED lenses
  * it patches, whose membership no payload can settle, and preserves every mark it
  * found — so a mark laid here still reaches its refetch. A lone write here sees zero
@@ -236,9 +257,9 @@ export function boardReadFailed(queryHash: string): boolean {
  * The refetching branch RESTARTS what it cancelled — `refetchQueries` under the
  * default active type re-runs every cancelled read that still has an enabled
  * observer, dataless ones included. The deferred branch does not, and relies on the
- * last write out to do it; when that last write settles through
- * projects.ts's `markProjectBoardsStale` instead, its own repo-wide rescue is what covers
- * the reads this branch left with nothing.
+ * last write out to do it; when that last write settles through one of the two
+ * modes above instead, its own repo-wide rescue is what covers the reads this
+ * branch left with nothing.
  */
 export function invalidateProjectBoards(
   queryClient: QueryClient,

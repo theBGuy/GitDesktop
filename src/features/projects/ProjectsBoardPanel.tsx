@@ -3807,7 +3807,7 @@ export function ProjectsBoardPanel({
     }
     // The board and the lens this write belongs to travel WITH it, the rule
     // `moveCard` states: `onMutate` pins this lens's key into the context its
-    // rollback and its settle read.
+    // restore and its settle read.
     reorder.mutate({
       repo: repoPath,
       projectId,

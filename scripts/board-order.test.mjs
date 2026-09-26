@@ -20,9 +20,14 @@ import {
   captureRemovedCard,
   failedRepositionTarget,
   insertBoardCardAfter,
+  nextChaseTarget,
+  pickWatchLens,
+  REORDER_CHASE_LIMIT,
   REPOSITION_SETTLE_SLACK_MS,
   rechunkPages,
   reorderBoardItem,
+  repositionFailure,
+  repositionRestoreTarget,
   repositionVerdict,
   resolveUndoAnchor,
   stepRepositionWatch,
@@ -658,18 +663,23 @@ const read = (data, extra = {}) => ({
   data,
   ...extra,
 });
-/** Feeds `events` in order; the last step, or the first that ends the watch. */
+/** Feeds `events` in order; the last step, or the first that ends the watch —
+ *  the whole step, so a report's `restore` is visible to the assertions. */
 const run = (...events) => {
   let watch = watch0();
   let step = { kind: "wait", watch };
   for (const event of events) {
     step = stepRepositionWatch(watch, event);
-    if (step.kind !== "wait") return step.kind;
+    if (step.kind !== "wait") return step;
     watch = step.watch;
   }
-  return step.kind;
+  return step;
 };
 const SETTLED = LAG; // a fetch started here is past the window
+/** A report that puts the card back, and one that leaves the cache alone. */
+const RESTORE = { kind: "report", restore: true };
+const NO_RESTORE = { kind: "report", restore: false };
+const SILENT = { kind: "silent" };
 
 test("stepRepositionWatch: the gate sits a clock-slack short of the replica window", () => {
   assert.equal(watch0().settledAt, LAG - REPOSITION_SETTLE_SLACK_MS);
@@ -677,64 +687,412 @@ test("stepRepositionWatch: the gate sits a clock-slack short of the replica wind
     REPOSITION_SETTLE_SLACK_MS > 0 && REPOSITION_SETTLE_SLACK_MS < 1_000,
   );
   // A read the recovery timer starts a coarsened tick early still counts.
-  assert.equal(run({ type: "fetch", at: LAG - 1 }, read(atTarget)), "silent");
+  assert.deepEqual(run({ type: "fetch", at: LAG - 1 }, read(atTarget)), SILENT);
+  // The gate is inclusive: a start exactly on it decides, a tick before it doesn't.
+  const gate = watch0().settledAt;
+  assert.deepEqual(run({ type: "fetch", at: gate }, read(atTarget)), SILENT);
+  assert.equal(
+    run({ type: "fetch", at: gate - 1 }, read(atTarget)).kind,
+    "wait",
+  );
 });
 
 test("stepRepositionWatch: a read started past the window decides both ways", () => {
-  assert.equal(run({ type: "fetch", at: SETTLED }, read(atTarget)), "silent");
-  assert.equal(run({ type: "fetch", at: SETTLED }, read(offTarget)), "report");
+  assert.deepEqual(run({ type: "fetch", at: SETTLED }, read(atTarget)), SILENT);
+  // The deciding read already drew GitHub's order, so nothing is put back over it.
+  assert.deepEqual(
+    run({ type: "fetch", at: SETTLED }, read(offTarget)),
+    NO_RESTORE,
+  );
 });
 
 test("stepRepositionWatch: settledness is the FETCH START, not when the read lands", () => {
   // Started inside the window: whatever it shows and however late it lands (the
   // stamp is all the step sees), it decides nothing.
-  assert.equal(run({ type: "fetch", at: 1_000 }, read(offTarget)), "wait");
-  assert.equal(run({ type: "fetch", at: 1_000 }, read(atTarget)), "wait");
+  assert.equal(run({ type: "fetch", at: 1_000 }, read(offTarget)).kind, "wait");
+  assert.equal(run({ type: "fetch", at: 1_000 }, read(atTarget)).kind, "wait");
   // A read already running when the watch began never stamped a start.
-  assert.equal(run(read(offTarget)), "wait");
+  assert.equal(run(read(offTarget)).kind, "wait");
 });
 
 test("stepRepositionWatch: a landed read's stamp is spent, so the next needs its own", () => {
   // The first read started early and landed; a second success with no fetch event
   // of its own must not borrow a later stamp it never had.
   assert.equal(
-    run({ type: "fetch", at: 1_000 }, read(offTarget), read(offTarget)),
+    run({ type: "fetch", at: 1_000 }, read(offTarget), read(offTarget)).kind,
     "wait",
   );
   // ...and a later settled start decides as usual.
-  assert.equal(
+  assert.deepEqual(
     run(
       { type: "fetch", at: 1_000 },
       read(offTarget),
       { type: "fetch", at: SETTLED },
       read(offTarget),
     ),
-    "report",
+    NO_RESTORE,
   );
 });
 
 test("stepRepositionWatch: optimistic patches and Load more appends are skipped", () => {
   const settledStart = { type: "fetch", at: SETTLED };
-  assert.equal(run(settledStart, read(offTarget, { manual: true })), "wait");
-  assert.equal(run(settledStart, read(offTarget, { fetchMore: true })), "wait");
-  // Skipping keeps the stamp: the real read after them still decides.
   assert.equal(
+    run(settledStart, read(offTarget, { manual: true })).kind,
+    "wait",
+  );
+  assert.equal(
+    run(settledStart, read(offTarget, { fetchMore: true })).kind,
+    "wait",
+  );
+  // Skipping keeps the stamp: the real read after them still decides.
+  assert.deepEqual(
     run(settledStart, read(atTarget, { manual: true }), read(offTarget)),
-    "report",
+    NO_RESTORE,
   );
 });
 
-test("stepRepositionWatch: every way no read can decide reports the error", () => {
-  assert.equal(run({ type: "error" }), "report");
-  assert.equal(run({ type: "bound" }), "report");
-  assert.equal(run({ type: "inactive" }), "report");
-  assert.equal(run({ type: "contested" }), "report");
+test("stepRepositionWatch: every way no read can decide reports and puts the card back", () => {
+  // Nothing drew GitHub's order over the held place, so the report restores.
+  assert.deepEqual(run({ type: "error" }), RESTORE);
+  assert.deepEqual(run({ type: "bound" }), RESTORE);
+  assert.deepEqual(run({ type: "inactive" }), RESTORE);
+  // A read already underway changes none of them.
+  assert.deepEqual(
+    run({ type: "fetch", at: SETTLED }, { type: "error" }),
+    RESTORE,
+  );
+  assert.deepEqual(
+    run({ type: "fetch", at: SETTLED }, { type: "inactive" }),
+    RESTORE,
+  );
+});
+
+test("stepRepositionWatch: a contested report leaves the card where the contester planned it", () => {
+  assert.deepEqual(run({ type: "contested" }), NO_RESTORE);
+  assert.deepEqual(
+    run({ type: "fetch", at: SETTLED }, { type: "contested" }),
+    NO_RESTORE,
+  );
+});
+
+test("stepRepositionWatch: the bound waits once for a deciding read in flight", () => {
+  const settledStart = { type: "fetch", at: SETTLED };
+  // Waiting arm: a read started past the window is still running.
+  const waited = run(settledStart, { type: "bound" });
+  assert.equal(waited.kind, "wait");
+  assert.equal(waited.watch.boundExtended, true);
+  // That read landing inside the grace decides as any deciding read does.
+  assert.deepEqual(
+    run(settledStart, { type: "bound" }, read(atTarget)),
+    SILENT,
+  );
+  assert.deepEqual(
+    run(settledStart, { type: "bound" }, read(offTarget)),
+    NO_RESTORE,
+  );
+  // Terminal arm: the second bound reports, however the read stands.
+  assert.deepEqual(
+    run(settledStart, { type: "bound" }, { type: "bound" }),
+    RESTORE,
+  );
+  // A read started INSIDE the window can't decide, so it earns no wait.
+  assert.deepEqual(
+    run({ type: "fetch", at: 1_000 }, { type: "bound" }),
+    RESTORE,
+  );
+  // An early read that landed spent its stamp: nothing is in flight to wait for.
+  assert.deepEqual(
+    run({ type: "fetch", at: 1_000 }, read(offTarget), { type: "bound" }),
+    RESTORE,
+  );
+  // A skipped optimistic patch keeps the stamp, so the read it rode is still owed.
+  assert.equal(
+    run(settledStart, read(offTarget, { manual: true }), { type: "bound" })
+      .kind,
+    "wait",
+  );
+  // The one wait survives a NEW deciding read starting inside the grace: the
+  // second bound still reports.
+  assert.deepEqual(
+    run(
+      settledStart,
+      { type: "bound" },
+      { type: "fetch", at: SETTLED + 1 },
+      { type: "bound" },
+    ),
+    RESTORE,
+  );
+});
+
+test("stepRepositionWatch: moving to another lens drops the old lens's stamp only", () => {
+  const moved = run({ type: "fetch", at: SETTLED }, { type: "retarget" });
+  assert.equal(moved.kind, "wait");
+  assert.equal(moved.watch.fetchStartedAt, undefined);
+  assert.equal(moved.watch.settledAt, watch0().settledAt);
+  // The old lens's read no longer decides, so a read landing unstamped waits...
+  assert.equal(
+    run({ type: "fetch", at: SETTLED }, { type: "retarget" }, read(offTarget))
+      .kind,
+    "wait",
+  );
+  // ...while the new lens's own settled read does.
+  assert.deepEqual(
+    run(
+      { type: "fetch", at: SETTLED },
+      { type: "retarget" },
+      { type: "fetch", at: SETTLED },
+      read(atTarget),
+    ),
+    SILENT,
+  );
+  // The bound's single wait is spent across a move, not granted again.
+  assert.deepEqual(
+    run(
+      { type: "fetch", at: SETTLED },
+      { type: "bound" },
+      { type: "retarget" },
+      { type: "fetch", at: SETTLED },
+      { type: "bound" },
+    ),
+    RESTORE,
+  );
+  // With no stamp after the move, the bound has nothing to wait for.
+  assert.deepEqual(
+    run(
+      { type: "fetch", at: SETTLED },
+      { type: "retarget" },
+      { type: "bound" },
+    ),
+    RESTORE,
+  );
 });
 
 test("stepRepositionWatch: the same card moved again releases the report silently", () => {
-  assert.equal(run({ type: "superseded" }), "silent");
-  assert.equal(
+  assert.deepEqual(run({ type: "superseded" }), SILENT);
+  assert.deepEqual(
     run({ type: "fetch", at: 1_000 }, { type: "superseded" }),
-    "silent",
+    SILENT,
   );
+  // Also inside the bound's grace.
+  assert.deepEqual(
+    run(
+      { type: "fetch", at: SETTLED },
+      { type: "bound" },
+      { type: "superseded" },
+    ),
+    SILENT,
+  );
+});
+
+// ---------------------------------------------------------- nextChaseTarget
+
+const KEY_A = ["repo", "r", "project-items", "p", null, false, false];
+const KEY_B = ["repo", "r", "project-items", "p", "status:done", false, false];
+
+test("nextChaseTarget: no press waiting is convergence, and consumes nothing", () => {
+  assert.deepEqual(nextChaseTarget(undefined, "a", 8), {
+    action: "converge",
+    consumed: false,
+  });
+  // Even with no rounds left: an empty slot never exhausts a burst.
+  assert.deepEqual(nextChaseTarget(undefined, null, 0), {
+    action: "converge",
+    consumed: false,
+  });
+});
+
+test("nextChaseTarget: a waiting press at the target just written converges and is spent", () => {
+  assert.deepEqual(nextChaseTarget({ afterId: "a", key: KEY_B }, "a", 8), {
+    action: "converge",
+    consumed: true,
+  });
+  // The top of the board is a real target, never "nothing waiting".
+  assert.deepEqual(nextChaseTarget({ afterId: null, key: KEY_A }, null, 0), {
+    action: "converge",
+    consumed: true,
+  });
+});
+
+test("nextChaseTarget: a waiting press elsewhere is written next, with its own lens", () => {
+  assert.deepEqual(nextChaseTarget({ afterId: "b", key: KEY_B }, "a", 1), {
+    action: "write",
+    afterId: "b",
+    key: KEY_B,
+    consumed: true,
+  });
+  assert.deepEqual(nextChaseTarget({ afterId: null, key: KEY_A }, "a", 8), {
+    action: "write",
+    afterId: null,
+    key: KEY_A,
+    consumed: true,
+  });
+});
+
+test("nextChaseTarget: out of rounds, a differing press ends the burst short and is spent", () => {
+  assert.deepEqual(nextChaseTarget({ afterId: "b", key: KEY_A }, "a", 0), {
+    action: "exhaust",
+    consumed: true,
+  });
+});
+
+/**
+ * The live write's loop, driven through the real step over a slot map the way the
+ * hook drives it: `presses[i]` are the folds landing while write `i` is in flight
+ * (write 0 is the initial one). Returns what was written and how it ended.
+ */
+function chase(presses, limit = REORDER_CHASE_LIMIT) {
+  const slots = new Map();
+  const written = ["start"];
+  let consumed = 0;
+  let afterId = "start";
+  const fold = (press) => slots.set("card", press);
+  for (const press of presses[0] ?? []) fold(press);
+  for (let round = 0; ; round += 1) {
+    const step = nextChaseTarget(slots.get("card"), afterId, limit - round);
+    if (step.consumed) {
+      slots.delete("card");
+      consumed += 1;
+    }
+    if (step.action !== "write")
+      return { written, end: step.action, consumed, left: slots.size };
+    afterId = step.afterId;
+    written.push(afterId);
+    for (const press of presses[round + 1] ?? []) fold(press);
+  }
+}
+
+test("nextChaseTarget: folded presses — the newest wins, and each is sent at most once", () => {
+  // Three presses fold during the initial write: only the newest is sent.
+  const pressA = { afterId: "x", key: KEY_A };
+  const pressB = { afterId: "y", key: KEY_B };
+  const pressC = { afterId: "z", key: KEY_B };
+  assert.deepEqual(chase([[pressA, pressB, pressC]]), {
+    written: ["start", "z"],
+    end: "converge",
+    consumed: 1,
+    left: 0,
+  });
+  // Nothing folds: the initial write converges on the spot with nothing spent.
+  assert.deepEqual(chase([]), {
+    written: ["start"],
+    end: "converge",
+    consumed: 0,
+    left: 0,
+  });
+  // A press back to the target just written converges without another write.
+  assert.deepEqual(chase([[pressA], [{ afterId: "x", key: KEY_B }]]), {
+    written: ["start", "x"],
+    end: "converge",
+    consumed: 2,
+    left: 0,
+  });
+});
+
+test("nextChaseTarget: the chase budget counts writes, never reset by a new press", () => {
+  // The budget the hook spends, pinned: a long key-hold must be able to run out.
+  assert.equal(REORDER_CHASE_LIMIT, 8);
+  // A press lands during every write, each to a new target: the budget's worth of
+  // follow-ups, then the next press is spent unsent and the burst ends short.
+  const presses = Array.from({ length: REORDER_CHASE_LIMIT + 2 }, (_, i) => [
+    { afterId: `t${i}`, key: i % 2 === 0 ? KEY_A : KEY_B },
+  ]);
+  const ended = chase(presses);
+  assert.equal(ended.end, "exhaust");
+  assert.deepEqual(
+    ended.written.slice(1),
+    Array.from({ length: REORDER_CHASE_LIMIT }, (_, i) => `t${i}`),
+  );
+  // One more decision than writes saw a press, and the slot is left empty for
+  // the next burst.
+  assert.equal(ended.consumed, REORDER_CHASE_LIMIT + 1);
+  assert.equal(ended.left, 0);
+  // The last round agreeing still converges, even with the budget spent.
+  const caughtUp = presses.slice(0, REORDER_CHASE_LIMIT);
+  caughtUp.push([{ afterId: `t${REORDER_CHASE_LIMIT - 1}`, key: KEY_A }]);
+  assert.equal(chase(caughtUp).end, "converge");
+});
+
+// ---------------------------------------------------------- repositionFailure
+
+test("repositionFailure: a press still waiting names both the target and the lens", () => {
+  // Nothing landed yet (the initial write failed) and a lens-B press is waiting.
+  assert.deepEqual(
+    repositionFailure({ afterId: "b", key: KEY_B }, null, "a", undefined),
+    { afterId: "b", watchKey: KEY_B, landedAfterId: undefined },
+  );
+  // A waiting press wins over the lens of the target just written, too.
+  assert.deepEqual(
+    repositionFailure({ afterId: null, key: KEY_A }, KEY_B, "a", "x"),
+    { afterId: null, watchKey: KEY_A, landedAfterId: "x" },
+  );
+});
+
+test("repositionFailure: with the slot consumed, the tried target goes with ITS lens", () => {
+  // The chase already sent lens B's press, and that write failed: judged on B.
+  assert.deepEqual(repositionFailure(undefined, KEY_B, "b", "a"), {
+    afterId: "b",
+    watchKey: KEY_B,
+    landedAfterId: "a",
+  });
+  // The burst's own target, never chased elsewhere: its own lens (null).
+  assert.deepEqual(repositionFailure(undefined, null, "a", undefined), {
+    afterId: "a",
+    watchKey: null,
+    landedAfterId: undefined,
+  });
+  // A landing at the top of the board is carried as null, not dropped.
+  assert.equal(
+    repositionFailure(undefined, null, "a", null).landedAfterId,
+    null,
+  );
+});
+
+// ---------------------------------------------------------- pickWatchLens
+
+test("pickWatchLens: the first active lens in preference order that draws the card", () => {
+  const draws = pagesOf([mk("a"), mk("c")]);
+  const hides = pagesOf([mk("a"), mk("b")]);
+  const lens = (name, active, data) => ({ name, active, data });
+  const pick = (...lenses) => pickWatchLens(lenses, "c")?.name;
+  // Preference order holds among eligible lenses.
+  assert.equal(
+    pick(lens("pressed", true, draws), lens("own", true, draws)),
+    "pressed",
+  );
+  // An inactive lens is skipped, however well it draws the card.
+  assert.equal(
+    pick(lens("pressed", false, draws), lens("own", true, draws)),
+    "own",
+  );
+  // A lens filtering the card out would judge a landed move failed: skipped.
+  assert.equal(
+    pick(lens("pressed", true, hides), lens("other", true, draws)),
+    "other",
+  );
+  // A lens with nothing cached yet can't say it draws the card.
+  assert.equal(pick(lens("loading", true, undefined)), undefined);
+  // Nothing eligible: no lens to judge on.
+  assert.equal(
+    pick(lens("a", false, draws), lens("b", true, hides)),
+    undefined,
+  );
+  assert.equal(pick(), undefined);
+});
+
+// ------------------------------------------------- repositionRestoreTarget
+
+test("repositionRestoreTarget: back to the last write that landed, never past it", () => {
+  // A landed write stuck: the pre-burst place would be a position GitHub never
+  // holds now.
+  assert.equal(repositionRestoreTarget("landed", "before"), "landed");
+  // Landing at the top is a real landing, not "nothing landed".
+  assert.equal(repositionRestoreTarget(null, "before"), null);
+  assert.equal(repositionRestoreTarget(null, undefined), null);
+});
+
+test("repositionRestoreTarget: nothing landed goes back to before the burst, or holds", () => {
+  assert.equal(repositionRestoreTarget(undefined, "before"), "before");
+  assert.equal(repositionRestoreTarget(undefined, null), null);
+  // Neither known: no splice, the card holds for the re-read.
+  assert.equal(repositionRestoreTarget(undefined, undefined), undefined);
 });
