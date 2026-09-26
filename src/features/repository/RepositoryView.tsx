@@ -672,10 +672,14 @@ export function RepositoryView() {
     // "refresh" — wrong for a never-signed-in host. Defaulting to "login" instead was
     // rejected because `gh auth login` re-requests the DEFAULT scope set (silently
     // narrowing extra granted scopes like `workflow`), while `refresh` preserves them —
-    // so the mode decision must never be made blind. Bitbucket needs no health probe (it
-    // deep-links to Settings), so it stays enabled on a known provider alone.
+    // so the mode decision must never be made blind. A rate limit hides it too: the
+    // credential is fine, and a fresh sign-in draws on the same exhausted quota.
+    // Bitbucket needs no health probe (it deep-links to Settings), so it stays enabled
+    // on a known provider alone.
     forgeProvider === "bitbucket" ||
-      (forgeProvider !== null && sessionHealth.data !== undefined),
+      (forgeProvider !== null &&
+        sessionHealth.data !== undefined &&
+        sessionHealth.data.state !== "rateLimited"),
   );
 
   // "repo • branch" in the OS title bar (and Alt-Tab) while a repo is open. No

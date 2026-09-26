@@ -113,6 +113,20 @@ impl Forge for GitLabForge {
     }
 }
 
+/// [`GitLabForge::status`]'s auth and login for every repo on `host`, with `repo`
+/// unset, for the background tick. `repo_path` must be a repo whose origin pins
+/// `host`: the runner addresses both probes through it. A missing glab reads as
+/// not installed, so no `--version` spawn is needed.
+pub(crate) async fn host_status(repo_path: &str, host: &str) -> ForgeStatus {
+    let authenticated = match run_glab_raw(Some(repo_path), &["auth", "status"], GLAB_TIMEOUT).await
+    {
+        Err(AppError::GlabNotFound) => return gitlab_status(false, false, host, None, None),
+        probe => probe.is_ok_and(|o| o.code == 0),
+    };
+    let login = cached_host_status_login(host, repo_path).await;
+    gitlab_status(true, authenticated, host, None, login)
+}
+
 // ── Repository listing (clone browser) ───────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -3529,17 +3543,28 @@ struct StatusLogin {
 
 const STATUS_LOGIN_TTL: Duration = Duration::from_secs(120);
 type StatusLoginCell = Arc<AsyncMutex<Option<StatusLogin>>>;
-static STATUS_LOGINS: LazyLock<Mutex<HashMap<String, StatusLoginCell>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type StatusLoginCache = LazyLock<Mutex<HashMap<String, StatusLoginCell>>>;
+static STATUS_LOGINS: StatusLoginCache = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Keyed by host rather than repo path; see [`cached_host_status_login`].
+static HOST_STATUS_LOGINS: StatusLoginCache = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn status_login_cell(cache: &StatusLoginCache, key: &str) -> StatusLoginCell {
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(cache.entry(key.to_string()).or_default())
+}
 
 /// Re-probe on the next request after two minutes to bound stale ownership after
 /// reconnects or origin edits, at one spawn per repo per window. Failures retry;
 /// the per-repo async lock coalesces concurrent successful probes.
 async fn cached_status_login(repo_path: &str) -> Option<String> {
-    let cell = {
-        let mut cache = STATUS_LOGINS.lock().unwrap_or_else(|e| e.into_inner());
-        Arc::clone(cache.entry(repo_path.to_string()).or_default())
-    };
+    let cell = status_login_cell(&STATUS_LOGINS, repo_path);
+    resolve_status_login(&cell, current_user_login(repo_path)).await
+}
+
+/// [`cached_status_login`] keyed by host, so the background tick pays one spawn per
+/// host per window however many repos share it. `repo_path` must pin `host`.
+async fn cached_host_status_login(host: &str, repo_path: &str) -> Option<String> {
+    let cell = status_login_cell(&HOST_STATUS_LOGINS, host);
     resolve_status_login(&cell, current_user_login(repo_path)).await
 }
 
