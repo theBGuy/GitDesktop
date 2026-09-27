@@ -503,11 +503,11 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
 
   // Close FIRST, as Automation history does: the popover's focus return to its
   // trigger would otherwise steal focus from the dialog opening over it.
-  const openDetails = (n: AppNotification, detail: string) => {
+  const openDetails = (summary: string, detail: string) => {
     onClose();
     useErrorDialog.getState().open({
       label: null,
-      summary: n.title,
+      summary,
       fullText: detail,
       long: true,
     });
@@ -572,6 +572,9 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
                 key={task.key}
                 task={task}
                 crossRepo={task.target.repoPath !== repoPath}
+                onOpenDetails={(detail) =>
+                  openDetails(task.title || "Pull request", detail)
+                }
               />
             ))}
           </div>
@@ -622,7 +625,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
               n={n}
               onNavigate={() => navigate(n)}
               onDelete={() => handleDelete(n.id)}
-              onOpenDetails={(detail) => openDetails(n, detail)}
+              onOpenDetails={(detail) => openDetails(n.title, detail)}
             />
           ))}
         </div>
@@ -703,8 +706,8 @@ function LiveTaskRow({
 }
 
 /** A cancelled/failed automation run, kept in the dock (unlike a live row) with
- *  Re-run + Dismiss. Failed rows carry the error in the subtitle's tooltip and
- *  render "Failed" in the destructive token (word + color, never color alone).
+ *  Re-run + Dismiss. Failed rows carry the error behind a full-text disclosure
+ *  and render "Failed" in the destructive token (word + color, never color alone).
  *
  *  Re-run just fires `task.rerun()` — it does NOT remove the row here. The row is
  *  removed inside the runner only once the replacement run actually registers, so
@@ -714,14 +717,20 @@ function LiveTaskRow({
 function StoppedTaskRow({
   task,
   crossRepo,
+  onOpenDetails,
 }: {
   task: ReviewTask;
   crossRepo: boolean;
+  /** Show a long error in the ErrorDialog. */
+  onOpenDetails: (detail: string) => void;
 }) {
   const ModeIcon = task.mode === "security" ? ShieldCheckIcon : SparkleIcon;
   const modeName = task.mode === "security" ? "Security audit" : "Review";
   const failed = task.phase === "error";
   const title = task.title || "Pull request";
+  const detailId = useId();
+  const detail = failed && task.error.trim() ? task.error : undefined;
+  const [expanded, setExpanded] = useState(false);
   // Static "ran for X" — only when both stamps exist and are ordered (a run
   // cancelled while queued never entered "running", so it carries no start).
   const ranFor =
@@ -730,44 +739,87 @@ function StoppedTaskRow({
       : null;
 
   return (
-    <div className="flex items-start gap-2 px-3 py-2 not-last:border-b">
-      <ModeIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-xs font-medium" title={task.title}>
-          {title}
-        </p>
-        <p
-          className="mt-0.5 truncate text-[11px] text-muted-foreground"
-          title={failed ? task.error : undefined}
+    <div className="not-last:border-b">
+      <div className="flex items-start gap-2 px-3 py-2">
+        <ModeIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-medium" title={task.title}>
+            {title}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {modeName} ·{" "}
+            {failed ? (
+              <span className="text-destructive">Failed</span>
+            ) : (
+              "Cancelled"
+            )}
+            {ranFor ? ` · ran ${ranFor}` : ""}
+            {crossRepo ? ` · ${task.target.repoName}` : ""}
+          </p>
+        </div>
+        {detail && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 self-start text-muted-foreground"
+            aria-expanded={expanded}
+            aria-controls={detailId}
+            aria-label={`Full error — ${title}`}
+            title={expanded ? "Hide full error" : "Show full error"}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            <CaretDownIcon
+              className={cn(
+                "transition-transform duration-200 ease-out motion-reduce:transition-none",
+                expanded && "rotate-180",
+              )}
+            />
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="xs"
+          className="shrink-0"
+          aria-label={`Re-run ${title}`}
+          // The row itself isn't focusable, so the error describes the action
+          // it bears on.
+          aria-describedby={detail ? detailId : undefined}
+          onClick={() => task.rerun?.()}
         >
-          {modeName} ·{" "}
-          {failed ? (
-            <span className="text-destructive">Failed</span>
-          ) : (
-            "Cancelled"
-          )}
-          {ranFor ? ` · ran ${ranFor}` : ""}
-          {crossRepo ? ` · ${task.target.repoName}` : ""}
-        </p>
+          Re-run
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="shrink-0 self-start text-muted-foreground"
+          aria-label={`Dismiss "${title}"`}
+          onClick={() => resetReview(task.key)}
+        >
+          <XIcon />
+        </Button>
       </div>
-      <Button
-        variant="ghost"
-        size="xs"
-        className="shrink-0"
-        aria-label={`Re-run ${title}`}
-        onClick={() => task.rerun?.()}
-      >
-        Re-run
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        className="shrink-0 self-start text-muted-foreground"
-        aria-label={`Dismiss "${title}"`}
-        onClick={() => resetReview(task.key)}
-      >
-        <XIcon />
-      </Button>
+      {detail && (
+        // The Re-run button's aria-describedby target in both states, since
+        // describedby resolves a hidden element's text.
+        <pre
+          id={detailId}
+          hidden={!expanded}
+          className="mr-3 mb-2 ml-9 max-h-40 overflow-y-auto bg-muted/50 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap wrap-anywhere select-text motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 motion-safe:duration-200 motion-safe:ease-out"
+        >
+          {detail}
+        </pre>
+      )}
+      {detail && expanded && presentError(detail).long && (
+        <div className="-mt-1 mb-1.5 ml-7">
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => onOpenDetails(detail)}
+          >
+            Open in Details
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import { RelativeTime } from "@/components/relative-time";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -152,12 +153,11 @@ export function GitLabWebhooksSection({
                 </p>
               </div>
               {h.alertStatus !== "executable" && (
-                <Badge
+                <StatusDetailChip
                   variant="destructive"
-                  title="GitLab disabled this hook after repeated failures — check the deliveries, then save it again to re-enable."
-                >
-                  disabled
-                </Badge>
+                  label="disabled"
+                  detail="GitLab disabled this hook after repeated failures — check the deliveries, then save it again to re-enable."
+                />
               )}
               {confirming === h.id ? (
                 <InlineConfirm

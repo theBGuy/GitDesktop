@@ -3513,7 +3513,7 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   expired* badge with a one-click **Reconnect** (GitHub reconnects the active account;
   switch first if it's another one). A GitHub account that hit the API rate limit shows
   a *rate limited* badge instead, with no Reconnect since signing in again can't lift
-  it; hover the badge for GitHub's message and, on the active account, when access
+  it; select the badge for GitHub's message and, on the active account, when access
   resumes if GitHub reports it. A GitLab host gets the same badge when \`glab\` names
   the limit. GitDesktop also **warns before a token lapses**: a
   GitLab personal-access-token session shows *token expires in N days* once it's within

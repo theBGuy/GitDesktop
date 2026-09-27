@@ -6,7 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -119,9 +119,11 @@ export function BitbucketWebhooksSection({
                 </p>
               </div>
               {!h.active && (
-                <Badge variant="secondary" title="This webhook is inactive.">
-                  inactive
-                </Badge>
+                <StatusDetailChip
+                  variant="secondary"
+                  label="inactive"
+                  detail="Bitbucket isn't sending events to this webhook. Edit it and turn on Active to resume deliveries."
+                />
               )}
               {confirming === h.uuid ? (
                 <InlineConfirm

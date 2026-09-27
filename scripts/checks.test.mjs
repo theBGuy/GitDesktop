@@ -215,6 +215,7 @@ const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
+const titledBadge = scanner("titled-badge");
 const ungatedProducer = scanner("ungated-notification-producer");
 const handRolledStoreOpen = scanner("hand-rolled-store-open");
 const rawStoreReload = scanner("raw-store-reload");
@@ -1414,6 +1415,48 @@ test("titled-disabled-trigger reports every site now that the allowlist is empty
     "src/features/conversations/ProjectsPopover.tsx:1",
     "src/features/issues/SomeNewPicker.tsx:1",
   ]);
+});
+
+test("titled-badge flags a title on a Badge, on one line or wrapped", () => {
+  assert.deepEqual(
+    titledBadge('<Badge variant="secondary" title="Managed on the group">'),
+    [1],
+  );
+  // The formatter's shape: the title several props into a split open tag, past
+  // an arrow-valued prop the attribute run must step over.
+  const wrapped = [
+    '<div className="flex items-center gap-2">',
+    "  <Badge",
+    '    variant="outline"',
+    "    onClick={() => setOpen(true)}",
+    '    className="shrink-0 text-warning"',
+    '    title={lockReason ? `Locked: ${lockReason}` : "Locked"}',
+    "  >",
+    "    Locked",
+    "  </Badge>",
+    "</div>",
+  ].join("\n");
+  assert.deepEqual(titledBadge(wrapped), [2]);
+});
+
+test("titled-badge leaves untitled badges and titles on other elements alone", () => {
+  for (const source of [
+    '<Badge variant="secondary">protected</Badge>',
+    '<StatusDetailChip variant="secondary" label="Inherited" detail={hint} />',
+    // A clip-titled sibling beside a plain badge: the open tag bounds the scan,
+    // so the neighbour's title never pairs with the badge.
+    '<Badge variant="secondary">inactive</Badge><p className="truncate" title={h.url}>{h.url}</p>',
+    '<p className="truncate" title={h.url}>{h.url}</p><Badge variant="secondary">inactive</Badge>',
+    // Look-alike props and a different component sharing the prefix.
+    '<Badge subtitle="x" data-title="y">z</Badge>',
+    '<BadgeList title="Labels" />',
+  ])
+    assert.deepEqual(titledBadge(source), [], `should ignore ${source}`);
+  // Comment stripping keeps prose that NAMES the banned shape clean.
+  assert.deepEqual(
+    titledBadge('// never <Badge title="…"> — use the chip'),
+    [],
+  );
 });
 
 test("ungated-notification-producer flags both routes around the gate", () => {

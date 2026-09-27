@@ -8,6 +8,7 @@ import {
 import { useSelector } from "@tanstack/react-store";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
@@ -35,6 +36,12 @@ import { McpServerDialog } from "./mcp/McpServerDialog";
 import { PerRepoStateControl } from "./mcp/PerRepoStateControl";
 import { repoBasename } from "./mcp/shared";
 import { settingsFormOpts } from "./settings-form";
+
+/** The row's small warning chip, restyled from the Badge base it rides. Its
+ *  hover/open tint is warning-keyed: the secondary variant's own tint matches
+ *  this bg-muted in dark themes, so it would never show. */
+const MCP_CHIP_CLASS =
+  "h-auto shrink-0 rounded border-0 bg-muted px-1.5 py-0.5 text-[10px] text-warning hover:bg-warning/20 aria-expanded:bg-warning/20";
 
 export const McpServersSection = withForm({
   ...settingsFormOpts,
@@ -360,20 +367,20 @@ export const McpServersSection = withForm({
                         {server.transport}
                       </span>
                       {incomplete && (
-                        <span
-                          className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-warning"
-                          title={`Set the ${server.transport === "stdio" ? "command" : "URL"} before enabling — edit this server.`}
-                        >
-                          needs setup
-                        </span>
+                        <StatusDetailChip
+                          variant="secondary"
+                          className={MCP_CHIP_CLASS}
+                          label="needs setup"
+                          detail={`Set the ${server.transport === "stdio" ? "command" : "URL"} before enabling — edit this server.`}
+                        />
                       )}
                       {hostNotAllowed && (
-                        <span
-                          className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-warning"
-                          title="The CLI connects to this host outside GitDesktop's AI host allowlist. Allow the host in AI settings to clear this."
-                        >
-                          host not allowed
-                        </span>
+                        <StatusDetailChip
+                          variant="secondary"
+                          className={MCP_CHIP_CLASS}
+                          label="host not allowed"
+                          detail="The CLI connects to this host outside GitDesktop's AI host allowlist. Allow the host in AI settings to clear this."
+                        />
                       )}
                       {server.description && (
                         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">

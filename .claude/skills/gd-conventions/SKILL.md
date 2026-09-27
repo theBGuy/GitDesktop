@@ -171,6 +171,10 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   the same hook directly: `focusableWhenDisabled`/`aria-describedby`/
   `wrapperTitle` passed straight through, plus its own sr-only reason span
   alongside (`src/features/welcome/CloneRepoDialog.tsx` is the reference).
+- A status badge or chip whose explanation isn't visible text is a
+  `StatusDetailChip` (`src/components/status-detail-chip.tsx`) — a click popover
+  keyboard, touch, and AT all reach, and a plain Badge when there's no detail. A
+  `title` alone is mouse-only; the `titled-badge` guard fails on it on a Badge.
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last
   action (the issue views); a surface whose right-slot action is itself a

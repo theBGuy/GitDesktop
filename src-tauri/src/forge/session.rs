@@ -580,19 +580,47 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
         let accounts = &map[host];
         for acct in accounts {
             let mut h = gh_account_health(host, acct);
-            // Expiry only for the active Healthy account on this host.
-            if h.state == SessionState::Healthy && acct.active {
-                apply_gh_expiry(&mut h, host).await;
-            }
-            // Reset time only for the active account too: `gh api` spends the host's
-            // ACTIVE token, so another account's reading would be the wrong quota.
-            if h.state == SessionState::RateLimited && acct.active {
-                h.reset_at = gh_rate_limit_reset(host).await;
+            match account_follow_up(h.state, acct.active) {
+                AccountFollowUp::Expiry => apply_gh_expiry(&mut h, host).await,
+                AccountFollowUp::ResetTime => h.reset_at = gh_rate_limit_reset(host).await,
+                AccountFollowUp::Disprove => {
+                    let token_present = gh_token_present(host).await;
+                    h = disprove_broken(h, token_present, gh_rate_limit_probe(host).await);
+                }
+                AccountFollowUp::None => {}
             }
             out.push(h);
         }
     }
     out
+}
+
+/// The follow-up probe one account's reading earns in the accounts list.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountFollowUp {
+    None,
+    /// Healthy: read the token expiry.
+    Expiry,
+    /// RateLimited on its own reading: fetch the reset time.
+    ResetTime,
+    /// Broken after the shared re-probe: the rate_limit disproof, which reads its
+    /// reset from the same response, so no separate reset fetch follows.
+    Disprove,
+}
+
+/// Only the active account earns a follow-up: every probe spends the host's ACTIVE
+/// token (`gh auth token` / `gh api --hostname`), so another account's result would
+/// describe the wrong credential or quota.
+fn account_follow_up(state: SessionState, active: bool) -> AccountFollowUp {
+    if !active {
+        return AccountFollowUp::None;
+    }
+    match state {
+        SessionState::Healthy => AccountFollowUp::Expiry,
+        SessionState::RateLimited => AccountFollowUp::ResetTime,
+        SessionState::Broken => AccountFollowUp::Disprove,
+        _ => AccountFollowUp::None,
+    }
 }
 
 /// One gh account's health — the single classifier behind the per-repo path and the
@@ -2051,6 +2079,73 @@ mod tests {
             assert_eq!(health.detail.as_deref(), Some(GH_TOKEN_INVALID));
             assert_eq!(health.reset_at, None);
         }
+    }
+
+    // ── github_accounts_health's per-account follow-up ──
+    /// Each account's reading in the accounts list, paired with its follow-up.
+    fn accounts_follow_ups(json: &str) -> Vec<(SessionHealth, AccountFollowUp)> {
+        let map = parse_hosts(json);
+        map["github.com"]
+            .iter()
+            .map(|a| {
+                let h = gh_account_health("github.com", a);
+                let follow_up = account_follow_up(h.state, a.active);
+                (h, follow_up)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn accounts_disprove_only_the_active_accounts_broken_reading() {
+        let json = format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"error","active":false,"login":"alt","error":{e}}},{{"state":"error","active":true,"login":"main","error":{e}}}]}}}}"#,
+            e = serde_json::to_string(GH_TOKEN_INVALID).unwrap(),
+        );
+        let [(alt, alt_follow_up), (main, main_follow_up)] =
+            <[_; 2]>::try_from(accounts_follow_ups(&json)).ok().unwrap();
+        // The probes would spend main's token, so alt's Broken stands unprobed.
+        assert_eq!(alt.state, SessionState::Broken);
+        assert_eq!(alt_follow_up, AccountFollowUp::None);
+        assert_eq!(main.state, SessionState::Broken);
+        assert_eq!(main_follow_up, AccountFollowUp::Disprove);
+
+        let exhausted = "HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: 1790000000\r\n\r\n{}";
+        let limited = disprove_broken(main.clone(), true, Ok(gh_out(0, exhausted)));
+        assert_eq!(limited.state, SessionState::RateLimited);
+        assert_eq!(limited.detail, None);
+        assert_eq!(limited.reset_at, Some(1_790_000_000));
+        let no_token = disprove_broken(main.clone(), false, Ok(gh_out(0, exhausted)));
+        assert_eq!(no_token.state, SessionState::Broken);
+        let failed = disprove_broken(main, true, Err(AppError::Timeout(15)));
+        assert_eq!(failed.state, SessionState::Broken);
+    }
+
+    #[test]
+    fn accounts_follow_up_is_one_probe_per_active_reading() {
+        let json = format!(
+            r#"{{"hosts":{{"github.com":[{{"state":"error","active":true,"login":"main","error":{}}}]}}}}"#,
+            serde_json::to_string(GH_403_PRIMARY).unwrap(),
+        );
+        let (limited, follow_up) = accounts_follow_ups(&json).remove(0);
+        assert_eq!(limited.state, SessionState::RateLimited);
+        assert_eq!(follow_up, AccountFollowUp::ResetTime);
+
+        assert_eq!(
+            account_follow_up(SessionState::Healthy, true),
+            AccountFollowUp::Expiry
+        );
+        for state in [
+            SessionState::Healthy,
+            SessionState::RateLimited,
+            SessionState::Broken,
+            SessionState::Offline,
+        ] {
+            assert_eq!(account_follow_up(state, false), AccountFollowUp::None);
+        }
+        assert_eq!(
+            account_follow_up(SessionState::Offline, true),
+            AccountFollowUp::None
+        );
     }
 
     #[test]

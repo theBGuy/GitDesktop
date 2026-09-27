@@ -18,6 +18,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { SelectClipText } from "@/components/select-clip-text";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -336,6 +337,7 @@ function WorktreeRow({
   const itemLabel = (label: string, otherReason?: string) =>
     worktreeItemLabel(label, isRemoving, otherReason);
   const openTitle = isCurrent ? "Current worktree" : "Open this worktree";
+  const lockDetail = isLocked ? lockReason.trim() : "";
 
   return (
     <div
@@ -383,7 +385,6 @@ function WorktreeRow({
               isCurrent={isCurrent}
               isDetached={isDetached}
               isLocked={isLocked}
-              lockReason={lockReason}
               isRemoving={isRemoving}
             />
           </span>
@@ -399,6 +400,29 @@ function WorktreeRow({
           </span>
         )}
       </button>
+
+      {/* A sibling, never nested: the row is itself a button, and the reason
+          chip is one too. The option announces the lock via RowTags, so the
+          reasonless tag stays out of the AT tree rather than repeat it. */}
+      {isLocked &&
+        (lockDetail ? (
+          <StatusDetailChip
+            variant="outline"
+            className="shrink-0 text-warning"
+            icon={<LockSimpleIcon data-icon="inline-start" />}
+            label="Locked"
+            detail={lockDetail}
+          />
+        ) : (
+          <Badge
+            aria-hidden
+            variant="outline"
+            className="shrink-0 text-warning"
+          >
+            <LockSimpleIcon data-icon="inline-start" />
+            Locked
+          </Badge>
+        ))}
 
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -481,14 +505,12 @@ function RowTags({
   isCurrent,
   isDetached,
   isLocked,
-  lockReason,
   isRemoving,
 }: {
   isMain: boolean;
   isCurrent: boolean;
   isDetached: boolean;
   isLocked: boolean;
-  lockReason: string;
   isRemoving: boolean;
 }) {
   return (
@@ -516,16 +538,8 @@ function RowTags({
           Detached
         </Badge>
       )}
-      {isLocked && (
-        <Badge
-          variant="outline"
-          className="shrink-0 text-warning"
-          title={lockReason ? `Locked: ${lockReason}` : "Locked"}
-        >
-          <LockSimpleIcon data-icon="inline-start" />
-          Locked
-        </Badge>
-      )}
+      {/* The visible lock sits at the row's right edge, outside the option. */}
+      {isLocked && <span className="sr-only">Locked</span>}
     </>
   );
 }

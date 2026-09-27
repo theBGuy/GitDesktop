@@ -1,6 +1,7 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -220,12 +221,11 @@ function VariableRow({
           {variable.key}
         </p>
         {variable.environmentScope !== "*" && (
-          <Badge
+          <StatusDetailChip
             variant="secondary"
-            title="Scoped to this environment (scopes are managed on GitLab)"
-          >
-            {variable.environmentScope}
-          </Badge>
+            label={variable.environmentScope}
+            detail="Scoped to this environment (scopes are managed on GitLab)"
+          />
         )}
         {variable.protected && <Badge variant="secondary">protected</Badge>}
         {variable.masked && <Badge variant="secondary">masked</Badge>}

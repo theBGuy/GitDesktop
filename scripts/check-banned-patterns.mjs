@@ -321,6 +321,17 @@ const TITLED_TRIGGER_DISABLED_RE = new RegExp(
   "g",
 );
 
+// A `<Badge>` whose explanation rides a `title` prop — mouse-only, since keyboard,
+// touch, and assistive tech never see a title. Bounded to the OPEN TAG rather than
+// a two-token proximity pair: badges sit beside clip-titled siblings constantly,
+// and a PAIR_GAP window would pair one with the other. The attribute run steps
+// over `=>` arrows but stops at any other `>`, and runs over the joined view, so
+// a formatter-wrapped tag is one match. The `\s` before `title` keeps
+// `subtitle=` and `data-title=` out. Accepted evasions, zero-instance today: an
+// attribute value holding JSX or a `>` comparison ahead of the title ends the tag
+// early, and a title spread in through `{...props}` is invisible.
+const TITLED_BADGE_RE = /<Badge\b(?:=>|[^>=]|=(?!>))*?\stitle\s*=/g;
+
 // Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
 // hit inside them could only ever be silenced by an allowlist entry, never
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
@@ -1298,6 +1309,16 @@ export const CHECKS = [
     allowlist: [],
     message:
       "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
+  },
+  {
+    name: "titled-badge",
+    appliesTo: notVendoredUi,
+    scan: perFile(TITLED_BADGE_RE),
+    // Empty on purpose: every titled badge converted to StatusDetailChip, so a
+    // hit is a new instance of the class.
+    allowlist: [],
+    message:
+      "a Badge that explains itself through `title` is mouse-only — keyboard, touch, and screen-reader users never reach the detail; render StatusDetailChip (src/components/status-detail-chip.tsx) with the text as `detail`, which opens it in a click popover and falls back to the plain Badge when there is none; a title that only repeats the badge's visible text carries nothing, so drop it; a site that genuinely cannot take the chip needs an allowlist entry with rationale",
   },
   {
     name: "ungated-notification-producer",

@@ -2,7 +2,7 @@ import { CaretLeftIcon, PlusIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Badge } from "@/components/ui/badge";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -184,9 +184,11 @@ function ProtectedBranchRow({
           {branch.name}
         </p>
         {branch.inherited && (
-          <Badge variant="secondary" title={inheritedHint}>
-            Inherited
-          </Badge>
+          <StatusDetailChip
+            variant="secondary"
+            label="Inherited"
+            detail={inheritedHint}
+          />
         )}
         {confirming ? (
           <InlineConfirm

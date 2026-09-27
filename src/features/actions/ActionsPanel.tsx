@@ -53,6 +53,12 @@ import {
   statusLabel,
 } from "./status";
 
+/** GitHub caps filtered run queries: totals floor at 2,500 and only 1,000 rows
+ *  page (measured 2026-09-27). A branch-filtered total is an unmarked floor past
+ *  a window paging can never reach, so the count line anchors on the window.
+ *  The cap is GitHub's, so other providers' totals render as reported. */
+const FILTERED_RUN_WINDOW = 1000;
+
 /** The loaded pages as one list, deduped by run id with the first occurrence
  *  winning. Page-number paging over a list that PREPENDS shifts rows across the
  *  boundary whenever a refetch lands after new runs started, so the same run can come
@@ -131,12 +137,8 @@ export function ActionsPanel({
   const rerun = useRerunRun(repoPath);
   const cancel = useCancelRun(repoPath);
 
-  const runs = useWorkflowRunPages(
-    repoPath,
-    ghReady,
-    active,
-    branchOnly && currentBranch ? currentBranch : undefined,
-  );
+  const branchFilter = branchOnly && currentBranch ? currentBranch : undefined;
+  const runs = useWorkflowRunPages(repoPath, ghReady, active, branchFilter);
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectRun = useUiStore((s) => s.selectRun);
 
@@ -434,7 +436,13 @@ export function ActionsPanel({
             {totalCount !== null &&
               !query &&
               !runs.isFetchNextPageError &&
-              ` · Showing ${allRuns.length.toLocaleString()} of ${totalCount.toLocaleString()}`}
+              ` · Showing ${allRuns.length.toLocaleString()} of ${
+                provider === "github" &&
+                branchFilter &&
+                totalCount >= FILTERED_RUN_WINDOW
+                  ? `${FILTERED_RUN_WINDOW.toLocaleString()}+`
+                  : totalCount.toLocaleString()
+              }`}
           </Button>
         )}
       </ScrollArea>

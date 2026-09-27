@@ -2573,11 +2573,11 @@ pub struct PrCiRefIn {
 /// an empty state string is treated the same. Unrecognized states bias to `"pending"`
 /// (conservative — never a false green). Case-insensitive.
 ///
-/// No `"neutral"` arm on this forge, deliberately: the rollup enum has no cancelled
-/// value (GitHub folds a cancelled check into FAILURE server-side), so the row keeps
-/// GitHub's own verdict while the checks panel derives per-check
-/// (`check-presentation.ts`) — an accepted GitHub-only disagreement, since
-/// re-deriving the rollup here would cost a per-check fetch for every listed PR.
+/// No `"neutral"` arm on this forge, deliberately: GitHub folds a cancelled check into
+/// FAILURE, and the row keeps that parity where the checks panel derives per-check
+/// (`check-presentation.ts`). Only a red enum is re-derived, over the head's contexts
+/// collapsed to each check's latest run (see [`confirm_red_rollup`]), so a superseded
+/// run can't hold a row red; green and pending enums are trusted without a fetch.
 fn rollup_state_to_ci(state: Option<&str>) -> String {
     match state.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),
@@ -2641,7 +2641,8 @@ fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
 /// `statusCheckRollup` expansion 504s on large repos), so row icons hydrate here.
 /// `sample_url` is any PR html url from the SAME list page: it fixes
 /// owner/name/host, which is load-bearing for forks. Queries ≤50 numbers per call;
-/// a chunk that errors is omitted rather than failing the whole call.
+/// a chunk that errors is omitted rather than failing the whole call. Red rows are
+/// then confirmed through `gh_confirm_red_rollups`.
 pub async fn gh_pr_list_ci(
     repo_path: &str,
     numbers: Vec<u64>,
@@ -2654,6 +2655,7 @@ pub async fn gh_pr_list_ci(
     let hostname_arg = (host != "github.com").then_some(host);
 
     let mut result: Vec<PrCiStatus> = Vec::with_capacity(numbers.len());
+    let mut red: Vec<RedRollupRow> = Vec::new();
     for chunk in numbers.chunks(50) {
         // Numbers are u64 (digits only) → safe to embed directly. Owner/name are
         // passed as GraphQL variables (validated above), never interpolated.
@@ -2661,7 +2663,7 @@ pub async fn gh_pr_list_ci(
             .iter()
             .map(|n| {
                 format!(
-                    "p{n}: pullRequest(number:{n}){{ number commits(last:1){{ nodes{{ commit{{ statusCheckRollup{{ state }} }} }} }} }} "
+                    "p{n}: pullRequest(number:{n}){{ number commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state }} }} }} }} }} "
                 )
             })
             .collect();
@@ -2712,13 +2714,222 @@ pub async fn gh_pr_list_ci(
             let state = node
                 .pointer("/commits/nodes/0/commit/statusCheckRollup/state")
                 .and_then(|s| s.as_str());
+            if needs_red_confirm(state) {
+                red.push(RedRollupRow {
+                    number: *n,
+                    head_oid: rollup_node_text(node, "/commits/nodes/0/commit/oid"),
+                    state: state.unwrap_or_default().to_string(),
+                });
+            }
             result.push(PrCiStatus {
                 number: *n,
                 ci_status: rollup_state_to_ci(state),
             });
         }
     }
+    if !red.is_empty() {
+        let verdicts =
+            gh_confirm_red_rollups(repo_path, hostname_arg.as_deref(), &owner, &name, &red).await;
+        for row in &mut result {
+            if let Some(state) = verdicts.get(&row.number) {
+                row.ci_status = rollup_state_to_ci(Some(state));
+            }
+        }
+    }
     Ok(result)
+}
+
+/// Whether a precomputed rollup enum gets the red-row confirm fetch: a failing row
+/// other than ERROR, so healthy rows never pay for it. ERROR is always kept as-is:
+/// [`derive_rollup_state`] never yields it, so its gate could never pass.
+fn needs_red_confirm(state: Option<&str>) -> bool {
+    rollup_state_to_ci(state) == "failing"
+        && !state.is_some_and(|s| s.trim().eq_ignore_ascii_case("ERROR"))
+}
+
+/// A row whose precomputed enum read red, pinned to the head that enum describes.
+struct RedRollupRow {
+    number: u64,
+    head_oid: String,
+    state: String,
+}
+
+/// Per-request PR cap for the confirm fetch. Each PR expands up to 100 contexts: a
+/// 50-PR page of the same contexts selection failed live on nodejs/node where a
+/// 10-PR page answered (measured 2026-09).
+const RED_CONFIRM_CHUNK: usize = 10;
+
+/// The head contexts of each listed PR, aliased `p{n}`. Numbers are digits by type;
+/// owner/name ride as GraphQL variables.
+fn red_rollup_confirm_query(numbers: &[u64]) -> String {
+    let aliases: String = numbers
+        .iter()
+        .map(|n| {
+            format!(
+                "p{n}: pullRequest(number:{n}){{ commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state contexts(first:100){{ totalCount nodes{{ __typename ... on CheckRun{{ name startedAt status conclusion checkSuite{{ workflowRun{{ event workflow{{ name }} }} }} }} ... on StatusContext{{ state context }} }} }} }} }} }} }} }} "
+            )
+        })
+        .collect();
+    format!("query($owner:String!,$name:String!){{ repository(owner:$owner,name:$name){{ {aliases}}} }}")
+}
+
+/// The verdict for each red row: its confirmed enum, or its precomputed one wherever
+/// the fetch or the gate in [`confirm_red_rollup`] fails, so a row never loses its icon.
+/// No cross-call memo, unlike the panel's events: a fixing re-run moves neither the
+/// head oid nor the precomputed FAILURE, so no key available here would observe the
+/// fix. Cost is bounded by the red rows and the callers' refetch cadence. Chunks run
+/// concurrently under the panel's 30s `GH_TIMEOUT`, so a hung confirm holds the
+/// caller's answer back by about one timeout, however many chunks there are.
+async fn gh_confirm_red_rollups(
+    repo_path: &str,
+    hostname: Option<&str>,
+    owner: &str,
+    name: &str,
+    red: &[RedRollupRow],
+) -> std::collections::HashMap<u64, String> {
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let chunks = crate::forge::futures_join_all(red.chunks(RED_CONFIRM_CHUNK).map(|chunk| {
+        let (owner_arg, name_arg) = (owner_arg.as_str(), name_arg.as_str());
+        async move {
+            let numbers: Vec<u64> = chunk.iter().map(|r| r.number).collect();
+            let query_arg = format!("query={}", red_rollup_confirm_query(&numbers));
+            let mut args: Vec<&str> = vec!["api", "graphql"];
+            if let Some(h) = hostname {
+                args.push("--hostname");
+                args.push(h);
+            }
+            args.extend(["-f", query_arg.as_str(), "-f", owner_arg, "-f", name_arg]);
+            let repo_obj = match run_gh_raw(Some(repo_path), &args, GH_TIMEOUT).await {
+                Ok(out) if out.code == 0 => {
+                    serde_json::from_str::<serde_json::Value>(&out.stdout_lossy())
+                        .ok()
+                        .and_then(|v| v.pointer("/data/repository").cloned())
+                }
+                _ => None,
+            };
+            chunk
+                .iter()
+                .map(|row| {
+                    let contexts = repo_obj
+                        .as_ref()
+                        .and_then(|r| r.get(format!("p{}", row.number)))
+                        .and_then(parse_red_rollup_contexts);
+                    let verdict = confirm_red_rollup(&row.state, &row.head_oid, contexts);
+                    (row.number, verdict)
+                })
+                .collect::<Vec<_>>()
+        }
+    }))
+    .await;
+    chunks.into_iter().flatten().collect()
+}
+
+/// One PR's head contexts from [`red_rollup_confirm_query`], with the rollup enum GitHub
+/// computed over them in the same answer.
+struct RedRollupContexts {
+    head_oid: String,
+    state: String,
+    total: u64,
+    checks: Vec<RawCheck>,
+    events: Vec<CheckRunEvent>,
+}
+
+/// A `p{n}` alias of a confirm answer, or `None` when any part of it is missing.
+fn parse_red_rollup_contexts(node: &serde_json::Value) -> Option<RedRollupContexts> {
+    let commit = node.pointer("/commits/nodes/0/commit")?;
+    let rollup = commit.get("statusCheckRollup")?;
+    let contexts = rollup.get("contexts")?;
+    let nodes = contexts.get("nodes")?.as_array()?;
+    Some(RedRollupContexts {
+        head_oid: commit.get("oid")?.as_str()?.to_string(),
+        state: rollup.get("state")?.as_str()?.to_string(),
+        total: contexts.get("totalCount")?.as_u64()?,
+        checks: nodes.iter().map(rollup_node_check).collect(),
+        events: check_run_events_of(nodes),
+    })
+}
+
+/// A rollup context node in the collapse kernel's row shape. A StatusContext gets no
+/// start, so the kernel never keys it: statuses aren't check runs and are always kept.
+fn rollup_node_check(n: &serde_json::Value) -> RawCheck {
+    let typename = rollup_node_text(n, "/__typename");
+    let started_at = (typename == "CheckRun")
+        .then(|| rollup_node_text(n, "/startedAt"))
+        .filter(|s| real_check_time(s));
+    RawCheck {
+        name: rollup_node_text(n, "/name"),
+        context: rollup_node_text(n, "/context"),
+        conclusion: rollup_node_text(n, "/conclusion"),
+        state: rollup_node_text(n, "/state"),
+        status: rollup_node_text(n, "/status"),
+        details_url: None,
+        target_url: None,
+        started_at,
+        completed_at: None,
+        workflow_name: rollup_node_text(n, "/checkSuite/workflowRun/workflow/name"),
+        typename,
+    }
+}
+
+/// GitHub's rollup enum over context rows, or `None` when any row can't be classified.
+/// Modelled on live answers (checked against the precomputed enum before any use): a
+/// cancelled, timed-out or action-required run and an ERROR status all read FAILURE,
+/// failure outranks pending, and skipped or neutral runs pass.
+fn derive_rollup_state(checks: &[RawCheck]) -> Option<&'static str> {
+    const BY_RANK: [&str; 4] = ["SUCCESS", "PENDING", "EXPECTED", "FAILURE"];
+    let mut worst: Option<usize> = None;
+    for c in checks {
+        let rank = match c.typename.as_str() {
+            "CheckRun" => match c.status.to_ascii_uppercase().as_str() {
+                "COMPLETED" => match c.conclusion.to_ascii_uppercase().as_str() {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => 0,
+                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                    | "STARTUP_FAILURE" => 3,
+                    _ => return None,
+                },
+                "QUEUED" | "IN_PROGRESS" | "WAITING" | "PENDING" | "REQUESTED" => 1,
+                _ => return None,
+            },
+            "StatusContext" => match c.state.to_ascii_uppercase().as_str() {
+                "SUCCESS" => 0,
+                "PENDING" => 1,
+                "EXPECTED" => 2,
+                "FAILURE" | "ERROR" => 3,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        worst = worst.max(Some(rank));
+    }
+    worst.map(|r| BY_RANK[r])
+}
+
+/// A red row's verdict: the enum of its checks collapsed to each one's latest run, but
+/// only once [`derive_rollup_state`] reproduces GitHub's own `precomputed` enum over the
+/// complete context set of the same head. A missing answer, another head, a page short
+/// of `totalCount` (the panel's join refusal), no contexts, or a model mismatch all
+/// keep `precomputed`, so drift in the model degrades to GitHub's verdict.
+fn confirm_red_rollup(
+    precomputed: &str,
+    head_oid: &str,
+    contexts: Option<RedRollupContexts>,
+) -> String {
+    let keep = || precomputed.to_string();
+    let Some(c) = contexts else {
+        return keep();
+    };
+    let expected = precomputed.trim().to_ascii_uppercase();
+    let trusted = !head_oid.is_empty()
+        && c.head_oid == head_oid
+        && c.state.eq_ignore_ascii_case(&expected)
+        && c.total <= c.checks.len() as u64
+        && derive_rollup_state(&c.checks) == Some(expected.as_str());
+    if !trusted {
+        return keep();
+    }
+    derive_rollup_state(&collapse_superseded_checks(c.checks, Some(&c.events)))
+        .map_or_else(keep, String::from)
 }
 
 // NOTE: `gh pr edit` is unusable on older gh versions (its GraphQL query
@@ -3010,7 +3221,8 @@ fn pr_poll_query(owner: &str, name: &str) -> String {
 
 /// Lightweight snapshot of the repo's recently-updated PRs for the
 /// notification poller — one GraphQL round trip including the check rollup
-/// (reliable on old gh, unlike `pr list --json statusCheckRollup`).
+/// (reliable on old gh, unlike `pr list --json statusCheckRollup`), plus the red-row
+/// confirm (`gh_confirm_red_rollups`) so a re-run fixing a failure reads SUCCESS.
 pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
     // Pin the origin slug: an unpinned `gh repo view` on a fork with an `upstream`
     // remote auto-resolves to the PARENT, so PR notifications + background pr-sync
@@ -3043,7 +3255,7 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
     let str_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
     };
-    Ok(nodes
+    let mut prs: Vec<PrPollInfo> = nodes
         .iter()
         .map(|n| PrPollInfo {
             number: n.pointer("/number").and_then(|x| x.as_u64()).unwrap_or(0),
@@ -3087,7 +3299,25 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
             created_at: str_at(n, "/createdAt"),
         })
         .filter(|p| p.number > 0)
-        .collect())
+        .collect();
+    let red: Vec<RedRollupRow> = prs
+        .iter()
+        .filter(|p| needs_red_confirm(Some(&p.checks_state)))
+        .map(|p| RedRollupRow {
+            number: p.number,
+            head_oid: p.head_sha.clone(),
+            state: p.checks_state.clone(),
+        })
+        .collect();
+    if !red.is_empty() {
+        let verdicts = gh_confirm_red_rollups(&repo_path, None, owner, name, &red).await;
+        for pr in &mut prs {
+            if let Some(state) = verdicts.get(&pr.number) {
+                pr.checks_state = state.clone();
+            }
+        }
+    }
+    Ok(prs)
 }
 
 /// Where one PR's head branch lives.
@@ -3960,27 +4190,35 @@ fn parse_check_run_events(body: &str) -> Option<CheckRunEvents> {
     if total > nodes.len() as u64 {
         return None;
     }
-    let text = |n: &serde_json::Value, p: &str| {
-        n.pointer(p)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let events = nodes
+    let events = check_run_events_of(nodes);
+    Some(CheckRunEvents { head_oid, events })
+}
+
+/// The CheckRun context nodes of a rollup page as collapse events; other typenames are
+/// skipped. Shared by the panel's events fetch and the list's red-row confirm.
+fn check_run_events_of(nodes: &[serde_json::Value]) -> Vec<CheckRunEvent> {
+    nodes
         .iter()
-        .filter(|n| n.get("__typename").and_then(serde_json::Value::as_str) == Some("CheckRun"))
+        .filter(|n| rollup_node_text(n, "/__typename") == "CheckRun")
         .map(|n| CheckRunEvent {
-            name: text(n, "/name"),
+            name: rollup_node_text(n, "/name"),
             started_at: n
                 .get("startedAt")
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| real_check_time(s))
                 .map(String::from),
-            event: text(n, "/checkSuite/workflowRun/event"),
-            workflow: text(n, "/checkSuite/workflowRun/workflow/name"),
+            event: rollup_node_text(n, "/checkSuite/workflowRun/event"),
+            workflow: rollup_node_text(n, "/checkSuite/workflowRun/workflow/name"),
         })
-        .collect();
-    Some(CheckRunEvents { head_oid, events })
+        .collect()
+}
+
+/// A string field of a rollup context node; absent or null reads "".
+fn rollup_node_text(n: &serde_json::Value, pointer: &str) -> String {
+    n.pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The events to collapse with, or `None` unless they describe the view's own head.
@@ -4677,7 +4915,7 @@ pub async fn gh_pr_reactions(
     Ok(IssueReactions { body, comments })
 }
 
-const PR_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, CLOSED_EVENT, REOPENED_EVENT, MERGED_EVENT, RENAMED_TITLE_EVENT]){ nodes{ __typename ... on HeadRefForcePushedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt beforeCommit{oid} afterCommit{oid} } ... on LabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on UnlabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on ReviewRequestedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt requestedReviewer{ __typename ... on User{login} ... on Team{slug} } } ... on ReadyForReviewEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ConvertToDraftEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ClosedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ReopenedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on MergedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt commit{oid} } ... on RenamedTitleEvent{ actor{login avatarUrl(size: 48) __typename} createdAt previousTitle currentTitle } } } } } }"#;
+const PR_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, CLOSED_EVENT, REOPENED_EVENT, MERGED_EVENT, RENAMED_TITLE_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, CROSS_REFERENCED_EVENT, CONNECTED_EVENT, DISCONNECTED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, LOCKED_EVENT, UNLOCKED_EVENT]){ nodes{ __typename ... on HeadRefForcePushedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt beforeCommit{oid} afterCommit{oid} } ... on LabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on UnlabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on ReviewRequestedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt requestedReviewer{ __typename ... on User{login} ... on Team{slug} } } ... on ReadyForReviewEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ConvertToDraftEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ClosedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ReopenedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on MergedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt commit{oid} } ... on RenamedTitleEvent{ actor{login avatarUrl(size: 48) __typename} createdAt previousTitle currentTitle } ... on AssignedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt assignee{ __typename ... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Organization{login} } } ... on UnassignedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt assignee{ __typename ... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Organization{login} } } ... on CrossReferencedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt willCloseTarget source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on ConnectedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } subject{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on DisconnectedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } subject{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on MilestonedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt milestoneTitle } ... on DemilestonedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt milestoneTitle } ... on LockedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt lockReason } ... on UnlockedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } } } } } }"#;
 
 /// Map one `timelineItems` node onto a [`ForgeTimelineEventOut`], or `None` when the
 /// `__typename` is missing/unrecognized (so one odd node can't break the batch).
@@ -8958,6 +9196,380 @@ github.acme.com
                 "unbalanced braces in: {q}"
             );
         }
+
+        /// The list icon's and poll's red-row confirm: the precomputed enum is
+        /// re-derived through the same collapse kernel as the panel, behind the gate.
+        mod red_rows {
+            use super::super::super::{
+                confirm_red_rollup, derive_rollup_state, needs_red_confirm,
+                parse_red_rollup_contexts, red_rollup_confirm_query, rollup_node_check,
+                rollup_state_to_ci,
+            };
+            use super::{HEAD_A, HEAD_B, T1, T2, T3};
+            use serde_json::{json, Value};
+
+            /// A CheckRun context node as the confirm query selects it; `wf` is
+            /// `(workflow, event)`, `None` for a third-party app's run.
+            fn cr(
+                name: &str,
+                wf: Option<(&str, &str)>,
+                started: Option<&str>,
+                status: &str,
+                conclusion: Option<&str>,
+            ) -> Value {
+                json!({
+                    "__typename": "CheckRun",
+                    "name": name,
+                    "startedAt": started,
+                    "status": status,
+                    "conclusion": conclusion,
+                    "checkSuite": {
+                        "workflowRun": wf.map(|(w, e)| json!({"event": e, "workflow": {"name": w}}))
+                    },
+                })
+            }
+
+            fn done(name: &str, started: &str, conclusion: &str) -> Value {
+                cr(
+                    name,
+                    Some(("ci", "pull_request")),
+                    Some(started),
+                    "COMPLETED",
+                    Some(conclusion),
+                )
+            }
+
+            fn sc(context: &str, state: &str) -> Value {
+                json!({"__typename": "StatusContext", "context": context, "state": state})
+            }
+
+            /// One `p{n}` alias of a confirm answer for head A.
+            fn alias(state: &str, total: u64, nodes: Vec<Value>) -> Value {
+                json!({"commits": {"nodes": [{"commit": {
+                    "oid": HEAD_A,
+                    "statusCheckRollup": {"state": state, "contexts": {
+                        "totalCount": total, "nodes": nodes,
+                    }},
+                }}]}})
+            }
+
+            fn full(state: &str, nodes: Vec<Value>) -> Value {
+                let total = nodes.len() as u64;
+                alias(state, total, nodes)
+            }
+
+            fn verdict(precomputed: &str, answer: &Value) -> String {
+                confirm_red_rollup(precomputed, HEAD_A, parse_red_rollup_contexts(answer))
+            }
+
+            #[test]
+            fn only_red_enums_are_confirm_candidates() {
+                for red in ["FAILURE", "failure", " FAILURE "] {
+                    assert!(needs_red_confirm(Some(red)), "{red}");
+                }
+                for healthy in ["SUCCESS", "PENDING", "EXPECTED", "", "SOMETHING_NEW"] {
+                    assert!(!needs_red_confirm(Some(healthy)), "{healthy}");
+                }
+                assert!(!needs_red_confirm(None));
+                // ERROR stays red on the row but is never fetched: no derive yields it.
+                for error in ["ERROR", "error", " ERROR "] {
+                    assert_eq!(rollup_state_to_ci(Some(error)), "failing");
+                    assert!(!needs_red_confirm(Some(error)), "{error}");
+                }
+            }
+
+            #[test]
+            fn a_superseded_failure_with_a_newer_pass_reads_passing() {
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        done("fragment", T1, "FAILURE"),
+                        done("fragment", T2, "CANCELLED"),
+                        done("fragment", T3, "SUCCESS"),
+                        done("build", T1, "SUCCESS"),
+                        cr(
+                            "Cloudflare Pages",
+                            None,
+                            Some(T2),
+                            "COMPLETED",
+                            Some("SUCCESS"),
+                        ),
+                        sc("CodeRabbit", "SUCCESS"),
+                    ],
+                );
+                let confirmed = verdict("FAILURE", &answer);
+                assert_eq!(confirmed, "SUCCESS");
+                assert_eq!(rollup_state_to_ci(Some(&confirmed)), "passing");
+            }
+
+            #[test]
+            fn a_failing_latest_run_stays_failing() {
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        done("fragment", T1, "CANCELLED"),
+                        done("fragment", T2, "SUCCESS"),
+                        done("appimage", T2, "FAILURE"),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+            }
+
+            #[test]
+            fn failure_outranks_pending_until_the_failure_is_superseded() {
+                let rerun_in_flight = full(
+                    "FAILURE",
+                    vec![
+                        done("fragment", T1, "FAILURE"),
+                        cr(
+                            "fragment",
+                            Some(("ci", "pull_request")),
+                            Some(T2),
+                            "IN_PROGRESS",
+                            None,
+                        ),
+                        done("build", T1, "SUCCESS"),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &rerun_in_flight), "PENDING");
+
+                let still_failing = full(
+                    "FAILURE",
+                    vec![
+                        done("build", T1, "FAILURE"),
+                        cr(
+                            "lint",
+                            Some(("ci", "pull_request")),
+                            Some(T2),
+                            "IN_PROGRESS",
+                            None,
+                        ),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &still_failing), "FAILURE");
+            }
+
+            #[test]
+            fn a_cancelled_latest_run_keeps_github_parity() {
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        done("fragment", T1, "SUCCESS"),
+                        done("fragment", T2, "CANCELLED"),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+            }
+
+            #[test]
+            fn an_undated_relic_is_never_keyed() {
+                // Cancelled before it started: no start, so no newer run supersedes it.
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        cr(
+                            "fragment",
+                            Some(("ci", "pull_request")),
+                            None,
+                            "COMPLETED",
+                            Some("CANCELLED"),
+                        ),
+                        done("fragment", T2, "SUCCESS"),
+                    ],
+                );
+                assert_eq!(
+                    rollup_node_check(&cr("x", None, None, "QUEUED", None)).started_at,
+                    None
+                );
+                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+            }
+
+            #[test]
+            fn a_third_party_app_run_is_never_keyed() {
+                // No workflow run → no (name, workflow, event) key: both rows count.
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        cr(
+                            "Cloudflare Pages",
+                            None,
+                            Some(T1),
+                            "COMPLETED",
+                            Some("FAILURE"),
+                        ),
+                        cr(
+                            "Cloudflare Pages",
+                            None,
+                            Some(T2),
+                            "COMPLETED",
+                            Some("SUCCESS"),
+                        ),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+            }
+
+            #[test]
+            fn status_contexts_are_kept_and_still_counted() {
+                // A status-only head: an ERROR folds into GitHub's FAILURE.
+                let errored = full(
+                    "FAILURE",
+                    vec![sc("ci/prow", "ERROR"), sc("lint", "SUCCESS")],
+                );
+                assert_eq!(verdict("FAILURE", &errored), "FAILURE");
+                // Two statuses under one context are never collapsed into one.
+                let twins = full("FAILURE", vec![sc("ci", "FAILURE"), sc("ci", "SUCCESS")]);
+                assert_eq!(verdict("FAILURE", &twins), "FAILURE");
+                assert_eq!(rollup_node_check(&sc("ci", "SUCCESS")).started_at, None);
+                // Check runs collapse clean; the statuses beside them still decide.
+                let superseded = || {
+                    vec![
+                        done("fragment", T1, "FAILURE"),
+                        done("fragment", T2, "SUCCESS"),
+                    ]
+                };
+                let mut failing = superseded();
+                failing.push(sc("CodeRabbit", "FAILURE"));
+                assert_eq!(verdict("FAILURE", &full("FAILURE", failing)), "FAILURE");
+                let mut pending = superseded();
+                pending.push(sc("CodeRabbit", "PENDING"));
+                assert_eq!(verdict("FAILURE", &full("FAILURE", pending)), "PENDING");
+            }
+
+            /// The superseded-failure shape that confirms to SUCCESS when whole.
+            fn fixable() -> Vec<Value> {
+                vec![
+                    done("fragment", T1, "FAILURE"),
+                    done("fragment", T2, "SUCCESS"),
+                ]
+            }
+
+            #[test]
+            fn a_partial_page_keeps_the_precomputed_enum() {
+                assert_eq!(verdict("FAILURE", &full("FAILURE", fixable())), "SUCCESS");
+                let mut hundred = fixable();
+                hundred.resize(100, done("build", T1, "SUCCESS"));
+                assert_eq!(
+                    verdict("FAILURE", &alias("FAILURE", 100, hundred.clone())),
+                    "SUCCESS"
+                );
+                assert_eq!(
+                    verdict("FAILURE", &alias("FAILURE", 150, hundred)),
+                    "FAILURE"
+                );
+            }
+
+            #[test]
+            fn a_model_mismatch_keeps_the_precomputed_enum() {
+                // GitHub says FAILURE over rows the model reads as passing.
+                let passing = full("FAILURE", vec![done("build", T1, "SUCCESS")]);
+                assert_eq!(verdict("FAILURE", &passing), "FAILURE");
+                // A conclusion or typename the model doesn't know.
+                let mut stale = fixable();
+                stale.push(done("lint", T1, "STALE"));
+                assert_eq!(verdict("FAILURE", &full("FAILURE", stale)), "FAILURE");
+                let mut unknown = fixable();
+                unknown.push(json!({"__typename": "SomethingNew"}));
+                assert_eq!(verdict("FAILURE", &full("FAILURE", unknown)), "FAILURE");
+                // GitHub's rollup never reads ERROR where the model reads FAILURE.
+                assert_eq!(verdict("ERROR", &full("ERROR", fixable())), "ERROR");
+            }
+
+            #[test]
+            fn empty_contexts_keep_the_precomputed_enum() {
+                assert_eq!(verdict("FAILURE", &full("FAILURE", Vec::new())), "FAILURE");
+            }
+
+            #[test]
+            fn a_missing_or_foreign_answer_keeps_the_precomputed_enum() {
+                // Failed fetch, null alias, no rollup.
+                assert_eq!(confirm_red_rollup("FAILURE", HEAD_A, None), "FAILURE");
+                assert_eq!(verdict("FAILURE", &Value::Null), "FAILURE");
+                let no_rollup = json!({"commits": {"nodes": [{"commit": {
+                    "oid": HEAD_A, "statusCheckRollup": null,
+                }}]}});
+                assert_eq!(verdict("FAILURE", &no_rollup), "FAILURE");
+                // Another head than the row's, or a row with no head to pin.
+                let answer = full("FAILURE", fixable());
+                let contexts = || parse_red_rollup_contexts(&answer);
+                assert_eq!(confirm_red_rollup("FAILURE", HEAD_B, contexts()), "FAILURE");
+                assert_eq!(confirm_red_rollup("FAILURE", "", contexts()), "FAILURE");
+                // The answer's own enum moved on since the row was read.
+                let moved = full("PENDING", fixable());
+                assert_eq!(verdict("FAILURE", &moved), "FAILURE");
+                assert_eq!(confirm_red_rollup("FAILURE", HEAD_A, contexts()), "SUCCESS");
+            }
+
+            #[test]
+            fn derives_github_rollup_classes() {
+                let derive = |nodes: Vec<Value>| {
+                    let checks: Vec<_> = nodes.iter().map(rollup_node_check).collect();
+                    derive_rollup_state(&checks)
+                };
+                assert_eq!(derive(Vec::new()), None);
+                for (conclusion, want) in [
+                    ("SUCCESS", "SUCCESS"),
+                    ("NEUTRAL", "SUCCESS"),
+                    ("SKIPPED", "SUCCESS"),
+                    ("FAILURE", "FAILURE"),
+                    ("TIMED_OUT", "FAILURE"),
+                    ("CANCELLED", "FAILURE"),
+                    ("ACTION_REQUIRED", "FAILURE"),
+                    ("STARTUP_FAILURE", "FAILURE"),
+                ] {
+                    assert_eq!(
+                        derive(vec![done("a", T1, conclusion)]),
+                        Some(want),
+                        "{conclusion}"
+                    );
+                }
+                for status in ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] {
+                    let row = cr("a", None, None, status, None);
+                    assert_eq!(derive(vec![row]), Some("PENDING"), "{status}");
+                }
+                for (state, want) in [
+                    ("SUCCESS", "SUCCESS"),
+                    ("PENDING", "PENDING"),
+                    ("EXPECTED", "EXPECTED"),
+                    ("FAILURE", "FAILURE"),
+                    ("ERROR", "FAILURE"),
+                ] {
+                    assert_eq!(derive(vec![sc("c", state)]), Some(want), "{state}");
+                }
+                assert_eq!(
+                    derive(vec![sc("c", "PENDING"), done("a", T1, "SUCCESS")]),
+                    Some("PENDING")
+                );
+                assert_eq!(
+                    derive(vec![sc("c", "PENDING"), sc("d", "ERROR")]),
+                    Some("FAILURE")
+                );
+                assert_eq!(derive(vec![cr("a", None, None, "", None)]), None);
+            }
+
+            #[test]
+            fn the_confirm_query_aliases_each_pr_and_selects_the_model_inputs() {
+                let q = red_rollup_confirm_query(&[400, 401]);
+                assert!(q.starts_with("query($owner:String!,$name:String!)"), "{q}");
+                assert!(q.contains("p400: pullRequest(number:400)"), "{q}");
+                assert!(q.contains("p401: pullRequest(number:401)"), "{q}");
+                for field in [
+                    "oid statusCheckRollup{ state contexts(first:100){ totalCount",
+                    "__typename",
+                    "... on CheckRun{ name startedAt status conclusion",
+                    "workflowRun{ event workflow{ name } }",
+                    "... on StatusContext{ state context }",
+                ] {
+                    assert!(q.contains(field), "{field} missing from: {q}");
+                }
+                // The substring asserts can't see a dropped brace; gh rejects one.
+                assert_eq!(
+                    q.matches('{').count(),
+                    q.matches('}').count(),
+                    "unbalanced braces in: {q}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -9037,6 +9649,72 @@ github.acme.com
         }))
         .expect("real submittedAt must deserialize");
         assert_eq!(mapped(submitted), "2026-07-18T12:34:56Z");
+    }
+
+    #[test]
+    fn pr_timeline_query_selects_every_mapped_field() {
+        let query = super::PR_TIMELINE_QUERY;
+        let item_types: Vec<_> = query
+            .split_once("itemTypes:[")
+            .unwrap()
+            .1
+            .split_once(']')
+            .unwrap()
+            .0
+            .split(',')
+            .map(str::trim)
+            .collect();
+        assert_eq!(item_types.len(), 19);
+        for item_type in [
+            "HEAD_REF_FORCE_PUSHED_EVENT",
+            "LABELED_EVENT",
+            "UNLABELED_EVENT",
+            "REVIEW_REQUESTED_EVENT",
+            "READY_FOR_REVIEW_EVENT",
+            "CONVERT_TO_DRAFT_EVENT",
+            "CLOSED_EVENT",
+            "REOPENED_EVENT",
+            "MERGED_EVENT",
+            "RENAMED_TITLE_EVENT",
+            "ASSIGNED_EVENT",
+            "UNASSIGNED_EVENT",
+            "CROSS_REFERENCED_EVENT",
+            "CONNECTED_EVENT",
+            "DISCONNECTED_EVENT",
+            "MILESTONED_EVENT",
+            "DEMILESTONED_EVENT",
+            "LOCKED_EVENT",
+            "UNLOCKED_EVENT",
+        ] {
+            assert!(item_types.contains(&item_type), "itemTypes missing {item_type}");
+        }
+        assert!(query.contains("timelineItems(last:100,"));
+
+        // Pin each fragment: fields omitted by GraphQL become blank mapper values.
+        let actor = "actor{login avatarUrl(size: 48) __typename}";
+        let assignee = " assignee{ __typename ... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Organization{login} }";
+        let entity = "{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} }";
+        let cross_reference = format!(" willCloseTarget source{entity}");
+        let linked = format!(" source{entity} subject{entity}");
+        for (typename, fields) in [
+            ("AssignedEvent", assignee),
+            ("UnassignedEvent", assignee),
+            ("CrossReferencedEvent", cross_reference.as_str()),
+            ("ConnectedEvent", linked.as_str()),
+            ("DisconnectedEvent", linked.as_str()),
+            ("MilestonedEvent", " milestoneTitle"),
+            ("DemilestonedEvent", " milestoneTitle"),
+            ("LockedEvent", " lockReason"),
+            ("UnlockedEvent", ""),
+        ] {
+            let fragment = format!("... on {typename}{{ {actor} createdAt{fields} }}");
+            assert!(query.contains(&fragment), "incomplete {typename} selection");
+        }
+        assert_eq!(
+            query.matches('{').count(),
+            query.matches('}').count(),
+            "PR timeline query must have balanced braces"
+        );
     }
 
     #[test]

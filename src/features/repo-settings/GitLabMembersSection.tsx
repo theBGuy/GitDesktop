@@ -2,7 +2,7 @@ import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
-import { Badge } from "@/components/ui/badge";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -238,9 +238,11 @@ function MemberRow({
         </p>
       </div>
       {!member.direct ? (
-        <Badge variant="secondary" title="Managed on the group">
-          {roleLabel(member.accessLevel)} · inherited
-        </Badge>
+        <StatusDetailChip
+          variant="secondary"
+          label={`${roleLabel(member.accessLevel)} · inherited`}
+          detail="Managed on the group"
+        />
       ) : confirming ? (
         <InlineConfirm
           prompt="Remove?"

@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { useRelativeNow } from "@/components/relative-time";
+import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -92,7 +93,7 @@ function formatDate(date: string): string {
   });
 }
 
-/** A rate-limited row's tooltip: the forge's own message, then when access
+/** A rate-limited badge's detail: the forge's own message, then when access
  *  resumes. No Reconnect rides this state — the credential is fine. */
 function rateLimitTitle(
   health: SessionHealth,
@@ -227,26 +228,24 @@ function GitHubAccounts() {
                             <Badge variant="secondary">active</Badge>
                           )}
                           {broken && (
-                            <Badge
+                            <StatusDetailChip
                               variant="destructive"
-                              title={
+                              label="session expired"
+                              detail={
                                 brokenDetail ??
                                 (account.active
                                   ? undefined
                                   : "Switch to this account, then reconnect.")
                               }
-                            >
-                              session expired
-                            </Badge>
+                            />
                           )}
                           {rowHealth?.state === "rateLimited" && (
-                            <Badge
+                            <StatusDetailChip
                               variant="outline"
                               className="text-warning"
-                              title={rateLimitTitle(rowHealth, now)}
-                            >
-                              rate limited
-                            </Badge>
+                              label="rate limited"
+                              detail={rateLimitTitle(rowHealth, now)}
+                            />
                           )}
                           <span className="flex-1" />
                           {broken && account.active && (
@@ -441,35 +440,34 @@ function GitLabSignInBlock() {
                   </p>
                 </div>
                 {broken && (
-                  <Badge
+                  <StatusDetailChip
                     variant="destructive"
                     className="ml-auto shrink-0"
-                    title={h.detail ?? undefined}
-                  >
-                    session expired
-                  </Badge>
+                    label="session expired"
+                    detail={h.detail}
+                  />
                 )}
                 {h.state === "rateLimited" && (
-                  <Badge
+                  <StatusDetailChip
                     variant="outline"
                     className="ml-auto shrink-0 text-warning"
-                    title={rateLimitTitle(h, now)}
-                  >
-                    rate limited
-                  </Badge>
+                    label="rate limited"
+                    detail={rateLimitTitle(h, now)}
+                  />
                 )}
                 {warnExpiry && (
-                  <Badge
+                  <StatusDetailChip
                     variant="outline"
                     className="ml-auto shrink-0 text-warning"
-                    title={h.detail ?? undefined}
-                  >
-                    {(h.daysLeft ?? 0) < 0
-                      ? "token expired"
-                      : h.daysLeft === 0
-                        ? "token expires today"
-                        : `token expires in ${h.daysLeft} day${h.daysLeft === 1 ? "" : "s"}`}
-                  </Badge>
+                    label={
+                      (h.daysLeft ?? 0) < 0
+                        ? "token expired"
+                        : h.daysLeft === 0
+                          ? "token expires today"
+                          : `token expires in ${h.daysLeft} day${h.daysLeft === 1 ? "" : "s"}`
+                    }
+                    detail={h.detail}
+                  />
                 )}
                 {broken && (
                   <Button

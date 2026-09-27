@@ -674,12 +674,15 @@ export function RepositoryView() {
     // narrowing extra granted scopes like `workflow`), while `refresh` preserves them —
     // so the mode decision must never be made blind. A rate limit hides it too: the
     // credential is fine, and a fresh sign-in draws on the same exhausted quota.
+    // forge_status's `probeError` catches the limit health misses: GraphQL-only
+    // exhaustion refuses the repo lookup while the session still reads healthy.
     // Bitbucket needs no health probe (it deep-links to Settings), so it stays enabled
     // on a known provider alone.
     forgeProvider === "bitbucket" ||
       (forgeProvider !== null &&
         sessionHealth.data !== undefined &&
-        sessionHealth.data.state !== "rateLimited"),
+        sessionHealth.data.state !== "rateLimited" &&
+        gh.data?.probeError !== "rateLimited"),
   );
 
   // "repo • branch" in the OS title bar (and Alt-Tab) while a repo is open. No
