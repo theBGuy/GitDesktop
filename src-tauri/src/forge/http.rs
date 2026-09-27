@@ -113,6 +113,9 @@ static CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TEST_CREDENTIALS: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
 /// Returns the previous override so the caller can restore it on every path.
+/// The slot is process-global with ONE consuming test today (the Bitbucket
+/// no-token arm — nothing else in the crate reaches `load_credentials` under
+/// test); a second concurrent consumer must serialize through a shared lock.
 #[cfg(test)]
 pub(crate) fn swap_test_credentials(
     credentials: Option<(String, String)>,

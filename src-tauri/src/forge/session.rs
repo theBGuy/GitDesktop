@@ -320,7 +320,8 @@ async fn github_health(host: &str) -> SessionHealth {
         // A failed re-probe (Err/None) leaves the first Broken standing — the
         // credential really was rejected and we couldn't disprove it.
         if health.state == SessionState::Broken {
-            health = disprove_broken(health, gh_rate_limit_probe(host).await);
+            let token_present = gh_token_present(host).await;
+            health = disprove_broken(health, token_present, gh_rate_limit_probe(host).await);
             disproved = health.state == SessionState::RateLimited;
         }
     }
@@ -335,13 +336,18 @@ async fn github_health(host: &str) -> SessionHealth {
     health
 }
 
-/// The confirmed-Broken disproof. `rate_limit` is exempt from the primary quota yet
-/// still needs a valid token, so its success proves the credential: gh words a REST
-/// secondary 403 as token-invalid. Any failure leaves Broken standing, the safe side.
+/// The confirmed-Broken disproof: gh words a REST secondary 403 as token-invalid.
+/// `rate_limit` is exempt from the primary quota and rejects an invalid token, but it
+/// also answers anonymous requests, so its success proves the credential only when gh
+/// had a token to send. Anything else leaves Broken standing, the safe side.
 fn disprove_broken(
     mut health: SessionHealth,
+    token_present: bool,
     rate_limit: AppResult<crate::github::runner::GhOutput>,
 ) -> SessionHealth {
+    if !token_present {
+        return health;
+    }
     let Ok(out) = rate_limit else {
         return health;
     };
@@ -435,6 +441,17 @@ fn gh_host_auth(probe: &GhJsonProbe, host: &str) -> Option<GhHostAuth> {
 async fn gh_rate_limit_reset(host: &str) -> Option<i64> {
     let out = gh_rate_limit_probe(host).await.ok()?;
     rate_limit_reset_header(&out.stdout_lossy())
+}
+
+/// Whether gh resolves a token for `host`, from `gh auth token`'s exit code alone. A
+/// probe that fails to run reads absent, so the disproof fails closed.
+///
+/// SECURITY: `gh auth token`'s stdout IS the user's token — only the exit code is
+/// read; the output is dropped and never logged or formatted anywhere.
+async fn gh_token_present(host: &str) -> bool {
+    run_gh_raw(None, &["auth", "token", "--hostname", host], GH_TIMEOUT)
+        .await
+        .is_ok_and(|out| out.code == 0)
 }
 
 /// One `gh api -i rate_limit` call against `host`, raw.
@@ -1974,7 +1991,7 @@ mod tests {
     #[test]
     fn disproof_reclassifies_broken_when_rate_limit_succeeds() {
         let exhausted = "HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: 1790000000\r\n\r\n{}";
-        let health = disprove_broken(confirmed_broken(), Ok(gh_out(0, exhausted)));
+        let health = disprove_broken(confirmed_broken(), true, Ok(gh_out(0, exhausted)));
         assert_eq!(health.state, SessionState::RateLimited);
         assert_eq!(health.reset_at, Some(1_790_000_000));
         assert_eq!(health.login.as_deref(), Some("theBGuy"));
@@ -1984,8 +2001,18 @@ mod tests {
         );
         // A secondary limit leaves core quota, so no reset time is claimed.
         let secondary = "HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1790000000\r\n\r\n{}";
-        let health = disprove_broken(confirmed_broken(), Ok(gh_out(0, secondary)));
+        let health = disprove_broken(confirmed_broken(), true, Ok(gh_out(0, secondary)));
         assert_eq!(health.state, SessionState::RateLimited);
+        assert_eq!(health.reset_at, None);
+    }
+
+    #[test]
+    fn disproof_keeps_broken_when_no_token_was_sent() {
+        // rate_limit answers anonymously, so a 200 without a token proves nothing.
+        let anonymous = "HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 60\r\nX-Ratelimit-Remaining: 59\r\nX-Ratelimit-Reset: 1790000000\r\n\r\n{}";
+        let health = disprove_broken(confirmed_broken(), false, Ok(gh_out(0, anonymous)));
+        assert_eq!(health.state, SessionState::Broken);
+        assert_eq!(health.detail.as_deref(), Some(GH_TOKEN_INVALID));
         assert_eq!(health.reset_at, None);
     }
 
@@ -2019,7 +2046,7 @@ mod tests {
             Err(AppError::Timeout(15)),
             Err(AppError::GhNotFound),
         ] {
-            let health = disprove_broken(confirmed_broken(), probe);
+            let health = disprove_broken(confirmed_broken(), true, probe);
             assert_eq!(health.state, SessionState::Broken);
             assert_eq!(health.detail.as_deref(), Some(GH_TOKEN_INVALID));
             assert_eq!(health.reset_at, None);

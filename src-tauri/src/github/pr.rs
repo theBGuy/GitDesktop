@@ -3401,6 +3401,10 @@ struct RawPr {
     base_ref_name: String,
     #[serde(default)]
     head_ref_name: String,
+    /// The head commit, straight from the PR. Deserialize-only: it pins the checks'
+    /// event data to this head, where the commit list can stop short of it.
+    #[serde(default, deserialize_with = "null_to_default")]
+    head_ref_oid: String,
     #[serde(default)]
     additions: u32,
     #[serde(default)]
@@ -3853,7 +3857,7 @@ pub struct ApprovalState {
     pub viewer_requested_changes: bool,
 }
 
-const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify";
+const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify";
 
 const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed } }";
 
@@ -4391,9 +4395,9 @@ pub async fn gh_pr_view(
         .await
         .unwrap_or_default();
 
-    // The commit list is oldest-first, so its last entry is the head the checks ran
-    // on. A list truncated short of the head only costs the collapse, never a merge.
-    let check_runs = events_for_head(check_runs, commits.last().map(|c| c.oid.as_str()));
+    // The view's own head oid, never the commit list: that list stops at 250 (REST) or
+    // 100 (GraphQL) commits, so on a large PR its last entry is not the head.
+    let check_runs = events_for_head(check_runs, Some(raw.head_ref_oid.as_str()));
 
     // Free: `mergeable`/`mergeStateStatus` ride the same `gh pr view` call. The
     // narrow `gh_pr_mergeability` read exists for the frontend's re-poll.
@@ -7723,7 +7727,12 @@ mod tests {
     #[test]
     fn view_fields_request_mergeability_and_the_list_still_does_not() {
         let view: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
-        for f in ["mergeable", "mergeStateStatus", "isCrossRepository"] {
+        for f in [
+            "mergeable",
+            "mergeStateStatus",
+            "isCrossRepository",
+            "headRefOid",
+        ] {
             assert!(view.contains(&f), "{f} missing from: {PR_VIEW_FIELDS}");
         }
         let list: Vec<&str> = PR_LIST_FIELDS.split(',').collect();
@@ -8474,7 +8483,8 @@ github.acme.com
         use super::super::{
             check_run_events_query, events_for_head, map_gh_check, map_gh_checks,
             parse_check_run_events, remember_or_recall_check_run_events, CheckRunEvent,
-            CheckRunEvents, CheckRunEventsMemo, PrCheckOut, RawCheck, CHECK_RUN_EVENTS_MEMO_CAP,
+            CheckRunEvents, CheckRunEventsMemo, PrCheckOut, RawCheck, RawPr,
+            CHECK_RUN_EVENTS_MEMO_CAP,
         };
 
         const HEAD_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -8835,6 +8845,32 @@ github.acme.com
             assert_eq!(events_for_head(fetched(), None), None);
             assert_eq!(events_for_head(fetched(), Some("")), None);
             assert_eq!(events_for_head(None, Some(HEAD_A)), None);
+        }
+
+        /// The gate reads the view's `headRefOid`; a view without one (absent or null)
+        /// leaves an empty oid, which refuses even a same-head recall.
+        #[test]
+        fn the_view_head_oid_feeds_the_gate_and_its_absence_refuses() {
+            let head_of = |json: &str| serde_json::from_str::<RawPr>(json).unwrap().head_ref_oid;
+            let (rows, events) = superseded_fragment_runs();
+            let mut memo = CheckRunEventsMemo::new();
+            remember_or_recall_check_run_events(&mut memo, "o/r", 1, Some(pinned(HEAD_A, events)));
+            let recall = |memo: &mut CheckRunEventsMemo| {
+                remember_or_recall_check_run_events(memo, "o/r", 1, None)
+            };
+
+            let head = head_of(&format!(r#"{{"headRefOid":"{HEAD_A}"}}"#));
+            let applied = events_for_head(recall(&mut memo), Some(head.as_str()));
+            assert_eq!(run_ids(&map_gh_checks(rows, applied.as_deref())), ["5"]);
+
+            for json in ["{}", r#"{"headRefOid":null}"#] {
+                let head = head_of(json);
+                assert_eq!(head, "", "json: {json}");
+                assert_eq!(
+                    events_for_head(recall(&mut memo), Some(head.as_str())),
+                    None
+                );
+            }
         }
 
         #[test]
