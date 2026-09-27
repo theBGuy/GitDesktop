@@ -1921,7 +1921,7 @@ const shiftingItems = new Map<
 
 /** How many live shift chases read each board LENS, by query hash, held for the
  *  whole burst alongside its {@link shiftingItems} entry. Its own map because the
- *  fold key carries the card too, and a focus read must be held per lens. */
+ *  fold key carries the card too, and a focus or mount read is held per lens. */
 const shiftChasedLenses = new Map<string, number>();
 
 /**
@@ -1930,7 +1930,8 @@ const shiftChasedLenses = new Map<string, number>();
  * invalidated as before, except that a lens a shift chase is reading is only
  * marked stale: its chase compares the cache against what it last sent, so a read
  * landing mid-chase would have it write the server's older dates back. The chase's
- * own settle re-reads that lens ({@link useShiftItemDates}).
+ * own settle re-reads that lens ({@link useShiftItemDates}). A mount of that lens
+ * is held the same way, through {@link useProjectItems}' `refetchOnMount`.
  *
  * Repositions need no hold: their chase steers by
  * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
@@ -2032,8 +2033,9 @@ function shiftUpdates(
  * and a press arriving meanwhile patches the cache and folds in. The live
  * write re-reads the card's dates from that cache after each round trip (a
  * CALL-TIME read, never a render closure) and writes again until the two agree,
- * so a held key converges on where the bar is drawn; a window-focus read of that
- * lens waits for the burst ({@link invalidateRepoOnFocus}). The write target rides
+ * so a held key converges on where the bar is drawn; neither a window-focus read
+ * nor a mount refetch of that lens runs during the burst
+ * ({@link invalidateRepoOnFocus}, {@link useProjectItems}). The write target rides
  * the variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field

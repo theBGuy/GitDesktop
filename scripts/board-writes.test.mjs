@@ -1,8 +1,9 @@
 // Pins the pure board-write bookkeeping: which paused writes a board settle waits
-// on, and how the window-focus invalidation holds a lens a date-shift chase is
-// reading. A wrong answer here never errors — a settle refetches under a paused
-// write's patch, or a focus read lands mid-chase and the chase writes the server's
-// older dates back — so each rule is a case.
+// on, and how the window-focus invalidation and the mount refetch hold a lens a
+// date-shift chase is reading. A wrong answer here never errors — a settle
+// refetches under a paused write's patch, or a focus or remount read lands
+// mid-chase and the chase writes the server's older dates back — so each rule is a
+// case.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases: `board-writes.ts` may

@@ -130,9 +130,7 @@ export function invalidateRepoAfterWrite(
   const straddling = queryClient.getQueryCache().findAll({
     queryKey,
     predicate: (query) =>
-      readStraddlesSettle(query) &&
-      !partialMatchKey(query.queryKey, boards) &&
-      !straddleHealer.isHealing(query),
+      readStraddlesSettle(query) && !partialMatchKey(query.queryKey, boards),
   });
   straddleHealer.watch(
     {

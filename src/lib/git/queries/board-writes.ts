@@ -1,7 +1,7 @@
 /**
  * The pure pieces of the board-write bookkeeping: the keys a board write and a
- * board read are filed under, how a write's variables name its repo, and the two
- * predicates the settle and focus paths decide by.
+ * board read are filed under, how a write's variables name its repo, and the
+ * predicates the settle, window-focus and mount paths decide by.
  *
  * Import-free at runtime on purpose (types only, erased): internal.ts, core.ts and
  * projects.ts all import this file, so it can sit under each of them without a
