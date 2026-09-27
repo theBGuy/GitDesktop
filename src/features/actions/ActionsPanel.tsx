@@ -439,7 +439,7 @@ export function ActionsPanel({
               ` · Showing ${allRuns.length.toLocaleString()} of ${
                 provider === "github" &&
                 branchFilter &&
-                totalCount >= FILTERED_RUN_WINDOW
+                totalCount > FILTERED_RUN_WINDOW
                   ? `${FILTERED_RUN_WINDOW.toLocaleString()}+`
                   : totalCount.toLocaleString()
               }`}

@@ -1212,6 +1212,7 @@ fn from_bb_poll_pr(p: BbPollPr, viewer_uuid: &str, viewer_login: &str) -> PrPoll
         // fire (a documented v1 limit).
         review_decision: String::new(),
         checks_state: String::new(),
+        checks_unconfirmed: false,
         // The 12-char SHORT sha as-is; `sameSha` on the frontend prefix-matches it
         // against the full head sha seeded by pr-open events.
         head_sha: p.source.and_then(|s| s.commit).map(|c| c.hash).unwrap_or_default(),

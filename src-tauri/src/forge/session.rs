@@ -320,8 +320,7 @@ async fn github_health(host: &str) -> SessionHealth {
         // A failed re-probe (Err/None) leaves the first Broken standing — the
         // credential really was rejected and we couldn't disprove it.
         if health.state == SessionState::Broken {
-            let token_present = gh_token_present(host).await;
-            health = disprove_broken(health, token_present, gh_rate_limit_probe(host).await);
+            health = disprove_broken_via_probe(health, host).await;
             disproved = health.state == SessionState::RateLimited;
         }
     }
@@ -359,6 +358,16 @@ fn disprove_broken(
     health.detail = None;
     health.reset_at = rate_limit_reset_header(&out.stdout_lossy());
     health
+}
+
+/// The [`disprove_broken`] probes for `host`. The rate_limit read spawns only when gh
+/// has a token to send: without one its answer proves nothing, so the verdict stays
+/// Broken either way and the spawn would only delay it.
+async fn disprove_broken_via_probe(health: SessionHealth, host: &str) -> SessionHealth {
+    if !gh_token_present(host).await {
+        return health;
+    }
+    disprove_broken(health, true, gh_rate_limit_probe(host).await)
 }
 
 /// Every known gh host's health from ONE `gh auth status --json hosts` spawn, keyed
@@ -583,10 +592,7 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
             match account_follow_up(h.state, acct.active) {
                 AccountFollowUp::Expiry => apply_gh_expiry(&mut h, host).await,
                 AccountFollowUp::ResetTime => h.reset_at = gh_rate_limit_reset(host).await,
-                AccountFollowUp::Disprove => {
-                    let token_present = gh_token_present(host).await;
-                    h = disprove_broken(h, token_present, gh_rate_limit_probe(host).await);
-                }
+                AccountFollowUp::Disprove => h = disprove_broken_via_probe(h, host).await,
                 AccountFollowUp::None => {}
             }
             out.push(h);

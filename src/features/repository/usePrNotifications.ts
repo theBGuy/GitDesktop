@@ -110,8 +110,22 @@ export function usePrNotifications(repoPath: string) {
       prevRepo.current = repoPath;
       prev.current = null;
     }
-    const snapshot = new Map(data.map((p) => [p.number, p]));
     const before = prev.current;
+    // An unconfirmed red rollup may flip back next poll, so it never replaces the
+    // baseline: the previous state carries over, and an unknown one stays unknown.
+    const snapshot = new Map(
+      data.map((p) => {
+        const held = p.checksUnconfirmed ? before?.get(p.number) : undefined;
+        const row = held
+          ? {
+              ...p,
+              checksState: held.checksState,
+              checksUnconfirmed: held.checksUnconfirmed,
+            }
+          : p;
+        return [p.number, row] as const;
+      }),
+    );
     prev.current = snapshot;
 
     // pr-sync: auto re-review open remote PRs whose head advanced — covers PRs whose
@@ -236,9 +250,12 @@ export function usePrNotifications(repoPath: string) {
       const old = before.get(pr.number);
       const mine = login !== null && pr.author === login;
 
+      // An unconfirmed side is an unknown state, never one end of a transition.
       if (
         (scope === "all" || mine) &&
         old &&
+        !old.checksUnconfirmed &&
+        !pr.checksUnconfirmed &&
         pr.state === "OPEN" &&
         old.checksState !== pr.checksState &&
         (pr.checksState === "SUCCESS" || pr.checksState === "FAILURE")

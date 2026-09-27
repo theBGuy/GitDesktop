@@ -1675,6 +1675,7 @@ fn from_glab_poll_mr(m: GlabPollMr) -> PrPollInfo {
         // rollup, so the poller's checks/review branches never fire for GitLab (v1).
         review_decision: String::new(),
         checks_state: String::new(),
+        checks_unconfirmed: false,
         head_sha: m.sha,
         // The new-comment / new-review / review-requested detectors are GitHub-only
         // in v1 — the MR list carries none of these.

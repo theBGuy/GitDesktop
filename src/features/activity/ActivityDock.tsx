@@ -572,9 +572,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
                 key={task.key}
                 task={task}
                 crossRepo={task.target.repoPath !== repoPath}
-                onOpenDetails={(detail) =>
-                  openDetails(task.title || "Pull request", detail)
-                }
+                onOpenDetails={openDetails}
               />
             ))}
           </div>
@@ -721,8 +719,8 @@ function StoppedTaskRow({
 }: {
   task: ReviewTask;
   crossRepo: boolean;
-  /** Show a long error in the ErrorDialog. */
-  onOpenDetails: (detail: string) => void;
+  /** Show a long error in the ErrorDialog, headed by `summary`. */
+  onOpenDetails: (summary: string, detail: string) => void;
 }) {
   const ModeIcon = task.mode === "security" ? ShieldCheckIcon : SparkleIcon;
   const modeName = task.mode === "security" ? "Security audit" : "Review";
@@ -814,7 +812,7 @@ function StoppedTaskRow({
           <Button
             variant="ghost"
             size="xs"
-            onClick={() => onOpenDetails(detail)}
+            onClick={() => onOpenDetails(title, detail)}
           >
             Open in Details
           </Button>

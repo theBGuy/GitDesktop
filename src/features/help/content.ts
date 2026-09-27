@@ -1130,11 +1130,12 @@ date and time. A run of pushes collapses
 into one **pushed N commits** row that expands to the commits (arrow-navigable), and each
 commit's short SHA is clickable — it jumps to that commit's detail. On GitHub, events show
 up as calm one-line entries: force-pushes, label added/removed, review requested, marked
-ready for review, converted to draft, closed, reopened, merged, and renamed. An **approval
-or changes-request that predates a later push is flagged stale** (**stale · N commits
-since**), so an out-of-date verdict never reads as current. The feed works for **GitLab
-MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for the events
-each one reports.
+ready for review, converted to draft, closed, reopened, merged, renamed, assigned/unassigned,
+milestone added/removed, cross-referenced, issue linked/unlinked, and locked/unlocked. An
+**approval or changes-request that predates a later push is flagged stale** (**stale · N
+commits since**), so an out-of-date verdict never reads as current. The feed works for
+**GitLab MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for the
+events each one reports.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
 ⊖ J skipped**, each count with its own icon and word so status never rides on color
@@ -2525,7 +2526,8 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   loading older runs pauses the auto-refresh, and **Refresh** updates everything
   you've loaded. **Load more** at the bottom pages older runs in, all the way back
   through the repository's history, and shows GitHub's total run count while older
-  pages remain. Filter by text or scope to the current branch.
+  pages remain. Filter by text or scope to the current branch; scoped to a branch,
+  GitHub pages up to 1,000 runs, and the count reads 1,000+ once there are more.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a
@@ -3495,11 +3497,12 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
-  **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed
-  automated run also lands a *review failed* row in the inbox (whenever the **Automation
-  results** source keeps its in-app channel on) that shows why it failed and offers a
-  one-click **Re-run** right from the row, matching manual-run failures (which show their
-  reason too).{{/ai}}
+  **Dismiss** — a stopped row notes how long it ran before it stopped, and a failed one
+  expands in place to its full error, offering **Open in Details** when it's long — and a
+  failed automated run also lands a *review failed* row in the inbox (whenever the
+  **Automation results** source keeps its in-app channel on) that shows why it failed and
+  offers a one-click **Re-run** right from the row, matching manual-run failures (which
+  show their reason too).{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture, filterable by name, category,
   or key.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**

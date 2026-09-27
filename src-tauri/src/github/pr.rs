@@ -2730,8 +2730,9 @@ pub async fn gh_pr_list_ci(
     if !red.is_empty() {
         let verdicts =
             gh_confirm_red_rollups(repo_path, hostname_arg.as_deref(), &owner, &name, &red).await;
+        // Kept and Unobserved both leave the precomputed icon: a blip here is cosmetic.
         for row in &mut result {
-            if let Some(state) = verdicts.get(&row.number) {
+            if let Some(RedVerdict::Confirmed(state)) = verdicts.get(&row.number) {
                 row.ci_status = rollup_state_to_ci(Some(state));
             }
         }
@@ -2773,11 +2774,11 @@ fn red_rollup_confirm_query(numbers: &[u64]) -> String {
     format!("query($owner:String!,$name:String!){{ repository(owner:$owner,name:$name){{ {aliases}}} }}")
 }
 
-/// The verdict for each red row: its confirmed enum, or its precomputed one wherever
-/// the fetch or the gate in [`confirm_red_rollup`] fails, so a row never loses its icon.
-/// No cross-call memo, unlike the panel's events: a fixing re-run moves neither the
-/// head oid nor the precomputed FAILURE, so no key available here would observe the
-/// fix. Cost is bounded by the red rows and the callers' refetch cadence. Chunks run
+/// The [`RedVerdict`] for each red row; a failed chunk reads `Unobserved` for its rows,
+/// so no row ever loses its precomputed enum. No cross-call memo, unlike the
+/// panel's events: a fixing re-run moves neither the head oid nor the
+/// precomputed FAILURE, so no key available here would observe the fix. Cost
+/// is bounded by the red rows and the callers' refetch cadence. Chunks run
 /// concurrently under the panel's 30s `GH_TIMEOUT`, so a hung confirm holds the
 /// caller's answer back by about one timeout, however many chunks there are.
 async fn gh_confirm_red_rollups(
@@ -2786,7 +2787,7 @@ async fn gh_confirm_red_rollups(
     owner: &str,
     name: &str,
     red: &[RedRollupRow],
-) -> std::collections::HashMap<u64, String> {
+) -> std::collections::HashMap<u64, RedVerdict> {
     let owner_arg = format!("owner={owner}");
     let name_arg = format!("name={name}");
     let chunks = crate::forge::futures_join_all(red.chunks(RED_CONFIRM_CHUNK).map(|chunk| {
@@ -2905,31 +2906,43 @@ fn derive_rollup_state(checks: &[RawCheck]) -> Option<&'static str> {
     worst.map(|r| BY_RANK[r])
 }
 
+/// What a red row's confirm established. Both non-confirmed arms leave the row on its
+/// precomputed enum; they differ in whether the next poll could answer otherwise.
+#[derive(Debug, PartialEq)]
+enum RedVerdict {
+    /// The enum of the row's checks collapsed to each one's latest run.
+    Confirmed(String),
+    /// The gate refuses this head's contexts deterministically, so every retry
+    /// repeats the refusal: the precomputed enum is the stable answer.
+    Kept,
+    /// No answer describing the row's own snapshot (no answer, or one from another
+    /// head or rollup state): a retry could answer differently with nothing changed.
+    Unobserved,
+}
+
 /// A red row's verdict: the enum of its checks collapsed to each one's latest run, but
 /// only once [`derive_rollup_state`] reproduces GitHub's own `precomputed` enum over the
-/// complete context set of the same head. A missing answer, another head, a page short
-/// of `totalCount` (the panel's join refusal), no contexts, or a model mismatch all
-/// keep `precomputed`, so drift in the model degrades to GitHub's verdict.
+/// complete context set of the same head. A page short of `totalCount` (the panel's
+/// join refusal), no contexts, or a model mismatch refuses as `Kept`, so drift in the
+/// model degrades to GitHub's verdict.
 fn confirm_red_rollup(
     precomputed: &str,
     head_oid: &str,
     contexts: Option<RedRollupContexts>,
-) -> String {
-    let keep = || precomputed.to_string();
-    let Some(c) = contexts else {
-        return keep();
-    };
+) -> RedVerdict {
     let expected = precomputed.trim().to_ascii_uppercase();
-    let trusted = !head_oid.is_empty()
-        && c.head_oid == head_oid
-        && c.state.eq_ignore_ascii_case(&expected)
-        && c.total <= c.checks.len() as u64
+    let Some(c) = contexts.filter(|c| {
+        !head_oid.is_empty() && c.head_oid == head_oid && c.state.eq_ignore_ascii_case(&expected)
+    }) else {
+        return RedVerdict::Unobserved;
+    };
+    let trusted = c.total <= c.checks.len() as u64
         && derive_rollup_state(&c.checks) == Some(expected.as_str());
     if !trusted {
-        return keep();
+        return RedVerdict::Kept;
     }
     derive_rollup_state(&collapse_superseded_checks(c.checks, Some(&c.events)))
-        .map_or_else(keep, String::from)
+        .map_or(RedVerdict::Kept, |s| RedVerdict::Confirmed(s.to_string()))
 }
 
 // NOTE: `gh pr edit` is unusable on older gh versions (its GraphQL query
@@ -3172,6 +3185,10 @@ pub struct PrPollInfo {
     pub review_decision: String,
     /// Rollup of the head commit's checks: SUCCESS/FAILURE/PENDING/"".
     pub checks_state: String,
+    /// True when `checks_state` is a red enum this poll could not confirm (the confirm
+    /// answer never described this snapshot), so it may flip back next poll: the
+    /// poller holds its previous state rather than notifying. GitHub only.
+    pub checks_unconfirmed: bool,
     /// Head commit SHA — lets the poll detect when a PR receives new commits
     /// (drives pr-sync auto re-review for remote PRs, incl. non-local heads).
     pub head_sha: String,
@@ -3269,6 +3286,7 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
             author: str_at(n, "/author/login"),
             review_decision: str_at(n, "/reviewDecision"),
             checks_state: str_at(n, "/commits/nodes/0/commit/statusCheckRollup/state"),
+            checks_unconfirmed: false,
             head_sha: str_at(n, "/commits/nodes/0/commit/oid"),
             comment_count: n
                 .pointer("/comments/totalCount")
@@ -3310,14 +3328,24 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
         })
         .collect();
     if !red.is_empty() {
-        let verdicts = gh_confirm_red_rollups(&repo_path, None, owner, name, &red).await;
+        let mut verdicts = gh_confirm_red_rollups(&repo_path, None, owner, name, &red).await;
         for pr in &mut prs {
-            if let Some(state) = verdicts.get(&pr.number) {
-                pr.checks_state = state.clone();
+            if let Some(verdict) = verdicts.remove(&pr.number) {
+                apply_red_verdict(pr, verdict);
             }
         }
     }
     Ok(prs)
+}
+
+/// Lands a red row's confirm on its poll row. Only `Unobserved` is flagged: a `Kept`
+/// refusal repeats every poll, so its precomputed enum is as stable as a confirmed one.
+fn apply_red_verdict(pr: &mut PrPollInfo, verdict: RedVerdict) {
+    match verdict {
+        RedVerdict::Confirmed(state) => pr.checks_state = state,
+        RedVerdict::Kept => {}
+        RedVerdict::Unobserved => pr.checks_unconfirmed = true,
+    }
 }
 
 /// Where one PR's head branch lives.
@@ -8084,6 +8112,7 @@ mod tests {
             author: "a".into(),
             review_decision: "APPROVED".into(),
             checks_state: "SUCCESS".into(),
+            checks_unconfirmed: true,
             head_sha: "deadbeef".into(),
             comment_count: 1,
             last_comment_author: "c".into(),
@@ -8114,6 +8143,7 @@ mod tests {
             assert!(v.get(key).is_some(), "{key} missing from: {v}");
         }
         assert_eq!(v.get("lastReviewId").and_then(|x| x.as_str()), Some("PRR_kwDO"));
+        assert_eq!(v.get("checksUnconfirmed").and_then(|x| x.as_bool()), Some(true));
     }
 
     #[test]
@@ -9201,9 +9231,9 @@ github.acme.com
         /// re-derived through the same collapse kernel as the panel, behind the gate.
         mod red_rows {
             use super::super::super::{
-                confirm_red_rollup, derive_rollup_state, needs_red_confirm,
+                apply_red_verdict, confirm_red_rollup, derive_rollup_state, needs_red_confirm,
                 parse_red_rollup_contexts, red_rollup_confirm_query, rollup_node_check,
-                rollup_state_to_ci,
+                rollup_state_to_ci, PrPollInfo, RedVerdict,
             };
             use super::{HEAD_A, HEAD_B, T1, T2, T3};
             use serde_json::{json, Value};
@@ -9258,8 +9288,16 @@ github.acme.com
                 alias(state, total, nodes)
             }
 
-            fn verdict(precomputed: &str, answer: &Value) -> String {
+            fn outcome(precomputed: &str, answer: &Value) -> RedVerdict {
                 confirm_red_rollup(precomputed, HEAD_A, parse_red_rollup_contexts(answer))
+            }
+
+            /// The enum the row ends up showing: both refusals keep `precomputed`.
+            fn verdict(precomputed: &str, answer: &Value) -> String {
+                match outcome(precomputed, answer) {
+                    RedVerdict::Confirmed(state) => state,
+                    RedVerdict::Kept | RedVerdict::Unobserved => precomputed.to_string(),
+                }
             }
 
             #[test]
@@ -9454,50 +9492,113 @@ github.acme.com
                     "SUCCESS"
                 );
                 assert_eq!(
-                    verdict("FAILURE", &alias("FAILURE", 150, hundred)),
-                    "FAILURE"
+                    outcome("FAILURE", &alias("FAILURE", 150, hundred)),
+                    RedVerdict::Kept
                 );
             }
 
             #[test]
             fn a_model_mismatch_keeps_the_precomputed_enum() {
                 // GitHub says FAILURE over rows the model reads as passing.
+                // Every refusal here repeats on every poll of this head: Kept.
                 let passing = full("FAILURE", vec![done("build", T1, "SUCCESS")]);
-                assert_eq!(verdict("FAILURE", &passing), "FAILURE");
+                assert_eq!(outcome("FAILURE", &passing), RedVerdict::Kept);
                 // A conclusion or typename the model doesn't know.
                 let mut stale = fixable();
                 stale.push(done("lint", T1, "STALE"));
-                assert_eq!(verdict("FAILURE", &full("FAILURE", stale)), "FAILURE");
+                assert_eq!(
+                    outcome("FAILURE", &full("FAILURE", stale)),
+                    RedVerdict::Kept
+                );
                 let mut unknown = fixable();
                 unknown.push(json!({"__typename": "SomethingNew"}));
-                assert_eq!(verdict("FAILURE", &full("FAILURE", unknown)), "FAILURE");
+                assert_eq!(
+                    outcome("FAILURE", &full("FAILURE", unknown)),
+                    RedVerdict::Kept
+                );
                 // GitHub's rollup never reads ERROR where the model reads FAILURE.
-                assert_eq!(verdict("ERROR", &full("ERROR", fixable())), "ERROR");
+                assert_eq!(
+                    outcome("ERROR", &full("ERROR", fixable())),
+                    RedVerdict::Kept
+                );
             }
 
             #[test]
             fn empty_contexts_keep_the_precomputed_enum() {
-                assert_eq!(verdict("FAILURE", &full("FAILURE", Vec::new())), "FAILURE");
+                assert_eq!(
+                    outcome("FAILURE", &full("FAILURE", Vec::new())),
+                    RedVerdict::Kept
+                );
             }
 
             #[test]
-            fn a_missing_or_foreign_answer_keeps_the_precomputed_enum() {
+            fn a_missing_or_foreign_answer_is_unobserved() {
                 // Failed fetch, null alias, no rollup.
-                assert_eq!(confirm_red_rollup("FAILURE", HEAD_A, None), "FAILURE");
-                assert_eq!(verdict("FAILURE", &Value::Null), "FAILURE");
+                assert_eq!(
+                    confirm_red_rollup("FAILURE", HEAD_A, None),
+                    RedVerdict::Unobserved
+                );
+                assert_eq!(outcome("FAILURE", &Value::Null), RedVerdict::Unobserved);
                 let no_rollup = json!({"commits": {"nodes": [{"commit": {
                     "oid": HEAD_A, "statusCheckRollup": null,
                 }}]}});
-                assert_eq!(verdict("FAILURE", &no_rollup), "FAILURE");
-                // Another head than the row's, or a row with no head to pin.
+                assert_eq!(outcome("FAILURE", &no_rollup), RedVerdict::Unobserved);
+                // Another head than the row's (a push raced the two reads), or a row
+                // with no head to pin.
                 let answer = full("FAILURE", fixable());
                 let contexts = || parse_red_rollup_contexts(&answer);
-                assert_eq!(confirm_red_rollup("FAILURE", HEAD_B, contexts()), "FAILURE");
-                assert_eq!(confirm_red_rollup("FAILURE", "", contexts()), "FAILURE");
+                assert_eq!(
+                    confirm_red_rollup("FAILURE", HEAD_B, contexts()),
+                    RedVerdict::Unobserved
+                );
+                assert_eq!(
+                    confirm_red_rollup("FAILURE", "", contexts()),
+                    RedVerdict::Unobserved
+                );
                 // The answer's own enum moved on since the row was read.
                 let moved = full("PENDING", fixable());
-                assert_eq!(verdict("FAILURE", &moved), "FAILURE");
-                assert_eq!(confirm_red_rollup("FAILURE", HEAD_A, contexts()), "SUCCESS");
+                assert_eq!(outcome("FAILURE", &moved), RedVerdict::Unobserved);
+                // Control: the same answer pinned to the row's head confirms.
+                assert_eq!(
+                    confirm_red_rollup("FAILURE", HEAD_A, contexts()),
+                    RedVerdict::Confirmed("SUCCESS".into())
+                );
+            }
+
+            #[test]
+            fn only_an_unobserved_confirm_flags_the_poll_row() {
+                let row = || PrPollInfo {
+                    number: 400,
+                    title: String::new(),
+                    url: String::new(),
+                    state: "OPEN".into(),
+                    is_draft: false,
+                    author: String::new(),
+                    review_decision: String::new(),
+                    checks_state: "FAILURE".into(),
+                    checks_unconfirmed: false,
+                    head_sha: HEAD_A.into(),
+                    comment_count: 0,
+                    last_comment_author: String::new(),
+                    review_count: 0,
+                    last_review_author: String::new(),
+                    last_review_id: String::new(),
+                    review_requests: Vec::new(),
+                    head_ref_name: String::new(),
+                    base_ref_name: String::new(),
+                    created_at: String::new(),
+                };
+                let applied = |verdict| {
+                    let mut pr = row();
+                    apply_red_verdict(&mut pr, verdict);
+                    (pr.checks_state, pr.checks_unconfirmed)
+                };
+                assert_eq!(
+                    applied(RedVerdict::Confirmed("SUCCESS".into())),
+                    ("SUCCESS".into(), false)
+                );
+                assert_eq!(applied(RedVerdict::Kept), ("FAILURE".into(), false));
+                assert_eq!(applied(RedVerdict::Unobserved), ("FAILURE".into(), true));
             }
 
             #[test]

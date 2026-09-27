@@ -95,7 +95,7 @@ function formatDate(date: string): string {
 
 /** A rate-limited badge's detail: the forge's own message, then when access
  *  resumes. No Reconnect rides this state — the credential is fine. */
-function rateLimitTitle(
+function rateLimitDetail(
   health: SessionHealth,
   now: number,
 ): string | undefined {
@@ -244,7 +244,7 @@ function GitHubAccounts() {
                               variant="outline"
                               className="text-warning"
                               label="rate limited"
-                              detail={rateLimitTitle(rowHealth, now)}
+                              detail={rateLimitDetail(rowHealth, now)}
                             />
                           )}
                           <span className="flex-1" />
@@ -452,7 +452,7 @@ function GitLabSignInBlock() {
                     variant="outline"
                     className="ml-auto shrink-0 text-warning"
                     label="rate limited"
-                    detail={rateLimitTitle(h, now)}
+                    detail={rateLimitDetail(h, now)}
                   />
                 )}
                 {warnExpiry && (

@@ -357,7 +357,8 @@ in one click.
   later commits land. Local PRs get the same feed (created → commits →
   comments → merged/closed). GitHub carries the full event set (force-push,
   label add/remove, review request, ready-for-review, convert-to-draft,
-  close, reopen, merge, rename); **GitLab MRs** add commits, label changes,
+  close, reopen, merge, rename, assignments, milestones, cross-references,
+  linked issues, lock/unlock); **GitLab MRs** add commits, label changes,
   close/reopen/merge, and approvals (approved / changes-requested /
   approval-withdrawn) but no force-push or draft events; **Bitbucket PRs**
   add commits, merge/close, and approved / changes-requested (no labels or

@@ -48,9 +48,10 @@ export function StatusDetailChip({
   variant?: BadgeVariant | null;
   className?: string;
 }) {
+  const v = variant ?? "default";
   if (!detail?.trim()) {
     return (
-      <Badge variant={variant} className={className}>
+      <Badge variant={v} className={className}>
         {icon}
         {label}
       </Badge>
@@ -61,8 +62,8 @@ export function StatusDetailChip({
       <PopoverTrigger
         aria-label={`${label}, details`}
         className={cn(
-          badgeVariants({ variant }),
-          TRIGGER_TINT[variant ?? "default"],
+          badgeVariants({ variant: v }),
+          TRIGGER_TINT[v],
           "cursor-pointer outline-none",
           className,
         )}
