@@ -342,6 +342,9 @@ type InFlightVerb =
 const OWNER_UNKNOWN_REASON =
   "Couldn't read who owns this repository, and a new project is created under that account";
 
+/** OWNER_UNKNOWN_REASON sized for HeldFooter's ~45-char reason column. */
+const OWNER_UNKNOWN_FOOTER_REASON = "Couldn't read who owns this repository";
+
 /** GitHub refuses to delete a project's last remaining view (probed live). */
 const LAST_VIEW_REASON =
   "A project keeps its last view, so GitHub won't delete this one";
@@ -3198,7 +3201,7 @@ export function ProjectsBoardPanel({
 
   async function submitNewProject(title: string): Promise<void> {
     const ownerId = projects.data?.ownerId;
-    // Belt-and-braces: the dialog's Create is held with OWNER_UNKNOWN_REASON then.
+    // Belt-and-braces: the dialog's Create is held with OWNER_UNKNOWN_FOOTER_REASON then.
     if (!ownerId) return;
     const session = lifecycleSessionRef.current;
     const generation = pickGenerationRef.current;
@@ -6467,7 +6470,7 @@ export function ProjectsBoardPanel({
           owner: projects.data?.ownerLogin ?? null,
         }}
         ownerHeldReason={
-          projects.data?.ownerId ? undefined : OWNER_UNKNOWN_REASON
+          projects.data?.ownerId ? undefined : OWNER_UNKNOWN_FOOTER_REASON
         }
         onOpenChange={(o) => {
           if (!o) closeLifecycle();

@@ -3952,8 +3952,8 @@ function patchedProject(
     title: patch.title ?? project.title,
     closed: patch.closed ?? project.closed,
   };
-  if (patch.shortDescription?.trim())
-    next.shortDescription = patch.shortDescription;
+  const description = patch.shortDescription?.trim();
+  if (description) next.shortDescription = description;
   return next;
 }
 
