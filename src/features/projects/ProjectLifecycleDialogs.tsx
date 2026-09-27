@@ -252,7 +252,7 @@ export function EditProjectDialog({
     form.store,
     (s) =>
       s.values.title.trim() === seedTitle &&
-      s.values.description.trim() === seedDescription,
+      s.values.description.trim() === seedDescription.trim(),
   );
   // GitHub keeps the old text for an emptied description, so a clear is held
   // rather than sent as a write that reports success and changes nothing.
