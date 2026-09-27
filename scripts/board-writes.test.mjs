@@ -15,6 +15,7 @@ import {
   holdLens,
   pausedBoardWriteOn,
   projectItemsRepoKey,
+  refetchOnMountUnlessHeld,
   releaseLens,
   repoFocusInvalidations,
 } from "../src/lib/git/queries/board-writes.ts";
@@ -111,4 +112,21 @@ test("the filters snapshot the held set: a chase ending afterwards changes neith
   releaseLens(held, "chased");
   assert.equal(refetch.predicate({ queryHash: "chased" }), false);
   assert.equal(markOnly.predicate({ queryHash: "chased" }), true);
+});
+
+test("a held lens takes no mount refetch; every other lens keeps the default", () => {
+  const held = new Map([["chased", 1]]);
+  const refetchOnMount = refetchOnMountUnlessHeld(held);
+  assert.equal(refetchOnMount({ queryHash: "chased" }), false);
+  assert.equal(refetchOnMount({ queryHash: "same-board-other-lens" }), true);
+});
+
+test("the mount predicate reads the held set LIVE, not as of its creation", () => {
+  const held = new Map();
+  const refetchOnMount = refetchOnMountUnlessHeld(held);
+  assert.equal(refetchOnMount({ queryHash: "lens" }), true);
+  holdLens(held, "lens");
+  assert.equal(refetchOnMount({ queryHash: "lens" }), false);
+  releaseLens(held, "lens");
+  assert.equal(refetchOnMount({ queryHash: "lens" }), true);
 });

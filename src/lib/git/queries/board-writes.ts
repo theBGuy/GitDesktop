@@ -86,6 +86,15 @@ export function releaseLens(held: Map<string, number>, hash: string): void {
 }
 
 /**
+ * A board lens's `refetchOnMount`: false while a date-shift chase holds the lens,
+ * the query-core default (`true`) otherwise. Reads `held` LIVE on every mount —
+ * a lens held after the predicate was built must still be caught.
+ */
+export function refetchOnMountUnlessHeld(held: ReadonlyMap<string, number>) {
+  return (query: { queryHash: string }): boolean => !held.has(query.queryHash);
+}
+
+/**
  * The window-focus bridge's invalidation of every repo query, as the filter sets
  * to run. A lens in `held` (a date-shift chase is reading it) is marked stale but
  * NOT refetched: an answer landing mid-chase replaces the patched dates the chase

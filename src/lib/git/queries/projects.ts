@@ -72,6 +72,7 @@ import {
   boardWriteVars,
   holdLens,
   projectItemsRepoKey,
+  refetchOnMountUnlessHeld,
   releaseLens,
   repoFocusInvalidations,
 } from "./board-writes";
@@ -876,6 +877,14 @@ export function useProjectItems(
     enabled,
     staleTime: 60_000,
     retry: false,
+    // No mount refetch (a remount, or an Activity re-show) of a lens a date-shift
+    // chase is reading, for the reason {@link invalidateRepoOnFocus} holds its
+    // focus read. Unlike `refetchOnWindowFocus`, which the app's focus bridge
+    // bypasses, query-core consults this on every observer mount; the chase's own
+    // settle brings a lens mounted during the hold current. Named residual: a view
+    // switched away and back mid-chase refetches a stale lens anyway — query-core's
+    // key-change fetch reads staleness alone.
+    refetchOnMount: refetchOnMountUnlessHeld(shiftChasedLenses),
     // The board is a placeholder axis (index 3 in the key literal above); the filter
     // at index 4, the archived state at index 5 and the richness at index 6
     // deliberately are not. Switching views, showing archived cards, or moving

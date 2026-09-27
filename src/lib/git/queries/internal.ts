@@ -95,8 +95,9 @@ export const pendingBoardWrites = new Map<string, number>();
 /** Whether a board write on `repo` is outstanding for a settle to wait on: inside
  *  its request ({@link pendingBoardWrites}), or PAUSED offline after its
  *  optimistic patch, before the request the count wraps ever started. A settling
- *  write never counts itself only while every board-write `onMutate` awaits
- *  microtask-scope work alone — the precondition `pausedBoardWriteOn` states. */
+ *  write is excluded from its own reading provided every board-write `onMutate`
+ *  awaits only microtask-scope work — the precondition `pausedBoardWriteOn`
+ *  states. */
 export function boardWritesOutstanding(
   queryClient: QueryClient,
   repo: string,

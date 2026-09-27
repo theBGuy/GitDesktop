@@ -9,7 +9,7 @@ import { COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "../api";
 import { repoIdentityQueryOptions } from "../repo-identity-query";
 import { projectItemsRepoKey } from "./board-writes";
-import { readStraddlesSettle, straddleOutcome } from "./write-settle";
+import { createStraddleHealer, readStraddlesSettle } from "./write-settle";
 
 /** A repo's worktree-stable identity key (its common git dir), for keying
  *  per-repo app-data the same across the main checkout and every worktree. Null or
@@ -102,9 +102,9 @@ export const repoKeys = {
   issueList: (repo: string) => ["repo", repo, "issue-list"] as const,
 };
 
-/** Straddling reads that already have a heal chained, so a second settle inside
- *  one round trip adds no second watch — the first one's heal runs after both. */
-const healing = new WeakSet<Query>();
+/** The one healer every whole-repo settle shares, so its already-watched set spans
+ *  them all. */
+const straddleHealer = createStraddleHealer<Query>();
 
 /**
  * A write's whole-repo settle: invalidate every query of `repo`, and for each read
@@ -132,35 +132,20 @@ export function invalidateRepoAfterWrite(
     predicate: (query) =>
       readStraddlesSettle(query) &&
       !partialMatchKey(query.queryKey, boards) &&
-      !healing.has(query),
+      !straddleHealer.isHealing(query),
   });
-  if (straddling.length > 0) healWhenLanded(queryClient, straddling);
-  return queryClient.invalidateQueries({ queryKey });
-}
-
-/** Re-invalidate each of `reads` once it stops fetching, then drop the watch. The
- *  invalidation is deferred a microtask: it must not start a fetch from inside the
- *  cache notification that reports the landing. */
-function healWhenLanded(queryClient: QueryClient, reads: Query[]): void {
-  const waiting = new Set(reads);
-  for (const query of reads) healing.add(query);
-  const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
-    if (!waiting.has(event.query)) return;
-    const outcome = straddleOutcome(event);
-    if (outcome === null) return;
-    waiting.delete(event.query);
-    healing.delete(event.query);
-    if (outcome === "landed") {
-      const landedKey = event.query.queryKey;
-      queueMicrotask(() => {
+  straddleHealer.watch(
+    {
+      subscribe: (listener) => queryClient.getQueryCache().subscribe(listener),
+      invalidate: (query) =>
         void queryClient.invalidateQueries({
-          queryKey: landedKey,
+          queryKey: query.queryKey,
           exact: true,
-        });
-      });
-    }
-    if (waiting.size === 0) unsubscribe();
-  });
+        }),
+    },
+    straddling,
+  );
+  return queryClient.invalidateQueries({ queryKey });
 }
 
 export function useGitInstalled() {

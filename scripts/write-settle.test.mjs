@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  createStraddleHealer,
   mergeTouched,
   projectTouchedKeys,
   readStraddlesSettle,
@@ -199,4 +200,136 @@ test("named edge: a later write of the SAME value is rolled back with this one",
     restoreTouched(current, ["title"], optimistic, before).title,
     "Roadmap",
   );
+});
+
+/** A stand-in query cache: one subscription at a time, its listener callable by
+ *  the test, and every re-invalidation recorded. */
+function fakeCache() {
+  const cache = {
+    listener: null,
+    subscribes: 0,
+    unsubscribed: 0,
+    invalidated: [],
+    subscribe(listener) {
+      cache.subscribes += 1;
+      cache.listener = listener;
+      return () => {
+        cache.unsubscribed += 1;
+        cache.listener = null;
+      };
+    },
+    invalidate(query) {
+      cache.invalidated.push(query.name);
+    },
+    emit(type, query) {
+      cache.listener?.({ type, query });
+    },
+  };
+  return cache;
+}
+
+/** A healer whose deferred invalidations wait for `flush()`. */
+function healerWithQueue() {
+  const queue = [];
+  const healer = createStraddleHealer((run) => queue.push(run));
+  const flush = () => {
+    for (const run of queue.splice(0)) run();
+  };
+  return { healer, flush, queue };
+}
+
+const read = (name) => ({ name, state: { fetchStatus: "fetching" } });
+
+test("heal: a landed read is re-invalidated exactly once, deferred off the notification", () => {
+  const { healer, flush, queue } = healerWithQueue();
+  const cache = fakeCache();
+  const q = read("q");
+  healer.watch(cache, [q]);
+  q.state.fetchStatus = "idle";
+  cache.emit("updated", q);
+  assert.deepEqual(cache.invalidated, []);
+  assert.equal(queue.length, 1);
+  flush();
+  cache.emit("updated", q);
+  flush();
+  assert.deepEqual(cache.invalidated, ["q"]);
+});
+
+test("heal: a second watch of a read still in flight adds no second watch", () => {
+  const { healer, flush } = healerWithQueue();
+  const cache = fakeCache();
+  const q = read("q");
+  healer.watch(cache, [q]);
+  assert.equal(healer.isHealing(q), true);
+  healer.watch(cache, [q]);
+  assert.equal(cache.subscribes, 1);
+  q.state.fetchStatus = "idle";
+  cache.emit("updated", q);
+  flush();
+  assert.deepEqual(cache.invalidated, ["q"]);
+});
+
+test("heal: a landed read leaves the watch set and can be watched again", () => {
+  const { healer, flush } = healerWithQueue();
+  const cache = fakeCache();
+  const q = read("q");
+  healer.watch(cache, [q]);
+  q.state.fetchStatus = "idle";
+  cache.emit("updated", q);
+  flush();
+  assert.equal(healer.isHealing(q), false);
+  q.state.fetchStatus = "fetching";
+  healer.watch(cache, [q]);
+  assert.equal(cache.subscribes, 2);
+  q.state.fetchStatus = "idle";
+  cache.emit("updated", q);
+  flush();
+  assert.deepEqual(cache.invalidated, ["q", "q"]);
+});
+
+test("heal: a removed read never heals, and leaves the watch set", () => {
+  const { healer, flush } = healerWithQueue();
+  const cache = fakeCache();
+  const q = read("q");
+  healer.watch(cache, [q]);
+  cache.emit("removed", q);
+  flush();
+  assert.deepEqual(cache.invalidated, []);
+  assert.equal(healer.isHealing(q), false);
+  assert.equal(cache.unsubscribed, 1);
+});
+
+test("heal: the subscription ends with its LAST read, not its first", () => {
+  const { healer, flush } = healerWithQueue();
+  const cache = fakeCache();
+  const a = read("a");
+  const b = read("b");
+  healer.watch(cache, [a, b]);
+  a.state.fetchStatus = "idle";
+  cache.emit("updated", a);
+  assert.equal(cache.unsubscribed, 0);
+  b.state.fetchStatus = "idle";
+  cache.emit("updated", b);
+  assert.equal(cache.unsubscribed, 1);
+  flush();
+  assert.deepEqual(cache.invalidated, ["a", "b"]);
+});
+
+test("heal: events for unwatched queries and in-flight updates change nothing", () => {
+  const { healer, flush } = healerWithQueue();
+  const cache = fakeCache();
+  const q = read("q");
+  healer.watch(cache, [q]);
+  cache.emit("updated", read("other"));
+  cache.emit("updated", q); // still fetching: an invalidate mark, a retry
+  flush();
+  assert.deepEqual(cache.invalidated, []);
+  assert.equal(cache.unsubscribed, 0);
+});
+
+test("heal: watching nothing new subscribes to nothing", () => {
+  const { healer } = healerWithQueue();
+  const cache = fakeCache();
+  healer.watch(cache, []);
+  assert.equal(cache.subscribes, 0);
 });

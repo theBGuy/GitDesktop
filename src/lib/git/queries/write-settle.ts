@@ -1,7 +1,8 @@
 /**
  * The pure pieces of how a write settles into the cache: which entity keys an
  * optimistic patch touched, merging a write's answer over only those, rolling
- * only those back, and which in-flight reads a whole-repo settle must heal.
+ * only those back, which in-flight reads a whole-repo settle must heal, and the
+ * heal itself over an injected cache surface.
  *
  * Import-free at runtime on purpose (types only, erased) so
  * `scripts/write-settle.test.mjs` can load it straight from `src/` under Node's
@@ -132,4 +133,51 @@ export function straddleOutcome(event: {
   if (event.type === "updated" && event.query.state.fetchStatus !== "fetching")
     return "landed";
   return null;
+}
+
+/** The cache surface a straddle heal drives, injected so the orchestration runs
+ *  without query-core: a cache-event subscription, and the re-invalidation of one
+ *  landed read's exact key. */
+export interface StraddleHealCache<Q> {
+  subscribe(listener: (event: { type: string; query: Q }) => void): () => void;
+  invalidate(query: Q): void;
+}
+
+/**
+ * Chains a heal after each straddling read ({@link readStraddlesSettle}): once a
+ * read lands, its key is invalidated again, one round trip after the stale answer
+ * instead of a staleTime later. The read itself is never touched.
+ *
+ * A read already watched is skipped, so a second settle inside one round trip adds
+ * no second watch — the first one's heal runs after both. A landed or removed read
+ * leaves the watch set, so a later settle can watch it again; a removed one has
+ * nothing to heal. The subscription ends with its last read. `defer` holds the
+ * invalidation off the cache notification that reports the landing, which must
+ * not start a fetch from inside itself.
+ */
+export function createStraddleHealer<
+  Q extends { state: { fetchStatus: string } },
+>(defer: (run: () => void) => void = queueMicrotask) {
+  const healing = new WeakSet<Q>();
+  return {
+    isHealing: (query: Q) => healing.has(query),
+    /** Watch every read of `reads` not already watched. */
+    watch(cache: StraddleHealCache<Q>, reads: readonly Q[]): void {
+      const waiting = new Set(reads.filter((query) => !healing.has(query)));
+      if (waiting.size === 0) return;
+      for (const query of waiting) healing.add(query);
+      const unsubscribe = cache.subscribe((event) => {
+        if (!waiting.has(event.query)) return;
+        const outcome = straddleOutcome(event);
+        if (outcome === null) return;
+        waiting.delete(event.query);
+        healing.delete(event.query);
+        if (outcome === "landed") {
+          const landed = event.query;
+          defer(() => cache.invalidate(landed));
+        }
+        if (waiting.size === 0) unsubscribe();
+      });
+    },
+  };
 }
