@@ -1,3 +1,3 @@
-- A pull request's checks panel no longer counts a stale failure against a
-  passing pull request after a workflow re-ran for a label, title, or
-  description edit.
+- A pull request's checks panel now counts a workflow that re-ran after a
+  label, title, or description edit by its latest run, so a passing pull
+  request reads as passing.
