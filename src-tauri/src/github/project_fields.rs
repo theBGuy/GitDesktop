@@ -9,8 +9,8 @@ use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::project::{item_projects_truncated, project_ref, ProjectV2Ref, PROJECT_FIELDS};
 use crate::github::project_item_edits::{
-    bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, strip_gh_prefix, BulkDocument,
-    BulkItemOutcomes, BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
+    bulk_document, bulk_outcomes, graphql_input, run_bulk_documents, strip_gh_prefix, AliasPayload,
+    BulkDocument, BulkItemOutcomes, BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
 };
 use crate::github::project_items::AssigneeRef;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
@@ -30,6 +30,18 @@ pub struct ItemFieldValues {
     pub items: Vec<ItemProjectFieldValues>,
     /// The item's `projectItems(first:20)` connection reported another page.
     pub truncated: bool,
+    /// Present on an issue read only: pull requests carry no org issue fields.
+    #[serde(flatten)]
+    pub issue: Option<IssueFieldAccess>,
+}
+
+/// What an org issue-field write needs from the issue itself.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueFieldAccess {
+    pub issue_id: String,
+    /// GitHub's nullable verdict, read as false when it names none.
+    pub viewer_can_set_fields: bool,
 }
 
 #[derive(Serialize)]
@@ -46,30 +58,42 @@ pub enum ProjectFieldValue {
         name: String,
         color: String,
         is_issue_field: bool,
+        /// The org IssueField behind a bridged value, which ties it to its definition
+        /// when the two wrapper ids differ. Absent on board-defined values.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     MultiSelect {
         field_id: String,
         field_name: String,
         options: Vec<SelectOptionRef>,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Text {
         field_id: String,
         field_name: String,
         text: String,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Number {
         field_id: String,
         field_name: String,
         number: f64,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Date {
         field_id: String,
         field_name: String,
         date: String,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Iteration {
         field_id: String,
@@ -163,12 +187,18 @@ pub enum ProjectFieldDef {
         name: String,
         options: Vec<FieldOptionDef>,
         is_issue_field: bool,
+        /// The underlying org IssueField's node id, which its writes address — the
+        /// wrapper `id` is refused there. Absent when GitHub didn't serve it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     MultiSelect {
         id: String,
         name: String,
         options: Vec<FieldOptionDef>,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Iteration {
         id: String,
@@ -180,16 +210,22 @@ pub enum ProjectFieldDef {
         id: String,
         name: String,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Number {
         id: String,
         name: String,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     Date {
         id: String,
         name: String,
         is_issue_field: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_field_id: Option<String>,
     },
     System {
         id: String,
@@ -254,6 +290,174 @@ pub enum FieldValueUpdate {
         field_id: String,
         iteration_id: String,
     },
+}
+
+/// One org issue field to SET on an issue. `field_id` is the IssueField node id,
+/// never the board's wrapper field id. No iteration arm: GitHub has none.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum IssueFieldValueUpdate {
+    Text {
+        field_id: String,
+        text: String,
+    },
+    Number {
+        field_id: String,
+        number: f64,
+    },
+    Date {
+        field_id: String,
+        date: String,
+    },
+    SingleSelect {
+        field_id: String,
+        option_id: String,
+    },
+    MultiSelect {
+        field_id: String,
+        option_ids: Vec<String>,
+    },
+}
+
+impl IssueFieldValueUpdate {
+    fn field_id(&self) -> &str {
+        match self {
+            Self::Text { field_id, .. }
+            | Self::Number { field_id, .. }
+            | Self::Date { field_id, .. }
+            | Self::SingleSelect { field_id, .. }
+            | Self::MultiSelect { field_id, .. } => field_id,
+        }
+    }
+}
+
+/// The issue half of a single-item field write.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueFieldWrites {
+    pub issue_id: String,
+    pub updates: Vec<IssueFieldValueUpdate>,
+    /// Issue field ids to UNSET.
+    pub clears: Vec<String>,
+}
+
+/// The issue half of a batch field write: one shared write, addressed per item by
+/// `issue_ids`, which pairs index-for-index with the batch's item ids. A `None`
+/// entry (a pull request or draft) takes no issue write.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkIssueFieldWrites {
+    pub issue_ids: Vec<Option<String>>,
+    pub updates: Vec<IssueFieldValueUpdate>,
+    pub clears: Vec<String>,
+}
+
+/// One `issueFields` entry. A value and a delete never share an entry: GitHub lets
+/// `delete: true` silently win over a value beside it.
+enum IssueFieldEntry<'a> {
+    Set(&'a IssueFieldValueUpdate),
+    Delete(&'a str),
+}
+
+/// Refuses a field named twice across one issue's updates and clears: how GitHub
+/// orders two entries for one field is unmeasured.
+fn check_issue_field_ids(updates: &[IssueFieldValueUpdate], clears: &[String]) -> AppResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    for field_id in updates
+        .iter()
+        .map(IssueFieldValueUpdate::field_id)
+        .chain(clears.iter().map(String::as_str))
+    {
+        if !seen.insert(field_id) {
+            return Err(AppError::InvalidArgument(format!(
+                "issue field {field_id} is written twice"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One `setIssueFieldValue` call for one issue, every update and clear batched into
+/// its `issueFields` list. The call is transactional per issue: one refused entry
+/// fails that issue's whole list. Variable types are the input's own —
+/// `singleSelectOptionId` and `multiSelectOptionIds` take `ID`, `dateValue` a String.
+fn build_issue_field_part(
+    n: usize,
+    issue_id: &str,
+    updates: &[IssueFieldValueUpdate],
+    clears: &[String],
+    variables: &mut Vec<String>,
+    args: &mut Vec<String>,
+) -> AppResult<String> {
+    validate_graphql_embed(issue_id, "issue id")?;
+    check_issue_field_ids(updates, clears)?;
+    variables.push(format!("$x{n}:ID!"));
+    args.extend(["-f".to_string(), format!("x{n}={issue_id}")]);
+    let entries = updates
+        .iter()
+        .map(IssueFieldEntry::Set)
+        .chain(clears.iter().map(|id| IssueFieldEntry::Delete(id)));
+    let mut literals = Vec::with_capacity(updates.len() + clears.len());
+    for (k, entry) in entries.enumerate() {
+        let field_id = match &entry {
+            IssueFieldEntry::Set(update) => update.field_id(),
+            IssueFieldEntry::Delete(field_id) => field_id,
+        };
+        validate_graphql_embed(field_id, "issue field id")?;
+        variables.push(format!("$h{n}_{k}:ID!"));
+        args.extend(["-f".to_string(), format!("h{n}_{k}={field_id}")]);
+        let (key, value) = match entry {
+            IssueFieldEntry::Delete(_) => ("delete", "true".to_string()),
+            IssueFieldEntry::Set(IssueFieldValueUpdate::Number { number, .. }) => {
+                if !number.is_finite() {
+                    return Err(AppError::InvalidArgument(
+                        "field number must be finite".into(),
+                    ));
+                }
+                // Finite f64 Display is always a valid GraphQL numeric literal.
+                ("numberValue", number.to_string())
+            }
+            IssueFieldEntry::Set(IssueFieldValueUpdate::Text { text, .. }) => {
+                variables.push(format!("$w{n}_{k}:String!"));
+                args.extend(["-f".to_string(), format!("w{n}_{k}={text}")]);
+                ("textValue", format!("$w{n}_{k}"))
+            }
+            IssueFieldEntry::Set(IssueFieldValueUpdate::Date { date, .. }) => {
+                variables.push(format!("$w{n}_{k}:String!"));
+                args.extend(["-f".to_string(), format!("w{n}_{k}={date}")]);
+                ("dateValue", format!("$w{n}_{k}"))
+            }
+            IssueFieldEntry::Set(IssueFieldValueUpdate::SingleSelect { option_id, .. }) => {
+                validate_graphql_embed(option_id, "option id")?;
+                variables.push(format!("$w{n}_{k}:ID!"));
+                args.extend(["-f".to_string(), format!("w{n}_{k}={option_id}")]);
+                ("singleSelectOptionId", format!("$w{n}_{k}"))
+            }
+            IssueFieldEntry::Set(IssueFieldValueUpdate::MultiSelect { option_ids, .. }) => {
+                for option_id in option_ids {
+                    validate_graphql_embed(option_id, "option id")?;
+                }
+                variables.push(format!("$w{n}_{k}:[ID!]!"));
+                if option_ids.is_empty() {
+                    // gh's bracket key without '=' represents an empty array.
+                    args.extend(["-f".to_string(), format!("w{n}_{k}[]")]);
+                }
+                for option_id in option_ids {
+                    args.extend(["-f".to_string(), format!("w{n}_{k}[]={option_id}")]);
+                }
+                ("multiSelectOptionIds", format!("$w{n}_{k}"))
+            }
+        };
+        literals.push(format!("{{fieldId:$h{n}_{k},{key}:{value}}}"));
+    }
+    Ok(format!(
+        "setIssueFieldValue(input:{{issueId:$x{n},issueFields:[{}]}}){{issue{{id}}}}",
+        literals.join(",")
+    ))
 }
 
 fn build_field_value_literal(
@@ -343,24 +547,45 @@ fn build_field_value_literal(
     Ok(format!("fieldId:$f{n},value:{{{key}:{value}}}"))
 }
 
+/// The board-only form the ProjectV2 builder tests pin.
+#[cfg(test)]
 fn build_set_item_field_values_args(
     project_id: &str,
     item_id: &str,
     updates: &[FieldValueUpdate],
     clears: &[String],
 ) -> AppResult<Vec<String>> {
+    build_field_write_args(project_id, item_id, updates, clears, None)
+}
+
+/// The alias a single write's issue part answers under.
+const ISSUE_ALIAS: &str = "issue";
+
+/// One document for a single item's write: its board aliases plus, when present, one
+/// issue alias. Each part declares only the variables it uses — an unused declaration
+/// fails the whole document.
+fn build_field_write_args(
+    project_id: &str,
+    item_id: &str,
+    updates: &[FieldValueUpdate],
+    clears: &[String],
+    issue: Option<&IssueFieldWrites>,
+) -> AppResult<Vec<String>> {
     validate_graphql_embed(project_id, "project id")?;
     validate_graphql_embed(item_id, "project item id")?;
-    let mut variables = vec!["$p:ID!".to_string(), "$i:ID!".to_string()];
-    let mut parts = Vec::with_capacity(updates.len() + clears.len());
-    let mut args = vec![
-        "api".to_string(),
-        "graphql".to_string(),
-        "-f".to_string(),
-        format!("p={project_id}"),
-        "-f".to_string(),
-        format!("i={item_id}"),
-    ];
+    let board = !updates.is_empty() || !clears.is_empty();
+    let mut variables = Vec::new();
+    let mut parts = Vec::with_capacity(updates.len() + clears.len() + 1);
+    let mut args = vec!["api".to_string(), "graphql".to_string()];
+    if board {
+        variables.extend(["$p:ID!".to_string(), "$i:ID!".to_string()]);
+        args.extend([
+            "-f".to_string(),
+            format!("p={project_id}"),
+            "-f".to_string(),
+            format!("i={item_id}"),
+        ]);
+    }
     for (n, update) in updates.iter().enumerate() {
         let input = build_field_value_literal(n, update, &mut variables, &mut args)?;
         parts.push(format!(
@@ -374,6 +599,19 @@ fn build_set_item_field_values_args(
         parts.push(format!(
             "c{n}: clearProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i,fieldId:$g{n}}}){{projectV2Item{{id}}}}"
         ));
+    }
+    if let Some(issue) = issue {
+        if !issue.updates.is_empty() || !issue.clears.is_empty() {
+            let part = build_issue_field_part(
+                0,
+                &issue.issue_id,
+                &issue.updates,
+                &issue.clears,
+                &mut variables,
+                &mut args,
+            )?;
+            parts.push(format!("{ISSUE_ALIAS}: {part}"));
+        }
     }
     args.extend([
         "-f".to_string(),
@@ -417,11 +655,82 @@ fn field_write_input(args: &[String]) -> String {
     graphql_input(document.expect("field mutation document"), variables)
 }
 
+/// The board-only form the ProjectV2 batch tests pin.
+#[cfg(test)]
 fn build_bulk_field_documents(
     project_id: &str,
     item_ids: &[String],
     updates: &[FieldValueUpdate],
     clears: &[String],
+) -> AppResult<Vec<BulkDocument>> {
+    build_bulk_field_write_documents(project_id, item_ids, updates, clears, None)
+}
+
+const PROJECT_ITEM_PAYLOAD: AliasPayload = AliasPayload::at("/projectV2Item/id");
+/// Errors on an issue alias pass through verbatim: the project-scope hint names a
+/// scope that write may not be missing.
+const ISSUE_PAYLOAD: AliasPayload = AliasPayload {
+    pointer: "/issue/id",
+    map_error: Some(strip_gh_prefix),
+};
+
+/// The aliases of one batch document being filled. `$p` is declared only once a
+/// board alias uses it: an issue-only document would otherwise fail validation.
+struct BulkBatch {
+    declarations: Vec<String>,
+    args: Vec<String>,
+    parts: Vec<String>,
+    item_indices: Vec<usize>,
+    aliases: Vec<AliasPayload>,
+    board: bool,
+}
+
+impl BulkBatch {
+    fn new() -> Self {
+        Self {
+            declarations: Vec::new(),
+            args: vec!["api".into(), "graphql".into()],
+            parts: Vec::new(),
+            item_indices: Vec::new(),
+            aliases: Vec::new(),
+            board: false,
+        }
+    }
+
+    fn push(&mut self, part: String, item_index: usize, alias: AliasPayload) {
+        self.parts.push(part);
+        self.item_indices.push(item_index);
+        self.aliases.push(alias);
+    }
+
+    /// The finished document once the batch reaches the alias cap.
+    fn flush_full(&mut self, project_id: &str) -> Option<BulkDocument> {
+        (self.parts.len() == BULK_ALIAS_CAP)
+            .then(|| std::mem::replace(self, Self::new()).document(project_id))
+    }
+
+    fn document(mut self, project_id: &str) -> BulkDocument {
+        if self.board {
+            self.declarations.insert(0, "$p:ID!".into());
+            self.args
+                .splice(2..2, ["-f".into(), format!("p={project_id}")]);
+        }
+        bulk_document(
+            self.declarations,
+            self.parts,
+            self.args,
+            self.item_indices,
+            self.aliases,
+        )
+    }
+}
+
+fn build_bulk_field_write_documents(
+    project_id: &str,
+    item_ids: &[String],
+    updates: &[FieldValueUpdate],
+    clears: &[String],
+    issue: Option<&BulkIssueFieldWrites>,
 ) -> AppResult<Vec<BulkDocument>> {
     if item_ids.is_empty() {
         return Err(AppError::InvalidArgument(
@@ -429,49 +738,62 @@ fn build_bulk_field_documents(
         ));
     }
     validate_graphql_embed(project_id, "project id")?;
+    let issue = issue.filter(|issue| !issue.updates.is_empty() || !issue.clears.is_empty());
+    if let Some(issue) = issue {
+        if issue.issue_ids.len() != item_ids.len() {
+            return Err(AppError::InvalidArgument(
+                "issue ids must pair with the project item ids".into(),
+            ));
+        }
+        check_issue_field_ids(&issue.updates, &issue.clears)?;
+    }
     let mut documents = Vec::new();
-    let mut declarations = vec!["$p:ID!".into()];
-    let mut args = vec![
-        "api".into(), "graphql".into(), "-f".into(), format!("p={project_id}"),
-    ];
-    let mut parts = Vec::new();
-    let mut item_indices = Vec::new();
+    let mut batch = BulkBatch::new();
     for (item_index, item_id) in item_ids.iter().enumerate() {
         validate_graphql_embed(item_id, "project item id")?;
         for op in 0..updates.len() + clears.len() {
-            let n = parts.len();
-            declarations.push(format!("$i{n}:ID!"));
-            args.extend(["-f".into(), format!("i{n}={item_id}")]);
+            let n = batch.parts.len();
+            batch.board = true;
+            batch.declarations.push(format!("$i{n}:ID!"));
+            batch.args.extend(["-f".into(), format!("i{n}={item_id}")]);
             let part = if let Some(update) = updates.get(op) {
-                let input = build_field_value_literal(n, update, &mut declarations, &mut args)?;
+                let input =
+                    build_field_value_literal(n, update, &mut batch.declarations, &mut batch.args)?;
                 format!("updateProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i{n},{input}}}){{projectV2Item{{id}}}}")
             } else {
                 let field_id = &clears[op - updates.len()];
                 validate_graphql_embed(field_id, "field id")?;
-                declarations.push(format!("$g{n}:ID!"));
-                args.extend(["-f".into(), format!("g{n}={field_id}")]);
+                batch.declarations.push(format!("$g{n}:ID!"));
+                batch.args.extend(["-f".into(), format!("g{n}={field_id}")]);
                 format!("clearProjectV2ItemFieldValue(input:{{projectId:$p,itemId:$i{n},fieldId:$g{n}}}){{projectV2Item{{id}}}}")
             };
-            parts.push(part);
-            item_indices.push(item_index);
-            if parts.len() == BULK_ALIAS_CAP {
-                documents.push(bulk_document(
-                    std::mem::replace(&mut declarations, vec!["$p:ID!".into()]),
-                    std::mem::take(&mut parts),
-                    std::mem::replace(
-                        &mut args,
-                        vec!["api".into(), "graphql".into(), "-f".into(), format!("p={project_id}")],
-                    ),
-                    std::mem::take(&mut item_indices),
-                    "/projectV2Item/id",
-                ));
+            batch.push(part, item_index, PROJECT_ITEM_PAYLOAD);
+            if let Some(document) = batch.flush_full(project_id) {
+                documents.push(document);
+            }
+        }
+        // The issue alias shares the `a{n}` numbering, which is how an error scoped
+        // to it finds its item.
+        if let Some((issue, issue_id)) =
+            issue.and_then(|issue| Some((issue, issue.issue_ids[item_index].as_deref()?)))
+        {
+            let n = batch.parts.len();
+            let part = build_issue_field_part(
+                n,
+                issue_id,
+                &issue.updates,
+                &issue.clears,
+                &mut batch.declarations,
+                &mut batch.args,
+            )?;
+            batch.push(part, item_index, ISSUE_PAYLOAD);
+            if let Some(document) = batch.flush_full(project_id) {
+                documents.push(document);
             }
         }
     }
-    if !parts.is_empty() {
-        documents.push(bulk_document(
-            declarations, parts, args, item_indices, "/projectV2Item/id",
-        ));
+    if !batch.parts.is_empty() {
+        documents.push(batch.document(project_id));
     }
     for document in &mut documents {
         document.input = Some(field_write_input(&document.args));
@@ -495,15 +817,25 @@ fn parse_field_write_response(stdout: &str) -> AppResult<()> {
         )
     })?;
     if let Some(error) = array(&value["errors"]).next() {
-        let message = error["message"]
-            .as_str()
-            .unwrap_or("GitHub could not update the project fields.");
-        return Err(map_scope_error(AppError::Gh(message.to_string())));
+        let message = AppError::Gh(
+            error["message"]
+                .as_str()
+                .unwrap_or("GitHub could not update the project fields.")
+                .to_string(),
+        );
+        // The issue alias's refusals are the issue's own, never a board-scope gap.
+        return Err(if error["path"][0] == ISSUE_ALIAS {
+            message
+        } else {
+            map_scope_error(message)
+        });
     }
     Ok(())
 }
 
-/// A batch can partially apply; the first error is returned and callers must refetch even on failure.
+/// A batch can partially apply — the board aliases and the issue alias land
+/// independently — so the first error is returned and callers must refetch even on
+/// failure.
 #[tauri::command]
 pub async fn gh_set_item_field_values(
     repo_path: String,
@@ -511,11 +843,13 @@ pub async fn gh_set_item_field_values(
     item_id: String,
     updates: Vec<FieldValueUpdate>,
     clears: Vec<String>,
+    issue_writes: Option<IssueFieldWrites>,
 ) -> AppResult<()> {
-    if updates.is_empty() && clears.is_empty() {
+    let issue = issue_writes.filter(|issue| !issue.updates.is_empty() || !issue.clears.is_empty());
+    if updates.is_empty() && clears.is_empty() && issue.is_none() {
         return Ok(());
     }
-    let args = build_set_item_field_values_args(&project_id, &item_id, &updates, &clears)?;
+    let args = build_field_write_args(&project_id, &item_id, &updates, &clears, issue.as_ref())?;
     let input = field_write_input(&args);
     let out = run_gh_input(
         Some(&repo_path),
@@ -529,8 +863,9 @@ pub async fn gh_set_item_field_values(
 }
 
 /// Duplicate ids execute independently in input order. Each item keeps its first
-/// failed field-op error; fields may partially apply, so callers must refetch on failure.
-/// Empty updates and clears succeed without a request when item_ids is nonempty.
+/// failed field-op error, its issue alias's included; fields may partially apply, so
+/// callers must refetch on failure. An item with no board op and no issue id sends
+/// nothing and reads as landed, so callers drop such items before calling.
 #[tauri::command]
 pub async fn gh_set_items_field_values(
     repo_path: String,
@@ -538,18 +873,38 @@ pub async fn gh_set_items_field_values(
     item_ids: Vec<String>,
     updates: Vec<FieldValueUpdate>,
     clears: Vec<String>,
+    issue_writes: Option<BulkIssueFieldWrites>,
 ) -> AppResult<BulkItemOutcomes> {
     let outcomes = bulk_outcomes(&item_ids)?;
-    let documents = build_bulk_field_documents(&project_id, &item_ids, &updates, &clears)?;
+    let documents = build_bulk_field_write_documents(
+        &project_id,
+        &item_ids,
+        &updates,
+        &clears,
+        issue_writes.as_ref(),
+    )?;
     Ok(run_bulk_documents(&repo_path, outcomes, documents, map_field_write_error).await)
 }
 
 const FIELDS_SCOPE_HINT: &str =
     "GitHub project fields need the read:project (or project) scope. Run:  gh auth refresh -s project";
+/// What an org issue-field id sent down the board's write path reads as.
+const ISSUE_FIELD_PATH_HINT: &str =
+    "This field belongs to the issue itself, so it saves through the issue. Reload the board's fields and try again.";
 
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
         let lower = msg.to_lowercase();
+        if lower.contains(
+            "issue field values cannot be updated using the updateprojectv2itemfieldvalue",
+        ) {
+            return AppError::Gh(ISSUE_FIELD_PATH_HINT.to_string());
+        }
+        // An issue write's refusal stays verbatim: which scope or permission it needs
+        // is GitHub's to say, and the project-scope hint would name the wrong one.
+        if lower.contains("setissuefieldvalue") {
+            return e;
+        }
         if lower.contains("required scopes") || lower.contains("read:project") {
             return AppError::Gh(FIELDS_SCOPE_HINT.to_string());
         }
@@ -558,6 +913,11 @@ fn map_scope_error(e: AppError) -> AppError {
 }
 
 const FIELD_COMMON: &str = "... on ProjectV2FieldCommon { id name dataType isIssueField }";
+
+/// A bridged value's field ref, down to its org IssueField's id. GitHub can type
+/// the ref apart from the definition (a multi-select's reads as `ProjectV2Field`),
+/// so each concrete arm asks for every kind it may carry.
+const ISSUE_FIELD_REF: &str = "... on ProjectV2Field{ issueField{ __typename ... on IssueFieldText{ id } ... on IssueFieldNumber{ id } ... on IssueFieldDate{ id } ... on IssueFieldSingleSelect{ id } ... on IssueFieldMultiSelect{ id } } } ... on ProjectV2SingleSelectField{ issueField{ __typename ... on IssueFieldSingleSelect{ id } } } ... on ProjectV2MultiSelectField{ issueField{ __typename ... on IssueFieldMultiSelect{ id } } }";
 
 // The IssueField*Value arms alias their `value` scalar (`text: value`, …) so
 // classic and bridge values parse by the same keys and String/Float response
@@ -586,7 +946,7 @@ pub(super) fn field_value_selection(rich: bool) -> String {
          ... on ProjectV2ItemFieldMilestoneValue{{ field{{ {FIELD_COMMON} }} milestone{{ title dueOn }} }} \
          ... on ProjectV2ItemFieldRepositoryValue{{ field{{ {FIELD_COMMON} }} repository{{ nameWithOwner }} }} \
          {connections} \
-         ... on ProjectV2ItemIssueFieldValue{{ field{{ {FIELD_COMMON} }} issueFieldValue{{ __typename \
+         ... on ProjectV2ItemIssueFieldValue{{ field{{ {FIELD_COMMON} {ISSUE_FIELD_REF} }} issueFieldValue{{ __typename \
            ... on IssueFieldSingleSelectValue{{ name optionId color }} \
            ... on IssueFieldMultiSelectValue{{ options{{ id name color }} }} \
            ... on IssueFieldTextValue{{ text: value }} \
@@ -598,21 +958,36 @@ pub(super) fn field_value_selection(rich: bool) -> String {
 
 fn item_field_values_query(field: &str) -> String {
     let values = field_value_selection(true);
+    // Issue-only scalars, selected directly on the issue: a PullRequest has no
+    // `viewerCanSetFields`, and no fragment on Issue may spread inside one.
+    let issue = if field == "issue" {
+        "id viewerCanSetFields "
+    } else {
+        ""
+    };
     format!(
         "query($owner:String!,$name:String!,$number:Int!){{ \
-         repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
+         repository(owner:$owner,name:$name){{ {field}(number:$number){{ {issue}\
          projectItems(first:20, includeArchived:true){{ pageInfo{{ hasNextPage }} nodes{{ id project{{ {PROJECT_FIELDS} }} \
          fieldValues(first:50){{ nodes{{ {values} \
          }} }} }} }} }} }} }}"
     )
 }
 
+/// The org IssueField behind a wrapper field — a union, so each concrete kind is
+/// its own fragment. Select kinds carry the options: the wrapper's own list is
+/// empty for an issue field.
+const ISSUE_FIELD_SCALAR: &str = "issueField{ __typename ... on IssueFieldText{ id } ... on IssueFieldNumber{ id } ... on IssueFieldDate{ id } }";
+const ISSUE_FIELD_SINGLE_SELECT: &str = "issueField{ __typename ... on IssueFieldSingleSelect{ id options{ id name color description } } }";
+const ISSUE_FIELD_MULTI_SELECT: &str = "issueField{ __typename ... on IssueFieldMultiSelect{ id options{ id name color description } } }";
+
 fn project_fields_query() -> String {
     format!(
         "query($id:ID!){{ node(id:$id){{ ... on ProjectV2{{ fields(first:50){{ pageInfo{{ hasNextPage }} nodes{{ \
          __typename {FIELD_COMMON} \
-         ... on ProjectV2SingleSelectField{{ options{{ id name color description }} }} \
-         ... on ProjectV2MultiSelectField{{ multiSelectOptions{{ id name color description }} }} \
+         ... on ProjectV2Field{{ {ISSUE_FIELD_SCALAR} }} \
+         ... on ProjectV2SingleSelectField{{ options{{ id name color description }} {ISSUE_FIELD_SINGLE_SELECT} }} \
+         ... on ProjectV2MultiSelectField{{ multiSelectOptions{{ id name color description }} {ISSUE_FIELD_MULTI_SELECT} }} \
          ... on ProjectV2IterationField{{ configuration{{ \
            iterations{{ id title startDate duration }} \
            completedIterations{{ id title startDate duration }} \
@@ -655,6 +1030,13 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
     } else {
         node
     };
+    // Read tolerantly: without it the value still matches its definition by
+    // wrapper id wherever the two agree.
+    let issue_field_id = bridge
+        .then(|| field["issueField"]["id"].as_str())
+        .flatten()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string);
     match (
         value["__typename"].as_str().unwrap_or_default(),
         field["dataType"].as_str().unwrap_or_default(),
@@ -669,6 +1051,7 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
             name: text(value, "name"),
             color: text(value, "color"),
             is_issue_field,
+            issue_field_id,
         },
         ("ProjectV2ItemFieldMultiSelectValue" | "IssueFieldMultiSelectValue", "MULTI_SELECT") => {
             ProjectFieldValue::MultiSelect {
@@ -682,6 +1065,7 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
                     })
                     .collect(),
                 is_issue_field,
+                issue_field_id,
             }
         }
         ("ProjectV2ItemFieldTextValue" | "IssueFieldTextValue", "TEXT") => {
@@ -690,6 +1074,7 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
                 field_name,
                 text: text(value, "text"),
                 is_issue_field,
+                issue_field_id,
             }
         }
         ("ProjectV2ItemFieldNumberValue" | "IssueFieldNumberValue", "NUMBER") => {
@@ -701,6 +1086,7 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
                 field_name,
                 number,
                 is_issue_field,
+                issue_field_id,
             }
         }
         ("ProjectV2ItemFieldDateValue" | "IssueFieldDateValue", "DATE") => {
@@ -709,6 +1095,7 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
                 field_name,
                 date: text(value, "date"),
                 is_issue_field,
+                issue_field_id,
             }
         }
         ("ProjectV2ItemFieldIterationValue", "ITERATION") => {
@@ -817,9 +1204,20 @@ fn parse_item_field_values(value: &Value, field: &str) -> ItemFieldValues {
             })
         })
         .collect();
+    let issue = (field == "issue")
+        .then(|| value.pointer("/data/repository/issue"))
+        .flatten()
+        .and_then(|issue| {
+            let issue_id = issue["id"].as_str().filter(|id| !id.trim().is_empty())?;
+            Some(IssueFieldAccess {
+                issue_id: issue_id.to_string(),
+                viewer_can_set_fields: issue["viewerCanSetFields"].as_bool().unwrap_or(false),
+            })
+        });
     ItemFieldValues {
         items,
         truncated: item_projects_truncated(value, field),
+        issue,
     }
 }
 
@@ -857,18 +1255,35 @@ fn parse_project_fields(value: &Value) -> ProjectFieldDefs {
             let id = node.get("id")?.as_str()?.to_string();
             let name = text(node, "name");
             let is_issue_field = node["isIssueField"].as_bool().unwrap_or(false);
+            // Read tolerantly: an issue field whose IssueField GitHub didn't serve
+            // still lists, and the frontend holds its writes for want of this id.
+            let issue_field = &node["issueField"];
+            let issue_field_id = is_issue_field
+                .then(|| issue_field["id"].as_str())
+                .flatten()
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string);
+            let options = |wrapper: &str| {
+                field_options(if is_issue_field && issue_field.is_object() {
+                    &issue_field["options"]
+                } else {
+                    &node[wrapper]
+                })
+            };
             Some(match node["dataType"].as_str().unwrap_or_default() {
                 "SINGLE_SELECT" => ProjectFieldDef::SingleSelect {
                     id,
                     name,
-                    options: field_options(&node["options"]),
+                    options: options("options"),
                     is_issue_field,
+                    issue_field_id,
                 },
                 "MULTI_SELECT" => ProjectFieldDef::MultiSelect {
                     id,
                     name,
-                    options: field_options(&node["multiSelectOptions"]),
+                    options: options("multiSelectOptions"),
                     is_issue_field,
+                    issue_field_id,
                 },
                 "ITERATION" => ProjectFieldDef::Iteration {
                     id,
@@ -880,16 +1295,19 @@ fn parse_project_fields(value: &Value) -> ProjectFieldDefs {
                     id,
                     name,
                     is_issue_field,
+                    issue_field_id,
                 },
                 "NUMBER" => ProjectFieldDef::Number {
                     id,
                     name,
                     is_issue_field,
+                    issue_field_id,
                 },
                 "DATE" => ProjectFieldDef::Date {
                     id,
                     name,
                     is_issue_field,
+                    issue_field_id,
                 },
                 _ => ProjectFieldDef::System {
                     id,
@@ -1250,6 +1668,7 @@ mod tests {
             "item".into(),
             vec![],
             vec!["field".into()],
+            None,
         )
         .await;
         let wire = serde_json::to_value(result.unwrap_err()).unwrap();
@@ -1325,7 +1744,23 @@ mod tests {
             String::new(),
             String::new(),
             vec![],
-            vec![]
+            vec![],
+            None,
+        )
+        .await
+        .is_ok());
+        // An issue part with nothing in it is no write either.
+        assert!(gh_set_item_field_values(
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+            vec![],
+            Some(IssueFieldWrites {
+                issue_id: String::new(),
+                updates: vec![],
+                clears: vec![],
+            }),
         )
         .await
         .is_ok());
@@ -1859,12 +2294,26 @@ mod tests {
 
     #[test]
     fn item_in_two_projects_preserves_memberships_and_values() {
-        for field in ["issue", "pullRequest"] {
-            let response = json!({"data":{"repository":{field:{"projectItems":{"nodes":[
+        // Per kind, because the envelope diverges: only an issue read carries the
+        // issue-level scalars, even when a response somehow held them for a PR.
+        for (field, envelope_keys) in [
+            (
+                "issue",
+                &["issueId", "items", "truncated", "viewerCanSetFields"][..],
+            ),
+            ("pullRequest", &["items", "truncated"][..]),
+        ] {
+            let response = json!({"data":{"repository":{field:{"id":"I_node","viewerCanSetFields":true,"projectItems":{"nodes":[
                 {"id":"item-a","project":{"id":"project-a","title":"Roadmap","number":3,"closed":false,"viewerCanUpdate":true},"fieldValues":{"nodes":custom_values()}},
                 {"id":"item-b","project":{"id":"project-b","title":"Backlog","number":4,"closed":true,"viewerCanUpdate":false},"fieldValues":{"nodes":[]}}
             ]}}}}});
             let out = parse_item_field_values(&response, field);
+            let envelope = serde_json::to_value(&out).expect("envelope serializes");
+            assert_keys(&envelope, envelope_keys);
+            if field == "issue" {
+                assert_eq!(envelope["issueId"], "I_node");
+                assert_eq!(envelope["viewerCanSetFields"], true);
+            }
             assert!(!out.truncated);
             let items = out.items;
             assert_eq!(items.len(), 2);
@@ -2196,7 +2645,7 @@ mod tests {
         ], &["due".into()]).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].item_indices, [0, 0, 1, 1]);
-        assert_eq!(docs[0].payload_pointer, "/projectV2Item/id");
+        assert!(docs[0].aliases.iter().all(|alias| alias.pointer == "/projectV2Item/id"));
         assert_eq!(docs[0].args, GRAPHQL_INPUT_ARGS);
         let input: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
         assert_eq!(input["query"], "mutation($p:ID!,$i0:ID!,$f0:ID!,$v0:String!,$i1:ID!,$g1:ID!,$i2:ID!,$f2:ID!,$v2:String!,$i3:ID!,$g3:ID!){ a0: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i0,fieldId:$f0,value:{text:$v0}}){projectV2Item{id}} a1: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i1,fieldId:$g1}){projectV2Item{id}} a2: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i2,fieldId:$f2,value:{text:$v2}}){projectV2Item{id}} a3: clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i3,fieldId:$g3}){projectV2Item{id}} }");
@@ -2330,8 +2779,8 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_field_empty_items_reject_and_empty_ops_skip_network() {
-        assert!(gh_set_items_field_values("missing".into(), "PVT_p".into(), vec![], vec![], vec![]).await.is_err());
-        let outcomes = gh_set_items_field_values("missing".into(), "PVT_p".into(), vec!["PVTI_z".into()], vec![], vec![]).await.unwrap();
+        assert!(gh_set_items_field_values("missing".into(), "PVT_p".into(), vec![], vec![], vec![], None).await.is_err());
+        let outcomes = gh_set_items_field_values("missing".into(), "PVT_p".into(), vec!["PVTI_z".into()], vec![], vec![], None).await.unwrap();
         assert_eq!(serde_json::to_value(outcomes).unwrap(), json!({"outcomes":[{"itemId":"PVTI_z","error":null}]}));
         assert!(build_bulk_field_documents("PVT_p", &["PVTI_z".into()], &[], &[]).unwrap().is_empty());
     }
@@ -2424,4 +2873,612 @@ mod tests {
         assert_eq!(GRAPHQL_INPUT_ARGS, ["api", "graphql", "--method", "POST", "--input", "-"]);
     }
 
+    fn issue_updates() -> Vec<IssueFieldValueUpdate> {
+        vec![
+            IssueFieldValueUpdate::Text {
+                field_id: "IFT_notes".into(),
+                text: "@secret\n\"quoted\"".into(),
+            },
+            IssueFieldValueUpdate::Number {
+                field_id: "IFN_estimate".into(),
+                number: 2.5,
+            },
+            IssueFieldValueUpdate::Date {
+                field_id: "IFD_target".into(),
+                date: "2027-01-01".into(),
+            },
+            IssueFieldValueUpdate::SingleSelect {
+                field_id: "IFSS_risk".into(),
+                option_id: "IFSSO_high".into(),
+            },
+            IssueFieldValueUpdate::MultiSelect {
+                field_id: "IFMS_areas".into(),
+                option_ids: vec!["IFSSO_web".into(), "IFSSO_rust".into()],
+            },
+        ]
+    }
+
+    fn issue_writes(updates: Vec<IssueFieldValueUpdate>, clears: Vec<String>) -> IssueFieldWrites {
+        IssueFieldWrites {
+            issue_id: "I_issue".into(),
+            updates,
+            clears,
+        }
+    }
+
+    fn document(args: &[String]) -> Value {
+        serde_json::from_str(&field_write_input(args)).unwrap()
+    }
+
+    #[test]
+    fn issue_field_updates_round_trip_the_typescript_contract() {
+        let updates: Vec<IssueFieldValueUpdate> = serde_json::from_value(json!([
+            {"kind":"text","fieldId":"IFT_notes","text":"@secret\n\"quoted\""},
+            {"kind":"number","fieldId":"IFN_estimate","number":2.5},
+            {"kind":"date","fieldId":"IFD_target","date":"2027-01-01"},
+            {"kind":"singleSelect","fieldId":"IFSS_risk","optionId":"IFSSO_high"},
+            {"kind":"multiSelect","fieldId":"IFMS_areas","optionIds":["IFSSO_web","IFSSO_rust"]}
+        ]))
+        .expect("TS-shaped issue updates deserialize");
+        for (actual, expected) in updates.iter().zip(issue_updates()) {
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        assert!(serde_json::from_value::<IssueFieldValueUpdate>(
+            json!({"kind":"iteration","fieldId":"f","iterationId":"i"})
+        )
+        .is_err());
+        let writes: IssueFieldWrites = serde_json::from_value(
+            json!({"issueId":"I_issue","updates":[],"clears":["IFT_notes"]}),
+        )
+        .unwrap();
+        assert_eq!(writes.issue_id, "I_issue");
+        assert_eq!(writes.clears, ["IFT_notes"]);
+        let bulk: BulkIssueFieldWrites =
+            serde_json::from_value(json!({"issueIds":["I_a",null],"updates":[],"clears":[]}))
+                .unwrap();
+        assert_eq!(bulk.issue_ids, [Some("I_a".to_string()), None]);
+    }
+
+    #[test]
+    fn issue_only_single_write_declares_only_its_own_variables() {
+        let issue = issue_writes(issue_updates(), vec!["IFT_old".into()]);
+        let args = build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)).unwrap();
+        let input = document(&args);
+        assert_eq!(
+            input["query"],
+            "mutation($x0:ID!,$h0_0:ID!,$w0_0:String!,$h0_1:ID!,$h0_2:ID!,$w0_2:String!,$h0_3:ID!,$w0_3:ID!,$h0_4:ID!,$w0_4:[ID!]!,$h0_5:ID!){ issue: setIssueFieldValue(input:{issueId:$x0,issueFields:[{fieldId:$h0_0,textValue:$w0_0},{fieldId:$h0_1,numberValue:2.5},{fieldId:$h0_2,dateValue:$w0_2},{fieldId:$h0_3,singleSelectOptionId:$w0_3},{fieldId:$h0_4,multiSelectOptionIds:$w0_4},{fieldId:$h0_5,delete:true}]}){issue{id}} }"
+        );
+        assert_eq!(
+            input["variables"],
+            json!({
+                "x0":"I_issue", "h0_0":"IFT_notes", "w0_0":"@secret\n\"quoted\"",
+                "h0_1":"IFN_estimate", "h0_2":"IFD_target", "w0_2":"2027-01-01",
+                "h0_3":"IFSS_risk", "w0_3":"IFSSO_high",
+                "h0_4":"IFMS_areas", "w0_4":["IFSSO_web","IFSSO_rust"],
+                "h0_5":"IFT_old",
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_single_write_is_one_document_with_both_parts() {
+        let issue = issue_writes(vec![issue_updates().remove(3)], vec![]);
+        let args = build_field_write_args(
+            "PVT_p",
+            "PVTI_i",
+            &field_updates()[..1],
+            &["due".into()],
+            Some(&issue),
+        )
+        .unwrap();
+        let input = document(&args);
+        let query = input["query"].as_str().unwrap();
+        assert!(query.starts_with(
+            "mutation($p:ID!,$i:ID!,$f0:ID!,$v0:String!,$g0:ID!,$x0:ID!,$h0_0:ID!,$w0_0:ID!)"
+        ));
+        for alias in [
+            "s0: updateProjectV2ItemFieldValue(",
+            "c0: clearProjectV2ItemFieldValue(",
+            "issue: setIssueFieldValue(",
+        ] {
+            assert_eq!(query.matches(alias).count(), 1, "{alias}");
+        }
+        assert_eq!(input["variables"]["p"], "PVT_p");
+        assert_eq!(input["variables"]["x0"], "I_issue");
+        // A board-only write still sends no issue alias or variable.
+        let args = build_field_write_args("PVT_p", "PVTI_i", &[], &["due".into()], None).unwrap();
+        let input = document(&args);
+        assert!(!input["query"]
+            .as_str()
+            .unwrap()
+            .contains("setIssueFieldValue"));
+        assert!(input["variables"].get("x0").is_none());
+    }
+
+    #[test]
+    fn issue_entries_never_carry_a_value_and_a_delete_together() {
+        let issue = issue_writes(issue_updates(), vec!["IFT_a".into(), "IFT_b".into()]);
+        let args = build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)).unwrap();
+        let query = document(&args)["query"].as_str().unwrap().to_string();
+        let list = query
+            .split_once("issueFields:[")
+            .unwrap()
+            .1
+            .split_once("]}")
+            .unwrap()
+            .0;
+        let entries: Vec<_> = list.split("},{").collect();
+        assert_eq!(entries.len(), 7);
+        for entry in entries {
+            let values = [
+                "textValue:",
+                "numberValue:",
+                "dateValue:",
+                "singleSelectOptionId:",
+                "multiSelectOptionIds:",
+            ]
+            .iter()
+            .filter(|key| entry.contains(*key))
+            .count();
+            let deletes = entry.matches("delete:").count();
+            assert_eq!(values + deletes, 1, "{entry}");
+        }
+    }
+
+    #[test]
+    fn issue_writes_refuse_duplicate_fields_bad_ids_and_non_finite_numbers() {
+        for (updates, clears) in [
+            (
+                vec![issue_updates().remove(0)],
+                vec!["IFT_notes".to_string()],
+            ),
+            (
+                vec![issue_updates().remove(0), issue_updates().remove(0)],
+                vec![],
+            ),
+            (vec![], vec!["IFT_a".to_string(), "IFT_a".to_string()]),
+        ] {
+            let issue = issue_writes(updates, clears);
+            assert!(matches!(
+                build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+        for bad in ["", "@secret", "bad\"}", "bad\n"] {
+            let mut cases = vec![
+                IssueFieldWrites {
+                    issue_id: bad.into(),
+                    updates: vec![],
+                    clears: vec!["IFT_a".into()],
+                },
+                issue_writes(vec![], vec![bad.into()]),
+                issue_writes(
+                    vec![IssueFieldValueUpdate::SingleSelect {
+                        field_id: "IFSS_a".into(),
+                        option_id: bad.into(),
+                    }],
+                    vec![],
+                ),
+                issue_writes(
+                    vec![IssueFieldValueUpdate::MultiSelect {
+                        field_id: "IFMS_a".into(),
+                        option_ids: vec!["ok".into(), bad.into()],
+                    }],
+                    vec![],
+                ),
+                issue_writes(
+                    vec![IssueFieldValueUpdate::Text {
+                        field_id: bad.into(),
+                        text: "t".into(),
+                    }],
+                    vec![],
+                ),
+            ];
+            for issue in cases.drain(..) {
+                assert!(matches!(
+                    build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)),
+                    Err(AppError::InvalidArgument(_))
+                ));
+            }
+        }
+        for number in [f64::NAN, f64::INFINITY] {
+            let issue = issue_writes(
+                vec![IssueFieldValueUpdate::Number {
+                    field_id: "IFN_a".into(),
+                    number,
+                }],
+                vec![],
+            );
+            assert!(build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)).is_err());
+        }
+        // An emptied multi-select is an empty list, never a missing variable.
+        let issue = issue_writes(
+            vec![IssueFieldValueUpdate::MultiSelect {
+                field_id: "IFMS_a".into(),
+                option_ids: vec![],
+            }],
+            vec![],
+        );
+        let args = build_field_write_args("PVT_p", "PVTI_i", &[], &[], Some(&issue)).unwrap();
+        assert_eq!(document(&args)["variables"]["w0_0"], json!([]));
+    }
+
+    fn bulk_issue(
+        issue_ids: Vec<Option<&str>>,
+        updates: Vec<IssueFieldValueUpdate>,
+        clears: Vec<String>,
+    ) -> BulkIssueFieldWrites {
+        BulkIssueFieldWrites {
+            issue_ids: issue_ids
+                .into_iter()
+                .map(|id| id.map(str::to_string))
+                .collect(),
+            updates,
+            clears,
+        }
+    }
+
+    #[test]
+    fn mixed_bulk_document_batches_one_issue_alias_per_issue() {
+        let ids = vec!["PVTI_a".to_string(), "PVTI_pr".into(), "PVTI_b".into()];
+        let issue = bulk_issue(
+            vec![Some("I_a"), None, Some("I_b")],
+            vec![issue_updates().remove(3)],
+            vec!["IFT_notes".into()],
+        );
+        let docs =
+            build_bulk_field_write_documents("PVT_p", &ids, &[], &["due".into()], Some(&issue))
+                .unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].item_indices, [0, 0, 1, 2, 2]);
+        let pointers: Vec<_> = docs[0].aliases.iter().map(|alias| alias.pointer).collect();
+        assert_eq!(
+            pointers,
+            [
+                "/projectV2Item/id",
+                "/issue/id",
+                "/projectV2Item/id",
+                "/projectV2Item/id",
+                "/issue/id"
+            ]
+        );
+        let input: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+        let query = input["query"].as_str().unwrap();
+        assert!(query.starts_with(
+            "mutation($p:ID!,$i0:ID!,$g0:ID!,$x1:ID!,$h1_0:ID!,$w1_0:ID!,$h1_1:ID!,$i2:ID!"
+        ));
+        assert!(query.contains("a1: setIssueFieldValue(input:{issueId:$x1,issueFields:[{fieldId:$h1_0,singleSelectOptionId:$w1_0},{fieldId:$h1_1,delete:true}]}){issue{id}}"));
+        assert!(query.contains("a4: setIssueFieldValue(input:{issueId:$x4,"));
+        assert_eq!(query.matches("setIssueFieldValue(").count(), 2);
+        assert_eq!(input["variables"]["x1"], "I_a");
+        assert_eq!(input["variables"]["x4"], "I_b");
+    }
+
+    #[test]
+    fn issue_only_bulk_document_declares_no_project_variable() {
+        let ids = vec!["PVTI_a".to_string(), "PVTI_b".into()];
+        let issue = bulk_issue(
+            vec![Some("I_a"), Some("I_b")],
+            vec![],
+            vec!["IFSS_risk".into()],
+        );
+        let docs = build_bulk_field_write_documents("PVT_p", &ids, &[], &[], Some(&issue)).unwrap();
+        let input: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            input["query"],
+            "mutation($x0:ID!,$h0_0:ID!,$x1:ID!,$h1_0:ID!){ a0: setIssueFieldValue(input:{issueId:$x0,issueFields:[{fieldId:$h0_0,delete:true}]}){issue{id}} a1: setIssueFieldValue(input:{issueId:$x1,issueFields:[{fieldId:$h1_0,delete:true}]}){issue{id}} }"
+        );
+        assert!(input["variables"].get("p").is_none());
+        // Issue ids must pair with the items.
+        let short = bulk_issue(vec![Some("I_a")], vec![], vec!["IFSS_risk".into()]);
+        assert!(build_bulk_field_write_documents("PVT_p", &ids, &[], &[], Some(&short)).is_err());
+        let dup = bulk_issue(
+            vec![Some("I_a"), None],
+            vec![],
+            vec!["IFSS_risk".into(), "IFSS_risk".into()],
+        );
+        assert!(build_bulk_field_write_documents("PVT_p", &ids, &[], &[], Some(&dup)).is_err());
+    }
+
+    #[test]
+    fn bulk_cap_flush_splits_a_mixed_batch_and_redeclares_per_document() {
+        let ids: Vec<_> = (0..13).map(|n| format!("PVTI_{n}")).collect();
+        // Two aliases per item, so the 25th is item 12's board part and its issue
+        // part spills into a document of its own.
+        let issue = bulk_issue(
+            vec![Some("I_x"); 13],
+            vec![issue_updates().remove(0)],
+            vec![],
+        );
+        let docs =
+            build_bulk_field_write_documents("PVT_p", &ids, &[], &["due".into()], Some(&issue))
+                .unwrap();
+        let sizes: Vec<_> = docs.iter().map(|doc| doc.item_indices.len()).collect();
+        assert_eq!(sizes, [25, 1]);
+        assert_eq!(docs[0].item_indices[24], 12);
+        assert_eq!(docs[1].item_indices, [12]);
+        // The tail document holds only the last item's issue alias: no `$p` there.
+        assert_eq!(docs[1].aliases[0].pointer, "/issue/id");
+        let tail: Value = serde_json::from_str(docs[1].input.as_deref().unwrap()).unwrap();
+        assert!(tail["query"]
+            .as_str()
+            .unwrap()
+            .starts_with("mutation($x0:ID!,"));
+        assert!(tail["query"]
+            .as_str()
+            .unwrap()
+            .contains("a0: setIssueFieldValue("));
+        let head: Value = serde_json::from_str(docs[0].input.as_deref().unwrap()).unwrap();
+        assert!(head["query"]
+            .as_str()
+            .unwrap()
+            .starts_with("mutation($p:ID!,"));
+        for doc in &docs {
+            let input: Value = serde_json::from_str(doc.input.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                input["query"].as_str().unwrap().matches("(input:").count(),
+                doc.item_indices.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_outcomes_map_issue_aliases_both_ways() {
+        use crate::github::project_item_edits::run_bulk_documents_with;
+        use crate::github::runner::GhOutput;
+
+        let ids = vec!["PVTI_a".to_string(), "PVTI_b".into(), "PVTI_c".into()];
+        let issue = bulk_issue(
+            vec![Some("I_a"), Some("I_b"), Some("I_c")],
+            vec![issue_updates().remove(3)],
+            vec![],
+        );
+        let docs =
+            build_bulk_field_write_documents("PVT_p", &ids, &[], &["due".into()], Some(&issue))
+                .unwrap();
+        let outcomes = run_bulk_documents_with(bulk_outcomes(&ids).unwrap(), docs, map_field_write_error, |_, _| {
+            let data = json!({
+                "a0":{"projectV2Item":{"id":"PVTI_a"}}, "a1":{"issue":{"id":"I_a"}},
+                "a2":{"projectV2Item":{"id":"PVTI_b"}}, "a3":null,
+                "a4":{"projectV2Item":{"id":"PVTI_c"}}, "a5":{"issue":null},
+            });
+            std::future::ready(Ok(GhOutput {
+                stdout: serde_json::to_vec(&json!({"data":data,"errors":[
+                    {"path":["a3"],"message":"Your token has not been granted the required scopes to execute this query."}
+                ]})).unwrap(),
+                stderr: String::new(),
+                code: 1,
+            }))
+        })
+        .await;
+        let wire = serde_json::to_value(outcomes).unwrap();
+        // A landed issue alias reads as landed; a refused one marks its item with
+        // GitHub's own words, never the project-scope hint; a missing issue payload
+        // fails closed.
+        assert_eq!(wire["outcomes"][0]["error"], Value::Null);
+        assert_eq!(
+            wire["outcomes"][1]["error"],
+            "Your token has not been granted the required scopes to execute this query."
+        );
+        assert!(wire["outcomes"][2]["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing id at /data/a5/issue/id"));
+    }
+
+    #[test]
+    fn issue_write_refusals_stay_verbatim_and_the_wrong_path_reads_actionably() {
+        for message in [
+            "Could not resolve to Issue node with the global id of 'PR_kw'",
+            "theBGuy does not have the correct permissions to execute `SetIssueFieldValue`",
+            "Your token has not been granted the required scopes to execute this query. The 'setIssueFieldValue' field requires one of the following scopes: ['admin:org']",
+        ] {
+            assert_eq!(map_field_write_error(AppError::Gh(format!("gh: {message}"))).to_string(), message);
+            assert_eq!(map_scope_error(AppError::Gh(message.into())).to_string(), message);
+        }
+        let wrong_path = "Issue field values cannot be updated using the updateProjectV2ItemFieldValue mutation, they must be updated using the updateIssueFieldValue mutation";
+        assert_eq!(
+            map_field_write_error(AppError::Gh(format!("gh: {wrong_path}"))).to_string(),
+            ISSUE_FIELD_PATH_HINT
+        );
+        // The single write's exit-0 body routes by alias: the issue alias's scope
+        // error is verbatim, a board alias's still gets the project hint.
+        let scope = "Your token has not been granted the required scopes to execute this query.";
+        let issue_error = json!({"errors":[{"message":scope,"path":["issue"]}]}).to_string();
+        assert_eq!(
+            parse_field_write_response(&issue_error)
+                .unwrap_err()
+                .to_string(),
+            scope
+        );
+        let board_error = json!({"errors":[{"message":scope,"path":["s0"]}]}).to_string();
+        assert_eq!(
+            parse_field_write_response(&board_error)
+                .unwrap_err()
+                .to_string(),
+            FIELDS_SCOPE_HINT
+        );
+    }
+
+    fn issue_field_defs() -> Value {
+        json!({"data":{"node":{"fields":{"nodes":[
+            {"__typename":"ProjectV2SingleSelectField","id":"PVTSSF_risk","name":"Risk","dataType":"SINGLE_SELECT","isIssueField":true,"options":[],
+                "issueField":{"__typename":"IssueFieldSingleSelect","id":"IFSS_risk","options":[{"id":"IFSSO_low","name":"Low","color":"GREEN","description":null}]}},
+            {"__typename":"ProjectV2MultiSelectField","id":"PVTMSF_areas","name":"Areas","dataType":"MULTI_SELECT","isIssueField":true,"multiSelectOptions":[],
+                "issueField":{"__typename":"IssueFieldMultiSelect","id":"IFMS_areas","options":[{"id":"IFSSO_web","name":"Web","color":"BLUE","description":"Browser"}]}},
+            {"__typename":"ProjectV2Field","id":"PVTF_notes","name":"Team notes","dataType":"TEXT","isIssueField":true,"issueField":{"__typename":"IssueFieldText","id":"IFT_notes"}},
+            {"__typename":"ProjectV2Field","id":"PVTF_estimate","name":"Estimate","dataType":"NUMBER","isIssueField":true,"issueField":{"__typename":"IssueFieldNumber","id":"IFN_estimate"}},
+            {"__typename":"ProjectV2Field","id":"PVTF_target","name":"Target","dataType":"DATE","isIssueField":true,"issueField":{"__typename":"IssueFieldDate","id":"IFD_target"}},
+            {"__typename":"ProjectV2Field","id":"PVTF_lost","name":"Lost","dataType":"DATE","isIssueField":true,"issueField":null},
+            {"__typename":"ProjectV2SingleSelectField","id":"PVTSSF_status","name":"Status","dataType":"SINGLE_SELECT","isIssueField":false,"options":[{"id":"todo","name":"Todo","color":"GRAY","description":""}],"issueField":null}
+        ]}}}})
+    }
+
+    #[test]
+    fn issue_field_definitions_carry_the_issue_field_id_and_its_options() {
+        let defs = serde_json::to_value(parse_project_fields(&issue_field_defs()).fields).unwrap();
+        assert_eq!(defs[0]["issueFieldId"], "IFSS_risk");
+        assert_eq!(
+            defs[0]["options"],
+            json!([{"id":"IFSSO_low","name":"Low","color":"GREEN","description":""}])
+        );
+        assert_eq!(defs[1]["issueFieldId"], "IFMS_areas");
+        assert_eq!(defs[1]["options"][0]["id"], "IFSSO_web");
+        for (index, id) in [(2, "IFT_notes"), (3, "IFN_estimate"), (4, "IFD_target")] {
+            assert_eq!(defs[index]["issueFieldId"], id);
+            assert_keys(
+                &defs[index],
+                &["id", "isIssueField", "issueFieldId", "kind", "name"],
+            );
+        }
+        // Unreadable issueField: the def still lists, flagged, with no id to route by.
+        assert_keys(&defs[5], &["id", "isIssueField", "kind", "name"]);
+        assert_eq!(defs[5]["isIssueField"], true);
+        // A board field keeps its own options and serializes no id key at all.
+        assert_keys(&defs[6], &["id", "isIssueField", "kind", "name", "options"]);
+        assert_eq!(defs[6]["options"][0]["id"], "todo");
+        assert_keys(
+            &defs[0],
+            &[
+                "id",
+                "isIssueField",
+                "issueFieldId",
+                "kind",
+                "name",
+                "options",
+            ],
+        );
+    }
+
+    #[test]
+    fn definition_query_selects_each_issue_field_kind_by_fragment() {
+        let query = project_fields_query();
+        for fragment in [
+            "... on ProjectV2Field{ issueField{ __typename ... on IssueFieldText{ id } ... on IssueFieldNumber{ id } ... on IssueFieldDate{ id } } }",
+            "... on ProjectV2SingleSelectField{ options{ id name color description } issueField{ __typename ... on IssueFieldSingleSelect{ id options{ id name color description } } } }",
+            "... on ProjectV2MultiSelectField{ multiSelectOptions{ id name color description } issueField{ __typename ... on IssueFieldMultiSelect{ id options{ id name color description } } } }",
+        ] {
+            assert!(query.contains(fragment), "{fragment}");
+        }
+        assert_query_fields(
+            &query,
+            &[
+                "/issueField/id",
+                "/issueField/options/id",
+                "/issueField/options/name",
+                "/issueField/options/color",
+                "/issueField/options/description",
+            ],
+        );
+    }
+
+    #[test]
+    fn bridged_values_carry_the_issue_field_id_their_definition_shares() {
+        // Measured on the org fixture: the value ref of an org multi-select reads
+        // as ProjectV2Field/PVTF_, its definition as ProjectV2MultiSelectField/
+        // PVTMSF_ — only the IssueField id is common to both.
+        let value = parse_field_value(&json!({
+            "__typename":"ProjectV2ItemIssueFieldValue",
+            "field":{"__typename":"ProjectV2Field","id":"PVTF_areas","name":"Areas","dataType":"MULTI_SELECT","isIssueField":true,
+                "issueField":{"__typename":"IssueFieldMultiSelect","id":"IFMS_areas"}},
+            "issueFieldValue":{"__typename":"IssueFieldMultiSelectValue","options":[{"id":"IFSSO_web","name":"Web","color":"BLUE"}]}
+        }));
+        let value = serde_json::to_value(value).unwrap();
+        assert_keys(
+            &value,
+            &[
+                "fieldId",
+                "fieldName",
+                "isIssueField",
+                "issueFieldId",
+                "kind",
+                "options",
+            ],
+        );
+        let defs = json!({"data":{"node":{"fields":{"nodes":[
+            {"__typename":"ProjectV2MultiSelectField","id":"PVTMSF_areas","name":"Areas","dataType":"MULTI_SELECT","isIssueField":true,"multiSelectOptions":[],
+                "issueField":{"__typename":"IssueFieldMultiSelect","id":"IFMS_areas","options":[]}}
+        ]}}}});
+        let def = serde_json::to_value(&parse_project_fields(&defs).fields[0]).unwrap();
+        assert_ne!(value["fieldId"], def["id"]);
+        assert_eq!(value["issueFieldId"], def["issueFieldId"]);
+        // Absent, null or blank: no key, and the value still parses.
+        for issue_field in [
+            None,
+            Some(Value::Null),
+            Some(json!({"id":""})),
+            Some(json!({})),
+        ] {
+            let mut node = json!({
+                "__typename":"ProjectV2ItemIssueFieldValue",
+                "field":{"id":"PVTF_notes","name":"Notes","dataType":"TEXT"},
+                "issueFieldValue":{"__typename":"IssueFieldTextValue","text":"x"}
+            });
+            if let Some(issue_field) = issue_field {
+                node["field"]["issueField"] = issue_field;
+            }
+            let wire = serde_json::to_value(parse_field_value(&node)).unwrap();
+            assert_keys(
+                &wire,
+                &["fieldId", "fieldName", "isIssueField", "kind", "text"],
+            );
+        }
+        // A board-defined value never carries one, whatever its ref says.
+        let classic = parse_field_value(&json!({
+            "__typename":"ProjectV2ItemFieldTextValue","text":"x",
+            "field":{"id":"notes","name":"Notes","dataType":"TEXT","issueField":{"id":"IFT_x"}}
+        }));
+        assert!(serde_json::to_value(classic)
+            .unwrap()
+            .get("issueFieldId")
+            .is_none());
+    }
+
+    #[test]
+    fn bridged_value_selection_asks_each_field_ref_arm_for_its_issue_field_id() {
+        for rich in [false, true] {
+            let selection = field_value_selection(rich);
+            assert!(selection.contains(&format!(
+                "... on ProjectV2ItemIssueFieldValue{{ field{{ {FIELD_COMMON} {ISSUE_FIELD_REF} }}"
+            )));
+            for fragment in [
+                "... on ProjectV2Field{ issueField{ __typename ... on IssueFieldText{ id } ... on IssueFieldNumber{ id } ... on IssueFieldDate{ id } ... on IssueFieldSingleSelect{ id } ... on IssueFieldMultiSelect{ id } } }",
+                "... on ProjectV2SingleSelectField{ issueField{ __typename ... on IssueFieldSingleSelect{ id } } }",
+                "... on ProjectV2MultiSelectField{ issueField{ __typename ... on IssueFieldMultiSelect{ id } } }",
+            ] {
+                assert!(selection.contains(fragment), "{fragment}");
+            }
+            assert_query_fields(&selection, &["/field/issueField/id"]);
+        }
+    }
+
+    #[test]
+    fn only_the_issue_read_selects_and_serves_the_issue_scalars() {
+        let issue_query = item_field_values_query("issue");
+        assert!(issue_query.contains("issue(number:$number){ id viewerCanSetFields projectItems("));
+        let pr_query = item_field_values_query("pullRequest");
+        assert!(pr_query.contains("pullRequest(number:$number){ projectItems("));
+        assert!(!pr_query.contains("viewerCanSetFields"));
+        assert!(!pr_query.contains("... on Issue{") && !pr_query.contains("... on Issue "));
+        for (verdict, expected) in [
+            (json!(true), true),
+            (json!(false), false),
+            (Value::Null, false),
+        ] {
+            let response = json!({"data":{"repository":{"issue":{"id":"I_node","viewerCanSetFields":verdict,"projectItems":{"nodes":[]}}}}});
+            let wire = serde_json::to_value(parse_item_field_values(&response, "issue")).unwrap();
+            assert_keys(
+                &wire,
+                &["issueId", "items", "truncated", "viewerCanSetFields"],
+            );
+            assert_eq!(wire["viewerCanSetFields"], expected);
+        }
+        // No id, no issue half: the editor then holds issue fields rather than guess.
+        let response = json!({"data":{"repository":{"issue":{"viewerCanSetFields":true,"projectItems":{"nodes":[]}}}}});
+        let wire = serde_json::to_value(parse_item_field_values(&response, "issue")).unwrap();
+        assert_keys(&wire, &["items", "truncated"]);
+    }
 }

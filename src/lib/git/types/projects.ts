@@ -63,9 +63,10 @@ export interface ProjectItemRemove {
 
 /** One project field's value on an item, tagged by the field's kind. `isIssueField`
  *  marks a value of an organization ISSUE field, owned on the issue itself and
- *  bridged onto the board, rather than a board-defined field — it rides the wire for
- *  the editor, which can't write those here. A kind this build doesn't know arrives
- *  as `unknown`, carrying only the name it was given. */
+ *  bridged onto the board, rather than a board-defined field. Its `fieldId` is still
+ *  the board's wrapper id; a write routes through the definition's `issueFieldId`.
+ *  A kind this build doesn't know arrives as `unknown`, carrying only the name it
+ *  was given. */
 export type ProjectFieldValue =
   | {
       kind: "singleSelect";
@@ -76,6 +77,10 @@ export type ProjectFieldValue =
       /** GitHub color NAME (GRAY/BLUE/GREEN/YELLOW/ORANGE/RED/PINK/PURPLE). */
       color: string;
       isIssueField: boolean;
+      /** The org IssueField behind a bridged value — what ties it to its
+       *  definition where the two wrapper ids differ. ABSENT on a board-defined
+       *  value, and on a bridged one GitHub didn't serve it for. */
+      issueFieldId?: string;
     }
   | {
       kind: "multiSelect";
@@ -83,6 +88,7 @@ export type ProjectFieldValue =
       fieldName: string;
       options: { id: string; name: string; color: string }[];
       isIssueField: boolean;
+      issueFieldId?: string;
     }
   | {
       kind: "text";
@@ -90,6 +96,7 @@ export type ProjectFieldValue =
       fieldName: string;
       text: string;
       isIssueField: boolean;
+      issueFieldId?: string;
     }
   | {
       kind: "number";
@@ -97,6 +104,7 @@ export type ProjectFieldValue =
       fieldName: string;
       number: number;
       isIssueField: boolean;
+      issueFieldId?: string;
     }
   | {
       kind: "date";
@@ -105,6 +113,7 @@ export type ProjectFieldValue =
       /** A bare `YYYY-MM-DD` as GitHub's Date scalar sends it — no zone. */
       date: string;
       isIssueField: boolean;
+      issueFieldId?: string;
     }
   | {
       kind: "iteration";
@@ -196,6 +205,12 @@ export interface ItemProjectFieldValues {
 export interface ItemFieldValues {
   items: ItemProjectFieldValues[];
   truncated: boolean;
+  /** The issue's node id, which an org issue-field write addresses. Present on an
+   *  ISSUE read only, and together with `viewerCanSetFields`. */
+  issueId?: string;
+  /** Whether the viewer may set this issue's org issue fields. Absent on a pull
+   *  request read; a reader gates on `=== true`. */
+  viewerCanSetFields?: boolean;
 }
 
 /** One option a board's single/multi-select field offers. */
@@ -229,8 +244,14 @@ export type ProjectFieldDef =
       kind: "singleSelect";
       id: string;
       name: string;
+      /** An org issue field's options are the IssueField's own (`IFSSO_` ids),
+       *  which is what its values carry too. */
       options: ProjectFieldOptionDef[];
       isIssueField: boolean;
+      /** The org IssueField's node id — what an issue-field write addresses, the
+       *  wrapper `id` being refused there. ABSENT on a board-defined field, and on
+       *  an issue field GitHub didn't serve it for, which then can't be written. */
+      issueFieldId?: string;
     }
   | {
       kind: "multiSelect";
@@ -238,6 +259,7 @@ export type ProjectFieldDef =
       name: string;
       options: ProjectFieldOptionDef[];
       isIssueField: boolean;
+      issueFieldId?: string;
     }
   | {
       kind: "iteration";
@@ -248,9 +270,27 @@ export type ProjectFieldDef =
        *  means by "the current one". */
       completedIterations: ProjectIterationDef[];
     }
-  | { kind: "text"; id: string; name: string; isIssueField: boolean }
-  | { kind: "number"; id: string; name: string; isIssueField: boolean }
-  | { kind: "date"; id: string; name: string; isIssueField: boolean }
+  | {
+      kind: "text";
+      id: string;
+      name: string;
+      isIssueField: boolean;
+      issueFieldId?: string;
+    }
+  | {
+      kind: "number";
+      id: string;
+      name: string;
+      isIssueField: boolean;
+      issueFieldId?: string;
+    }
+  | {
+      kind: "date";
+      id: string;
+      name: string;
+      isIssueField: boolean;
+      issueFieldId?: string;
+    }
   | { kind: "system"; id: string; name: string; dataType: string };
 
 /** One board's field definitions. `truncated` reports that the server capped the
@@ -367,6 +407,31 @@ export type ProjectFieldValueUpdate =
   | { kind: "multiSelect"; fieldId: string; optionIds: string[] }
   | { kind: "iteration"; fieldId: string; iterationId: string };
 
+/** One org issue field to SET on an issue: {@link ProjectFieldValueUpdate}'s shape
+ *  with `fieldId` the definition's `issueFieldId`, never the wrapper id. No
+ *  iteration arm — GitHub has no org iteration field. */
+export type IssueFieldValueUpdate = Exclude<
+  ProjectFieldValueUpdate,
+  { kind: "iteration" }
+>;
+
+/** The issue half of a single-item field write, riding the same call as the board
+ *  half. `clears` carries issue field ids to UNSET. */
+export interface IssueFieldWrites {
+  issueId: string;
+  updates: IssueFieldValueUpdate[];
+  clears: string[];
+}
+
+/** The issue half of a batch field write: one shared write, addressed per item by
+ *  `issueIds`, which pairs index-for-index with the batch's item ids. A null entry
+ *  (a pull request, a draft, an issue the viewer can't set) takes none. */
+export interface BulkIssueFieldWrites {
+  issueIds: (string | null)[];
+  updates: IssueFieldValueUpdate[];
+  clears: string[];
+}
+
 /** One item's result in a BATCH board write: the membership it addressed, and the
  *  failure GitHub gave for it, or null when it landed. The message is already
  *  presentable — the backend maps its own error there. */
@@ -430,6 +495,9 @@ export type BoardItemContent =
       assignees: AssigneeRef[];
       createdAt: string;
       updatedAt: string;
+      /** Whether the viewer may set this issue's org issue fields — false when
+       *  GitHub named no verdict, so a reader gates on it as-is. */
+      viewerCanSetFields: boolean;
     }
   | {
       kind: "pullRequest";

@@ -48,6 +48,9 @@ pub enum BoardItemContent {
         assignees: Vec<AssigneeRef>,
         created_at: String,
         updated_at: String,
+        /// Whether the viewer may set this issue's org issue fields; false when
+        /// GitHub named no verdict.
+        viewer_can_set_fields: bool,
     },
     PullRequest {
         id: String,
@@ -100,7 +103,7 @@ pub(crate) fn board_item_selection(rich: bool) -> String {
     let values = field_value_selection(rich);
     format!(
         "id createdAt isArchived type content{{ __typename \
-         ... on Issue {{ id number title state stateReason createdAt updatedAt \
+         ... on Issue {{ id number title state stateReason createdAt updatedAt viewerCanSetFields \
            repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
          ... on PullRequest {{ id number title state isDraft createdAt updatedAt \
            repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
@@ -195,6 +198,9 @@ enum ContentResponse {
         assignees: Option<AssigneesResponse>,
         created_at: Option<String>,
         updated_at: Option<String>,
+        // Nullable on GitHub's side: a plain bool fails on null, which would redact
+        // the whole card.
+        viewer_can_set_fields: Option<bool>,
     },
     PullRequest {
         id: String,
@@ -267,6 +273,7 @@ pub(crate) fn parse_content(item_type: &str, content: Option<Value>) -> BoardIte
             assignees,
             created_at,
             updated_at,
+            viewer_can_set_fields,
         } => BoardItemContent::Issue {
             id,
             number,
@@ -277,6 +284,7 @@ pub(crate) fn parse_content(item_type: &str, content: Option<Value>) -> BoardIte
             assignees: assignee_refs(assignees),
             created_at: created_at.unwrap_or_default(),
             updated_at: updated_at.unwrap_or_default(),
+            viewer_can_set_fields: viewer_can_set_fields.unwrap_or(false),
         },
         ContentResponse::PullRequest {
             id,
@@ -522,6 +530,7 @@ mod tests {
                     "assignees",
                     "createdAt",
                     "updatedAt",
+                    "viewerCanSetFields",
                 ],
             );
             assert_eq!(issue["kind"], "issue");
@@ -709,6 +718,31 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn issue_field_verdict_reads_null_and_absent_as_false_without_redacting() {
+        for (verdict, expected) in [
+            (Some(Value::Null), false),
+            (None, false),
+            (Some(json!(false)), false),
+            (Some(json!(true)), true),
+        ] {
+            let mut issue = content("Issue");
+            if let Some(verdict) = verdict {
+                issue["viewerCanSetFields"] = verdict;
+            }
+            let wire = serde_json::to_value(parse_content("ISSUE", Some(issue))).unwrap();
+            assert_eq!(wire["kind"], "issue");
+            assert_eq!(wire["title"], "Board card");
+            assert_eq!(wire["viewerCanSetFields"], expected);
+        }
+        // The verdict is an issue's alone: a pull request's wire never carries it.
+        let mut pr = content("PullRequest");
+        pr["viewerCanSetFields"] = json!(true);
+        let wire = serde_json::to_value(parse_content("PULL_REQUEST", Some(pr))).unwrap();
+        assert_eq!(wire["kind"], "pullRequest");
+        assert!(wire.get("viewerCanSetFields").is_none());
+    }
+
     #[tokio::test]
     async fn two_pages_concatenate_and_exhaust_with_cursor_cleared() {
         let first = page(
@@ -873,7 +907,7 @@ mod tests {
              items(first:100, after:$after, orderBy:{{field:POSITION,direction:ASC}}, query:$q){{ \
              totalCount pageInfo{{ hasNextPage endCursor }} \
              nodes{{ id createdAt isArchived type content{{ __typename \
-             ... on Issue {{ id number title state stateReason createdAt updatedAt \
+             ... on Issue {{ id number title state stateReason createdAt updatedAt viewerCanSetFields \
                repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
              ... on PullRequest {{ id number title state isDraft createdAt updatedAt \
                repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
@@ -919,6 +953,7 @@ mod tests {
             "/content/body",
             "/content/createdAt",
             "/content/updatedAt",
+            "/content/viewerCanSetFields",
             "/content/repository/nameWithOwner",
             "/content/assignees/nodes/login",
             "/content/assignees/nodes/avatarUrl",

@@ -7,6 +7,10 @@ import {
   IterationRange,
   OptionValue,
 } from "@/features/conversations/ProjectFieldValues";
+import {
+  type IssueFieldHost,
+  issueFieldHeldReason,
+} from "@/lib/git/project-field-routing";
 import type {
   ProjectFieldDef,
   ProjectFieldOptionDef,
@@ -35,10 +39,6 @@ export function isWritable(def: ProjectFieldDef): def is WritableFieldDef {
   return def.kind !== "system";
 }
 
-/** One wording for every surface that holds an org issue-field: they gate on the
- *  same predicate and must not say it differently. */
-export const ISSUE_FIELD_REASON =
-  "Issue fields are edited on GitHub — board editing arrives later";
 export const MULTILINE_TEXT_REASON = "Multi-line text is edited on GitHub";
 export const NO_ITERATIONS_REASON =
   "This board's iteration field has no iterations to pick from yet";
@@ -46,23 +46,20 @@ export const NO_ITERATIONS_REASON =
 /** A board text value the API wrote with line breaks in it. */
 const MULTILINE = /[\r\n]/;
 
-/** An org issue-field bridged onto a board. `updateProjectV2ItemFieldValue` is not
- *  its write path, so its control is held rather than hidden — the value still
- *  shows, and a missing control there would read as a broken render. */
-export function isIssueFieldDef(def: WritableFieldDef): boolean {
-  return def.kind !== "iteration" && def.isIssueField;
-}
-
 /** Why ONE field is held for an editor that SEEDS from the item's value, or
  *  `undefined` when it's editable; `seeded` is the value held now, which is what
- *  the multi-line arm protects. */
+ *  the multi-line arm protects, and `host` is the item an org issue field would be
+ *  written on. The issue-field arm FALLS THROUGH when writable: a multi-line org
+ *  text value still holds. */
 export function fieldLockedReason(
   def: WritableFieldDef,
   seeded: ProjectFieldValue | undefined,
+  host: IssueFieldHost,
 ): string | undefined {
+  const issueHeld = issueFieldHeldReason(def, host);
   switch (true) {
-    case isIssueFieldDef(def):
-      return ISSUE_FIELD_REASON;
+    case issueHeld !== undefined:
+      return issueHeld;
     // A single-line input strips CR/LF as the value is assigned to it, so the first
     // keystroke would draft the flattened string and the close would commit it — a
     // multi-line control belongs to a board surface if ever.

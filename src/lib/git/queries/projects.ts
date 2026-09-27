@@ -17,6 +17,13 @@ import { toast } from "sonner";
 import { presentError } from "@/lib/error-summary";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import * as api from "../api";
+import {
+  hasIssueFieldWrites,
+  ISSUE_FIELD_CONTENT_REASON,
+  type IssueFieldPart,
+  issueFieldRoutes,
+  partitionFieldWrites,
+} from "../project-field-routing";
 import type {
   AssigneeRef,
   AvailableProjects,
@@ -24,8 +31,10 @@ import type {
   BoardItemContent,
   BoardItems,
   BoardOrder,
+  BulkIssueFieldWrites,
   BulkItemOutcomes,
   DuplicateViewSource,
+  IssueFieldWrites,
   ItemFieldValues,
   ItemProjects,
   ProjectFieldDef,
@@ -1007,6 +1016,30 @@ function moveUpdates(
   return [{ kind: "iteration", fieldId, iterationId: bucket.iteration.id }];
 }
 
+/** `bucket` as the write's two halves. A board grouped by an org issue field moves
+ *  a card by writing the ISSUE, so the whole write lands in the issue half there —
+ *  the "No {field}" clear included, as a delete. Built inside `mutationFn` from the
+ *  pinned field, so a paused move still routes by what was pressed. */
+function moveWrite(field: BoardGroupField, bucket: BoardMoveBucket) {
+  return partitionFieldWrites(
+    moveUpdates(field.id, bucket),
+    bucket === null ? [field.id] : [],
+    issueFieldRoutes([field]),
+  );
+}
+
+/** `part` addressed to one card's issue, or null when the write has no issue half.
+ *  A routed write with no issue to land on throws rather than sending anything:
+ *  the panel holds such a card before it gets here. */
+function issueWritesFor(
+  part: IssueFieldPart,
+  issueId: string | null,
+): IssueFieldWrites | null {
+  if (!hasIssueFieldWrites(part)) return null;
+  if (issueId === null) throw new Error(ISSUE_FIELD_CONTENT_REASON);
+  return { issueId, ...part };
+}
+
 /** The moved item's field values with `field` set to `bucket`, or dropped when
  *  `bucket` is null — the clear. Replaced IN PLACE where an entry already exists so
  *  the rail's line order survives a move. Matched on the FIELD ID alone: one field
@@ -1235,6 +1268,9 @@ export function useMoveBoardCard() {
       projectId: string;
       /** The membership's item id on `projectId` — what the write addresses. */
       itemId: string;
+      /** The card's issue node id, or null for a pull request or draft — what a
+       *  board grouped by an org issue field writes to. */
+      issueId: string | null;
       field: BoardGroupField;
       /** The column's bucket, or null for the board's "No {field}" column. */
       bucket: BoardMoveBucket;
@@ -1249,17 +1285,19 @@ export function useMoveBoardCard() {
       /** Whether that lens was the rich read — its key's last axis. */
       rich: boolean;
     }) =>
-      trackBoardWrite(args.repo, () =>
-        api.ghSetItemFieldValues(
+      trackBoardWrite(args.repo, () => {
+        // The wire takes the field id and the bucket's own id, so the field's
+        // KIND never enters here — a mismatched pair is unrepresentable.
+        const write = moveWrite(args.field, args.bucket);
+        return api.ghSetItemFieldValues(
           args.repo,
           args.projectId,
           args.itemId,
-          // The wire takes the field id and the bucket's own id, so the field's
-          // KIND never enters here — a mismatched pair is unrepresentable.
-          moveUpdates(args.field.id, args.bucket),
-          args.bucket === null ? [args.field.id] : [],
-        ),
-      ),
+          write.updates,
+          write.clears,
+          issueWritesFor(write.issue, args.issueId),
+        );
+      }),
     onMutate: async (args) => {
       // Derived from the variables, like every other target here: `onMutate` runs
       // before the pause so its own scope is safe, but one source of truth for
@@ -2051,6 +2089,14 @@ export function useShiftItemDates() {
       projectId: string;
       /** The membership's item id on `projectId` — what the write addresses. */
       itemId: string;
+      /** The card's issue node id, or null for a pull request or draft: where a
+       *  date that is an org issue field is written. */
+      issueId: string | null;
+      /** The board's org issue fields by wrapper id → issue field id (null where
+       *  GitHub didn't serve one). Every chase round rebuilds its updates from
+       *  cached values keyed by the WRAPPER id, so each round routes through this.
+       *  Never part of the lens key. */
+      issueFieldIdByFieldId: Record<string, string | null>;
       /** The date or iteration values this press lands on. */
       values: ProjectFieldValue[];
       /** The lens the roadmap was showing — the cache this write patches, rolls
@@ -2104,14 +2150,26 @@ export function useShiftItemDates() {
             ? null
             : shiftUpdates(at.item.fieldValues, fieldIds);
         };
+        const routes = new Map(Object.entries(args.issueFieldIdByFieldId));
         const write = async (updates: ProjectFieldValueUpdate[]) => {
+          // Inside the try, like everything past `holdLens`: a routing refusal
+          // still reaches the `finally` that releases the lens.
+          const parts = partitionFieldWrites(updates, [], routes);
+          const issue = issueWritesFor(parts.issue, args.issueId);
           const result = await trackBoardWrite(args.repo, () =>
             api.ghSetItemsFieldValues(
               args.repo,
               args.projectId,
               [args.itemId],
-              updates,
+              parts.updates,
               [],
+              issue === null
+                ? null
+                : {
+                    issueIds: [issue.issueId],
+                    updates: issue.updates,
+                    clears: issue.clears,
+                  },
             ),
           );
           // The batch command resolves with its refusal inside it; for one card
@@ -3031,8 +3089,14 @@ export function useBulkMoveBoardCards() {
     mutationFn: (args: {
       repo: string;
       projectId: string;
-      /** The memberships on `projectId` — what the write addresses. */
+      /** The memberships on `projectId` — what the write addresses. On a board
+       *  grouped by an org issue field, only cards the viewer may set it on: the
+       *  panel filters the rest out before this fires, so the patch, the rollback
+       *  and the pending count all see one set. */
       itemIds: string[];
+      /** Each card's issue node id by membership id, for an org issue-field
+       *  grouping; a card missing here takes no issue write. */
+      issueIdByItemId: Record<string, string>;
       field: BoardGroupField;
       /** The column's bucket, or null for the board's "No {field}" column. */
       bucket: BoardMoveBucket;
@@ -3044,15 +3108,26 @@ export function useBulkMoveBoardCards() {
       /** Whether that lens was the rich read — its key's last axis. */
       rich: boolean;
     }) =>
-      trackBoardWrite(args.repo, () =>
-        api.ghSetItemsFieldValues(
+      trackBoardWrite(args.repo, () => {
+        const write = moveWrite(args.field, args.bucket);
+        const issueIds = args.itemIds.map(
+          (itemId): string | null => args.issueIdByItemId[itemId] ?? null,
+        );
+        // A card with no issue under an issue-field move would send nothing and
+        // read as moved; the panel filters those, so one reaching here refuses all.
+        if (hasIssueFieldWrites(write.issue) && issueIds.includes(null))
+          throw new Error(ISSUE_FIELD_CONTENT_REASON);
+        return api.ghSetItemsFieldValues(
           args.repo,
           args.projectId,
           args.itemIds,
-          moveUpdates(args.field.id, args.bucket),
-          args.bucket === null ? [args.field.id] : [],
-        ),
-      ),
+          write.updates,
+          write.clears,
+          hasIssueFieldWrites(write.issue)
+            ? { issueIds, ...write.issue }
+            : null,
+        );
+      }),
     onMutate: async (args) => {
       const key = projectItemsKey(
         args.repo,
@@ -3152,6 +3227,9 @@ export function useBulkSetItemFieldValues() {
       updates: ProjectFieldValueUpdate[];
       /** Field ids to UNSET; no update shape expresses a clear. */
       clears: string[];
+      /** The org issue-field half, already routed by the caller (which holds the
+       *  definitions), riding the same call — or null for a board-only write. */
+      issueWrites: BulkIssueFieldWrites | null;
     }) =>
       trackBoardWrite(args.repo, () =>
         api.ghSetItemsFieldValues(
@@ -3160,6 +3238,7 @@ export function useBulkSetItemFieldValues() {
           args.itemIds,
           args.updates,
           args.clears,
+          args.issueWrites,
         ),
       ),
     // Reporting lives here for the family's reason: the dialog that fires this
@@ -3324,23 +3403,31 @@ export function useAddIssueToProjects() {
  * board's entry in the item-field-values cache. `values` is the patch itself: the
  * wire `updates` carry ids alone, so only the editor — which holds the board's
  * definitions — can say what those ids render as.
+ *
+ * The item this writes — repo, lens, kind, number — rides the VARIABLES, the rule
+ * {@link useMoveBoardCard} states: a pending or paused write runs on the latest
+ * render's options, and the editor's per-board chain fires each later board from
+ * them, so a host re-rendered onto another item would otherwise retarget the write,
+ * its patch and its rollback. Deliberately NOT in the board-write family (no
+ * `mutationKey`): the chain would flip the board's holds link by link.
  */
-export function useSetItemFieldValues(
-  repo: string,
-  kind: "issue" | "pr",
-  number: number,
-  lens: RemoteLens,
-) {
+export function useSetItemFieldValues() {
   const queryClient = useQueryClient();
-  const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
   return useMutation({
     mutationFn: (args: {
+      repo: string;
+      lens: RemoteLens;
+      kind: "issue" | "pr";
+      number: number;
       projectId: string;
       /** The membership's item id on `projectId` — what the write addresses. */
       itemId: string;
       updates: ProjectFieldValueUpdate[];
       /** Field ids to UNSET; no update shape expresses a clear. */
       clears: string[];
+      /** The item's org issue fields drafted on this board, in the same call, or
+       *  null when there are none. */
+      issueWrites: IssueFieldWrites | null;
       /** That board's values as they'll read once this lands. */
       values: ProjectFieldValue[];
       /** Boards queued behind this one. The editor writes board by board and stops
@@ -3348,13 +3435,20 @@ export function useSetItemFieldValues(
       unwritten: number;
     }) =>
       api.ghSetItemFieldValues(
-        repo,
+        args.repo,
         args.projectId,
         args.itemId,
         args.updates,
         args.clears,
+        args.issueWrites,
       ),
     onMutate: async (args) => {
+      const fieldsKey = itemFieldValuesKey(
+        args.repo,
+        args.lens,
+        args.kind,
+        args.number,
+      );
       await queryClient.cancelQueries({ queryKey: fieldsKey });
       const prev = queryClient.getQueryData<ItemFieldValues>(fieldsKey);
       if (prev) {
@@ -3374,7 +3468,8 @@ export function useSetItemFieldValues(
               },
         );
       }
-      return { prev };
+      // The settle handlers read the key from here, never their own scope.
+      return { prev, fieldsKey };
     },
     // Reporting lives here, not in the caller's `mutate` options: the popover that
     // fires this closes as it does, and react-query drops mutate-scoped callbacks
@@ -3382,17 +3477,23 @@ export function useSetItemFieldValues(
     // through `mutateAsync`, which is what stops its per-board chain.
     onError: (e, args, ctx) => {
       if (ctx?.prev)
-        queryClient.setQueryData<ItemFieldValues>(fieldsKey, ctx.prev);
-      if (args.unwritten === 0) {
-        toastError(e);
-        return;
-      }
-      toastErrorWithNote(
-        e,
-        args.unwritten === 1
-          ? "One more board's changes were left unwritten."
-          : `${args.unwritten} more boards' changes were left unwritten.`,
-      );
+        queryClient.setQueryData<ItemFieldValues>(ctx.fieldsKey, ctx.prev);
+      // A write carrying both halves can fail on one after the other landed, so
+      // the toast says so rather than implying nothing saved; the settle's re-read
+      // shows what GitHub kept.
+      const mixed =
+        args.issueWrites !== null &&
+        args.updates.length + args.clears.length > 0;
+      const notes = [
+        mixed ? "Some of this board's fields may have saved." : null,
+        args.unwritten === 0
+          ? null
+          : args.unwritten === 1
+            ? "One more board's changes were left unwritten."
+            : `${args.unwritten} more boards' changes were left unwritten.`,
+      ].filter((note) => note !== null);
+      if (notes.length === 0) toastError(e);
+      else toastErrorWithNote(e, notes.join(" "));
     },
     // Cancel-before-invalidate, and RETURNED so `isPending` spans the refetch —
     // both for the reasons {@link useEditItemProjects}'s `onSettled` states.
@@ -3402,15 +3503,20 @@ export function useSetItemFieldValues(
     // last settle — the caller stops there, so this is the only chance to reconcile
     // the boards already written. The cancel stays unconditional (an in-flight read
     // still holds pre-write values), and `isPending` spans the chain either way.
-    onSettled: (_d, e, args) =>
-      queryClient.cancelQueries({ queryKey: fieldsKey }).then(() => {
+    onSettled: (_d, e, args, ctx) => {
+      // Absent only when `onMutate` threw; the variables still name the item.
+      const fieldsKey =
+        ctx?.fieldsKey ??
+        itemFieldValuesKey(args.repo, args.lens, args.kind, args.number);
+      return queryClient.cancelQueries({ queryKey: fieldsKey }).then(() => {
         if (args.unwritten !== 0 && e === null) return undefined;
         // The Projects BOARD reads these same values through its own query, so a
         // field write has to reach it as well as the rail — it rides the same
         // last-settle condition, for the same reason.
-        invalidateProjectBoards(queryClient, repo);
+        invalidateProjectBoards(queryClient, args.repo);
         return queryClient.invalidateQueries({ queryKey: fieldsKey });
-      }),
+      });
+    },
   });
 }
 

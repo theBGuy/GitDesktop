@@ -530,8 +530,9 @@ Browse, create, and edit (drafting with AI from your repo's issue
 templates), react with emoji, and manage the shared metadata: labels,
 assignees, and milestones. On GitHub, add **projects** (GitHub Projects,
 repo and owner level) and set each board's **Status**, **Priority**,
-**Iteration**, dates and custom fields from the rail — a line per board
-below the chips, and one popup that edits every field on every board, with
+**Iteration**, dates, custom fields and your organization's issue fields
+from the rail — a line per board below the chips, and one popup that edits
+every field on every board, with
 **Edit projects…** and **Edit project fields…** in the command palette
 opening either one. Also on GitHub: issue type, sub-issues, dependencies
 (blocked-by / blocking), and development links (linked and closing PRs and

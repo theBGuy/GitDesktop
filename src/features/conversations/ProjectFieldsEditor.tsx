@@ -29,11 +29,22 @@ import {
 import { presentError } from "@/lib/error-summary";
 import { useActiveGhHost } from "@/lib/git/host";
 import {
+  alignSeed,
+  applyFieldDraft,
+  canWriteIssueFields,
+  type EditorDrafts,
+  hasIssueFieldWrites,
+  type IssueFieldHost,
+  issueFieldHostReason,
+  partitionFieldWrites,
+} from "@/lib/git/project-field-routing";
+import {
   useGhScopes,
   useProjectFields,
   useSetItemFieldValues,
 } from "@/lib/git/queries";
 import type {
+  IssueFieldWrites,
   ItemProjectFieldValues,
   ProjectFieldValue,
   ProjectFieldValueUpdate,
@@ -73,6 +84,24 @@ function boardLockedReason(
 /** Every touched field of one board, by field id. An absent key is untouched. */
 type BoardDraft = Record<string, FieldDraft>;
 
+/** One org issue field's draft as the other sections mirror it. */
+type MirroredDraft = { projectId: string; entry: FieldDraft; rev: number };
+
+/** The popup's drafts. An org issue field lives on the issue, so every board that
+ *  bridges it shows the same value: it holds one draft, owned by the section last
+ *  edited, and every other section mirrors it — two drafts would race to the issue
+ *  with the later board silently winning ({@link applyFieldDraft}). */
+const NO_DRAFTS: EditorDrafts<FieldDraft> = { boards: {}, issueOwners: {} };
+
+const ISSUE_FIELDS_UNSENT = "Issue field changes weren't applied";
+
+/** The issue field id a row's writes route to, for an org issue field. */
+function issueFieldIdOf(def: WritableFieldDef): string | undefined {
+  return def.kind !== "iteration" && def.isIssueField
+    ? def.issueFieldId
+    : undefined;
+}
+
 /** One board's values by field id, the baseline a close diffs against. */
 function seedBoard(
   board: ItemProjectFieldValues,
@@ -82,6 +111,18 @@ function seedBoard(
     if ("fieldId" in value) seed[value.fieldId] = value;
   }
   return seed;
+}
+
+/** What `seed` holds for `def`: by its id, else — an org issue field — by the
+ *  IssueField id its value carries. */
+function seedValueFor(
+  seed: Record<string, ProjectFieldValue>,
+  def: WritableFieldDef,
+): ProjectFieldValue | undefined {
+  const issueFieldId = issueFieldIdOf(def);
+  return issueFieldId === undefined
+    ? seed[def.id]
+    : alignSeed(seed, new Map([[def.id, issueFieldId]]))[def.id];
 }
 
 type FieldDiff = {
@@ -131,14 +172,20 @@ type BoardWrite = FieldDiff & {
 };
 
 /** One board's diff plus the patched value list it implies, which keeps the
- *  server's order and appends whatever the item had no value for before. */
+ *  server's order and appends whatever the item had no value for before. A value
+ *  served under another wrapper id than its org field's definition is replaced in
+ *  place through `routes`, never kept beside its draft. */
 function boardWrite(
   board: ItemProjectFieldValues,
   seed: Record<string, ProjectFieldValue>,
   touched: BoardDraft,
+  routes: ReadonlyMap<string, string>,
 ): BoardWrite {
-  const diff = fieldDiff(seed, touched);
+  const diff = fieldDiff(alignSeed(seed, routes), touched);
   const { applied } = diff;
+  const defIdByIssue = new Map(
+    [...routes].map(([defId, issueFieldId]) => [issueFieldId, defId]),
+  );
   const values: ProjectFieldValue[] = [];
   const had = new Set<string>();
   for (const value of board.values) {
@@ -146,12 +193,18 @@ function boardWrite(
       values.push(value);
       continue;
     }
-    had.add(value.fieldId);
-    if (!applied.has(value.fieldId)) {
+    const key =
+      !applied.has(value.fieldId) &&
+      "issueFieldId" in value &&
+      value.issueFieldId !== undefined
+        ? (defIdByIssue.get(value.issueFieldId) ?? value.fieldId)
+        : value.fieldId;
+    had.add(key);
+    if (!applied.has(key)) {
       values.push(value);
       continue;
     }
-    const entry = applied.get(value.fieldId);
+    const entry = applied.get(key);
     if (entry) values.push(entry.value);
   }
   for (const [fieldId, entry] of applied) {
@@ -173,6 +226,8 @@ export function ProjectFieldsEditor({
   number,
   lens,
   boards,
+  issueId,
+  viewerCanSetFields,
   disabledReason,
   unsettledReason,
   paletteEnabled = false,
@@ -186,6 +241,11 @@ export function ProjectFieldsEditor({
   /** The boards this item is on, in memberships order, each with the cached values
    *  the draft seeds from. Empty while those values are still unread. */
   boards: ItemProjectFieldValues[];
+  /** The issue's node id and GitHub's verdict on setting its org issue fields,
+   *  from the values read — absent on a pull request, whose rows for those fields
+   *  hold. */
+  issueId?: string;
+  viewerCanSetFields?: boolean;
   /** Set when the surface can't be edited right now — the viewer lacks the access
    *  its action needs, or the entity is still loading. Outranks every other hold. */
   disabledReason?: string;
@@ -201,14 +261,18 @@ export function ProjectFieldsEditor({
   const readOnlyScope = projectScopeReadOnly(scopes.data);
 
   const [open, setOpen] = useState(false);
-  const [drafts, setDrafts] = useState<Record<string, BoardDraft>>({});
+  const [drafts, setDrafts] = useState<EditorDrafts<FieldDraft>>(NO_DRAFTS);
   // Each board's values AS SEEN at open. The close diffs draft-vs-SEEDED, never
   // draft-vs-live, so a value landing mid-open is in neither set and left alone.
   const [seeds, setSeeds] = useState<
     Record<string, Record<string, ProjectFieldValue>>
   >({});
   const portalContainer = usePanelPortalContainer();
-  const setFields = useSetItemFieldValues(repoPath, kind, number, lens);
+  const setFields = useSetItemFieldValues();
+  const issueHost: IssueFieldHost =
+    kind === "issue"
+      ? { issueId, canSetFields: viewerCanSetFields === true }
+      : null;
 
   // Ranked: the caller's reason outranks a write the viewer started, which outranks
   // values this surface hasn't read yet.
@@ -229,17 +293,49 @@ export function ProjectFieldsEditor({
     }
   })();
 
-  function setDraft(projectId: string, fieldId: string, entry: FieldDraft) {
-    setDrafts((prev) => ({
-      ...prev,
-      [projectId]: { ...(prev[projectId] ?? {}), [fieldId]: entry },
-    }));
+  function setDraft(
+    projectId: string,
+    def: WritableFieldDef,
+    entry: FieldDraft,
+  ) {
+    const issueFieldId = issueFieldIdOf(def);
+    setDrafts((prev) =>
+      applyFieldDraft(prev, projectId, def.id, issueFieldId, entry),
+    );
+  }
+
+  // Each org field's one draft, for the sections that mirror it.
+  const mirrored: Record<string, MirroredDraft> = {};
+  for (const [issueFieldId, owner] of Object.entries(drafts.issueOwners)) {
+    const entry = drafts.boards[owner.projectId]?.[owner.fieldId];
+    if (entry !== undefined)
+      mirrored[issueFieldId] = {
+        projectId: owner.projectId,
+        entry,
+        rev: owner.rev,
+      };
+  }
+
+  /** A board's org fields by the definition id its rows drafted them under →
+   *  their issue field id; only the owning section holds a draft for any one. */
+  function routesFor(projectId: string): Map<string, string> {
+    const routes = new Map<string, string>();
+    for (const [issueFieldId, owner] of Object.entries(drafts.issueOwners))
+      if (owner.projectId === projectId)
+        routes.set(owner.fieldId, issueFieldId);
+    return routes;
   }
 
   async function commit() {
-    const pending: { board: ItemProjectFieldValues; write: BoardWrite }[] = [];
+    const pending: {
+      board: ItemProjectFieldValues;
+      write: BoardWrite;
+      parts: ReturnType<typeof partitionFieldWrites>;
+      issueWrites: IssueFieldWrites | null;
+    }[] = [];
+    let unsentIssueFields = false;
     for (const board of boards) {
-      const touched = drafts[board.project.id];
+      const touched = drafts.boards[board.project.id];
       if (touched === undefined) continue;
       // Belt for the rows' own hold: a board the viewer can't write would 403 at the
       // end of a chain that stops on the first failure, stranding the boards after it.
@@ -248,28 +344,74 @@ export function ProjectFieldsEditor({
       // in — a baseline that can move under a background refetch while a mounted
       // input's text stays frozen. Diffing only touched fields bounds that.
       const seed = seeds[board.project.id] ?? seedBoard(board);
-      const write = boardWrite(board, seed, touched);
+      const routes = routesFor(board.project.id);
+      let write = boardWrite(board, seed, touched, routes);
+      // Tested before the split, so a board whose only change is an org issue
+      // field still writes.
       if (write.updates.length === 0 && write.clears.length === 0) continue;
-      pending.push({ board, write });
+      const parts = partitionFieldWrites(write.updates, write.clears, routes);
+      // The issue's verdict can change under an open popup (a background re-read),
+      // so an issue half drafted while it could be set may no longer be sendable:
+      // the board half goes alone, its patch rebuilt without the unsent fields so
+      // the cache never shows them as saved, and the drop is said once below.
+      const issueWrites =
+        hasIssueFieldWrites(parts.issue) && canWriteIssueFields(issueHost)
+          ? { issueId: issueHost.issueId, ...parts.issue }
+          : null;
+      if (hasIssueFieldWrites(parts.issue) && issueWrites === null) {
+        unsentIssueFields = true;
+        write = boardWrite(
+          board,
+          seed,
+          Object.fromEntries(
+            Object.entries(touched).filter(([fieldId]) => !routes.has(fieldId)),
+          ),
+          routes,
+        );
+      }
+      if (
+        parts.updates.length === 0 &&
+        parts.clears.length === 0 &&
+        issueWrites === null
+      )
+        continue;
+      pending.push({ board, write, parts, issueWrites });
     }
     // Drafts for a board the item left mid-open have nowhere to go — the
     // membership their itemId addressed is gone, and its section left the popup
     // as it went. Said once, however many boards it was.
     const live = new Set(boards.map((board) => board.project.id));
-    const stranded = Object.entries(drafts).some(([projectId, touched]) => {
-      if (live.has(projectId)) return false;
-      const { updates, clears } = fieldDiff(seeds[projectId] ?? {}, touched);
-      return updates.length > 0 || clears.length > 0;
-    });
+    const stranded = Object.entries(drafts.boards).some(
+      ([projectId, touched]) => {
+        if (live.has(projectId)) return false;
+        const { updates, clears } = fieldDiff(
+          alignSeed(seeds[projectId] ?? {}, routesFor(projectId)),
+          touched,
+        );
+        return updates.length > 0 || clears.length > 0;
+      },
+    );
     if (stranded) toast.info(STRANDED_NOTICE);
+    if (unsentIssueFields)
+      toast.info(
+        `${ISSUE_FIELDS_UNSENT}: ${issueFieldHostReason(issueHost) ?? ""}`,
+      );
 
-    for (const [i, { board, write }] of pending.entries()) {
+    // Sibling boards bridging the same org field keep their old value until the
+    // settle's re-read: a board's values carry its own wrapper ids, so this
+    // board's patch can't be applied to another's entry.
+    for (const [i, { board, write, parts, issueWrites }] of pending.entries()) {
       try {
         await setFields.mutateAsync({
+          repo: repoPath,
+          lens,
+          kind,
+          number,
           projectId: board.project.id,
           itemId: board.itemId,
-          updates: write.updates,
-          clears: write.clears,
+          updates: parts.updates,
+          clears: parts.clears,
+          issueWrites,
           values: write.values,
           unwritten: pending.length - i - 1,
         });
@@ -285,7 +427,7 @@ export function ProjectFieldsEditor({
       const next: Record<string, Record<string, ProjectFieldValue>> = {};
       for (const board of boards) next[board.project.id] = seedBoard(board);
       setSeeds(next);
-      setDrafts({});
+      setDrafts(NO_DRAFTS);
       setOpen(true);
       return;
     }
@@ -381,12 +523,15 @@ export function ProjectFieldsEditor({
                   showTitle={showTitles && board.project.title !== ""}
                   // Ranked as the Projects picker ranks its rows: the popover-wide
                   // scope gap outranks the per-board access one, and BoardSection
-                  // puts the per-field issue-field reason below both.
+                  // puts the per-field reasons below both — org issue-field rows
+                  // included, deliberately: the board is how the user got here.
                   lockedReason={boardLockedReason(readOnlyScope, board)}
+                  issueHost={issueHost}
                   seed={seeds[board.project.id]}
-                  draft={drafts[board.project.id]}
-                  onChange={(fieldId, entry) =>
-                    setDraft(board.project.id, fieldId, entry)
+                  draft={drafts.boards[board.project.id]}
+                  mirrored={mirrored}
+                  onChange={(def, entry) =>
+                    setDraft(board.project.id, def, entry)
                   }
                 />
               ))}
@@ -412,8 +557,10 @@ function BoardSection({
   open,
   showTitle,
   lockedReason,
+  issueHost,
   seed,
   draft,
+  mirrored,
   onChange,
 }: {
   repoPath: string;
@@ -421,9 +568,12 @@ function BoardSection({
   open: boolean;
   showTitle: boolean;
   lockedReason?: string;
+  issueHost: IssueFieldHost;
   seed?: Record<string, ProjectFieldValue>;
   draft?: BoardDraft;
-  onChange: (fieldId: string, entry: FieldDraft) => void;
+  /** Each org issue field's one draft, by issue field id, and its owning board. */
+  mirrored: Record<string, MirroredDraft>;
+  onChange: (def: WritableFieldDef, entry: FieldDraft) => void;
 }) {
   const defs = useProjectFields(repoPath, board.project.id, open);
   const writable = (defs.data?.fields ?? []).filter(isWritable);
@@ -461,19 +611,42 @@ function BoardSection({
           This board defines no fields you can change here.
         </p>
       )}
-      {writable.map((def) => (
-        <FieldRow
-          key={def.id}
-          def={def}
-          current={currentValue(def, draft, baseline)}
-          // The board-wide hold outranks the per-field ones, as the Projects
-          // picker's rows rank theirs: a scope gap has a remedy on this popup.
-          lockedReason={
-            lockedReason ?? fieldLockedReason(def, baseline[def.id])
-          }
-          onChange={(entry) => onChange(def.id, entry)}
-        />
-      ))}
+      {writable.map((def) => {
+        const issueFieldId = issueFieldIdOf(def);
+        const mirror =
+          issueFieldId === undefined ? undefined : mirrored[issueFieldId];
+        // Another section owns this org field's draft: show that one.
+        const foreign =
+          mirror !== undefined && mirror.projectId !== board.project.id
+            ? mirror.entry
+            : undefined;
+        const current = currentValue(
+          def,
+          foreign === undefined ? draft?.[def.id] : foreign,
+          baseline,
+        );
+        return (
+          <FieldRow
+            key={def.id}
+            def={def}
+            current={current}
+            // Remounts a mirroring scalar input on each of the owner's drafts; the
+            // owning row passes none, so typing never costs the caret.
+            mirrorKey={
+              foreign === undefined || mirror === undefined
+                ? undefined
+                : String(mirror.rev)
+            }
+            // The board-wide hold outranks the per-field ones, as the Projects
+            // picker's rows rank theirs: a scope gap has a remedy on this popup.
+            lockedReason={
+              lockedReason ??
+              fieldLockedReason(def, seedValueFor(baseline, def), issueHost)
+            }
+            onChange={(entry) => onChange(def, entry)}
+          />
+        );
+      })}
       {/* Stands alone, as the picker's own truncation note does: a capped list of
           fields this build can't write renders zero rows, where the empty-state
           line above would be a lie. */}
@@ -491,12 +664,11 @@ function BoardSection({
  *  still holds what it held, and its Clear stays offered. */
 function currentValue(
   def: WritableFieldDef,
-  draft: BoardDraft | undefined,
+  entry: FieldDraft | undefined,
   baseline: Record<string, ProjectFieldValue>,
 ): ProjectFieldValue | null {
-  const entry = draft?.[def.id];
   if (entry === undefined || entry === INVALID_DRAFT)
-    return baseline[def.id] ?? null;
+    return seedValueFor(baseline, def) ?? null;
   return entry?.value ?? null;
 }
 
@@ -506,12 +678,16 @@ function currentValue(
 function FieldRow({
   def,
   current,
+  mirrorKey,
   lockedReason,
   onChange,
 }: {
   def: WritableFieldDef;
   /** What the field reads as right now — the draft if touched, else the seed. */
   current: ProjectFieldValue | null;
+  /** The mirrored draft's revision, set while this row mirrors another section's
+   *  draft of the same org field. */
+  mirrorKey?: string;
   lockedReason?: string;
   onChange: (entry: FieldDraft) => void;
 }) {
@@ -520,6 +696,12 @@ function FieldRow({
   // the browser reports as empty stays legible while it can't be parsed. Bumped
   // only by Clear, so a keystroke never costs the caret its place.
   const [clearSeq, setClearSeq] = useState(0);
+  // The last mirrored revision this row remounted to, kept once the row takes the
+  // draft over: its own first keystroke must not remount the input under the
+  // caret, and a return to mirroring always brings a higher revision.
+  const [shownMirror, setShownMirror] = useState(mirrorKey);
+  if (mirrorKey !== undefined && mirrorKey !== shownMirror)
+    setShownMirror(mirrorKey);
   const action =
     current === null ? (
       <span className="text-[11px] text-muted-foreground">Not set</span>
@@ -556,7 +738,7 @@ function FieldRow({
           {action}
         </div>
         <ScalarInput
-          key={clearSeq}
+          key={`${clearSeq}:${shownMirror ?? ""}`}
           id={inputId}
           def={def}
           defaultValue={scalarText(def, current)}

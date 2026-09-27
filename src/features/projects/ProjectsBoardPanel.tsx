@@ -67,6 +67,19 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { presentError } from "@/lib/error-summary";
 import { useActiveGhHost, useForgeGhHost } from "@/lib/git/host";
+import {
+  canWriteIssueFields,
+  hasIssueFieldWrites,
+  ISSUE_FIELD_UNREADABLE_REASON,
+  isIssueFieldDef,
+  issueFieldHeldReason,
+  issueFieldHostOf,
+  issueFieldNoneEligibleReason,
+  issueFieldRoutes,
+  partitionFieldWrites,
+  planBulkFieldWrite,
+  scopeToIssueFieldWritable,
+} from "@/lib/git/project-field-routing";
 import type { BoardMoveBucket, BoardWriteKind } from "@/lib/git/queries";
 import {
   forgeReady,
@@ -187,7 +200,6 @@ import { itemTitle } from "./item-title";
 import {
   type FieldDraft,
   INVALID_DRAFT,
-  ISSUE_FIELD_REASON,
   isWritable,
   valueKey,
 } from "./ProjectFieldControls";
@@ -208,6 +220,7 @@ import { ProjectsTableView } from "./ProjectsTableView";
 import {
   type DateSource,
   type DateSources,
+  datesAreIssueFields,
   iterationCalendars,
   localDateISO,
   NO_DATE_SOURCES,
@@ -238,7 +251,7 @@ const LOADING_FIELDS_REASON = "Loading this project's fields…";
 const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
 /** Mirrors the field editor's own wording verbatim: each surface gates on the
  *  same flag as the row it mirrors, and the two must not say it differently
- *  (ProjectFieldsEditor.tsx). The issue-field hold is the controls module's own. */
+ *  (ProjectFieldsEditor.tsx). The org issue-field holds are the routing module's own. */
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
 const LOADING_VIEWS_REASON = "Loading this project's views…";
@@ -1727,8 +1740,9 @@ export function ProjectsBoardPanel({
     // Seeded only from a grouping this board can actually draw, off the same
     // `groupableFields` set the Group-by rows offer — which is the board's
     // single-selects AND its iteration fields, so a view grouped either way seeds.
-    // A table view groups by nothing, and a view grouped by anything else (a
-    // multi-select, an issue field) leaves the current grouping alone.
+    // An org issue field's single-select groups like any other. A table view
+    // groups by nothing, and a view grouped by anything else (a multi-select)
+    // leaves the current grouping alone.
     const vgroup = picked?.verticalGroupFieldIds[0];
     if (vgroup !== undefined && groupFields.some((f) => f.id === vgroup))
       setPickedFieldId(vgroup);
@@ -2570,15 +2584,21 @@ export function ProjectsBoardPanel({
    *  gate on the same flags, so they say it the same way. The last two arms rank at
    *  the tail because they are the only ones that clear on their own. */
   function moveHeldFor(item: BoardItem): string | undefined {
+    const issueHeld =
+      bucketField === null
+        ? undefined
+        : issueFieldHeldReason(bucketField, issueFieldHostOf(item.content));
     switch (true) {
       case projectScopeReadOnly(scopes.data):
         return READ_ONLY_SCOPE_REASON;
       case project !== null && !project.viewerCanUpdate:
         return NO_ACCESS_REASON;
-      // Iteration fields have no issue-field arm at all — GitHub defines none at
-      // the org level — so this asks only of the kind that can carry one.
-      case bucketField?.kind === "singleSelect" && bucketField.isIssueField:
-        return ISSUE_FIELD_REASON;
+      // Under the board's own permission arms, deliberately: the board is how the
+      // user got here. A board grouped by an org issue field moves a card by
+      // writing its ISSUE, so a pull request, a draft, or an issue the viewer may
+      // not set holds here.
+      case issueHeld !== undefined:
+        return issueHeld;
       // Under the three arms above, which say a move is impossible HERE whatever the
       // card is: a column pick writes a live card's field, so the restore row is
       // what clears this one.
@@ -2814,13 +2834,26 @@ export function ProjectsBoardPanel({
       toast(held, { id: CELL_EDIT_REFUSAL_TOAST_ID });
       return;
     }
+    // The hold above has already refused an org issue field this row can't take;
+    // the belt keeps a routed write from going out empty and reading as saved.
+    const parts = partitionFieldWrites(
+      entry === null ? [] : [entry.update],
+      entry === null ? [def.id] : [],
+      issueFieldRoutes([def]),
+    );
+    const host = issueFieldHostOf(item.content);
+    if (hasIssueFieldWrites(parts.issue) && !canWriteIssueFields(host)) return;
     try {
       const result = await bulkFields.mutateAsync({
         repo: repoPath,
         projectId,
         itemIds: [itemId],
-        updates: entry === null ? [] : [entry.update],
-        clears: entry === null ? [def.id] : [],
+        updates: parts.updates,
+        clears: parts.clears,
+        issueWrites:
+          hasIssueFieldWrites(parts.issue) && canWriteIssueFields(host)
+            ? { issueIds: [host.issueId], ...parts.issue }
+            : null,
       });
       // One cell, so its own words rather than the bulk count's: the field it
       // saved, or why it didn't.
@@ -2940,11 +2973,20 @@ export function ProjectsBoardPanel({
    *  counted the whole selection would promise cards the write will skip. */
   function bulkState(verb: BulkVerb): {
     cards: BoardItem[];
+    /** Live cards an org issue-field move drops, for the report's skip note; the
+     *  verb's own skips (archived cards) are never counted here. */
+    issueSkipped: number;
     label: string;
     reason: string | undefined;
   } {
     const selected = selectedCards();
-    const cards = partitionEligible(verb, selected).eligible;
+    const live = partitionEligible(verb, selected).eligible;
+    // A move on a board grouped by an org issue field writes each card's ISSUE,
+    // so it scopes to the issues the viewer may set — filtered HERE, before any
+    // write, so the label, the patch and the rollback all count one set.
+    const issueMove =
+      verb === "move" && bucketField !== null && isIssueFieldDef(bucketField);
+    const { cards, issueSkipped } = scopeToIssueFieldWritable(live, issueMove);
     const n = cards.length;
     const label = {
       move: `Move ${cardCount(n, noun)} to`,
@@ -2968,19 +3010,23 @@ export function ProjectsBoardPanel({
           return surface === "board"
             ? NO_GROUP_FIELDS_REASON
             : ROWS_UNGROUPED_MOVE_REASON[surface];
-        case verb === "move" &&
+        case issueMove &&
           bucketField?.kind === "singleSelect" &&
-          bucketField.isIssueField:
-          return ISSUE_FIELD_REASON;
+          bucketField.issueFieldId === undefined:
+          return ISSUE_FIELD_UNREADABLE_REASON;
         case selected.length === 0:
           return BULK_NO_SELECTION_REASON[noun];
+        // Its own words: every live card being a pull request or draft is not
+        // the archived-only state the verb's generic sentence names.
+        case issueMove && live.length > 0 && n === 0:
+          return issueFieldNoneEligibleReason(noun);
         case n === 0:
           return BULK_NOTHING_REASON[verb](noun);
         default:
           return undefined;
       }
     })();
-    return { cards, label, reason };
+    return { cards, issueSkipped, label, reason };
   }
 
   // The four verbs resolved ONCE, shared by the selection bar and the card menu:
@@ -3714,6 +3760,7 @@ export function ProjectsBoardPanel({
       repo: repoPath,
       projectId,
       itemId: item.itemId,
+      issueId: item.content.kind === "issue" ? item.content.id : null,
       field: bucketField,
       bucket,
       query: lensQuery,
@@ -3941,6 +3988,8 @@ export function ProjectsBoardPanel({
         repo: repoPath,
         projectId,
         itemId: item.itemId,
+        issueId: item.content.kind === "issue" ? item.content.id : null,
+        issueFieldIdByFieldId: Object.fromEntries(issueFieldRoutes(fieldDefs)),
         values: plan.values,
         query: lensQuery,
         archived: showArchived,
@@ -4217,6 +4266,7 @@ export function ProjectsBoardPanel({
     result: BulkItemOutcomes,
     sent: number,
     cards: BoardItem[],
+    skipped = 0,
   ) {
     const byId = new Map(cards.map((card) => [card.itemId, card]));
     const failures = result.outcomes.flatMap((outcome) =>
@@ -4226,14 +4276,24 @@ export function ProjectsBoardPanel({
     );
     const errors = failures.map((failure) => failure.error);
     const failed = errors.length;
+    // Skips are cards an org issue-field write could never reach (a pull request,
+    // a draft, an issue the viewer may not set), said apart from failures and never
+    // a reason to retry. They are SHOWN as well as announced: unlike a failure,
+    // nothing else on screen says a selected card was left out.
+    const skippedNote =
+      skipped === 0
+        ? ""
+        : `; skipped ${cardCount(skipped, noun)} you can't set issue fields on`;
     if (failed === 0) {
-      announce(`${BULK_DONE_WORD[verb]} ${cardCount(sent, noun)}`);
+      const done = `${BULK_DONE_WORD[verb]} ${cardCount(sent, noun)}${skippedNote}`;
+      announce(done);
+      if (skipped > 0) toast.info(done);
       return;
     }
     // COUNT-ONLY on purpose: the live region is terse by design, and the toast
     // beside it carries the diagnosis. The reason lives in one place, not two.
     announce(
-      `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent, noun)} — ${failed} failed`,
+      `${BULK_DONE_WORD[verb]} ${sent - failed} of ${cardCount(sent, noun)} — ${failed} failed${skippedNote}`,
     );
     // Distinct, in the order GitHub gave them (`Set` keeps insertion order), each
     // through the house presenter so a multi-line dump reads as its one
@@ -4245,7 +4305,7 @@ export function ProjectsBoardPanel({
     toastComposedError({
       title: `${failed} of ${cardCount(sent, noun)} failed to ${BULK_FAIL_WORD[verb]} — ${reasons[0]}${
         more > 0 ? ` (+${more} more ${more === 1 ? "reason" : "reasons"})` : ""
-      }`,
+      }${skippedNote}`,
       errors,
       // Outcomes arrive in request order, which is card order. An unmatched id
       // (never expected) leaves its section unheaded rather than misnamed.
@@ -4277,7 +4337,7 @@ export function ProjectsBoardPanel({
     // Every read happens BEFORE the first await, and the gates are re-checked here
     // rather than trusted from the render that disabled the control.
     const column = columns[columnIndex];
-    const { cards, reason } = bulkState("move");
+    const { cards, issueSkipped, reason } = bulkState("move");
     if (bucketField === null || projectId === null || column === undefined)
       return;
     if (reason !== undefined || cards.length === 0) return;
@@ -4310,13 +4370,20 @@ export function ProjectsBoardPanel({
         repo: repoPath,
         projectId,
         itemIds,
+        issueIdByItemId: Object.fromEntries(
+          cards.flatMap((card) =>
+            card.content.kind === "issue"
+              ? [[card.itemId, card.content.id] as const]
+              : [],
+          ),
+        ),
         field: bucketField,
         bucket,
         query: lensQuery,
         archived: showArchived,
         rich: tableView !== null,
       });
-      reportBulk("move", result, itemIds.length, cards);
+      reportBulk("move", result, itemIds.length, cards, issueSkipped);
     } catch {
       // The mutation reported it and rolled every card back to its old column.
     }
@@ -4491,18 +4558,55 @@ export function ProjectsBoardPanel({
     if (projectId === null || reason !== undefined || cards.length === 0)
       return false;
     if (updates.length === 0 && clears.length === 0) return false;
-    const itemIds = cards.map((card) => card.itemId);
+    // The board half goes to every card; the org issue-field half only to the
+    // issues the viewer may set. A card left with neither is dropped here, before
+    // the write — the backend would answer its empty write as landed.
+    let parts: ReturnType<typeof partitionFieldWrites>;
+    try {
+      parts = partitionFieldWrites(
+        updates,
+        clears,
+        issueFieldRoutes(fieldDefs),
+      );
+    } catch (e) {
+      // An org field whose issue id went missing under the open dialog.
+      toastError(e);
+      return false;
+    }
+    const issueHalf = hasIssueFieldWrites(parts.issue);
+    const plan = planBulkFieldWrite(
+      cards,
+      parts.updates.length > 0 || parts.clears.length > 0,
+      issueHalf,
+    );
+    const sentCards = cards.filter((card) => !plan.skipped.includes(card));
+    if (plan.itemIds.length === 0) {
+      // Nothing reachable: a documented skip, which closes rather than retries.
+      announce(issueFieldNoneEligibleReason(noun));
+      toast.info(issueFieldNoneEligibleReason(noun));
+      return session === bulkFieldsSessionRef.current;
+    }
+    const itemIds = plan.itemIds;
     try {
       const result = await bulkFields.mutateAsync({
         repo: repoPath,
         projectId,
         itemIds,
-        updates,
-        clears,
+        updates: parts.updates,
+        clears: parts.clears,
+        issueWrites: issueHalf
+          ? { issueIds: plan.issueIds, ...parts.issue }
+          : null,
       });
       // Reported whatever run this was: the message describes a write the user
       // really fired, and is true wherever they have since got to.
-      reportBulk("fields", result, itemIds.length, cards);
+      reportBulk(
+        "fields",
+        result,
+        itemIds.length,
+        sentCards,
+        plan.skipped.length,
+      );
       // Only the run still on screen may close anything. A stale token means the
       // user cancelled over this write and opened the editor again (or switched
       // board), and the close below is a PANEL setter every run shares — so a
@@ -5200,6 +5304,7 @@ export function ProjectsBoardPanel({
               peekItemId={peekItemId}
               items={roadmapItems}
               sources={dateSources}
+              datesOnIssues={datesAreIssueFields(dateSources, fieldDefs)}
               calendars={calendars}
               zoom={zoom}
               onCellFocus={onTableCellFocus}

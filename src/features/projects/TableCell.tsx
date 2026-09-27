@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { fieldValueNode } from "@/features/conversations/ProjectFieldValues";
 import { StateIcon } from "@/features/issues/IssueRelations";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { issueFieldHostOf } from "@/lib/git/project-field-routing";
 import type { BoardItem, ProjectFieldDef } from "@/lib/git/types";
 import { useDisabledReason } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
@@ -359,9 +360,10 @@ export function ValueCell({
  * Why one table cell can't be edited, or undefined when it can. Board-wide holds
  * first (the sign-in, access, a write in flight), then the item's own state — an
  * archived item takes no field write, the bulk dialog's rule — then the field's:
- * an org issue field, or a multi-line text value the single-line control would
- * flatten. Shared by the cell's rendering and the panel's fire-time re-check, so
- * the two can't disagree about the same cell.
+ * an org issue field on a row that isn't an issue the viewer may set, or a
+ * multi-line text value the single-line control would flatten. Shared by the
+ * cell's rendering and the panel's fire-time re-checks, so none of them can
+ * disagree about the same cell.
  */
 export function cellEditHeld(
   boardHeld: string | undefined,
@@ -378,7 +380,11 @@ export function cellEditHeld(
     case item.isArchived:
       return ARCHIVED_ITEM_REASON.row;
     default:
-      return fieldLockedReason(def, columnValue(item, def));
+      return fieldLockedReason(
+        def,
+        columnValue(item, def),
+        issueFieldHostOf(item.content),
+      );
   }
 }
 

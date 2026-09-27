@@ -32,6 +32,7 @@ import type {
 } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
+import { valueBelongsTo } from "./board-model";
 
 /** How many assignee faces a card shows before the rest collapse into "+N" —
  *  three is what fits beside the number on the narrowest column. */
@@ -263,8 +264,7 @@ function valueFor(
   def: ProjectFieldDef,
 ): ProjectFieldValue | undefined {
   return item.fieldValues.find(
-    (value) =>
-      value.kind === def.kind && "fieldId" in value && value.fieldId === def.id,
+    (value) => value.kind === def.kind && valueBelongsTo(value, def),
   );
 }
 

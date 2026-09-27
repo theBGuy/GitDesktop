@@ -31,6 +31,25 @@ export interface DateSources {
 
 export const NO_DATE_SOURCES: DateSources = { start: null, target: null };
 
+/** Whether every date the roadmap places items by is an org ISSUE field — the case
+ *  where an undated pull request or draft has no date it could ever be given, so
+ *  telling it to set one would be advice it can't follow. False with no sources. */
+export function datesAreIssueFields(
+  sources: DateSources,
+  defs: readonly ProjectFieldDef[],
+): boolean {
+  const used = [sources.start, sources.target].filter(
+    (source): source is DateSource => source !== null,
+  );
+  return (
+    used.length > 0 &&
+    used.every((source) => {
+      const def = defs.find((f) => f.id === source.fieldId);
+      return source.kind === "date" && def?.kind === "date" && def.isIssueField;
+    })
+  );
+}
+
 export type Zoom = "month" | "quarter" | "year";
 
 /** Most detailed first: zooming out walks forward, zooming in walks back. */

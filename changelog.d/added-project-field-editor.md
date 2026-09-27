@@ -6,5 +6,8 @@
   drafts your edits and writes them when it closes, one write per board. It works on
   closed and merged pull requests too, so a card can still move to *Done* after the
   merge. **Edit project fields…** in the command palette opens it without the mouse.
-  GitHub only, and it uses the same `project` sign-in scope the Projects picker already
-  needs.
+  Your organization's issue fields are there too, and anywhere a board lets you edit a
+  field (its table cells, the bulk fields editor, a move between columns, the roadmap's
+  date keys) they set the value on the issue itself, so every board showing that field
+  agrees. GitHub only; a board's own fields use the same `project` sign-in scope the
+  Projects picker already needs.

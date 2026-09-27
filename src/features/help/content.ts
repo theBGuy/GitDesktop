@@ -1803,7 +1803,11 @@ duplicates, and same-project mentions.
   the trigger: it opens one popup holding every field you can set on every board the issue is
   on, filled in or not, and any field that already holds a value carries a **Clear** to empty
   it again. Like the pickers above it, the popup drafts your edits and writes them when it
-  closes — one write per board. The command palette opens either popup without the mouse:
+  closes — one write per board. An organization's issue fields are among them: they live on
+  the issue itself, so a board that shows one is showing the issue's value, and when two
+  boards carry the same field its rows share one edit. On a pull request those rows hold,
+  since issue fields belong to issues, and they also hold when the issue's organization
+  doesn't let you set its fields. The command palette opens either popup without the mouse:
   **Edit projects…** and **Edit project fields…**, on an issue or a pull request alike
   (palette-only by default — bind a key in Settings if you want one). GitHub hands back
   only so much at a time, and a muted note says when a list is partial rather than letting
@@ -1811,7 +1815,7 @@ duplicates, and same-project mentions.
   boards on offer are cut short, while *Some of this item's projects aren't shown* means
   the item sits on more boards than came back: some of its chips and field lines are
   missing, and a board it's already on can even show unchecked in the picker. GitHub
-  only, and changing anything needs the \`project\`
+  only, and changing a board's fields needs the \`project\`
   scope: with just \`read:project\` the boards still show but every row is locked, and with
   neither the picker says so and helps you get it — when your sign-in's scopes are readable,
   that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\` command
@@ -2178,8 +2182,9 @@ why in a toast, with **Details** or **Copy** for GitHub's full answer. One cell 
 a time, so the next edit opens once the last one has landed. Fields GitHub keeps on the issue
 itself (assignees, labels, milestone and the rest) aren't edited here, and a cell that
 can't be edited says why when you try: a sign-in or access that can't change the
-board, an archived row, an organization's issue field, multi-line text, or another
-change still being written.
+board, an archived row, an organization's issue field on a pull request or draft (or on
+an issue whose organization doesn't let you set it), multi-line text, or another change
+still being written.
 
 Selecting rows works the way selecting cards does: {{key:mod}}-click, {{key:shift}}-click,
 or {{key:shift}} with the row keys. A range runs straight down the rows, across sections,
@@ -2231,8 +2236,10 @@ toolbar shows the write on its way; hold the keys down and GitDesktop keeps savi
 catch up with the bar. A very long hold can stop short of it, and then the roadmap
 refreshes to show the dates GitHub saved. A write GitHub refuses puts the dates back and
 says why. When a shift can't happen (no dates to move, a sign-in or access that can't
-change the board, an archived row, an organization's issue field, another change still
-being written, or the roadmap still refreshing after one) the keys say why instead.
+change the board, an archived row, another change still being written, or the roadmap
+still refreshing after one) the keys say why instead. A date that is an organization's
+issue field moves only on an issue whose fields you can set, and a bar moves whole or not
+at all: if any date it would write can't change on that row, none of them move.
 
 Sections, selection, the row menu and the bulk bar work as they do in the table, and so
 do {{key:alt+up}} and {{key:alt+down}} for the project order.
@@ -2328,11 +2335,13 @@ dialog), and **Cancel** or {{key:escape}} discards the whole draft without askin
 Reopening starts fresh on **Leave as is** everywhere. **Apply** says **Nothing to apply
 yet** until you've drafted at least one row.
 
-Archived cards are skipped, so the count on the button is the number that will really
-be written. Fields GitHub owns on the issue itself (assignees, labels, milestone)
-carry no row here, and an org-level field bridged onto the board renders held with
-**Issue fields are edited on GitHub**. If a card refuses the write, the rest still land
-and a message says how many didn't. While the write is on its way, the toolbar
+Archived cards are skipped, so the count on the button is the number of cards the write
+reaches. An organization's issue field reaches fewer: it's set on issues, so its row
+reaches only the issues you can set it on, says how many (**Issues only: 2 of 5
+cards**), and reads **Now:** from those alone. A card with nothing left to write is
+skipped and counted apart when the write lands. Fields GitHub owns on the issue itself
+(assignees, labels, milestone) carry no row here. If a card refuses the write, the rest
+still land and a message says how many didn't. While the write is on its way, the toolbar
 says so beside **View options**, whether or not you left the dialog open.
 
 ## Moving a card
@@ -2353,9 +2362,11 @@ One move at a time: while a write is in flight the menu says so in place of the 
 it waits the same way while **Load more** is still fetching, so a move can't cut the page you
 asked for short. **Load more** waits for a move to finish for the same reason, and says so —
 the two never run at once, in either order. The section is held with its reason on it when
-your GitHub sign-in can read project fields but not change them, when you don't have write
-access to the board, and when the board is grouped by one of GitHub's own issue fields (those
-are edited on GitHub). An ungrouped board has no columns to move between, so its cards carry
+your GitHub sign-in can read project fields but not change them, and when you don't have write
+access to the board. On a board grouped by an organization's issue field, a move sets that
+field on the issue, so it holds for a pull request or a draft, and for an issue whose
+organization doesn't let you set its fields; a move across a selection takes only the
+issues it can. An ungrouped board has no columns to move between, so its cards carry
 no **Move to** section, and a card whose contents you can't see carries none either.
 
 ## Ordering a card inside its column

@@ -19,6 +19,11 @@ import {
   OptionValue,
 } from "@/features/conversations/ProjectFieldValues";
 import { presentError } from "@/lib/error-summary";
+import {
+  isIssueFieldDef,
+  issueFieldRowReason,
+  issueFieldWritable,
+} from "@/lib/git/project-field-routing";
 import type {
   BoardItem,
   ProjectFieldDef,
@@ -27,12 +32,10 @@ import type {
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import type { ItemNoun } from "./board-model";
+import { type ItemNoun, valueBelongsTo } from "./board-model";
 import {
   INVALID_DRAFT,
-  ISSUE_FIELD_REASON,
   IterationRows,
-  isIssueFieldDef,
   isWritable,
   iterationDraft,
   MultiSelectRows,
@@ -72,15 +75,13 @@ function rowMode(entry: RowDraft | undefined): RowMode {
   return entry.mode;
 }
 
-/** One card's value for `fieldId`, matched on the field id alone — one field holds
- *  one value, whatever kind the cached copy of it was read as. */
+/** One card's value for `def`, matched on the field alone — one field holds one
+ *  value, whatever kind the cached copy of it was read as. */
 function cardValueFor(
   card: BoardItem,
-  fieldId: string,
+  def: ProjectFieldDef,
 ): ProjectFieldValue | undefined {
-  return card.fieldValues.find(
-    (value) => "fieldId" in value && value.fieldId === fieldId,
-  );
+  return card.fieldValues.find((value) => valueBelongsTo(value, def));
 }
 
 /** What the eligible cards currently hold for one field: the shared value where
@@ -96,12 +97,12 @@ type FieldHint =
   | { kind: "agreed"; value: ProjectFieldValue | undefined }
   | { kind: "mixed" };
 
-function fieldHint(cards: BoardItem[], fieldId: string): FieldHint {
+function fieldHint(cards: BoardItem[], def: ProjectFieldDef): FieldHint {
   if (cards.length === 0) return { kind: "agreed", value: undefined };
-  const first = cardValueFor(cards[0], fieldId);
+  const first = cardValueFor(cards[0], def);
   const key = valueKey(first);
   for (const card of cards.slice(1)) {
-    if (valueKey(cardValueFor(card, fieldId)) !== key) return { kind: "mixed" };
+    if (valueKey(cardValueFor(card, def)) !== key) return { kind: "mixed" };
   }
   return { kind: "agreed", value: first };
 }
@@ -199,6 +200,17 @@ export function BoardBulkFieldsDialog({
   const writable = fieldDefs.filter(isWritable);
   const { updates, clears } = draftPayload(draft);
   const drafted = updates.length + clears.length;
+  // An org issue field reaches only the issues the viewer may set; every other
+  // card skips that row, so its hint and count read those cards alone.
+  const issueCards = issueFieldWritable(cards);
+  const issueRowsNarrow =
+    issueCards.length < cards.length &&
+    writable.some(
+      (def) =>
+        isIssueFieldDef(def) &&
+        draft[def.id] !== undefined &&
+        draft[def.id] !== INVALID_DRAFT,
+    );
   // Ranked: the board-wide hold outranks the draft's own emptiness, since a
   // sign-in that can't write at all is the more useful thing to say.
   const applyHeld =
@@ -275,26 +287,34 @@ export function BoardBulkFieldsDialog({
               This board defines no fields you can change here.
             </p>
           )}
-          {writable.map((def) => (
-            <BulkFieldRow
-              key={def.id}
-              def={def}
-              hint={fieldHint(cards, def.id)}
-              entry={draft[def.id]}
-              // Ranked below the board-wide hold, as the single-card editor ranks
-              // its rows: an org issue-field has no write path here whatever the
-              // sign-in can do.
-              // No multi-line hold here, unlike a table cell and the item
-              // editor: that hold exists because a single-line control would LOAD
-              // the value and flatten it, and "Set to" never loads one — it
-              // replaces the value wholesale with what the user typed.
-              lockedReason={
-                heldReason ??
-                (isIssueFieldDef(def) ? ISSUE_FIELD_REASON : undefined)
-              }
-              onChange={(entry) => setRow(def.id, entry)}
-            />
-          ))}
+          {writable.map((def) => {
+            const issueRow = isIssueFieldDef(def);
+            const rowCards = issueRow ? issueCards : cards;
+            return (
+              <BulkFieldRow
+                key={def.id}
+                def={def}
+                hint={fieldHint(rowCards, def)}
+                reach={
+                  issueRow && rowCards.length < cards.length
+                    ? `Issues only: ${rowCards.length} of ${cards.length} ${cards.length === 1 ? noun : `${noun}s`}`
+                    : undefined
+                }
+                entry={draft[def.id]}
+                // Ranked below the board-wide hold, as the single-card editor
+                // ranks its rows. An org issue-field row holds only when it can
+                // reach no card at all; otherwise the rest are skipped, not held.
+                // No multi-line hold here, unlike a table cell and the item
+                // editor: that hold exists because a single-line control would
+                // LOAD the value and flatten it, and "Set to" never loads one — it
+                // replaces the value wholesale with what the user typed.
+                lockedReason={
+                  heldReason ?? issueFieldRowReason(def, rowCards.length, noun)
+                }
+                onChange={(entry) => setRow(def.id, entry)}
+              />
+            );
+          })}
           {/* Stands alone, as the single-card editor's own note does: a capped list
               whose remainder this build can't write renders zero rows, where the
               empty-state line above would be a lie. */}
@@ -304,12 +324,17 @@ export function BoardBulkFieldsDialog({
             </p>
           )}
         </div>
-        <DialogFooter>
-          <span className="mr-auto self-center text-[11px] text-muted-foreground">
-            {drafted === 0
-              ? "No changes drafted"
+        {/* Its own full-width line above the buttons, in every state: a note
+            sharing their row wraps once it grows, and pushes them onto a row of
+            their own as a draft starts. */}
+        <p className="text-[11px] text-muted-foreground">
+          {drafted === 0
+            ? "No changes drafted"
+            : issueRowsNarrow
+              ? `${drafted} ${drafted === 1 ? "field" : "fields"} will be written; issue fields skip ${noun}s you can't set them on`
               : `${drafted} ${drafted === 1 ? "field" : "fields"} will be written to every eligible ${noun}`}
-          </span>
+        </p>
+        <DialogFooter>
           <Button
             type="button"
             variant="outline"
@@ -407,18 +432,22 @@ const MODE_ROW_CLASS =
 function BulkFieldRow({
   def,
   hint,
+  reach,
   entry,
   lockedReason,
   onChange,
 }: {
   def: WritableFieldDef;
   hint: FieldHint;
+  /** How many of the cards this row reaches, when it is fewer than all of them. */
+  reach?: string;
   entry: RowDraft | undefined;
   lockedReason?: string;
   onChange: (entry: RowDraft | undefined) => void;
 }) {
   const mode = rowMode(entry);
   const modeLabelId = useId();
+  const reachId = useId();
   return (
     <div
       className="space-y-1.5 border-b pb-2.5 last:border-b-0"
@@ -433,12 +462,19 @@ function BulkFieldRow({
           <HintLine def={def} hint={hint} />
         </span>
       </div>
+      {reach !== undefined && (
+        <p id={reachId} className="text-[11px] text-muted-foreground">
+          {reach}
+        </p>
+      )}
       {/* A radio group rather than a select: three choices with no positioning
           machinery to get wrong, and arrow-key navigation the group already owns.
           Horizontal because the row's own control sits under it. */}
       <RadioGroup
         className="flex flex-row flex-wrap gap-x-4 gap-y-1"
         aria-labelledby={modeLabelId}
+        // The reduced reach is heard while walking the choices, not only seen.
+        aria-describedby={reach === undefined ? undefined : reachId}
         value={mode}
         onValueChange={(next) => {
           if (typeof next !== "string") return;

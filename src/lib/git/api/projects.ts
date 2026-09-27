@@ -6,9 +6,11 @@ import type {
   BoardItemContent,
   BoardItems,
   BoardOrder,
+  BulkIssueFieldWrites,
   BulkItemOutcomes,
   ConvertedDraft,
   DuplicateViewSource,
+  IssueFieldWrites,
   ItemFieldValues,
   ItemProjects,
   ProjectFieldDefs,
@@ -239,13 +241,17 @@ export const ghDeleteProjectStatusUpdate = (
 
 /** Writes one board's field values for one item in a single call. `updates` sets or
  *  replaces; `clears` carries the field ids to UNSET, which no update shape can
- *  express. Both address the item by its membership `itemId` on `projectId`. */
+ *  express. Both address the item by its membership `itemId` on `projectId`.
+ *  `issueWrites` carries the item's org issue fields, addressed by the issue itself,
+ *  in the SAME call: the two halves land independently, so a failure may leave the
+ *  other half written. */
 export const ghSetItemFieldValues = (
   repoPath: string,
   projectId: string,
   itemId: string,
   updates: ProjectFieldValueUpdate[],
   clears: string[],
+  issueWrites: IssueFieldWrites | null = null,
 ) =>
   invoke<void>("gh_set_item_field_values", {
     repoPath,
@@ -253,6 +259,7 @@ export const ghSetItemFieldValues = (
     itemId,
     updates,
     clears,
+    issueWrites,
   });
 
 /** Moves one card within the project's own item order, landing it directly after
@@ -423,13 +430,16 @@ export const ghRemoveBoardItems = (
 /** Writes ONE set of field values across several items of a board:
  *  {@link ghSetItemFieldValues} for a whole selection, with the same `updates`
  *  and `clears` split. Every item takes the same write, which is what makes a bulk
- *  column move expressible as a single call. */
+ *  column move expressible as a single call. `issueWrites` adds the org issue-field
+ *  half, one alias per item its `issueIds` names; an issue alias's refusal marks
+ *  that item's outcome like any other. */
 export const ghSetItemsFieldValues = (
   repoPath: string,
   projectId: string,
   itemIds: string[],
   updates: ProjectFieldValueUpdate[],
   clears: string[],
+  issueWrites: BulkIssueFieldWrites | null = null,
 ) =>
   invoke<BulkItemOutcomes>("gh_set_items_field_values", {
     repoPath,
@@ -437,6 +447,7 @@ export const ghSetItemsFieldValues = (
     itemIds,
     updates,
     clears,
+    issueWrites,
   });
 
 /** Adds one issue to boards by project id, addressed by issue NUMBER rather than

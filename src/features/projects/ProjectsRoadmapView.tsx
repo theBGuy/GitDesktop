@@ -19,6 +19,10 @@ import {
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { clipTitleFromText } from "@/lib/clip-title";
+import {
+  issueFieldHostOf,
+  issueFieldHostReason,
+} from "@/lib/git/project-field-routing";
 import type { BoardItem, ProjectIterationDef } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 import type { TableEntry, TablePosition } from "./board-model";
@@ -109,11 +113,14 @@ function besideStyle(left: number, right: number, laneWidth: number) {
 function LaneMark({
   span,
   title,
+  unplacedHint,
   timeline,
   laneWidth,
 }: {
   span: ItemSpan;
   title: string;
+  /** What an undated item's "No dates" says it can do about it. */
+  unplacedHint: string;
   timeline: RoadmapTimeline;
   laneWidth: number;
 }) {
@@ -197,7 +204,7 @@ function LaneMark({
       return (
         <span
           aria-hidden
-          title="Set this item's date fields to place it on the roadmap"
+          title={unplacedHint}
           className="sticky rounded-sm bg-background px-1 text-[11px] text-muted-foreground italic"
           style={{ left: RAIL_WIDTH + 8 }}
         >
@@ -256,6 +263,7 @@ const RoadmapItemRow = memo(function RoadmapItemRow({
   peek,
   tabCol,
   sources,
+  datesOnIssues,
   calendars,
   timeline,
   onCellFocus,
@@ -273,12 +281,20 @@ const RoadmapItemRow = memo(function RoadmapItemRow({
   peek: boolean;
   tabCol: number | null;
   sources: DateSources;
+  /** Every date source is an org issue field ({@link datesAreIssueFields}). */
+  datesOnIssues: boolean;
   calendars: ReadonlyMap<string, ProjectIterationDef[]>;
   timeline: RoadmapTimeline;
   onCellFocus: (rowKey: string, colIndex: number | null) => void;
   onPeekChange: (itemId: string | null) => void;
 }) {
   const span = itemSpan(item, sources, calendars);
+  // An undated row whose only dates are org issue fields it can't take says why,
+  // in the issue-field hold's own words, rather than asking for a date.
+  const unplacedHint =
+    (datesOnIssues && item.content.kind !== "redacted"
+      ? issueFieldHostReason(issueFieldHostOf(item.content))
+      : undefined) ?? "Set this item's date fields to place it on the roadmap";
   const words = `${spanText(span, timeline.todayISO)}${cutWords(span, timeline.range)}`;
   return (
     <div
@@ -312,11 +328,7 @@ const RoadmapItemRow = memo(function RoadmapItemRow({
       <div
         role="gridcell"
         aria-colindex={2}
-        aria-label={
-          span.kind === "none"
-            ? `${words}. Set this item's date fields to place it on the roadmap.`
-            : words
-        }
+        aria-label={span.kind === "none" ? `${words}. ${unplacedHint}.` : words}
         data-table-cell=""
         data-col-index={1}
         tabIndex={tabCol === 1 ? 0 : -1}
@@ -327,6 +339,7 @@ const RoadmapItemRow = memo(function RoadmapItemRow({
         <LaneMark
           span={span}
           title={itemTitle(item)}
+          unplacedHint={unplacedHint}
           timeline={timeline}
           laneWidth={laneWidth}
         />
@@ -641,6 +654,7 @@ export function ProjectsRoadmapView({
   peekItemId,
   items,
   sources,
+  datesOnIssues,
   calendars,
   zoom,
   onCellFocus,
@@ -667,6 +681,9 @@ export function ProjectsRoadmapView({
    *  all, so folding a section doesn't re-scale the lane. */
   items: readonly BoardItem[];
   sources: DateSources;
+  /** Every date source is an org issue field, which a pull request or draft can't
+   *  take — what an undated row's hint says instead of asking for a date. */
+  datesOnIssues: boolean;
   calendars: ReadonlyMap<string, ProjectIterationDef[]>;
   zoom: Zoom;
   onCellFocus: (rowKey: string, colIndex: number | null) => void;
@@ -1058,6 +1075,7 @@ export function ProjectsRoadmapView({
                     tabStopRow === vi.index ? (tabStop?.colIndex ?? 0) : null
                   }
                   sources={sources}
+                  datesOnIssues={datesOnIssues}
                   calendars={calendars}
                   timeline={timeline}
                   onCellFocus={onCellFocus}

@@ -492,6 +492,8 @@ export function ProjectFieldValues({
       number={number}
       lens={lens}
       boards={boards}
+      issueId={values.data?.issueId}
+      viewerCanSetFields={values.data?.viewerCanSetFields}
       disabledReason={disabledReason}
       unsettledReason={unsettledReason}
       paletteEnabled={paletteEnabled}

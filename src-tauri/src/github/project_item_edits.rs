@@ -32,7 +32,26 @@ pub(super) struct BulkDocument {
     pub args: Vec<String>,
     pub input: Option<String>,
     pub item_indices: Vec<usize>,
-    pub payload_pointer: &'static str,
+    /// One per alias, parallel to `item_indices`: one document may mix mutations
+    /// whose payloads answer at different paths.
+    pub aliases: Vec<AliasPayload>,
+}
+
+/// Where one alias's landed write answers, and who maps its scoped errors.
+#[derive(Clone, Copy)]
+pub(super) struct AliasPayload {
+    pub pointer: &'static str,
+    /// Overrides the command's error mapper for errors scoped to this alias.
+    pub map_error: Option<fn(AppError) -> AppError>,
+}
+
+impl AliasPayload {
+    pub(super) const fn at(pointer: &'static str) -> Self {
+        Self {
+            pointer,
+            map_error: None,
+        }
+    }
 }
 
 pub(super) fn bulk_document(
@@ -40,8 +59,9 @@ pub(super) fn bulk_document(
     parts: Vec<String>,
     mut args: Vec<String>,
     item_indices: Vec<usize>,
-    payload_pointer: &'static str,
+    aliases: Vec<AliasPayload>,
 ) -> BulkDocument {
+    debug_assert_eq!(item_indices.len(), aliases.len());
     let parts: Vec<_> = parts
         .iter()
         .enumerate()
@@ -59,7 +79,7 @@ pub(super) fn bulk_document(
         args,
         input: None,
         item_indices,
-        payload_pointer,
+        aliases,
     }
 }
 
@@ -116,13 +136,9 @@ fn apply_bulk_response(
         Err(error) => errors.fill(Some(map_error(error).to_string())),
         Ok(value) => {
             for error in value["errors"].as_array().into_iter().flatten() {
-                let message = map_error(AppError::Gh(
-                    error["message"]
-                        .as_str()
-                        .unwrap_or("GitHub could not update the project item.")
-                        .to_string(),
-                ))
-                .to_string();
+                let raw = error["message"]
+                    .as_str()
+                    .unwrap_or("GitHub could not update the project item.");
                 let alias = error["path"][0].as_str().unwrap_or("");
                 let index = (0..errors.len())
                     .find(|n| alias == format!("a{n}"))
@@ -133,6 +149,9 @@ fn apply_bulk_response(
                             .ok()
                     })
                     .filter(|n| *n < errors.len());
+                let alias_map = index.and_then(|n| document.aliases[n].map_error);
+                let message =
+                    alias_map.unwrap_or(map_error)(AppError::Gh(raw.to_string())).to_string();
                 if let Some(index) = index {
                     errors[index].get_or_insert_with(|| message.clone());
                     outcomes.outcomes[document.item_indices[index]]
@@ -149,7 +168,7 @@ fn apply_bulk_response(
                 }
             }
             for (n, error) in errors.iter_mut().enumerate() {
-                let pointer = format!("/data/a{n}{}", document.payload_pointer);
+                let pointer = format!("/data/a{n}{}", document.aliases[n].pointer);
                 if value
                     .pointer(&pointer)
                     .and_then(Value::as_str)
@@ -308,7 +327,8 @@ fn build_bulk_item_documents(
                 parts.push(selection.replace("$itemId", &format!("$itemId{n}")));
                 item_indices.push(chunk * BULK_ALIAS_CAP + n);
             }
-            bulk_document(declarations, parts, args, item_indices, payload_pointer)
+            let aliases = vec![AliasPayload::at(payload_pointer); item_indices.len()];
+            bulk_document(declarations, parts, args, item_indices, aliases)
         })
         .collect())
 }
@@ -885,7 +905,8 @@ mod tests {
             assert_eq!(docs.len(), 1);
             assert_eq!(docs[0].args, ["api", "graphql", "-f", "projectId=PVT_p", "-f", "itemId0=PVTI_z", "-f", "itemId1=PVTI_a", "-f", expected]);
             assert_eq!(docs[0].item_indices, [0, 1]);
-            assert_eq!(docs[0].payload_pointer, pointer);
+            assert!(docs[0].aliases.iter().all(|alias| alias.pointer == pointer));
+            assert_eq!(docs[0].aliases.len(), 2);
         }
     }
 
@@ -991,7 +1012,7 @@ mod tests {
             args: vec![],
             input: None,
             item_indices: vec![0, 0],
-            payload_pointer: "/projectV2Item/id",
+            aliases: vec![AliasPayload::at("/projectV2Item/id"); 2],
         };
         let mut outcomes = bulk_outcomes(&ids).unwrap();
         apply_bulk_response(&mut outcomes, &document, Ok(json!({"errors":[

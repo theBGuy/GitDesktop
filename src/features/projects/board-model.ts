@@ -26,9 +26,8 @@ export interface BoardColumnModel {
 }
 
 /** The fields a board can be grouped by, in the board's own field order: its
- *  single-selects and its iteration fields. Issue fields (GitHub's own
- *  single-selects, which this build can't write) group just as well as
- *  board-defined ones, so they stay in. */
+ *  single-selects and its iteration fields. An org issue field's single-select
+ *  groups like a board-defined one, its options being the issue field's own. */
 export function groupableFields(fields: ProjectFieldDef[]): GroupField[] {
   return fields.filter(
     (f): f is GroupField => f.kind === "singleSelect" || f.kind === "iteration",
@@ -104,6 +103,26 @@ export const ARCHIVED_ITEM_REASON: Record<ItemNoun, string> = {
   row: "Restore this row to change it",
 };
 
+/** Whether `value` is `def`'s. By the wrapper id first; an org issue field also
+ *  matches on its IssueField id, since GitHub can serve a value's field ref under a
+ *  different wrapper id than the definition (measured: a multi-select's value ref
+ *  as ProjectV2Field/PVTF_, its definition as ProjectV2MultiSelectField/PVTMSF_).
+ *  Never by name, and never by decoding an id. */
+export function valueBelongsTo(
+  value: ProjectFieldValue,
+  def: ProjectFieldDef,
+): boolean {
+  if (value.kind === "unknown") return false;
+  if (value.fieldId === def.id) return true;
+  if (def.kind === "iteration" || def.kind === "system" || !def.isIssueField)
+    return false;
+  return (
+    def.issueFieldId !== undefined &&
+    "issueFieldId" in value &&
+    value.issueFieldId === def.issueFieldId
+  );
+}
+
 /** The bucket a board item sits in for `field`, or null when the field is unset on
  *  it: a single-select's `optionId`, an iteration field's `iterationId`. Matched on
  *  the id, never the name — options are renamable and an iteration's title and dates
@@ -115,13 +134,13 @@ export function bucketIdFor(item: BoardItem, field: GroupField): string | null {
     if (
       field.kind === "singleSelect" &&
       value.kind === "singleSelect" &&
-      value.fieldId === field.id
+      valueBelongsTo(value, field)
     )
       return value.optionId;
     if (
       field.kind === "iteration" &&
       value.kind === "iteration" &&
-      value.fieldId === field.id
+      valueBelongsTo(value, field)
     )
       return value.iterationId;
   }
@@ -301,17 +320,17 @@ function collates(def: SortableDef): boolean {
 /** One usable key of a view's sort, resolved once for the whole column. */
 type SortKey = { def: SortableDef; descending: boolean; collate: boolean };
 
-/** The item's value for `fieldId` as `kind`, or null when it carries none — the
+/** The item's value for `def` as `kind`, or null when it carries none — the
  *  value's own kind has to match the definition's, since a wire shape that
  *  disagrees is not a value of this field. */
 function valueOfKind<K extends ProjectFieldValue["kind"]>(
   item: BoardItem,
-  fieldId: string,
+  def: ProjectFieldDef,
   kind: K,
 ): Extract<ProjectFieldValue, { kind: K }> | null {
   for (const value of item.fieldValues) {
     if (value.kind !== kind) continue;
-    if ("fieldId" in value && value.fieldId === fieldId)
+    if (valueBelongsTo(value, def))
       return value as Extract<ProjectFieldValue, { kind: K }>;
   }
   return null;
@@ -324,19 +343,19 @@ function valueOfKind<K extends ProjectFieldValue["kind"]>(
 function sortKeyFor(item: BoardItem, def: SortableDef): string | number | null {
   switch (def.kind) {
     case "text": {
-      const text = valueOfKind(item, def.id, "text")?.text.trim();
+      const text = valueOfKind(item, def, "text")?.text.trim();
       return text === undefined || text === "" ? null : text;
     }
     case "number": {
-      const number = valueOfKind(item, def.id, "number")?.number;
+      const number = valueOfKind(item, def, "number")?.number;
       return number !== undefined && Number.isFinite(number) ? number : null;
     }
     case "date": {
-      const date = valueOfKind(item, def.id, "date")?.date;
+      const date = valueOfKind(item, def, "date")?.date;
       return date === undefined || date === "" ? null : date;
     }
     case "singleSelect": {
-      const optionId = valueOfKind(item, def.id, "singleSelect")?.optionId;
+      const optionId = valueOfKind(item, def, "singleSelect")?.optionId;
       const at = def.options.findIndex((option) => option.id === optionId);
       return at === -1 ? null : at;
     }
@@ -349,7 +368,7 @@ function sortKeyFor(item: BoardItem, def: SortableDef): string | number | null {
     }
     // Iteration, the last kind admitted: its START date is the key.
     default: {
-      const start = valueOfKind(item, def.id, "iteration")?.startDate;
+      const start = valueOfKind(item, def, "iteration")?.startDate;
       return start === undefined || start === "" ? null : start;
     }
   }
@@ -625,7 +644,7 @@ export function columnValue(
           isIssueField: false,
         };
   for (const value of item.fieldValues) {
-    if (value.kind === "unknown" || value.fieldId !== def.id) continue;
+    if (!valueBelongsTo(value, def)) continue;
     if (def.kind === "system" || value.kind === def.kind) return value;
   }
   if (def.kind !== "system") return undefined;
