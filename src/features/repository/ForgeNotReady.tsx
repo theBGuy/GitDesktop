@@ -400,7 +400,7 @@ export function ForgeNotReady({
 
 /** Slack past the reset second, so the re-read doesn't land a hair early. */
 const RESET_GRACE_MS = 5_000;
-/** The longest a rate-limited panel waits after the last health read before
+/** The longest a rate-limited panel waits after the driving read before
  *  checking again, whatever the reset says (null, past, or far out). */
 const RATE_LIMIT_RECHECK_MS = 2 * 60_000;
 

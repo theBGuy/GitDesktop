@@ -44,11 +44,10 @@ const reportedAt = (run: PrCheckOut) =>
  * The most recent of several same-named runs, or null when none of them is dated.
  * Newest-wins is MEASURED, not GitHub's documented contract: GitHub reported a
  * branch mergeable while an older cancelled run of a required check sat beside a
- * newer passing one. The backend's best-effort collapse keeps only the newest GitHub
- * run per name, workflow and event, but groups still form here from same-named runs
- * across workflows or trigger events, from GitHub rows left uncollapsed when that
- * collapse had no data, and from GitLab/Bitbucket checks, which never collapse. Ties
- * keep the later entry, the order the rollup itself supplied.
+ * newer passing one. The backend's collapse of GitHub re-runs is best-effort, so
+ * groups still form here by several routes, among them other workflows or trigger
+ * events, GitHub re-runs it could not key, and GitLab/Bitbucket checks, which never
+ * collapse. Ties keep the later entry, the order the rollup itself supplied.
  */
 function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
   let latest: PrCheckOut | null = null;

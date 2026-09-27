@@ -250,11 +250,11 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
     Ok(GhJsonProbe::Parsed(parsed.hosts))
 }
 
-/// Whether gh error text (an account's `error`, or a failed command's stderr) names a
-/// rate limit (primary or secondary, or older GHES's "abuse detection" wording for
-/// the latter), or is a 429. Substring matches, not exact ones: go-gh wraps the API
-/// message as
-/// `HTTP <code>: <message> (<url>)`, and the message wording varies by limit kind.
+/// Whether gh error text (an account's `error`, or a failed command's stderr)
+/// names a rate limit (primary or secondary, or older GHES's "abuse detection"
+/// wording for the latter), or is a 429. Substring matches, not exact ones:
+/// go-gh wraps the API message as `HTTP <code>: <message> (<url>)`, and the
+/// message wording varies by limit kind.
 pub(crate) fn gh_error_is_rate_limit(error: Option<&str>) -> bool {
     error.is_some_and(|e| {
         let e = e.to_lowercase();
@@ -439,12 +439,20 @@ async fn gh_rate_limit_reset(host: &str) -> Option<i64> {
 
 /// One `gh api -i rate_limit` call against `host`, raw.
 async fn gh_rate_limit_probe(host: &str) -> AppResult<crate::github::runner::GhOutput> {
-    let mut args: Vec<&str> = vec!["api", "-i", "rate_limit"];
-    if !host.is_empty() && host != "github.com" {
+    run_gh_raw(None, &gh_api_host_args("rate_limit", host), GH_TIMEOUT).await
+}
+
+/// The argv for a host-scoped `gh api -i <endpoint>` read. `--hostname` is explicit
+/// even for github.com: gh otherwise resolves its host from an ambient `GH_HOST`, and
+/// the reading must describe the host it was asked about. Callers always pass a
+/// resolved host; an empty one would fall back to gh's default.
+fn gh_api_host_args<'a>(endpoint: &'a str, host: &'a str) -> Vec<&'a str> {
+    let mut args: Vec<&str> = vec!["api", "-i", endpoint];
+    if !host.is_empty() {
         args.push("--hostname");
         args.push(host);
     }
-    run_gh_raw(None, &args, GH_TIMEOUT).await
+    args
 }
 
 /// The `x-ratelimit-reset` header as positive epoch seconds, kept ONLY when
@@ -616,12 +624,7 @@ fn gh_accounts_need_reprobe(map: &HashMap<String, Vec<GhJsonAccount>>) -> bool {
 /// and is known-buggy for fine-grained PATs, so absence/garbage is tolerated and
 /// never flips the already-decided Healthy state.
 async fn apply_gh_expiry(health: &mut SessionHealth, host: &str) {
-    let mut args: Vec<&str> = vec!["api", "-i", "user"];
-    if !host.is_empty() && host != "github.com" {
-        args.push("--hostname");
-        args.push(host);
-    }
-    let Ok(out) = run_gh_raw(None, &args, GH_TIMEOUT).await else {
+    let Ok(out) = run_gh_raw(None, &gh_api_host_args("user", host), GH_TIMEOUT).await else {
         return; // network/timeout: don't touch the decided health.
     };
     if out.code != 0 {
@@ -1984,6 +1987,28 @@ mod tests {
         let health = disprove_broken(confirmed_broken(), Ok(gh_out(0, secondary)));
         assert_eq!(health.state, SessionState::RateLimited);
         assert_eq!(health.reset_at, None);
+    }
+
+    #[test]
+    fn gh_api_reads_pin_the_host_even_for_github_com() {
+        // An ambient GH_HOST must never redirect the disproof or the expiry read to
+        // another host's token.
+        for endpoint in ["rate_limit", "user"] {
+            let hostname = |host| {
+                let args = gh_api_host_args(endpoint, host);
+                assert_eq!(args[..3], ["api", "-i", endpoint]);
+                args.windows(2)
+                    .find(|w| w[0] == "--hostname")
+                    .map(|w| w[1].to_string())
+            };
+            assert_eq!(hostname("github.com").as_deref(), Some("github.com"));
+            assert_eq!(hostname("ghes.example").as_deref(), Some("ghes.example"));
+            assert_eq!(
+                hostname("ghes.example:8443").as_deref(),
+                Some("ghes.example:8443")
+            );
+            assert_eq!(gh_api_host_args(endpoint, ""), ["api", "-i", endpoint]);
+        }
     }
 
     #[test]

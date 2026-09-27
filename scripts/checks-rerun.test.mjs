@@ -302,8 +302,9 @@ test("a cancelled job is not offered", () => {
 
 // ── Collapsed GitHub input ───────────────────────────────────────────────────
 //
-// The GitHub backend keeps only the newest run per (name, workflow, event), so a
-// workflow re-triggered by PR events reaches these derivations as its latest run.
+// The GitHub backend keeps only the newest run per (name, workflow, event) when it
+// can key the rows (best-effort), so a workflow re-triggered by PR events usually
+// reaches these derivations as its latest run.
 
 test("a collapsed rollup offers no re-run of a superseded failure", () => {
   // Five runs of one check at one head sha: the oldest failed, two were
@@ -329,9 +330,9 @@ test("a collapsed rollup offers no re-run of a superseded failure", () => {
   assert.deepEqual(jobOffer({ checks: collapsed }), []);
 });
 
-test("a same-named failure from another trigger event keeps its offer", () => {
-  // Push and pull_request runs of one workflow are different keys, so both
-  // survive the collapse, and the derivations key by run id regardless.
+test("a same-named failed row that survives the collapse keeps its offer", () => {
+  // A push twin of a passing pull_request run, for instance, is a different key,
+  // and the derivations key by run id, whatever the name.
   const checks = [
     jobCheck({ jobId: "jp", runId: "7", completedAt: "t1" }),
     jobCheck({ jobId: "jr", runId: "8", status: "SUCCESS", completedAt: "t2" }),

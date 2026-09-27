@@ -161,6 +161,11 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
     if let Some(creds) = CREDENTIAL_CACHE.read().unwrap_or_else(|p| p.into_inner()).clone() {
         return Ok(creds); // another caller warmed the cache while we waited
     }
+    // Fail closed under test: reaching the keyring read means no override is
+    // installed, and tests never read the real OS keyring.
+    if cfg!(test) {
+        panic!("load_credentials in a test without swap_test_credentials installed");
+    }
     // Capture the generation before the (slow) keyring read; if a connect/disconnect
     // invalidates while we read, we must NOT cache the now-stale value.
     let generation = CREDENTIAL_GENERATION.load(Ordering::Acquire);
