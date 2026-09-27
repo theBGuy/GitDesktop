@@ -245,6 +245,7 @@ const NO_FORGE_STATUS: ForgeStatus = {
     listFilterAuthor: false,
     reviewGrouping: false,
   },
+  probeError: null,
 };
 
 /**

@@ -50,7 +50,8 @@ const ATLASSIAN_TOKEN_URL =
  * ladder — no saved Atlassian API token → connect one, a saved token that won't
  * authenticate → update it — both deep-linking to Settings → Accounts. A
  * rate-limited GitHub or GitLab session outranks each ladder's sign-in arms,
- * which a rate limit would otherwise trip.
+ * which a rate limit would otherwise trip, and a GitHub repo lookup refused by a
+ * rate limit outranks the `gh auth status` diagnostic.
  */
 export function ForgeNotReady({
   repoPath,
@@ -304,6 +305,25 @@ export function ForgeNotReady({
     );
   }
 
+  // A limit that refused only the repo lookup reaches forge-status while auth
+  // reads healthy, so the "couldn't connect" arm below would misdirect. Health
+  // carries no reset here; the recheck keys on the forge-status read instead.
+  if (
+    (provider == null || provider === "github") &&
+    forge.data?.probeError === "rateLimited" &&
+    authed
+  ) {
+    return (
+      <RateLimitedNotice
+        repoPath={repoPath}
+        provider="github"
+        feature={feature}
+        resetAt={null}
+        checkedAt={forge.dataUpdatedAt}
+      />
+    );
+  }
+
   // GitHub: nothing can publish this repo, so walk the gh setup ladder
   // (install → sign in), then — if gh is ready but the repo still isn't
   // resolvable (an origin gh can't identify, or the targets probe found
@@ -397,7 +417,7 @@ function RateLimitedNotice({
   provider: "github" | "gitlab";
   feature: string;
   resetAt: number | null | undefined;
-  /** When session health was last read (`dataUpdatedAt`, epoch ms). */
+  /** When the driving query (health, or forge-status) was last read (`dataUpdatedAt`, epoch ms). */
   checkedAt: number;
 }) {
   const queryClient = useQueryClient();
@@ -407,9 +427,9 @@ function RateLimitedNotice({
   // Re-read this repo's forge status and session health, plus the accounts list
   // behind Settings' "rate limited" badge, so no surface stays stuck without a
   // restart. The timer fires at whichever comes first: just past a known future
-  // reset, or RATE_LIMIT_RECHECK_MS after the last health read. A stale
+  // reset, or RATE_LIMIT_RECHECK_MS after the driving read. A stale
   // `checkedAt` fires at once, which stays bounded: each re-arm needs a fresh
-  // successful health read to move `checkedAt`, never a tight loop.
+  // successful read to move `checkedAt`, never a tight loop.
   useEffect(() => {
     const nowMs = Date.now();
     const recheck = Math.max(0, checkedAt + RATE_LIMIT_RECHECK_MS - nowMs);

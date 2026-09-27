@@ -225,6 +225,9 @@ export interface ForgeStatus {
   /** Which capabilities are actually built for this provider — drives per-feature
    *  "coming soon" gating distinct from `capabilities`. */
   implemented: ForgeImplemented;
+  /** Why the repo lookup failed, set only for a positively-identified class;
+   *  absent on success and on every unclassified failure. */
+  probeError?: "rateLimited" | null;
 }
 
 export interface RepoLabel {

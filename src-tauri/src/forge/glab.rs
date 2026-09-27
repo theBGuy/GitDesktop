@@ -104,6 +104,12 @@ async fn repo_host(repo_path: &str) -> RepoHost {
     }
 }
 
+/// The repo's pinned GitLab host (`repo_host`'s resolved arm); `None` when the
+/// origin is missing or unresolvable, which callers read as "no pinned host".
+pub(crate) async fn repo_pinned_host(repo_path: &str) -> Option<String> {
+    repo_host(repo_path).await.hostname().map(str::to_owned)
+}
+
 /// Account reads follow glab's environment > config default > cloud precedence.
 pub(crate) async fn account_hostname() -> String {
     let env_host = std::env::var("GITLAB_HOST").ok();

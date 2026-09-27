@@ -109,11 +109,48 @@ static CREDENTIAL_LOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 /// write-after-invalidate race). See [`load_credentials`] / [`invalidate_credential_cache`].
 static CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+static TEST_CREDENTIALS: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Returns the previous override so the caller can restore it on every path.
+#[cfg(test)]
+pub(crate) fn swap_test_credentials(
+    credentials: Option<(String, String)>,
+) -> Option<(String, String)> {
+    let mut slot = TEST_CREDENTIALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::replace(&mut *slot, credentials)
+}
+
 /// Load the stored credentials — from the process cache when warm, else the OS
 /// keyring (blocking reads run on a blocking thread), caching the result.
 /// `BitbucketNotConfigured` when no token is stored — the signal the read commands
 /// turn into the "connect an account" state.
 pub async fn load_credentials() -> AppResult<BbCredentials> {
+    fn credentials_from_parts(
+        email: Option<String>,
+        token: Option<String>,
+    ) -> AppResult<BbCredentials> {
+        match (email, token) {
+            (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
+                Ok(BbCredentials { email, token })
+            }
+            _ => Err(AppError::BitbucketNotConfigured),
+        }
+    }
+
+    // The test override precedes the cache fast-path and returns before cache writes,
+    // so test credentials can never warm the process-global cache or read the keyring.
+    #[cfg(test)]
+    if let Some((email, token)) = TEST_CREDENTIALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return credentials_from_parts(Some(email), Some(token));
+    }
+
     // Fast path: cached credential → no keyring read → no macOS prompt. Poison recovery
     // (`into_inner`) is safe — nothing fallible runs under these guards.
     if let Some(creds) = CREDENTIAL_CACHE.read().unwrap_or_else(|p| p.into_inner()).clone() {
@@ -134,22 +171,17 @@ pub async fn load_credentials() -> AppResult<BbCredentials> {
     })
     .await
     .map_err(|e| AppError::Bitbucket(format!("keyring task failed: {e}")))??;
-    match (email, token) {
-        (Some(email), Some(token)) if !email.is_empty() && !token.is_empty() => {
-            let creds = BbCredentials { email, token };
-            // Commit only if no invalidation raced in: check + write are held under
-            // the cache write lock, and `invalidate` bumps the generation BEFORE
-            // clearing under that lock, so a stale value is never left cached.
-            {
-                let mut cache = CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner());
-                if CREDENTIAL_GENERATION.load(Ordering::Acquire) == generation {
-                    *cache = Some(creds.clone());
-                }
-            }
-            Ok(creds)
+    let creds = credentials_from_parts(email, token)?;
+    // Commit only if no invalidation raced in: check + write are held under
+    // the cache write lock, and `invalidate` bumps the generation BEFORE
+    // clearing under that lock, so a stale value is never left cached.
+    {
+        let mut cache = CREDENTIAL_CACHE.write().unwrap_or_else(|p| p.into_inner());
+        if CREDENTIAL_GENERATION.load(Ordering::Acquire) == generation {
+            *cache = Some(creds.clone());
         }
-        _ => Err(AppError::BitbucketNotConfigured),
     }
+    Ok(creds)
 }
 
 /// Drop the cached credential so the next [`load_credentials`] re-reads the keyring —

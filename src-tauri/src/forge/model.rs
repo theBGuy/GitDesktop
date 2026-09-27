@@ -695,6 +695,18 @@ pub struct ForgeStatus {
     /// Which of those capabilities GitDesktop has actually built for this provider
     /// — drives per-feature "coming soon" gating distinct from `capabilities`.
     pub implemented: Implemented,
+    /// Why the repo lookup failed, set only when the failure positively names a class
+    /// the UI routes on; absent on success and on every unclassified failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<ProbeError>,
+}
+
+/// A positively-identified repo-lookup failure on an otherwise signed-in status.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum ProbeError {
+    /// The forge's API rate limit refused the lookup; the credential is not in question.
+    RateLimited,
 }
 
 /// A provider user reference — a stable id plus a human label — for pickers,
@@ -1058,6 +1070,27 @@ mod tests {
                 "repos": [],
             })
         );
+    }
+
+    /// ForgeNotReady routes on this exact key and value; an unrenamed unit variant
+    /// would serialize "RateLimited" and the rate-limit arm would never match.
+    #[test]
+    fn forge_status_probe_error_wire_shape() {
+        let status = |probe_error| ForgeStatus {
+            provider: None,
+            installed: true,
+            authenticated: true,
+            repo: None,
+            host: None,
+            login: None,
+            capabilities: Capabilities::none(),
+            implemented: Implemented::none(),
+            probe_error,
+        };
+        let json = serde_json::to_string(&status(Some(ProbeError::RateLimited))).unwrap();
+        assert!(json.contains(r#""probeError":"rateLimited""#), "{json}");
+        let bare = serde_json::to_string(&status(None)).unwrap();
+        assert!(!bare.contains("probeError"), "absent when unset: {bare}");
     }
 
     /// A provider whose viewer/workspace probe failed contributes nothing to the set:

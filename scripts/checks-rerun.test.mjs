@@ -299,3 +299,43 @@ test("a cancelled job is not offered", () => {
   const checks = [jobCheck({ status: "CANCELLED", completedAt: "t1" })];
   assert.deepEqual(jobOffer({ checks, provider: "gitlab" }), []);
 });
+
+// ── Collapsed GitHub input ───────────────────────────────────────────────────
+//
+// The GitHub backend keeps only the newest run per (name, workflow, event), so a
+// workflow re-triggered by PR events reaches these derivations as its latest run.
+
+test("a collapsed rollup offers no re-run of a superseded failure", () => {
+  // Five runs of one check at one head sha: the oldest failed, two were
+  // cancelled, two passed. Offered uncollapsed, the stale failure would be re-run
+  // and fail again.
+  const runs = [
+    ["1", "FAILURE"],
+    ["2", "CANCELLED"],
+    ["3", "CANCELLED"],
+    ["4", "SUCCESS"],
+    ["5", "SUCCESS"],
+  ].map(([id, status]) =>
+    jobCheck({ jobId: `j${id}`, runId: id, status, completedAt: `t${id}` }),
+  );
+  assert.deepEqual(
+    offer({ checks: runs }).map(([id]) => id),
+    ["1"],
+    "the premise: uncollapsed, the superseded failure is offered",
+  );
+  const collapsed = [runs[4]];
+  assert.deepEqual(failedRunSignatures(collapsed, bucketOf), new Map());
+  assert.deepEqual(offer({ checks: collapsed }), []);
+  assert.deepEqual(jobOffer({ checks: collapsed }), []);
+});
+
+test("a same-named failure from another trigger event keeps its offer", () => {
+  // Push and pull_request runs of one workflow are different keys, so both
+  // survive the collapse, and the derivations key by run id regardless.
+  const checks = [
+    jobCheck({ jobId: "jp", runId: "7", completedAt: "t1" }),
+    jobCheck({ jobId: "jr", runId: "8", status: "SUCCESS", completedAt: "t2" }),
+  ];
+  assert.deepEqual(offer({ checks }), [["7", "t1"]]);
+  assert.deepEqual(jobOffer({ checks }), [["jp", "t1", "7"]]);
+});

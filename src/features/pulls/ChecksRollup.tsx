@@ -109,8 +109,10 @@ function isRunningActionsCheck(
  *  reading as a finished, neutral result — a cancelled or stale run. Genuinely
  *  skipped or neutral runs satisfy GitHub, and failed or pending ones already carry
  *  their own presentation, so this composition is the only one that needs flagging.
- *  A cancelled run superseded by a green re-run of the same name leaves its context
- *  met, so the name is absent from the unmet list and the row stays quiet. */
+ *  A cancelled run beside a later green run of the same name leaves its context met,
+ *  so the name is absent from the unmet list and the row stays quiet. Same-named rows
+ *  still reach here from another workflow or trigger event, and on GitHub from re-runs
+ *  of one workflow too whenever the backend's best-effort collapse had no data. */
 function needsRequiredAttention(
   check: PrCheckOut,
   checks: PrCheckOut[],
@@ -126,7 +128,7 @@ function needsRequiredAttention(
   }
   // The unmet list names a context, but a failed or still-running run of that name
   // is what the merge is actually waiting on, and it already shows that visibly —
-  // so a run this one superseded stays quiet. No self-exclusion needed: the check
+  // so this cancelled one stays quiet beside it. No self-exclusion needed: the check
   // reaching here is in the skipped bucket.
   return !checks.some((other) => {
     if (other.name !== check.name) return false;

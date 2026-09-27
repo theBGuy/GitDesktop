@@ -43,6 +43,7 @@ pub(crate) fn from_gh_status(gh: GhStatus) -> ForgeStatus {
             Some(p) => Implemented::for_provider(p),
             None => Implemented::none(),
         },
+        probe_error: gh.probe_error,
     }
 }
 
@@ -1705,6 +1706,7 @@ mod tests {
             repo: Some("owner/name".into()),
             host: Some("github.com".into()),
             login: Some("me".into()),
+            probe_error: None,
         };
         let f = from_gh_status(gh);
         assert_eq!(f.provider, Some(Provider::GitHub));
@@ -1723,10 +1725,99 @@ mod tests {
             repo: None,
             host: None,
             login: None,
+            probe_error: None,
         };
         let f = from_gh_status(gh);
         assert_eq!(f.provider, None);
         assert!(f.installed && f.authenticated);
         assert!(!f.capabilities.pull_requests && !f.capabilities.ci);
+    }
+
+    // --- gh_status's repo lookup, through the ForgeStatus mapping ---
+
+    fn view_out(code: i32, stdout: &str, stderr: &str) -> crate::github::runner::GhOutput {
+        crate::github::runner::GhOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    /// `gh_status`'s signed-in status for one repo-view result.
+    fn status_after_view(view: AppResult<crate::github::runner::GhOutput>) -> ForgeStatus {
+        let (repo, host, probe_error) = crate::github::pr::repo_view_outcome(view);
+        from_gh_status(GhStatus {
+            installed: true,
+            authenticated: true,
+            repo,
+            host,
+            login: Some("me".into()),
+            probe_error,
+        })
+    }
+
+    /// The signed-in status with no classification, as every lookup produced it
+    /// before the probe class existed.
+    fn unclassified(repo: Option<&str>, host: Option<&str>) -> serde_json::Value {
+        serde_json::to_value(from_gh_status(GhStatus {
+            installed: true,
+            authenticated: true,
+            repo: repo.map(str::to_string),
+            host: host.map(str::to_string),
+            login: Some("me".into()),
+            probe_error: None,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn rate_limited_repo_view_carries_the_probe_class() {
+        for stderr in [
+            "GraphQL: API rate limit exceeded for user ID 12345.",
+            "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/graphql)",
+            "HTTP 429: Too Many Requests (https://api.github.com/graphql)",
+        ] {
+            let f = status_after_view(Ok(view_out(1, "", stderr)));
+            assert!(f.authenticated, "{stderr}");
+            assert_eq!(
+                f.probe_error,
+                Some(crate::forge::model::ProbeError::RateLimited),
+                "{stderr}"
+            );
+            assert_eq!((f.repo, f.provider, f.host), (None, None, None), "{stderr}");
+        }
+    }
+
+    #[test]
+    fn other_repo_view_failures_stay_unclassified() {
+        // A revoked token must keep today's arms, never a try-again-later notice.
+        for view in [
+            Ok(view_out(
+                1,
+                "",
+                "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)",
+            )),
+            Ok(view_out(
+                1,
+                "",
+                "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            )),
+            Ok(view_out(0, "not json", "")),
+            Err(AppError::Timeout(15)),
+        ] {
+            let f = status_after_view(view);
+            assert_eq!(f.probe_error, None);
+            assert_eq!(serde_json::to_value(&f).unwrap(), unclassified(None, None));
+        }
+    }
+
+    #[test]
+    fn successful_repo_view_is_unchanged() {
+        let body = r#"{"nameWithOwner":"owner/name","url":"https://github.com/owner/name"}"#;
+        let f = status_after_view(Ok(view_out(0, body, "")));
+        assert_eq!(f.probe_error, None);
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json, unclassified(Some("owner/name"), Some("github.com")));
+        assert!(json.get("probeError").is_none());
     }
 }

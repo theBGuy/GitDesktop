@@ -177,12 +177,8 @@ pub async fn forge_background_statuses(paths: Vec<String>) -> AppResult<Vec<Back
     for path in paths {
         let route = match crate::forge::detect_non_github(&path).await {
             Some((Provider::GitLab, host)) => {
-                // The per-repo runner's own host resolution (`glab::repo_host`'s
-                // resolved arm), so a batched probe addresses the instance it would.
-                let pinned = crate::git::remote::git_remote_url(path.clone(), "origin".into())
-                    .await
-                    .ok()
-                    .and_then(|url| crate::forge::glab::cwd_host(Some(&url)));
+                // The accessor uses the per-repo runner's `repo_host` resolution.
+                let pinned = crate::forge::glab::repo_pinned_host(&path).await;
                 if let Some(pinned) = pinned {
                     gitlab_hosts.insert(path.clone(), pinned);
                 }
@@ -384,6 +380,7 @@ mod tests {
             login: None,
             capabilities: Capabilities::for_provider(provider),
             implemented: Implemented::for_provider(provider),
+            probe_error: None,
         }
     }
 
@@ -539,18 +536,23 @@ mod tests {
         );
     }
 
+    /// Empty credentials reach the real `BitbucketNotConfigured` arm, which returns
+    /// before the first `bb_get_json` call, so this probe performs no HTTP request.
     #[test]
     fn a_missing_bitbucket_token_mirrors_the_per_repo_not_ready_shape() {
-        // Seam gap: `http::load_credentials` reads the OS keyring with no hermetic
-        // override, so the arm's routing and its no-network return stay unpinned here.
-        fn account_probe<F>(_: impl Fn(&'static str) -> F)
-        where
-            F: std::future::Future<Output = AppResult<ForgeStatus>>,
-        {
-        }
-        account_probe(crate::forge::bitbucket::account_status);
-        // The value that arm returns; `BitbucketForge::status` fills only `repo`.
-        let account = crate::forge::bitbucket::no_token_status(BB_HOST);
+        use crate::forge::http::swap_test_credentials;
+
+        let empty = (String::new(), String::new());
+        let previous = swap_test_credentials(Some(empty.clone()));
+        let result = std::panic::catch_unwind(|| {
+            tauri::async_runtime::block_on(crate::forge::bitbucket::account_status(BB_HOST))
+        });
+        assert_eq!(swap_test_credentials(previous), Some(empty));
+        let account = result.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&account).unwrap(),
+            serde_json::to_value(crate::forge::bitbucket::no_token_status(BB_HOST)).unwrap()
+        );
         assert!(!account.installed && !account.authenticated);
         assert_eq!(
             (account.repo.as_deref(), account.login.as_deref()),

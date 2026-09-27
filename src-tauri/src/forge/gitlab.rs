@@ -86,6 +86,7 @@ fn gitlab_status(
         login,
         capabilities: Capabilities::for_provider(Provider::GitLab),
         implemented: Implemented::for_provider(Provider::GitLab),
+        probe_error: None,
     }
 }
 
