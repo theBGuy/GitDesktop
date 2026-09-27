@@ -211,6 +211,17 @@ export function BoardBulkFieldsDialog({
         draft[def.id] !== undefined &&
         draft[def.id] !== INVALID_DRAFT,
     );
+  const fields = `${drafted} ${drafted === 1 ? "field" : "fields"}`;
+  const draftStatus = (() => {
+    switch (true) {
+      case drafted === 0:
+        return "No changes drafted";
+      case issueRowsNarrow:
+        return `${fields} will be written; issue fields skip ${noun}s you can't set them on`;
+      default:
+        return `${fields} will be written to every eligible ${noun}`;
+    }
+  })();
   // Ranked: the board-wide hold outranks the draft's own emptiness, since a
   // sign-in that can't write at all is the more useful thing to say.
   const applyHeld =
@@ -327,13 +338,7 @@ export function BoardBulkFieldsDialog({
         {/* Its own full-width line above the buttons, in every state: a note
             sharing their row wraps once it grows, and pushes them onto a row of
             their own as a draft starts. */}
-        <p className="text-[11px] text-muted-foreground">
-          {drafted === 0
-            ? "No changes drafted"
-            : issueRowsNarrow
-              ? `${drafted} ${drafted === 1 ? "field" : "fields"} will be written; issue fields skip ${noun}s you can't set them on`
-              : `${drafted} ${drafted === 1 ? "field" : "fields"} will be written to every eligible ${noun}`}
-        </p>
+        <p className="text-[11px] text-muted-foreground">{draftStatus}</p>
         <DialogFooter>
           <Button
             type="button"

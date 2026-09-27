@@ -7,8 +7,9 @@
 // bucketed under "No Risk" — so each is a case.
 //
 // The imports reach straight into `src/` and rely on Node's default type stripping
-// (>= 23.6), which resolves no bundler aliases: both modules must stay import-free
-// apart from erased `import type`s. A runtime import added there fails this file.
+// (>= 23.6), which resolves no bundler aliases: every module imported below
+// (board-model, roadmap-model, project-field-routing) must stay import-free apart
+// from erased `import type`s. A runtime import added there fails this file.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -34,9 +35,12 @@ import {
   issueFieldRoutes,
   issueFieldRowReason,
   issueFieldWritable,
+  orphanedIssueOwners,
   partitionFieldWrites,
   planBulkFieldWrite,
+  rescueIssueHalf,
   scopeToIssueFieldWritable,
+  withoutRoutedFields,
 } from "../src/lib/git/project-field-routing.ts";
 
 const issue = (viewerCanSetFields, id = "I_issue") => ({
@@ -463,4 +467,89 @@ test("a roadmap placed only by org issue dates tells undated PRs and drafts why"
     false,
   );
   assert.equal(datesAreIssueFields({ start: null, target: null }, defs), false);
+});
+
+// The editor's drafts as the rescue reads them: board X owns the Risk draft (an
+// org field, routed) beside its own Status draft; board Y mirrors Risk.
+const editorDrafts = {
+  boards: {
+    X: { PVTSSF_risk: "IFSSO_high", PVTSSF_status: "todo" },
+    Y: {},
+  },
+  issueOwners: {
+    IFSS_risk: { projectId: "X", fieldId: "PVTSSF_risk", rev: 1 },
+  },
+};
+/** A diff that treats every touched entry as a change: a string is a set, null a
+ *  clear. The editor passes its own no-op-aware diff here. */
+const everyEntry = (_projectId, touched) => {
+  const updates = [];
+  const clears = [];
+  for (const [fieldId, entry] of Object.entries(touched)) {
+    if (entry === null) clears.push(fieldId);
+    else updates.push({ kind: "singleSelect", fieldId, optionId: entry });
+  }
+  return { updates, clears };
+};
+
+test("an org draft whose owning board left mid-open still reaches the issue", () => {
+  // Case 1: X is gone from the item; only Y is live and writable.
+  assert.deepEqual(rescueIssueHalf(editorDrafts, new Set(["Y"]), everyEntry), {
+    updates: [
+      { kind: "singleSelect", fieldId: "IFSS_risk", optionId: "IFSSO_high" },
+    ],
+    clears: [],
+  });
+});
+
+test("an org draft whose owning board can no longer be written still reaches the issue", () => {
+  // Case 2: X is live but lost write access, so it is not in the writable set.
+  // Its own Status draft is NOT rescued: that half is addressed to X's membership.
+  const rescued = rescueIssueHalf(
+    {
+      ...editorDrafts,
+      boards: {
+        ...editorDrafts.boards,
+        X: { PVTSSF_risk: null, PVTSSF_status: "todo" },
+      },
+    },
+    new Set(["Y"]),
+    everyEntry,
+  );
+  assert.deepEqual(rescued, { updates: [], clears: ["IFSS_risk"] });
+});
+
+test("a draft owned by a written board is left to that board's own write", () => {
+  assert.deepEqual(
+    rescueIssueHalf(editorDrafts, new Set(["X", "Y"]), everyEntry),
+    {
+      updates: [],
+      clears: [],
+    },
+  );
+  assert.equal(
+    orphanedIssueOwners(editorDrafts.issueOwners, new Set(["X"])).size,
+    0,
+  );
+});
+
+test("with no board left, the rescue finds the drafts but invents no write", () => {
+  // Every board gone: the issue half is still found (so the editor can say it
+  // wasn't applied); carrying it needs a live board, which the editor checks.
+  const rescued = rescueIssueHalf(editorDrafts, new Set(), everyEntry);
+  assert.equal(rescued.updates.length, 1);
+  assert.deepEqual(
+    [...orphanedIssueOwners(editorDrafts.issueOwners, new Set())],
+    [["X", new Map([["PVTSSF_risk", "IFSS_risk"]])]],
+  );
+});
+
+test("the stranded-board count reads only a board's own drafts", () => {
+  assert.deepEqual(
+    withoutRoutedFields(
+      editorDrafts.boards.X,
+      new Map([["PVTSSF_risk", "IFSS_risk"]]),
+    ),
+    { PVTSSF_status: "todo" },
+  );
 });

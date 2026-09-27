@@ -3094,8 +3094,9 @@ export function useBulkMoveBoardCards() {
        *  panel filters the rest out before this fires, so the patch, the rollback
        *  and the pending count all see one set. */
       itemIds: string[];
-      /** Each card's issue node id by membership id, for an org issue-field
-       *  grouping; a card missing here takes no issue write. */
+      /** Each card's issue node id by membership id. Used only on a board grouped
+       *  by an org issue field, where a card missing here refuses the whole move —
+       *  the panel filters such cards first, so reaching one is a bug. */
       issueIdByItemId: Record<string, string>;
       field: BoardGroupField;
       /** The column's bucket, or null for the board's "No {field}" column. */
@@ -3398,6 +3399,13 @@ export function useAddIssueToProjects() {
   });
 }
 
+/** What a failed field-editor write left undone behind it, or null for none. */
+function unwrittenNote(unwritten: number): string | null {
+  if (unwritten === 0) return null;
+  if (unwritten === 1) return "One more board's changes were left unwritten.";
+  return `${unwritten} more boards' changes were left unwritten.`;
+}
+
 /**
  * The field editor's batched per-board write, with an optimistic patch of that
  * board's entry in the item-field-values cache. `values` is the patch itself: the
@@ -3486,11 +3494,7 @@ export function useSetItemFieldValues() {
         args.updates.length + args.clears.length > 0;
       const notes = [
         mixed ? "Some of this board's fields may have saved." : null,
-        args.unwritten === 0
-          ? null
-          : args.unwritten === 1
-            ? "One more board's changes were left unwritten."
-            : `${args.unwritten} more boards' changes were left unwritten.`,
+        unwrittenNote(args.unwritten),
       ].filter((note) => note !== null);
       if (notes.length === 0) toastError(e);
       else toastErrorWithNote(e, notes.join(" "));

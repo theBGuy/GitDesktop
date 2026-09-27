@@ -37,6 +37,8 @@ import {
   type IssueFieldHost,
   issueFieldHostReason,
   partitionFieldWrites,
+  rescueIssueHalf,
+  withoutRoutedFields,
 } from "@/lib/git/project-field-routing";
 import {
   useGhScopes,
@@ -94,6 +96,9 @@ type MirroredDraft = { projectId: string; entry: FieldDraft; rev: number };
 const NO_DRAFTS: EditorDrafts<FieldDraft> = { boards: {}, issueOwners: {} };
 
 const ISSUE_FIELDS_UNSENT = "Issue field changes weren't applied";
+/** An issue-field write rides a board membership, and none is left to carry it. */
+const ISSUE_FIELDS_NO_BOARD =
+  "Issue field changes weren't applied — this item isn't on a board they can be saved through anymore";
 
 /** The issue field id a row's writes route to, for an org issue field. */
 function issueFieldIdOf(def: WritableFieldDef): string | undefined {
@@ -363,9 +368,7 @@ export function ProjectFieldsEditor({
         write = boardWrite(
           board,
           seed,
-          Object.fromEntries(
-            Object.entries(touched).filter(([fieldId]) => !routes.has(fieldId)),
-          ),
+          withoutRoutedFields(touched, routes),
           routes,
         );
       }
@@ -377,16 +380,59 @@ export function ProjectFieldsEditor({
         continue;
       pending.push({ board, write, parts, issueWrites });
     }
-    // Drafts for a board the item left mid-open have nowhere to go — the
-    // membership their itemId addressed is gone, and its section left the popup
-    // as it went. Said once, however many boards it was.
+    // An org field's one draft is owned by a single board, but it addresses the
+    // ISSUE: when that board left mid-open or can no longer be written, the draft
+    // still rides this commit, on the first write going out or — with none — an
+    // issue-only write through any live board, whose patch is its values as they
+    // stand. Sibling boards reconcile by the settle's re-read, as ever.
+    const writable = new Set(
+      boards
+        .filter((board) => board.project.viewerCanUpdate)
+        .map((board) => board.project.id),
+    );
+    const rescued = rescueIssueHalf(
+      drafts,
+      writable,
+      (projectId, touched, routes) =>
+        fieldDiff(alignSeed(seeds[projectId] ?? {}, routes), touched),
+    );
+    let unplacedIssueFields = false;
+    if (hasIssueFieldWrites(rescued)) {
+      const first = pending[0];
+      if (!canWriteIssueFields(issueHost)) unsentIssueFields = true;
+      else if (first !== undefined)
+        first.issueWrites = {
+          issueId: issueHost.issueId,
+          updates: [...(first.issueWrites?.updates ?? []), ...rescued.updates],
+          clears: [...(first.issueWrites?.clears ?? []), ...rescued.clears],
+        };
+      else if (boards[0] !== undefined)
+        pending.push({
+          board: boards[0],
+          write: {
+            updates: [],
+            clears: [],
+            applied: new Map(),
+            values: boards[0].values,
+          },
+          parts: { updates: [], clears: [], issue: rescued },
+          issueWrites: { issueId: issueHost.issueId, ...rescued },
+        });
+      // No board left to carry even an issue-only write: say so, invent nothing.
+      else unplacedIssueFields = true;
+    }
+    // A board's OWN drafts for a board the item left mid-open have nowhere to go —
+    // the membership their itemId addressed is gone, and its section left the
+    // popup as it went. Said once, however many boards it was. Its org-field
+    // drafts are the rescue's above, never counted here.
     const live = new Set(boards.map((board) => board.project.id));
     const stranded = Object.entries(drafts.boards).some(
       ([projectId, touched]) => {
         if (live.has(projectId)) return false;
+        const routes = routesFor(projectId);
         const { updates, clears } = fieldDiff(
-          alignSeed(seeds[projectId] ?? {}, routesFor(projectId)),
-          touched,
+          alignSeed(seeds[projectId] ?? {}, routes),
+          withoutRoutedFields(touched, routes),
         );
         return updates.length > 0 || clears.length > 0;
       },
@@ -396,6 +442,7 @@ export function ProjectFieldsEditor({
       toast.info(
         `${ISSUE_FIELDS_UNSENT}: ${issueFieldHostReason(issueHost) ?? ""}`,
       );
+    if (unplacedIssueFields) toast.info(ISSUE_FIELDS_NO_BOARD);
 
     // Sibling boards bridging the same org field keep their old value until the
     // settle's re-read: a board's values carry its own wrapper ids, so this

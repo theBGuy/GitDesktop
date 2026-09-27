@@ -225,6 +225,68 @@ export function partitionFieldWrites(
   return { updates: board, clears: boardClears, issue };
 }
 
+/** `touched` without the org fields `routes` names — a board's own drafts, the
+ *  half that is addressed to its membership. */
+export function withoutRoutedFields<Entry>(
+  touched: Record<string, Entry>,
+  routes: ReadonlyMap<string, unknown>,
+): Record<string, Entry> {
+  return Object.fromEntries(
+    Object.entries(touched).filter(([fieldId]) => !routes.has(fieldId)),
+  );
+}
+
+/** The org-field owners no board write will carry, grouped by owning board:
+ *  those whose board is not in `writable` (it left the item, or can no longer
+ *  be written). Each maps the drafted definition id → its issue field id. */
+export function orphanedIssueOwners(
+  issueOwners: Record<string, IssueDraftOwner>,
+  writable: ReadonlySet<string>,
+): Map<string, Map<string, string>> {
+  const orphans = new Map<string, Map<string, string>>();
+  for (const [issueFieldId, owner] of Object.entries(issueOwners)) {
+    if (writable.has(owner.projectId)) continue;
+    const routes = orphans.get(owner.projectId) ?? new Map<string, string>();
+    routes.set(owner.fieldId, issueFieldId);
+    orphans.set(owner.projectId, routes);
+  }
+  return orphans;
+}
+
+/**
+ * The issue half of every org-field draft whose owning board won't be written —
+ * still sendable, since it addresses the issue rather than any membership. `diff`
+ * is the editor's own no-op-aware diff of one board's drafts against its seed.
+ * One owner per issue field, so the result never names a field twice, nor one a
+ * written board's own issue half already carries.
+ */
+export function rescueIssueHalf<Entry>(
+  drafts: EditorDrafts<Entry>,
+  writable: ReadonlySet<string>,
+  diff: (
+    projectId: string,
+    touched: Record<string, Entry>,
+    routes: ReadonlyMap<string, string>,
+  ) => { updates: ProjectFieldValueUpdate[]; clears: string[] },
+): IssueFieldPart {
+  const rescued: IssueFieldPart = { updates: [], clears: [] };
+  for (const [projectId, routes] of orphanedIssueOwners(
+    drafts.issueOwners,
+    writable,
+  )) {
+    const touched = Object.fromEntries(
+      Object.entries(drafts.boards[projectId] ?? {}).filter(([fieldId]) =>
+        routes.has(fieldId),
+      ),
+    );
+    const { updates, clears } = diff(projectId, touched, routes);
+    const { issue } = partitionFieldWrites(updates, clears, routes);
+    rescued.updates.push(...issue.updates);
+    rescued.clears.push(...issue.clears);
+  }
+  return rescued;
+}
+
 /** One batch card as the bulk write plan reads it. */
 interface PlannedCard {
   itemId: string;

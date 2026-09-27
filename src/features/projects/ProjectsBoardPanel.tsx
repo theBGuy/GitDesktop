@@ -2599,9 +2599,9 @@ export function ProjectsBoardPanel({
       // not set holds here.
       case issueHeld !== undefined:
         return issueHeld;
-      // Under the three arms above, which say a move is impossible HERE whatever the
-      // card is: a column pick writes a live card's field, so the restore row is
-      // what clears this one.
+      // Under the permission arms above (the board's, then the issue field's for
+      // this card), which no restore could clear: a column pick writes a live
+      // card's field, so the restore row is what clears this one.
       case item.isArchived:
         return ARCHIVED_ITEM_REASON[noun];
       // Above the two that clear on their own: the cards drawn while a lens loads
