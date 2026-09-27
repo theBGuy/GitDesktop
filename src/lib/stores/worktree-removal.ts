@@ -10,7 +10,11 @@ import {
   validateRepo,
 } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
-import { repoKeys, worktreeKey } from "@/lib/git/queries";
+import {
+  invalidateRepoAfterWrite,
+  repoKeys,
+  worktreeKey,
+} from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastComposedError, toastError } from "@/lib/toast";
@@ -529,7 +533,7 @@ async function runPromote(
     await gitCheckoutBranch(mainPath, branch);
     settleRemoval(activeKey, worktreePath);
     markedKey = null;
-    await queryClient.invalidateQueries({ queryKey: repoKeys.all(activeKey) });
+    await invalidateRepoAfterWrite(queryClient, activeKey);
     toast.success(
       willStash
         ? `Promoted ${branch} — your main workspace changes were stashed; Pop latest stash brings them back`

@@ -1,7 +1,15 @@
-import { type QueryKey, useQuery } from "@tanstack/react-query";
+import {
+  partialMatchKey,
+  type Query,
+  type QueryClient,
+  type QueryKey,
+  useQuery,
+} from "@tanstack/react-query";
 import { COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "../api";
 import { repoIdentityQueryOptions } from "../repo-identity-query";
+import { projectItemsRepoKey } from "./board-writes";
+import { readStraddlesSettle, straddleOutcome } from "./write-settle";
 
 /** A repo's worktree-stable identity key (its common git dir), for keying
  *  per-repo app-data the same across the main checkout and every worktree. Null or
@@ -93,6 +101,67 @@ export const repoKeys = {
   prReviewState: (repo: string) => ["repo", repo, "pr-review-state"] as const,
   issueList: (repo: string) => ["repo", repo, "issue-list"] as const,
 };
+
+/** Straddling reads that already have a heal chained, so a second settle inside
+ *  one round trip adds no second watch — the first one's heal runs after both. */
+const healing = new WeakSet<Query>();
+
+/**
+ * A write's whole-repo settle: invalidate every query of `repo`, and for each read
+ * that would land AFTER that invalidation with pre-write data and stamp it fresh
+ * ({@link readStraddlesSettle}), invalidate that key again once the read lands.
+ *
+ * The straddling read itself is never touched. Cancelling it, even silently with
+ * a restart, rejects whoever awaits it (an imperative `fetchQuery`) as soon as a
+ * second cancel arrives inside the same round trip, and a restarted Load more
+ * becomes a refetch of every loaded page. Chaining after it costs one extra round
+ * trip for a read that is still on screen, and only a stale mark for one that is
+ * not.
+ *
+ * Board reads are left alone: that family settles through its own cancel
+ * discipline (`invalidateProjectBoards`) and owed-read bookkeeping.
+ */
+export function invalidateRepoAfterWrite(
+  queryClient: QueryClient,
+  repo: string,
+): Promise<void> {
+  const queryKey = repoKeys.all(repo);
+  const boards = projectItemsRepoKey(repo);
+  const straddling = queryClient.getQueryCache().findAll({
+    queryKey,
+    predicate: (query) =>
+      readStraddlesSettle(query) &&
+      !partialMatchKey(query.queryKey, boards) &&
+      !healing.has(query),
+  });
+  if (straddling.length > 0) healWhenLanded(queryClient, straddling);
+  return queryClient.invalidateQueries({ queryKey });
+}
+
+/** Re-invalidate each of `reads` once it stops fetching, then drop the watch. The
+ *  invalidation is deferred a microtask: it must not start a fetch from inside the
+ *  cache notification that reports the landing. */
+function healWhenLanded(queryClient: QueryClient, reads: Query[]): void {
+  const waiting = new Set(reads);
+  for (const query of reads) healing.add(query);
+  const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+    if (!waiting.has(event.query)) return;
+    const outcome = straddleOutcome(event);
+    if (outcome === null) return;
+    waiting.delete(event.query);
+    healing.delete(event.query);
+    if (outcome === "landed") {
+      const landedKey = event.query.queryKey;
+      queueMicrotask(() => {
+        void queryClient.invalidateQueries({
+          queryKey: landedKey,
+          exact: true,
+        });
+      });
+    }
+    if (waiting.size === 0) unsubscribe();
+  });
+}
 
 export function useGitInstalled() {
   return useQuery({

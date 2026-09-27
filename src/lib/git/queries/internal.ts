@@ -8,6 +8,11 @@ import {
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
+import {
+  BOARD_WRITES_KEY,
+  pausedBoardWriteOn,
+  projectItemsRepoKey,
+} from "./board-writes";
 import { repoKeys } from "./core";
 
 /**
@@ -71,12 +76,6 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
   });
 }
 
-/** EVERY cached board read in one repo — every board, every lens of each. The
- *  scope a board write settles against: a write changes what an item IS, which no
- *  board's filter makes untrue. */
-export const projectItemsRepoKey = (repo: string) =>
-  ["repo", repo, "project-items"] as const;
-
 /** How many of a repo's own board writes are between their request and their
  *  answer, PER REPO — keyed by the same `repo` string the invalidation targets,
  *  because that is the scope the deferral decides. One shared number would let a
@@ -93,12 +92,34 @@ export const projectItemsRepoKey = (repo: string) =>
  *  for every caller: "someone else is mid-write on THIS repo". */
 export const pendingBoardWrites = new Map<string, number>();
 
+/** Whether a board write on `repo` is outstanding for a settle to wait on: inside
+ *  its request ({@link pendingBoardWrites}), or PAUSED offline after its
+ *  optimistic patch, before the request the count wraps ever started. A settling
+ *  write never counts itself only while every board-write `onMutate` awaits
+ *  microtask-scope work alone — the precondition `pausedBoardWriteOn` states. */
+export function boardWritesOutstanding(
+  queryClient: QueryClient,
+  repo: string,
+): boolean {
+  if ((pendingBoardWrites.get(repo) ?? 0) > 0) return true;
+  // `findAll`, never `find`: the mutation cache's `find` defaults to an EXACT key
+  // match (query-core 5.102.8), which the `["board-write"]` prefix never is.
+  return (
+    queryClient.getMutationCache().findAll({
+      mutationKey: BOARD_WRITES_KEY,
+      predicate: (mutation) => pausedBoardWriteOn(mutation, repo),
+    }).length > 0
+  );
+}
+
 /**
  * Board RE-READS a write asked for and that are still running, per repo — the
  * refetching branch of {@link invalidateProjectBoards}, counted from the call until
  * its refetch settles. The honest "a write's result is still on its way to the
  * screen" signal: the app's window-focus invalidation, a background refetch, a
  * stale mark and a page fetch all bypass this function, so none of them counts.
+ * (The focus one holds off only a lens a date-shift chase is reading —
+ * `invalidateRepoOnFocus` in projects.ts.)
  * Module-scoped with its own listeners for the reason {@link pendingBoardWrites} is:
  * no query or mutation state carries WHY a fetch started.
  */
@@ -230,22 +251,23 @@ export function boardReadFailed(queryHash: string): boolean {
  * filter makes untrue.
  *
  * LAST WRITE REFETCHES, with one named gap. While another board write on THIS repo
- * is still in flight this marks stale WITHOUT fetching (`refetchType: "none"`),
- * because the answer a refetch would bring back has not seen that sibling yet:
- * server truth fetched mid-flight puts an archived card back on the board, or a
- * moved one in its old column, until the sibling's own settle re-reads. Deferring
- * costs nothing while the last write out is one of THESE —
- * projects.ts's `trackBoardWrite` decrements before any `onSettled` runs, so it sees a
- * clear count and performs the one real refetch. The gap: when the last one out
- * settles through `markProjectBoardsStale` or `holdBoardsForVerdict` (both
- * projects.ts) instead, nothing refetches at once. That is the point of those
- * modes — the first's own patch is already on screen, and the boards stay marked
- * stale for the next natural read; the second records its board's lenses owed,
- * and its caller arms the full re-read that judges the failed reposition. A write under
- * the shield (writeThroughBoards' `markStale: false`) marks only the FILTERED lenses
- * it patches, whose membership no payload can settle, and preserves every mark it
- * found — so a mark laid here still reaches its refetch. A lone write here sees zero
- * and refetches immediately, exactly as before.
+ * is still in flight, or paused offline ({@link boardWritesOutstanding}), this marks
+ * stale WITHOUT fetching (`refetchType: "none"`), because the answer a refetch
+ * would bring back has not seen that sibling yet: server truth fetched mid-flight
+ * puts an archived card back on the board, or a moved one in its old column, until
+ * the sibling's own settle re-reads. Deferring costs nothing while the last write
+ * out is one of THESE — projects.ts's `trackBoardWrite` decrements before any
+ * `onSettled` runs, so it sees a clear count and performs the one real refetch.
+ * The gap: when the last one out settles through `markProjectBoardsStale` or
+ * `holdBoardsForVerdict` (both projects.ts) instead, nothing refetches at once.
+ * That is the point of those modes — the first's own patch is already on screen,
+ * and the boards stay marked stale for the next natural read; the second records
+ * its board's lenses owed, and its caller arms the full re-read that judges the
+ * failed reposition. A write under the shield (writeThroughBoards'
+ * `markStale: false`) marks only the FILTERED lenses it patches, whose membership
+ * no payload can settle, and preserves every mark it found — so a mark laid here
+ * still reaches its refetch. A lone write here sees zero and refetches
+ * immediately, exactly as before.
  *
  * Read PER REPO, matching the key this invalidates: a write pending in another
  * repository must not defer this one, whose stale mark that write's own settle
@@ -266,7 +288,7 @@ export function invalidateProjectBoards(
   repo: string,
 ): void {
   const queryKey = projectItemsRepoKey(repo);
-  const deferred = (pendingBoardWrites.get(repo) ?? 0) > 0;
+  const deferred = boardWritesOutstanding(queryClient, repo);
   // Only the refetching branch is a re-read in flight; the deferred one marks and
   // leaves the read to the last write out, which counts it there.
   if (!deferred) bumpBoardRereads(repo, 1);

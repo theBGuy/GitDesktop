@@ -23,7 +23,11 @@ import type {
   RemoteListFilter,
 } from "../types";
 import { remoteListFilterKey } from "../types";
-import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
+import {
+  invalidateRepoAfterWrite,
+  keepPreviousDataForKeyAxes,
+  repoKeys,
+} from "./core";
 import { invalidateProjectBoards, useRepoMutation } from "./internal";
 
 export function useIssueList(
@@ -844,7 +848,7 @@ export function useAddSubIssue() {
       ),
     // Follows the variables' repo, so the refresh lands where the write did.
     onSettled: (_d, _e, args) => {
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(args.repo) });
+      void invalidateRepoAfterWrite(queryClient, args.repo);
     },
   });
 }

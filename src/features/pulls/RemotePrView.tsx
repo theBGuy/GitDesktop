@@ -99,10 +99,10 @@ import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
+  invalidateRepoAfterWrite,
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
   prUpdateBranchKeys,
-  repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useAbortRemotePrResolve,
@@ -1024,9 +1024,7 @@ export function RemotePrView({
       // awaited and silent: the update already landed, and a fetch failure toast
       // would misreport it (the header's Fetch stays the manual fallback).
       void gitFetch(repoPath)
-        .then(() =>
-          queryClient.invalidateQueries({ queryKey: repoKeys.all(repoPath) }),
-        )
+        .then(() => invalidateRepoAfterWrite(queryClient, repoPath))
         .catch(() => undefined);
       toast.success(`Branch updated from ${awaited.base}.`);
       return;

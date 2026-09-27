@@ -28,7 +28,11 @@ import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
-import { useGitInstalled, usePrefetchMyWorkSources } from "@/lib/git/queries";
+import {
+  invalidateRepoOnFocus,
+  useGitInstalled,
+  usePrefetchMyWorkSources,
+} from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
@@ -258,11 +262,12 @@ function App() {
 
   // The webview stays "visible" when the window loses focus, so TanStack's
   // own focus refetch never fires in Tauri; bridge the native focus event.
+  // Board lenses a date-shift chase is reading are held (see the helper).
   useEffect(() => {
     const unlisten = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {
         if (focused) {
-          queryClient.invalidateQueries({ queryKey: ["repo"] });
+          invalidateRepoOnFocus(queryClient);
           // The MCP server (with --allow-write) can mutate these store files on
           // disk while we're unfocused; reload each from disk BEFORE invalidating
           // so the refetch sees the external writes. Each store is independent.

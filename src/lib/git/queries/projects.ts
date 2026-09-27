@@ -67,15 +67,23 @@ import {
   stepRepositionWatch,
   watchReposition,
 } from "./board-order";
+import {
+  BOARD_WRITES_KEY,
+  boardWriteVars,
+  holdLens,
+  projectItemsRepoKey,
+  releaseLens,
+  repoFocusInvalidations,
+} from "./board-writes";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
 import {
   boardReadFailed,
   boardReadOwed,
   boardRereadsRunning,
+  boardWritesOutstanding,
   invalidateProjectBoards,
   oweBoardReads,
   pendingBoardWrites,
-  projectItemsRepoKey,
   subscribeBoardRereads,
 } from "./internal";
 import {
@@ -85,6 +93,12 @@ import {
   prependStatusUpdate,
   replaceStatusUpdate,
 } from "./project-status-cache";
+import {
+  mergeTouched,
+  projectTouchedKeys,
+  restoreTouched,
+  viewTouchedKeys,
+} from "./write-settle";
 
 /** Every lens's project catalog in one repo — the prefix
  *  {@link projectsAvailableKey} extends, which a project write's settle re-reads. */
@@ -447,9 +461,6 @@ export type BoardWriteKind =
  */
 const boardWriteKey = (kind: BoardWriteKind) => ["board-write", kind] as const;
 
-/** Filter prefix for EVERY board write — narrowed to one repo by variables below. */
-const BOARD_WRITES_KEY = ["board-write"] as const;
-
 /** One pending board write, flattened for the panel's holds, write indicator and
  *  busy card. The two value fields are display-only reads off the write's own
  *  variables, and absent on the kinds that don't carry them. */
@@ -466,37 +477,6 @@ export interface PendingBoardWrite {
    *  Keeping both fields on one total shape is what lets a consumer answer for
    *  every kind without knowing which family it is looking at. */
   count: number | null;
-}
-
-/** Every board write's variables carry the repo it addresses; the rest are per-kind
- *  and read only for labels. Untrusted at this boundary in the sense that the
- *  filter sees `Mutation<any>`, so each field is `typeof`-guarded rather than
- *  asserted. The two BULK list spellings are read here rather than at the call
- *  site for the same reason: one place decides what a write's variables mean. */
-function boardWriteVars(mutation: { state: { variables?: unknown } }): {
-  repo: string | null;
-  itemId: string | null;
-  number: number | null;
-  count: number | null;
-} {
-  const vars = mutation.state.variables;
-  if (typeof vars !== "object" || vars === null)
-    return { repo: null, itemId: null, number: null, count: null };
-  const { repo, itemId, number, items, itemIds } = vars as Record<
-    string,
-    unknown
-  >;
-  const list = Array.isArray(items)
-    ? items
-    : Array.isArray(itemIds)
-      ? itemIds
-      : null;
-  return {
-    repo: typeof repo === "string" ? repo : null,
-    itemId: typeof itemId === "string" ? itemId : null,
-    number: typeof number === "number" ? number : null,
-    count: list === null ? null : list.length,
-  };
 }
 
 /**
@@ -827,7 +807,7 @@ function scheduleOwedReread(
     timer: setTimeout(() => {
       owedRereadTimers.delete(repo);
       const busy =
-        (pendingBoardWrites.get(repo) ?? 0) > 0 ||
+        boardWritesOutstanding(queryClient, repo) ||
         [...reorderingBoards.keys()].some(
           (key) => (JSON.parse(key) as unknown[])[0] === repo,
         );
@@ -1930,6 +1910,29 @@ const shiftingItems = new Map<
   { fieldIds: Set<string>; presses: number }
 >();
 
+/** How many live shift chases read each board LENS, by query hash, held for the
+ *  whole burst alongside its {@link shiftingItems} entry. Its own map because the
+ *  fold key carries the card too, and a focus read must be held per lens. */
+const shiftChasedLenses = new Map<string, number>();
+
+/**
+ * The app's window-focus invalidation (the native-focus bridge in App.tsx), which
+ * query-core's own `refetchOnWindowFocus` never sees. Every repo query is
+ * invalidated as before, except that a lens a shift chase is reading is only
+ * marked stale: its chase compares the cache against what it last sent, so a read
+ * landing mid-chase would have it write the server's older dates back. The chase's
+ * own settle re-reads that lens ({@link useShiftItemDates}).
+ *
+ * Repositions need no hold: their chase steers by
+ * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
+ * on their board, which {@link holdBoardsForVerdict} names as a read it can't hold
+ * off.
+ */
+export function invalidateRepoOnFocus(queryClient: QueryClient): void {
+  for (const filters of repoFocusInvalidations(shiftChasedLenses))
+    void queryClient.invalidateQueries(filters);
+}
+
 /** How many FOLLOW-UP writes one shift burst may spend catching up with the
  *  card's cached dates SINCE ITS LAST PRESS before the settle's re-read takes
  *  over. A press folding in is new intent and restarts the count, so the cap
@@ -2020,8 +2023,9 @@ function shiftUpdates(
  * and a press arriving meanwhile patches the cache and folds in. The live
  * write re-reads the card's dates from that cache after each round trip (a
  * CALL-TIME read, never a render closure) and writes again until the two agree,
- * so a held key converges on where the bar is drawn. The write target rides the
- * variables for the family's reason.
+ * so a held key converges on where the bar is drawn; a window-focus read of that
+ * lens waits for the burst ({@link invalidateRepoOnFocus}). The write target rides
+ * the variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field
  * writes' own ({@link useBulkSetItemFieldValues}): the boards and the rail
@@ -2065,15 +2069,17 @@ export function useShiftItemDates() {
       }
       const burst = { fieldIds: new Set(pressed), presses: 0 };
       const fieldIds = burst.fieldIds;
+      const key = projectItemsKey(
+        args.repo,
+        args.projectId,
+        args.query,
+        args.archived,
+        args.rich,
+      );
+      const lens = hashKey(key);
       shiftingItems.set(fold, burst);
+      holdLens(shiftChasedLenses, lens);
       try {
-        const key = projectItemsKey(
-          args.repo,
-          args.projectId,
-          args.query,
-          args.archived,
-          args.rich,
-        );
         /** What the cache says the card's dates are now; null once the lens no
          *  longer draws it, which reads as agreement — nothing left to chase. */
         const cached = () => {
@@ -2131,6 +2137,7 @@ export function useShiftItemDates() {
         }
       } finally {
         shiftingItems.delete(fold);
+        releaseLens(shiftChasedLenses, lens);
       }
     },
     onMutate: async (args) => {
@@ -3542,6 +3549,10 @@ export function useCreateProjectStatusUpdate() {
  * contract {@link api.ghUpdateProjectStatusUpdate} states). OPTIMISTIC: the entry
  * reads as edited at once, then as GitHub's answer; a failure puts back that ONE
  * entry as it was, onto the current cache.
+ *
+ * Whole-entry on purpose, unlike the project and view writes' touched-keys merge:
+ * every field rides this write, so the keys it touches ARE the entry, and the
+ * answer carries the server-set `updatedAt` a touched-keys merge would drop.
  */
 export function useUpdateProjectStatusUpdate() {
   const queryClient = useQueryClient();
@@ -3882,6 +3893,13 @@ export function useCreateProject() {
  * Renames, describes, closes or reopens a project. OPTIMISTIC in every lens's
  * catalog: the picker reads the change at once, then GitHub's answer; a failure
  * puts back that ONE project as it was.
+ *
+ * Both the answer and the rollback reach only the keys the patch TOUCHED, plus
+ * the close/reopen permissions whenever `closed` is ({@link projectTouchedKeys}):
+ * an edit and a close are separate writes that can overlap, and neither may erase
+ * the other's landed change. Named residuals, both corrected only by the settle's
+ * re-read: a sibling that answered earlier but committed later, and a failed write
+ * whose rollback undoes a later sibling's IDENTICAL value for the same key.
  */
 export function useUpdateProject() {
   const queryClient = useQueryClient();
@@ -3910,24 +3928,34 @@ export function useUpdateProject() {
       return { prev, stranded };
     },
     onSuccess: (updated, args) => {
+      const keys = projectTouchedKeys(args.patch);
       queryClient.setQueriesData<AvailableProjects>(
         { queryKey: projectsAvailableFamilyKey(args.repo) },
         (current) =>
           patchCatalog(current, (projects) =>
-            projects.map((p) => (p.id === updated.id ? updated : p)),
+            projects.map((p) =>
+              p.id === updated.id ? mergeTouched(p, keys, updated) : p,
+            ),
           ),
       );
     },
     onError: (e, args, ctx) => {
       const prev = ctx?.prev;
-      if (prev !== undefined)
+      if (prev !== undefined) {
+        const keys = projectTouchedKeys(args.patch);
+        const optimistic = patchedProject(prev, args.patch);
         queryClient.setQueriesData<AvailableProjects>(
           { queryKey: projectsAvailableFamilyKey(args.repo) },
           (current) =>
             patchCatalog(current, (projects) =>
-              projects.map((p) => (p.id === prev.id ? prev : p)),
+              projects.map((p) =>
+                p.id === prev.id
+                  ? restoreTouched(p, keys, optimistic, prev)
+                  : p,
+              ),
             ),
         );
+      }
       toastError(e);
     },
     onSettled: (_d, _e, args, ctx) => {
@@ -3983,11 +4011,16 @@ function withView(views: ProjectViewDef[], view: ProjectViewDef) {
     : [...views, view];
 }
 
-/** `view` in its own place, and nothing when the list no longer carries it: an
- *  update answering after a delete must not bring the deleted view back. */
-function replaceView(views: ProjectViewDef[], view: ProjectViewDef) {
-  return views.some((v) => v.id === view.id)
-    ? views.map((v) => (v.id === view.id ? view : v))
+/** `id`'s view rewritten by `replace` in its own place, and nothing when the list
+ *  no longer carries it: an update answering after a delete must not bring the
+ *  deleted view back. */
+function replaceView(
+  views: ProjectViewDef[],
+  id: string,
+  replace: (view: ProjectViewDef) => ProjectViewDef,
+) {
+  return views.some((v) => v.id === id)
+    ? views.map((v) => (v.id === id ? replace(v) : v))
     : views;
 }
 
@@ -4066,6 +4099,10 @@ export function useDuplicateProjectView() {
  * Renames a view, changes its layout, or sets its visible fields. OPTIMISTIC: the
  * view reads as edited at once, then as GitHub's answer; a failure puts back that
  * ONE view as it was, onto the current cache.
+ *
+ * Answer and rollback both reach only the keys the patch touched
+ * ({@link viewTouchedKeys}), for {@link useUpdateProject}'s reason and with its
+ * named residual: a rename, a field pick and a layout save are separate writes.
  */
 export function useUpdateProjectView() {
   const queryClient = useQueryClient();
@@ -4089,22 +4126,32 @@ export function useUpdateProjectView() {
       return { prev, stranded };
     },
     onSuccess: (updated, args) => {
+      const keys = viewTouchedKeys(args.patch);
       queryClient.setQueryData<ProjectViews>(
         projectViewsKey(args.repo, args.projectId),
         (current) =>
-          patchViews(current, (views) => replaceView(views, updated)),
+          patchViews(current, (views) =>
+            replaceView(views, updated.id, (v) =>
+              mergeTouched(v, keys, updated),
+            ),
+          ),
       );
     },
     onError: (e, args, ctx) => {
       const prev = ctx?.prev;
-      if (prev !== undefined)
+      if (prev !== undefined) {
+        const keys = viewTouchedKeys(args.patch);
+        const optimistic = { ...prev, ...args.patch };
         queryClient.setQueryData<ProjectViews>(
           projectViewsKey(args.repo, args.projectId),
           (current) =>
             patchViews(current, (views) =>
-              views.map((v) => (v.id === prev.id ? prev : v)),
+              replaceView(views, prev.id, (v) =>
+                restoreTouched(v, keys, optimistic, prev),
+              ),
             ),
         );
+      }
       toastError(e);
     },
     onSettled: (_d, _e, args, ctx) => {

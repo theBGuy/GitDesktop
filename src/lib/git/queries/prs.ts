@@ -22,7 +22,11 @@ import type {
   ReviewThreadOut,
 } from "../types";
 import { remoteListFilterKey } from "../types";
-import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
+import {
+  invalidateRepoAfterWrite,
+  keepPreviousDataForKeyAxes,
+  repoKeys,
+} from "./core";
 import {
   useOptimisticCacheMutation,
   useRepoMutation,
@@ -704,8 +708,7 @@ export function useCreateCommitComment(repo: string, lens: RemoteLens) {
     onError: (_e, _args, ctx) => {
       if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
     },
-    onSettled: () =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    onSettled: () => void invalidateRepoAfterWrite(queryClient, repo),
   });
 }
 
@@ -737,8 +740,7 @@ function useOptimisticCommitCommentMutation<TData>(
         const patched = patchComment(c, args);
         return patched ? [patched] : [];
       }),
-    (queryClient) =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
   );
 }
 
@@ -852,8 +854,7 @@ export function useCreateReviewThread(repo: string, lens: RemoteLens) {
     onError: (_e, _args, ctx) => {
       if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
     },
-    onSettled: () =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    onSettled: () => void invalidateRepoAfterWrite(queryClient, repo),
   });
 }
 
@@ -1001,7 +1002,6 @@ function useOptimisticCreateCommentMutation<TData>(
       };
       return d ? { ...d, comments: [...d.comments, synthetic] } : d;
     },
-    (queryClient) =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
   );
 }

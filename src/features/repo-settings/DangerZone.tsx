@@ -24,6 +24,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { probeAndPersistVisibility } from "@/features/repository/useRepoVisibilityProbe";
 import {
+  invalidateRepoAfterWrite,
   useBbRepoSettings,
   useDeleteRepo,
   useForgeStatus,
@@ -837,7 +838,7 @@ function DeleteAction({
       // The remote is gone — re-probe the repo's hosted panels so they
       // stop showing stale data, and close the settings dialog (it only
       // offers actions against a repo that no longer exists).
-      queryClient.invalidateQueries({ queryKey: ["repo", repoPath] });
+      void invalidateRepoAfterWrite(queryClient, repoPath);
       onRepoDeleted();
     } catch (e) {
       toastError(e);

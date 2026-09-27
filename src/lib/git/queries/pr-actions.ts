@@ -14,7 +14,7 @@ import type {
   RemoteLens,
   ReviewThreadOut,
 } from "../types";
-import { repoKeys } from "./core";
+import { invalidateRepoAfterWrite, repoKeys } from "./core";
 import {
   invalidateProjectBoards,
   useOptimisticCacheMutation,
@@ -224,8 +224,7 @@ export function useSetPrDraft(repo: string, lens: RemoteLens) {
         cur ? { ...cur, isDraft: prevIsDraft } : cur,
       );
     },
-    onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    onSettled: () => invalidateRepoAfterWrite(queryClient, repo),
   });
 }
 
@@ -380,9 +379,7 @@ export function useMergePr(repo: string, lens: RemoteLens) {
       // The mutation's own invalidation refreshes the forge-side PR state.
       void api
         .gitFetch(repo)
-        .then(() =>
-          queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
-        )
+        .then(() => invalidateRepoAfterWrite(queryClient, repo))
         .catch(() => undefined);
       return outcome;
     },
@@ -567,8 +564,7 @@ function useOptimisticCommentMutation<
             }),
           }
         : d,
-    (queryClient) =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
   );
 }
 
@@ -644,8 +640,7 @@ function useOptimisticReviewCommentMutation<
         // A delete that empties the thread drops the whole card (server does too).
         return comments.length === 0 ? [] : [{ ...t, comments }];
       }),
-    (queryClient) =>
-      void queryClient.invalidateQueries({ queryKey: repoKeys.all(repo) }),
+    (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
   );
 }
 

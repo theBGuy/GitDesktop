@@ -2158,7 +2158,8 @@ export function ProjectsBoardPanel({
   // repeated presses are the point, so the hook coalesces them per card rather
   // than the panel holding the route.
   const reorder = useReorderBoardCard();
-  // The roadmap's date shifts, which coalesce per card the same way.
+  // The roadmap's date shifts, which the hook coalesces too — per card per lens,
+  // where a reposition's is per card whatever the lens.
   const shiftWrite = useShiftItemDates();
   const convertDraft = useConvertDraftItem();
   const updateDraft = useUpdateDraftItem();
