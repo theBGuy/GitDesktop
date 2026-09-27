@@ -46,8 +46,10 @@ export interface AvailableProjects {
   ownerLogin: string | null;
 }
 
-/** A project details write. An ABSENT key leaves that detail as it is; an empty
- *  `shortDescription` clears it. */
+/** A project details write. An ABSENT key leaves that detail as it is. A present
+ *  `shortDescription` must be non-blank: GitHub silently keeps the old text for
+ *  an emptied one (only github.com's project settings clears it), so the write
+ *  layer refuses a blank. */
 export interface ProjectPatch {
   title?: string;
   shortDescription?: string;

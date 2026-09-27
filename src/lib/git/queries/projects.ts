@@ -3942,7 +3942,7 @@ function patchCatalog(
 }
 
 /** `project` with `patch` applied the way GitHub applies it: absent keys keep
- *  their value, and an emptied description reads as none. */
+ *  their value, and so does a blank description, which GitHub never clears. */
 function patchedProject(
   project: ProjectV2Ref,
   patch: ProjectPatch,
@@ -3952,10 +3952,8 @@ function patchedProject(
     title: patch.title ?? project.title,
     closed: patch.closed ?? project.closed,
   };
-  if (patch.shortDescription !== undefined) {
-    if (patch.shortDescription === "") delete next.shortDescription;
-    else next.shortDescription = patch.shortDescription;
-  }
+  if (patch.shortDescription?.trim())
+    next.shortDescription = patch.shortDescription;
   return next;
 }
 

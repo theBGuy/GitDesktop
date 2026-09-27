@@ -454,8 +454,9 @@ pub(super) async fn project_write(repo_path: &str, input: &str, surface: &str) -
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
 
-/// A title or name the server would refuse as blank, refused here in the
-/// dialog's own words. Trimmed, since a padded name is never what was meant.
+/// A value the server would refuse, or silently ignore, as blank, refused here
+/// pre-network with the caller's reason. Trimmed, since a padded value is never
+/// what was meant.
 pub(super) fn required_text(value: &str, reason: &str) -> AppResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -486,15 +487,22 @@ fn create_project_input(
     ))
 }
 
+const DESCRIPTION_CLEAR_REASON: &str = "GitHub can't clear a project description";
+
 /// Only the patch's PRESENT fields reach the mutation. A patch with none of them
-/// is refused: an all-absent update is unprobed, and it would change nothing.
+/// is refused: an all-absent update is unprobed, and it would change nothing. A
+/// blank description refuses the whole write: GitHub keeps the old text for an
+/// emptied one (`""`, `null`, and `" "` all probed 2026-09-26).
 fn update_project_input(project_id: &str, patch: ProjectPatch) -> AppResult<String> {
     let patch = ProjectPatch {
         title: patch
             .title
             .map(|t| required_text(&t, "Give the project a title"))
             .transpose()?,
-        short_description: patch.short_description.map(|d| d.trim().to_string()),
+        short_description: patch
+            .short_description
+            .map(|d| required_text(&d, DESCRIPTION_CLEAR_REASON))
+            .transpose()?,
         closed: patch.closed,
     };
     if patch.title.is_none() && patch.short_description.is_none() && patch.closed.is_none() {
@@ -1139,13 +1147,12 @@ mod tests {
         );
         let details = input(ProjectPatch {
             title: Some(" Renamed ".into()),
-            short_description: Some("".into()),
+            short_description: Some("  Ship it  ".into()),
             closed: None,
         });
-        // An emptied description is a present field that CLEARS, never an omission.
         assert_eq!(
             details["variables"],
-            serde_json::json!({"input":{"projectId":"PVT_one","title":"Renamed","shortDescription":""}})
+            serde_json::json!({"input":{"projectId":"PVT_one","title":"Renamed","shortDescription":"Ship it"}})
         );
         assert_keys(
             &details["variables"]["input"],
@@ -1175,6 +1182,30 @@ mod tests {
             ),
             Err(AppError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn a_cleared_description_refuses_the_whole_update() {
+        // GitHub keeps the old text for an emptied description ("", null, and " "
+        // probed 2026-09-26), so refusing beats a write that pretends to clear.
+        for description in ["", "   "] {
+            let alone = ProjectPatch {
+                short_description: Some(description.into()),
+                ..Default::default()
+            };
+            let mixed = ProjectPatch {
+                title: Some("Renamed".into()),
+                short_description: Some(description.into()),
+                closed: None,
+            };
+            for patch in [alone, mixed] {
+                assert!(matches!(
+                    update_project_input("PVT_one", patch),
+                    Err(AppError::InvalidArgument(ref m))
+                        if m == "GitHub can't clear a project description"
+                ));
+            }
+        }
     }
 
     #[test]

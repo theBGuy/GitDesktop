@@ -2108,7 +2108,9 @@ The **⋯** menu beside **Project** looks after the project itself:
   names the repository it links to, or says the project will be created unlinked under the
   owner's account. It starts with a single table view and GitHub's default fields. A
   repository with no projects offers **New project…** in place of the board.
-- **Edit details…** changes the title and the short description.
+- **Edit details…** changes the title and the short description. A description can be
+  rewritten but not cleared: GitHub only clears it from the project's settings page on
+  github.com, so the dialog won't save an emptied one and says why.
 - **Close project…** asks first, then files the project under **Closed** in the list; it
   stays on screen and keeps working. **Reopen project** brings it back straight away.
 - **Delete project…** asks first, naming the project. Its items, fields, views and status
