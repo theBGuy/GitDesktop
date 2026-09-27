@@ -27,6 +27,7 @@ import {
   type NotificationTone,
   repoNameFromPath,
 } from "@/lib/stores/notifications";
+import { mergePollBaseline } from "./pr-poll-baseline";
 
 /**
  * Background PR poller for OS notifications: roughly once a minute (also
@@ -99,6 +100,7 @@ export function usePrNotifications(repoPath: string) {
   });
 
   const prev = useRef<Map<number, PrPollInfo> | null>(null);
+  const unconfirmedStreaks = useRef<Map<number, number>>(new Map());
   const prevRepo = useRef(repoPath);
 
   // Effect event: reads the latest prefs/login without re-running the diff
@@ -109,24 +111,18 @@ export function usePrNotifications(repoPath: string) {
     if (prevRepo.current !== repoPath) {
       prevRepo.current = repoPath;
       prev.current = null;
+      unconfirmedStreaks.current = new Map();
     }
     const before = prev.current;
-    // An unconfirmed red rollup may flip back next poll, so it never replaces the
-    // baseline: the previous state carries over, and an unknown one stays unknown.
-    const snapshot = new Map(
-      data.map((p) => {
-        const held = p.checksUnconfirmed ? before?.get(p.number) : undefined;
-        const row = held
-          ? {
-              ...p,
-              checksState: held.checksState,
-              checksUnconfirmed: held.checksUnconfirmed,
-            }
-          : p;
-        return [p.number, row] as const;
-      }),
+    // An unconfirmed red rollup holds the previous state for up to
+    // MAX_UNCONFIRMED_POLLS polls, then GitHub's precomputed rollup stands.
+    const { snapshot, streaks } = mergePollBaseline(
+      before,
+      data,
+      unconfirmedStreaks.current,
     );
     prev.current = snapshot;
+    unconfirmedStreaks.current = streaks;
 
     // pr-sync: auto re-review open remote PRs whose head advanced — covers PRs whose
     // head branch isn't local (forks / pushed elsewhere). Gated on hasPrSync so
@@ -376,7 +372,10 @@ export function usePrNotifications(repoPath: string) {
     }
   });
 
+  // One diff per completed poll: identical payloads share structure, so `data`
+  // keeps its reference and only `dataUpdatedAt` ticks — the per-poll step the
+  // unconfirmed-streak limit counts on.
   useEffect(() => {
-    if (poll.data) diff(poll.data);
-  }, [poll.data]);
+    if (poll.data && poll.dataUpdatedAt > 0) diff(poll.data);
+  }, [poll.data, poll.dataUpdatedAt]);
 }

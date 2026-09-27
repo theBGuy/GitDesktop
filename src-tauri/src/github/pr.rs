@@ -3187,7 +3187,8 @@ pub struct PrPollInfo {
     pub checks_state: String,
     /// True when `checks_state` is a red enum this poll could not confirm (the confirm
     /// answer never described this snapshot), so it may flip back next poll: the
-    /// poller holds its previous state rather than notifying. GitHub only.
+    /// poller holds its previous state for up to `MAX_UNCONFIRMED_POLLS` polls
+    /// (pr-poll-baseline.ts) rather than notifying. GitHub only.
     pub checks_unconfirmed: bool,
     /// Head commit SHA — lets the poll detect when a PR receives new commits
     /// (drives pr-sync auto re-review for remote PRs, incl. non-local heads).

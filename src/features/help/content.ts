@@ -3497,8 +3497,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
-  **Dismiss** — a stopped row notes how long it ran before it stopped, and a failed one
-  expands in place to its full error, offering **Open in Details** when it's long — and a
+  **Dismiss**. A stopped row notes how long it ran before it stopped, and a failed one
+  expands in place to its full error, offering **Open in Details** when it's long. A
   failed automated run also lands a *review failed* row in the inbox (whenever the
   **Automation results** source keeps its in-app channel on) that shows why it failed and
   offers a one-click **Re-run** right from the row, matching manual-run failures (which

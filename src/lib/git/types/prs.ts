@@ -13,7 +13,8 @@ export interface PrPollInfo {
   checksState: string;
   /** True when `checksState` is a red rollup this poll could not confirm against
    *  the head's latest runs, so it may flip back next poll: the poller holds the
-   *  previous state instead of notifying. GitHub only (false elsewhere). */
+   *  previous state for up to `MAX_UNCONFIRMED_POLLS` polls instead of notifying.
+   *  GitHub only (false elsewhere). */
   checksUnconfirmed: boolean;
   /** Head commit SHA — drives pr-sync detection for remote PRs. */
   headSha: string;
