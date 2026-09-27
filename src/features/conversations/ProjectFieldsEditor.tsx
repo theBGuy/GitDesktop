@@ -393,8 +393,15 @@ export function ProjectFieldsEditor({
     const rescued = rescueIssueHalf(
       drafts,
       writable,
-      (projectId, touched, routes) =>
-        fieldDiff(alignSeed(seeds[projectId] ?? {}, routes), touched),
+      (projectId, touched, routes) => {
+        // The commit loop's own fallback for a board with no snapshot: an empty
+        // seed would read a Clear as a no-op. A departed board has nothing live.
+        const liveBoard = boards.find((b) => b.project.id === projectId);
+        const seed =
+          seeds[projectId] ??
+          (liveBoard === undefined ? {} : seedBoard(liveBoard));
+        return fieldDiff(alignSeed(seed, routes), touched);
+      },
     );
     let unplacedIssueFields = false;
     if (hasIssueFieldWrites(rescued)) {

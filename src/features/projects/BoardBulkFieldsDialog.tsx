@@ -32,7 +32,7 @@ import type {
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { type ItemNoun, valueBelongsTo } from "./board-model";
+import { cardCount, type ItemNoun, valueBelongsTo } from "./board-model";
 import {
   INVALID_DRAFT,
   IterationRows,
@@ -308,7 +308,7 @@ export function BoardBulkFieldsDialog({
                 hint={fieldHint(rowCards, def)}
                 reach={
                   issueRow && rowCards.length < cards.length
-                    ? `Issues only: ${rowCards.length} of ${cards.length} ${cards.length === 1 ? noun : `${noun}s`}`
+                    ? `Issues only: ${rowCards.length} of ${cardCount(cards.length, noun)}`
                     : undefined
                 }
                 entry={draft[def.id]}

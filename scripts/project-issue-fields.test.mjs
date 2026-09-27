@@ -15,6 +15,7 @@ import { test } from "node:test";
 
 import {
   buildColumns,
+  cardCount,
   columnValue,
   sortColumnItems,
   UNSET_COLUMN_ID,
@@ -552,4 +553,11 @@ test("the stranded-board count reads only a board's own drafts", () => {
     ),
     { PVTSSF_status: "todo" },
   );
+});
+
+test("a bulk row's reach counts its cards in the board's own grammar", () => {
+  assert.equal(cardCount(1, "card"), "1 card");
+  assert.equal(cardCount(5, "card"), "5 cards");
+  assert.equal(cardCount(1, "row"), "1 row");
+  assert.equal(cardCount(0, "row"), "0 rows");
 });

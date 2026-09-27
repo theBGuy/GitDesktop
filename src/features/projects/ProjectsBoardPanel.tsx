@@ -153,6 +153,7 @@ import {
   type BoardCursor,
   bucketIdFor,
   buildColumns,
+  cardCount,
   chipFieldDefs,
   columnValue,
   findCard,
@@ -715,12 +716,6 @@ const BULK_NOTHING_REASON: Record<BulkVerb, (noun: ItemNoun) => string> = {
   restore: (noun) => `No selected ${noun} is archived`,
   remove: (noun) => `Select ${noun}s to remove`,
 };
-
-/** `n` cards (or rows), with the singular the eligible count really can land on:
- *  a mixed selection leaves one verb with a single card to act on. */
-function cardCount(n: number, noun: ItemNoun): string {
-  return `${n} ${n === 1 ? noun : `${noun}s`}`;
-}
 
 /** A view's filter as the board's LENS. GitHub reports an unfiltered view as
  *  either null or an empty string, and sending `""` would key a second cache

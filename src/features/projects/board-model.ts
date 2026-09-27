@@ -43,6 +43,12 @@ export const UNSET_COLUMN_ID = "__unset__";
  *  hold reads in the words of the surface the user is looking at. */
 export type ItemNoun = "card" | "row";
 
+/** `n` cards (or rows), with the singular the eligible count really can land on:
+ *  a mixed selection leaves one verb with a single card to act on. */
+export function cardCount(n: number, noun: ItemNoun): string {
+  return `${n} ${n === 1 ? noun : `${noun}s`}`;
+}
+
 /** Single-writer past the move, for the same reason and one step wider: an archive,
  *  a removal, a convert and a draft edit all change what the board draws, so a
  *  second write fired over one in flight would settle against a board neither of
