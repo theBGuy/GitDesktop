@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, Notify, OnceCell};
 
 use crate::error::{AppError, AppResult};
 use crate::git::types::GitInfo;
-use crate::git::worktree::normalize_wt_path;
+use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
 
 /// The agent cancel registry: run id → the `Notify` the cancel command fires.
 type AgentCancels = SyncMutex<HashMap<String, CancelEntry>>;
@@ -170,9 +170,16 @@ impl AppState {
             (Some(_), Ok(toplevel)) => common_dir_from_fs(toplevel).await,
             _ => None,
         };
+        // Resolved like git resolves the settled identity (junctions, `subst`
+        // drives and 8.3 names all fold to the real path, measured), so a
+        // link-spelled checkout keeps the settled domain.
+        let shared = match fs_common.as_deref() {
+            Some(fs_common) => canonical_wt_path(fs_common),
+            None => normalize_wt_path(&identity),
+        };
         let keys = LockKeys {
             checkout: normalize_wt_path(toplevel.as_deref().unwrap_or(repo_path)),
-            shared: normalize_wt_path(fs_common.as_deref().unwrap_or(&identity)),
+            shared,
             identity,
         };
         if !resolved {
@@ -405,8 +412,9 @@ async fn common_dir_from_fs(toplevel: &str) -> Option<String> {
     Some(lexically_normal(&common).to_string_lossy().into_owned())
 }
 
-/// Folds `.` and `..` components without touching the filesystem: canonicalizing
-/// would yield a `\\?\` verbatim spelling on Windows, which no git output matches.
+/// Folds `.` and `..` components without touching the filesystem, so the gitfile's
+/// `commondir` hop still yields a clean path where the caller's canonicalize fails
+/// (and falls back to this spelling), and for the tests that compare it directly.
 fn lexically_normal(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
     let mut out = std::path::PathBuf::new();
@@ -701,17 +709,67 @@ mod lock_key_tests {
                 .await
                 .unwrap_or_else(|| panic!("no common dir read for {path}"));
             let identity = crate::git::repo::repo_identity(path).await.unwrap();
+            // The two key compositions `try_resolve_lock_keys` uses, compared as built.
             assert_eq!(
-                normalize_wt_path(&from_fs),
+                canonical_wt_path(&from_fs),
                 normalize_wt_path(&identity),
                 "{path}: fs {from_fs:?} vs git {identity:?}"
             );
         }
     }
 
-    /// A gitfile whose admin dir is gone (a pruned worktree) yields no common dir, so
-    /// the shared key keeps its raw-path fallback instead of a path that names
-    /// nothing; trailing whitespace on a live gitfile is ignored, as git ignores it.
+    /// A `.git` that is a link (a Windows junction, a Unix symlink) to a git dir
+    /// elsewhere: git resolves it for the settled identity (measured, git 2.51.1),
+    /// so under a transient identity failure the filesystem fallback must resolve it
+    /// too, or the checkout splits off the repo's shared domain.
+    #[tokio::test]
+    async fn an_identity_error_resolves_a_linked_git_dir_to_the_shared_domain() {
+        let (_dir, repo) = setup_repo("identity-error-link").await;
+        let holder = temp_dir("identity-error-link-holder");
+        let real_git = std::path::Path::new(&fixture_path(holder.path())).join("realgit");
+        let dot_git = std::path::Path::new(&repo).join(".git");
+        std::fs::rename(&dot_git, &real_git).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&dot_git)
+                .arg(&real_git)
+                .output()
+                .expect("spawn mklink");
+            assert!(made.status.success(), "mklink /J failed: {made:?}");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_git, &dot_git).unwrap();
+        // A second spelling of the same checkout, so the transient read below can't
+        // be served from the settled spelling's cache entry.
+        let sub = std::path::Path::new(&repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let sub = sub.to_string_lossy().into_owned();
+
+        let state = AppState::default();
+        let settled = domains_of(&state, &repo).await;
+        crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(|| AppError::Timeout(30), async {
+                let keys = state.resolve_lock_keys(&sub).await;
+                assert_eq!(keys.identity, sub, "the identity stays the raw spelling");
+                let during = domains_of(&state, &sub).await;
+                assert!(same(&settled.1, &during.1), "worktree admin stays shared");
+                assert!(same(&settled.2, &during.2), "network stays shared");
+            })
+            .await;
+        // Unlink first so the temp-dir teardown never walks through the link.
+        #[cfg(windows)]
+        std::fs::remove_dir(&dot_git).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&dot_git).unwrap();
+    }
+
+    /// A gitfile whose admin dir is gone (a pruned worktree) yields no common dir;
+    /// the direct `common_dir_from_fs` assert is what pins that check. End to end the
+    /// shared key keeps the raw path too, but there git's own toplevel refusal of the
+    /// broken checkout is what keeps it, so the fallback never runs. Trailing
+    /// whitespace on a live gitfile is ignored, as git ignores it.
     #[tokio::test]
     async fn a_stale_gitfile_reads_no_common_dir() {
         let (_dir, repo) = setup_repo("fs-common-stale").await;
@@ -730,10 +788,11 @@ mod lock_key_tests {
             .await;
         assert_eq!(keys.shared, normalize_wt_path(&checkout_path));
 
-        let live = std::path::Path::new(&repo).join(".git");
-        std::fs::write(&gitfile, format!("gitdir: {}  \r\n", live.display())).unwrap();
-        let from_fs = common_dir_from_fs(&checkout_path).await.unwrap();
+        // The live target is git's own spelling (git writes gitfiles itself) — a
+        // hand-joined temp path diverges on 8.3-shortened CI runner temp dirs.
         let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+        std::fs::write(&gitfile, format!("gitdir: {identity}  \r\n")).unwrap();
+        let from_fs = common_dir_from_fs(&checkout_path).await.unwrap();
         assert_eq!(normalize_wt_path(&from_fs), normalize_wt_path(&identity));
     }
 

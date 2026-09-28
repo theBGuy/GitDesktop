@@ -1,3 +1,3 @@
-- **Reset to upstream** keeps your untracked files safe: when the upstream
-  version has a file at the same path, the reset stops and names the files to
-  move aside first.
+- **Reset to _origin/…_** keeps your untracked work safe: when files or folders
+  (other than ignored ones) sit where the upstream version has files, the reset
+  stops and names them so you can move them aside first.

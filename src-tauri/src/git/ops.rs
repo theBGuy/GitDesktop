@@ -50,14 +50,15 @@ const COLLISIONS_NAMED: usize = 5;
 /// passed [`ensure_clean_tree`], so the index matches HEAD and an untracked path
 /// is by definition one HEAD doesn't track.
 async fn refuse_untracked_reset_collisions(repo: &str, target: &str) -> AppResult<()> {
-    let untracked = git_list_untracked(repo.to_string()).await?;
+    // Every listing runs from the resolved toplevel: they are cwd-relative, so only
+    // from there do their paths line up and cover the whole tree the reset writes.
+    let top = crate::git::runner::worktree_toplevel(repo).await?;
+    let untracked = git_list_untracked(top.clone()).await?;
     if untracked.is_empty() {
         return Ok(());
     }
-    // `repo` is always a checkout toplevel: both listings are cwd-relative, and
-    // their paths only line up because they share that cwd (so no `--full-tree`).
     let tracked = run_git(
-        Some(repo),
+        Some(&top),
         &["ls-tree", "-r", "--name-only", "-z", target],
         DEFAULT_TIMEOUT,
     )
@@ -66,7 +67,7 @@ async fn refuse_untracked_reset_collisions(repo: &str, target: &str) -> AppResul
     // A case-folding filesystem overwrites `G.txt` when the target writes `g.txt`
     // (measured, git 2.51.1 on NTFS), so the match folds exactly when git does.
     let ignore_case = run_git_raw(
-        Some(repo),
+        Some(&top),
         &["config", "--bool", "core.ignorecase"],
         DEFAULT_TIMEOUT,
     )
@@ -86,13 +87,15 @@ async fn refuse_untracked_reset_collisions(repo: &str, target: &str) -> AppResul
     if colliding.len() > COLLISIONS_NAMED {
         named.push_str(&format!(" and {} more", colliding.len() - COLLISIONS_NAMED));
     }
+    // "Path", not "file": an entry can be a directory (`sub/`) or a file inside
+    // one, standing where the target needs a file.
     let (noun, pronoun) = if colliding.len() == 1 {
-        ("an untracked file", "it")
+        ("an untracked path", "it")
     } else {
-        ("untracked files", "them")
+        ("untracked paths", "them")
     };
     Err(AppError::InvalidArgument(format!(
-        "resetting would overwrite {noun} the target commit tracks ({named}) — move or remove {pronoun} first"
+        "resetting would overwrite {noun} ({named}) — move or remove {pronoun} first"
     )))
 }
 
@@ -5276,7 +5279,8 @@ mod tests {
             .expect_err("an untracked file at a target-tracked path must refuse the reset");
         assert!(
             matches!(&err, AppError::InvalidArgument(m)
-                if m.contains("(g.txt)") && m.contains("move or remove it first")),
+                if m.contains("overwrite an untracked path (g.txt)")
+                    && m.contains("move or remove it first")),
             "the refusal must name the file and the remedy, got {err:?}"
         );
         assert_eq!(std::fs::read(dir.path().join("g.txt")).unwrap(), precious);
@@ -5354,7 +5358,7 @@ mod tests {
             panic!("got {err:?}");
         };
         assert!(
-            msg.contains("(n1.txt, n2.txt, n3.txt, n4.txt, n5.txt and 2 more)")
+            msg.contains("untracked paths (n1.txt, n2.txt, n3.txt, n4.txt, n5.txt and 2 more)")
                 && msg.contains("move or remove them first"),
             "{msg}"
         );
