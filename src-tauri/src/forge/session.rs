@@ -1583,7 +1583,7 @@ fn normalize_detail(raw: &str, cap: usize) -> String {
             continue;
         }
         if host_token_len(line) == Some(line.len()) {
-            hosts.push(line.to_ascii_lowercase());
+            hosts.push(line.to_string());
             continue;
         }
         let (success, text) = strip_detail_framing(line, &mut hosts);
@@ -1630,7 +1630,7 @@ fn strip_detail_framing(line: &str, hosts: &mut Vec<String>) -> (bool, String) {
             let (host, rest) = s.split_at(n);
             if rest.starts_with(char::is_whitespace) && status_glyph(rest.trim_start()).is_some() {
                 // glab's host header run together with the status line under it.
-                hosts.push(host.to_ascii_lowercase());
+                hosts.push(host.to_string());
                 s = rest.trim_start();
             } else if let Some(after) = rest
                 .strip_prefix(':')

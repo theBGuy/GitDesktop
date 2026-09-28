@@ -110,6 +110,8 @@ export function CollaboratorsSection({
         return "Enter a GitHub username";
       case !validUsername(username.trim()):
         return "That isn't a valid GitHub username";
+      case add.isPending:
+        return SAVING_REASON;
       default:
         return rolesUnknownReason;
     }
@@ -366,7 +368,13 @@ function RoleSlot({
       </span>
     );
   return (
-    <span className="inline-flex shrink-0" title={reason.wrapperTitle}>
+    <span
+      className={cn(
+        "inline-flex shrink-0",
+        reason.blockedReason !== null && "cursor-not-allowed",
+      )}
+      title={reason.wrapperTitle}
+    >
       <Select
         items={ROLE_ITEMS}
         value={value}
@@ -395,7 +403,7 @@ function RoleSlot({
         </SelectContent>
       </Select>
       {/* `hidden` rather than sr-only: a description may point at hidden text, and
-          the trigger's own name must not read the reason a second time. */}
+          an sr-only sibling would be read again as page text after the trigger. */}
       {reason.blockedReason !== null && (
         <span id={reason.reasonId} hidden>
           {reason.blockedReason}
