@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{
     prompt_handler, schemars, tool_handler, ErrorData as McpError, ServerHandler, ServiceExt,
@@ -424,10 +424,10 @@ fn ensure_key_in_project(
 #[tool_handler(router = self.tool_router)]
 #[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for GitDesktopMcp {
-    fn get_info(&self) -> ServerInfo {
-        // ServerInfo (InitializeResult) is #[non_exhaustive] — build from default,
+    fn get_info(&self) -> ServerConfig {
+        // ServerConfig (InitializeResult) is #[non_exhaustive] — build from default,
         // then set the fields we care about.
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         // rmcp's default derives name/version from ITS OWN build env, so without this
         // every client lists the server as "rmcp" at the SDK's version.
         info.server_info = Implementation::new("GitDesktop", env!("CARGO_PKG_VERSION"));
