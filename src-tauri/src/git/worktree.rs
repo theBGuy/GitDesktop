@@ -416,23 +416,26 @@ pub async fn git_worktree_repair(
 /// `/var` → `/private/var`) or a Windows verbatim prefix would otherwise read as a
 /// different worktree. Unresolvable paths (already deleted) fall back to the raw
 /// form; both sides get the same treatment, so quirks cancel out.
-///
-/// `dunce` drops the verbatim prefix only from drive paths it can express plainly
-/// (dunce 1.0.5 keeps it past MAX_PATH, on reserved names, and on every UNC share),
-/// so both leftover forms are unwrapped here: `\\?\UNC\server\share` must fold to
-/// git's `//server/share`, never `unc/server/share`.
 pub(crate) fn canonical_wt_path(p: &str) -> String {
     let resolved = dunce::canonicalize(p)
         .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string());
-    let plain = match resolved.strip_prefix(r"\\?\UNC\") {
+    normalize_wt_path(&strip_verbatim(&resolved))
+}
+
+/// Unwraps a Windows verbatim spelling to the form git prints. `dunce` drops the
+/// prefix only from drive paths it can express plainly (dunce 1.0.5 keeps it past
+/// MAX_PATH, on reserved names, and on every UNC share), so both leftover forms land
+/// here: `\\?\UNC\server\share` must fold to git's `//server/share`, never
+/// `unc/server/share`. Pure string work, so tests never touch the filesystem.
+fn strip_verbatim(resolved: &str) -> String {
+    match resolved.strip_prefix(r"\\?\UNC\") {
         Some(share) => format!(r"\\{share}"),
         None => resolved
             .strip_prefix(r"\\?\")
-            .unwrap_or(&resolved)
+            .unwrap_or(resolved)
             .to_string(),
-    };
-    normalize_wt_path(&plain)
+    }
 }
 
 /// Whether git still lists `path` as a LIVE worktree of the repo. An unreadable
@@ -900,19 +903,17 @@ mod tests {
     }
 
     /// Verbatim spellings fold to the form git prints: a UNC share to `//server/share`
-    /// (never `unc/server/share`), a drive path to `c:/…`. The paths don't exist, so
-    /// this pins the unwrap on the raw-input fallback, the same code dunce's verbatim
-    /// leftovers go through.
+    /// (never `unc/server/share`), a drive path to `c:/…`, and a plain path passes
+    /// through. Pure strings, so no share lookup ever runs.
     #[test]
-    fn canonical_wt_path_unwraps_verbatim_spellings_to_gits_form() {
+    fn strip_verbatim_unwraps_verbatim_spellings_to_gits_form() {
+        let folded = |p: &str| normalize_wt_path(&strip_verbatim(p));
         assert_eq!(
-            canonical_wt_path(r"\\?\UNC\gd-no-such-host\share\repo\.git"),
-            "//gd-no-such-host/share/repo/.git"
+            folded(r"\\?\UNC\server\share\repo\.git"),
+            "//server/share/repo/.git"
         );
-        assert_eq!(
-            canonical_wt_path(r"\\?\Z:\gd-no-such-dir\repo"),
-            "z:/gd-no-such-dir/repo"
-        );
+        assert_eq!(folded(r"\\?\Z:\dir\repo"), "z:/dir/repo");
+        assert_eq!(folded(r"C:\dir\repo"), "c:/dir/repo");
     }
 
     #[test]
