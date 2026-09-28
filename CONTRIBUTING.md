@@ -105,13 +105,13 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Seven dependency-free Node scripts guard convention classes a past audit already
+Eight dependency-free Node scripts guard convention classes a past audit already
 paid to close once. Run them before pushing:
 
 ```sh
 # banned patterns · Rust invariants · OG card references ·
 # IPC surface drift · rule-mirror drift · skill-mirror drift ·
-# Tauri npm/crate parity · guard self-tests
+# Tauri npm/crate parity · lockfile singleton dedupe · guard self-tests
 pnpm run checks
 ```
 
@@ -127,16 +127,17 @@ a registration), drift between the files that restate the git-whitelist hard
 rule, drift between the two trees that ship the same skills (`.claude/skills/`
 for Claude Code, `.agents/skills/` for the other agent lanes), and the
 major.minor parity of each Tauri package's npm and crate halves, each declared
-npm half needing a crate half to compare against.
+npm half needing a crate half to compare against, and that each CodeMirror/Lezer
+core package resolves to a single version in `pnpm-lock.yaml`.
 
 The pattern, Rust-invariant, and surface checks carry allowlists, and they
-ratchet one way (rule-mirror drift and Tauri parity carry none — there is
-nothing to exempt). Adding an entry is a reviewed change like any other: it
-needs an inline rationale naming what makes that site safe, and it isn't the
-way to quiet a fresh violation. The ratchet is enforced, not just documented —
-an entry that no longer suppresses anything (its site gone, or its command back
-in live use) fails the gate as a stale allowlist entry, so the PR that removes
-the site removes its entry too.
+ratchet one way (rule-mirror drift, Tauri parity and lockfile dedupe carry
+none — there is nothing to exempt). Adding an entry is a reviewed change like
+any other: it needs an inline rationale naming what makes that site safe, and
+it isn't the way to quiet a fresh violation. The ratchet is enforced, not just
+documented — an entry that no longer suppresses anything (its site gone, or its
+command back in live use) fails the gate as a stale allowlist entry, so the PR
+that removes the site removes its entry too.
 
 Skill-mirror drift declares its skips rather than allowlisting sites: the ones
 rewritten per harness, and the ones living in a single tree, each entry naming

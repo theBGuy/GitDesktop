@@ -34,9 +34,11 @@ export const SINGLETONS = [
 
 /**
  * Every `packages:` key in a pnpm lockfile, name → set of versions, plus the
- * keys that did not split into a name and a version. `packages:` holds one key
- * per installed copy for every importer, which is the scope a duplicate lives
- * in; `importers:` and `snapshots:` restate the same copies and are skipped.
+ * keys that did not split into a name and a version. Lockfile v9's `packages:`
+ * holds one key per resolved name@version across every importer, which is where
+ * a version split shows up. Same-version copies split by peer context appear
+ * only as `snapshots:` keys and are not counted; no SINGLETONS entry declares
+ * peerDependencies today, so a peer-context split cannot occur for them.
  */
 export function parsePackageVersions(pnpmLockText) {
   const versions = new Map();
@@ -126,7 +128,7 @@ function main() {
   }
   if (missing.length > 0) {
     process.stderr.write(
-      `lockfile-dedupe: FAIL — ${missing.length} singleton(s) absent from ${PNPM_LOCK}\n`,
+      `lockfile-dedupe: FAIL — ${missing.length} singleton(s) absent from ${lockPath}\n`,
     );
     for (const name of missing) process.stderr.write(`  ${name}\n`);
     process.stderr.write(

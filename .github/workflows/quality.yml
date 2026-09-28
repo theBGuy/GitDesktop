@@ -45,9 +45,10 @@ jobs:
 
       # One step per script so a failure names its own check in the UI. The same
       # eight scripts plus the self-tests below run locally via package.json's
-      # `checks` alias — a new guard is added in BOTH places. Exception: a guard
-      # needing a built artifact (check-built-whitespace.mjs) runs from the
-      # workflow that builds it, and reaches this job only via its fixtures.
+      # `checks` alias — a new guard is added in BOTH places, and in
+      # CONTRIBUTING.md's *Convention checks* list. Exception: a guard needing a
+      # built artifact (check-built-whitespace.mjs) runs from the workflow that
+      # builds it, and reaches this job only via its fixtures.
       - name: Banned frontend patterns
         run: node scripts/check-banned-patterns.mjs
 
