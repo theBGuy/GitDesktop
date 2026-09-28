@@ -5334,6 +5334,26 @@ mod tests {
         );
     }
 
+    /// Called with a subdirectory, the guard still sees the whole tree: an untracked
+    /// file at the root, where the target writes, refuses even though the
+    /// subdirectory itself holds nothing untracked.
+    #[tokio::test]
+    async fn reset_collision_guard_resolves_the_toplevel_from_a_subdirectory() {
+        let (dir, _repo, tracks_g) = setup_reset_collision("reset-collide-subdir").await;
+        std::fs::write(dir.path().join("g.txt"), "precious\n").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let sub = sub.to_string_lossy().into_owned();
+
+        let err = refuse_untracked_reset_collisions(&sub, &tracks_g)
+            .await
+            .expect_err("a root-level collision must refuse from a subdirectory too");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("(g.txt)")),
+            "got {err:?}"
+        );
+    }
+
     /// Past a handful, the refusal names the first few and counts the rest.
     #[tokio::test]
     async fn reset_hard_collision_refusal_caps_the_named_files() {

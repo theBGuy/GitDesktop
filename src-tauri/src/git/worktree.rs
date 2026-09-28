@@ -416,11 +416,23 @@ pub async fn git_worktree_repair(
 /// `/var` → `/private/var`) or a Windows verbatim prefix would otherwise read as a
 /// different worktree. Unresolvable paths (already deleted) fall back to the raw
 /// form; both sides get the same treatment, so quirks cancel out.
+///
+/// `dunce` drops the verbatim prefix only from drive paths it can express plainly
+/// (dunce 1.0.5 keeps it past MAX_PATH, on reserved names, and on every UNC share),
+/// so both leftover forms are unwrapped here: `\\?\UNC\server\share` must fold to
+/// git's `//server/share`, never `unc/server/share`.
 pub(crate) fn canonical_wt_path(p: &str) -> String {
-    let resolved = std::fs::canonicalize(p)
+    let resolved = dunce::canonicalize(p)
         .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string());
-    normalize_wt_path(resolved.strip_prefix(r"\\?\").unwrap_or(&resolved))
+    let plain = match resolved.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => resolved
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&resolved)
+            .to_string(),
+    };
+    normalize_wt_path(&plain)
 }
 
 /// Whether git still lists `path` as a LIVE worktree of the repo. An unreadable
@@ -885,6 +897,22 @@ mod tests {
     #[test]
     fn repo_hash_distinguishes_separator_spellings() {
         assert_ne!(repo_hash(r"C:\repos\x"), repo_hash("c:/repos/x"));
+    }
+
+    /// Verbatim spellings fold to the form git prints: a UNC share to `//server/share`
+    /// (never `unc/server/share`), a drive path to `c:/…`. The paths don't exist, so
+    /// this pins the unwrap on the raw-input fallback, the same code dunce's verbatim
+    /// leftovers go through.
+    #[test]
+    fn canonical_wt_path_unwraps_verbatim_spellings_to_gits_form() {
+        assert_eq!(
+            canonical_wt_path(r"\\?\UNC\gd-no-such-host\share\repo\.git"),
+            "//gd-no-such-host/share/repo/.git"
+        );
+        assert_eq!(
+            canonical_wt_path(r"\\?\Z:\gd-no-such-dir\repo"),
+            "z:/gd-no-such-dir/repo"
+        );
     }
 
     #[test]

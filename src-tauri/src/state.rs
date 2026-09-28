@@ -170,9 +170,10 @@ impl AppState {
             (Some(_), Ok(toplevel)) => common_dir_from_fs(toplevel).await,
             _ => None,
         };
-        // Resolved like git resolves the settled identity (junctions, `subst`
-        // drives and 8.3 names all fold to the real path, measured), so a
-        // link-spelled checkout keeps the settled domain.
+        // Resolved like git resolves the settled identity, so a link-spelled checkout
+        // keeps the settled domain: junctions, `subst` drives and 8.3 names fold to
+        // the real path (measured); UNC shares rest on `canonical_wt_path`'s unwrap
+        // of the verbatim `\\?\UNC\` form, untested against a live share.
         let shared = match fs_common.as_deref() {
             Some(fs_common) => canonical_wt_path(fs_common),
             None => normalize_wt_path(&identity),
@@ -412,9 +413,9 @@ async fn common_dir_from_fs(toplevel: &str) -> Option<String> {
     Some(lexically_normal(&common).to_string_lossy().into_owned())
 }
 
-/// Folds `.` and `..` components without touching the filesystem, so the gitfile's
-/// `commondir` hop still yields a clean path where the caller's canonicalize fails
-/// (and falls back to this spelling), and for the tests that compare it directly.
+/// Folds `.` and `..` components without touching the filesystem, so the `commondir`
+/// hop yields a clean path even where the caller's canonicalize fails and falls back
+/// to this spelling.
 fn lexically_normal(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
     let mut out = std::path::PathBuf::new();
