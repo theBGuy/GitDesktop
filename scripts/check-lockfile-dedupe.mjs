@@ -37,8 +37,9 @@ export const SINGLETONS = [
  * keys that did not split into a name and a version. Lockfile v9's `packages:`
  * holds one key per resolved name@version across every importer, which is where
  * a version split shows up. Same-version copies split by peer context appear
- * only as `snapshots:` keys and are not counted; no SINGLETONS entry declares
- * peerDependencies today, so a peer-context split cannot occur for them.
+ * only as `snapshots:` keys and are not counted; no SINGLETONS entry, nor
+ * anything in its dependency tree, declares peerDependencies today, so no
+ * peer-context split exists for them.
  */
 export function parsePackageVersions(pnpmLockText) {
   const versions = new Map();

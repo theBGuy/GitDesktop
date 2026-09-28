@@ -125,10 +125,10 @@ card plus its `.webp` sibling — a missing file ships as a 404 social card),
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
 a registration), drift between the files that restate the git-whitelist hard
 rule, drift between the two trees that ship the same skills (`.claude/skills/`
-for Claude Code, `.agents/skills/` for the other agent lanes), and the
-major.minor parity of each Tauri package's npm and crate halves, each declared
-npm half needing a crate half to compare against, and that each CodeMirror/Lezer
-core package resolves to a single version in `pnpm-lock.yaml`.
+for Claude Code, `.agents/skills/` for the other agent lanes), the major.minor
+parity of each Tauri package's npm and crate halves (each declared npm half
+needing a crate half to compare against), and a single resolved version in
+`pnpm-lock.yaml` for each CodeMirror/Lezer core package.
 
 The pattern, Rust-invariant, and surface checks carry allowlists, and they
 ratchet one way (rule-mirror drift, Tauri parity and lockfile dedupe carry
