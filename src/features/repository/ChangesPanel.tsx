@@ -1304,6 +1304,12 @@ export function ChangesPanel({
     switch (true) {
       case shownDiscardScope?.kind === "all":
         return `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+      // Per-file discard restores the worktree from the INDEX, so a file with
+      // staged changes lands on its staged version, not the last commit.
+      case discardOne !== null &&
+        discardOne.unstaged !== "untracked" &&
+        discardOne.staged !== null:
+        return `Unstaged changes to ${discardOne.path} will be discarded, returning it to its staged version. Its staged changes are kept. This cannot be undone.`;
       case discardOne !== null && discardOne.unstaged !== "untracked":
         return `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`;
       case discardOne !== null && discardHasReserved:

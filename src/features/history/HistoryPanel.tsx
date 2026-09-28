@@ -237,6 +237,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     ) {
       return;
     }
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     let details: CommitDetails;
     try {
       // The undo names no commit — it always unwinds whatever HEAD is at the
@@ -287,6 +291,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   async function doRevertCommit(hash: string) {
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     void revertCommit.mutateAsync(hash).catch(onError);
   }
 
@@ -296,6 +304,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       .getState()
       .ask(cherryPickCommitConfirm(hash, currentBranch));
     if (!ok) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     let applied: boolean;
     try {
       applied = await cherryPick.mutateAsync(hash);

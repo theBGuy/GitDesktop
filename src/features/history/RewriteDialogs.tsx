@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { createAiClient } from "@/lib/ai/client";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { buildCommitPrompt } from "@/lib/ai/prompt";
@@ -25,6 +26,7 @@ import type { RewriteStep } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 
 /**
@@ -145,6 +147,10 @@ export function SquashDialog({
   const form = useAppForm({
     defaultValues: { message: defaultMessage },
     onSubmit: async ({ value }) => {
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       try {
         await rewrite.mutateAsync({
           base,

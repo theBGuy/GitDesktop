@@ -18,8 +18,10 @@ import * as api from "@/lib/git/api";
 import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { cn } from "@/lib/utils";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 
 type Mode = "archive" | "delete";
 
@@ -494,6 +496,12 @@ export function CleanupBranchesDialog({
   async function runBatch() {
     const names = candidateNames.filter((n) => selected.has(n));
     if (names.length === 0) return;
+    // A promote's branch sits in no checkout while it moves, so the worktree
+    // exclusion can't see it.
+    if (mode === "delete" && promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const fails = new Map<string, string>();
     setFailed(new Map());
     setProgress({ done: 0, total: names.length });

@@ -45,8 +45,10 @@ export const ROW_CHECKOUT_COPY = {
 export const rowCheckoutCopy = (isMain: boolean | undefined) =>
   ROW_CHECKOUT_COPY[isMain ? "main" : "linked"];
 
-/** The in-app HEAD-moving surfaces' refusal while `promotionBlocksCheckout`
- *  holds: in the main workspace a checkout would race the promote's own final
- *  one, and in the promote's source worktree the folder is being removed. */
+/** The refusal every in-app HEAD- or branch-moving surface, and every branch
+ *  delete, shows while `promotionBlocksCheckout` holds: in the main workspace the
+ *  op would race the promote's own stash and checkout (or delete the branch it is
+ *  about to check out), and in the promote's source worktree the folder is being
+ *  removed. */
 export const PROMOTION_BLOCKS_CHECKOUT =
   "A worktree is being promoted to your main workspace. Try again once it finishes.";

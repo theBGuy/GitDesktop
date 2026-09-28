@@ -170,9 +170,10 @@ export function isMainPromoting(path: string): boolean {
   return promotingMains.has(normPath(path));
 }
 
-/** Fire-time gate for any HEAD-moving op in `repoPath`: refuses both while a
- *  promote targets it as the main workspace and while it is the promote's source
- *  worktree (active until the promote's `openRepo` moves the app off it). */
+/** Fire-time gate for any HEAD- or branch-moving op in `repoPath`, and for branch
+ *  deletes: refuses both while a promote targets it as the main workspace and
+ *  while it is the promote's source worktree (active until the promote's
+ *  `openRepo` moves the app off it). */
 export function promotionBlocksCheckout(repoPath: string): boolean {
   return isMainPromoting(repoPath) || isWorktreePromoting(repoPath);
 }

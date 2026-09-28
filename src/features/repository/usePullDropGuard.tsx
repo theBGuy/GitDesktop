@@ -11,7 +11,9 @@ import type {
   PullWouldDrop,
 } from "@/lib/git/api";
 import { usePullRebaseDecided } from "@/lib/git/queries";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   PULL_DECISION_COPY,
   PullRebaseDropDialog,
@@ -74,6 +76,11 @@ export function usePullDropGuard(
   // the user explicitly authorized must report back either way.
   async function decide(decision: PullDecision) {
     if (!refusal) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      setRefusal(null);
+      return;
+    }
     const shas: PullDecisionShas = {
       branch: refusal.branch,
       decision,

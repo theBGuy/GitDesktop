@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { required, withForm } from "@/lib/form";
 import type { CherryPickRangeResult } from "@/lib/git/api";
@@ -30,6 +31,7 @@ import {
   useResetToCommit,
 } from "@/lib/git/queries";
 import { refNameWarning } from "@/lib/git/ref-name";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
@@ -119,6 +121,10 @@ export function ResetCommitDialog({
   const shownHash = useRetained(hash);
   async function run() {
     if (!hash) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await resetMutation.mutateAsync(hash);
     } catch (e) {
@@ -191,6 +197,11 @@ export function CherryPickOntoDialog({
   const count = shownHashes?.length ?? 0;
   async function run() {
     if (!hashes || !branch) return;
+    // It switches to the destination branch, so it moves HEAD.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const target = branch;
     let result: CherryPickRangeResult;
     try {

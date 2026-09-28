@@ -48,6 +48,7 @@ import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotk
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { useStashReapplyRecovery } from "@/features/repository/useStashReapplyRecovery";
 import {
   isMergeMethodAllowed,
@@ -77,6 +78,7 @@ import type { PrSection } from "@/lib/pulls/pr-section";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
@@ -461,6 +463,10 @@ export function LocalPrView({
   // to reach its resolver by.
   async function doMerge(strategy: MergeStrategy) {
     if (!pr) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const message = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
     try {
       const outcome = await merge.mutateAsync({
@@ -523,6 +529,10 @@ export function LocalPrView({
    *  it on teardown would withdraw the offer entirely. */
   async function doUpdateBranch() {
     if (!pr) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       await updateBranchFrom.mutateAsync({ branch: pr.head, base: pr.base });
       toast.success(`Updated ${pr.head} from ${pr.base}`);

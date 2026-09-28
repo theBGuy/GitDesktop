@@ -148,6 +148,11 @@ impl AppState {
     /// both resolve and the first insert wins — the same value either way.
     ///
     /// Only settled identities enter the cache; failures remain retryable.
+    ///
+    /// The SHARED key's source, first that applies: the settled identity; under an
+    /// identity failure with the checkout resolved, [`common_dir_from_fs`] (so a
+    /// linked worktree or subdirectory keeps the repo's domain through a transient);
+    /// else the raw spelling. `identity` itself never takes the filesystem arm.
     async fn try_resolve_lock_keys(
         &self,
         repo_path: &str,
@@ -161,9 +166,13 @@ impl AppState {
             Err(error) => (repo_path.to_string(), Some(error)),
         };
         let resolved = error.is_none() && toplevel.is_ok() && identity != repo_path;
+        let fs_common = match (&error, &toplevel) {
+            (Some(_), Ok(toplevel)) => common_dir_from_fs(toplevel).await,
+            _ => None,
+        };
         let keys = LockKeys {
             checkout: normalize_wt_path(toplevel.as_deref().unwrap_or(repo_path)),
-            shared: normalize_wt_path(&identity),
+            shared: normalize_wt_path(fs_common.as_deref().unwrap_or(&identity)),
             identity,
         };
         if !resolved {
@@ -364,6 +373,55 @@ fn sweep_unadopted_tombstone(registry: &AgentCancels, id: &str) {
     {
         map.remove(id);
     }
+}
+
+/// The common git dir read off the filesystem, git's own way: `<toplevel>/.git` is
+/// either that directory, or a gitfile naming a per-checkout git dir whose
+/// `commondir` file (relative to it) points back at the shared one. A lock-key
+/// fallback only, never an identity: marker roots hash `repo_identity`'s exact
+/// spelling. `None` on anything unreadable, leaving the caller's raw-path fallback.
+async fn common_dir_from_fs(toplevel: &str) -> Option<String> {
+    let dot_git = std::path::Path::new(toplevel).join(".git");
+    if tokio::fs::metadata(&dot_git).await.ok()?.is_dir() {
+        return Some(dot_git.to_string_lossy().into_owned());
+    }
+    let gitfile = tokio::fs::read_to_string(&dot_git).await.ok()?;
+    // Trailing whitespace stripped, as git's own gitfile reader does.
+    let gitdir = gitfile.lines().next()?.strip_prefix("gitdir: ")?.trim_end();
+    // `join` keeps an absolute gitdir as-is and anchors a relative one (the
+    // `worktree.useRelativePaths` form) at the checkout, as git does.
+    let gitdir = std::path::Path::new(toplevel).join(gitdir);
+    // A stale gitfile (its admin dir pruned) must not read as a submodule below.
+    if !tokio::fs::metadata(&gitdir).await.ok()?.is_dir() {
+        return None;
+    }
+    let common = match tokio::fs::read_to_string(gitdir.join("commondir")).await {
+        Ok(rel) => gitdir.join(rel.trim_end_matches(['\r', '\n'])),
+        // No `commondir`: this git dir is not a linked worktree's, so it IS the common
+        // dir (a submodule's `.git/modules/<name>`).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => gitdir,
+        Err(_) => return None,
+    };
+    Some(lexically_normal(&common).to_string_lossy().into_owned())
+}
+
+/// Folds `.` and `..` components without touching the filesystem: canonicalizing
+/// would yield a `\\?\` verbatim spelling on Windows, which no git output matches.
+fn lexically_normal(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -590,11 +648,128 @@ mod lock_key_tests {
             .scope(|| AppError::Timeout(30), async {
                 let keys = state.resolve_lock_keys(&sub).await;
                 assert_eq!(keys.checkout, root_keys.checkout);
-                assert_eq!(keys.shared, normalize_wt_path(&sub));
+                // The resolved checkout also anchors the filesystem read of its common
+                // dir, so the subdirectory keeps the repo's shared domain too.
+                assert_eq!(keys.shared, root_keys.shared);
+                assert_eq!(
+                    keys.identity, sub,
+                    "while the identity stays the raw spelling"
+                );
                 assert!(same(&root_lock, &state.working_tree_lock(&sub).await));
                 assert!(!state.lock_keys.lock().await.contains_key(&sub));
             })
             .await;
+    }
+
+    /// The filesystem fallback and `repo_identity` must name the same common dir for
+    /// every checkout shape, or a transient identity failure would split one repo's
+    /// shared domain in two.
+    #[tokio::test]
+    async fn the_filesystem_common_dir_agrees_with_repo_identity() {
+        let (_dir, repo) = setup_repo("fs-common").await;
+        let sub = std::path::Path::new(&repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let holder = temp_dir("fs-common-linked");
+        let linked = std::path::Path::new(&fixture_path(holder.path())).join("wt");
+        let linked = linked.to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-b", "gd-lockkey-fs", &linked]).await;
+        let mut spellings = vec![repo.clone(), sub.to_string_lossy().into_owned(), linked];
+        // A relative gitfile (`worktree add --relative-paths`, git >= 2.48); skipped
+        // where the runner's git predates the flag.
+        let relative = std::path::Path::new(&fixture_path(holder.path())).join("rel");
+        let relative = relative.to_string_lossy().into_owned();
+        let added = run_git(
+            Some(&repo),
+            &[
+                "worktree",
+                "add",
+                "--relative-paths",
+                "-b",
+                "gd-lockkey-rel",
+                &relative,
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        if added.is_ok() {
+            spellings.push(relative);
+        }
+
+        for path in &spellings {
+            let toplevel = crate::git::runner::worktree_toplevel(path).await.unwrap();
+            let from_fs = common_dir_from_fs(&toplevel)
+                .await
+                .unwrap_or_else(|| panic!("no common dir read for {path}"));
+            let identity = crate::git::repo::repo_identity(path).await.unwrap();
+            assert_eq!(
+                normalize_wt_path(&from_fs),
+                normalize_wt_path(&identity),
+                "{path}: fs {from_fs:?} vs git {identity:?}"
+            );
+        }
+    }
+
+    /// A gitfile whose admin dir is gone (a pruned worktree) yields no common dir, so
+    /// the shared key keeps its raw-path fallback instead of a path that names
+    /// nothing; trailing whitespace on a live gitfile is ignored, as git ignores it.
+    #[tokio::test]
+    async fn a_stale_gitfile_reads_no_common_dir() {
+        let (_dir, repo) = setup_repo("fs-common-stale").await;
+        let checkout = temp_dir("fs-common-stale-checkout");
+        let checkout_path = fixture_path(checkout.path());
+        let missing = std::path::Path::new(&repo).join(".git/worktrees/pruned");
+        let gitfile = std::path::Path::new(&checkout_path).join(".git");
+        std::fs::write(&gitfile, format!("gitdir: {}\n", missing.display())).unwrap();
+        assert_eq!(common_dir_from_fs(&checkout_path).await, None);
+        let state = AppState::default();
+        let keys = crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(
+                || AppError::Timeout(30),
+                state.resolve_lock_keys(&checkout_path),
+            )
+            .await;
+        assert_eq!(keys.shared, normalize_wt_path(&checkout_path));
+
+        let live = std::path::Path::new(&repo).join(".git");
+        std::fs::write(&gitfile, format!("gitdir: {}  \r\n", live.display())).unwrap();
+        let from_fs = common_dir_from_fs(&checkout_path).await.unwrap();
+        let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+        assert_eq!(normalize_wt_path(&from_fs), normalize_wt_path(&identity));
+    }
+
+    /// A transient identity failure from inside a linked worktree must leave it in
+    /// the repo's shared domain, so its fetch or worktree admin still serializes with
+    /// the main checkout's, while the identity error still propagates uncached.
+    #[tokio::test]
+    async fn an_identity_error_keeps_a_linked_worktree_in_the_shared_domain() {
+        let (_dir, repo) = setup_repo("identity-error-linked").await;
+        let holder = temp_dir("identity-error-linked-wt");
+        let linked = std::path::Path::new(&fixture_path(holder.path())).join("wt");
+        let linked = linked.to_string_lossy().into_owned();
+        git(
+            &repo,
+            &["worktree", "add", "-b", "gd-lockkey-transient", &linked],
+        )
+        .await;
+
+        let state = AppState::default();
+        let main = domains_of(&state, &repo).await;
+        crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(|| AppError::Timeout(30), async {
+                let during = domains_of(&state, &linked).await;
+                assert!(same(&main.1, &during.1), "worktree admin stays shared");
+                assert!(same(&main.2, &during.2), "network stays shared");
+                assert!(!same(&main.0, &during.0), "the checkout keeps its own lock");
+                assert!(matches!(
+                    state.repo_identity_cached(&linked).await,
+                    Err(AppError::Timeout(30))
+                ));
+                assert_eq!(state.resolve_lock_keys(&linked).await.identity, linked);
+                assert!(!state.lock_keys.lock().await.contains_key(&linked));
+            })
+            .await;
+        let settled = domains_of(&state, &linked).await;
+        assert!(same(&main.1, &settled.1) && same(&main.2, &settled.2));
     }
 
     /// Marker roots hash the raw identity spelling, including separators.

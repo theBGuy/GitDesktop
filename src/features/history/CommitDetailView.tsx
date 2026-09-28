@@ -270,6 +270,10 @@ export function CommitDetailView({
 
   async function doRevertCommit() {
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     void revertCommit.mutateAsync(hash).catch(onError);
   }
 
@@ -280,6 +284,10 @@ export function CommitDetailView({
       .getState()
       .ask(cherryPickCommitConfirm(hash, null));
     if (!ok) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     let applied: boolean;
     try {
       applied = await cherryPick.mutateAsync(hash);

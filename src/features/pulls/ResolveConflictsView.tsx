@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import {
   useAbortLocalPrMerge,
   useFinishLocalPrMerge,
@@ -22,6 +23,7 @@ import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -127,6 +129,10 @@ export function ResolveConflictsView({
   // keep pointing at a worktree the merge already finished with or threw away.
   async function onFinish() {
     if (!pending) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       const outcome = await finish.mutateAsync({
         base: pr.base,

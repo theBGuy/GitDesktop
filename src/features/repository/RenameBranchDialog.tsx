@@ -14,8 +14,10 @@ import { useRenameBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   GenerateBranchNameButton,
   useBranchNameGenerateAction,
@@ -104,6 +106,10 @@ export function RenameBranchDialog({
     defaultValues: { name: "" },
     onSubmit: async ({ value }) => {
       if (!target) return;
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       const newName = sanitizeRefName(value.name);
       try {
         await renameBranch.mutateAsync({ oldName: target, newName });

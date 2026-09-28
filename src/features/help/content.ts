@@ -719,8 +719,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   remote was rewritten (a rebase or force-push) and every commit here already landed
   upstream under new ids, the item becomes a confirmed **Reset to _origin/…_** instead —
   and when you still have commits of your own on top of a proven rewrite, the update is
-  disabled with the reason, since a merge would duplicate the rewritten history. This
-  is the "just merged a PR — bring the default branch current before I switch back" flow;
+  disabled with the reason, since a merge would duplicate the rewritten history. On the
+  branch you're on, that reset rewrites your files too, so it stops and names any
+  untracked files sitting where the upstream version has files; move them aside and run it
+  again. This is the "just merged a PR — bring the default branch current before I switch back" flow;
   every branch's row shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so
   the branches with commits to pull are visible at a glance, and *Update default branch from
   its remote* is available from the command palette too.
@@ -851,7 +853,9 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
   you're currently in. The dialog closes right away and the promote finishes on its own;
   a status line at the top of the repository view names each step (removing the worktree,
   stashing your changes, checking out the branch) until the branch lands in your main
-  workspace.
+  workspace. For those few moments the main workspace turns away pulls, merges, rebases,
+  resets, reverts, cherry-picks, undo and history edits, along with branch renames and
+  deletes, with a short message, so the promote lands on the branch you chose.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 
@@ -982,7 +986,8 @@ And when it's the **remote** that was rewritten (a server-side rebase, like GitH
 *Update branch → rebase*) and every commit of yours already landed upstream under new
 ids, the force-push confirmation warns that pushing would put the old history back,
 and the Pull menu offers a confirmed **Reset to _origin/…_** that lines the two up
-instead.
+instead. The reset never overwrites untracked files: if any sit where the upstream
+version has files, it stops and names them so you can move them aside first.
 
 ## Resolving conflicts
 

@@ -14,7 +14,9 @@ import {
   useRebaseOntoAutostash,
 } from "@/lib/git/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   StashReapplyDialog,
   type StashReapplyTarget,
@@ -188,6 +190,12 @@ export function useStashReapplyRecovery(repoPath: string) {
   // per-call callbacks once the observer has no listeners — the report of a
   // recovery the user explicitly asked for would never arrive, stash included.
   async function runRecovery(req: StashReapplyRequest) {
+    // Every compound funnels through here, whether confirmed or auto-run.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      setRequest(null);
+      return;
+    }
     const copy: AutostashCopy = {
       operation: capitalize(req.operationLabel),
       reapplied: req.reappliedMessage,

@@ -234,6 +234,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
 
   async function doRevertCommit(hash: string) {
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     revertCommit.mutate(hash, { onError });
   }
 
@@ -242,6 +246,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       .getState()
       .ask(cherryPickCommitConfirm(hash, currentName));
     if (!ok) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     cherryPick.mutate(hash, {
       onSuccess: (applied) => {
         if (applied) {

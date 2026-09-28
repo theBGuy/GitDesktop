@@ -20,7 +20,9 @@ use crate::state::AppState;
 /// cherry-pick-onto) MUST call this before their first mutation: a protective
 /// `switch <target>` is a no-op when target IS the current branch, so a dirty
 /// tree would otherwise flow into the destructive reset. Untracked files are
-/// deliberately allowed — `reset --hard` never removes them, and a merge that
+/// deliberately allowed: `reset --hard` leaves them alone only where the target
+/// tracks no file at their path, so a caller resetting to an arbitrary commit
+/// also needs [`refuse_untracked_reset_collisions`]. A merge, switch or pick that
 /// would clobber one is refused by git itself.
 async fn ensure_clean_tree(repo: &str) -> AppResult<()> {
     let status = run_git(
@@ -35,6 +37,99 @@ async fn ensure_clean_tree(repo: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+/// How many colliding paths a refusal names before summarizing the rest.
+const COLLISIONS_NAMED: usize = 5;
+
+/// Refuses a `reset --hard <target>` that would overwrite untracked files: git
+/// deletes any untracked file or directory in the way of a path the target
+/// tracks (git-reset(1)), leaving no stash, object or reflog to recover it from.
+/// Ignored files are deliberately not guarded, so build-artifact churn can't
+/// block a legitimate reset. Callers hold the working-tree lock and have already
+/// passed [`ensure_clean_tree`], so the index matches HEAD and an untracked path
+/// is by definition one HEAD doesn't track.
+async fn refuse_untracked_reset_collisions(repo: &str, target: &str) -> AppResult<()> {
+    let untracked = git_list_untracked(repo.to_string()).await?;
+    if untracked.is_empty() {
+        return Ok(());
+    }
+    // `repo` is always a checkout toplevel: both listings are cwd-relative, and
+    // their paths only line up because they share that cwd (so no `--full-tree`).
+    let tracked = run_git(
+        Some(repo),
+        &["ls-tree", "-r", "--name-only", "-z", target],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy();
+    // A case-folding filesystem overwrites `G.txt` when the target writes `g.txt`
+    // (measured, git 2.51.1 on NTFS), so the match folds exactly when git does.
+    let ignore_case = run_git_raw(
+        Some(repo),
+        &["config", "--bool", "core.ignorecase"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .is_ok_and(|o| o.code == 0 && o.stdout_lossy().trim() == "true");
+    let tracked: Vec<&str> = tracked.split('\0').filter(|s| !s.is_empty()).collect();
+    let colliding = colliding_untracked(&untracked, &tracked, ignore_case);
+    if colliding.is_empty() {
+        return Ok(());
+    }
+    let mut named = colliding
+        .iter()
+        .take(COLLISIONS_NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if colliding.len() > COLLISIONS_NAMED {
+        named.push_str(&format!(" and {} more", colliding.len() - COLLISIONS_NAMED));
+    }
+    let (noun, pronoun) = if colliding.len() == 1 {
+        ("an untracked file", "it")
+    } else {
+        ("untracked files", "them")
+    };
+    Err(AppError::InvalidArgument(format!(
+        "resetting would overwrite {noun} the target commit tracks ({named}) — move or remove {pronoun} first"
+    )))
+}
+
+/// The untracked paths a checkout of `tracked` would overwrite: an exact match,
+/// an untracked file standing where the target needs a directory, or an untracked
+/// directory (or file inside one) standing where the target needs a file. An
+/// untracked file merely sharing a directory with a tracked one is not in the way.
+fn colliding_untracked(untracked: &[String], tracked: &[&str], ignore_case: bool) -> Vec<String> {
+    let fold = |p: &str| {
+        if ignore_case {
+            p.to_lowercase()
+        } else {
+            p.to_string()
+        }
+    };
+    let mut files = std::collections::HashSet::new();
+    let mut dirs = std::collections::HashSet::new();
+    for path in tracked {
+        let path = fold(path);
+        for (i, _) in path.match_indices('/') {
+            dirs.insert(path[..i].to_string());
+        }
+        files.insert(path);
+    }
+    untracked
+        .iter()
+        .filter(|raw| {
+            // `ls-files --others` names an untracked nested repository as `dir/`.
+            let path = fold(raw.trim_end_matches('/'));
+            files.contains(&path)
+                || dirs.contains(&path)
+                || path
+                    .match_indices('/')
+                    .any(|(i, _)| files.contains(&path[..i]))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Resolves a path inside .git (worktree-safe via --git-path) to an absolute one.
@@ -463,7 +558,10 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// the dirty check alone would let a reset strand those markers and leave the
 /// repo claiming an operation whose commits have moved out from under it.
 ///
-/// Both `--hard` guards and the reset itself run under ONE working-tree-lock hold,
+/// `--hard` also refuses when an untracked file sits at a path the target tracks,
+/// which git would silently overwrite (see [`refuse_untracked_reset_collisions`]).
+///
+/// Every `--hard` guard and the reset itself run under ONE working-tree-lock hold,
 /// so no other caller in THIS PROCESS can dirty the tree or start a merge between the
 /// checks and a rewrite that has no stash and no reflog to recover from. The hold
 /// is why the reset runs on the lock-free `run_git`: `run_git_mutating` re-acquires
@@ -525,6 +623,7 @@ pub(crate) async fn git_reset_core(
             "an operation is still in progress — finish or abort it before resetting".into(),
         ));
     }
+    refuse_untracked_reset_collisions(&repo_path, &hash).await?;
     run_git(
         Some(&repo_path),
         &["reset", "--hard", &hash],
@@ -4965,7 +5064,8 @@ mod tests {
         let (dir, repo) = setup_repo("clean-tree").await;
         // Clean tree → Ok.
         assert!(ensure_clean_tree(&repo).await.is_ok());
-        // Untracked file → still Ok (`reset --hard` never removes it).
+        // Untracked file → still Ok: `reset --hard` leaves it alone only where the
+        // target doesn't track its path, which `refuse_untracked_reset_collisions` checks.
         std::fs::write(dir.path().join("scratch.txt"), "x\n").unwrap();
         assert!(ensure_clean_tree(&repo).await.is_ok());
         // Unstaged tracked change → refused (this is the reset --hard loss surface).
@@ -5118,6 +5218,145 @@ mod tests {
         assert!(
             matches!(&err, AppError::InvalidArgument(m) if m.contains("keep")),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn colliding_untracked_matches_every_shape_git_overwrites() {
+        let untracked = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let tracked = ["a.txt", "d/x", "f", "sub/inner.txt"];
+        assert_eq!(
+            colliding_untracked(
+                &untracked(&["a.txt", "d", "f/y", "sub/", "d/y", "other.txt"]),
+                &tracked,
+                false
+            ),
+            untracked(&["a.txt", "d", "f/y", "sub/"]),
+            "exact path, file-where-dir, dir-where-file and a nested repo collide; \
+             a sibling in a shared directory and an unrelated file don't"
+        );
+        assert!(colliding_untracked(&untracked(&["A.TXT"]), &tracked, false).is_empty());
+        assert_eq!(
+            colliding_untracked(&untracked(&["A.TXT", "D/X"]), &tracked, true),
+            untracked(&["A.TXT", "D/X"]),
+            "a case-folding checkout overwrites a differently-cased file"
+        );
+        assert!(colliding_untracked(&[], &tracked, false).is_empty());
+        assert!(colliding_untracked(&untracked(&["a.txt"]), &[], false).is_empty());
+    }
+
+    /// Commits `g.txt`, then deletes it in a second commit: resetting to the first
+    /// writes `g.txt` back. Returns the commit that tracks it.
+    async fn setup_reset_collision(marker: &str) -> (tempfile::TempDir, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        commit_file(&repo, dir.path(), "g.txt", "tracked\n", "add g").await;
+        let tracks_g = rev(&repo, "HEAD").await;
+        git(&repo, &["rm", "-q", "g.txt"]).await;
+        git(&repo, &["commit", "-m", "drop g"]).await;
+        (dir, repo, tracks_g)
+    }
+
+    /// git deletes an untracked file in the way of a path the target tracks, and a
+    /// clean-tree check can't see it. The destruction control at the end proves the
+    /// refusal is what kept the bytes.
+    #[tokio::test]
+    async fn reset_hard_refuses_to_overwrite_an_untracked_file_the_target_tracks() {
+        let (dir, repo, tracks_g) = setup_reset_collision("reset-hard-collide").await;
+        let precious = b"precious untracked work\r\nno newline at end";
+        std::fs::write(dir.path().join("g.txt"), precious).unwrap();
+        assert!(
+            ensure_clean_tree(&repo).await.is_ok(),
+            "fixture must pass the clean-tree check, or this test proves nothing new"
+        );
+        let tip = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+
+        let err = git_reset_core(&state, repo.clone(), tracks_g.clone(), Some("hard".into()))
+            .await
+            .expect_err("an untracked file at a target-tracked path must refuse the reset");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m)
+                if m.contains("(g.txt)") && m.contains("move or remove it first")),
+            "the refusal must name the file and the remedy, got {err:?}"
+        );
+        assert_eq!(std::fs::read(dir.path().join("g.txt")).unwrap(), precious);
+        assert_eq!(rev(&repo, "HEAD").await, tip, "and HEAD never moved");
+
+        // Destruction control: git itself has no such scruples.
+        git(&repo, &["reset", "--hard", &tracks_g]).await;
+        assert_eq!(
+            tree_text(dir.path(), "g.txt"),
+            "tracked\n",
+            "an unguarded hard reset overwrites exactly what the refusal protects"
+        );
+    }
+
+    /// Moving the file aside clears the refusal; the reset then behaves as before.
+    #[tokio::test]
+    async fn reset_hard_proceeds_once_the_colliding_file_is_gone() {
+        let (dir, repo, tracks_g) = setup_reset_collision("reset-hard-cleared").await;
+        std::fs::write(dir.path().join("g.txt"), "precious\n").unwrap();
+        let state = AppState::default();
+        assert!(
+            git_reset_core(&state, repo.clone(), tracks_g.clone(), Some("hard".into()))
+                .await
+                .is_err()
+        );
+        std::fs::rename(dir.path().join("g.txt"), dir.path().join("g.moved")).unwrap();
+        // `g.moved` is untracked everywhere, so it must not block the reset either.
+        git_reset_core(&state, repo.clone(), tracks_g.clone(), Some("hard".into()))
+            .await
+            .expect("a reset with nothing in its way succeeds");
+        assert_eq!(rev(&repo, "HEAD").await, tracks_g);
+        assert_eq!(tree_text(dir.path(), "g.txt"), "tracked\n");
+        assert_eq!(tree_text(dir.path(), "g.moved"), "precious\n");
+    }
+
+    /// An untracked file at a path the target doesn't track is out of the reset's
+    /// way: no refusal, and the file survives byte-identical.
+    #[tokio::test]
+    async fn reset_hard_keeps_an_untracked_file_the_target_does_not_track() {
+        let (dir, repo, tracks_g) = setup_reset_collision("reset-hard-bystander").await;
+        let bytes = b"scratch\r\n";
+        std::fs::write(dir.path().join("scratch.txt"), bytes).unwrap();
+        let state = AppState::default();
+        git_reset_core(&state, repo.clone(), tracks_g.clone(), Some("hard".into()))
+            .await
+            .expect("an untracked bystander must not block the reset");
+        assert_eq!(rev(&repo, "HEAD").await, tracks_g);
+        assert_eq!(
+            std::fs::read(dir.path().join("scratch.txt")).unwrap(),
+            bytes
+        );
+    }
+
+    /// Past a handful, the refusal names the first few and counts the rest.
+    #[tokio::test]
+    async fn reset_hard_collision_refusal_caps_the_named_files() {
+        let (dir, repo) = setup_repo("reset-hard-many").await;
+        let base = rev(&repo, "HEAD").await;
+        let names: Vec<String> = (1..=7).map(|i| format!("n{i}.txt")).collect();
+        for name in &names {
+            std::fs::write(dir.path().join(name), "tracked\n").unwrap();
+        }
+        git(&repo, &["add", "."]).await;
+        git(&repo, &["commit", "-m", "add seven"]).await;
+        let tracks_all = rev(&repo, "HEAD").await;
+        git(&repo, &["reset", "--hard", &base]).await;
+        for name in &names {
+            std::fs::write(dir.path().join(name), "mine\n").unwrap();
+        }
+        let state = AppState::default();
+        let err = git_reset_core(&state, repo.clone(), tracks_all, Some("hard".into()))
+            .await
+            .expect_err("seven collisions refuse");
+        let AppError::InvalidArgument(msg) = &err else {
+            panic!("got {err:?}");
+        };
+        assert!(
+            msg.contains("(n1.txt, n2.txt, n3.txt, n4.txt, n5.txt and 2 more)")
+                && msg.contains("move or remove them first"),
+            "{msg}"
         );
     }
 

@@ -1027,6 +1027,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     try {
+      // Between freeing its branch and checking it out, a promote leaves that
+      // branch in no checkout, so git would let it be deleted from under it.
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
       // git refuses to delete the checked-out branch: move off it first — onto a
       // branch not already occupied by another worktree (that checkout fails too).
       if (deleteTarget === currentName) {
@@ -1164,6 +1170,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     options: MergeRunOptions,
   ) {
     setPickerMode(null);
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     if (mode === "rebase") {
       try {
         await rebaseBranch.mutateAsync(branch);
@@ -1216,6 +1226,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // compound up front beats a round-trip that can only fail.
   async function runRebaseOnto(newBase: string, oldBase: string) {
     setRebaseOntoOpen(false);
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const request = {
       operationLabel: "rebase",
       detail: newBase,
@@ -1279,6 +1293,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       );
       return;
     }
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
@@ -1299,6 +1317,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // flow. Merges in place when `target` is current, fast-forwards otherwise.
   async function doUpdateFromUpstream(target: string, base: string) {
     setOpen(false);
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
@@ -1339,6 +1361,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       confirmVariant: "destructive",
     });
     if (!ok) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       if (branch.isCurrent) {
         // The confirmation above spans an await, and HEAD can move under it — an

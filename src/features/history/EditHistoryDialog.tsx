@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import {
   useRebaseEdit,
   useRewriteCommits,
@@ -33,6 +34,7 @@ import {
 import type { CommitSummary } from "@/lib/git/types";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
@@ -170,6 +172,10 @@ export function EditHistoryDialog({
   // the hand-off to the Changes tab that the paused rebase depends on.
   async function apply() {
     if (plan.error || !plan.changed) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     if (plan.hasEdit) {
       // Resumable path: starts a real rebase that pauses at the first Edit —
       // the conflict/op banner in Changes takes it from there.

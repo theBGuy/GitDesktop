@@ -55,8 +55,10 @@ import {
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
 import { usePullDropGuard } from "./usePullDropGuard";
@@ -327,6 +329,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // error keeps its normal toast. Both are triggered by the refusal, never
   // pre-flighted.
   async function doPull(mode: PullMode) {
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     const plain = pullSuccessMessage(mode);
     try {
       await pull.mutateAsync(mode);
@@ -353,6 +359,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // outcome; a conflicting merge rejects and the conflict banner takes over
   // (its error still toasts). No auto-push — Push lights up on its own.
   async function doUpdateFromUpstream() {
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
     try {
       const outcome = await updateUpstream.mutateAsync(undefined);
       const ref = `upstream/${outcome.branch}`;
@@ -407,6 +417,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // Wording kept in step with the branch menu's twin.
     if (headNameRef.current !== branch) {
       toast.info("HEAD moved while the dialog was open — nothing was reset.");
+      return;
+    }
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
     try {
