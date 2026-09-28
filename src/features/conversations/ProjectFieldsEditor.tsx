@@ -173,6 +173,22 @@ function fieldDiff(
   return { updates, clears, applied };
 }
 
+/** Whether a board's OWN drafts hold a change: every org-field draft a board holds
+ *  is one it owns, so `routes` names them all and they're left out (the issue-half
+ *  rescue sends those, or says why it can't). The one test behind both
+ *  dropped-drafts notices. */
+function ownDraftsChanged(
+  seed: Record<string, ProjectFieldValue>,
+  touched: BoardDraft,
+  routes: ReadonlyMap<string, string>,
+): boolean {
+  const { updates, clears } = fieldDiff(
+    alignSeed(seed, routes),
+    withoutRoutedFields(touched, routes),
+  );
+  return updates.length > 0 || clears.length > 0;
+}
+
 type BoardWrite = FieldDiff & {
   /** That board's values as they'll read once the write lands — the optimistic patch. */
   values: ProjectFieldValue[];
@@ -354,12 +370,7 @@ export function ProjectFieldsEditor({
       // end of a chain that stops on the first failure, stranding the boards after it.
       // Its org-field drafts are the rescue's below; its own are said once after.
       if (!board.project.viewerCanUpdate) {
-        const own = fieldDiff(
-          alignSeed(seed, routes),
-          withoutRoutedFields(touched, routes),
-        );
-        if (own.updates.length > 0 || own.clears.length > 0)
-          lockedBoardFields = true;
+        if (ownDraftsChanged(seed, touched, routes)) lockedBoardFields = true;
         continue;
       }
       let write = boardWrite(board, seed, touched, routes);
@@ -446,15 +457,9 @@ export function ProjectFieldsEditor({
     // drafts are the rescue's above, never counted here.
     const live = new Set(boards.map((board) => board.project.id));
     const stranded = Object.entries(drafts.boards).some(
-      ([projectId, touched]) => {
-        if (live.has(projectId)) return false;
-        const routes = routesFor(projectId);
-        const { updates, clears } = fieldDiff(
-          alignSeed(seeds[projectId] ?? {}, routes),
-          withoutRoutedFields(touched, routes),
-        );
-        return updates.length > 0 || clears.length > 0;
-      },
+      ([projectId, touched]) =>
+        !live.has(projectId) &&
+        ownDraftsChanged(seeds[projectId] ?? {}, touched, routesFor(projectId)),
     );
     if (stranded) toast.info(STRANDED_NOTICE);
     if (lockedBoardFields) toast.info(LOCKED_BOARD_NOTICE);

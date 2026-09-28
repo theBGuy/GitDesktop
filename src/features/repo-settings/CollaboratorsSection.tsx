@@ -28,6 +28,10 @@ import type { RepoRole } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { AsyncListBody, InlineConfirm } from "./parts";
 
@@ -47,6 +51,7 @@ const ROLE_ITEMS: Record<string, string> = Object.fromEntries(
 
 const ROLES_UNREAD_REASON =
   "Couldn't check which roles this repository supports";
+const SAVING_REASON = "Saving your last change…";
 
 function validUsername(u: string): boolean {
   return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(u);
@@ -69,7 +74,8 @@ export function CollaboratorsSection({
 
   // Every collaborator on a USER-owned repo gets write: GitHub 422s a read invite and
   // silently clamps triage/maintain/admin to write. So a KNOWN personal repo offers no
-  // role picker, and Invite holds until org-ness resolves rather than send read blind.
+  // role picker, and Invite and the row pickers hold until org-ness resolves rather
+  // than send a role blind (a clamped row pick would toast the role it didn't get).
   const personal = settings.data !== undefined && !settings.data.isOrg;
   const rolesUnknownReason = (() => {
     switch (true) {
@@ -97,6 +103,21 @@ export function CollaboratorsSection({
     validUsername(username.trim()) &&
     !add.isPending &&
     rolesUnknownReason === undefined;
+  // The username is the blocker to name first: it's the one the user can fix here.
+  const inviteHeldReason = (() => {
+    switch (true) {
+      case username.trim() === "":
+        return "Enter a GitHub username";
+      case !validUsername(username.trim()):
+        return "That isn't a valid GitHub username";
+      default:
+        return rolesUnknownReason;
+    }
+  })();
+  const collabRoleHeld =
+    rolesUnknownReason ?? (add.isPending ? SAVING_REASON : undefined);
+  const inviteRoleHeld =
+    rolesUnknownReason ?? (updateInvite.isPending ? SAVING_REASON : undefined);
 
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];
@@ -173,7 +194,7 @@ export function CollaboratorsSection({
           <DisabledReasonButton
             size="sm"
             disabled={!canAdd}
-            reason={rolesUnknownReason}
+            reason={inviteHeldReason}
             onClick={addCollaborator}
           >
             {add.isPending ? (
@@ -192,8 +213,9 @@ export function CollaboratorsSection({
             organization.
           </p>
         )}
-        {/* The settings read never retries on its own, so an error would hold Invite
-            for the dialog's life without this. */}
+        {/* The settings read has `retry: false`: an error holds Invite and the row
+            pickers until a re-read: this Retry, the window-focus `["repo"]`
+            invalidation, or reopening the dialog. */}
         {rolesUnknownReason === ROLES_UNREAD_REASON && (
           <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
             <p>{ROLES_UNREAD_REASON}.</p>
@@ -243,7 +265,7 @@ export function CollaboratorsSection({
                 active={i === activeCollab}
                 onFocus={() => setActiveCollab(i)}
                 roleValue={c.roleName}
-                roleDisabled={add.isPending || settings.isPending}
+                roleHeld={collabRoleHeld}
                 personal={personal}
                 onRole={(r) => setCollaboratorRole(c.login, r)}
                 confirming={confirming === key}
@@ -292,7 +314,7 @@ export function CollaboratorsSection({
                       : "pending"
                   }
                   roleValue={inv.permission}
-                  roleDisabled={updateInvite.isPending || settings.isPending}
+                  roleHeld={inviteRoleHeld}
                   personal={personal}
                   onRole={(r) => setInvitationRole(inv.id, r)}
                   confirming={confirming === key}
@@ -321,14 +343,21 @@ export function CollaboratorsSection({
 function RoleSlot({
   personal,
   value,
-  disabled,
+  heldReason,
   onRole,
 }: {
   personal: boolean;
   value: string;
-  disabled?: boolean;
+  /** Why the picker is held, as its hover text and accessible description. */
+  heldReason?: string;
   onRole: (role: RepoRole) => void;
 }) {
+  const held = heldReason !== undefined;
+  const reason = useDisabledReason({ disabled: held, reason: heldReason });
+  // Held by readOnly + a gated open state, never Base UI's `disabled`: that sets
+  // the trigger's tabIndex to -1, taking the picker and its reason out of reach.
+  const [open, setOpen] = useState(false);
+  if (held && open) setOpen(false);
   if (personal)
     return (
       <span className="flex h-7 w-28 shrink-0 items-center pl-2.5 text-xs">
@@ -337,23 +366,42 @@ function RoleSlot({
       </span>
     );
   return (
-    <Select
-      items={ROLE_ITEMS}
-      value={value}
-      disabled={disabled}
-      onValueChange={(v) => v && onRole(v as RepoRole)}
-    >
-      <SelectTrigger size="sm" className="w-28" aria-label="Role">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {ROLES.map((r) => (
-          <SelectItem key={r.value} value={r.value}>
-            {r.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <span className="inline-flex shrink-0" title={reason.wrapperTitle}>
+      <Select
+        items={ROLE_ITEMS}
+        value={value}
+        onValueChange={(v) => v && onRole(v as RepoRole)}
+        readOnly={held}
+        open={open}
+        onOpenChange={(next) => {
+          if (!held) setOpen(next);
+        }}
+      >
+        <SelectTrigger
+          size="sm"
+          className={cn("w-28", ARIA_DISABLED_CLASS)}
+          aria-label="Role"
+          aria-disabled={held || undefined}
+          aria-describedby={reason.describedBy}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {ROLES.map((r) => (
+            <SelectItem key={r.value} value={r.value}>
+              {r.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* `hidden` rather than sr-only: a description may point at hidden text, and
+          the trigger's own name must not read the reason a second time. */}
+      {reason.blockedReason !== null && (
+        <span id={reason.reasonId} hidden>
+          {reason.blockedReason}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -366,7 +414,7 @@ function PersonRow({
   active,
   onFocus,
   roleValue,
-  roleDisabled,
+  roleHeld,
   personal,
   onRole,
   confirming,
@@ -383,7 +431,8 @@ function PersonRow({
   active: boolean;
   onFocus: () => void;
   roleValue: string;
-  roleDisabled: boolean;
+  /** Why the role picker is held; unset leaves it editable. */
+  roleHeld?: string;
   personal: boolean;
   onRole: (role: RepoRole) => void;
   confirming: boolean;
@@ -424,7 +473,7 @@ function PersonRow({
           <RoleSlot
             personal={personal}
             value={roleValue}
-            disabled={roleDisabled}
+            heldReason={roleHeld}
             onRole={onRole}
           />
           <Button

@@ -68,8 +68,9 @@ pub struct SessionHealth {
     pub login: Option<String>,
     /// `gh` accounts only; `None` elsewhere.
     pub active: Option<bool>,
-    /// A short human reason for broken/offline, minted by `sanitize_detail`'s register:
-    /// one line, the forge's own words without CLI framing, NEVER token material.
+    /// A short human reason for a broken, rate-limited, or offline session, minted in
+    /// `sanitize_detail`'s register: one line, the forge's own words without CLI
+    /// framing, NEVER token material.
     pub detail: Option<String>,
     /// `"oauth"` | `"pat"` | `"token"` | `None`.
     pub method: Option<String>,
@@ -1568,19 +1569,24 @@ fn is_aggregate_failure(text: &str) -> bool {
 }
 
 /// Redacts tokens, then reduces CLI output to the forge's own words on one line: host
-/// header lines, status glyphs, `<host>:` prefixes and `DETAIL_WRAPPERS` go, success
-/// (✓) lines and aggregate failure lines go while a specific failure line remains, and
-/// an over-`cap` result is cut at a word with an ellipsis, never leaving an unbalanced
-/// quote. At most `cap` chars.
+/// header lines, status glyphs, announced `<host>:` prefixes and `DETAIL_WRAPPERS`
+/// go, success (✓) lines and aggregate failure lines go while a specific failure
+/// line remains, and an over-`cap` result is cut at a word with an ellipsis, never
+/// leaving an unbalanced quote. At most `cap` chars.
 fn normalize_detail(raw: &str, cap: usize) -> String {
     let redacted = redact_tokens(raw).replace('\r', "\n");
     let mut failures = Vec::new();
     let mut successes = Vec::new();
+    let mut hosts = Vec::new();
     for line in redacted.lines().map(str::trim) {
-        if line.is_empty() || host_token_len(line) == Some(line.len()) {
+        if line.is_empty() {
             continue;
         }
-        let (success, text) = strip_detail_framing(line);
+        if host_token_len(line) == Some(line.len()) {
+            hosts.push(line.to_ascii_lowercase());
+            continue;
+        }
+        let (success, text) = strip_detail_framing(line, &mut hosts);
         match (text.is_empty(), success) {
             (true, _) => {}
             (false, true) => successes.push(text),
@@ -1612,23 +1618,26 @@ fn normalize_detail(raw: &str, cap: usize) -> String {
 }
 
 /// One output line without its CLI framing, and whether it carried a success glyph.
-fn strip_detail_framing(line: &str) -> (bool, String) {
+/// `hosts` holds the hosts this output names as its own (a header line, or a host
+/// leading a status glyph); only those lose a `<host>:` prefix, so a file name such as
+/// `config.yml:` keeps its place in the message.
+fn strip_detail_framing(line: &str, hosts: &mut Vec<String>) -> (bool, String) {
     let mut s = line;
     let mut success = false;
     loop {
         let before = s.len();
         if let Some(n) = host_token_len(s) {
-            let rest = &s[n..];
-            if let Some(after) = rest
+            let (host, rest) = s.split_at(n);
+            if rest.starts_with(char::is_whitespace) && status_glyph(rest.trim_start()).is_some() {
+                // glab's host header run together with the status line under it.
+                hosts.push(host.to_ascii_lowercase());
+                s = rest.trim_start();
+            } else if let Some(after) = rest
                 .strip_prefix(':')
                 .filter(|a| a.starts_with(char::is_whitespace))
+                .filter(|_| hosts.iter().any(|h| h.eq_ignore_ascii_case(host)))
             {
                 s = after.trim_start();
-            } else if rest.starts_with(char::is_whitespace)
-                && status_glyph(rest.trim_start()).is_some()
-            {
-                // glab's host header run together with the status line under it.
-                s = rest.trim_start();
             }
         }
         if let Some((ok, n)) = status_glyph(s) {
@@ -3187,6 +3196,27 @@ mod tests {
             assert_eq!(health.detail.as_deref(), Some(GH_TOKEN_INVALID));
         }
         assert_eq!(sanitize_detail(GH_401), GH_401);
+    }
+
+    #[test]
+    fn only_announced_hosts_lose_their_prefix() {
+        // A dotted file name is not a host the output named, so it keeps its place.
+        for raw in [
+            "config.yml: permission denied",
+            "hosts.yml: permission denied",
+        ] {
+            assert_eq!(sanitize_detail(raw), raw);
+        }
+        // A host the output announced as a header still loses its prefix.
+        assert_eq!(
+            sanitize_detail("gitlab.com\n  x gitlab.com: token expired"),
+            "token expired"
+        );
+        // The match ignores case and takes a `:port` as part of the host.
+        assert_eq!(
+            sanitize_detail("GHES.Example:8443\n  x ghes.example:8443: token expired"),
+            "token expired"
+        );
     }
 
     // ── tombstone sweep ──
