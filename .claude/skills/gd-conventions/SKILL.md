@@ -524,6 +524,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `package.json`); the blind spots are a crate-only bump and a lockfile-only
   drift inside a caret range, both gated by check-tauri-plugin-parity.mjs on
   every PR. A Dependabot group can't span ecosystems, so the two PRs combine.
+- **CodeMirror/Lezer core packages are lockfile SINGLETONS**, gated by
+  `scripts/check-lockfile-dedupe.mjs` (its `SINGLETONS` list): two installed
+  copies of `@codemirror/state` throw at editor open, and a split
+  `@lezer/highlight` drops theme coloring — neither shows in build or tests.
+  Remedy is `pnpm dedupe`, then an `overrides:` pin in `pnpm-workspace.yaml`
+  for a split that survives it.
 
 ## Code comments
 

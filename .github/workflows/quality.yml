@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The seven scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The eight scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
           node-version: 24
 
       # One step per script so a failure names its own check in the UI. The same
-      # seven scripts plus the self-tests below run locally via package.json's
+      # eight scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places. Exception: a guard
       # needing a built artifact (check-built-whitespace.mjs) runs from the
       # workflow that builds it, and reaches this job only via its fixtures.
@@ -68,6 +68,9 @@ jobs:
 
       - name: Tauri npm/crate parity
         run: node scripts/check-tauri-plugin-parity.mjs
+
+      - name: Lockfile singleton dedupe
+        run: node scripts/check-lockfile-dedupe.mjs
 
       # Negative controls for the scanners themselves — their worst failure is a
       # silent fail-open, so the fixtures that prove each predicate still fires

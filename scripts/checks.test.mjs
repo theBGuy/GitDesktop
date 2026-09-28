@@ -45,6 +45,11 @@ import {
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
 import {
+  verdict as dedupeVerdict,
+  parsePackageVersions,
+  SINGLETONS,
+} from "./check-lockfile-dedupe.mjs";
+import {
   cardRefOf,
   frontmatterOf,
   isAbsoluteRef,
@@ -3786,6 +3791,93 @@ test("servedRelPathsFor rejects refs that escape public/", () => {
   assert.throws(() => servedRelPathsFor("/./og/a.png"));
   // The legal shapes still pass untouched.
   assert.deepEqual(servedRelPathsFor("/og/a.png"), ["og/a.png", "og/a.webp"]);
+});
+
+// --------------------------------------------------------- check-lockfile-dedupe
+
+/** A pnpm lockfile whose `packages:` section carries the given keys. */
+function pnpmLock(packageKeys, eol = "\n") {
+  return [
+    "lockfileVersion: '9.0'",
+    "",
+    "importers:",
+    "",
+    "  .:",
+    "    dependencies:",
+    "      '@codemirror/state':",
+    "        specifier: ^6.0.0",
+    "        version: 9.9.9",
+    "",
+    "packages:",
+    "",
+    ...packageKeys.flatMap((key) => [
+      `  ${key}:`,
+      "    resolution: {integrity: sha512-fixture}",
+      "",
+    ]),
+    "snapshots:",
+    "",
+    "  '@codemirror/state@8.8.8':",
+    "    dependencies:",
+    "      style-mod: 7.7.7",
+  ].join(eol);
+}
+
+/** One key per singleton at a single version — the clean baseline. */
+const singletonKeys = () =>
+  SINGLETONS.map((name) =>
+    name.startsWith("@") ? `'${name}@1.0.0'` : `${name}@1.0.0`,
+  );
+
+const dedupeOf = (keys, eol) =>
+  dedupeVerdict(parsePackageVersions(pnpmLock(keys, eol)));
+
+test("check-lockfile-dedupe passes one version per singleton under both line endings", () => {
+  // CRLF is what a Windows checkout materializes under core.autocrlf.
+  for (const eol of ["\n", "\r\n"]) {
+    assert.deepEqual(
+      dedupeOf([...singletonKeys(), "zod@3.25.76", "zod@4.6.5"], eol),
+      { empty: false, malformed: [], missing: [], split: [] },
+      `should pass ${JSON.stringify(eol)} lockfiles`,
+    );
+  }
+});
+
+test("check-lockfile-dedupe flags a singleton at two versions, scoped or not", () => {
+  // Non-singletons may legitimately split (zod above); these may not.
+  const { split } = dedupeOf([
+    ...singletonKeys(),
+    "'@codemirror/state@6.7.10'",
+    "style-mod@4.1.4",
+  ]);
+  assert.deepEqual(split, [
+    { name: "@codemirror/state", versions: ["1.0.0", "6.7.10"] },
+    { name: "style-mod", versions: ["1.0.0", "4.1.4"] },
+  ]);
+});
+
+test("check-lockfile-dedupe reads only the packages: section", () => {
+  // The importer and snapshots fixtures carry singletons at other versions; a
+  // parse leaking past either boundary would report a phantom split.
+  const { versions } = parsePackageVersions(pnpmLock(singletonKeys()));
+  assert.deepEqual([...versions.get("@codemirror/state")], ["1.0.0"]);
+  assert.deepEqual([...versions.get("style-mod")], ["1.0.0"]);
+  assert.equal(versions.size, SINGLETONS.length);
+});
+
+test("check-lockfile-dedupe fails closed on inputs it cannot read", () => {
+  // No `packages:` section at all.
+  assert.equal(
+    dedupeVerdict(parsePackageVersions("lockfileVersion: '9.0'\n")).empty,
+    true,
+  );
+  // A key that does not split into name@version is reported, never skipped.
+  assert.deepEqual(
+    dedupeOf([...singletonKeys(), "no-version-here"]).malformed,
+    ["no-version-here"],
+  );
+  // A singleton the lock no longer carries would otherwise check nothing.
+  assert.deepEqual(dedupeOf(singletonKeys().slice(1)).missing, [SINGLETONS[0]]);
 });
 
 // ---------------------------------------------------------- check-skill-mirrors
