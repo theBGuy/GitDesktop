@@ -1,6 +1,7 @@
 import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -38,11 +39,14 @@ const ROLES: { value: RepoRole; label: string }[] = [
   { value: "admin", label: "Admin" },
 ];
 
-/** Trigger labels for the role selects — without them Base UI shows the raw
- *  role ("maintain"). Covers every role, including ones a narrowed picker omits. */
+/** Labels for every role, for the selects' triggers (without them Base UI shows the
+ *  raw role, "maintain") and the static role text on a personal repo. */
 const ROLE_ITEMS: Record<string, string> = Object.fromEntries(
   ROLES.map((r) => [r.value, r.label]),
 );
+
+const ROLES_UNREAD_REASON =
+  "Couldn't check which roles this repository supports";
 
 function validUsername(u: string): boolean {
   return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(u);
@@ -63,21 +67,24 @@ export function CollaboratorsSection({
   const updateInvite = useUpdateInvitation(repoPath);
   const cancelInvite = useCancelInvitation(repoPath);
 
-  // GitHub silently clamps triage/maintain/admin to `write` on a USER-owned repo
-  // (the PUT returns 204 but never applies them), so only Read/Write actually work
-  // there. Offer the granular roles on org repos only.
-  const isOrg = settings.data?.isOrg ?? false;
-  // Until settings resolve, show the FULL role set rather than clamping — otherwise an
-  // existing org "maintain"/"admin" collaborator whose row loads from cache first would
-  // briefly hold a Select value with no matching item. Once we KNOW it's a personal
-  // repo, filter to the two roles that actually stick.
-  const roles =
-    !settings.data || settings.data.isOrg
-      ? ROLES
-      : ROLES.filter((r) => r.value === "read" || r.value === "write");
+  // Every collaborator on a USER-owned repo gets write: GitHub 422s a read invite and
+  // silently clamps triage/maintain/admin to write. So a KNOWN personal repo offers no
+  // role picker, and Invite holds until org-ness resolves rather than send read blind.
+  const personal = settings.data !== undefined && !settings.data.isOrg;
+  const rolesUnknownReason = (() => {
+    switch (true) {
+      case settings.data !== undefined:
+        return undefined;
+      case settings.isError:
+        return ROLES_UNREAD_REASON;
+      default:
+        return "Checking which roles this repository supports…";
+    }
+  })();
 
   const [username, setUsername] = useState("");
   const [role, setRole] = useState<RepoRole>("read");
+  const inviteRole: RepoRole = personal ? "write" : role;
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeCollab, setActiveCollab] = useState(-1);
   const [activeInvite, setActiveInvite] = useState(-1);
@@ -86,7 +93,10 @@ export function CollaboratorsSection({
   // hand — `<RelativeTime>` can't render there.
   const now = useRelativeNow();
 
-  const canAdd = validUsername(username.trim()) && !add.isPending;
+  const canAdd =
+    validUsername(username.trim()) &&
+    !add.isPending &&
+    rolesUnknownReason === undefined;
 
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];
@@ -98,7 +108,7 @@ export function CollaboratorsSection({
     try {
       const pending = await add.mutateAsync({
         username: username.trim(),
-        role,
+        role: inviteRole,
       });
       toast.success(pending ? "Invitation sent" : "Collaborator added");
       setUsername("");
@@ -159,39 +169,43 @@ export function CollaboratorsSection({
               if (e.key === "Enter" && canAdd) void addCollaborator();
             }}
           />
-          <Select
-            items={ROLE_ITEMS}
-            value={role}
-            onValueChange={(v) => v && setRole(v as RepoRole)}
+          <RoleSlot personal={personal} value={inviteRole} onRole={setRole} />
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canAdd}
+            reason={rolesUnknownReason}
+            onClick={addCollaborator}
           >
-            <SelectTrigger size="sm" className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {roles.map((r) => (
-                <SelectItem key={r.value} value={r.value}>
-                  {r.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button size="sm" disabled={!canAdd} onClick={addCollaborator}>
             {add.isPending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <UserPlusIcon data-icon="inline-start" />
             )}
             Invite
-          </Button>
+          </DisabledReasonButton>
         </div>
-        {settings.data && !isOrg && (
+        {personal && (
           <p className="mt-2 text-[11px] text-muted-foreground">
-            Personal repositories support the{" "}
-            <span className="font-medium text-foreground">Read</span> and{" "}
-            <span className="font-medium text-foreground">Write</span> roles
-            only. Triage, Maintain, and Admin apply to organization
-            repositories.
+            Collaborators on a personal repository get{" "}
+            <span className="font-medium text-foreground">Write</span> access.
+            Read, Triage, Maintain, and Admin roles need the repository in an
+            organization.
           </p>
+        )}
+        {/* The settings read never retries on its own, so an error would hold Invite
+            for the dialog's life without this. */}
+        {rolesUnknownReason === ROLES_UNREAD_REASON && (
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <p>{ROLES_UNREAD_REASON}.</p>
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => void settings.refetch()}
+            >
+              {settings.isFetching && <Spinner data-icon="inline-start" />}
+              Retry
+            </Button>
+          </div>
         )}
       </div>
 
@@ -229,8 +243,8 @@ export function CollaboratorsSection({
                 active={i === activeCollab}
                 onFocus={() => setActiveCollab(i)}
                 roleValue={c.roleName}
-                roleDisabled={add.isPending}
-                roles={roles}
+                roleDisabled={add.isPending || settings.isPending}
+                personal={personal}
                 onRole={(r) => setCollaboratorRole(c.login, r)}
                 confirming={confirming === key}
                 pending={remove.isPending}
@@ -278,8 +292,8 @@ export function CollaboratorsSection({
                       : "pending"
                   }
                   roleValue={inv.permission}
-                  roleDisabled={updateInvite.isPending}
-                  roles={roles}
+                  roleDisabled={updateInvite.isPending || settings.isPending}
+                  personal={personal}
                   onRole={(r) => setInvitationRole(inv.id, r)}
                   confirming={confirming === key}
                   pending={cancelInvite.isPending}
@@ -301,6 +315,48 @@ export function CollaboratorsSection({
   );
 }
 
+/** A role picker, or on a personal repo, where every collaborator gets write, the
+ *  role as static text in the picker's slot. The full role set stays offered until
+ *  org-ness resolves, so a cached org row's maintain/admin keeps a matching item. */
+function RoleSlot({
+  personal,
+  value,
+  disabled,
+  onRole,
+}: {
+  personal: boolean;
+  value: string;
+  disabled?: boolean;
+  onRole: (role: RepoRole) => void;
+}) {
+  if (personal)
+    return (
+      <span className="flex h-7 w-28 shrink-0 items-center pl-2.5 text-xs">
+        <span className="sr-only">Role: </span>
+        {ROLE_ITEMS[value] ?? value}
+      </span>
+    );
+  return (
+    <Select
+      items={ROLE_ITEMS}
+      value={value}
+      disabled={disabled}
+      onValueChange={(v) => v && onRole(v as RepoRole)}
+    >
+      <SelectTrigger size="sm" className="w-28" aria-label="Role">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {ROLES.map((r) => (
+          <SelectItem key={r.value} value={r.value}>
+            {r.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function PersonRow({
   login,
   avatarUrl,
@@ -311,7 +367,7 @@ function PersonRow({
   onFocus,
   roleValue,
   roleDisabled,
-  roles,
+  personal,
   onRole,
   confirming,
   pending,
@@ -328,7 +384,7 @@ function PersonRow({
   onFocus: () => void;
   roleValue: string;
   roleDisabled: boolean;
-  roles: { value: RepoRole; label: string }[];
+  personal: boolean;
   onRole: (role: RepoRole) => void;
   confirming: boolean;
   pending: boolean;
@@ -365,23 +421,12 @@ function PersonRow({
         />
       ) : (
         <>
-          <Select
-            items={ROLE_ITEMS}
+          <RoleSlot
+            personal={personal}
             value={roleValue}
             disabled={roleDisabled}
-            onValueChange={(v) => v && onRole(v as RepoRole)}
-          >
-            <SelectTrigger size="sm" className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {roles.map((r) => (
-                <SelectItem key={r.value} value={r.value}>
-                  {r.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            onRole={onRole}
+          />
           <Button
             size="sm"
             variant="ghost"

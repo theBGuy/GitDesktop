@@ -65,6 +65,8 @@ const READ_ONLY_SCOPE_REASON =
 const SAVING_REASON = "Saving your last change…";
 const STRANDED_NOTICE =
   "Field changes weren't applied — this item is no longer on the board they were drafted for";
+const LOCKED_BOARD_NOTICE =
+  "Field changes weren't applied — they were drafted for a board you can no longer edit";
 
 /** Why a whole board's rows are held, or `undefined` when they're editable. The
  *  no-access wording is the Projects picker's own: both surfaces gate on the same
@@ -339,17 +341,27 @@ export function ProjectFieldsEditor({
       issueWrites: IssueFieldWrites | null;
     }[] = [];
     let unsentIssueFields = false;
+    let lockedBoardFields = false;
     for (const board of boards) {
       const touched = drafts.boards[board.project.id];
       if (touched === undefined) continue;
-      // Belt for the rows' own hold: a board the viewer can't write would 403 at the
-      // end of a chain that stops on the first failure, stranding the boards after it.
-      if (!board.project.viewerCanUpdate) continue;
       // A board that appeared mid-open has no snapshot, so its LIVE values stand
       // in — a baseline that can move under a background refetch while a mounted
       // input's text stays frozen. Diffing only touched fields bounds that.
       const seed = seeds[board.project.id] ?? seedBoard(board);
       const routes = routesFor(board.project.id);
+      // Belt for the rows' own hold: a board the viewer can't write would 403 at the
+      // end of a chain that stops on the first failure, stranding the boards after it.
+      // Its org-field drafts are the rescue's below; its own are said once after.
+      if (!board.project.viewerCanUpdate) {
+        const own = fieldDiff(
+          alignSeed(seed, routes),
+          withoutRoutedFields(touched, routes),
+        );
+        if (own.updates.length > 0 || own.clears.length > 0)
+          lockedBoardFields = true;
+        continue;
+      }
       let write = boardWrite(board, seed, touched, routes);
       // Tested before the split, so a board whose only change is an org issue
       // field still writes.
@@ -445,6 +457,7 @@ export function ProjectFieldsEditor({
       },
     );
     if (stranded) toast.info(STRANDED_NOTICE);
+    if (lockedBoardFields) toast.info(LOCKED_BOARD_NOTICE);
     if (unsentIssueFields)
       toast.info(
         `${ISSUE_FIELDS_UNSENT}: ${issueFieldHostReason(issueHost) ?? ""}`,

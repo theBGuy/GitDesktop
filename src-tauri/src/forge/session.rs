@@ -68,7 +68,8 @@ pub struct SessionHealth {
     pub login: Option<String>,
     /// `gh` accounts only; `None` elsewhere.
     pub active: Option<bool>,
-    /// A short human reason for broken/offline — NEVER token material.
+    /// A short human reason for broken/offline, minted by `sanitize_detail`'s register:
+    /// one line, the forge's own words without CLI framing, NEVER token material.
     pub detail: Option<String>,
     /// `"oauth"` | `"pat"` | `"token"` | `None`.
     pub method: Option<String>,
@@ -208,7 +209,8 @@ enum GhJsonProbe {
     Parsed(HashMap<String, Vec<GhJsonAccount>>),
     /// Non-zero because `--json` is an unknown flag (old gh) → use the text fallback.
     UnknownFlag,
-    /// Any other non-zero exit (fatal/environmental) → Offline, with a sanitized detail.
+    /// Any other non-zero exit (fatal/environmental) → Offline, with its stderr as a
+    /// `sanitize_detail` detail.
     Inconclusive(Option<String>),
 }
 
@@ -867,16 +869,12 @@ fn glab_rate_limited(host: &str, combined: &str) -> SessionHealth {
     h
 }
 
-/// A ≤200-char, sanitized, single-line detail from glab `output`: stderr for a Broken
-/// session, the combined stdout + stderr the classifier matched for a RateLimited one.
+/// A ≤200-char detail in `sanitize_detail`'s register from glab `output`: stderr for a
+/// Broken session, the combined stdout + stderr the classifier matched for a
+/// RateLimited one.
 fn glab_broken_detail(output: &str) -> Option<String> {
-    let msg = output.trim();
-    if msg.is_empty() {
-        return None;
-    }
-    let sanitized = sanitize_detail(msg);
-    let trimmed: String = sanitized.chars().take(200).collect();
-    (!trimmed.is_empty()).then_some(trimmed)
+    let detail = normalize_detail(output, 200);
+    (!detail.is_empty()).then_some(detail)
 }
 
 /// GitLab token expiry for a Healthy session: `glab api personal_access_tokens/self`.
@@ -1543,11 +1541,207 @@ fn sanitize_line(raw: &str) -> String {
     redacted.chars().take(300).collect()
 }
 
-/// Sanitize a detail/reason string: redact tokens, collapse to one line, cap at 300
-/// chars (the same bound as `sanitize_line`).
+/// The register every `SessionHealth.detail` is minted in, capped at 300 chars (the
+/// same bound as `sanitize_line`). See `normalize_detail`.
 fn sanitize_detail(raw: &str) -> String {
-    let one_line = raw.replace(['\n', '\r'], " ");
-    redact_tokens(one_line.trim()).chars().take(300).collect()
+    normalize_detail(raw, 300)
+}
+
+/// CLI wrappers that precede the forge's own message: glab's API-failure framing and
+/// Go's oauth2 error prefix.
+const DETAIL_WRAPPERS: [&str; 2] = ["API call failed:", "oauth2:"];
+
+/// glab's styled failure banner, once trimmed of its padding.
+const GLAB_ERROR_BANNER: &str = "ERROR";
+
+/// glab's closing summary across every configured host, after its status glyph.
+const GLAB_AGGREGATE_SUMMARY: &str =
+    "could not authenticate to one or more of the configured GitLab instances";
+
+/// glab's trailing banner and host-wide summary: they say THAT something failed,
+/// never why, so they give way to any specific failure line.
+fn is_aggregate_failure(text: &str) -> bool {
+    text == GLAB_ERROR_BANNER
+        || text
+            .get(..GLAB_AGGREGATE_SUMMARY.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(GLAB_AGGREGATE_SUMMARY))
+}
+
+/// Redacts tokens, then reduces CLI output to the forge's own words on one line: host
+/// header lines, status glyphs, `<host>:` prefixes and `DETAIL_WRAPPERS` go, success
+/// (✓) lines and aggregate failure lines go while a specific failure line remains, and
+/// an over-`cap` result is cut at a word with an ellipsis, never leaving an unbalanced
+/// quote. At most `cap` chars.
+fn normalize_detail(raw: &str, cap: usize) -> String {
+    let redacted = redact_tokens(raw).replace('\r', "\n");
+    let mut failures = Vec::new();
+    let mut successes = Vec::new();
+    for line in redacted.lines().map(str::trim) {
+        if line.is_empty() || host_token_len(line) == Some(line.len()) {
+            continue;
+        }
+        let (success, text) = strip_detail_framing(line);
+        match (text.is_empty(), success) {
+            (true, _) => {}
+            (false, true) => successes.push(text),
+            (false, false) => failures.push(text),
+        }
+    }
+    // Aggregate lines give way to a specific failure, then the bare banner to the summary.
+    if failures.iter().any(|text| !is_aggregate_failure(text)) {
+        failures.retain(|text| !is_aggregate_failure(text));
+    } else if failures.iter().any(|text| text != GLAB_ERROR_BANNER) {
+        failures.retain(|text| text != GLAB_ERROR_BANNER);
+    }
+    let kept = if failures.is_empty() {
+        successes
+    } else {
+        failures
+    };
+    let mut joined = String::new();
+    for text in kept {
+        if !joined.is_empty() {
+            if !joined.ends_with(['.', '!', '?', ':', ';']) {
+                joined.push('.');
+            }
+            joined.push(' ');
+        }
+        joined.push_str(&text);
+    }
+    drop_unbalanced_quote(&truncate_at_word(&joined, cap))
+}
+
+/// One output line without its CLI framing, and whether it carried a success glyph.
+fn strip_detail_framing(line: &str) -> (bool, String) {
+    let mut s = line;
+    let mut success = false;
+    loop {
+        let before = s.len();
+        if let Some(n) = host_token_len(s) {
+            let rest = &s[n..];
+            if let Some(after) = rest
+                .strip_prefix(':')
+                .filter(|a| a.starts_with(char::is_whitespace))
+            {
+                s = after.trim_start();
+            } else if rest.starts_with(char::is_whitespace)
+                && status_glyph(rest.trim_start()).is_some()
+            {
+                // glab's host header run together with the status line under it.
+                s = rest.trim_start();
+            }
+        }
+        if let Some((ok, n)) = status_glyph(s) {
+            success |= ok;
+            s = s[n..].trim_start();
+        }
+        for wrapper in DETAIL_WRAPPERS {
+            if s.get(..wrapper.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(wrapper))
+            {
+                s = s[wrapper.len()..].trim_start();
+            }
+        }
+        if s.len() == before {
+            return (success, unwrap_quoted_detail(s));
+        }
+    }
+}
+
+/// A leading CLI status glyph followed by whitespace: `(is_success, byte length)`.
+fn status_glyph(s: &str) -> Option<(bool, usize)> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if !chars.next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    match c {
+        '✓' | '✔' => Some((true, c.len_utf8())),
+        '✗' | '✘' | '×' | 'x' | 'X' | '!' | '-' | '*' | '•' => Some((false, c.len_utf8())),
+        _ => None,
+    }
+}
+
+/// The byte length of a leading hostname (`gitlab.com`, `ghes.example:8443`): dotted
+/// labels ending in an alphabetic TLD, so a version or decimal never reads as one.
+fn host_token_len(s: &str) -> Option<usize> {
+    let mut n = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .unwrap_or(s.len());
+    let host = &s[..n];
+    let tld = host.rsplit('.').next().unwrap_or("");
+    if !host.contains('.') || tld.is_empty() || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if let Some(port) = s[n..].strip_prefix(':') {
+        let digits = port
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(port.len());
+        if digits > 0 {
+            n += 1 + digits;
+        }
+    }
+    Some(n)
+}
+
+/// Go's oauth2 errors print as `"code" "description"` (`%q %q`): the description is the
+/// forge's own sentence, the snake_case code is not. Text that isn't wholly quoted
+/// segments passes through; an unterminated last segment (upstream truncation) keeps
+/// what it holds.
+fn unwrap_quoted_detail(s: &str) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let mut rest = s;
+    while let Some(body) = rest.strip_prefix('"') {
+        let mut segment = String::new();
+        let mut end = None;
+        let mut chars = body.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => segment.extend(chars.next().map(|(_, escaped)| escaped)),
+                '"' => {
+                    end = Some(i + 1);
+                    break;
+                }
+                _ => segment.push(c),
+            }
+        }
+        segments.push(segment);
+        rest = end.map_or("", |e| body[e..].trim_start());
+    }
+    if segments.is_empty() || !rest.is_empty() {
+        return s.to_string();
+    }
+    let sentence = segments
+        .iter()
+        .find(|seg| seg.contains(char::is_whitespace));
+    sentence.or(segments.first()).cloned().unwrap_or_default()
+}
+
+/// `s` in at most `cap` chars: whole when it fits, else cut at the last word boundary
+/// in the back half (a hard cut for one unbroken run) with an ellipsis.
+fn truncate_at_word(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(cap.saturating_sub(1)).collect();
+    let cut = head
+        .rfind(char::is_whitespace)
+        .filter(|&i| head[..i].chars().count() >= cap / 2)
+        .map_or(head.as_str(), |i| &head[..i]);
+    let mut out = cut
+        .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | ':'))
+        .to_string();
+    out.push('…');
+    out
+}
+
+/// `s` without its last `"` when the quotes don't pair — the opening of a quoted span
+/// a cut ended inside.
+fn drop_unbalanced_quote(s: &str) -> String {
+    match s.rfind('"') {
+        Some(i) if s.matches('"').count() % 2 == 1 => format!("{}{}", &s[..i], &s[i + 1..]),
+        _ => s.to_string(),
+    }
 }
 
 /// Replace any token-ish substring with `[redacted]`. Covers gh (`gho_`, `ghp_`,
@@ -2872,6 +3066,127 @@ mod tests {
         assert!(out.contains("[redacted]"));
         assert!(!out.contains('\n'));
         assert_eq!(out.chars().count(), 300);
+    }
+
+    // ── detail register ──
+
+    /// The oauth2 description GitLab (Doorkeeper) returns for a dead grant.
+    const GLAB_GRANT_DESCRIPTION: &str = "The provided authorization grant is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client.";
+
+    fn assert_detail_register(detail: &str) {
+        assert!(
+            detail.matches('"').count() % 2 == 0,
+            "unbalanced quote: {detail}"
+        );
+        assert!(!detail.contains('\n'), "{detail}");
+        for framing in [
+            "✓",
+            "API call failed",
+            "oauth2",
+            "gitlab.com:",
+            "invalid_grant",
+        ] {
+            assert!(!detail.contains(framing), "{framing} survived: {detail}");
+        }
+        assert!(!detail.starts_with("x "), "{detail}");
+    }
+
+    #[test]
+    fn glab_grant_failure_reads_as_the_forge_sentence() {
+        // Drive-measured chip text: the host header, a status glyph, the host prefix,
+        // and two wrappers run together ahead of the quoted oauth2 pair.
+        let measured = format!(
+            r#"gitlab.com x gitlab.com: API call failed: oauth2: "invalid_grant" "{GLAB_GRANT_DESCRIPTION}""#
+        );
+        // A live `glab auth status --hostname gitlab.com` stderr (exit 1): success
+        // lines, then a styled ERROR banner and a host-wide summary, both padded with
+        // trailing spaces by glab's terminal styling.
+        let pad = " ".repeat(40);
+        let captured = [
+            "gitlab.com".to_string(),
+            format!(
+                r#"  x gitlab.com: API call failed: oauth2: "invalid_grant" "{GLAB_GRANT_DESCRIPTION}""#
+            ),
+            "  ✓ Git operations for gitlab.com configured to use https protocol.".to_string(),
+            "  ✓ API calls for gitlab.com are made over https protocol.".to_string(),
+            "  ✓ REST API Endpoint: https://gitlab.com/api/v4/".to_string(),
+            "  ✓ GraphQL Endpoint: https://gitlab.com/api/graphql/".to_string(),
+            "  ✓ Token found: **************************".to_string(),
+            String::new(),
+            format!("   ERROR{pad}"),
+            String::new(),
+            format!(
+                "  X could not authenticate to one or more of the configured GitLab instances.{pad}"
+            ),
+            String::new(),
+        ]
+        .join("\n");
+        for raw in [measured.as_str(), captured.as_str()] {
+            let detail = glab_broken_detail(raw).expect("a detail");
+            assert_detail_register(&detail);
+            assert_eq!(detail, GLAB_GRANT_DESCRIPTION);
+        }
+    }
+
+    #[test]
+    fn glab_aggregate_lines_stand_when_nothing_specific_remains() {
+        let raw = "   ERROR   \n\n  X could not authenticate to one or more of the configured GitLab instances.  \n";
+        assert_eq!(
+            glab_broken_detail(raw).as_deref(),
+            Some("could not authenticate to one or more of the configured GitLab instances.")
+        );
+    }
+
+    #[test]
+    fn glab_detail_cut_upstream_keeps_the_sentence_without_its_quote() {
+        // A detail cut at 200 chars inside the quoted description.
+        let cut: String = format!(
+            r#"gitlab.com x gitlab.com: API call failed: oauth2: "invalid_grant" "{GLAB_GRANT_DESCRIPTION}""#
+        )
+        .chars()
+        .take(200)
+        .collect();
+        let detail = glab_broken_detail(&cut).expect("a detail");
+        assert_detail_register(&detail);
+        assert!(
+            detail.starts_with("The provided authorization grant is invalid, expired"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn over_cap_detail_cuts_at_a_word_and_never_leaves_an_open_quote() {
+        let raw = format!(r#"request rejected: "{}""#, "denied again ".repeat(30));
+        let detail = normalize_detail(&raw, 60);
+        assert!(detail.chars().count() <= 60, "{detail}");
+        assert!(detail.ends_with('…'), "{detail}");
+        assert!(detail.matches('"').count() % 2 == 0, "{detail}");
+        // A word boundary, not a mid-word cut.
+        let body = detail.trim_end_matches('…');
+        assert!(
+            body.ends_with("again") || body.ends_with("denied"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn gh_details_keep_their_single_line_messages() {
+        // The `--json` probe exits non-zero only on an environmental failure, whose
+        // stderr is one line plus gh's trailing newline.
+        let config = r"failed to read configuration: open C:\Users\me\AppData\Roaming\GitHub CLI\config.yml: Access is denied.";
+        match classify_gh_json_nonzero(1, &format!("{config}\n")) {
+            GhJsonProbe::Inconclusive(Some(detail)) => {
+                assert_detail_register(&detail);
+                assert_eq!(detail, config);
+            }
+            _ => panic!("expected Inconclusive(Some), got a different variant"),
+        }
+        // A Broken account's reason is its `error` field, already the forge's words.
+        let map = one_account("error", Some(GH_TOKEN_INVALID));
+        for (health, _) in classify_both(&map) {
+            assert_eq!(health.detail.as_deref(), Some(GH_TOKEN_INVALID));
+        }
+        assert_eq!(sanitize_detail(GH_401), GH_401);
     }
 
     // ── tombstone sweep ──

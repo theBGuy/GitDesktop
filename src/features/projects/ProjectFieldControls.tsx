@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
@@ -278,6 +278,10 @@ export function ScalarInput({
   onEdit: (raw: string, badInput: boolean) => void;
 }) {
   const hostRef = useRef<HTMLSpanElement>(null);
+  // Captured once: an uncontrolled input ignores later defaults anyway (fresh
+  // values arrive by remount, per the contract above), and a changing prop only
+  // trips Base UI's dev-mode default-drift warning.
+  const [initial] = useState(defaultValue);
   // The last state reported, seeded from the mounted control so a reconcile that
   // finds nothing changed reports nothing.
   const lastRef = useRef<{ raw: string; badInput: boolean } | null>(null);
@@ -333,7 +337,7 @@ export function ScalarInput({
         placeholder={def.kind === "date" ? undefined : `Set ${def.name}…`}
         className="h-7"
         disabled={!!lockedReason}
-        defaultValue={defaultValue}
+        defaultValue={initial}
       />
     </span>
   );

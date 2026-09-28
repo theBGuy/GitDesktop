@@ -360,9 +360,10 @@ like this:
   projects, wiki, discussions), pull-request merge options (allowed merge methods,
   default squash/merge commit messages, auto-merge, delete-branch-on-merge), template
   repository, and (on org-owned private repos) allow-forking.
-- **Access** — collaborators and their roles; invite someone at any level
-  (Read / Triage / Write / Maintain / Admin), change a role inline, remove access, and
-  manage pending invitations.
+- **Access** — collaborators and their roles; invite someone at any level on an
+  organization repo (Read / Triage / Write / Maintain / Admin) and change a role
+  inline, invite someone with Write access on a personal repo (the one level GitHub
+  grants there), remove access, and manage pending invitations.
 - **Rules** — GitHub's **rulesets**: list them, flip enforcement
   (Active / Evaluate / Disabled), and create or edit a **branch** ruleset (require a PR
   with approvals / code-owner review, required status checks, block force pushes,
