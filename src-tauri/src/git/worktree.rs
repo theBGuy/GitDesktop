@@ -428,14 +428,22 @@ pub(crate) fn canonical_wt_path(p: &str) -> String {
 /// MAX_PATH, on reserved names, and on every UNC share), so both leftover forms land
 /// here: `\\?\UNC\server\share` must fold to git's `//server/share`, never
 /// `unc/server/share`. Pure string work, so tests never touch the filesystem.
+///
+/// The UNC prefix matches case-insensitively, as Windows parses it: the
+/// canonicalize-failed fallback passes a caller's own spelling through here.
 fn strip_verbatim(resolved: &str) -> String {
-    match resolved.strip_prefix(r"\\?\UNC\") {
-        Some(share) => format!(r"\\{share}"),
-        None => resolved
-            .strip_prefix(r"\\?\")
-            .unwrap_or(resolved)
-            .to_string(),
+    const VERBATIM_UNC: &str = r"\\?\UNC\";
+    let is_unc = resolved
+        .get(..VERBATIM_UNC.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(VERBATIM_UNC));
+    if is_unc {
+        // ASCII prefix matched, so its length is a char boundary.
+        return format!(r"\\{}", &resolved[VERBATIM_UNC.len()..]);
     }
+    resolved
+        .strip_prefix(r"\\?\")
+        .unwrap_or(resolved)
+        .to_string()
 }
 
 /// Whether git still lists `path` as a LIVE worktree of the repo. An unreadable
@@ -912,6 +920,7 @@ mod tests {
             folded(r"\\?\UNC\server\share\repo\.git"),
             "//server/share/repo/.git"
         );
+        assert_eq!(folded(r"\\?\unc\server\share\x"), "//server/share/x");
         assert_eq!(folded(r"\\?\Z:\dir\repo"), "z:/dir/repo");
         assert_eq!(folded(r"C:\dir\repo"), "c:/dir/repo");
     }
