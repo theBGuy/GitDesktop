@@ -1028,12 +1028,15 @@ const NO_LABEL_SENTINELS = new Set(["none", "n/a", "na", "-"]);
 const DIRECTIVE_MARKUP = /\*\*|__|`/g;
 
 /** A directive line with its keyword-side wrappers tolerated: an optional list
- *  marker, and one bold/underscore/code marker opened before the keyword and closed
- *  before or after its colon, as in `- **Labels:** bug` or `` `Labels:` bug ``. Only
- *  the OPENER's own marker may close (the backreference), so a value starting with
- *  `__` stays whole; the value (group 3) is captured RAW for the same reason. */
+ *  marker, and up to two nested bold/underscore/code markers opened before the
+ *  keyword and closed innermost-first on ONE side of its colon, as in
+ *  `- **Labels:** bug` or `` **`Labels`**: bug ``. Only the openers' own markers may
+ *  close (the backreferences), and the after-colon arm is tried first so a closer
+ *  already spent before the colon is never taken again from the value, which is
+ *  captured RAW (group 4): `__` inside or around a label name stays whole. Three-deep
+ *  nesting is the accepted bound and stays body text. */
 const DIRECTIVE_LINE =
-  /^(?:[-*+]\s+)?(\*\*|__|`)?\s*(labels|closes|relates)\s*\1?\s*:\s*\1?\s*(.*)$/i;
+  /^(?:[-*+]\s+)?(\*\*|__|`)?(\*\*|__|`)?\s*(labels|closes|relates)(?:\s*:\s*\2?\1?|\s*\2?\1?\s*:)\s*(.*)$/i;
 
 /** Markup and straight/curly quotes a model wraps a directive VALUE in, matched only
  *  at its edges so a name's own `__` or quote survives. */
@@ -1123,7 +1126,7 @@ export function extractPrDraft(
     const nascent =
       !m && /^(labels?|closes?|relates?)$/i.test(line.replace(/[:\s]*$/, ""));
     if (!m && !nascent) break;
-    const kindRaw = (m ? m[2] : line.replace(/[:\s]*$/, "")).toLowerCase();
+    const kindRaw = (m ? m[3] : line.replace(/[:\s]*$/, "")).toLowerCase();
     // Normalize the nascent singular forms (`label`/`close`/`relate`) to the key.
     const kind = kindRaw.startsWith("label")
       ? "labels"
@@ -1133,7 +1136,7 @@ export function extractPrDraft(
     // A second occurrence of an already-seen kind STOPS the loop (that earlier
     // line is real body content, not another directive).
     if (kind in captured) break;
-    captured[kind] = m ? (m[3] ?? "").trim() : "";
+    captured[kind] = m ? (m[4] ?? "").trim() : "";
     bodyEnd = cursor;
     cursor--;
   }

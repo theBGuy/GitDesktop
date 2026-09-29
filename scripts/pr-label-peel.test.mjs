@@ -79,12 +79,112 @@ test("markup inside a label name survives: raw first, then edge wrappers only", 
     // Names that themselves begin or end with a wrapper character match raw.
     ["Labels: __init__", ["__init__"]],
     ["Labels: `code`", ["`code`"]],
+    // A keyword closer spent BEFORE the colon is never taken again from the value.
+    ["__Labels__: __init__", ["__init__"]],
   ]) {
     const d = extractPrDraft(draft(trailer), repo);
     assert.deepEqual(d.labels, want, trailer);
     assert.deepEqual(d.droppedLabels, [], trailer);
     assert.equal(d.body, "Guards the null path.", trailer);
   }
+});
+
+test("two nested keyword wrappers close on either side of the colon", () => {
+  for (const [trailer, want] of [
+    ["**`Labels:`** bug", ["bug"]],
+    ["**`Labels`**: bug", ["bug"]],
+    ["`Labels:` bug", ["bug"]],
+    // Nesting on the keyword never reaches the value, which stays raw.
+    ["**`Labels:`** area__parser", ["area__parser"]],
+    ["**`Labels`**: area__parser", ["area__parser"]],
+  ]) {
+    const d = extractPrDraft(draft(trailer), ["bug", "area__parser"]);
+    assert.deepEqual(d.labels, want, trailer);
+    assert.equal(d.body, "Guards the null path.", trailer);
+  }
+});
+
+// The pre-fix recognizer from 62e000df (`normalizeDirectiveLine` + its plain match):
+// every markup marker stripped globally, then the keyword and its colon. It lost
+// markup INSIDE values, but its recognition is the reference for which lines are
+// directives.
+const MARKUP = /\*\*|__|`/g;
+function oldRecognizes(line) {
+  const norm = line
+    .trim()
+    .replace(/^[-*+]\s+/, "")
+    .replace(MARKUP, "")
+    .trim();
+  return /^(labels|closes|relates)\s*:\s*(.*)$/i.test(norm);
+}
+
+test("every wrapper combination is recognized as before and keeps its value", () => {
+  const markers = ["**", "__", "`"];
+  const wrappers = [{ open: "", before: "", after: "" }];
+  for (const m of markers) {
+    wrappers.push({ open: m, before: m, after: "" });
+    wrappers.push({ open: m, before: "", after: m });
+  }
+  for (const outer of markers)
+    for (const inner of markers) {
+      if (outer === inner) continue;
+      const close = `${inner}${outer}`;
+      wrappers.push({ open: `${outer}${inner}`, before: close, after: "" });
+      wrappers.push({ open: `${outer}${inner}`, before: "", after: close });
+    }
+  const keywords = ["Labels", "Closes", "Relates"];
+  const bullets = ["", "- "];
+  // value -> the repo name it denotes (null: an abstention, no label).
+  const values = new Map([
+    ["bug", "bug"],
+    ["area__parser", "area__parser"],
+    ["__init__", "__init__"],
+    ["`code`", "code"],
+    ['"quoted"', "quoted"],
+    ["**bold**", "bold"],
+    ["MY_PROJ-7", "MY_PROJ-7"],
+    ["none", null],
+  ]);
+  const repo = ["bug", "area__parser", "__init__", "code", "quoted", "bold"];
+  const failures = [];
+  let cases = 0;
+  for (const w of wrappers)
+    for (const kw of keywords)
+      for (const bullet of bullets)
+        for (const [value, name] of values) {
+          cases++;
+          const line = `${bullet}${w.open}${kw}${w.before}:${w.after} ${value}`;
+          const d = extractPrDraft(
+            draft(line),
+            [...repo, "MY_PROJ-7"],
+            [],
+            ["MY_PROJ-7"],
+          );
+          const recognized = d.body === "Guards the null path.";
+          if (recognized !== oldRecognizes(line)) {
+            failures.push(`recognition: ${line}`);
+            continue;
+          }
+          if (!recognized) continue;
+          if (kw === "Labels") {
+            const want = name === null ? [] : [name];
+            if (JSON.stringify(d.labels) !== JSON.stringify(want))
+              failures.push(`labels ${JSON.stringify(d.labels)}: ${line}`);
+            if (d.droppedLabels.length > 0)
+              failures.push(`dropped ${d.droppedLabels}: ${line}`);
+          } else if (kw === "Relates" && name === "MY_PROJ-7") {
+            if (d.jiraMentions[0] !== "MY_PROJ-7")
+              failures.push(`jira ${d.jiraMentions}: ${line}`);
+          }
+        }
+  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 8 values: a generator that
+  // silently truncates fails here rather than passing on fewer cases.
+  const expected =
+    wrappers.length * keywords.length * bullets.length * values.size;
+  console.log(`wrapper-combination cases: ${cases}`);
+  assert.equal(wrappers.length, 19);
+  assert.ok(cases >= expected && expected === 912, `${cases} of ${expected}`);
+  assert.deepEqual(failures, []);
 });
 
 test("a Jira key keeps its underscores and still unwraps", () => {
@@ -116,6 +216,7 @@ test("a streaming partial directive never renders, wrapped or not", () => {
     "- Labels",
     "**Labels:**",
     "`Labels:",
+    "**`Labels",
   ]) {
     const d = extractPrDraft(draft(partial), LABELS);
     assert.equal(d.body, "Guards the null path.", partial);
