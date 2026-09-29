@@ -783,13 +783,16 @@ function functionsIn(masked) {
           : -1;
     if (arrow !== -1) {
       // An arrow; with type parameters it starts at their `<` (an `=>` just
-      // before the `(` is a curried arrow's, not type parameters).
+      // before the `(` is a curried arrow's, not type parameters). Walking
+      // backward, an `=>` inside them (a function-type constraint or default)
+      // reads as `>` then `=`: both are stepped over, never counted as depth.
       let start = p;
       let k = p - 1;
       while (/\s/.test(masked[k] ?? "")) k--;
       if (masked[k] === ">" && masked[k - 1] !== "=") {
         for (let depth = 0; k >= 0; k--) {
-          if (masked[k] === ">") depth++;
+          if (masked[k] === ">" && masked[k - 1] === "=") k--;
+          else if (masked[k] === ">") depth++;
           else if (masked[k] === "<" && --depth === 0) break;
         }
         if (k >= 0) start = k;
@@ -1445,6 +1448,10 @@ test("an arrow-bound wrapper resolves at its callers, never by its parameter's n
       "const useW: (repo: string, saveFn: (a: { x: string; y: number }) => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
     "generic default in a function-typed binding":
       "const useW: <T = string>(repo: string, saveFn: (a: T) => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
+    "a function-type constraint in the arrow's type parameters":
+      "const useW = <T extends () => void>(repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
+    "a function-type default in the arrow's type parameters":
+      "const useW = <T = () => void>(repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
   };
   // Every annotation shape must walk to its initializer's `=`.
   for (const type of [
