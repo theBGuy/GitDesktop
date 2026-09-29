@@ -641,11 +641,19 @@ function arrowAfter(masked, paramsClose) {
 }
 
 /** Index just past an arrow's expression body starting at `from`: the first `;` or
- *  `,` at its own depth, or the bracket that closes around it. */
+ *  `,` at its own depth, or the bracket that closes around it. A call's type
+ *  arguments are skipped, so their commas don't end the body. */
 function expressionEnd(masked, from) {
   let depth = 0;
   for (let i = from; i < masked.length; i++) {
     const c = masked[i];
+    if (c === "<" && /[\w$]/.test(masked[i - 1] ?? "")) {
+      const past = skipTypeArgs(masked, i);
+      if (past !== -1) {
+        i = past - 1;
+        continue;
+      }
+    }
     if (OPEN.has(c)) depth++;
     else if (CLOSE.has(c) && --depth < 0) return i;
     else if (depth === 0 && (c === ";" || c === ",")) return i;
@@ -659,8 +667,8 @@ const paramNames = (masked, open, close) =>
   );
 
 /** Every named function: `function` declarations and `const`/`let`/`var` bindings
- *  of an arrow or a function expression (async, generic, braced or expression-
- *  bodied). Each carries its name, parameter names (null for a destructured one),
+ *  of an arrow or a function expression (async, generic, type-annotated, braced or
+ *  expression-bodied). Each carries its name, parameter names (null for a destructured one),
  *  whether it is exported inline, its parameter list's `(` (undefined for a bare
  *  single-parameter arrow), and its body's span. */
 function functionsIn(masked) {
@@ -669,7 +677,7 @@ function functionsIn(masked) {
     /\bexport\s+(?:default\s+)?(?:async\s+)?$/.test(
       masked.slice(Math.max(0, at - 30), at),
     );
-  for (const m of masked.matchAll(/\bfunction\s*\*?\s*([\w$]+)/g)) {
+  for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*([\w$]+)/g)) {
     // A named function EXPRESSION is indexed under its binding below.
     if (
       /=\s*(?:async\s+)?$/.test(
@@ -695,7 +703,8 @@ function functionsIn(masked) {
     });
   }
   for (const m of masked.matchAll(
-    /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;]*?)?=\s*(?:async\s+)?/g,
+    // The annotation may itself be a function type, so its `=>` doesn't end it.
+    /\b(?:const|let|var)\s+([\w$]+)\s*(?::(?:[^=;]|=>)*?)?=(?!>)\s*(?:async\s+)?/g,
   )) {
     const from = m.index + m[0].length;
     const rest = masked.slice(from);
@@ -1338,6 +1347,12 @@ test("an arrow-bound wrapper resolves at its callers, never by its parameter's n
       "let useW = saveFn => useMutation({ mutationFn: saveFn });\nuseW(api.gitPush);",
     "call form inside an arrow":
       "const useW = (repo, saveFn) => useRepoMutation(repo, (a) => saveFn(a));\nuseW(r, api.gitPush);",
+    "type arguments in an expression body":
+      'const useW = (repo, saveFn) => useMutation<void, Error, string>({ mutationFn: saveFn, networkMode: "always" });\nuseW(r, api.gitPush);',
+    "wrapper type arguments in an expression body":
+      'const useW = (repo, saveFn) => useRepoMutation<A, B>(repo, saveFn, { networkMode: "always" });\nuseW(r, api.gitPush);',
+    "function-typed binding":
+      'const useW: (repo: string, saveFn: () => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn, networkMode: "always" });\nuseW(r, api.gitPush);',
   };
   for (const [name, src] of Object.entries(forms)) {
     const r = verdictOf(src);
@@ -1534,6 +1549,15 @@ test("EXEMPT covers its hook's failures only, and a stale entry fails", () => {
     stale.map((e) => e.hook),
     ["useGone"],
     "a stale exemption went unreported",
+  );
+  // The hook name an exemption keys on: `functionalUpdate` is no `function` keyword.
+  const method = scan(
+    "const o = { functionalUpdate(a) { return useMutation({ mutationFn: () => saveThing(a) }); } };",
+  );
+  assert.deepEqual(
+    method.sites.map((s) => s.hook),
+    ["(module scope)"],
+    "a word starting with `function` was indexed as a declaration",
   );
 });
 
