@@ -75,9 +75,29 @@ test("trailing sentence punctuation neither hides a label nor fakes an answer", 
   // A real label ending in punctuation matches at the raw tier, first.
   const d = extractPrDraft(draft("Labels: v2.0!, v2.0"), ["v2.0!", "v2.0"]);
   assert.deepEqual(d.labels, ["v2.0!", "v2.0"]);
-  // An unknown name is still reported as the model wrote it.
+  // An unknown name is reported edge-unwrapped, punctuation kept.
   const unknown = extractPrDraft(draft("Labels: made-up."), LABELS);
   assert.deepEqual(unknown.droppedLabels, ["made-up."]);
+});
+
+test("trailing punctuation resolves on Closes and Relates values too", () => {
+  const d = extractPrDraft(
+    draft("Closes: #12.\nRelates: ABC-12., #34!"),
+    LABELS,
+    [12, 34],
+    ["ABC-12"],
+  );
+  assert.deepEqual(d.closes, [12]);
+  assert.deepEqual(d.relates, [34]);
+  assert.deepEqual(d.jiraMentions, ["ABC-12"]);
+  const wrapped = extractPrDraft(
+    draft("Closes: `#12`.\nRelates: `ABC-12`;"),
+    LABELS,
+    [12],
+    ["ABC-12"],
+  );
+  assert.deepEqual(wrapped.closes, [12]);
+  assert.deepEqual(wrapped.jiraMentions, ["ABC-12"]);
 });
 
 test("wrapped names still validate case-insensitively into the repo's casing", () => {
@@ -131,7 +151,7 @@ test("two nested keyword wrappers close on either side of the colon", () => {
 // arrangement around the keyword, which makes it the definition of which lines are
 // directives.
 const MARKUP = /\*\*|__|`/g;
-function oldRecognizes(line) {
+function referenceRecognizes(line) {
   const norm = line
     .trim()
     .replace(/^[-*+]\s+/, "")
@@ -140,7 +160,7 @@ function oldRecognizes(line) {
   return /^(labels|closes|relates)\s*:\s*(.*)$/i.test(norm);
 }
 
-test("every wrapper combination is recognized as before and keeps its value", () => {
+test("every wrapper combination matches the reference recognizer and keeps its value", () => {
   const markers = ["**", "__", "`"];
   const wrappers = [{ open: "", before: "", after: "" }];
   for (const m of markers) {
@@ -156,18 +176,24 @@ test("every wrapper combination is recognized as before and keeps its value", ()
     }
   const keywords = ["Labels", "Closes", "Relates"];
   const bullets = ["", "- "];
-  // value -> the repo name it denotes (null: an abstention, no label).
+  // value -> what it denotes on each kind: `label` the repo name (null: an
+  // abstention; absent: not a label, unchecked), `issue` a candidate number on a
+  // Closes/Relates line, `jira` a candidate key on a Relates line.
   const values = new Map([
-    ["bug", "bug"],
-    ["area__parser", "area__parser"],
-    ["__init__", "__init__"],
-    ["`code`", "code"],
-    ['"quoted"', "quoted"],
-    ["**bold**", "bold"],
-    ["MY_PROJ-7", "MY_PROJ-7"],
-    ["none", null],
-    ["none.", null],
-    ["bug.", "bug"],
+    ["bug", { label: "bug" }],
+    ["area__parser", { label: "area__parser" }],
+    ["__init__", { label: "__init__" }],
+    ["`code`", { label: "code" }],
+    ['"quoted"', { label: "quoted" }],
+    ["**bold**", { label: "bold" }],
+    ["MY_PROJ-7", { label: "MY_PROJ-7", jira: "MY_PROJ-7" }],
+    ["none", { label: null }],
+    ["none.", { label: null }],
+    ["bug.", { label: "bug" }],
+    ["MY_PROJ-7.", { label: "MY_PROJ-7", jira: "MY_PROJ-7" }],
+    ["#12", { issue: 12 }],
+    ["#12.", { issue: 12 }],
+    ["`#12`.", { issue: 12 }],
   ]);
   const repo = ["bug", "area__parser", "__init__", "code", "quoted", "bold"];
   const failures = [];
@@ -175,39 +201,45 @@ test("every wrapper combination is recognized as before and keeps its value", ()
   for (const w of wrappers)
     for (const kw of keywords)
       for (const bullet of bullets)
-        for (const [value, name] of values) {
+        for (const [value, want] of values) {
           cases++;
           const line = `${bullet}${w.open}${kw}${w.before}:${w.after} ${value}`;
           const d = extractPrDraft(
             draft(line),
             [...repo, "MY_PROJ-7"],
-            [],
+            [12],
             ["MY_PROJ-7"],
           );
           const recognized = d.body === "Guards the null path.";
-          if (recognized !== oldRecognizes(line)) {
+          if (recognized !== referenceRecognizes(line)) {
             failures.push(`recognition: ${line}`);
             continue;
           }
           if (!recognized) continue;
-          if (kw === "Labels") {
-            const want = name === null ? [] : [name];
-            if (JSON.stringify(d.labels) !== JSON.stringify(want))
+          if (kw === "Labels" && "label" in want) {
+            const labels = want.label === null ? [] : [want.label];
+            if (JSON.stringify(d.labels) !== JSON.stringify(labels))
               failures.push(`labels ${JSON.stringify(d.labels)}: ${line}`);
             if (d.droppedLabels.length > 0)
               failures.push(`dropped ${d.droppedLabels}: ${line}`);
-          } else if (kw === "Relates" && name === "MY_PROJ-7") {
-            if (d.jiraMentions[0] !== "MY_PROJ-7")
+          }
+          if (kw !== "Labels" && want.issue !== undefined) {
+            const got = kw === "Closes" ? d.closes : d.relates;
+            if (JSON.stringify(got) !== JSON.stringify([want.issue]))
+              failures.push(`issue ${JSON.stringify(got)}: ${line}`);
+          }
+          if (kw === "Relates" && want.jira !== undefined) {
+            if (JSON.stringify(d.jiraMentions) !== JSON.stringify([want.jira]))
               failures.push(`jira ${d.jiraMentions}: ${line}`);
           }
         }
-  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 10 values: a generator that
+  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 14 values: a generator that
   // silently truncates fails here rather than passing on fewer cases.
   const expected =
     wrappers.length * keywords.length * bullets.length * values.size;
   console.log(`wrapper-combination cases: ${cases}`);
   assert.equal(wrappers.length, 19);
-  assert.ok(cases >= expected && expected === 1140, `${cases} of ${expected}`);
+  assert.ok(cases >= expected && expected === 1596, `${cases} of ${expected}`);
   assert.deepEqual(failures, []);
 });
 

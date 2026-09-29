@@ -1062,6 +1062,15 @@ function unwrapDirectiveValue(part: string): string {
   return part.trim().replace(VALUE_WRAPPERS, "").trim();
 }
 
+/** A directive value with its edge wrappers AND trailing sentence punctuation removed:
+ *  unwrap, strip the punctuation that is then at the edge, and unwrap again for
+ *  wrappers the punctuation sat outside (`` `#12`. `` → `#12`). */
+function bareDirectiveValue(part: string): string {
+  return unwrapDirectiveValue(
+    unwrapDirectiveValue(part).replace(TRAILING_PUNCT, ""),
+  );
+}
+
 /**
  * Splits a (possibly still streaming) PR/MR response into title, body, validated
  * label NAMES, and validated `closes` / `relates` issue numbers. Reuses
@@ -1075,18 +1084,19 @@ function unwrapDirectiveValue(part: string): string {
  *   body — which is why the peel is unconditional even with no candidates fed; a
  *   prose final line starting with one of those tokens is deliberately sacrificed to
  *   that guarantee.
- * - Labels match case-insensitively against `availableLabels` (the raw value first,
- *   then with its edge wrappers removed), returned in the repo's
- *   canonical casing; anything not in the set is DROPPED and reported in
- *   `droppedLabels` (as the model emitted it) so a caller can surface the mismatch —
- *   except a {@link NO_LABEL_SENTINELS} token, which is skipped silently. Empty
- *   whenever there is no directive or no `availableLabels` — a run with the feature
- *   off drops nothing.
- * - `Closes:`/`Relates:` numbers are comma-split, `#`-stripped, digits-only, validated
- *   against `candidateIssueNumbers` and deduped; a number in both lands in `relates`.
- * - `Relates:` KEY-shaped tokens validate against `candidateJiraKeys` → `jiraMentions`
- *   (uppercase, deduped). A key on a `Closes:` line is ALWAYS dropped — Jira tickets
- *   are never closed from PR text.
+ * - Labels match case-insensitively against `availableLabels`, trying three forms of
+ *   each value in order: as written, edge-unwrapped, then also without trailing
+ *   sentence punctuation. They come back in the repo's canonical casing; anything not
+ *   in the set is DROPPED and reported in `droppedLabels` in its edge-unwrapped form,
+ *   punctuation kept, so a caller can surface the mismatch — except a
+ *   {@link NO_LABEL_SENTINELS} token, which is skipped silently. Empty whenever there
+ *   is no directive or no `availableLabels` — a run with the feature off drops nothing.
+ * - `Closes:`/`Relates:` numbers are comma-split, reduced by `bareDirectiveValue`,
+ *   `#`-stripped, digits-only, validated against `candidateIssueNumbers` and deduped;
+ *   a number in both lands in `relates`.
+ * - `Relates:` KEY-shaped tokens (as written, else reduced the same way) validate
+ *   against `candidateJiraKeys` → `jiraMentions` (uppercase, deduped). A key on a
+ *   `Closes:` line is ALWAYS dropped — Jira tickets are never closed from PR text.
  */
 export function extractPrDraft(
   raw: string,
@@ -1150,7 +1160,8 @@ export function extractPrDraft(
       : fullBody;
 
   // Validate the label names against the repo's set (canonical casing). A name the
-  // set doesn't hold is kept as the model emitted it so the caller can say so.
+  // set doesn't hold is reported edge-unwrapped, punctuation kept, so the caller can
+  // say so.
   const labels: string[] = [];
   const droppedLabels: string[] = [];
   if (availableLabels.length > 0 && captured.labels) {
@@ -1167,7 +1178,7 @@ export function extractPrDraft(
       // matches at the raw tier, so the last tier only adds matches.
       const raw = part.trim();
       const unwrapped = unwrapDirectiveValue(part);
-      const bare = unwrapDirectiveValue(unwrapped.replace(TRAILING_PUNCT, ""));
+      const bare = bareDirectiveValue(part);
       const hit = [raw, unwrapped, bare].find((t) =>
         canonical.has(t.toLowerCase()),
       );
@@ -1182,13 +1193,15 @@ export function extractPrDraft(
 
   // Validate issue numbers against the fed candidate set. A `#` prefix is
   // accepted; only bare digits count; a number in both lines lands in `relates`.
+  // Only the fully reduced form is tried: no digits-only token can carry wrappers or
+  // punctuation, so there is no raw tier to preserve.
   const candidateSet = new Set(candidateIssueNumbers);
   const parseNumbers = (rawLine: string | undefined): number[] => {
     if (!rawLine) return [];
     const seen = new Set<number>();
     const out: number[] = [];
     for (const part of rawLine.split(",")) {
-      const token = unwrapDirectiveValue(part).replace(/^#/, "");
+      const token = bareDirectiveValue(part).replace(/^#/, "");
       if (!/^\d+$/.test(token)) continue;
       const n = Number.parseInt(token, 10);
       if (candidateSet.has(n) && !seen.has(n)) {
@@ -1215,10 +1228,12 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.relates.split(",")) {
+      // As written first; else fully reduced, which leaves a valid key unchanged
+      // (letters first, digits last), so no edge-unwrapped-only tier is needed.
       const raw = part.trim().toUpperCase();
       const token = canonicalKeys.has(raw)
         ? raw
-        : unwrapDirectiveValue(part).toUpperCase();
+        : bareDirectiveValue(part).toUpperCase();
       if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(token)) continue;
       if (canonicalKeys.has(token) && !seen.has(token)) {
         seen.add(token);
