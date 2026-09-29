@@ -63,7 +63,11 @@ export function useAddUserWorktree(repo: string) {
         args.newBranch,
         args.baseRef,
       ),
-    { invalidate: [worktreeKey(repo), repoKeys.branches(repo)] },
+    {
+      invalidate: [worktreeKey(repo), repoKeys.branches(repo)],
+      // Local worktree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -73,7 +77,11 @@ export function useMoveUserWorktree(repo: string) {
     repo,
     (args: { from: string; to: string }) =>
       moveUserWorktree(repo, args.from, args.to),
-    { invalidate: [worktreeKey(repo)] },
+    {
+      invalidate: [worktreeKey(repo)],
+      // Local worktree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -83,7 +91,11 @@ export function useLockUserWorktree(repo: string) {
     repo,
     (args: { path: string; reason?: string }) =>
       lockWorktree(repo, args.path, args.reason),
-    { invalidate: [worktreeKey(repo)] },
+    {
+      invalidate: [worktreeKey(repo)],
+      // Local worktree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -91,6 +103,8 @@ export function useLockUserWorktree(repo: string) {
 export function useUnlockUserWorktree(repo: string) {
   return useRepoMutation(repo, (path: string) => unlockWorktree(repo, path), {
     invalidate: [worktreeKey(repo)],
+    // Local worktree write — never park it offline.
+    networkMode: "always",
   });
 }
 
@@ -98,5 +112,7 @@ export function useUnlockUserWorktree(repo: string) {
 export function useRepairWorktrees(repo: string) {
   return useRepoMutation(repo, (_: void) => repairWorktrees(repo), {
     invalidate: [worktreeKey(repo)],
+    // Local worktree write — never park it offline.
+    networkMode: "always",
   });
 }

@@ -50,6 +50,8 @@ function useLocalPrMutation<TArgs, TData>(
   return useMutation({
     mutationKey: ["local-pr", op, repo],
     mutationFn: fn,
+    // Local PR write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: localPrKey(repo) }),
   });
@@ -123,6 +125,8 @@ function useReviewHistoryMutation<TArgs>(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: fn,
+    // Local review-history write — never park it offline.
+    networkMode: "always",
     // Both keys: every mutation here writes the whole record set, and clear/delete
     // remove kept PARTIAL runs too (they carry no phase filter). Refreshing only the
     // completed-review key would leave a deleted partial's cached text on screen.

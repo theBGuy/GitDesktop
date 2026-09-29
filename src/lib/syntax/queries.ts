@@ -28,6 +28,8 @@ export function useSaveSharedSyntax(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (config: SyntaxConfig) => saveSharedSyntax(repo, config),
+    // Local file write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: sharedSyntaxKey(repo) }),
   });

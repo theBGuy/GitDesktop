@@ -25,19 +25,38 @@ export function useHookContent(repo: string, name: string | null) {
 }
 
 export function useWriteHook(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; content: string }) =>
-    api.gitHookWrite(repo, args.name, args.content),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; content: string }) =>
+      api.gitHookWrite(repo, args.name, args.content),
+    {
+      // Local hook write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useSetHookEnabled(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; enabled: boolean }) =>
-    api.gitHookSetEnabled(repo, args.name, args.enabled),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; enabled: boolean }) =>
+      api.gitHookSetEnabled(repo, args.name, args.enabled),
+    {
+      // Local hook write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useDeleteHook(repo: string) {
-  return useRepoMutation(repo, (name: string) => api.gitHookDelete(repo, name));
+  return useRepoMutation(
+    repo,
+    (name: string) => api.gitHookDelete(repo, name),
+    {
+      // Local hook write — never park it offline.
+      networkMode: "always",
+    },
+  );
 }
 
 export function useRunHookManager(repo: string) {

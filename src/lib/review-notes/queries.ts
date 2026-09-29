@@ -23,6 +23,8 @@ export function useDeleteReviewNote(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (branch: string) => deleteReviewNote(repo, branch),
+    // Local review-notes write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["review-notes", repo] }),
   });

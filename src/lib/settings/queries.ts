@@ -110,6 +110,8 @@ export function useSaveSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (settings: AppSettings) => saveSettingsMerged(settings),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });
@@ -154,6 +156,8 @@ export function useAddRecentRepo() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (repo: { path: string; name: string }) => addRecentRepo(repo),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });
@@ -173,6 +177,8 @@ export function usePersistRepoOwners() {
         repoName: string | null;
       }[],
     ) => persistRepoOwners(owners),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });
@@ -183,6 +189,8 @@ export function useSetRepoAlias() {
   return useMutation({
     mutationFn: (args: { path: string; alias: string }) =>
       setRepoAlias(args.path, args.alias),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });
@@ -192,6 +200,8 @@ export function useRemoveRecentRepo() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (path: string) => removeRecentRepo(path),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });
@@ -204,6 +214,8 @@ export function useRelocateRecentRepo() {
   return useMutation({
     mutationFn: (args: { oldPath: string; newPath: string }) =>
       relocateRecentRepo(args.oldPath, args.newPath),
+    // Local settings write — never park it offline.
+    networkMode: "always",
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
   });

@@ -19,6 +19,10 @@ export function useMergeLocalPr(repo: string) {
         args.message,
         args.strategy,
       ),
+    {
+      // Local merge write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -43,6 +47,10 @@ export function useFinishLocalPrMerge(repo: string) {
         args.worktreeId,
         args.opId,
       ),
+    {
+      // Local merge write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -52,6 +60,10 @@ export function useAbortLocalPrMerge(repo: string) {
     repo,
     (args: { worktreePath: string; opId: string | null }) =>
       api.gitAbortLocalPrMerge(repo, args.worktreePath, args.opId),
+    {
+      // Local merge write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -96,8 +108,14 @@ export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
 
 /** Discards a paused remote-PR resolution by deleting its worktree. */
 export function useAbortRemotePrResolve(repo: string) {
-  return useRepoMutation(repo, (args: { worktreePath: string }) =>
-    api.gitAbortRemotePrResolve(repo, args.worktreePath),
+  return useRepoMutation(
+    repo,
+    (args: { worktreePath: string }) =>
+      api.gitAbortRemotePrResolve(repo, args.worktreePath),
+    {
+      // Local merge write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 

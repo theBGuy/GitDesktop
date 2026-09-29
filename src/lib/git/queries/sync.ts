@@ -23,20 +23,36 @@ export function usePullAutostash(repo: string) {
 }
 
 export function useMergeAutostash(repo: string) {
-  return useRepoMutation(repo, (branch: string) =>
-    api.gitMergeAutostash(repo, branch),
+  return useRepoMutation(
+    repo,
+    (branch: string) => api.gitMergeAutostash(repo, branch),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useRebaseAutostash(repo: string) {
-  return useRepoMutation(repo, (branch: string) =>
-    api.gitRebaseAutostash(repo, branch),
+  return useRepoMutation(
+    repo,
+    (branch: string) => api.gitRebaseAutostash(repo, branch),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useRebaseOntoAutostash(repo: string) {
-  return useRepoMutation(repo, (args: { newBase: string; oldBase: string }) =>
-    api.gitRebaseOntoAutostash(repo, args.newBase, args.oldBase),
+  return useRepoMutation(
+    repo,
+    (args: { newBase: string; oldBase: string }) =>
+      api.gitRebaseOntoAutostash(repo, args.newBase, args.oldBase),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -45,6 +61,10 @@ export function useSwitchAutostash(repo: string) {
     repo,
     (args: { name: string; remote: string | null; reapply: boolean }) =>
       api.gitSwitchAutostash(repo, args.name, args.remote, args.reapply),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -52,14 +72,25 @@ export function useSwitchAutostash(repo: string) {
  *  whole-repo invalidation as the plain pull: both move HEAD and rewrite the
  *  working tree. */
 export function usePullRebaseDecided(repo: string) {
-  return useRepoMutation(repo, (decided: api.PullDecisionShas) =>
-    api.gitPullRebaseDecided(repo, decided),
+  return useRepoMutation(
+    repo,
+    (decided: api.PullDecisionShas) => api.gitPullRebaseDecided(repo, decided),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function usePullRebaseDecidedAutostash(repo: string) {
-  return useRepoMutation(repo, (decided: api.PullDecisionShas) =>
-    api.gitPullRebaseDecidedAutostash(repo, decided),
+  return useRepoMutation(
+    repo,
+    (decided: api.PullDecisionShas) =>
+      api.gitPullRebaseDecidedAutostash(repo, decided),
+    {
+      // Local git write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -155,12 +186,22 @@ export function useRemoveSubmodule(repo: string) {
         args.force,
         args.deleteModuleData,
       ),
+    {
+      // Local submodule write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useSetSubmoduleUrl(repo: string) {
-  return useRepoMutation(repo, (args: { path: string; url: string }) =>
-    api.gitSubmoduleSetUrl(repo, args.path, args.url),
+  return useRepoMutation(
+    repo,
+    (args: { path: string; url: string }) =>
+      api.gitSubmoduleSetUrl(repo, args.path, args.url),
+    {
+      // Local submodule write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -169,6 +210,10 @@ export function useSetSubmoduleBranch(repo: string) {
     repo,
     (args: { path: string; branch: string | null }) =>
       api.gitSubmoduleSetBranch(repo, args.path, args.branch),
+    {
+      // Local submodule write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -196,5 +241,8 @@ export function usePush(repo: string) {
 }
 
 export function useUndoCommit(repo: string) {
-  return useRepoMutation(repo, () => api.gitUndoCommit(repo));
+  return useRepoMutation(repo, () => api.gitUndoCommit(repo), {
+    // Local history write — never park it offline.
+    networkMode: "always",
+  });
 }

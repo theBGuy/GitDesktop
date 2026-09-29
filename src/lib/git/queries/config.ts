@@ -16,6 +16,8 @@ export function useSetGlobalIdentity() {
   return useMutation({
     mutationFn: (args: { name: string; email: string }) =>
       api.gitSetGlobalIdentity(args.name, args.email),
+    // Local git-config write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["global-identity"] }),
   });
@@ -35,6 +37,8 @@ export function useSetGlobalDefaultBranch() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (branch: string) => api.gitSetGlobalDefaultBranch(branch),
+    // Local git-config write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["global-default-branch"] }),
   });
@@ -54,6 +58,8 @@ export function useSetGlobalAutocrlf() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (value: string) => api.gitSetGlobalAutocrlf(value),
+    // Local git-config write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["global-autocrlf"] }),
   });
@@ -82,6 +88,8 @@ export function useSetLocalIdentity(repo: string) {
   return useMutation({
     mutationFn: (args: { name: string; email: string }) =>
       api.gitSetLocalIdentity(repo, args.name, args.email),
+    // Local git-config write — never park it offline.
+    networkMode: "always",
     onSettled: () => {
       queryClient.invalidateQueries({
         queryKey: ["repo", repo, "local-identity"],

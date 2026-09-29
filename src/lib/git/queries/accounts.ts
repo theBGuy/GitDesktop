@@ -23,6 +23,8 @@ export function useSwitchAccount() {
   return useMutation({
     mutationFn: (args: { host: string; login: string }) =>
       api.ghSwitchAccount(args.host, args.login),
+    // Local gh-config write — never park it offline.
+    networkMode: "always",
     // Deliberately app-wide (no key filter): the active account changes every
     // gh-derived answer, and switches are rare enough that the collateral refetch
     // beats the narrow-invalidation policy used elsewhere.
@@ -153,6 +155,8 @@ export function useClearGitlabReviewToken() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.forgeGitlabReviewTokenClear(),
+    // Local keychain write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       void queryClient.invalidateQueries({ queryKey: gitlabReviewBotKey }),
   });

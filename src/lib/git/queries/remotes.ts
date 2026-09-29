@@ -77,8 +77,14 @@ export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
 }
 
 export function useSetRemoteUrl(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; url: string }) =>
-    api.gitRemoteSetUrl(repo, args.name, args.url),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; url: string }) =>
+      api.gitRemoteSetUrl(repo, args.name, args.url),
+    {
+      // Local git-config write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -86,8 +92,14 @@ export function useSetRemoteUrl(repo: string) {
  *  invalidation prefix-covers `remotes`/`remote-url`, so `useLensGate` re-reads and the
  *  fork/upstream UI lights up live. */
 export function useAddRemote(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; url: string }) =>
-    api.gitRemoteAdd(repo, args.name, args.url),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; url: string }) =>
+      api.gitRemoteAdd(repo, args.name, args.url),
+    {
+      // Local git-config write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -95,7 +107,12 @@ export function useAddRemote(repo: string) {
  *  `remotes`/`remote-url`, so `useLensGate` re-reads and every fork-identity surface
  *  collapses live. */
 export function useRemoveRemote(repo: string) {
-  return useRepoMutation(repo, (args: { name: string }) =>
-    api.gitRemoteRemove(repo, args.name),
+  return useRepoMutation(
+    repo,
+    (args: { name: string }) => api.gitRemoteRemove(repo, args.name),
+    {
+      // Local git-config write — never park it offline.
+      networkMode: "always",
+    },
   );
 }

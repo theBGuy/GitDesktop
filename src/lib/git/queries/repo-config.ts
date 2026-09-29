@@ -120,6 +120,8 @@ export function useSetDependabot(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (content: string) => api.dependabotSet(repo, content),
+    // Local file write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: dependabotKey(repo) }),
   });
@@ -129,6 +131,8 @@ export function useDeleteDependabot(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.dependabotDelete(repo),
+    // Local file write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: dependabotKey(repo) }),
   });
@@ -151,6 +155,8 @@ export function useSetFunding(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (content: string) => api.fundingSet(repo, content),
+    // Local file write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: fundingKey(repo) }),
   });
@@ -160,6 +166,8 @@ export function useDeleteFunding(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.fundingDelete(repo),
+    // Local file write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: fundingKey(repo) }),
   });

@@ -4,30 +4,53 @@ import type { RewriteStep } from "../types";
 import { useRepoMutation } from "./internal";
 
 export function useResetToCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) => api.gitReset(repo, hash));
+  return useRepoMutation(repo, (hash: string) => api.gitReset(repo, hash), {
+    // Local history write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 /** Moves the CURRENT branch and the working tree to `hash`. The backend refuses
  *  outright while tracked changes are outstanding, so the caller's confirm can
  *  promise a clean tree is required rather than pre-flighting one. */
 export function useHardResetToCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) =>
-    api.gitReset(repo, hash, "hard"),
+  return useRepoMutation(
+    repo,
+    (hash: string) => api.gitReset(repo, hash, "hard"),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useCheckoutCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) =>
-    api.gitCheckoutCommit(repo, hash),
+  return useRepoMutation(
+    repo,
+    (hash: string) => api.gitCheckoutCommit(repo, hash),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useRevertCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) => api.gitRevert(repo, hash));
+  return useRepoMutation(repo, (hash: string) => api.gitRevert(repo, hash), {
+    // Local history write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 export function useCherryPick(repo: string) {
-  return useRepoMutation(repo, (hash: string) => api.gitCherryPick(repo, hash));
+  return useRepoMutation(
+    repo,
+    (hash: string) => api.gitCherryPick(repo, hash),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
+  );
 }
 
 export function useCherryPickOnto(repo: string) {
@@ -35,6 +58,10 @@ export function useCherryPickOnto(repo: string) {
     repo,
     (args: { hashes: string[]; targetBranch: string }) =>
       api.gitCherryPickOnto(repo, args.hashes, args.targetBranch),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -48,21 +75,35 @@ export function useCreateTag(repo: string) {
       // hosts survive a repo switch — without the key a switch retargets the pending
       // create, tagging the wrong repo.
       identity: ["create-tag", repo],
+      // Local history write — never park it offline.
+      networkMode: "always",
     },
   );
 }
 
 export function useRewriteCommits(repo: string) {
-  return useRepoMutation(repo, (args: { base: string; steps: RewriteStep[] }) =>
-    api.gitRewriteCommits(repo, args.base, args.steps),
+  return useRepoMutation(
+    repo,
+    (args: { base: string; steps: RewriteStep[] }) =>
+      api.gitRewriteCommits(repo, args.base, args.steps),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 /** Starts a resumable interactive rebase (for plans containing an `edit`); the
  *  rebase pauses and the conflict/op banner takes over. */
 export function useRebaseEdit(repo: string) {
-  return useRepoMutation(repo, (args: { base: string; steps: RewriteStep[] }) =>
-    api.gitRebaseEdit(repo, args.base, args.steps),
+  return useRepoMutation(
+    repo,
+    (args: { base: string; steps: RewriteStep[] }) =>
+      api.gitRebaseEdit(repo, args.base, args.steps),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 

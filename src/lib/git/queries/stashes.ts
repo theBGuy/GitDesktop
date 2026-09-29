@@ -14,7 +14,10 @@ export function useStashCount(repo: string) {
 }
 
 export function useDiscardAll(repo: string) {
-  return useRepoMutation(repo, () => api.gitDiscardAll(repo));
+  return useRepoMutation(repo, () => api.gitDiscardAll(repo), {
+    // Local working-tree write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 export function useDiscardPaths(repo: string) {
@@ -22,21 +25,36 @@ export function useDiscardPaths(repo: string) {
     repo,
     (paths: { path: string; untracked: boolean }[]) =>
       api.gitDiscardPaths(repo, paths),
+    {
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useStashAll(repo: string) {
-  return useRepoMutation(repo, () => api.gitStashAll(repo));
+  return useRepoMutation(repo, () => api.gitStashAll(repo), {
+    // Local stash write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 export function useStashPaths(repo: string) {
-  return useRepoMutation(repo, (paths: string[]) =>
-    api.gitStashPaths(repo, paths),
+  return useRepoMutation(
+    repo,
+    (paths: string[]) => api.gitStashPaths(repo, paths),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useStashPop(repo: string) {
-  return useRepoMutation(repo, () => api.gitStashPop(repo));
+  return useRepoMutation(repo, () => api.gitStashPop(repo), {
+    // Local stash write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 export function useStashList(repo: string, enabled = false) {
@@ -79,14 +97,25 @@ export function useStashFileDiff(
 }
 
 export function useStashApply(repo: string) {
-  return useRepoMutation(repo, (args: { index: number; pop: boolean }) =>
-    api.gitStashApply(repo, args.index, args.pop),
+  return useRepoMutation(
+    repo,
+    (args: { index: number; pop: boolean }) =>
+      api.gitStashApply(repo, args.index, args.pop),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useStashDrop(repo: string) {
-  return useRepoMutation(repo, (index: number) =>
-    api.gitStashDrop(repo, index),
+  return useRepoMutation(
+    repo,
+    (index: number) => api.gitStashDrop(repo, index),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -141,8 +170,13 @@ export function useOrphanedStashFileDiff(
 /** Restore an orphaned stash to the working tree (`git stash apply <sha>` — never
  *  drops). Default whole-repo invalidation refreshes the status and stash lists. */
 export function useRestoreOrphaned(repo: string) {
-  return useRepoMutation(repo, (sha: string) =>
-    api.gitRestoreOrphaned(repo, sha),
+  return useRepoMutation(
+    repo,
+    (sha: string) => api.gitRestoreOrphaned(repo, sha),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -174,5 +208,8 @@ export function useOplogHistory(repo: string, enabled = false) {
 /** Dismiss a journal entry so it stops surfacing as interrupted. Default
  *  invalidation refetches the repo subtree, clearing the banner. */
 export function useDismissOplog(repo: string) {
-  return useRepoMutation(repo, (id: string) => api.gitOplogDismiss(repo, id));
+  return useRepoMutation(repo, (id: string) => api.gitOplogDismiss(repo, id), {
+    // Local operation-journal write — never park it offline.
+    networkMode: "always",
+  });
 }

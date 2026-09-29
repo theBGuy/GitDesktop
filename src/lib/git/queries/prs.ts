@@ -579,7 +579,11 @@ export function useApplySuggestion(repo: string) {
         args.replacementLines,
         args.stageWhenClean,
       ),
-    { invalidate: workingTreeKeys(repo) },
+    {
+      invalidate: workingTreeKeys(repo),
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 

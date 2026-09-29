@@ -32,6 +32,8 @@ function useLocalIssueMutation<TArgs, TData>(
   return useMutation({
     mutationKey: ["local-issue", op, repo],
     mutationFn: fn,
+    // Local issue write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: localIssueKey(repo) }),
   });

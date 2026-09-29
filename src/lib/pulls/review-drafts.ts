@@ -213,6 +213,8 @@ export function useAddReviewDraft(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (draft: ReviewDraft) => addDraft(repo, lens, number, draft),
+    // Local draft write — never park it offline.
+    networkMode: "always",
     onSettled: () =>
       void queryClient.invalidateQueries({
         queryKey: reviewDraftsKey(repo, lens, number),
@@ -229,6 +231,8 @@ export function useUpdateReviewDraft(
   return useMutation({
     mutationFn: (args: { id: string; body: string }) =>
       updateDraft(repo, lens, number, args.id, args.body),
+    // Local draft write — never park it offline.
+    networkMode: "always",
     // Mutation-level so the failure still reports after the card unmounts: the
     // draft cards are keyed per draft id, so switching PR replaces them all and
     // mutate-scoped callbacks stop firing once the observer loses its listeners.
@@ -248,6 +252,8 @@ export function useRemoveReviewDraft(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => removeDraft(repo, lens, number, id),
+    // Local draft write — never park it offline.
+    networkMode: "always",
     // Mutation-level: see useUpdateReviewDraft.
     onError: (e) => toastError(e),
     onSettled: () =>
@@ -271,6 +277,8 @@ export function useClearReviewDrafts(
   const silent = opts?.silent ?? false;
   return useMutation({
     mutationFn: () => clearDrafts(repo, lens, number),
+    // Local draft write — never park it offline.
+    networkMode: "always",
     // Mutation-level: see useUpdateReviewDraft. The pending-review bar unmounts on a
     // tab switch away from Files, which is exactly when a slow discard fails.
     onError: (e) => {

@@ -363,6 +363,10 @@ export function useRepoMutation<TArgs, TData>(
      * award this to sites whose callers await the promise.
      */
     identity?: readonly unknown[];
+    /** Opt-in per site, for a mutationFn that writes only local state: the default
+     *  "online" mode parks a write while the OS reports no connection. Never a
+     *  default here: the forge writes this wrapper also carries are meant to pause. */
+    networkMode?: "always";
   } = {},
 ) {
   const queryClient = useQueryClient();
@@ -390,6 +394,7 @@ export function useRepoMutation<TArgs, TData>(
   return useMutation({
     mutationFn,
     ...(opts.identity ? { mutationKey: opts.identity } : {}),
+    ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),
     ...(opts.refetchBeforeSuccess
       ? {
           onSuccess: async (data: TData, variables: TArgs) => {

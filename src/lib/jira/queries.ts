@@ -110,6 +110,8 @@ export function useSaveJiraLink(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (link: JiraLink) => setJiraLink(repo, link),
+    // Local plugin-store write — never park it offline.
+    networkMode: "always",
     onSettled: () => invalidateJiraForRepo(queryClient, repo),
   });
 }
@@ -118,6 +120,8 @@ export function useClearJiraLink(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => clearJiraLink(repo),
+    // Local plugin-store write — never park it offline.
+    networkMode: "always",
     onSettled: () => invalidateJiraForRepo(queryClient, repo),
   });
 }

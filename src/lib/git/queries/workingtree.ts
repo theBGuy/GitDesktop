@@ -105,6 +105,8 @@ export function useSessionFileDiff(
 export function useStage(repo: string) {
   return useRepoMutation(repo, (paths: string[]) => api.gitStage(repo, paths), {
     invalidate: workingTreeKeys(repo),
+    // Local working-tree write — never park it offline.
+    networkMode: "always",
   });
 }
 
@@ -123,11 +125,17 @@ export function useOpState(repo: string) {
 }
 
 export function useOpAbort(repo: string) {
-  return useRepoMutation(repo, (op: RepoOp) => api.gitOpAbort(repo, op));
+  return useRepoMutation(repo, (op: RepoOp) => api.gitOpAbort(repo, op), {
+    // Local git write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 export function useOpContinue(repo: string) {
-  return useRepoMutation(repo, (op: RepoOp) => api.gitOpContinue(repo, op));
+  return useRepoMutation(repo, (op: RepoOp) => api.gitOpContinue(repo, op), {
+    // Local git write — never park it offline.
+    networkMode: "always",
+  });
 }
 
 /** The conflicted file's sides + marked working text, for the conflict editor.
@@ -151,7 +159,11 @@ export function useResolveConflict(repo: string) {
     repo,
     (args: { path: string; content: string; stage: boolean }) =>
       resolveConflict(repo, args.path, args.content, args.stage),
-    { invalidate: conflictFileKeys(repo) },
+    {
+      invalidate: conflictFileKeys(repo),
+      // Local conflict write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -161,7 +173,11 @@ export function useCheckoutConflictSide(repo: string) {
     repo,
     (args: { path: string; side: "ours" | "theirs" }) =>
       checkoutConflictSide(repo, args.path, args.side),
-    { invalidate: conflictFileKeys(repo) },
+    {
+      invalidate: conflictFileKeys(repo),
+      // Local conflict write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -171,7 +187,11 @@ export function useMarkConflictResolved(repo: string) {
   return useRepoMutation(
     repo,
     (path: string) => api.gitStage(repo, [literalPathspec(path)]),
-    { invalidate: conflictFileKeys(repo) },
+    {
+      invalidate: conflictFileKeys(repo),
+      // Local conflict write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -194,7 +214,11 @@ export function useApplyPatch(repo: string) {
     repo,
     (args: { patch: string; cached: boolean; reverse: boolean }) =>
       api.gitApplyPatch(repo, args.patch, args.cached, args.reverse),
-    { invalidate: workingTreeKeys(repo) },
+    {
+      invalidate: workingTreeKeys(repo),
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -214,7 +238,11 @@ export function useApplyPartial(repo: string) {
         args.cached,
         args.reverse,
       ),
-    { invalidate: workingTreeKeys(repo) },
+    {
+      invalidate: workingTreeKeys(repo),
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -225,7 +253,11 @@ export function useDiscardUntrackedLines(repo: string) {
     repo,
     (args: { path: string; lines: number[] }) =>
       api.gitDiscardUntrackedLines(repo, args.path, args.lines),
-    { invalidate: workingTreeKeys(repo) },
+    {
+      invalidate: workingTreeKeys(repo),
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -233,7 +265,11 @@ export function useUnstage(repo: string) {
   return useRepoMutation(
     repo,
     (paths: string[]) => api.gitUnstage(repo, paths),
-    { invalidate: workingTreeKeys(repo) },
+    {
+      invalidate: workingTreeKeys(repo),
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -249,13 +285,20 @@ export function useCommit(repo: string) {
       invalidate: workingTreeKeys(repo),
       invalidateAfter: commitAftermathKeys(repo),
       refetchBeforeSuccess: true,
+      // Local commit write — never park it offline.
+      networkMode: "always",
     },
   );
 }
 
 export function useAppendToGitignore(repo: string) {
-  return useRepoMutation(repo, (patterns: string[]) =>
-    api.appendToGitignore(repo, patterns),
+  return useRepoMutation(
+    repo,
+    (patterns: string[]) => api.appendToGitignore(repo, patterns),
+    {
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -266,7 +309,11 @@ export function useAppendRepoAiIgnore(repo: string) {
     // Staging-class edit — only the working tree changes (the aiignore file
     // appears/updates), so narrow like useStage/useApplySuggestion. The
     // AI-excluded view reads those rules, so it goes with them.
-    { invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)] },
+    {
+      invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)],
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -323,6 +370,10 @@ export function useUntrack(repo: string) {
     repo,
     (args: { pathspecs: string[]; ignorePatterns: string[] }) =>
       api.gitUntrack(repo, args.pathspecs, args.ignorePatterns),
+    {
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -366,14 +417,24 @@ export function useIgnoredFiles(repo: string, enabled: boolean) {
 }
 
 export function useForceAdd(repo: string) {
-  return useRepoMutation(repo, (pathspecs: string[]) =>
-    api.gitForceAdd(repo, pathspecs),
+  return useRepoMutation(
+    repo,
+    (pathspecs: string[]) => api.gitForceAdd(repo, pathspecs),
+    {
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useUnignoreRules(repo: string) {
-  return useRepoMutation(repo, (rules: UnignoreRule[]) =>
-    api.gitUnignoreRules(repo, rules),
+  return useRepoMutation(
+    repo,
+    (rules: UnignoreRule[]) => api.gitUnignoreRules(repo, rules),
+    {
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -384,6 +445,10 @@ export function useRemoveRepoAiIgnore(repo: string) {
   return useRepoMutation(
     repo,
     (patterns: string[]) => api.removeRepoAiIgnore(repo, patterns),
-    { invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)] },
+    {
+      invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)],
+      // Local working-tree write — never park it offline.
+      networkMode: "always",
+    },
   );
 }

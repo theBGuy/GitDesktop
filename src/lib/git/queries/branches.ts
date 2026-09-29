@@ -29,14 +29,25 @@ export function useRemoteBranches(repo: string, enabled = true) {
 }
 
 export function useCheckoutBranch(repo: string) {
-  return useRepoMutation(repo, (name: string) =>
-    api.gitCheckoutBranch(repo, name),
+  return useRepoMutation(
+    repo,
+    (name: string) => api.gitCheckoutBranch(repo, name),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useCheckoutRemoteBranch(repo: string) {
-  return useRepoMutation(repo, (args: { remote: string; name: string }) =>
-    api.gitCheckoutRemoteBranch(repo, args.remote, args.name),
+  return useRepoMutation(
+    repo,
+    (args: { remote: string; name: string }) =>
+      api.gitCheckoutRemoteBranch(repo, args.remote, args.name),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -61,6 +72,8 @@ export function useCreateBranch(repo: string) {
       // panel hosts survive a repo switch — without the key a switch retargets the
       // pending create, branching the wrong repo.
       identity: ["create-branch", repo],
+      // Local branch write — never park it offline.
+      networkMode: "always",
     },
   );
 }
@@ -100,19 +113,32 @@ export function useRenameBranch(repo: string) {
             // Best-effort: a failed reload just leaves the last known state.
           });
       },
+      // Local branch write — never park it offline.
+      networkMode: "always",
     },
   );
 }
 
 export function useSetBranchArchived(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; archived: boolean }) =>
-    api.gitSetBranchArchived(repo, args.name, args.archived),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; archived: boolean }) =>
+      api.gitSetBranchArchived(repo, args.name, args.archived),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
 export function useDeleteBranch(repo: string) {
-  return useRepoMutation(repo, (name: string) =>
-    api.gitDeleteBranch(repo, name),
+  return useRepoMutation(
+    repo,
+    (name: string) => api.gitDeleteBranch(repo, name),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -140,6 +166,10 @@ export function useMergeBranch(repo: string) {
       strategy: api.MergeConflictStrategy;
     }) =>
       api.gitMerge(repo, args.branch, args.squash, args.noFf, args.strategy),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -163,15 +193,28 @@ export function useMergePreview(
 }
 
 export function useRebaseBranch(repo: string) {
-  return useRepoMutation(repo, (branch: string) => api.gitRebase(repo, branch));
+  return useRepoMutation(
+    repo,
+    (branch: string) => api.gitRebase(repo, branch),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
+  );
 }
 
 /** Rebases the current branch onto `newBase`, replaying only `oldBase..HEAD`
  *  (the "branched off the wrong branch" fix). Conflicts leave the rebase in
  *  progress for the conflict banner, exactly like {@link useRebaseBranch}. */
 export function useRebaseOnto(repo: string) {
-  return useRepoMutation(repo, (args: { newBase: string; oldBase: string }) =>
-    api.gitRebaseOnto(repo, args.newBase, args.oldBase),
+  return useRepoMutation(
+    repo,
+    (args: { newBase: string; oldBase: string }) =>
+      api.gitRebaseOnto(repo, args.newBase, args.oldBase),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -194,8 +237,14 @@ export function useBranchDivergence(
 }
 
 export function useUpdateBranchFrom(repo: string) {
-  return useRepoMutation(repo, (args: { branch: string; base: string }) =>
-    api.gitUpdateBranchFrom(repo, args.branch, args.base),
+  return useRepoMutation(
+    repo,
+    (args: { branch: string; base: string }) =>
+      api.gitUpdateBranchFrom(repo, args.branch, args.base),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
 
@@ -243,5 +292,9 @@ export function useBranchResetToUpstream(repo: string) {
     repo,
     (args: { branch: string; expectedTip: string }) =>
       api.gitBranchResetToUpstream(repo, args.branch, args.expectedTip),
+    {
+      // Local branch write — never park it offline.
+      networkMode: "always",
+    },
   );
 }
