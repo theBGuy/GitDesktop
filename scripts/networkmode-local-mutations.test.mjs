@@ -766,8 +766,10 @@ function annotationStop(masked, from) {
   return -1;
 }
 
-/** Words that precede a `(` and a `{` without declaring a method. */
-const NOT_METHODS = new Set([...NOT_CALLS, "constructor"]);
+/** Words that precede a `(` and a `{` without opening a parameter scope. `catch`
+ *  binds its parameter and a `constructor` takes parameters, so both are indexed
+ *  (anonymous) like any method. */
+const NOT_METHODS = new Set([...NOT_CALLS].filter((w) => w !== "catch"));
 
 /**
  * Index of the `{` opening the body after a parameter list closing at
@@ -1146,14 +1148,15 @@ function passThrough(ctx, fn, name, nested) {
     }
     const close = matchBrace(ctx.masked, paren);
     const args = close === -1 ? [] : splitTopLevel(ctx.masked, paren, close);
-    if (args.length <= k) {
-      verdicts.push({ ambiguity: `${at}: passes no argument ${k + 1}` });
-      continue;
-    }
+    // First, so a spread that makes the list look short is named as the spread.
     if (args.slice(0, k + 1).some((a) => a.text.startsWith("..."))) {
       verdicts.push({
         ambiguity: `${at}: spreads an argument at or before position ${k + 1}, so which value lands there can't be read`,
       });
+      continue;
+    }
+    if (args.length <= k) {
+      verdicts.push({ ambiguity: `${at}: passes no argument ${k + 1}` });
       continue;
     }
     const v = classifyValue(ctx, args[k], true);
@@ -1869,6 +1872,11 @@ test("shapes the scan can't read fail closed", () => {
       'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { await saveFn(); if (repo) { const saveFn = () => saveThing(r); await saveFn(); } }, networkMode: "always" }); }\nuseW(r, api.gitPush);',
     "a spread at or before the pass-through's position":
       "function useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(...a, saveThing);",
+    // `catch` and `constructor` bind parameters like any function.
+    "a catch binding":
+      'useMutation({ mutationFn: async () => { try { await saveThing(r); } catch (saveFn) { await saveFn(); } }, networkMode: "always" });',
+    "a constructor parameter":
+      'class K { constructor(saveFn) { this.m = useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nnew K(api.gitPush);',
     // An in-body value shadowing a hook parameter must not resolve through the
     // hook's callers (here: a local write).
     "an in-body value shadowing a parameter":
@@ -1898,6 +1906,15 @@ test("shapes the scan can't read fail closed", () => {
     const r = scan(src);
     assert.notDeepEqual(r.ambiguities, [], `${name}: read as unambiguous`);
   }
+  // A spread that leaves the list short is named as the spread, not a gap.
+  const shortSpread = scan(
+    "function useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(...args);",
+  );
+  assert.match(
+    shortSpread.ambiguities.map((a) => a.why).join("\n"),
+    /spreads an argument at or before position 2/,
+    "a short spread was reported as a missing argument",
+  );
 });
 
 test("the scan passes what it should", () => {
