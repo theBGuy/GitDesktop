@@ -1,14 +1,27 @@
-import { useCallback } from "react";
+import { generateText, Output } from "ai";
+import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
+import { z } from "zod";
 import { useAiStream } from "@/features/conversations/useAiStream";
+import { resolveModel } from "@/lib/ai/client";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
-import { buildPrPrompt, extractPrDraft } from "@/lib/ai/prompt";
-import type { PromptProvider } from "@/lib/ai/types";
+import {
+  buildPrLabelFallbackPrompt,
+  buildPrPrompt,
+  extractPrDraft,
+  needsStructuredLabelPick,
+} from "@/lib/ai/prompt";
+import { isCliProvider } from "@/lib/ai/providers";
+import type { AiSettings, PromptProvider } from "@/lib/ai/types";
 import { gitBranchDiff, readRepoInstructions } from "@/lib/git/api";
 import type { AppSettings } from "@/lib/settings/api";
 
 /** Raw diff bytes requested from the backend; prompt budgeting trims further. */
 const RAW_DIFF_MAX_BYTES = 200_000;
+
+/** Most labels the structured pick may add. Enforced here rather than as a schema
+ *  `maxItems`, which not every provider's structured-output mode accepts. */
+const STRUCTURED_PICK_MAX_LABELS = 3;
 
 /** The diff shape a supplier must yield — matches `buildPrPrompt`'s `files`. */
 interface SuppliedDiff {
@@ -56,6 +69,50 @@ interface PrDraft {
   closes: number[];
   relates: number[];
   jiraMentions: string[];
+  /** RESOLVED draft only: labels the structured label pick added after the stream
+   *  ended. No `onUpdate` carries them, so a caller that proposes labels merges
+   *  these itself. */
+  pickedLabels?: string[];
+}
+
+/** One structured-output call choosing labels for a finished draft, from its title
+ *  and body only, on the model the draft was written with. The schema's enum keeps
+ *  the answer inside the repo's set; names still validate case-insensitively into
+ *  the repo's casing, as the text path does. Throws on any provider failure. */
+async function pickLabelsStructured(
+  ai: AiSettings,
+  draft: { title: string; body: string },
+  availableLabels: AvailableLabel[],
+  abortSignal: AbortSignal,
+): Promise<string[]> {
+  const canonical = new Map<string, string>();
+  for (const l of availableLabels) {
+    const name = l.name.trim();
+    if (name && !canonical.has(name.toLowerCase()))
+      canonical.set(name.toLowerCase(), name);
+  }
+  const names = [...canonical.values()];
+  if (names.length === 0) return [];
+  const { system, prompt } = buildPrLabelFallbackPrompt({
+    title: draft.title,
+    body: draft.body,
+    availableLabels,
+  });
+  const result = await generateText({
+    model: await resolveModel(ai),
+    system,
+    prompt,
+    abortSignal,
+    output: Output.object({
+      schema: z.object({ labels: z.array(z.enum(names)) }),
+    }),
+  });
+  const picked: string[] = [];
+  for (const raw of result.output.labels) {
+    const match = canonical.get(raw.trim().toLowerCase());
+    if (match && !picked.includes(match)) picked.push(match);
+  }
+  return picked.slice(0, STRUCTURED_PICK_MAX_LABELS);
 }
 
 /**
@@ -63,7 +120,21 @@ interface PrDraft {
  * the PR would introduce. `onUpdate` fires with the parsed draft on each chunk.
  */
 export function useGeneratePrDescription(repoPath: string) {
-  const { generating, cancel, run } = useAiStream(repoPath);
+  const {
+    generating: streaming,
+    cancel: cancelStream,
+    run,
+  } = useAiStream(repoPath);
+  // The structured label pick runs after the stream ends but belongs to the same
+  // run: it keeps `generating` true, and Cancel reaches it, so no surface can start
+  // a second run or settle this one while the pick is still out.
+  const [pickingLabels, setPickingLabels] = useState(false);
+  const pickAbortRef = useRef<AbortController | null>(null);
+  const generating = streaming || pickingLabels;
+  const cancel = useCallback(() => {
+    cancelStream();
+    pickAbortRef.current?.abort();
+  }, [cancelStream]);
 
   /** Shared streaming core: gets the diff from `getDiff` (handed the loaded
    *  settings, so a supplier can honor the user's AI-ignore patterns), budgets
@@ -73,7 +144,12 @@ export function useGeneratePrDescription(repoPath: string) {
    *
    *  Resolves with the draft parsed from the COMPLETE response, or null when the
    *  run bailed, aborted, or errored — the only signal that tells a completed
-   *  draft from the partial parses `onUpdate` sees mid-stream. */
+   *  draft from the partial parses `onUpdate` sees mid-stream. A draft with no
+   *  `Labels` line at all gets one best-effort structured label pick first
+   *  (`needsStructuredLabelPick`); labels it finds ride ONLY the resolved draft's
+   *  `pickedLabels`, never another `onUpdate` (which would re-send a title and body
+   *  the user may have edited meanwhile), and any failure or cancel leaves the
+   *  draft as the stream wrote it. */
   const runFromDiff = useCallback(
     async (
       getDiff: (settings: AppSettings) => Promise<SuppliedDiff>,
@@ -103,8 +179,11 @@ export function useGeneratePrDescription(repoPath: string) {
           (issueCandidates ?? []).map((c) => c.number),
           (jiraCandidates ?? []).map((c) => c.key),
         );
+      // The settings this run loaded, so the label pick uses the same model.
+      const loaded: { ai?: AiSettings } = {};
       const final = await run(
         async (settings) => {
+          loaded.ai = settings.ai;
           const [diff, repoInstructions] = await Promise.all([
             getDiff(settings),
             readRepoInstructions(repoPath),
@@ -140,7 +219,38 @@ export function useGeneratePrDescription(repoPath: string) {
         },
         { onChunk: (buffer) => onUpdate(parse(buffer)) },
       );
-      return final === null ? null : parse(final);
+      if (final === null) return null;
+      const draft = parse(final);
+      const ai = loaded.ai;
+      if (
+        !ai ||
+        !needsStructuredLabelPick(
+          draft,
+          availableLabels.map((l) => l.name),
+          isCliProvider(ai.provider),
+        )
+      )
+        return draft;
+      // Raised before any await, so it batches with the stream's flag clearing
+      // rather than leaving a render where `generating` reads false mid-run.
+      const abort = new AbortController();
+      pickAbortRef.current = abort;
+      setPickingLabels(true);
+      try {
+        const labels = await pickLabelsStructured(
+          ai,
+          draft,
+          availableLabels,
+          abort.signal,
+        );
+        if (labels.length === 0 || abort.signal.aborted) return draft;
+        return { ...draft, labels, pickedLabels: labels };
+      } catch {
+        return draft;
+      } finally {
+        if (pickAbortRef.current === abort) pickAbortRef.current = null;
+        setPickingLabels(false);
+      }
     },
     [repoPath, run],
   );

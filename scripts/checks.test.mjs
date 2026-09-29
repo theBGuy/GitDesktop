@@ -4382,3 +4382,50 @@ test("raw-copy-icon-button exempts the component file and vendored ui only", () 
   const views = new Map([[file, view(source)]]);
   assert.deepEqual(runCheck(check, [file], views).violations, []);
 });
+
+// The PR-description prompt ships twice: `buildPrPrompt` for the app and
+// `assemble_pr_recipe` for the MCP recipe tool, synced by hand. These are the
+// label-policy sentences a one-sided edit would silently fork. Each source is
+// read from disk with its own string escaping undone (TS template-literal
+// backticks, Rust `\"`), so the check is byte-equality of the prompt text.
+const PR_LABEL_PROMPT_SENTENCES = [
+  "for most changes the right outcome is one label or none — never force one.",
+  "After the description, always add a final line exactly like `Labels: name1, name2` listing ONLY label names from the list above, copied verbatim.",
+  "When no label qualifies, write exactly `Labels: none` — never omit the line, and never invent a label.",
+  " Output the title on the first line, a blank line, the description, then the final `Labels:` line (`Labels: none` when no label qualifies)",
+  ", then the `Closes:` / `Relates:` line(s) for any qualifying issue",
+  ", then the `Relates:` line for any qualifying issue",
+];
+
+/** A prompt source with its string-literal escaping undone. Throws when the file
+ *  is unreadable, so a moved or deleted mirror fails rather than passing empty. */
+function promptSource(rel) {
+  const text = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", rel),
+    "utf8",
+  );
+  assert.ok(text.length > 0, `${rel} is empty`);
+  // A Windows checkout may carry CRLF; the markers below are LF-spelled.
+  return text
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\\`", "`")
+    .replaceAll('\\"', '"');
+}
+
+test("the PR label-policy sentences are identical in prompt.ts and generate.rs", () => {
+  // The Rust test module pins these same sentences as constants, so only the code
+  // above it counts: otherwise a prompt edit its stale test copy still matched
+  // would pass here.
+  const rust = promptSource("src-tauri/src/mcp_server/generate.rs");
+  const testsAt = rust.indexOf("\n#[cfg(test)]\nmod tests");
+  assert.ok(testsAt > 0, "generate.rs test module marker not found");
+  const sources = {
+    "src/lib/ai/prompt.ts": promptSource("src/lib/ai/prompt.ts"),
+    "src-tauri/src/mcp_server/generate.rs": rust.slice(0, testsAt),
+  };
+  for (const sentence of PR_LABEL_PROMPT_SENTENCES) {
+    for (const [rel, text] of Object.entries(sources)) {
+      assert.ok(text.includes(sentence), `${rel} lacks: ${sentence}`);
+    }
+  }
+});

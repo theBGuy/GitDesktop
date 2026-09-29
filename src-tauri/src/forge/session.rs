@@ -265,6 +265,55 @@ pub(crate) fn gh_error_is_rate_limit(error: Option<&str>) -> bool {
     })
 }
 
+/// Transport-failure vocabulary shared by the gh and glab classifiers. "deadline
+/// exceeded" is an exhausted context budget, never a credential verdict.
+const NETWORKISH: [&str; 7] = [
+    "timeout",
+    "connection",
+    "dial",
+    "lookup",
+    "network",
+    "tls",
+    "deadline exceeded",
+];
+
+/// gh-only additions, measured from `gh auth status --json` (gh 2.94.0) behind a
+/// failing proxy, whose CONNECT refusals carry only the status TEXT: a dropped stream
+/// reads `unexpected EOF`, and a refusing proxy `Bad Gateway`, `Service Unavailable`,
+/// or `Proxy Authentication Required` (reconnecting to GitHub can't clear any of them);
+/// Go prefixes a failed proxy dial with `proxyconnect`. The 5xx codes cover the
+/// server's own outage answers, `HTTP 503: … (<url>)`.
+const GH_NETWORKISH_EXTRA: [&str; 9] = [
+    "eof",
+    "bad gateway",
+    "service unavailable",
+    "proxy",
+    "proxyconnect",
+    "500",
+    "502",
+    "503",
+    "504",
+];
+
+/// Whether gh error text (an account's `error`, or an old gh's text report) names a
+/// transport or server failure: the request never reached a verdict on the
+/// credential, so the session is Offline, not Broken. Deliberately narrow, in the
+/// spirit of `git::remote::is_auth_class_failure`: whole words only, and any text
+/// naming a 401/403 answer is the server's credential verdict whatever its body says.
+/// Callers check the rate limit first.
+pub(crate) fn gh_error_is_network(error: Option<&str>) -> bool {
+    error.is_some_and(|e| {
+        let e = e.to_lowercase();
+        if has_standalone_word(&e, "401") || has_standalone_word(&e, "403") {
+            return false;
+        }
+        NETWORKISH
+            .iter()
+            .chain(GH_NETWORKISH_EXTRA.iter())
+            .any(|w| has_standalone_word(&e, w))
+    })
+}
+
 /// Whether a reading, on its own, earns the anti-flap re-probe: only Broken does. A
 /// RateLimited reading never triggers one (it would spend another call against the
 /// exhausted quota), though the accounts path's SHARED re-probe, fired by another
@@ -407,24 +456,26 @@ pub(crate) struct GhHostAuth {
     pub login: Option<String>,
 }
 
-/// Per-host gh auth verdict for `host`, or `None` when per-host truth is unavailable
+/// Per-host gh auth verdict for `host`, or `Ok(None)` when per-host truth is unavailable
 /// (old gh without `--json`, an inconclusive probe, or `host` absent from the map) —
 /// the caller then falls back to the host-less exit-code probe. No anti-flap re-probe:
 /// this backs a hot UI probe, and a transient Broken heals on its next refetch.
-pub(crate) async fn github_auth_on_host(host: &str) -> Option<GhHostAuth> {
+pub(crate) async fn github_auth_on_host(host: &str) -> AppResult<Option<GhHostAuth>> {
     gh_host_auth_from_result(gh_status_json(Some(host)).await, host)
 }
 
-/// A probe that failed to run at all (timeout, spawn error) reads signed-out rather
-/// than `None`: the fallback probe is network-bound too, so a hung network would pay
-/// the gh timeout twice on this hot path.
-fn gh_host_auth_from_result(probe: AppResult<GhJsonProbe>, host: &str) -> Option<GhHostAuth> {
+/// A probe that failed to run at all (timeout, spawn error) is an error, never a
+/// signed-out verdict or `None`: the caller's react-query observers keep their last
+/// good status on a rejection, and the fallback probe is network-bound too, so a hung
+/// network would pay the gh timeout twice on this hot path.
+fn gh_host_auth_from_result(
+    probe: AppResult<GhJsonProbe>,
+    host: &str,
+) -> AppResult<Option<GhHostAuth>> {
     match probe {
         Ok(probe) => gh_host_auth(&probe, host),
-        Err(_) => Some(GhHostAuth {
-            authenticated: false,
-            login: None,
-        }),
+        Err(AppError::Timeout(_)) => Err(unreachable_forge_error(host, None)),
+        Err(e) => Err(e),
     }
 }
 
@@ -432,16 +483,31 @@ fn gh_host_auth_from_result(probe: AppResult<GhJsonProbe>, host: &str) -> Option
 /// never another host's, as in background.rs `github_verdict` — because in `--json`
 /// mode an absent key is the only "unknown host" signal (gh still exits 0). Only
 /// Healthy authenticates: a RateLimited host reads false so the UI's rate-limit arm,
-/// not every panel's 403s, owns that state.
-fn gh_host_auth(probe: &GhJsonProbe, host: &str) -> Option<GhHostAuth> {
+/// not every panel's 403s, owns that state. An Offline host is an error: its sign-in
+/// is unknown, and reading it false would unmount every hosted panel for an outage.
+fn gh_host_auth(probe: &GhJsonProbe, host: &str) -> AppResult<Option<GhHostAuth>> {
     let GhJsonProbe::Parsed(map) = probe else {
-        return None;
+        return Ok(None);
+    };
+    let Some(accounts) = map.get(host) else {
+        return Ok(None);
     };
     // A present key with no accounts classifies NotConnected, so it reads false.
-    let health = classify_gh_host(map.get(host)?);
-    Some(GhHostAuth {
+    let health = classify_gh_host(accounts);
+    if health.state == SessionState::Offline {
+        return Err(unreachable_forge_error(host, health.detail));
+    }
+    Ok(Some(GhHostAuth {
         authenticated: health.state == SessionState::Healthy,
         login: health.login,
+    }))
+}
+
+/// The error a sign-in probe that couldn't reach `host` rejects with.
+fn unreachable_forge_error(host: &str, detail: Option<String>) -> AppError {
+    AppError::Gh(match detail {
+        Some(d) => format!("Couldn't reach {host} to check the GitHub sign-in: {d}"),
+        None => format!("Couldn't reach {host} to check the GitHub sign-in."),
     })
 }
 
@@ -500,10 +566,9 @@ fn rate_limit_reset_header(body: &str) -> Option<i64> {
 
 /// Degraded GitHub health via plain `gh auth status` (old gh without `--json`). Exit
 /// 0 → Healthy (login via `parse_auth_accounts`); non-zero with no parsed accounts →
-/// NotConnected; non-zero with accounts → Broken. No Offline detection is possible
-/// here — plain text can't distinguish a transient failure from a real one — and no
-/// RateLimited either: gh's text renderer prints the same token-invalid line for
-/// every error, so no rate-limit signal exists to read.
+/// NotConnected; non-zero with accounts → Broken, or Offline when the report carries
+/// transport-failure words (a timeout line, say). No RateLimited: gh's text renderer
+/// prints the same token-invalid line for every error, so no rate-limit signal exists.
 async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     let host_str = host.unwrap_or("github.com");
     let mut args: Vec<&str> = vec!["auth", "status"];
@@ -519,13 +584,19 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
         Err(_) => return SessionHealth::new("github", host_str, SessionState::Offline),
     };
     let report = format!("{}\n{}", out.stdout_lossy(), out.stderr);
-    let accounts = crate::github::pr::parse_auth_accounts(&report);
+    classify_gh_text_report(out.code, &report, host_str)
+}
+
+/// The pure step behind [`github_health_text_fallback`]: one plain `gh auth status`
+/// result (exit code + combined report) classified for `host_str`.
+fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHealth {
+    let accounts = crate::github::pr::parse_auth_accounts(report);
     // Prefer the account matching this host, else any.
     let acct = accounts
         .iter()
         .find(|a| a.host == host_str)
         .or_else(|| accounts.first());
-    if out.code == 0 {
+    if code == 0 {
         let mut h = SessionHealth::new("github", host_str, SessionState::Healthy);
         h.login = acct.map(|a| a.login.clone());
         h.active = acct.map(|a| a.active);
@@ -533,7 +604,12 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     } else if accounts.is_empty() {
         SessionHealth::new("github", host_str, SessionState::NotConnected)
     } else {
-        let mut h = SessionHealth::new("github", host_str, SessionState::Broken);
+        let state = if gh_error_is_network(Some(report)) {
+            SessionState::Offline
+        } else {
+            SessionState::Broken
+        };
+        let mut h = SessionHealth::new("github", host_str, state);
         h.login = acct.map(|a| a.login.clone());
         h.active = acct.map(|a| a.active);
         h
@@ -639,6 +715,9 @@ fn gh_account_health(host: &str, acct: &GhJsonAccount) -> SessionHealth {
     let state = match acct.state.as_str() {
         "success" => SessionState::Healthy,
         "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
+        // A request that never reached GitHub says nothing about the credential, and an
+        // outage fails the anti-flap re-probe identically.
+        "error" if gh_error_is_network(acct.error.as_deref()) => SessionState::Offline,
         // Possibly transient: the per-repo and accounts paths confirm it with a
         // re-probe; the poller takes it as-is and re-reads next tick.
         "error" => SessionState::Broken,
@@ -740,20 +819,11 @@ enum GlabFailure {
 /// still surfaces as an actionable "reconnect" rather than being swallowed.
 fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
-    // "deadline exceeded" is an exhausted context budget, never a credential verdict.
-    // Source-derived, not live-reproduced: glab 1.105.0's client-go (v2.40.1) retries a
-    // 429 until its Ratelimit-Reset inside that budget, so a long throttle can surface as
-    // Go's bare "context deadline exceeded" with no rate-limit wording or status digits.
-    // Offline rather than RateLimited: a genuine network hang surfaces the same words.
-    const NETWORKISH: [&str; 7] = [
-        "timeout",
-        "connection",
-        "dial",
-        "lookup",
-        "network",
-        "tls",
-        "deadline exceeded",
-    ];
+    // NETWORKISH matches as bare substrings here. Source-derived, not live-reproduced:
+    // glab 1.105.0's client-go (v2.40.1) retries a 429 until its Ratelimit-Reset inside
+    // the context budget, so a long throttle can surface as Go's bare "context deadline
+    // exceeded" with no rate-limit wording or status digits. Offline rather than
+    // RateLimited: a genuine network hang surfaces the same words.
     // Checked first as the most specific signal. glab's exact wording is unmeasured, so
     // it matches the phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
@@ -771,12 +841,17 @@ fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     }
 }
 
-/// Whether `429` appears as a standalone token — no ASCII letter or digit on either
-/// side — so a hash, id, or port that merely contains the digits doesn't match.
+/// Whether `429` appears as a standalone token, so a hash, id, or port that merely
+/// contains the digits doesn't match.
 fn has_standalone_429(text: &str) -> bool {
-    text.match_indices("429").any(|(i, _)| {
+    has_standalone_word(text, "429")
+}
+
+/// Whether `word` appears with no ASCII letter or digit on either side.
+fn has_standalone_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(i, _)| {
         let before = text[..i].chars().next_back();
-        let after = text[i + 3..].chars().next();
+        let after = text[i + word.len()..].chars().next();
         !before.is_some_and(|c| c.is_ascii_alphanumeric())
             && !after.is_some_and(|c| c.is_ascii_alphanumeric())
     })
@@ -2114,9 +2189,150 @@ mod tests {
         assert_eq!(main.method, None);
     }
 
+    // ── transport-failure wording (Offline, never Broken) ──
+    /// Every NETWORKISH token, the gh-only additions, and realistic gh phrasings.
+    /// MEASURED from `gh auth status --json` (gh 2.94.0): the `Get "https://…"` lines
+    /// behind a local proxy that reset, closed, or refused the CONNECT (502/503/504/407),
+    /// and the `HTTP 5xx: … (http://api.github.localhost/)` lines from a local origin
+    /// answering 500/503. INFERRED (not reproduced): the `no such host`, `connection
+    /// refused`, TLS-handshake, and `proxyconnect` lines, and the `non-200 OK status
+    /// code: 503` shape, extrapolated from the measured 401 in that shape.
+    const GH_NETWORK_ERRORS: [&str; 30] = [
+        "timeout",
+        "connection",
+        "dial",
+        "lookup",
+        "network",
+        "tls",
+        "deadline exceeded",
+        "EOF",
+        "Bad Gateway",
+        "Service Unavailable",
+        "proxy",
+        "proxyconnect",
+        "500",
+        "502",
+        "503",
+        "504",
+        "Get \"https://api.github.com/\": dial tcp: lookup api.github.com: no such host",
+        "Get \"https://api.github.com/\": dial tcp 140.82.112.6:443: connect: connection refused",
+        "Get \"https://api.github.com/\": net/http: TLS handshake timeout",
+        "Get \"https://api.github.com/\": proxyconnect tcp: dial tcp 10.0.0.1:8080: i/o timeout",
+        "Get \"https://api.github.com/\": context deadline exceeded",
+        "Get \"https://api.github.com/\": read tcp 127.0.0.1:50615->127.0.0.1:9902: wsarecv: An existing connection was forcibly closed by the remote host.",
+        "Get \"https://api.github.com/\": unexpected EOF",
+        "Get \"https://api.github.com/\": Bad Gateway",
+        "Get \"https://api.github.com/\": Service Unavailable",
+        "Get \"https://api.github.com/\": Gateway Timeout",
+        "Get \"https://api.github.com/\": Proxy Authentication Required",
+        "HTTP 503: Service Unavailable (http://api.github.localhost/)",
+        "HTTP 500: Server Error (http://api.github.localhost/)",
+        "non-200 OK status code: 503 Service Unavailable body: \"{}\"",
+    ];
+
+    #[test]
+    fn gh_json_network_error_is_offline_never_broken() {
+        for error in GH_NETWORK_ERRORS {
+            assert!(gh_error_is_network(Some(error)), "{error}");
+            let map = one_account("error", Some(error));
+            for (health, reprobe) in classify_both(&map) {
+                assert_eq!(health.state, SessionState::Offline, "{error}");
+                assert!(
+                    !reprobe,
+                    "an outage fails the re-probe identically: {error}"
+                );
+                assert_eq!(health.login.as_deref(), Some("theBGuy"));
+            }
+        }
+    }
+
+    #[test]
+    fn gh_json_auth_refusal_stays_broken_despite_network_words() {
+        // gh 2.94.0's live wording for a rejected token, measured with a bogus GH_TOKEN.
+        let live_401 = "non-200 OK status code: 401 Unauthorized body: \"{\\r\\n  \\\"message\\\": \\\"Bad credentials\\\",\\r\\n  \\\"documentation_url\\\": \\\"https://docs.github.com/rest\\\",\\r\\n  \\\"status\\\": \\\"401\\\"\\r\\n}\"";
+        for error in [
+            GH_401,
+            live_401,
+            "The token in keyring is invalid.",
+            // An answered 401/403 is a credential verdict whatever its body says.
+            "HTTP 401: token revoked after a network policy change (https://api.github.com/)",
+            "HTTP 403: Resource protected by organization SAML enforcement; connection denied",
+            // Measured origin 401 (local `github.localhost` origin, gh 2.94.0).
+            "HTTP 401: Bad credentials (http://api.github.localhost/)",
+            // The 401/403 check runs before the 5xx and proxy words.
+            "HTTP 401: Bad credentials from proxy 503 retry",
+        ] {
+            assert!(!gh_error_is_network(Some(error)), "{error}");
+            for (health, reprobe) in classify_both(&one_account("error", Some(error))) {
+                assert_eq!(health.state, SessionState::Broken, "{error}");
+                assert!(
+                    reprobe,
+                    "Broken still earns the anti-flap re-probe: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gh_network_match_is_whole_word_only() {
+        for error in [
+            "connections are fine but the token was rejected",
+            "reconnection required",
+            "a cordial refusal",
+            "thereof",
+            "networked credential store rejected the token",
+            "port 5030 rejected the token",
+            "request id 1503-a rejected",
+        ] {
+            assert!(!gh_error_is_network(Some(error)), "{error}");
+        }
+        assert!(!gh_error_is_network(None));
+        assert!(
+            gh_error_is_network(Some("i/o TIMEOUT")),
+            "matching is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn old_gh_text_report_reads_offline_only_on_transport_words() {
+        // Inferred old-gh wording (from gh's source, not a live old gh).
+        let timed_out = "\
+  ✓ Logged in to github.com as alice (oauth_token)
+  X Timeout trying to log in to github.acme.com account bob (keyring)";
+        let h = classify_gh_text_report(1, timed_out, "github.com");
+        assert_eq!(h.state, SessionState::Offline);
+        assert_eq!(h.login.as_deref(), Some("alice"));
+        let invalid = "\
+  ✓ Logged in to github.com as alice (oauth_token)
+  X Failed to log in to github.acme.com account bob (keyring)
+  - The token in keyring is invalid.";
+        assert_eq!(
+            classify_gh_text_report(1, invalid, "github.com").state,
+            SessionState::Broken
+        );
+        assert_eq!(
+            classify_gh_text_report(0, timed_out, "github.com").state,
+            SessionState::Healthy
+        );
+        assert_eq!(
+            classify_gh_text_report(1, "You are not logged into any GitHub hosts.", "github.com")
+                .state,
+            SessionState::NotConnected
+        );
+    }
+
+    #[test]
+    fn gh_rate_limit_outranks_network_words() {
+        let error =
+            "HTTP 403: API rate limit exceeded; connection throttled (https://api.github.com/)";
+        for (health, _) in classify_both(&one_account("error", Some(error))) {
+            assert_eq!(health.state, SessionState::RateLimited);
+        }
+    }
+
     // ── gh_status's per-host auth read ──
     fn host_auth(json: &str, host: &str) -> Option<GhHostAuth> {
-        gh_host_auth(&GhJsonProbe::Parsed(parse_hosts(json)), host)
+        gh_host_auth(&GhJsonProbe::Parsed(parse_hosts(json)), host).expect("no Offline host")
     }
 
     #[test]
@@ -2144,18 +2360,39 @@ mod tests {
     }
 
     #[test]
-    fn host_auth_broken_timeout_and_empty_accounts_read_false() {
+    fn host_auth_broken_and_empty_accounts_read_false() {
         assert!(!host_auth_of(one_account("error", Some(GH_401))).authenticated);
-        assert!(!host_auth_of(one_account("timeout", None)).authenticated);
         let empty = host_auth(r#"{"hosts":{"github.com":[]}}"#, "github.com")
             .expect("a present key answers even with no accounts");
         assert!(!empty.authenticated);
         assert_eq!(empty.login, None);
     }
 
+    #[test]
+    fn host_auth_offline_host_is_an_error_never_signed_out() {
+        for map in [
+            one_account("timeout", None),
+            one_account(
+                "error",
+                Some("Get \"https://api.github.com/\": unexpected EOF"),
+            ),
+            one_account("", None),
+        ] {
+            let err = gh_host_auth(&GhJsonProbe::Parsed(map), "github.com")
+                .err()
+                .expect("an Offline host rejects");
+            assert!(
+                err.to_string().starts_with("Couldn't reach github.com"),
+                "{err}"
+            );
+        }
+    }
+
     /// `gh_host_auth` for github.com over a reading that contains it.
     fn host_auth_of(map: HashMap<String, Vec<GhJsonAccount>>) -> GhHostAuth {
-        gh_host_auth(&GhJsonProbe::Parsed(map), "github.com").expect("github.com is in the map")
+        gh_host_auth(&GhJsonProbe::Parsed(map), "github.com")
+            .expect("no Offline host")
+            .expect("github.com is in the map")
     }
 
     #[test]
@@ -2172,27 +2409,41 @@ mod tests {
 
     #[test]
     fn host_auth_is_unknown_on_old_gh() {
-        assert!(gh_host_auth(&GhJsonProbe::UnknownFlag, "github.com").is_none());
+        assert!(gh_host_auth(&GhJsonProbe::UnknownFlag, "github.com")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn host_auth_probe_error_reads_signed_out_without_a_fallback() {
+    fn host_auth_probe_error_rejects_without_a_fallback() {
+        let timeout = gh_host_auth_from_result(Err(AppError::Timeout(15)), "github.com")
+            .err()
+            .expect("a timed-out probe rejects");
+        assert_eq!(
+            timeout.to_string(),
+            "Couldn't reach github.com to check the GitHub sign-in."
+        );
         for err in [
-            AppError::Timeout(15),
             AppError::Io(std::io::Error::other("spawn failed")),
             AppError::GhNotFound,
         ] {
-            let auth = gh_host_auth_from_result(Err(err), "github.com")
-                .expect("a failed probe answers, so the fallback never spawns");
-            assert!(!auth.authenticated);
-            assert_eq!(auth.login, None);
+            let expected = err.to_string();
+            let got = gh_host_auth_from_result(Err(err), "github.com")
+                .err()
+                .expect("a failed probe rejects, so the fallback never spawns");
+            assert_eq!(got.to_string(), expected);
         }
         // An Ok probe with no per-host truth still defers to the fallback.
-        assert!(gh_host_auth_from_result(Ok(GhJsonProbe::UnknownFlag), "github.com").is_none());
+        assert!(
+            gh_host_auth_from_result(Ok(GhJsonProbe::UnknownFlag), "github.com")
+                .unwrap()
+                .is_none()
+        );
         let healthy = gh_host_auth_from_result(
             Ok(GhJsonProbe::Parsed(one_account("success", None))),
             "github.com",
         )
+        .unwrap()
         .expect("github.com is in the map");
         assert!(healthy.authenticated);
     }
@@ -2200,8 +2451,10 @@ mod tests {
     #[test]
     fn host_auth_is_unknown_on_an_inconclusive_probe() {
         let probe = GhJsonProbe::Inconclusive(Some("could not read config".into()));
-        assert!(gh_host_auth(&probe, "github.com").is_none());
-        assert!(gh_host_auth(&GhJsonProbe::Inconclusive(None), "github.com").is_none());
+        assert!(gh_host_auth(&probe, "github.com").unwrap().is_none());
+        assert!(gh_host_auth(&GhJsonProbe::Inconclusive(None), "github.com")
+            .unwrap()
+            .is_none());
     }
 
     // ── github_health's confirmed-Broken disproof ──

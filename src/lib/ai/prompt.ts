@@ -347,7 +347,7 @@ export function buildPrPrompt(input: PrPromptInput): {
       .map((l) => renderLabelLine(l.name.trim(), l.description))
       .join("\n");
     systemParts.push(
-      `## Labels\n${labelLines}\nLabels are optional metadata: for most changes the right outcome is one label or none — never force one. Suggest a label ONLY when the change as a whole is what that label is for, judged by its stated purpose above (or by an unambiguous name when it has no description). Some labels belong to automation or maintainer workflows rather than to authors: dependency-bot ecosystem labels (a language or tooling name described like "Pull requests that update … code", which bots apply to dependency bumps), changelog or release controls, and triage states. Never suggest those for ordinary code changes — only when the change is precisely that case (for example, a PR that does nothing but bump dependencies).\nAfter the description, if any label qualifies, add a final line exactly like \`Labels: name1, name2\` listing ONLY label names from the list above, copied verbatim. When the change clearly matches a label's stated purpose — a bug-fix PR where a "bug" label exists — propose that label rather than abstaining. Omit the line entirely when none qualify — never invent a label.`,
+      `## Labels\n${labelLines}\nLabels are optional metadata: for most changes the right outcome is one label or none — never force one. Suggest a label ONLY when the change as a whole is what that label is for, judged by its stated purpose above (or by an unambiguous name when it has no description). Some labels belong to automation or maintainer workflows rather than to authors: dependency-bot ecosystem labels (a language or tooling name described like "Pull requests that update … code", which bots apply to dependency bumps), changelog or release controls, and triage states. Never suggest those for ordinary code changes — only when the change is precisely that case (for example, a PR that does nothing but bump dependencies).\nAfter the description, always add a final line exactly like \`Labels: name1, name2\` listing ONLY label names from the list above, copied verbatim. When the change clearly matches a label's stated purpose — a bug-fix PR where a "bug" label exists — propose that label rather than abstaining. When no label qualifies, write exactly \`Labels: none\` — never omit the line, and never invent a label.`,
     );
   }
 
@@ -374,10 +374,18 @@ export function buildPrPrompt(input: PrPromptInput): {
   }
 
   let closing = `Write the ${prNoun} title and description. Lead with a summary of the goal, then group related changes by theme under \`###\` headings when the diff touches several areas, citing the files involved.`;
+  // With labels the output shape is restated in full after the diff: smaller models
+  // follow the prompt's end, and a required line they skip reads as abstention.
+  // KEEP IN SYNC with generate.rs (pinned by scripts/checks.test.mjs).
   if (labels.length > 0) {
-    closing += ` Then, if any of the repository's labels qualify, end with a single \`Labels:\` line as instructed.`;
-  }
-  if (candidates.length > 0) {
+    let issues = "";
+    if (candidates.length > 0)
+      issues =
+        ", then the `Closes:` / `Relates:` line(s) for any qualifying issue";
+    else if (jira.length > 0)
+      issues = ", then the `Relates:` line for any qualifying issue";
+    closing += ` Output the title on the first line, a blank line, the description, then the final \`Labels:\` line (\`Labels: none\` when no label qualifies)${issues}.`;
+  } else if (candidates.length > 0) {
     closing += ` Then, if any of the listed related issues qualify, end with the \`Closes:\` / \`Relates:\` line(s) as instructed.`;
   } else if (jira.length > 0) {
     closing += ` Then, if any of the listed related issues qualify, end with the \`Relates:\` line as instructed.`;
@@ -388,6 +396,44 @@ export function buildPrPrompt(input: PrPromptInput): {
     system: systemParts.join("\n\n"),
     prompt: promptParts.join("\n\n"),
   };
+}
+
+/** The structured-output label pick run when a PR draft came back with no `Labels:`
+ *  line at all. It sees the finished title and description only, never the diff,
+ *  and the same label list and selection policy the draft prompt carries. GUI-only:
+ *  the MCP recipe has no generation step of its own, so there is no Rust twin. */
+export function buildPrLabelFallbackPrompt(input: {
+  title: string;
+  body: string;
+  availableLabels: { name: string; description?: string | null }[];
+}): { system: string; prompt: string } {
+  const labelLines = input.availableLabels
+    .filter((l) => l.name.trim())
+    .map((l) => renderLabelLine(l.name.trim(), l.description))
+    .join("\n");
+  return {
+    system:
+      "You choose repository labels for a pull request from its title and description. Labels are optional metadata: for most changes the right outcome is one label or none — never force one. Pick a label ONLY when the change as a whole is what that label is for, judged by its stated purpose (or by an unambiguous name when it has no description). Never pick automation or maintainer labels (dependency-bot ecosystem labels, changelog or release controls, triage states) unless the change is precisely that case. Return an empty list when no label qualifies.",
+    prompt: `## Labels\n${labelLines}\n\n## Pull request\n${input.title}\n\n${input.body}`,
+  };
+}
+
+/** Whether a finished PR draft earns the structured label pick: the model wrote no
+ *  `Labels` directive at all (so its silence is a format failure, not abstention),
+ *  the repo has labels to pick from, and the provider is an API one — a CLI agent
+ *  has no structured-output call. */
+export function needsStructuredLabelPick(
+  draft: { labels: string[]; droppedLabels: string[]; labelsLine: boolean },
+  availableLabelNames: string[],
+  cliProvider: boolean,
+): boolean {
+  return (
+    draft.labels.length === 0 &&
+    draft.droppedLabels.length === 0 &&
+    !draft.labelsLine &&
+    availableLabelNames.some((n) => n.trim()) &&
+    !cliProvider
+  );
 }
 
 const GENERAL_REVIEW_SYSTEM = `You are a senior software engineer reviewing a pull request. Review ONLY the changes in the provided diff.
@@ -978,14 +1024,41 @@ export function splitCommitMessage(raw: string): {
  *  wins — a sentinel must never be reported as an invented label. */
 const NO_LABEL_SENTINELS = new Set(["none", "n/a", "na", "-"]);
 
+/** Markdown emphasis and code markers a model wraps a directive line in. */
+const DIRECTIVE_MARKUP = /\*\*|__|`/g;
+/** Straight and curly quotes a model wraps a directive value in. */
+const WRAPPING_QUOTES = /^["'‘’“”]+|["'‘’“”]+$/g;
+
+/** A trailing directive line as the peel reads it: a leading list marker and every
+ *  bold/underscore/code marker dropped, so `- **Labels:** bug` parses like
+ *  `Labels: bug`. A line that is ONLY markup normalizes to empty and stops the peel,
+ *  exactly as it did unnormalized. */
+function normalizeDirectiveLine(line: string): string {
+  return line
+    .replace(/^[-*+]\s+/, "")
+    .replace(DIRECTIVE_MARKUP, "")
+    .trim();
+}
+
+/** One comma-split directive value with the model's wrappers removed. */
+function unwrapDirectiveValue(part: string): string {
+  return part
+    .replace(DIRECTIVE_MARKUP, "")
+    .trim()
+    .replace(WRAPPING_QUOTES, "")
+    .trim();
+}
+
 /**
  * Splits a (possibly still streaming) PR/MR response into title, body, validated
  * label NAMES, and validated `closes` / `relates` issue numbers. Reuses
  * {@link splitCommitMessage}, then PEELS trailing `Labels:` / `Closes:` / `Relates:`
  * lines (any order, one per kind) off the end of the body:
  * - The peel walks up from the last non-empty line, accepting a directive line or a
- *   nascent bare prefix still streaming (no colon yet); first-from-end wins per kind
- *   and a repeat of a seen kind STOPS the loop. It runs on EVERY chunk so a partial
+ *   nascent bare prefix still streaming (no colon yet), each read through
+ *   `normalizeDirectiveLine` and each value through `unwrapDirectiveValue`, so list
+ *   markers, bold/code markup, and quotes don't hide a directive; first-from-end
+ *   wins per kind and a repeat of a seen kind STOPS the loop. It runs on EVERY chunk so a partial
  *   line never flickers into the rendered body — which is why the peel is
  *   unconditional even with no candidates fed; a prose final line starting with one
  *   of those tokens is deliberately sacrificed to that guarantee.
@@ -1014,6 +1087,9 @@ export function extractPrDraft(
   closes: number[];
   relates: number[];
   jiraMentions: string[];
+  /** Whether the peel found a `Labels` directive at all, `Labels: none` included —
+   *  what tells a model that abstained from one that skipped the required line. */
+  labelsLine: boolean;
 } {
   const { title, body: fullBody } = splitCommitMessage(raw);
 
@@ -1029,7 +1105,7 @@ export function extractPrDraft(
       cursor--;
       continue;
     }
-    const line = lines[cursor].trim();
+    const line = normalizeDirectiveLine(lines[cursor].trim());
     // Require the colon so a normal sentence merely starting with the keyword
     // (e.g. "Closes the gap …") is not mistaken for a directive line; the nascent
     // pre-colon case is handled just below.
@@ -1071,7 +1147,7 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.labels.split(",")) {
-      const trimmed = part.trim();
+      const trimmed = unwrapDirectiveValue(part);
       const key = trimmed.toLowerCase();
       if (!key || seen.has(key)) continue;
       const match = canonical.get(key);
@@ -1089,7 +1165,7 @@ export function extractPrDraft(
     const seen = new Set<number>();
     const out: number[] = [];
     for (const part of rawLine.split(",")) {
-      const token = part.trim().replace(/^#/, "");
+      const token = unwrapDirectiveValue(part).replace(/^#/, "");
       if (!/^\d+$/.test(token)) continue;
       const n = Number.parseInt(token, 10);
       if (candidateSet.has(n) && !seen.has(n)) {
@@ -1116,7 +1192,7 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.relates.split(",")) {
-      const token = part.trim().toUpperCase();
+      const token = unwrapDirectiveValue(part).toUpperCase();
       if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(token)) continue;
       if (canonicalKeys.has(token) && !seen.has(token)) {
         seen.add(token);
@@ -1125,7 +1201,16 @@ export function extractPrDraft(
     }
   }
 
-  return { title, body, labels, droppedLabels, closes, relates, jiraMentions };
+  return {
+    title,
+    body,
+    labels,
+    droppedLabels,
+    closes,
+    relates,
+    jiraMentions,
+    labelsLine: "labels" in captured,
+  };
 }
 
 /** The branch name from a branch-name response, tolerant of a leaked preamble line.

@@ -78,7 +78,9 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     // host can't gate this repo. The hint only keys the auth read — `host` below
     // stays canonical from the view URL.
     let host_hint = crate::forge::session::github_host_for_repo(&repo_path).await;
-    let host_auth = crate::forge::session::github_auth_on_host(&host_hint).await;
+    // A probe that couldn't reach the host rejects rather than reading signed-out: the
+    // frontend keeps its last good status through an outage instead of unmounting.
+    let host_auth = crate::forge::session::github_auth_on_host(&host_hint).await?;
 
     // Fallback when per-host truth is unavailable (old gh without `--json`, an
     // inconclusive probe, an unregistered host): `gh auth status` exits non-zero when
@@ -86,13 +88,11 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     // Its report (stderr on old gh, stdout on newer) names the account(s) per host.
     let (authenticated, accounts) = match &host_auth {
         Some(auth) => (auth.authenticated, Vec::new()),
-        None => match run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await {
-            Ok(out) => {
-                let report = format!("{}\n{}", out.stdout_lossy(), out.stderr);
-                (out.code == 0, parse_auth_accounts(&report))
-            }
-            Err(_) => (false, Vec::new()),
-        },
+        None => {
+            let out = run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await?;
+            let report = format!("{}\n{}", out.stdout_lossy(), out.stderr);
+            fallback_auth_outcome(out.code, &report)?
+        }
     };
 
     // Pin the origin slug POSITIONALLY (`gh repo view <slug>` — the `repo` family
@@ -136,6 +136,18 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         login,
         probe_error,
     })
+}
+
+/// The host-global `gh auth status` fallback's `(authenticated, accounts)`. A failing
+/// report worded like a transport failure rejects under the same contract as the
+/// per-host probe: the sign-in is unknown, never signed-out.
+fn fallback_auth_outcome(code: i32, report: &str) -> AppResult<(bool, Vec<ParsedAccount>)> {
+    if code != 0 && crate::forge::session::gh_error_is_network(Some(report)) {
+        return Err(AppError::Gh(
+            "Couldn't reach GitHub to check the sign-in.".to_string(),
+        ));
+    }
+    Ok((code == 0, parse_auth_accounts(report)))
 }
 
 /// `gh_status`'s repo lookup as `(repo, host, probe_error)`. Only rate-limit wording
@@ -6823,7 +6835,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
-        external_items_from_thread_nodes,
+        external_items_from_thread_nodes, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
@@ -8684,6 +8696,30 @@ github.acme.com
         assert_eq!(accounts[0].host, "github.com");
         assert_eq!(accounts[1].host, "github.acme.com");
         assert!(accounts[0].active && accounts[1].active);
+    }
+
+    #[test]
+    fn auth_fallback_rejects_a_transport_failure_but_not_a_sign_out() {
+        // Inferred old-gh wording (from gh's source, not a live old gh): a timed-out
+        // host beside a signed-in one exits non-zero.
+        let timed_out = "\
+  ✓ Logged in to github.com as alice (oauth_token)
+  X Timeout trying to log in to github.acme.com account bob (keyring)";
+        let err = fallback_auth_outcome(1, timed_out).err().expect("rejects");
+        assert_eq!(err.to_string(), "Couldn't reach GitHub to check the sign-in.");
+        // A genuine sign-out still resolves false.
+        let signed_out =
+            "You are not logged into any GitHub hosts. To log in, run: gh auth login";
+        let (authed, accounts) = fallback_auth_outcome(1, signed_out).unwrap();
+        assert!(!authed);
+        assert!(accounts.is_empty());
+        let invalid = "\
+  X Failed to log in to github.com account alice (keyring)
+  - The token in keyring is invalid.";
+        assert!(!fallback_auth_outcome(1, invalid).unwrap().0);
+        // A healthy report never rejects, whatever words it carries.
+        let healthy = "  ✓ Logged in to git.network.example as alice (oauth_token)";
+        assert!(fallback_auth_outcome(0, healthy).unwrap().0);
     }
 
     #[test]

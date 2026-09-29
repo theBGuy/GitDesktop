@@ -5109,9 +5109,11 @@ export function ProjectsBoardPanel({
 
   const body = (() => {
     switch (true) {
-      // A failed forge probe is not "still detecting": without this arm the
-      // panel sits on a skeleton forever and nothing on screen can refetch it.
-      case gh.error !== null:
+      // A failed forge probe with nothing cached is not "still detecting":
+      // without this arm the panel sits on a skeleton forever and nothing on
+      // screen can refetch it. A failed REFETCH keeps its last good status in
+      // `gh.data`, so the board stays mounted through it.
+      case gh.error !== null && gh.data === undefined:
         return <ErrorCard error={gh.error} onRetry={() => void gh.refetch()} />;
       // Still detecting: `gh.data` undefined is not yet "not GitHub".
       case gh.data === undefined:

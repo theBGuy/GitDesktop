@@ -324,6 +324,29 @@ export function ForgeNotReady({
     );
   }
 
+  // A status probe that rejected with nothing cached (a cold start while the host
+  // is unreachable) knows neither the provider nor its install or sign-in state,
+  // so this copy names no host and the ladder below would misdirect.
+  if (forge.isError && forge.data === undefined) {
+    return (
+      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+        <p>
+          GitDesktop couldn't reach this repository's host, so {feature} aren't
+          available right now. Check your network connection.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="cursor-pointer"
+          // Joins a probe already in flight rather than spawning a second one.
+          onClick={() => void forge.refetch({ cancelRefetch: false })}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
   // GitHub: nothing can publish this repo, so walk the gh setup ladder
   // (install → sign in), then — if gh is ready but the repo still isn't
   // resolvable (an origin gh can't identify, or the targets probe found

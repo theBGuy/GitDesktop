@@ -58,6 +58,10 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     switch (true) {
       case gh.isPending:
         return "Loading discussions…";
+      // A status probe that couldn't reach the host knows nothing about the
+      // sign-in, so it must not read as a sign-in instruction.
+      case gh.isError && gh.data === undefined:
+        return "Couldn't reach this repository's host";
       case !ghReady:
         return signedOutReason;
       case !supportsDiscussions:

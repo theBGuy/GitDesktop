@@ -935,7 +935,14 @@ export function CreatePrDialog({
       jiraCandidates,
     ).then(
       (final) => {
-        if (final) setDroppedLabels(final.droppedLabels);
+        if (final) {
+          setDroppedLabels(final.droppedLabels);
+          // The post-stream label pick arrives only here, so title and body the
+          // user edited meanwhile stay theirs. Additive, like the streamed labels.
+          const picked = final.pickedLabels ?? [];
+          if (picked.length > 0)
+            setLabels((prev) => new Set([...prev, ...picked]));
+        }
         surface.noteRunSettled(final !== null);
       },
       // Two-arm, never a trailing .catch: a settle must be reported exactly
