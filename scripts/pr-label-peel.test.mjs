@@ -68,6 +68,35 @@ test("wrapped names still validate case-insensitively into the repo's casing", (
   assert.deepEqual(d.droppedLabels, ["made-up"]);
 });
 
+test("markup inside a label name survives: raw first, then edge wrappers only", () => {
+  const repo = ["bug", "area__parser", "__init__", "`code`"];
+  for (const [trailer, want] of [
+    ["Labels: area__parser", ["area__parser"]],
+    ["Labels: **bug**", ["bug"]],
+    ["Labels: `area__parser`", ["area__parser"]],
+    ["**Labels:** area__parser, **bug**", ["area__parser", "bug"]],
+    ["- Labels: `area__parser`", ["area__parser"]],
+    // Names that themselves begin or end with a wrapper character match raw.
+    ["Labels: __init__", ["__init__"]],
+    ["Labels: `code`", ["`code`"]],
+  ]) {
+    const d = extractPrDraft(draft(trailer), repo);
+    assert.deepEqual(d.labels, want, trailer);
+    assert.deepEqual(d.droppedLabels, [], trailer);
+    assert.equal(d.body, "Guards the null path.", trailer);
+  }
+});
+
+test("a Jira key keeps its underscores and still unwraps", () => {
+  const d = extractPrDraft(
+    draft("Relates: `MY_PROJ-7`, **ABC-12**"),
+    LABELS,
+    [],
+    ["MY_PROJ-7", "ABC-12"],
+  );
+  assert.deepEqual(d.jiraMentions, ["MY_PROJ-7", "ABC-12"]);
+});
+
 test("wrapped Closes/Relates lines peel alongside the Labels line", () => {
   const d = extractPrDraft(
     draft("**Labels:** bug\n**Closes:** #12\n- Relates: `34`"),

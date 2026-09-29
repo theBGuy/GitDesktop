@@ -1026,13 +1026,22 @@ const NO_LABEL_SENTINELS = new Set(["none", "n/a", "na", "-"]);
 
 /** Markdown emphasis and code markers a model wraps a directive line in. */
 const DIRECTIVE_MARKUP = /\*\*|__|`/g;
-/** Straight and curly quotes a model wraps a directive value in. */
-const WRAPPING_QUOTES = /^["'‘’“”]+|["'‘’“”]+$/g;
 
-/** A trailing directive line as the peel reads it: a leading list marker and every
- *  bold/underscore/code marker dropped, so `- **Labels:** bug` parses like
- *  `Labels: bug`. A line that is ONLY markup normalizes to empty and stops the peel,
- *  exactly as it did unnormalized. */
+/** A directive line with its keyword-side wrappers tolerated: an optional list
+ *  marker, and one bold/underscore/code marker opened before the keyword and closed
+ *  before or after its colon, as in `- **Labels:** bug` or `` `Labels:` bug ``. Only
+ *  the OPENER's own marker may close (the backreference), so a value starting with
+ *  `__` stays whole; the value (group 3) is captured RAW for the same reason. */
+const DIRECTIVE_LINE =
+  /^(?:[-*+]\s+)?(\*\*|__|`)?\s*(labels|closes|relates)\s*\1?\s*:\s*\1?\s*(.*)$/i;
+
+/** Markup and straight/curly quotes a model wraps a directive VALUE in, matched only
+ *  at its edges so a name's own `__` or quote survives. */
+const VALUE_WRAPPERS = /^(?:\*\*|__|`|["'‘’“”])+|(?:\*\*|__|`|["'‘’“”])+$/g;
+
+/** A partial directive line as the nascent check reads it: list marker and every
+ *  markup marker dropped, so a streaming `**Labels` is recognized. A line that is
+ *  ONLY markup normalizes to empty and stops the peel, exactly as it did unnormalized. */
 function normalizeDirectiveLine(line: string): string {
   return line
     .replace(/^[-*+]\s+/, "")
@@ -1040,13 +1049,11 @@ function normalizeDirectiveLine(line: string): string {
     .trim();
 }
 
-/** One comma-split directive value with the model's wrappers removed. */
+/** One comma-split directive value with the model's edge wrappers removed. Callers
+ *  validating against a known set try the raw trimmed value FIRST: a name may itself
+ *  begin or end with a wrapper character. */
 function unwrapDirectiveValue(part: string): string {
-  return part
-    .replace(DIRECTIVE_MARKUP, "")
-    .trim()
-    .replace(WRAPPING_QUOTES, "")
-    .trim();
+  return part.trim().replace(VALUE_WRAPPERS, "").trim();
 }
 
 /**
@@ -1055,14 +1062,15 @@ function unwrapDirectiveValue(part: string): string {
  * {@link splitCommitMessage}, then PEELS trailing `Labels:` / `Closes:` / `Relates:`
  * lines (any order, one per kind) off the end of the body:
  * - The peel walks up from the last non-empty line, accepting a directive line or a
- *   nascent bare prefix still streaming (no colon yet), each read through
- *   `normalizeDirectiveLine` and each value through `unwrapDirectiveValue`, so list
- *   markers, bold/code markup, and quotes don't hide a directive; first-from-end
- *   wins per kind and a repeat of a seen kind STOPS the loop. It runs on EVERY chunk so a partial
- *   line never flickers into the rendered body — which is why the peel is
- *   unconditional even with no candidates fed; a prose final line starting with one
- *   of those tokens is deliberately sacrificed to that guarantee.
- * - Labels match case-insensitively against `availableLabels`, returned in the repo's
+ *   nascent bare prefix still streaming (no colon yet), read through `DIRECTIVE_LINE`
+ *   and `normalizeDirectiveLine` so list markers and bold/code markup don't hide a
+ *   directive; first-from-end wins per kind and a repeat of a seen kind STOPS the
+ *   loop. It runs on EVERY chunk so a partial line never flickers into the rendered
+ *   body — which is why the peel is unconditional even with no candidates fed; a
+ *   prose final line starting with one of those tokens is deliberately sacrificed to
+ *   that guarantee.
+ * - Labels match case-insensitively against `availableLabels` (the raw value first,
+ *   then with its edge wrappers removed), returned in the repo's
  *   canonical casing; anything not in the set is DROPPED and reported in
  *   `droppedLabels` (as the model emitted it) so a caller can surface the mismatch —
  *   except a {@link NO_LABEL_SENTINELS} token, which is skipped silently. Empty
@@ -1109,13 +1117,13 @@ export function extractPrDraft(
     // Require the colon so a normal sentence merely starting with the keyword
     // (e.g. "Closes the gap …") is not mistaken for a directive line; the nascent
     // pre-colon case is handled just below.
-    const m = line.match(/^(labels|closes|relates)\s*:\s*(.*)$/i);
+    const m = lines[cursor].trim().match(DIRECTIVE_LINE);
     // A trailing bare `Labels`/`Closes`/`Relates` prefix mid-stream (no colon
     // yet) also counts as a nascent line to strip so it doesn't briefly render.
     const nascent =
       !m && /^(labels?|closes?|relates?)$/i.test(line.replace(/[:\s]*$/, ""));
     if (!m && !nascent) break;
-    const kindRaw = (m ? m[1] : line.replace(/[:\s]*$/, "")).toLowerCase();
+    const kindRaw = (m ? m[2] : line.replace(/[:\s]*$/, "")).toLowerCase();
     // Normalize the nascent singular forms (`label`/`close`/`relate`) to the key.
     const kind = kindRaw.startsWith("label")
       ? "labels"
@@ -1125,7 +1133,7 @@ export function extractPrDraft(
     // A second occurrence of an already-seen kind STOPS the loop (that earlier
     // line is real body content, not another directive).
     if (kind in captured) break;
-    captured[kind] = m ? (m[2] ?? "").trim() : "";
+    captured[kind] = m ? (m[3] ?? "").trim() : "";
     bodyEnd = cursor;
     cursor--;
   }
@@ -1147,7 +1155,11 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.labels.split(",")) {
-      const trimmed = unwrapDirectiveValue(part);
+      // Raw first: a repo label may itself start or end with a wrapper character.
+      const raw = part.trim();
+      const trimmed = canonical.has(raw.toLowerCase())
+        ? raw
+        : unwrapDirectiveValue(part);
       const key = trimmed.toLowerCase();
       if (!key || seen.has(key)) continue;
       const match = canonical.get(key);
@@ -1192,7 +1204,10 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.relates.split(",")) {
-      const token = unwrapDirectiveValue(part).toUpperCase();
+      const raw = part.trim().toUpperCase();
+      const token = canonicalKeys.has(raw)
+        ? raw
+        : unwrapDirectiveValue(part).toUpperCase();
       if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(token)) continue;
       if (canonicalKeys.has(token) && !seen.has(token)) {
         seen.add(token);
