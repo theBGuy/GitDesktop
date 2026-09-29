@@ -15,21 +15,26 @@
 // site. A mutationFn passed through a parameter resolves at the enclosing hook's call
 // sites in the same file (every one must agree), or is delegated to a WRAPPERS entry;
 // `useRepoMutation` must thread `opts.networkMode` per site and never default it.
-// A name that is a PARAMETER or a VARIABLE is never classified by its spelling. A
-// positional parameter resolves through a named hook (a declaration, or the FIRST
-// declarator of a `const`/`let`/`var` whose whole initializer is the function,
-// annotated or not: `annotationEnd` walks any type to the initializer's `=`, so that
-// declarator is left unnamed only when it has no initializer). A parameter of any
-// other function (a callback, a method, a parenthesized or curried initializer, a
-// second declarator), a name bound by a destructured or rest parameter, a parameter
-// its function's body declares again, and a `const`/`let`/`var` holding a value all
-// fail as ambiguities. Only imported names and named functions meet the
-// vocabularies.
+// A name that is a PARAMETER or a VARIABLE is never classified by its spelling
+// (within the blind spots below: a reassigned parameter still resolves from its
+// call site). A positional parameter resolves through a named hook (a declaration,
+// or the FIRST declarator of a `const`/`let`/`var` whose whole initializer is the
+// function, annotated or not: `annotationEnd` walks any type to the initializer's
+// `=`, so that declarator is left unnamed only when it has no initializer). A
+// parameter of any other function (a callback, a method, a parenthesized or curried
+// initializer, a second declarator), a name bound by a destructured or rest
+// parameter, a parameter its function's body declares again, and a
+// `const`/`let`/`var` holding a value all fail as ambiguities. Only imported names
+// and named functions meet the vocabularies.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
-// mutationFn reached through `.bind()`. A future unprefixed network helper named like
-// a local verb (`createRelease`) would classify local: the families trade that hole
-// for totality, so a network write must be named in NETWORK_CALLEES on purpose. A
+// function handed off uncalled (through `.bind()`, as an argument such as
+// `helper(api.gitPush)`, or as `(0, f)()`). Pass-through resolution assumes the
+// parameter is not reassigned before the use (`=`, a compound or `??=` assignment,
+// a destructuring-assignment target): a reassigned parameter resolves from the call
+// site. A future unprefixed network helper named like a local verb
+// (`createRelease`) would classify local: the families trade that hole for
+// totality, so a network write must be named in NETWORK_CALLEES on purpose. A
 // return type whose object type follows a keyword (`keyof { … }`, `x is { … }`), or a
 // template-literal return type (its `${…}` brace), reads as the function's body
 // (`bodyAfter`), so the real body's parameters go unseen and could classify by
@@ -558,7 +563,9 @@ const NOT_CALLS = new Set([
 // A callee is bare (not a property of some other object) or qualified as `api.`.
 const TYPE_ARGS = String.raw`<[^()<>]*(?:<[^()<>]*>[^()<>]*)*>`;
 const CALL_RE = new RegExp(
-  String.raw`(?:\bapi\.|(?<![\w$.]))([A-Za-z_$][\w$]*)(?=\s*(?:${TYPE_ARGS}\s*)?\()`,
+  // `name!(…)` and `name?.(…)` call too: the `!` must touch the name (so `!=` and
+  // `return !(…)` stay out) and `?.` must reach a `(` (so a ternary's `?.5` does).
+  String.raw`(?:\bapi\.|(?<![\w$.]))([A-Za-z_$][\w$]*)(?=!?\s*(?:\?\.\s*)?(?:${TYPE_ARGS}\s*)?\()`,
   "g",
 );
 const INVOKE_COMMAND_RE = /^invoke\s*(?:<[^()]*?>)?\s*\(\s*(["'])([\w-]+)\1/;
@@ -1043,9 +1050,6 @@ function classifyValue(ctx, part, nested = false) {
     const name = c[1];
     const before = value.slice(0, c.index);
     if (NOT_CALLS.has(name) || /\b(?:function|new)\s*$/.test(before)) continue;
-    // A closure the mutationFn declares is scanned in place, where its body sits;
-    // any other name it declares is a value, caught below as a shadow or an alias.
-    if (closures.has(name) && !c[0].startsWith("api.")) continue;
     // Owned at the call itself, so a parameter of an arrow inside the mutationFn
     // counts as much as one of the hook around it.
     const owner = c[0].startsWith("api.")
@@ -1062,6 +1066,10 @@ function classifyValue(ctx, part, nested = false) {
       );
       continue;
     }
+    // A closure the mutationFn declares, where no parameter of that name owns the
+    // call, is scanned in place; any other name it declares is a value, caught
+    // below as an alias.
+    if (closures.has(name) && !c[0].startsWith("api.")) continue;
     if (!c[0].startsWith("api.") && ctx.variables.has(name))
       return aliasAmbiguity(name);
     if (name === "invoke") {
@@ -1102,7 +1110,9 @@ function classifyValue(ctx, part, nested = false) {
  *  is a WRAPPERS definition, else classified at every call of the hook in this file,
  *  all of which must agree. A hook that leaves the file (exported inline, from an
  *  export list, or through an alias) or is referenced without a call has callers this
- *  scan can't see, so it fails rather than resolving from the calls it can. */
+ *  scan can't see, so it fails rather than resolving from the calls it can. It
+ *  assumes the parameter is not reassigned before the use; a reassigned parameter
+ *  resolves from the call site. */
 function passThrough(ctx, fn, name, nested) {
   if (ctx.file === WRAPPER_HOME && Object.hasOwn(WRAPPERS, fn.name))
     return { cls: "delegated", callees: [] };
@@ -1138,6 +1148,12 @@ function passThrough(ctx, fn, name, nested) {
     const args = close === -1 ? [] : splitTopLevel(ctx.masked, paren, close);
     if (args.length <= k) {
       verdicts.push({ ambiguity: `${at}: passes no argument ${k + 1}` });
+      continue;
+    }
+    if (args.slice(0, k + 1).some((a) => a.text.startsWith("..."))) {
+      verdicts.push({
+        ambiguity: `${at}: spreads an argument at or before position ${k + 1}, so which value lands there can't be read`,
+      });
       continue;
     }
     const v = classifyValue(ctx, args[k], true);
@@ -1491,6 +1507,16 @@ test("every network callee makes a network site, flagged when annotated", () => 
     "one network callee left a site local",
   );
   assert.equal(mixed.flagged, 1, "a mixed site carrying always passed");
+  // A non-null-asserted call is a call.
+  const asserted = verdictOf(
+    'useMutation({ mutationFn: async () => { saveThing(r); api.gitPush!(r); }, networkMode: "always" });',
+  );
+  assert.deepEqual(asserted.classes, ["network"], "`api.gitPush!(…)` unseen");
+  assert.equal(
+    asserted.flagged,
+    1,
+    "an asserted network call carrying always passed",
+  );
 });
 
 test("neutral callees neither make nor break a site", () => {
@@ -1630,6 +1656,8 @@ test("an arrow-bound wrapper resolves at its callers, never by its parameter's n
       "interface X { save(saveFn: string): void; }\nfunction useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(r, api.gitPush);",
     "a typed declaration before an arrow wrapper":
       "function useA(fn: X): Y { return fn; }\nconst useW = (repo, fn) => useMutation({ mutationFn: fn });\nuseW(r, api.gitPush);",
+    "an optional call of the parameter":
+      "function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { await saveFn?.(r); } }); }\nuseW(r, api.gitPush);",
   };
   // Every annotation shape must walk to its initializer's `=`.
   for (const type of [
@@ -1834,6 +1862,13 @@ test("shapes the scan can't read fail closed", () => {
       'function useW(repo, saveFn) { if (repo) { const saveFn = api.gitPush; return useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nuseW(r, saveThing);',
     "a parameter redeclared as a named closure in the hook body":
       'function useW(repo, saveFn) { if (repo) { const saveFn = () => api.gitPush(); return useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nuseW(r, saveThing);',
+    // A mutationFn closure never hides a parameter of the same name.
+    "an inner arrow's parameter named like a mutationFn closure":
+      'function useW(repo, x) { return useMutation({ mutationFn: async () => { const saveFn = () => saveThing(r); await saveFn(); await [api.gitPush].forEach((saveFn) => saveFn(r)); }, networkMode: "always" }); }\nuseW(r, 1);',
+    "a parameter redeclared as a block closure in the mutationFn":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { await saveFn(); if (repo) { const saveFn = () => saveThing(r); await saveFn(); } }, networkMode: "always" }); }\nuseW(r, api.gitPush);',
+    "a spread at or before the pass-through's position":
+      "function useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(...a, saveThing);",
     // An in-body value shadowing a hook parameter must not resolve through the
     // hook's callers (here: a local write).
     "an in-body value shadowing a parameter":
