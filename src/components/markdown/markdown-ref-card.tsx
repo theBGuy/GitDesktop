@@ -345,17 +345,14 @@ function RefCardBody({
   // GitLab numbers merge requests in their own space, so `!5` and `#5` are two
   // different items — the card has to spell the one the body linked.
   const label = `${target.kind === "mr" ? "!" : "#"}${target.number}`;
+  const noun = target.kind === "mr" ? "merge request" : "pull request";
   if (item === undefined) return <RefCardSkeleton />;
   if (item === null) {
     return <p className="text-muted-foreground">{`Couldn't load ${label}`}</p>;
   }
   const pill: StatePill =
     item.flavor === "pr"
-      ? prPill(
-          item.state,
-          item.isDraft,
-          target.kind === "mr" ? "merge request" : "pull request",
-        )
+      ? prPill(item.state, item.isDraft, noun)
       : (ISSUE_PILL[item.state] ?? neutralIssuePill(item.state));
   const { createdAt } = item;
   return (
