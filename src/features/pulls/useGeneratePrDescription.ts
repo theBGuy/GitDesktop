@@ -343,5 +343,5 @@ export function useGeneratePrDescription(repoPath: string) {
     [runFromDiff],
   );
 
-  return { generate, generateFromDiff, cancel, generating };
+  return { generate, generateFromDiff, cancel, generating, pickingLabels };
 }

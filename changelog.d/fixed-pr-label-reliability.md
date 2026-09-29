@@ -1,4 +1,4 @@
-- Every AI-drafted pull request comes with a label suggestion from your
-  repository's labels, where "none" is an explicit answer. With a model reached
-  through an API key, a quick follow-up request picks labels when the draft
-  leaves them out.
+- When you create a pull request in a repository that has labels, the AI draft
+  includes a label choice, with "none" as a clear answer of its own. If a model
+  reached through an API key leaves the choice out, a quick follow-up request
+  picks from your repository's labels.

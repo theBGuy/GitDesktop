@@ -1042,6 +1042,9 @@ const DIRECTIVE_LINE =
  *  at its edges so a name's own `__` or quote survives. */
 const VALUE_WRAPPERS = /^(?:\*\*|__|`|["'‘’“”])+|(?:\*\*|__|`|["'‘’“”])+$/g;
 
+/** Sentence punctuation a model ends a directive value with. */
+const TRAILING_PUNCT = /[.!,;]+$/;
+
 /** A partial directive line as the nascent check reads it: list marker and every
  *  markup marker dropped, so a streaming `**Labels` is recognized. A line that is
  *  ONLY markup normalizes to empty and stops the peel, exactly as it did unnormalized. */
@@ -1158,17 +1161,22 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.labels.split(",")) {
-      // Raw first: a repo label may itself start or end with a wrapper character.
+      // Tried in order, first hit wins: raw (a repo label may itself start or end
+      // with a wrapper character), edge-unwrapped, then without trailing sentence
+      // punctuation (`Labels: None.`). A real label ending in punctuation already
+      // matches at the raw tier, so the last tier only adds matches.
       const raw = part.trim();
-      const trimmed = canonical.has(raw.toLowerCase())
-        ? raw
-        : unwrapDirectiveValue(part);
-      const key = trimmed.toLowerCase();
+      const unwrapped = unwrapDirectiveValue(part);
+      const bare = unwrapDirectiveValue(unwrapped.replace(TRAILING_PUNCT, ""));
+      const hit = [raw, unwrapped, bare].find((t) =>
+        canonical.has(t.toLowerCase()),
+      );
+      const key = (hit ?? bare).toLowerCase();
       if (!key || seen.has(key)) continue;
-      const match = canonical.get(key);
       seen.add(key);
+      const match = hit === undefined ? undefined : canonical.get(key);
       if (match) labels.push(match);
-      else if (!NO_LABEL_SENTINELS.has(key)) droppedLabels.push(trimmed);
+      else if (!NO_LABEL_SENTINELS.has(key)) droppedLabels.push(unwrapped);
     }
   }
 

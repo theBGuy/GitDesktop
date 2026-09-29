@@ -1110,6 +1110,15 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
     } else {
         format!(" and no issue/{abbrev} references")
     };
+    // The in-app parser strips the required `Labels:` line; an MCP client has no such
+    // step, so the note tells it the line is metadata for create_pull_request.
+    let labels_tail = if labels.is_empty() {
+        ""
+    } else {
+        " The `Labels:` line after the description is metadata, not description: leave it \
+         out of the body you submit and pass its names as create_pull_request's `labels` \
+         (no labels for `Labels: none`)."
+    };
     Recipe {
         system: system_parts.join("\n\n"),
         prompt: prompt_parts.join("\n\n"),
@@ -1117,7 +1126,8 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
             &format!("{pr_noun} title and description"),
             &format!(
                 "The first line is the {pr_noun} title (imperative, no trailing period), then a \
-                 blank line, then the description in {}, with no code fences{note_tail}.",
+                 blank line, then the description in {}, with no code fences{note_tail}.\
+                 {labels_tail}",
                 copy.markdown_flavor
             ),
         ),
@@ -1817,7 +1827,9 @@ impl GitDesktopMcp {
                        as one ready-to-complete message. Defaults: base = the repo's default branch, \
                        head = the current branch. The user's AI-ignore patterns are applied to the \
                        diff and the withheld file count is disclosed in the prompt. Your model \
-                       completes it and the result is the PR/MR title and description. Errors when \
+                       completes it and the result is the PR/MR title and description, plus a \
+                       `Labels:` metadata line when the repo has labels (the returned description \
+                       says how to use it). Errors when \
                        the range has no changes, or when all of them match those patterns."
     )]
     async fn pr_description_prompt(
@@ -2473,6 +2485,40 @@ mod tests {
             "{LABELS_SHAPE}, then the `Relates:` line for any qualifying issue."
         )));
         assert!(!jira.prompt.contains("as instructed"));
+    }
+
+    #[test]
+    fn pr_recipe_note_marks_the_labels_line_as_metadata_only_when_labels_exist() {
+        const METADATA: &str = "The `Labels:` line after the description is metadata";
+        let with_labels = |available_labels: Vec<(String, Option<String>)>| {
+            assemble_pr_recipe(PrPieces {
+                diff_text: String::new(),
+                diff_truncated: false,
+                files: vec![],
+                excluded_files: 0,
+                commit_subjects: vec![],
+                base_branch: "main".to_string(),
+                head_branch: "topic".to_string(),
+                available_labels,
+                candidate_issues: vec![],
+                jira_candidates: vec![],
+                repo_instructions: None,
+                global_instructions: String::new(),
+                provider: Some("github".to_string()),
+            })
+        };
+        let labelled = with_labels(vec![("bug".to_string(), None)]);
+        assert!(labelled.note.contains(METADATA), "{}", labelled.note);
+        assert!(labelled.note.contains("create_pull_request's `labels`"));
+        // The MCP prompt surface carries the same note as its description.
+        let prompt = recipe_as_prompt(labelled);
+        assert!(prompt
+            .description
+            .as_deref()
+            .is_some_and(|d| d.contains(METADATA)));
+        // No labels offered, no Labels line asked for, so nothing to explain.
+        let bare = with_labels(vec![]);
+        assert!(!bare.note.contains("`Labels:`"), "{}", bare.note);
     }
 
     #[test]

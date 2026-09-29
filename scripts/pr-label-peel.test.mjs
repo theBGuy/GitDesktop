@@ -59,6 +59,27 @@ test("Labels: none is a silent abstention, not a missing line", () => {
   }
 });
 
+test("trailing sentence punctuation neither hides a label nor fakes an answer", () => {
+  for (const [trailer, want] of [
+    ["Labels: None.", []],
+    ["- Labels: `none`.", []],
+    ["Labels: n/a!", []],
+    ["Labels: bug.", ["bug"]],
+    ["**Labels:** `bug`;", ["bug"]],
+  ]) {
+    const d = extractPrDraft(draft(trailer), LABELS);
+    assert.deepEqual(d.labels, want, trailer);
+    assert.deepEqual(d.droppedLabels, [], trailer);
+    assert.equal(d.labelsLine, true, trailer);
+  }
+  // A real label ending in punctuation matches at the raw tier, first.
+  const d = extractPrDraft(draft("Labels: v2.0!, v2.0"), ["v2.0!", "v2.0"]);
+  assert.deepEqual(d.labels, ["v2.0!", "v2.0"]);
+  // An unknown name is still reported as the model wrote it.
+  const unknown = extractPrDraft(draft("Labels: made-up."), LABELS);
+  assert.deepEqual(unknown.droppedLabels, ["made-up."]);
+});
+
 test("wrapped names still validate case-insensitively into the repo's casing", () => {
   const d = extractPrDraft(
     draft('**Labels:** "needs review", `ENHANCEMENT`, "made-up"'),
@@ -104,9 +125,10 @@ test("two nested keyword wrappers close on either side of the colon", () => {
   }
 });
 
-// The pre-fix recognizer from 62e000df (`normalizeDirectiveLine` + its plain match):
-// every markup marker stripped globally, then the keyword and its colon. It lost
-// markup INSIDE values, but its recognition is the reference for which lines are
+// The reference recognizer: strip a list marker and EVERY markup marker anywhere in
+// the line, then require the keyword and its colon. Global stripping would mangle
+// markup inside values, so the parser can't use it, but it accepts any wrapper
+// arrangement around the keyword, which makes it the definition of which lines are
 // directives.
 const MARKUP = /\*\*|__|`/g;
 function oldRecognizes(line) {
@@ -144,6 +166,8 @@ test("every wrapper combination is recognized as before and keeps its value", ()
     ["**bold**", "bold"],
     ["MY_PROJ-7", "MY_PROJ-7"],
     ["none", null],
+    ["none.", null],
+    ["bug.", "bug"],
   ]);
   const repo = ["bug", "area__parser", "__init__", "code", "quoted", "bold"];
   const failures = [];
@@ -177,13 +201,13 @@ test("every wrapper combination is recognized as before and keeps its value", ()
               failures.push(`jira ${d.jiraMentions}: ${line}`);
           }
         }
-  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 8 values: a generator that
+  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 10 values: a generator that
   // silently truncates fails here rather than passing on fewer cases.
   const expected =
     wrappers.length * keywords.length * bullets.length * values.size;
   console.log(`wrapper-combination cases: ${cases}`);
   assert.equal(wrappers.length, 19);
-  assert.ok(cases >= expected && expected === 912, `${cases} of ${expected}`);
+  assert.ok(cases >= expected && expected === 1140, `${cases} of ${expected}`);
   assert.deepEqual(failures, []);
 });
 
