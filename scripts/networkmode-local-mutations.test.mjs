@@ -21,9 +21,10 @@
 // annotated or not: `annotationEnd` walks any type to the initializer's `=`, so that
 // declarator is left unnamed only when it has no initializer). A parameter of any
 // other function (a callback, a method, a parenthesized or curried initializer, a
-// second declarator), a name bound by a destructured or rest parameter, and a
-// `const`/`let`/`var` holding a value all fail as ambiguities. Only imported names
-// and named functions meet the vocabularies.
+// second declarator), a name bound by a destructured or rest parameter, a parameter
+// its function's body declares again, and a `const`/`let`/`var` holding a value all
+// fail as ambiguities. Only imported names and named functions meet the
+// vocabularies.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // mutationFn reached through `.bind()`. A future unprefixed network helper named like
@@ -560,11 +561,6 @@ const CALL_RE = new RegExp(
   String.raw`(?:\bapi\.|(?<![\w$.]))([A-Za-z_$][\w$]*)(?=\s*(?:${TYPE_ARGS}\s*)?\()`,
   "g",
 );
-/** Names a mutationFn declares for itself, closures and values alike: a call to a
- *  closure (a named scope declared there) is scanned in place, a call to a value
- *  fails as an alias. */
-const DECLARED_RE =
-  /\b(?:(?:const|let|var)\s+([\w$]+)\s*[=:]|function\s+([\w$]+))/g;
 const INVOKE_COMMAND_RE = /^invoke\s*(?:<[^()]*?>)?\s*\(\s*(["'])([\w-]+)\1/;
 const CONSTRUCTION_RE = new RegExp(
   String.raw`(?<![\w$.])(${Object.keys(WRAPPERS).join("|")})\b`,
@@ -694,14 +690,16 @@ const patternBound = (masked, open, close) =>
       .flatMap((p) => p.text.match(IDENTIFIER_RE) ?? []),
   );
 
-/** Names a `const`/`let`/`var` binds to a VALUE rather than naming a function:
+/** Names a `const`/`let`/`var` binds to a VALUE rather than naming a function,
+ *  each mapped to the positions of the declarations (their keyword) that bind it:
  *  every declarator of every declaration, walked across its depth-0 commas, except
  *  a first declarator that is a named scope's declaration; a destructuring one
  *  contributes every identifier in its pattern (over-collected, as in
  *  `patternBound`). `as const` is an assertion, not a declaration. */
 function variableNames(masked, fns) {
   const named = new Set(fns.filter((f) => f.name).map((f) => f.at));
-  const names = new Set();
+  const names = new Map();
+  const add = (id, at) => names.set(id, [...(names.get(id) ?? []), at]);
   for (const m of masked.matchAll(/(?<!\bas\s+)\b(?:const|let|var)\b\s*/g)) {
     let i = m.index + m[0].length;
     for (let first = true; ; first = false) {
@@ -710,12 +708,12 @@ function variableNames(masked, fns) {
         const close = matchBrace(masked, i);
         if (close === -1) break;
         for (const id of masked.slice(i, close).match(IDENTIFIER_RE) ?? [])
-          names.add(id);
+          add(id, m.index);
         i = close + 1;
       } else {
         const id = /^[A-Za-z_$][\w$]*/.exec(masked.slice(i, i + 200))?.[0];
         if (!id) break;
-        if (!(first && named.has(m.index))) names.add(id);
+        if (!(first && named.has(m.index))) add(id, m.index);
         i += id.length;
       }
       // Past any definite-assignment `!`, annotation and initializer to the
@@ -989,6 +987,21 @@ function networkModeOf(ctx, part) {
   return mode;
 }
 
+/** Whether `f`'s body declares `name` again (a variable, or a named scope such as
+ *  a closure), shadowing its parameter somewhere inside. Block scoping is ignored on
+ *  purpose: a declaration anywhere in the body counts, erring toward ambiguity. */
+const shadowedIn = (ctx, f, name) =>
+  (ctx.variables.get(name) ?? []).some(
+    (at) => f.bodyOpen < at && at < f.bodyClose,
+  ) ||
+  ctx.fns.some(
+    (g) => g.name === name && f.bodyOpen < g.at && g.at < f.bodyClose,
+  );
+
+const shadowAmbiguity = (name, owner) => ({
+  ambiguity: `mutationFn \`${name}\` is a parameter${owner.name ? ` of \`${owner.name}\`` : ""} that its body declares again — the scan can't tell which one the mutationFn reaches; rename one, or EXEMPT the hook with a reason`,
+});
+
 /** A name a `const`/`let`/`var` binds to a value: its spelling says nothing about
  *  what it holds, so it is never classified by the vocabularies. */
 const aliasAmbiguity = (name) => ({
@@ -1007,6 +1020,8 @@ function classifyValue(ctx, part, nested = false) {
   if (ref) {
     const name = ref[2];
     const owner = ref[1] ? null : paramOwner(ctx.fns, part.start, name);
+    if (owner && shadowedIn(ctx, owner, name))
+      return shadowAmbiguity(name, owner);
     if (owner) return throughParameter(ctx, owner, name, nested);
     if (!ref[1] && ctx.variables.has(name)) return aliasAmbiguity(name);
     const cls = classifyCallee(name);
@@ -1019,9 +1034,6 @@ function classifyValue(ctx, part, nested = false) {
   const callees = [];
   const unknown = [];
   const value = masked.slice(part.start, part.end);
-  const declared = new Set(
-    [...value.matchAll(DECLARED_RE)].map((d) => d[1] ?? d[2]),
-  );
   const closures = new Set(
     ctx.fns
       .filter((f) => f.name && f.at >= part.start && f.at < part.end)
@@ -1031,17 +1043,16 @@ function classifyValue(ctx, part, nested = false) {
     const name = c[1];
     const before = value.slice(0, c.index);
     if (NOT_CALLS.has(name) || /\b(?:function|new)\s*$/.test(before)) continue;
-    // A name the mutationFn declares itself outranks any parameter it shadows: a
-    // closure's body is scanned in place here, a value it holds is not followed.
-    if (declared.has(name) && !c[0].startsWith("api.")) {
-      if (closures.has(name)) continue;
-      return aliasAmbiguity(name);
-    }
+    // A closure the mutationFn declares is scanned in place, where its body sits;
+    // any other name it declares is a value, caught below as a shadow or an alias.
+    if (closures.has(name) && !c[0].startsWith("api.")) continue;
     // Owned at the call itself, so a parameter of an arrow inside the mutationFn
     // counts as much as one of the hook around it.
     const owner = c[0].startsWith("api.")
       ? null
       : paramOwner(ctx.fns, part.start + c.index, name);
+    if (owner && shadowedIn(ctx, owner, name))
+      return shadowAmbiguity(name, owner);
     if (owner) {
       const v = throughParameter(ctx, owner, name, nested);
       if (v.ambiguity) return v;
@@ -1809,6 +1820,20 @@ test("shapes the scan can't read fail closed", () => {
       'const a = 1, saveFn = api.gitPush;\nuseMutation({ mutationFn: saveFn, networkMode: "always" });',
     "a destructured later declarator":
       'let a: number = 1, { saveFn } = opts;\nuseMutation({ mutationFn: () => saveFn(), networkMode: "always" });',
+    // A parameter its own body declares again: the caller's argument may not be
+    // what the mutationFn reaches (here the body pushes, the caller writes locally).
+    "a parameter redeclared by a later declarator":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { const a = 1, saveFn = api.gitPush; await saveFn(); }, networkMode: "always" }); }\nuseW(r, saveThing);',
+    "a parameter redeclared by destructuring":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { const { saveFn } = { saveFn: api.gitPush }; await saveFn(); }, networkMode: "always" }); }\nuseW(r, saveThing);',
+    "a parameter redeclared by a loop variable":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { for (const saveFn of [api.gitPush]) await saveFn(); }, networkMode: "always" }); }\nuseW(r, saveThing);',
+    "a parameter redeclared bare and assigned later":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { let saveFn; saveFn = api.gitPush; await saveFn(); }, networkMode: "always" }); }\nuseW(r, saveThing);',
+    "a parameter redeclared in the hook body, referenced bare":
+      'function useW(repo, saveFn) { if (repo) { const saveFn = api.gitPush; return useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nuseW(r, saveThing);',
+    "a parameter redeclared as a named closure in the hook body":
+      'function useW(repo, saveFn) { if (repo) { const saveFn = () => api.gitPush(); return useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nuseW(r, saveThing);',
     // An in-body value shadowing a hook parameter must not resolve through the
     // hook's callers (here: a local write).
     "an in-body value shadowing a parameter":
