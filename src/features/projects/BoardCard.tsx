@@ -20,7 +20,7 @@ import type {
   ProjectFieldDef,
   ProjectFieldValue,
 } from "@/lib/git/types";
-import { CLOSED_REASON, prPill } from "@/lib/pulls/pr-state";
+import { prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { valueBelongsTo } from "./board-model";
@@ -28,6 +28,14 @@ import { valueBelongsTo } from "./board-model";
 /** How many assignee faces a card shows before the rest collapse into "+N" —
  *  three is what fits beside the number on the narrowest column. */
 const AVATARS_SHOWN = 3;
+
+/** Why a closed issue closed, as the words after "Issue ". An unmapped reason
+ *  (wire drift) leaves the bare state, never a guess. */
+const CLOSED_REASON: Partial<Record<string, string>> = {
+  COMPLETED: "closed as completed",
+  NOT_PLANNED: "closed as not planned",
+  DUPLICATE: "closed as duplicate",
+};
 
 /** State AND kind, since the card shows neither as text. A reason only qualifies
  *  a CLOSED issue: REOPENED rides an OPEN one, so a present reason is never on

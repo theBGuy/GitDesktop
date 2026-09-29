@@ -10,14 +10,6 @@ import {
 // A leaf on purpose: the markdown ref card draws from this too, and the issue
 // module reaches markdown, so a home under issues/ would close an import cycle.
 
-/** Why a closed issue closed, as base words each surface composes into its own
- *  sentence. An unmapped reason (wire drift) leaves the bare state, never a guess. */
-export const CLOSED_REASON: Partial<Record<string, string>> = {
-  COMPLETED: "closed as completed",
-  NOT_PLANNED: "closed as not planned",
-  DUPLICATE: "closed as duplicate",
-};
-
 interface PrStatePresentation {
   Icon: Icon;
   tone: string;

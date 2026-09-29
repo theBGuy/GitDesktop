@@ -59,11 +59,15 @@ function handOffFocusBeforeRemoving(
 ) {
   const nextCount = count - 1;
   if (nextCount <= 0) {
-    // Nothing survives in the row, so focus goes where re-adding starts.
-    from
+    // Nothing survives in the row, so focus goes where re-adding starts. A
+    // disabled trigger (the field disables during AI generation) refuses focus,
+    // so the dialog popup takes it, never a footer button an Enter could fire.
+    const trigger = from
       .closest<HTMLElement>('[role="group"]')
-      ?.querySelector<HTMLElement>("[data-link-issue-trigger]")
-      ?.focus();
+      ?.querySelector<HTMLElement>("[data-link-issue-trigger]");
+    trigger?.focus();
+    if (from.ownerDocument.activeElement !== trigger)
+      from.closest<HTMLElement>('[role="dialog"]')?.focus();
     return;
   }
   // The survivor at its CURRENT index: the next chip slides into this slot, or

@@ -20,7 +20,7 @@ import { useBoardCandidates } from "@/lib/git/queries";
 import type { BoardCandidate, RemoteLens } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { CLOSED_REASON, prPill } from "@/lib/pulls/pr-state";
+import { prPill } from "@/lib/pulls/pr-state";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ARIA_DISABLED_CLASS,
@@ -28,6 +28,7 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import { issueStateWord } from "./BoardCard";
 import {
   ALREADY_DRAWN_REASON,
   type ItemNoun,
@@ -38,18 +39,13 @@ import {
  *  list feels live. The Explore and registry searches sit either side of it. */
 const SEARCH_DEBOUNCE_MS = 300;
 
-/** A candidate's state AND kind as words. Nothing here is carried by colour: the
- *  glyph's tone repeats what this sentence already says. A reason only qualifies a
- *  CLOSED issue — REOPENED rides an OPEN one. */
+/** A candidate's state AND kind as words, in the board card's own wording so a
+ *  row and the card it becomes say the same thing. Nothing here is carried by
+ *  colour: the glyph's tone repeats what this sentence already says. */
 function candidateStateWord(candidate: BoardCandidate): string {
   if (candidate.kind === "pr")
     return prPill(candidate.state, candidate.isDraft).word;
-  if (candidate.state !== "CLOSED") return "Open issue";
-  const reason =
-    candidate.stateReason === null
-      ? undefined
-      : CLOSED_REASON[candidate.stateReason];
-  return reason === undefined ? "Closed issue" : `Issue ${reason}`;
+  return issueStateWord(candidate.state, candidate.stateReason);
 }
 
 /** The row's leading glyph, off the same tables the board card uses, so a row

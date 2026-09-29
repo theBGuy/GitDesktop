@@ -145,8 +145,9 @@ export function isPullRefUrl(url: string): boolean {
 /** The calm card's whole payload. `createdAt` is present only where the resolved
  *  shape carries one — pull request details have no creation timestamp. */
 interface RefItem {
-  /** Which shape answered. A GitHub `#N` can be either, and the two read CLOSED
-   *  differently, so the pill needs the answer the resolve already had. */
+  /** What the reference IS, as the resolve settled it: a GitHub `#N` can be
+   *  either, and the two read CLOSED differently. A PR whose details read failed
+   *  stays pr-flavored even when the issue read's fields stand in for it. */
   flavor: "issue" | "pr";
   state: string;
   /** Draft qualifies an OPEN pull request only — a merged or closed one reports
@@ -237,22 +238,27 @@ async function resolveRefItem(
 interface StatePill {
   Icon: Icon;
   tone: string;
+  /** State AND kind for a reader, since the visible word names the state only. */
+  word: string;
 }
 
 /** The issue flavor's OPEN and CLOSED glyphs, mirroring the related-issue
  *  `StateIcon`: importing it would close a cycle, since the issue module reaches
  *  markdown. */
 const ISSUE_PILL: Partial<Record<string, StatePill>> = {
-  OPEN: { Icon: CircleDashedIcon, tone: "text-success" },
-  CLOSED: { Icon: CheckCircleIcon, tone: "text-merged" },
+  OPEN: { Icon: CircleDashedIcon, tone: "text-success", word: "Open issue" },
+  CLOSED: { Icon: CheckCircleIcon, tone: "text-merged", word: "Closed issue" },
 };
 
-/** An issue state this build doesn't know: the word beside the glyph still
- *  carries it, so a muted dot loses no meaning. */
-const NEUTRAL_PILL: StatePill = {
-  Icon: CircleDashedIcon,
-  tone: "text-muted-foreground",
-};
+/** An issue state this build doesn't know: a muted dot, with the forge's own
+ *  state in the words, as `prPill` does for a pull request. */
+function neutralIssuePill(state: string): StatePill {
+  return {
+    Icon: CircleDashedIcon,
+    tone: "text-muted-foreground",
+    word: `${state} issue`,
+  };
+}
 
 /** The card's settled maximum, reserved up front: a state row, a `line-clamp-2`
  *  title, and an author row — four lines at the popup's own `text-xs/relaxed`
@@ -346,13 +352,16 @@ function RefCardBody({
   const pill: StatePill =
     item.flavor === "pr"
       ? prPill(item.state, item.isDraft)
-      : (ISSUE_PILL[item.state] ?? NEUTRAL_PILL);
+      : (ISSUE_PILL[item.state] ?? neutralIssuePill(item.state));
   const { createdAt } = item;
   return (
     <div className="flex flex-col gap-1.5">
       <p className="flex items-center gap-1.5">
         <pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />
-        <span className="capitalize">
+        {/* The kind rides only here: the visible word names the state alone, so
+            it is hidden from a reader rather than announced twice. */}
+        <span className="sr-only">{`${pill.word} `}</span>
+        <span className="capitalize" aria-hidden="true">
           {item.isDraft ? "draft" : item.state.toLowerCase()}
         </span>
         <span className="text-muted-foreground tabular-nums">{label}</span>
