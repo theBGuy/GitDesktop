@@ -565,10 +565,10 @@ fn rate_limit_reset_header(body: &str) -> Option<i64> {
 }
 
 /// Degraded GitHub health via plain `gh auth status` (old gh without `--json`). Exit
-/// 0 → Healthy (login via `parse_auth_accounts`); non-zero with no parsed accounts →
-/// NotConnected; non-zero with accounts → Broken, or Offline when the report carries
-/// transport-failure words (a timeout line, say). No RateLimited: gh's text renderer
-/// prints the same token-invalid line for every error, so no rate-limit signal exists.
+/// 0 → Healthy (login via `parse_auth_accounts`); non-zero → Offline when the report
+/// carries transport-failure words (a timeout line, say), else NotConnected with no
+/// parsed accounts and Broken with some. No RateLimited: gh's text renderer prints the
+/// same token-invalid line for every error, so no rate-limit signal exists.
 async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     let host_str = host.unwrap_or("github.com");
     let mut args: Vec<&str> = vec!["auth", "status"];
@@ -596,24 +596,24 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
         .iter()
         .find(|a| a.host == host_str)
         .or_else(|| accounts.first());
-    if code == 0 {
-        let mut h = SessionHealth::new("github", host_str, SessionState::Healthy);
-        h.login = acct.map(|a| a.login.clone());
-        h.active = acct.map(|a| a.active);
-        h
+    // Transport words outrank the account count: a failed report can carry no
+    // "Logged in" line at all, and reading that as NotConnected would sign the user
+    // out for an outage.
+    let state = if code == 0 {
+        SessionState::Healthy
+    } else if gh_error_is_network(Some(report)) {
+        SessionState::Offline
     } else if accounts.is_empty() {
-        SessionHealth::new("github", host_str, SessionState::NotConnected)
+        SessionState::NotConnected
     } else {
-        let state = if gh_error_is_network(Some(report)) {
-            SessionState::Offline
-        } else {
-            SessionState::Broken
-        };
-        let mut h = SessionHealth::new("github", host_str, state);
-        h.login = acct.map(|a| a.login.clone());
-        h.active = acct.map(|a| a.active);
-        h
-    }
+        SessionState::Broken
+    };
+    // With no parsed account (NotConnected, or an Offline report carrying none) there
+    // is no login to report.
+    let mut h = SessionHealth::new("github", host_str, state);
+    h.login = acct.map(|a| a.login.clone());
+    h.active = acct.map(|a| a.active);
+    h
 }
 
 /// Account-scoped GitHub health — one entry PER account across all hosts. Uses ONE
@@ -2319,6 +2319,15 @@ mod tests {
                 .state,
             SessionState::NotConnected
         );
+        // A transport failure can leave no account line to parse; it still reads
+        // Offline, with no login to carry. Inferred wording, not a live old gh.
+        let unreachable = "\
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com";
+        let h = classify_gh_text_report(1, unreachable, "github.com");
+        assert_eq!(h.state, SessionState::Offline);
+        assert_eq!(h.login, None);
+        assert_eq!(h.active, None);
     }
 
     #[test]

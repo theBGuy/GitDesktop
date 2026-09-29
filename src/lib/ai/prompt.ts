@@ -1055,9 +1055,9 @@ function normalizeDirectiveLine(line: string): string {
     .trim();
 }
 
-/** One comma-split directive value with the model's edge wrappers removed. Callers
- *  validating against a known set try the raw trimmed value FIRST: a name may itself
- *  begin or end with a wrapper character. */
+/** One comma-split directive value with the model's edge wrappers removed. Label
+ *  validation tries the raw trimmed value FIRST, since a label name may itself begin
+ *  or end with a wrapper character; issue numbers and Jira keys cannot. */
 function unwrapDirectiveValue(part: string): string {
   return part.trim().replace(VALUE_WRAPPERS, "").trim();
 }
@@ -1094,9 +1094,9 @@ function bareDirectiveValue(part: string): string {
  * - `Closes:`/`Relates:` numbers are comma-split, reduced by `bareDirectiveValue`,
  *   `#`-stripped, digits-only, validated against `candidateIssueNumbers` and deduped;
  *   a number in both lands in `relates`.
- * - `Relates:` KEY-shaped tokens (as written, else reduced the same way) validate
- *   against `candidateJiraKeys` → `jiraMentions` (uppercase, deduped). A key on a
- *   `Closes:` line is ALWAYS dropped — Jira tickets are never closed from PR text.
+ * - `Relates:` KEY-shaped tokens, reduced by `bareDirectiveValue`, validate against
+ *   `candidateJiraKeys` → `jiraMentions` (uppercase, deduped). A key on a `Closes:`
+ *   line is ALWAYS dropped — Jira tickets are never closed from PR text.
  */
 export function extractPrDraft(
   raw: string,
@@ -1228,12 +1228,9 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.relates.split(",")) {
-      // As written first; else fully reduced, which leaves a valid key unchanged
-      // (letters first, digits last), so no edge-unwrapped-only tier is needed.
-      const raw = part.trim().toUpperCase();
-      const token = canonicalKeys.has(raw)
-        ? raw
-        : bareDirectiveValue(part).toUpperCase();
+      // No raw tier: a key starts with a letter and ends with digits, so reduction
+      // never alters one the regex below accepts.
+      const token = bareDirectiveValue(part).toUpperCase();
       if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(token)) continue;
       if (canonicalKeys.has(token) && !seen.has(token)) {
         seen.add(token);
