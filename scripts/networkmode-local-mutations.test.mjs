@@ -21,11 +21,11 @@
 // or the FIRST declarator of a `const`/`let`/`var` whose whole initializer is the
 // function, annotated or not: `annotationEnd` walks any type to the initializer's
 // `=`, so that declarator is left unnamed only when it has no initializer). A
-// parameter of any other function (a callback, a method, a parenthesized or curried
-// initializer, a second declarator), a name bound by a destructured or rest
-// parameter, a parameter its function's body declares again, and a
-// `const`/`let`/`var` holding a value all fail as ambiguities. Only imported names
-// and named functions meet the vocabularies.
+// parameter of any other function (a callback, a method, a constructor, a `catch`
+// binding, a parenthesized or curried initializer, a second declarator), a name
+// bound by a destructured or rest parameter, a parameter its function's body
+// declares again, and a `const`/`let`/`var` holding a value all fail as
+// ambiguities. Only imported names and named functions meet the vocabularies.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // function handed off uncalled (through `.bind()`, as an argument such as
@@ -679,9 +679,14 @@ function expressionEnd(masked, from) {
   return masked.length;
 }
 
+// A constructor's parameter properties (`private saveFn: F`) lead with modifiers;
+// the required whitespace after each keeps a parameter NAMED `readonly` itself.
 const paramNames = (masked, open, close) =>
   splitTopLevel(masked, open, close, true).map(
-    (p) => /^([\w$]+)\s*[?:=]?/.exec(p.text)?.[1] ?? null,
+    (p) =>
+      /^(?:(?:public|private|protected|readonly|override)\s+)*([\w$]+)\s*[?:=]?/.exec(
+        p.text,
+      )?.[1] ?? null,
   );
 
 const IDENTIFIER_RE = /[A-Za-z_$][\w$]*/g;
@@ -978,7 +983,7 @@ function throughParameter(ctx, owner, name, nested) {
     };
   if (owner.name) return passThrough(ctx, owner, name, nested);
   return {
-    ambiguity: `mutationFn \`${name}\` is a parameter of an anonymous function (a callback, a parenthesized initializer or a method) — its callers can't be followed; pass it through a named hook`,
+    ambiguity: `mutationFn \`${name}\` is a parameter of an anonymous function (a callback, a parenthesized initializer, a method or constructor, or a \`catch\` clause) — its callers can't be followed; pass it through a named hook, or EXEMPT the hook with a reason`,
   };
 }
 
@@ -1877,6 +1882,8 @@ test("shapes the scan can't read fail closed", () => {
       'useMutation({ mutationFn: async () => { try { await saveThing(r); } catch (saveFn) { await saveFn(); } }, networkMode: "always" });',
     "a constructor parameter":
       'class K { constructor(saveFn) { this.m = useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nnew K(api.gitPush);',
+    "a constructor parameter property":
+      'class K { constructor(private readonly saveFn: F) { this.m = useMutation({ mutationFn: saveFn, networkMode: "always" }); } }\nnew K(api.gitPush);',
     // An in-body value shadowing a hook parameter must not resolve through the
     // hook's callers (here: a local write).
     "an in-body value shadowing a parameter":
