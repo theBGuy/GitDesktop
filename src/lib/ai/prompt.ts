@@ -398,10 +398,11 @@ export function buildPrPrompt(input: PrPromptInput): {
   };
 }
 
-/** The structured-output label pick run when a PR draft came back with no `Labels:`
- *  line at all. It sees the finished title and description only, never the diff,
- *  and the same label list and selection policy the draft prompt carries. GUI-only:
- *  the MCP recipe has no generation step of its own, so there is no Rust twin. */
+/** The structured-output label pick run when a PR draft's `Labels:` directive gave
+ *  no answer (missing, bare, or markup only). It sees the finished title and
+ *  description only, never the diff, and the same label list and selection policy
+ *  the draft prompt carries. GUI-only: the MCP recipe has no generation step of its
+ *  own, so there is no Rust twin. */
 export function buildPrLabelFallbackPrompt(input: {
   title: string;
   body: string;
@@ -423,14 +424,18 @@ export function buildPrLabelFallbackPrompt(input: {
  *  abstention), the repo has labels to pick from, and the provider is an API one — a
  *  CLI agent has no structured-output call. */
 export function needsStructuredLabelPick(
-  draft: { labels: string[]; droppedLabels: string[]; labelsLine: boolean },
+  draft: {
+    labels: string[];
+    droppedLabels: string[];
+    labelsAnswered: boolean;
+  },
   availableLabelNames: string[],
   cliProvider: boolean,
 ): boolean {
   return (
     draft.labels.length === 0 &&
     draft.droppedLabels.length === 0 &&
-    !draft.labelsLine &&
+    !draft.labelsAnswered &&
     availableLabelNames.some((n) => n.trim()) &&
     !cliProvider
   );
@@ -1115,7 +1120,7 @@ export function extractPrDraft(
    *  lacks, or an explicit `none`-style abstention. A missing line, a bare `Labels:`,
    *  or markup with no name all read false (the model skipped the required answer),
    *  as does any line when the repo offers no labels to answer from. */
-  labelsLine: boolean;
+  labelsAnswered: boolean;
 } {
   const { title, body: fullBody } = splitCommitMessage(raw);
 
@@ -1254,7 +1259,7 @@ export function extractPrDraft(
     closes,
     relates,
     jiraMentions,
-    labelsLine: labelsAnswered,
+    labelsAnswered,
   };
 }
 

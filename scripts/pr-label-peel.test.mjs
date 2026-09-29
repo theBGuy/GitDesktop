@@ -1,8 +1,8 @@
 // Pins how a PR draft's trailing `Labels:` line is read. The prompt makes the line
 // REQUIRED (`Labels: none` when nothing fits), so the parser has to find it in the
-// shapes models actually wrap it in, and has to report whether it found one at
-// all: a draft with no line is a format failure the structured label pick
-// catches, while `Labels: none` is a real abstention it must leave alone.
+// shapes models actually wrap it in, and has to report whether the line gave an
+// answer: a missing, bare, or markup-only line is a format failure the structured
+// label pick catches, while `Labels: none` is a real abstention it must leave alone.
 //
 // `src/lib/ai/prompt.ts` imports its siblings extensionless, which Node's type
 // stripping cannot resolve, so the shared src hooks go in first and the import is
@@ -39,7 +39,7 @@ test("every tolerated Labels spelling yields the repo label and leaves the body 
     const d = extractPrDraft(draft(trailer), LABELS);
     assert.deepEqual(d.labels, ["bug"], trailer);
     assert.deepEqual(d.droppedLabels, [], trailer);
-    assert.equal(d.labelsLine, true, trailer);
+    assert.equal(d.labelsAnswered, true, trailer);
     assert.equal(d.body, "Guards the null path.", trailer);
     assert.equal(d.title, "Fix the crash", trailer);
   }
@@ -54,7 +54,7 @@ test("Labels: none is a silent abstention, not a missing line", () => {
     const d = extractPrDraft(draft(trailer), LABELS);
     assert.deepEqual(d.labels, [], trailer);
     assert.deepEqual(d.droppedLabels, [], trailer);
-    assert.equal(d.labelsLine, true, trailer);
+    assert.equal(d.labelsAnswered, true, trailer);
     assert.equal(needsStructuredLabelPick(d, LABELS, false), false, trailer);
   }
 });
@@ -70,7 +70,7 @@ test("trailing sentence punctuation neither hides a label nor fakes an answer", 
     const d = extractPrDraft(draft(trailer), LABELS);
     assert.deepEqual(d.labels, want, trailer);
     assert.deepEqual(d.droppedLabels, [], trailer);
-    assert.equal(d.labelsLine, true, trailer);
+    assert.equal(d.labelsAnswered, true, trailer);
   }
   // A real label ending in punctuation matches at the raw tier, first.
   const d = extractPrDraft(draft("Labels: v2.0!, v2.0"), ["v2.0!", "v2.0"]);
@@ -178,8 +178,8 @@ test("every wrapper combination matches the reference recognizer and keeps its v
   const bullets = ["", "- "];
   // value -> what it denotes on each kind: `label` the repo name (null: an
   // abstention or no answer; absent: not a label, unchecked), `answered` the
-  // Labels line's `labelsLine` (default true), `issue` a candidate number on a
-  // Closes/Relates line, `jira` a candidate key on a Relates line.
+  // expected `labelsAnswered` on a Labels line (default true), `issue` a candidate
+  // number on a Closes/Relates line, `jira` a candidate key on a Relates line.
   const values = new Map([
     ["bug", { label: "bug" }],
     ["area__parser", { label: "area__parser" }],
@@ -195,7 +195,7 @@ test("every wrapper combination matches the reference recognizer and keeps its v
     ["#12", { issue: 12 }],
     ["#12.", { issue: 12 }],
     ["`#12`.", { issue: 12 }],
-    // No answer at all: nothing resolves, so `labelsLine` stays false.
+    // No answer at all: nothing resolves, so `labelsAnswered` stays false.
     ["", { label: null, answered: false }],
     ["**", { label: null, answered: false }],
   ]);
@@ -227,8 +227,8 @@ test("every wrapper combination matches the reference recognizer and keeps its v
             if (d.droppedLabels.length > 0)
               failures.push(`dropped ${d.droppedLabels}: ${line}`);
           }
-          if (kw === "Labels" && d.labelsLine !== (want.answered ?? true))
-            failures.push(`labelsLine ${d.labelsLine}: ${line}`);
+          if (kw === "Labels" && d.labelsAnswered !== (want.answered ?? true))
+            failures.push(`labelsAnswered ${d.labelsAnswered}: ${line}`);
           if (kw !== "Labels" && want.issue !== undefined) {
             const got = kw === "Closes" ? d.closes : d.relates;
             if (JSON.stringify(got) !== JSON.stringify([want.issue]))
@@ -289,7 +289,7 @@ test("a streaming partial directive never renders, wrapped or not", () => {
 test("a prose final line is still body, and reports no Labels line", () => {
   const d = extractPrDraft(draft("- Adds **labels** to the picker"), LABELS);
   assert.match(d.body, /Adds \*\*labels\*\* to the picker$/);
-  assert.equal(d.labelsLine, false);
+  assert.equal(d.labelsAnswered, false);
 });
 
 test("a Labels line counts only when it resolves to an answer", () => {
@@ -302,7 +302,7 @@ test("a Labels line counts only when it resolves to an answer", () => {
     ["Labels: madeup", true],
   ]) {
     const d = extractPrDraft(draft(trailer), LABELS);
-    assert.equal(d.labelsLine, answered, trailer);
+    assert.equal(d.labelsAnswered, answered, trailer);
     // The line is peeled either way; only the answer is in question.
     assert.equal(d.body, "Guards the null path.", trailer);
     assert.equal(
@@ -317,9 +317,9 @@ test("a Labels line counts only when it resolves to an answer", () => {
   );
 });
 
-test("the structured pick fires only on a missing line, with labels, on an API provider", () => {
+test("the structured pick fires only on an unanswered line, with labels, on an API provider", () => {
   const missing = extractPrDraft(draft("Thanks!"), LABELS);
-  assert.equal(missing.labelsLine, false);
+  assert.equal(missing.labelsAnswered, false);
   assert.equal(needsStructuredLabelPick(missing, LABELS, false), true);
   // CLI providers have no structured-output call.
   assert.equal(needsStructuredLabelPick(missing, LABELS, true), false);
