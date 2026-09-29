@@ -418,10 +418,10 @@ export function buildPrLabelFallbackPrompt(input: {
   };
 }
 
-/** Whether a finished PR draft earns the structured label pick: the model wrote no
- *  `Labels` directive at all (so its silence is a format failure, not abstention),
- *  the repo has labels to pick from, and the provider is an API one — a CLI agent
- *  has no structured-output call. */
+/** Whether a finished PR draft earns the structured label pick: the model's `Labels`
+ *  directive gave no answer (missing, bare, or markup only — a format failure, not
+ *  abstention), the repo has labels to pick from, and the provider is an API one — a
+ *  CLI agent has no structured-output call. */
 export function needsStructuredLabelPick(
   draft: { labels: string[]; droppedLabels: string[]; labelsLine: boolean },
   availableLabelNames: string[],
@@ -1111,8 +1111,10 @@ export function extractPrDraft(
   closes: number[];
   relates: number[];
   jiraMentions: string[];
-  /** Whether the peel found a `Labels` directive at all, `Labels: none` included —
-   *  what tells a model that abstained from one that skipped the required line. */
+  /** Whether the `Labels` directive gave an answer: a repo label, a name the repo
+   *  lacks, or an explicit `none`-style abstention. A missing line, a bare `Labels:`,
+   *  or markup with no name all read false (the model skipped the required answer),
+   *  as does any line when the repo offers no labels to answer from. */
   labelsLine: boolean;
 } {
   const { title, body: fullBody } = splitCommitMessage(raw);
@@ -1164,6 +1166,9 @@ export function extractPrDraft(
   // say so.
   const labels: string[] = [];
   const droppedLabels: string[] = [];
+  // Set as each value resolves to an outcome: a repo label, a dropped name, or a
+  // no-label sentinel. An empty or markup-only value leaves it false.
+  let labelsAnswered = false;
   if (availableLabels.length > 0 && captured.labels) {
     const canonical = new Map<string, string>();
     for (const name of availableLabels) {
@@ -1183,7 +1188,9 @@ export function extractPrDraft(
         canonical.has(t.toLowerCase()),
       );
       const key = (hit ?? bare).toLowerCase();
-      if (!key || seen.has(key)) continue;
+      if (!key) continue;
+      labelsAnswered = true;
+      if (seen.has(key)) continue;
       seen.add(key);
       const match = hit === undefined ? undefined : canonical.get(key);
       if (match) labels.push(match);
@@ -1247,7 +1254,7 @@ export function extractPrDraft(
     closes,
     relates,
     jiraMentions,
-    labelsLine: "labels" in captured,
+    labelsLine: labelsAnswered,
   };
 }
 

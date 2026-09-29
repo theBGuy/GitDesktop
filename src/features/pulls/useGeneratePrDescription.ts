@@ -144,8 +144,8 @@ export function useGeneratePrDescription(repoPath: string) {
    *
    *  Resolves with the draft parsed from the COMPLETE response, or null when the
    *  run bailed, aborted, or errored — the only signal that tells a completed
-   *  draft from the partial parses `onUpdate` sees mid-stream. A draft with no
-   *  `Labels` line at all gets one best-effort structured label pick first
+   *  draft from the partial parses `onUpdate` sees mid-stream. A draft whose
+   *  `Labels` line gave no answer gets one best-effort structured label pick first
    *  (`needsStructuredLabelPick`); labels it finds ride ONLY the resolved draft's
    *  `pickedLabels`, never another `onUpdate` (which would re-send a title and body
    *  the user may have edited meanwhile), and any failure or cancel leaves the

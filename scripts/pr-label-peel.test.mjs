@@ -177,7 +177,8 @@ test("every wrapper combination matches the reference recognizer and keeps its v
   const keywords = ["Labels", "Closes", "Relates"];
   const bullets = ["", "- "];
   // value -> what it denotes on each kind: `label` the repo name (null: an
-  // abstention; absent: not a label, unchecked), `issue` a candidate number on a
+  // abstention or no answer; absent: not a label, unchecked), `answered` the
+  // Labels line's `labelsLine` (default true), `issue` a candidate number on a
   // Closes/Relates line, `jira` a candidate key on a Relates line.
   const values = new Map([
     ["bug", { label: "bug" }],
@@ -194,6 +195,9 @@ test("every wrapper combination matches the reference recognizer and keeps its v
     ["#12", { issue: 12 }],
     ["#12.", { issue: 12 }],
     ["`#12`.", { issue: 12 }],
+    // No answer at all: nothing resolves, so `labelsLine` stays false.
+    ["", { label: null, answered: false }],
+    ["**", { label: null, answered: false }],
   ]);
   const repo = ["bug", "area__parser", "__init__", "code", "quoted", "bold"];
   const failures = [];
@@ -223,6 +227,8 @@ test("every wrapper combination matches the reference recognizer and keeps its v
             if (d.droppedLabels.length > 0)
               failures.push(`dropped ${d.droppedLabels}: ${line}`);
           }
+          if (kw === "Labels" && d.labelsLine !== (want.answered ?? true))
+            failures.push(`labelsLine ${d.labelsLine}: ${line}`);
           if (kw !== "Labels" && want.issue !== undefined) {
             const got = kw === "Closes" ? d.closes : d.relates;
             if (JSON.stringify(got) !== JSON.stringify([want.issue]))
@@ -233,13 +239,13 @@ test("every wrapper combination matches the reference recognizer and keeps its v
               failures.push(`jira ${d.jiraMentions}: ${line}`);
           }
         }
-  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 14 values: a generator that
+  // 19 wrapper shapes x 3 keywords x 2 bullet forms x 16 values: a generator that
   // silently truncates fails here rather than passing on fewer cases.
   const expected =
     wrappers.length * keywords.length * bullets.length * values.size;
   console.log(`wrapper-combination cases: ${cases}`);
   assert.equal(wrappers.length, 19);
-  assert.ok(cases >= expected && expected === 1596, `${cases} of ${expected}`);
+  assert.ok(cases >= expected && expected === 1824, `${cases} of ${expected}`);
   assert.deepEqual(failures, []);
 });
 
@@ -284,6 +290,31 @@ test("a prose final line is still body, and reports no Labels line", () => {
   const d = extractPrDraft(draft("- Adds **labels** to the picker"), LABELS);
   assert.match(d.body, /Adds \*\*labels\*\* to the picker$/);
   assert.equal(d.labelsLine, false);
+});
+
+test("a Labels line counts only when it resolves to an answer", () => {
+  for (const [trailer, answered] of [
+    ["Labels:", false],
+    ["Labels: **", false],
+    ["**Labels:** ``", false],
+    ["Labels: none", true],
+    ["Labels: bug", true],
+    ["Labels: madeup", true],
+  ]) {
+    const d = extractPrDraft(draft(trailer), LABELS);
+    assert.equal(d.labelsLine, answered, trailer);
+    // The line is peeled either way; only the answer is in question.
+    assert.equal(d.body, "Guards the null path.", trailer);
+    assert.equal(
+      needsStructuredLabelPick(d, LABELS, false),
+      !answered,
+      `pick eligibility: ${trailer}`,
+    );
+  }
+  assert.deepEqual(
+    extractPrDraft(draft("Labels: madeup"), LABELS).droppedLabels,
+    ["madeup"],
+  );
 });
 
 test("the structured pick fires only on a missing line, with labels, on an API provider", () => {
