@@ -1111,6 +1111,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             </Button>
           </div>
         }
+        remoteRetry={() => prList.refetch()}
         // More may exist server-side exactly when this page filled the requested
         // limit (compared against the raw loaded count, not the filtered view).
         hasMore={(prList.data?.length ?? 0) === limit}

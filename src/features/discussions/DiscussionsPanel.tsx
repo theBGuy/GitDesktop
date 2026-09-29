@@ -1,10 +1,17 @@
 import { CaretDownIcon, PlusIcon } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import {
+  type ReactElement,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,7 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
+import { resolveRemoteSection } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
@@ -143,6 +152,161 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     <ListRowSkeletons rows={1} lines={3} indent={false} name="discussions" />
   );
 
+  // Refetching a disabled list would fire a read the meta probe hasn't cleared;
+  // a recovered probe enables it on its own.
+  const retry = () => {
+    void meta.refetch();
+    if (listEnabled) void list.refetch();
+  };
+  const errorState = (copy: string) => (
+    <div className="space-y-2 px-3 py-6 text-center text-xs text-muted-foreground">
+      <p>{copy}</p>
+      <Button
+        variant="outline"
+        size="sm"
+        className="cursor-pointer"
+        onClick={retry}
+      >
+        Retry
+      </Button>
+    </div>
+  );
+  const emptyCopy = (() => {
+    if (discussions.length > 0) return "No discussions match the filter.";
+    if (activeCat) return "No discussions in this category yet.";
+    return "No discussions yet.";
+  })();
+
+  const discussionRow = (d: (typeof visible)[number]) => {
+    const active = selectedDiscussion?.number === d.number;
+    return (
+      <button
+        type="button"
+        key={d.number}
+        data-row={String(d.number)}
+        className={cn(
+          "flex w-full items-start gap-2 border-b px-3 py-2 text-left",
+          active ? "bg-accent text-accent-foreground" : "hover:bg-muted/60",
+        )}
+        onClick={() => selectDiscussion({ number: d.number })}
+        onMouseEnter={() => hoverPrefetch(() => prefetch(d.number))}
+      >
+        <Avatar size="sm" className="mt-0.5 shrink-0">
+          <AvatarImage
+            src={`https://${host}/${d.author}.png?size=48`}
+            alt={d.author}
+          />
+          <AvatarFallback>
+            {(d.author || "?").charAt(0).toUpperCase()}
+          </AvatarFallback>
+        </Avatar>
+        <div className="min-w-0 flex-1">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <span aria-hidden className="shrink-0">
+              {d.categoryEmoji || "💬"}
+            </span>
+            <span className="truncate" title={d.title}>
+              {d.title}
+            </span>
+            {d.isAnswered && <Badge variant="secondary">answered</Badge>}
+          </p>
+          {d.labels.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {d.labels.map((l) => (
+                <LabelChip key={l.name} label={l} />
+              ))}
+            </div>
+          )}
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            #{d.number} · {d.author || "unknown"} · {d.categoryName}
+          </p>
+          <p className="truncate text-[11px] text-muted-foreground">
+            {d.commentCount} {d.commentCount === 1 ? "comment" : "comments"}
+            {parseableDate(d.createdAt) && (
+              <>
+                {" · "}
+                <RelativeTime date={d.createdAt} />
+              </>
+            )}
+            {d.upvoteCount > 0 && (
+              <>
+                {" · "}
+                <span aria-hidden>▲ {d.upvoteCount}</span>
+                <span className="sr-only">
+                  {d.upvoteCount} {d.upvoteCount === 1 ? "upvote" : "upvotes"}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+      </button>
+    );
+  };
+
+  // A failed meta or list read replaces the list only when no rows are drawn:
+  // react-query keeps the last good data beside `isError`, and those rows stay
+  // on screen under the degraded notice instead. Past a failed probe, `enabled`
+  // is the last KNOWN answer, so it can't stand in for "turned off".
+  const probeContent = ((): ReactElement | undefined => {
+    switch (true) {
+      case gh.isPending:
+        return probeSkeleton;
+      case !ghReady:
+        return <ForgeNotReady repoPath={repoPath} feature="discussions" />;
+      case !supportsDiscussions:
+        return (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Discussions aren't available on this repository's host.
+          </p>
+        );
+      case meta.isPending:
+        return probeSkeleton;
+      case meta.isError && visible.length === 0:
+        return errorState("Couldn't load discussions for this repository.");
+      case !meta.isError && !enabled:
+        return (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Discussions aren't enabled for this repository.
+          </p>
+        );
+      default:
+        return undefined;
+    }
+  })();
+  const listState =
+    probeContent === undefined
+      ? resolveRemoteSection({
+          ghPending: false,
+          ghReady: true,
+          listPending: list.isPending,
+          error: meta.isError || list.isError,
+          rowCount: visible.length,
+        })
+      : null;
+  const listContent = ((): ReactNode => {
+    if (probeContent !== undefined) return probeContent;
+    switch (listState) {
+      case "error":
+        return errorState("Couldn't load discussions.");
+      case "empty":
+        return (
+          <p className="px-3 py-4 text-xs text-muted-foreground">{emptyCopy}</p>
+        );
+      case "rows":
+      case "rows-degraded":
+        return visible.map(discussionRow);
+      default:
+        return (
+          <ListRowSkeletons
+            rows={3}
+            lines={3}
+            indent={false}
+            name="discussions"
+          />
+        );
+    }
+  })();
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
@@ -231,112 +395,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           scrollbar over a black void). The Viewport still scrolls internally. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         <div onKeyDown={onListKeyDown}>
-          {gh.isPending ? (
-            probeSkeleton
-          ) : !ghReady ? (
-            <ForgeNotReady repoPath={repoPath} feature="discussions" />
-          ) : !forgeSupports(gh.data, "discussions") ? (
-            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-              Discussions aren't available on this repository's host.
-            </p>
-          ) : meta.isPending ? (
-            probeSkeleton
-          ) : meta.isError ? (
-            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-              Couldn't load discussions for this repository.
-            </p>
-          ) : !enabled ? (
-            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-              Discussions aren't enabled for this repository.
-            </p>
-          ) : list.isPending ? (
-            <ListRowSkeletons
-              rows={3}
-              lines={3}
-              indent={false}
-              name="discussions"
-            />
-          ) : visible.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-muted-foreground">
-              {discussions.length > 0
-                ? "No discussions match the filter."
-                : activeCat
-                  ? "No discussions in this category yet."
-                  : "No discussions yet."}
-            </p>
-          ) : (
-            visible.map((d) => {
-              const active = selectedDiscussion?.number === d.number;
-              return (
-                <button
-                  type="button"
-                  key={d.number}
-                  data-row={String(d.number)}
-                  className={cn(
-                    "flex w-full items-start gap-2 border-b px-3 py-2 text-left",
-                    active
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-muted/60",
-                  )}
-                  onClick={() => selectDiscussion({ number: d.number })}
-                  onMouseEnter={() => hoverPrefetch(() => prefetch(d.number))}
-                >
-                  <Avatar size="sm" className="mt-0.5 shrink-0">
-                    <AvatarImage
-                      src={`https://${host}/${d.author}.png?size=48`}
-                      alt={d.author}
-                    />
-                    <AvatarFallback>
-                      {(d.author || "?").charAt(0).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0 flex-1">
-                    <p className="flex items-center gap-1.5 text-xs font-medium">
-                      <span aria-hidden className="shrink-0">
-                        {d.categoryEmoji || "💬"}
-                      </span>
-                      <span className="truncate" title={d.title}>
-                        {d.title}
-                      </span>
-                      {d.isAnswered && (
-                        <Badge variant="secondary">answered</Badge>
-                      )}
-                    </p>
-                    {d.labels.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {d.labels.map((l) => (
-                          <LabelChip key={l.name} label={l} />
-                        ))}
-                      </div>
-                    )}
-                    <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                      #{d.number} · {d.author || "unknown"} · {d.categoryName}
-                    </p>
-                    <p className="truncate text-[11px] text-muted-foreground">
-                      {d.commentCount}{" "}
-                      {d.commentCount === 1 ? "comment" : "comments"}
-                      {parseableDate(d.createdAt) && (
-                        <>
-                          {" · "}
-                          <RelativeTime date={d.createdAt} />
-                        </>
-                      )}
-                      {d.upvoteCount > 0 && (
-                        <>
-                          {" · "}
-                          <span aria-hidden>▲ {d.upvoteCount}</span>
-                          <span className="sr-only">
-                            {d.upvoteCount}{" "}
-                            {d.upvoteCount === 1 ? "upvote" : "upvotes"}
-                          </span>
-                        </>
-                      )}
-                    </p>
-                  </div>
-                </button>
-              );
-            })
-          )}
+          <DegradedListNotice
+            noun="discussions"
+            degraded={listState === "rows-degraded"}
+            onRetry={retry}
+            className="pt-2"
+          />
+          {listContent}
           {listEnabled && !list.isPending && hasMore && (
             <LoadMoreRow
               count={discussions.length}

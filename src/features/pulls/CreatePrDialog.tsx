@@ -8,7 +8,14 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -86,6 +93,13 @@ import {
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
+import {
+  type AiLabelProposal,
+  applyAiProposal,
+  deriveSelectedLabels,
+  type LabelTargetSig,
+  sameLabelTarget,
+} from "./pr-label-selection";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
@@ -234,7 +248,13 @@ export function CreatePrDialog({
   const canPickAssignees =
     !targetIsParent && forgeFeatureReady(forge.data, "mrAssignees");
   const [reviewers, setReviewers] = useState<ForgeUserRef[]>([]);
-  const [labels, setLabels] = useState<Set<string>>(new Set());
+  // The label selection is DERIVED (see `selectedLabels`): the AI's proposal
+  // stamped with the target it was validated against, the user's own picks,
+  // and the user's removals, which stay tombstoned until the next seed so no
+  // later chunk, pick, or run can bring a removed name back.
+  const [aiProposal, setAiProposal] = useState<AiLabelProposal>(null);
+  const [addedLabels, setAddedLabels] = useState<Set<string>>(new Set());
+  const [removedLabels, setRemovedLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
   // Label names a FINISHED generation proposed that the repo doesn't have — only
   // ever set from the resolved draft, since a mid-stream chunk can hold a
@@ -469,8 +489,12 @@ export function CreatePrDialog({
             ? { reviewers: reviewers.map((r) => r.id) }
             : {}),
           // GitHub/GitLab only; omit the key (and for empty selections) so the
-          // backend leaves create behavior untouched.
-          ...(canPickLabels && labels.size > 0 ? { labels: [...labels] } : {}),
+          // backend leaves create behavior untouched. The displayed chips, not
+          // the raw selection: a name the target doesn't carry fails the
+          // forge's whole post-create label edit.
+          ...(canPickLabels && selectedChips.length > 0
+            ? { labels: selectedChips.map((l) => l.name) }
+            : {}),
           ...(canPickAssignees && assignees.length > 0
             ? { assignees: assignees.map((a) => a.id) }
             : {}),
@@ -689,7 +713,9 @@ export function CreatePrDialog({
     seedGenRef.current += 1;
     aiDescriptionRef.current = false;
     setReviewers([]);
-    setLabels(new Set());
+    setAiProposal(null);
+    setAddedLabels(new Set());
+    setRemovedLabels(new Set());
     setDroppedLabels([]);
     setAssignees([]);
     // Reset the linked-issue chips (and their dismissed/probed refs) — the create
@@ -873,23 +899,51 @@ export function CreatePrDialog({
     link: jiraLink.data ?? null,
   });
 
+  // The DERIVED lens, never raw `target`: adding the upstream remote moves
+  // `createLens` without touching `target`.
+  const labelTarget: LabelTargetSig = { repoPath, lens: createLens };
+  // Read by a finished run's label pick, which settles long after the render
+  // that started it.
+  const labelTargetRef = useRef(labelTarget);
+  useLayoutEffect(() => {
+    labelTargetRef.current = { repoPath, lens: createLens };
+  }, [repoPath, createLens]);
+
   function toggleLabel(name: string, on: boolean) {
-    setLabels((prev) => {
+    setAddedLabels((prev) => {
       const next = new Set(prev);
       if (on) next.add(name);
       else next.delete(name);
       return next;
     });
+    setRemovedLabels((prev) => {
+      const next = new Set(prev);
+      if (on) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   }
 
+  const selectedLabels = deriveSelectedLabels({
+    ai: aiProposal,
+    added: addedLabels,
+    removed: removedLabels,
+    current: labelTarget,
+  });
+  // What renders is exactly what submits: names the current target doesn't
+  // carry (another target's proposal, a pick made there) stay out of both.
   const selectedChips = (repoLabels.data ?? []).filter((l) =>
-    labels.has(l.name),
+    selectedLabels.has(l.name),
   );
 
   // AI title+description generation — shared by the Generate button and the
   // dialog-local generate chord.
   function runGenerate() {
     setDroppedLabels([]);
+    // The target this run's labels are validated against — the one
+    // `repoLabels` feeds the prompt below.
+    const runTarget = labelTarget;
+    const runAcceptsLabels = canPickLabels;
     // Grounded issue candidates the model may link: current chips pinned first,
     // then the highest-scoring OPEN issues, capped at 8 (the hook records the set
     // it fed so `upsertAiIssues` can resolve an AI-proposed number's title/state).
@@ -910,9 +964,9 @@ export function CreatePrDialog({
         // failed, aborted before the first chunk) leaves a hand-typed
         // description, and the reopen may skip the seed that would reset this.
         if (d.body.trim()) aiDescriptionRef.current = true;
-        // Additive: union the model's (already repo-validated) labels with the
-        // user's manual picks, never replace.
-        setLabels((prev) => new Set([...prev, ...d.labels]));
+        // Each chunk's parse supersedes the last; the user's own picks and
+        // removals live beside it, untouched.
+        setAiProposal(applyAiProposal(d.labels, runTarget));
         // Union the model's proposed issue links into the chip cluster (the hook
         // owns the relate-default / dismissed-set / AI-flag rules).
         upsertAiIssues({ closes: d.closes, relates: d.relates });
@@ -934,15 +988,22 @@ export function CreatePrDialog({
       issueCandidates,
       // Grounded Jira mention candidates — empty/undefined ⇒ no Jira variant.
       jiraCandidates,
+      // The pick answers for the run's target, so it is skipped on the parent
+      // path and once the dialog has moved to another target.
+      {
+        targetAcceptsLabels: runAcceptsLabels,
+        stillCurrent: () => sameLabelTarget(runTarget, labelTargetRef.current),
+      },
     ).then(
       (final) => {
         if (final) {
           setDroppedLabels(final.droppedLabels);
           // The post-stream label pick arrives only here, so title and body the
-          // user edited meanwhile stay theirs. Additive, like the streamed labels.
+          // user edited meanwhile stay theirs. It replaces the streamed proposal
+          // under the same target stamp.
           const picked = final.pickedLabels ?? [];
           if (picked.length > 0)
-            setLabels((prev) => new Set([...prev, ...picked]));
+            setAiProposal(applyAiProposal(picked, runTarget));
         }
         surface.noteRunSettled(final !== null);
       },
@@ -1230,7 +1291,7 @@ export function CreatePrDialog({
                               className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
                             >
                               <Checkbox
-                                checked={labels.has(label.name)}
+                                checked={selectedLabels.has(label.name)}
                                 onCheckedChange={(v) =>
                                   toggleLabel(label.name, v === true)
                                 }

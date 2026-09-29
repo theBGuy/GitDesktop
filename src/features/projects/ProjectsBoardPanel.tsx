@@ -62,6 +62,7 @@ import {
   projectScopeReadOnly,
   ScopeGapBlock,
 } from "@/features/conversations/ProjectsPopover";
+import { groupNoticesByMessage } from "@/features/conversations/remote-section-state";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -6177,16 +6178,26 @@ export function ProjectsBoardPanel({
       {showBoardChrome &&
         (liveNotices.length > 0 || cappedNotes.length > 0) && (
           <div className="mb-2 shrink-0 space-y-1 border-b pb-1.5 text-[11px]">
-            {liveNotices.map((notice) => (
+            {/* One outage fails every read with the same message, so equal
+                messages share a line naming the reads it covers, and its Retry
+                re-runs each of them. */}
+            {groupNoticesByMessage(liveNotices).map((group) => (
               <p
-                key={notice.key}
+                key={group.map((notice) => notice.key).join("+")}
                 className="flex flex-wrap items-center gap-1.5"
               >
-                <span className="text-destructive">{notice.message}</span>
+                <span className="text-destructive">{group[0].message}</span>
+                {group.length > 1 && (
+                  <span className="text-muted-foreground">
+                    ({group.map((notice) => notice.what).join(", ")})
+                  </span>
+                )}
                 <button
                   type="button"
-                  aria-label={`Retry loading ${notice.what}`}
-                  onClick={notice.retry}
+                  aria-label={`Retry loading ${group.map((notice) => notice.what).join(", ")}`}
+                  onClick={() => {
+                    for (const notice of group) notice.retry();
+                  }}
                   className="cursor-pointer text-muted-foreground underline hover:text-foreground"
                 >
                   Retry

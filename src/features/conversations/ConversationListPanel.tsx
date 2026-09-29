@@ -19,6 +19,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { cn } from "@/lib/utils";
 import { LoadMoreRow } from "./LoadMoreRow";
+import { resolveRemoteSection } from "./remote-section-state";
 
 /** The "New ▾" dropdown's items (GitHub + local, plus an optional third for a
  *  linked Jira project on the issues panel). */
@@ -90,6 +91,53 @@ function SectionHeader(props: {
         <span className="tabular-nums">({count})</span>
       )}
     </button>
+  );
+}
+
+/** The in-flow line a list section shows while it draws cached rows its last
+ *  refresh couldn't replace. The words carry the state, never color alone.
+ *  Mount it whenever the section renders: the live region only announces text
+ *  that arrives after it is in the DOM, so a healthy section keeps it empty
+ *  and sr-only (never display:none, which drops it from the a11y tree). The
+ *  actions sit outside the region so they aren't read as part of the status. */
+export function DegradedListNotice(props: {
+  noun: string;
+  degraded: boolean;
+  onRetry?: () => void;
+  /** A second recovery action beside Retry, e.g. a reconnect. */
+  extraAction?: ReactNode;
+  /** Spacing for the visible line; the healthy state ignores it. */
+  className?: string;
+}) {
+  const { noun, degraded, onRetry, extraAction, className } = props;
+  return (
+    <div
+      className={
+        degraded
+          ? cn(
+              "flex flex-wrap items-center gap-x-1.5 px-3 pb-1 text-[11px] text-muted-foreground",
+              className,
+            )
+          : "sr-only"
+      }
+    >
+      <p role="status">
+        {degraded
+          ? `Couldn't refresh ${noun} — showing the last loaded results.`
+          : null}
+      </p>
+      {degraded && onRetry && (
+        <button
+          type="button"
+          aria-label={`Retry loading ${noun}`}
+          onClick={onRetry}
+          className="cursor-pointer underline underline-offset-2 hover:text-foreground"
+        >
+          Retry
+        </button>
+      )}
+      {degraded && extraAction}
+    </div>
   );
 }
 
@@ -174,12 +222,14 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   /** Lines per skeleton row: match the panel's real row layout (three-line
    *  PR rows vs two-line issue rows); `remoteSkeletonRows` sets the count. */
   skeletonRowLines?: 2 | 3;
-  /** The remote list fetch failed — render `remoteErrorSlot` in place of the
-   *  empty state so a failed load doesn't read as "no items". Omit (the default)
-   *  and the remote section behaves exactly as before. */
+  /** The remote list fetch failed. With no rows to draw, `remoteErrorSlot`
+   *  replaces the empty state so a failed load doesn't read as "no items"; with
+   *  cached rows, they stay on screen under a degraded notice. */
   remoteError?: boolean;
   /** Rendered in place of the remote list on error (e.g. a Retry prompt). */
   remoteErrorSlot?: ReactNode;
+  /** The degraded notice's Retry; omit and the notice renders without one. */
+  remoteRetry?: () => void;
   /** A muted line under the remote header, above its rows — e.g. why a requested
    *  grouping couldn't be applied. Omit (the default) and nothing renders. */
   remoteNote?: ReactNode;
@@ -232,7 +282,8 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     headerAction?: ReactNode;
     pending: boolean;
     isError: boolean;
-    /** Rendered in place of the list on error (e.g. a Reconnect prompt). */
+    /** Rendered in place of the list on error when no rows are cached (e.g. a
+     *  Reconnect prompt); cached rows keep rendering under a degraded notice. */
     errorSlot?: ReactNode;
     items: J[];
     itemKey: (item: J) => string;
@@ -243,6 +294,11 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     /** Empty-state teaching copy when the linked project has no matching issues. */
     emptyLabel: ReactNode;
   };
+  /** The Jira section's degraded-notice Retry. */
+  jiraRetry?: () => void;
+  /** A second action on the Jira degraded notice, beside Retry. Jira errors
+   *  carry no typed auth kind, so a caller offers its reconnect here too. */
+  jiraDegradedAction?: ReactNode;
   /** "Load more" for the REMOTE section: true when the remote list filled its
    *  requested limit (more may exist server-side). Renders a focusable row at the
    *  very bottom of the list; `onLoadMore` bumps the caller's limit, `loadingMore`
@@ -300,12 +356,15 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     skeletonRowLines = 2,
     remoteError,
     remoteErrorSlot,
+    remoteRetry,
     remoteNote,
     remotePinned,
     remoteGroups,
     localNoun,
     remoteNoun,
     jira,
+    jiraRetry,
+    jiraDegradedAction,
     hasMore,
     onLoadMore,
     loadingMore,
@@ -377,6 +436,115 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     if (stateRemote.length > 0) return `No ${remoteNoun} match the filter.`;
     if (pinnedBody != null && pinnedBody.length > 0) return null;
     return `No ${stateFilter} ${remoteNoun}.`;
+  })();
+
+  // Keyed on the DRAWN rows, the same set the caller's arrow-key registry walks.
+  const remoteState = resolveRemoteSection({
+    ghPending,
+    ghReady,
+    listPending,
+    error: remoteError ?? false,
+    rowCount: visibleRemote.length,
+  });
+  const remoteContent = ((): ReactNode => {
+    switch (remoteState) {
+      case "gh-skeleton":
+        return (
+          <ListRowSkeletons
+            rows={1}
+            lines={skeletonRowLines}
+            name={remoteNoun}
+          />
+        );
+      case "not-ready":
+        return (
+          remoteNotReadySlot ?? (
+            <ForgeNotReady repoPath={repoPath} feature={feature} />
+          )
+        );
+      case "list-skeleton":
+        return (
+          <ListRowSkeletons
+            rows={remoteSkeletonRows}
+            lines={skeletonRowLines}
+            name={remoteNoun}
+          />
+        );
+      case "error":
+        return (
+          remoteErrorSlot ?? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">
+              Couldn't load {remoteNoun}.
+            </p>
+          )
+        );
+      case "empty":
+        return (
+          remoteEmptyCopy && (
+            <p className="px-3 py-4 text-xs text-muted-foreground">
+              {remoteEmptyCopy}
+            </p>
+          )
+        );
+      case "rows":
+      case "rows-degraded":
+        return remoteBody;
+    }
+  })();
+  // The Jira section has no forge gate of its own, so it enters the ladder at
+  // the list rung.
+  const jiraState =
+    jira &&
+    resolveRemoteSection({
+      ghPending: false,
+      ghReady: true,
+      listPending: jira.pending,
+      error: jira.isError,
+      rowCount: jira.items.length,
+    });
+  const jiraContent = ((): ReactNode => {
+    if (!jira) return null;
+    switch (jiraState) {
+      case "error":
+        return (
+          jira.errorSlot ?? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">
+              Couldn't load Jira issues.
+            </p>
+          )
+        );
+      case "empty":
+        return (
+          <p className="px-3 py-4 text-xs text-muted-foreground">
+            {jira.emptyLabel}
+          </p>
+        );
+      case "rows":
+      case "rows-degraded":
+        return jira.items.map((item) => (
+          <button
+            type="button"
+            key={jira.itemKey(item)}
+            data-row={`jira:${jira.itemKey(item)}`}
+            className={rowClass(jira.isActive(item))}
+            onClick={() => jira.onSelect(item)}
+          >
+            {jira.renderRow(item)}
+          </button>
+        ));
+      default:
+        // Jira rows are three-line (status chips · title · key/updated),
+        // unlike this panel's own two-line issue rows — and chip-led with all
+        // three lines flush, so no meta indent.
+        return (
+          <ListRowSkeletons
+            rows={jira.skeletonRows}
+            lines={3}
+            name="Jira issues"
+            indent={false}
+          />
+        );
+    }
   })();
 
   return (
@@ -529,39 +697,15 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
               {remoteNote}
             </p>
           )}
+          {!remoteCollapsed && (
+            <DegradedListNotice
+              noun={remoteNoun}
+              degraded={remoteState === "rows-degraded"}
+              onRetry={remoteRetry}
+            />
+          )}
           {!remoteCollapsed && pinnedBody}
-          {!remoteCollapsed &&
-            (ghPending ? (
-              <ListRowSkeletons
-                rows={1}
-                lines={skeletonRowLines}
-                name={remoteNoun}
-              />
-            ) : !ghReady ? (
-              (remoteNotReadySlot ?? (
-                <ForgeNotReady repoPath={repoPath} feature={feature} />
-              ))
-            ) : listPending ? (
-              <ListRowSkeletons
-                rows={remoteSkeletonRows}
-                lines={skeletonRowLines}
-                name={remoteNoun}
-              />
-            ) : remoteError ? (
-              (remoteErrorSlot ?? (
-                <p className="px-3 py-4 text-xs text-muted-foreground">
-                  Couldn't load {remoteNoun}.
-                </p>
-              ))
-            ) : visibleRemote.length === 0 ? (
-              remoteEmptyCopy && (
-                <p className="px-3 py-4 text-xs text-muted-foreground">
-                  {remoteEmptyCopy}
-                </p>
-              )
-            ) : (
-              remoteBody
-            ))}
+          {!remoteCollapsed && remoteContent}
 
           {jira && (
             <>
@@ -571,39 +715,13 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
                   <span className="ml-auto">{jira.headerAction}</span>
                 )}
               </div>
-              {jira.pending ? (
-                // Jira rows are three-line (status chips · title · key/updated),
-                // unlike this panel's own two-line issue rows — and chip-led
-                // with all three lines flush, so no meta indent.
-                <ListRowSkeletons
-                  rows={jira.skeletonRows}
-                  lines={3}
-                  name="Jira issues"
-                  indent={false}
-                />
-              ) : jira.isError ? (
-                (jira.errorSlot ?? (
-                  <p className="px-3 py-4 text-xs text-muted-foreground">
-                    Couldn't load Jira issues.
-                  </p>
-                ))
-              ) : jira.items.length === 0 ? (
-                <p className="px-3 py-4 text-xs text-muted-foreground">
-                  {jira.emptyLabel}
-                </p>
-              ) : (
-                jira.items.map((item) => (
-                  <button
-                    type="button"
-                    key={jira.itemKey(item)}
-                    data-row={`jira:${jira.itemKey(item)}`}
-                    className={rowClass(jira.isActive(item))}
-                    onClick={() => jira.onSelect(item)}
-                  >
-                    {jira.renderRow(item)}
-                  </button>
-                ))
-              )}
+              <DegradedListNotice
+                noun="Jira issues"
+                degraded={jiraState === "rows-degraded"}
+                onRetry={jiraRetry}
+                extraAction={jiraDegradedAction}
+              />
+              {jiraContent}
             </>
           )}
 

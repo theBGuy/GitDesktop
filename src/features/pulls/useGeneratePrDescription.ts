@@ -75,6 +75,16 @@ interface PrDraft {
   pickedLabels?: string[];
 }
 
+/** The caller's say over the structured label pick. The pick's answer lands on
+ *  the target the run started on, so it is skipped when that target can't take
+ *  labels or is no longer the one on screen by the time the stream ends. */
+interface LabelPickGate {
+  /** Captured when the run starts. */
+  targetAcceptsLabels: boolean;
+  /** Read after the stream, just before the pick would start. */
+  stillCurrent: () => boolean;
+}
+
 /** One structured-output call choosing labels for a finished draft, from its title
  *  and body only, on the model the draft was written with. The schema's enum keeps
  *  the answer inside the repo's set; names still validate case-insensitively into
@@ -171,6 +181,8 @@ export function useGeneratePrDescription(repoPath: string) {
       /** Which set of changes the "nothing to describe" toasts name; the
        *  change-request noun follows `provider` (GitLab: merge request). */
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
+      /** Omit and the pick runs whenever the draft needs it. */
+      labelPick?: LabelPickGate,
     ): Promise<PrDraft | null> => {
       const parse = (buffer: string) =>
         extractPrDraft(
@@ -224,6 +236,8 @@ export function useGeneratePrDescription(repoPath: string) {
       const ai = loaded.ai;
       if (
         !ai ||
+        (labelPick &&
+          (!labelPick.targetAcceptsLabels || !labelPick.stillCurrent())) ||
         !needsStructuredLabelPick(
           draft,
           availableLabels.map((l) => l.name),
@@ -276,6 +290,8 @@ export function useGeneratePrDescription(repoPath: string) {
       issueCandidates?: IssueCandidate[],
       /** Mention-only Jira candidates (Bitbucket + linked project). */
       jiraCandidates?: JiraCandidate[],
+      /** Gates the structured label pick on the run's target. */
+      labelPick?: LabelPickGate,
     ) =>
       runFromDiff(
         async (settings) => {
@@ -300,6 +316,8 @@ export function useGeneratePrDescription(repoPath: string) {
         reviewNotes,
         issueCandidates,
         jiraCandidates,
+        "branch-diff",
+        labelPick,
       ),
     [repoPath, runFromDiff],
   );
