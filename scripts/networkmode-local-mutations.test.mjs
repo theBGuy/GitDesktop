@@ -139,6 +139,7 @@ const LOCAL_CALLEES = [
   "gitHookWrite",
   "gitHookSetEnabled",
   "gitHookDelete",
+  "gitInstallHookManager",
   "moveUserWorktree",
   "lockWorktree",
   "unlockWorktree",
@@ -172,7 +173,8 @@ const NETWORK_CALLEES = [
   "gitMergeRemotePr",
   "gitFinishRemotePrResolve",
   "gitRemoteDefaultBranch",
-  "gitRunHookManager",
+  // pre-commit `autoupdate` fetches each hook repo's latest tag.
+  "gitUpdateHookManager",
 ];
 
 /** Calls that do no I/O of their own; they neither make nor break a site's class. */
@@ -226,7 +228,7 @@ const EXEMPT = [];
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(REPO_ROOT, "src");
 
-/** Floors for the scanned corpus (292 mutation constructions and 107 local sites
+/** Floors for the scanned corpus (293 mutation constructions and 108 local sites
  *  measured when this guard was written). A walk, name match or vocabulary that goes
  *  inert finds nothing and reports OK, so the counts are asserted rather than
  *  trusted; the floors sit near the measure so a partly-inert match trips them too. */
@@ -621,11 +623,60 @@ function splitTopLevel(masked, open, close, types = false) {
 const isObjectLiteral = (masked, part) =>
   masked[part.start] === "{" && matchBrace(masked, part.start) === part.end - 1;
 
-/** Every named function declaration: its name, parameter names (null for a
- *  destructured one), whether it is exported, and its body's span. */
+/** Index of the `=>` ending an arrow's parameter list at `paramsClose`, past an
+ *  optional return-type annotation; -1 when none follows. */
+function arrowAfter(masked, paramsClose) {
+  let depth = 0;
+  for (let i = paramsClose + 1; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "=" && masked[i + 1] === ">") {
+      if (depth === 0) return i;
+      i++;
+    } else if (OPEN.has(c) || c === "<") depth++;
+    else if (CLOSE.has(c) || c === ">") {
+      if (--depth < 0) return -1;
+    } else if (depth === 0 && (c === ";" || c === ",")) return -1;
+  }
+  return -1;
+}
+
+/** Index just past an arrow's expression body starting at `from`: the first `;` or
+ *  `,` at its own depth, or the bracket that closes around it. */
+function expressionEnd(masked, from) {
+  let depth = 0;
+  for (let i = from; i < masked.length; i++) {
+    const c = masked[i];
+    if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c) && --depth < 0) return i;
+    else if (depth === 0 && (c === ";" || c === ",")) return i;
+  }
+  return masked.length;
+}
+
+const paramNames = (masked, open, close) =>
+  splitTopLevel(masked, open, close, true).map(
+    (p) => /^([\w$]+)\s*[?:=]?/.exec(p.text)?.[1] ?? null,
+  );
+
+/** Every named function: `function` declarations and `const`/`let`/`var` bindings
+ *  of an arrow or a function expression (async, generic, braced or expression-
+ *  bodied). Each carries its name, parameter names (null for a destructured one),
+ *  whether it is exported inline, its parameter list's `(` (undefined for a bare
+ *  single-parameter arrow), and its body's span. */
 function functionsIn(masked) {
   const fns = [];
+  const exportedAt = (at) =>
+    /\bexport\s+(?:default\s+)?(?:async\s+)?$/.test(
+      masked.slice(Math.max(0, at - 30), at),
+    );
   for (const m of masked.matchAll(/\bfunction\s*\*?\s*([\w$]+)/g)) {
+    // A named function EXPRESSION is indexed under its binding below.
+    if (
+      /=\s*(?:async\s+)?$/.test(
+        masked.slice(Math.max(0, m.index - 20), m.index),
+      )
+    )
+      continue;
     const paren = callParen(masked, m.index + m[0].length);
     if (paren === -1) continue;
     const paramsClose = matchBrace(masked, paren);
@@ -636,12 +687,59 @@ function functionsIn(masked) {
     fns.push({
       name: m[1],
       at: m.index,
-      params: splitTopLevel(masked, paren, paramsClose, true).map(
-        (p) => /^([\w$]+)\s*[?:=]?/.exec(p.text)?.[1] ?? null,
-      ),
-      exported: /\bexport\s+(?:default\s+)?(?:async\s+)?$/.test(
-        masked.slice(Math.max(0, m.index - 30), m.index),
-      ),
+      paramsOpen: paren,
+      params: paramNames(masked, paren, paramsClose),
+      exported: exportedAt(m.index),
+      bodyOpen,
+      bodyClose,
+    });
+  }
+  for (const m of masked.matchAll(
+    /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;]*?)?=\s*(?:async\s+)?/g,
+  )) {
+    const from = m.index + m[0].length;
+    const rest = masked.slice(from);
+    const single = /^([\w$]+)\s*=>\s*/.exec(rest);
+    const fnExpr = /^function\b\s*\*?\s*[\w$]*/.exec(rest);
+    let params;
+    let paramsOpen;
+    let bodyStart;
+    if (single) {
+      params = [single[1]];
+      bodyStart = from + single[0].length;
+    } else {
+      const paren = callParen(masked, fnExpr ? from + fnExpr[0].length : from);
+      // A bare `(` right after `=` is an arrow's parameter list; anything else
+      // (a call such as `= useState(…)`) is not a function binding.
+      if (paren === -1 || (!fnExpr && !/^\s*(?:<|\()/.test(rest))) continue;
+      const paramsClose = matchBrace(masked, paren);
+      if (paramsClose === -1) continue;
+      params = paramNames(masked, paren, paramsClose);
+      paramsOpen = paren;
+      if (fnExpr) bodyStart = masked.indexOf("{", paramsClose);
+      else {
+        const arrow = arrowAfter(masked, paramsClose);
+        bodyStart = arrow === -1 ? -1 : arrow + 2;
+      }
+      if (bodyStart === -1) continue;
+    }
+    while (/\s/.test(masked[bodyStart] ?? "")) bodyStart++;
+    let bodyOpen;
+    let bodyClose;
+    if (masked[bodyStart] === "{") {
+      bodyOpen = bodyStart;
+      bodyClose = matchBrace(masked, bodyStart);
+    } else {
+      bodyOpen = bodyStart - 1;
+      bodyClose = expressionEnd(masked, bodyStart);
+    }
+    if (bodyClose === -1) continue;
+    fns.push({
+      name: m[1],
+      at: m.index,
+      paramsOpen,
+      params,
+      exported: exportedAt(m.index),
       bodyOpen,
       bodyClose,
     });
@@ -817,7 +915,16 @@ function threadsNetworkMode(source) {
     throw e;
   }
   const def = functionsIn(masked).find((f) => f.name === "useRepoMutation");
-  if (!def) return false;
+  if (!def || def.paramsOpen === undefined) return false;
+  // The `opts` parameter must default to an empty object: a default carrying
+  // `networkMode` would reach every site that passes no options, forge ones too.
+  const optsParam = splitTopLevel(
+    masked,
+    def.paramsOpen,
+    matchBrace(masked, def.paramsOpen),
+    true,
+  ).find((p) => /^opts\b/.test(p.text));
+  if (!optsParam || !/=\s*\{\s*\}$/.test(optsParam.text)) return false;
   const body = masked.slice(def.bodyOpen, def.bodyClose);
   for (const m of body.matchAll(/(?<![\w$.])useMutation\b/g)) {
     const paren = callParen(masked, def.bodyOpen + m.index + m[0].length);
@@ -1218,6 +1325,36 @@ test("each wrapper form finds its mutationFn and options", () => {
   assert.equal(defaulted.flagged, 1, "a wrapper-wide always default passed");
 });
 
+test("an arrow-bound wrapper resolves at its callers, never by its parameter's name", () => {
+  // `saveFn` fits the `save` family; only its callers say what it writes.
+  const forms = {
+    "expression-bodied arrow":
+      "const useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nexport const useP = () => useW(r, api.gitPush);",
+    "async, generic, typed, braced arrow":
+      "const useW = async <A,>(repo: string, saveFn: (a: A) => Promise<void>): Promise<X> => {\n  return useMutation({ mutationFn: saveFn });\n};\nuseW(r, api.gitPush);",
+    "function expression":
+      "const useW = function (repo, saveFn) { return useMutation({ mutationFn: saveFn }); };\nuseW(r, api.gitPush);",
+    "single-parameter arrow":
+      "let useW = saveFn => useMutation({ mutationFn: saveFn });\nuseW(api.gitPush);",
+    "call form inside an arrow":
+      "const useW = (repo, saveFn) => useRepoMutation(repo, (a) => saveFn(a));\nuseW(r, api.gitPush);",
+  };
+  for (const [name, src] of Object.entries(forms)) {
+    const r = verdictOf(src);
+    assert.deepEqual(r.ambiguities, [], `${name}: ambiguous`);
+    assert.deepEqual(
+      r.classes,
+      ["network"],
+      `${name}: classified by the parameter's name`,
+    );
+    assert.deepEqual(
+      r.sites[0].callees,
+      ["api.gitPush"],
+      `${name}: its callers were not read`,
+    );
+  }
+});
+
 test('a networkMode counts only as a literal "always" at the options\' top level', () => {
   const cases = {
     "another value":
@@ -1249,8 +1386,8 @@ test('a networkMode counts only as a literal "always" at the options\' top level
 });
 
 test("useRepoMutation must thread opts.networkMode into its useMutation", () => {
-  const wrapper = (options) =>
-    `export function useRepoMutation<A, D>(repo: string, mutationFn: (a: A) => Promise<D>, opts: { networkMode?: "always" } = {}) {\n  const queryClient = useQueryClient();\n  return useMutation({\n    mutationFn,\n${options}\n  });\n}\n`;
+  const wrapper = (options, init = "{}") =>
+    `export function useRepoMutation<A, D>(repo: string, mutationFn: (a: A) => Promise<D>, opts: { networkMode?: "always" } = ${init}) {\n  const queryClient = useQueryClient();\n  return useMutation({\n    mutationFn,\n${options}\n  });\n}\n`;
   assert.equal(
     threadsNetworkMode(
       wrapper(
@@ -1275,6 +1412,13 @@ test("useRepoMutation must thread opts.networkMode into its useMutation", () => 
     "threaded, then overridden": wrapper(
       '    ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),\n    networkMode: "online",',
     ),
+    "defaulted through the parameter": wrapper(
+      "    ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),",
+      '{ networkMode: "always" }',
+    ),
+    "a parameter with no default": wrapper(
+      "    ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),",
+    ).replace(" = {}) {", ") {"),
     "no wrapper at all":
       "export function useOtherMutation(opts) { return useMutation({ networkMode: opts.networkMode }); }",
   };
@@ -1322,6 +1466,10 @@ test("shapes the scan can't read fail closed", () => {
       "function useW(repo, fn) { return useMutation({ mutationFn: fn }); }\nuseW(r, saveThing);\nexport const useX = useW;",
     "a pass-through hook referenced without a call":
       "function useW(repo, fn) { return useMutation({ mutationFn: fn }); }\nuseW(r, saveThing);\nregistry.push(useW);",
+    "an arrow pass-through mixing local and network callers":
+      "const useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, saveThing);\nuseW(r, api.gitPush);",
+    "an exported arrow pass-through":
+      "export const useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, saveThing);",
     "a renamed construction":
       'import { useMutation as useM } from "@tanstack/react-query";',
     "a renamed wrapper from another module":

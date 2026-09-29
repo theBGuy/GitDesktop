@@ -23,8 +23,9 @@ import {
   useDeleteHook,
   useHookContent,
   useHooks,
-  useRunHookManager,
+  useInstallHookManager,
   useSetHookEnabled,
+  useUpdateHookManager,
   useWriteHook,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -54,7 +55,10 @@ export function HooksDialog({
   const writeHook = useWriteHook(repoPath);
   const setEnabled = useSetHookEnabled(repoPath);
   const deleteHook = useDeleteHook(repoPath);
-  const runHookManager = useRunHookManager(repoPath);
+  const installHookManager = useInstallHookManager(repoPath);
+  const updateHookManager = useUpdateHookManager(repoPath);
+  const managerRunning =
+    installHookManager.isPending || updateHookManager.isPending;
 
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -132,18 +136,16 @@ export function HooksDialog({
     const manager = hooks.data?.manager;
     if (!manager) return;
     setManagerOutput(null);
-    runHookManager.mutate(
-      { manager, action },
-      {
-        onSuccess: (out) => {
-          setManagerOutput(out || "Done.");
-          toast.success(
-            `${manager} ${action === "install" ? "installed" : "updated"}`,
-          );
-        },
-        onError: toastError,
+    const run = action === "install" ? installHookManager : updateHookManager;
+    run.mutate(manager, {
+      onSuccess: (out) => {
+        setManagerOutput(out || "Done.");
+        toast.success(
+          `${manager} ${action === "install" ? "installed" : "updated"}`,
+        );
       },
-    );
+      onError: toastError,
+    });
   }
 
   // Arrow keys walk the hook list, mirroring the app's other lists.
@@ -199,7 +201,7 @@ export function HooksDialog({
                 <Button
                   variant="outline"
                   size="xs"
-                  disabled={runHookManager.isPending}
+                  disabled={managerRunning}
                   onClick={() => runManager("install")}
                 >
                   Install hooks
@@ -209,7 +211,7 @@ export function HooksDialog({
                 <Button
                   variant="outline"
                   size="xs"
-                  disabled={runHookManager.isPending}
+                  disabled={managerRunning}
                   onClick={() => runManager("update")}
                 >
                   Update

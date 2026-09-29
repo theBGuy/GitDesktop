@@ -59,10 +59,20 @@ export function useDeleteHook(repo: string) {
   );
 }
 
-export function useRunHookManager(repo: string) {
+export function useInstallHookManager(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { manager: string; action: "install" | "update" }) =>
-      api.gitRunHookManager(repo, args.manager, args.action),
+    (manager: string) => api.gitInstallHookManager(repo, manager),
+    {
+      // Local hook write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
+
+/** pre-commit `autoupdate` fetches, so it keeps the default and pauses offline. */
+export function useUpdateHookManager(repo: string) {
+  return useRepoMutation(repo, (manager: string) =>
+    api.gitUpdateHookManager(repo, manager),
   );
 }
