@@ -351,7 +351,11 @@ function RefCardBody({
   }
   const pill: StatePill =
     item.flavor === "pr"
-      ? prPill(item.state, item.isDraft)
+      ? prPill(
+          item.state,
+          item.isDraft,
+          target.kind === "mr" ? "merge request" : "pull request",
+        )
       : (ISSUE_PILL[item.state] ?? neutralIssuePill(item.state));
   const { createdAt } = item;
   return (

@@ -17,45 +17,43 @@ interface PrStatePresentation {
   word: string;
 }
 
+/** The kind half of `word`: GitLab calls its change requests merge requests. */
+type PrNoun = "pull request" | "merge request";
+
 /**
  * The one PR-state table every surface draws from. Each arm carries its own
  * SHAPE so no two states differ by colour alone. CLOSED is XCircle + destructive
  * because a closed pull request is abandoned where a closed issue is resolved
  * (the issue `StateIcon`), and no shape reuses an issue glyph since boards mix both.
  */
-const PR_STATE: Partial<Record<string, PrStatePresentation>> = {
-  OPEN: {
-    Icon: GitPullRequestIcon,
-    tone: "text-success",
-    word: "Open pull request",
-  },
-  MERGED: {
-    Icon: GitMergeIcon,
-    tone: "text-merged",
-    word: "Merged pull request",
-  },
-  CLOSED: {
-    Icon: XCircleIcon,
-    tone: "text-destructive",
-    word: "Closed pull request",
-  },
+const PR_STATE: Partial<
+  Record<string, Omit<PrStatePresentation, "word"> & { label: string }>
+> = {
+  OPEN: { Icon: GitPullRequestIcon, tone: "text-success", label: "Open" },
+  MERGED: { Icon: GitMergeIcon, tone: "text-merged", label: "Merged" },
+  CLOSED: { Icon: XCircleIcon, tone: "text-destructive", label: "Closed" },
 };
 
 /** Draft qualifies an OPEN pull request only, and takes `FileDashed` because the
  *  dashed circle is the open-issue glyph. A state this build doesn't know keeps a
  *  shape of its own and the forge's word, never "open"'s glyph at another tone. */
-export function prPill(state: string, isDraft: boolean): PrStatePresentation {
+export function prPill(
+  state: string,
+  isDraft: boolean,
+  noun: PrNoun = "pull request",
+): PrStatePresentation {
   if (isDraft && state === "OPEN")
     return {
       Icon: FileDashedIcon,
       tone: "text-muted-foreground",
-      word: "Draft pull request",
+      word: `Draft ${noun}`,
     };
-  return (
-    PR_STATE[state] ?? {
+  const known = PR_STATE[state];
+  if (known === undefined)
+    return {
       Icon: CircleIcon,
       tone: "text-muted-foreground",
-      word: `${state} pull request`,
-    }
-  );
+      word: `${state} ${noun}`,
+    };
+  return { Icon: known.Icon, tone: known.tone, word: `${known.label} ${noun}` };
 }
