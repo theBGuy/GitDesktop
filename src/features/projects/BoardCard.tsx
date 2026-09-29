@@ -1,15 +1,5 @@
 import { Popover } from "@base-ui/react/popover";
-import {
-  CheckIcon,
-  CircleIcon,
-  FileDashedIcon,
-  GitMergeIcon,
-  GitPullRequestIcon,
-  type Icon,
-  LockSimpleIcon,
-  NoteIcon,
-  XCircleIcon,
-} from "@phosphor-icons/react";
+import { CheckIcon, LockSimpleIcon, NoteIcon } from "@phosphor-icons/react";
 import { Fragment, memo, type ReactNode, useId, useRef } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
@@ -30,6 +20,7 @@ import type {
   ProjectFieldDef,
   ProjectFieldValue,
 } from "@/lib/git/types";
+import { CLOSED_REASON, prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { valueBelongsTo } from "./board-model";
@@ -37,71 +28,6 @@ import { valueBelongsTo } from "./board-model";
 /** How many assignee faces a card shows before the rest collapse into "+N" —
  *  three is what fits beside the number on the narrowest column. */
 const AVATARS_SHOWN = 3;
-
-/** Why a closed issue closed, as the words that ride beside its glyph. An
- *  unmapped reason (wire drift) leaves the bare state, never a guess. */
-const CLOSED_REASON: Record<string, string> = {
-  COMPLETED: "Issue closed as completed",
-  NOT_PLANNED: "Issue closed as not planned",
-  DUPLICATE: "Issue closed as duplicate",
-};
-
-interface StatePill {
-  Icon: Icon;
-  tone: string;
-  /** The state as words — what actually carries it, since colour never may. */
-  word: string;
-}
-
-/**
- * A pull request's glyph and tone per state. Every arm carries its OWN SHAPE:
- * a card shows no state text, so a table that separated open from closed by tone
- * alone would be conveying state by colour — which is why this diverges from
- * `IssueDevelopment`'s `prPresentation` and `markdown-ref-card`'s `STATE_PILL`
- * (both hand `GitPullRequestIcon` to more than one state). CLOSED also takes the
- * destructive tone because a closed pull request is abandoned where a closed
- * ISSUE is resolved, the one place the app's two conventions part — so the issue
- * arm reuses `StateIcon` rather than sharing this table.
- *
- * Shapes are picked to stay distinct from the ISSUE glyphs too, since one board
- * mixes both: `CircleDashed` (issue open) and `CheckCircle` (issue closed) are
- * spoken for, hence `FileDashed` for a draft rather than a second dashed circle.
- */
-const PR_STATE: Record<string, StatePill | undefined> = {
-  OPEN: {
-    Icon: GitPullRequestIcon,
-    tone: "text-success",
-    word: "Open pull request",
-  },
-  MERGED: {
-    Icon: GitMergeIcon,
-    tone: "text-merged",
-    word: "Merged pull request",
-  },
-  CLOSED: {
-    Icon: XCircleIcon,
-    tone: "text-destructive",
-    word: "Closed pull request",
-  },
-};
-
-export function prPill(state: string, isDraft: boolean): StatePill {
-  if (isDraft && state === "OPEN")
-    return {
-      Icon: FileDashedIcon,
-      tone: "text-muted-foreground",
-      word: "Draft pull request",
-    };
-  return (
-    // A state this build doesn't know keeps a shape of its own and the forge's
-    // own word, rather than borrowing "open"'s glyph at a different tone.
-    PR_STATE[state] ?? {
-      Icon: CircleIcon,
-      tone: "text-muted-foreground",
-      word: `${state} pull request`,
-    }
-  );
-}
 
 /** State AND kind, since the card shows neither as text. A reason only qualifies
  *  a CLOSED issue: REOPENED rides an OPEN one, so a present reason is never on
@@ -111,8 +37,8 @@ export function issueStateWord(
   stateReason: string | null,
 ): string {
   if (state !== "CLOSED") return "Open issue";
-  if (stateReason === null) return "Closed issue";
-  return CLOSED_REASON[stateReason] ?? "Closed issue";
+  const reason = stateReason === null ? undefined : CLOSED_REASON[stateReason];
+  return reason === undefined ? "Closed issue" : `Issue ${reason}`;
 }
 
 /** The card's first line: glyph, the state in words for a reader, and the title
@@ -205,7 +131,7 @@ function IssueHead({
   );
 }
 
-/** A pull request's head line, off {@link PR_STATE}. */
+/** A pull request's head line, off {@link prPill}. */
 function PullRequestHead({
   content,
   checked,

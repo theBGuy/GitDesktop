@@ -1,8 +1,6 @@
 import {
   ArrowSquareOutIcon,
   GitBranchIcon,
-  GitMergeIcon,
-  GitPullRequestIcon,
   PlusIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -27,33 +25,11 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { prPill } from "@/lib/pulls/pr-state";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-
-/** Icon + tone for a linked PR, so state isn't conveyed by color alone. */
-function prPresentation(state: string): {
-  Icon: typeof GitPullRequestIcon;
-  tone: string;
-} {
-  if (state === "MERGED") {
-    return {
-      Icon: GitMergeIcon,
-      tone: "text-merged",
-    };
-  }
-  if (state === "CLOSED") {
-    return {
-      Icon: GitPullRequestIcon,
-      tone: "text-destructive",
-    };
-  }
-  return {
-    Icon: GitPullRequestIcon,
-    tone: "text-success",
-  };
-}
 
 /** GitHub's default linked-branch name: `<number>-<slugified title>`. */
 function defaultBranchName(number: number, title: string): string {
@@ -172,7 +148,8 @@ export function IssueDevelopment({
       </div>
 
       {prs.map((pr) => {
-        const { Icon, tone } = prPresentation(pr.state);
+        // The linked-PR payload carries no draft flag.
+        const { Icon, tone, word } = prPill(pr.state, false);
         return (
           <button
             key={pr.number}
@@ -182,6 +159,9 @@ export function IssueDevelopment({
             title={`#${pr.number} ${pr.title}`}
           >
             <Icon className={cn("size-3.5 shrink-0", tone)} />
+            {/* The glyph's state in words for a reader; the trailing space keeps
+                it from running into the number in the accessible name. */}
+            <span className="sr-only">{`${word} `}</span>
             <span className="text-muted-foreground">#{pr.number}</span>
             <span className="min-w-0 flex-1 truncate">{pr.title}</span>
           </button>

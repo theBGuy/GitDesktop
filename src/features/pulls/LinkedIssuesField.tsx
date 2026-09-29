@@ -1,6 +1,6 @@
 import { Popover } from "@base-ui/react/popover";
 import { LinkIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
-import { type KeyboardEvent, useRef, useState } from "react";
+import { type KeyboardEvent, type RefObject, useRef, useState } from "react";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,39 @@ const STATE_SENTENCE: Partial<Record<string, string>> = {
   OPEN: "Open issue. ",
   CLOSED: "Closed issue. ",
 };
+
+/**
+ * Moves focus to whatever survives removing the chip at `index`, BEFORE it goes;
+ * both bands call it ahead of every removal, Delete and ✕ alike. Inside a modal
+ * the handoff must be synchronous: Base UI's focus containment recaptures to the
+ * dialog container the moment a focused child unmounts, beating any rAF. The ✕
+ * needs it too, since Chromium focuses a clicked button on mousedown. `from` is
+ * any node still inside the band, used only for the `closest` walk.
+ */
+function handOffFocusBeforeRemoving(
+  index: number,
+  count: number,
+  from: HTMLElement,
+  chipRefs: RefObject<(HTMLButtonElement | null)[]>,
+  setFocusIndex: (index: number) => void,
+) {
+  const nextCount = count - 1;
+  if (nextCount <= 0) {
+    // Nothing survives in the row, so focus goes where re-adding starts.
+    from
+      .closest<HTMLElement>('[role="group"]')
+      ?.querySelector<HTMLElement>("[data-link-issue-trigger]")
+      ?.focus();
+    return;
+  }
+  // The survivor at its CURRENT index: the next chip slides into this slot, or
+  // the previous one when the last of several goes. Both are mounted now.
+  const survivor = index < count - 1 ? index + 1 : index - 1;
+  chipRefs.current[survivor]?.focus();
+  // Set after the focus (whose onFocus names the pre-removal index) so the roving
+  // tab stop names the index the survivor will occupy after the re-render.
+  setFocusIndex(Math.min(index, nextCount - 1));
+}
 
 /** Props for the native (GitHub/GitLab) issue-link cluster. `variant` is optional
  *  (absent ⇒ native), so existing call sites compile unchanged. */
@@ -101,9 +134,9 @@ function NativeLinkedIssuesField({
     (a, b) => Number(b.aiSuggestedClose) - Number(a.aiSuggestedClose),
   );
   const excluded = new Set(chips.map((c) => c.number));
-  // Clamp the roved index at point of use: chips can shrink via the mouse ✕
-  // without touching `focusIndex`, and a stale index past the end would render
-  // EVERY chip tabIndex=-1 — the band would drop out of the tab order entirely.
+  // Clamp the roved index at point of use: the parent owns `chips` and can shrink
+  // them without touching `focusIndex`, and a stale index past the end would
+  // render EVERY chip tabIndex=-1, dropping the band out of the tab order.
   const effectiveFocusIndex = Math.max(
     0,
     Math.min(focusIndex, ordered.length - 1),
@@ -128,17 +161,19 @@ function NativeLinkedIssuesField({
       onToggleKeyword(chip.number);
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      onRemove(chip.number);
-      // Focus the chip that slides into this slot (or the new last one). Defer
-      // past the removal re-render: focusChip reads chipRefs, and reading them
-      // synchronously here would target the node being unmounted (focus drops to
-      // body for any non-last chip). rAF lands after the list has re-rendered.
-      const nextCount = ordered.length - 1;
-      if (nextCount > 0) {
-        const target = Math.min(index, nextCount - 1);
-        requestAnimationFrame(() => focusChip(target));
-      }
+      removeAt(index, e.currentTarget);
     }
+  }
+
+  function removeAt(index: number, from: HTMLElement) {
+    handOffFocusBeforeRemoving(
+      index,
+      ordered.length,
+      from,
+      chipRefs,
+      setFocusIndex,
+    );
+    onRemove(ordered[index].number);
   }
 
   return (
@@ -149,7 +184,10 @@ function NativeLinkedIssuesField({
         <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
           <Popover.Trigger
             render={
+              // Marked so removing the LAST chip can hand focus here: the attribute
+              // rides the same prop path as `aria-label`, clear of Base UI's ref.
               <Button
+                data-link-issue-trigger=""
                 variant="outline"
                 size="xs"
                 disabled={disabled}
@@ -167,6 +205,14 @@ function NativeLinkedIssuesField({
               className="isolate z-50"
             >
               <Popover.Popup className="w-72 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+                {/* Names the popup via aria-labelledby; render keeps the <p> off
+                    Title's default <h2>. */}
+                <Popover.Title
+                  render={<p />}
+                  className="px-1 pb-1.5 text-xs font-medium"
+                >
+                  Link issue
+                </Popover.Title>
                 <IssuePicker
                   repoPath={repoPath}
                   exclude={excluded}
@@ -240,7 +286,7 @@ function NativeLinkedIssuesField({
                     tabIndex={-1}
                     aria-label={`Remove #${chip.number}`}
                     className="text-muted-foreground"
-                    onClick={() => onRemove(chip.number)}
+                    onClick={(e) => removeAt(index, e.currentTarget)}
                   >
                     <XIcon />
                   </Button>
@@ -282,9 +328,8 @@ function JiraMentionsField({
     (a, b) => Number(b.source === "ai") - Number(a.source === "ai"),
   );
   const excluded = new Set(jiraChips.map((c) => c.key));
-  // Clamp the roved index at point of use (see the native band): a mouse ✕ can
-  // shrink the list without touching `focusIndex`, and a stale index past the end
-  // would render every chip tabIndex=-1, dropping the band out of the tab order.
+  // Clamp the roved index at point of use (see the native band): the parent can
+  // shrink `jiraChips` without touching `focusIndex`.
   const effectiveFocusIndex = Math.max(
     0,
     Math.min(focusIndex, ordered.length - 1),
@@ -297,7 +342,6 @@ function JiraMentionsField({
   }
 
   function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
-    const chip = ordered[index];
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       if (index > 0) focusChip(index - 1);
@@ -306,17 +350,20 @@ function JiraMentionsField({
       if (index < ordered.length - 1) focusChip(index + 1);
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      onRemove(chip.key);
-      // Focus the slid-in chip, deferred past the removal re-render (reading
-      // chipRefs synchronously would target the unmounting node — focus drops to
-      // body for any non-last chip). Same rAF fix as the native band.
-      const nextCount = ordered.length - 1;
-      if (nextCount > 0) {
-        const target = Math.min(index, nextCount - 1);
-        requestAnimationFrame(() => focusChip(target));
-      }
+      removeAt(index, e.currentTarget);
     }
     // Enter/Space intentionally do nothing — there is no keyword toggle.
+  }
+
+  function removeAt(index: number, from: HTMLElement) {
+    handOffFocusBeforeRemoving(
+      index,
+      ordered.length,
+      from,
+      chipRefs,
+      setFocusIndex,
+    );
+    onRemove(ordered[index].key);
   }
 
   return (
@@ -327,7 +374,9 @@ function JiraMentionsField({
         <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
           <Popover.Trigger
             render={
+              // Marked for the last-chip focus handoff (see the native band).
               <Button
+                data-link-issue-trigger=""
                 variant="outline"
                 size="xs"
                 disabled={disabled}
@@ -345,6 +394,13 @@ function JiraMentionsField({
               className="isolate z-50"
             >
               <Popover.Popup className="w-72 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+                {/* Names the popup via aria-labelledby (see the native band). */}
+                <Popover.Title
+                  render={<p />}
+                  className="px-1 pb-1.5 text-xs font-medium"
+                >
+                  Link issue
+                </Popover.Title>
                 <JiraIssuePicker
                   repoPath={repoPath}
                   link={link}
@@ -406,7 +462,7 @@ function JiraMentionsField({
                     tabIndex={-1}
                     aria-label={`Remove ${chip.key}`}
                     className="text-muted-foreground"
-                    onClick={() => onRemove(chip.key)}
+                    onClick={(e) => removeAt(index, e.currentTarget)}
                   >
                     <XIcon />
                   </Button>

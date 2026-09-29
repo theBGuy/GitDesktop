@@ -1,12 +1,4 @@
-import {
-  CircleIcon,
-  FileDashedIcon,
-  GitMergeIcon,
-  GitPullRequestIcon,
-  type Icon,
-  MagnifyingGlassIcon,
-  XCircleIcon,
-} from "@phosphor-icons/react";
+import { MagnifyingGlassIcon } from "@phosphor-icons/react";
 import { type ReactNode, useState } from "react";
 import { usePanelActive } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
@@ -28,6 +20,7 @@ import { useBoardCandidates } from "@/lib/git/queries";
 import type { BoardCandidate, RemoteLens } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { CLOSED_REASON, prPill } from "@/lib/pulls/pr-state";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ARIA_DISABLED_CLASS,
@@ -45,40 +38,12 @@ import {
  *  list feels live. The Explore and registry searches sit either side of it. */
 const SEARCH_DEBOUNCE_MS = 300;
 
-/** A pull request's glyph and tone per state, matching `BoardCard.tsx`'s own
- *  `PR_STATE` shape for shape — these rows sit one keystroke from the cards they
- *  become, so one state must not draw two different glyphs across the pair. Every
- *  arm carries its own SHAPE, including the unknown-state fallback below: the tone
- *  only repeats what the row already says in words, so two states separated by
- *  colour alone would be conveying meaning by colour. */
-const PR_STATE: Record<string, { Icon: Icon; tone: string } | undefined> = {
-  OPEN: { Icon: GitPullRequestIcon, tone: "text-success" },
-  MERGED: { Icon: GitMergeIcon, tone: "text-merged" },
-  CLOSED: { Icon: XCircleIcon, tone: "text-destructive" },
-};
-
-/** Why a closed issue closed, as words. An unmapped reason (wire drift) leaves the
- *  bare state rather than a guess — the board card's own rule. */
-const CLOSED_REASON: Record<string, string> = {
-  COMPLETED: "closed as completed",
-  NOT_PLANNED: "closed as not planned",
-  DUPLICATE: "closed as duplicate",
-};
-
 /** A candidate's state AND kind as words. Nothing here is carried by colour: the
  *  glyph's tone repeats what this sentence already says. A reason only qualifies a
  *  CLOSED issue — REOPENED rides an OPEN one. */
 function candidateStateWord(candidate: BoardCandidate): string {
-  if (candidate.kind === "pr") {
-    if (candidate.isDraft && candidate.state === "OPEN")
-      return "Draft pull request";
-    const known: Record<string, string> = {
-      OPEN: "Open pull request",
-      MERGED: "Merged pull request",
-      CLOSED: "Closed pull request",
-    };
-    return known[candidate.state] ?? `${candidate.state} pull request`;
-  }
+  if (candidate.kind === "pr")
+    return prPill(candidate.state, candidate.isDraft).word;
   if (candidate.state !== "CLOSED") return "Open issue";
   const reason =
     candidate.stateReason === null
@@ -87,20 +52,11 @@ function candidateStateWord(candidate: BoardCandidate): string {
   return reason === undefined ? "Closed issue" : `Issue ${reason}`;
 }
 
-/** The row's leading glyph. Issues reuse the related-issue {@link StateIcon} the
- *  board card does, so a closed issue reads the same on both. */
+/** The row's leading glyph, off the same tables the board card uses, so a row
+ *  and the card it becomes never draw one state two ways. */
 function CandidateGlyph({ candidate }: { candidate: BoardCandidate }) {
   if (candidate.kind === "issue") return <StateIcon state={candidate.state} />;
-  if (candidate.isDraft && candidate.state === "OPEN")
-    return (
-      <FileDashedIcon className="size-3.5 shrink-0 text-muted-foreground" />
-    );
-  // A state this build doesn't know keeps a shape of its own rather than
-  // borrowing "open"'s glyph at another tone.
-  const pill = PR_STATE[candidate.state] ?? {
-    Icon: CircleIcon,
-    tone: "text-muted-foreground",
-  };
+  const pill = prPill(candidate.state, candidate.isDraft);
   return <pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />;
 }
 

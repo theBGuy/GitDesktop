@@ -9,9 +9,10 @@ import { StateIcon } from "@/features/issues/IssueRelations";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { issueFieldHostOf } from "@/lib/git/project-field-routing";
 import type { BoardItem, ProjectFieldDef } from "@/lib/git/types";
+import { prPill } from "@/lib/pulls/pr-state";
 import { useDisabledReason } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
-import { ArchivedBadge, CardDates, issueStateWord, prPill } from "./BoardCard";
+import { ArchivedBadge, CardDates, issueStateWord } from "./BoardCard";
 import {
   ARCHIVED_ITEM_REASON,
   columnValue,

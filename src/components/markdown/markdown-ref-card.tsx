@@ -1,8 +1,6 @@
 import {
   CheckCircleIcon,
   CircleDashedIcon,
-  GitMergeIcon,
-  GitPullRequestIcon,
   type Icon,
 } from "@phosphor-icons/react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
@@ -24,6 +22,7 @@ import {
   useAssignableUsers,
 } from "@/lib/git/queries";
 import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
+import { prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -150,6 +149,9 @@ interface RefItem {
    *  differently, so the pill needs the answer the resolve already had. */
   flavor: "issue" | "pr";
   state: string;
+  /** Draft qualifies an OPEN pull request only — a merged or closed one reports
+   *  its own state even where the forge's `isDraft` lingers. */
+  isDraft: boolean;
   title: string;
   author: string;
   createdAt?: string;
@@ -159,18 +161,18 @@ function issueItem(issue: IssueDetails): RefItem {
   return {
     flavor: "issue",
     state: issue.state,
+    isDraft: false,
     title: issue.title,
     author: issue.author,
     createdAt: issue.createdAt,
   };
 }
 
-/** Draft qualifies an OPEN pull request only — a merged or closed one reports
- *  its own state even where `isDraft` lingers. */
 function prItem(pr: PrDetails): RefItem {
   return {
     flavor: "pr",
-    state: pr.isDraft && pr.state === "OPEN" ? "DRAFT" : pr.state,
+    state: pr.state,
+    isDraft: pr.isDraft && pr.state === "OPEN",
     title: pr.title,
     author: pr.author,
   };
@@ -224,39 +226,32 @@ async function resolveRefItem(
       await queryClient.fetchQuery(prDetailsOptions(repoPath, number, lens)),
     );
   } catch (e) {
-    // The reference DID resolve; only the merged/draft distinction is lost, so
-    // the issue read stands in rather than the card claiming a failure.
-    if (issue) return issueItem(issue);
+    // The reference DID resolve, so the issue read stands in rather than the card
+    // claiming a failure. A kept read already classified this number as a PR by
+    // its URL, so it stays pr-flavored: its CLOSED/MERGED take the PR glyphs.
+    if (issue) return { ...issueItem(issue), flavor: "pr" };
     throw e;
   }
 }
 
 interface StatePill {
   Icon: Icon;
-  className: string;
+  tone: string;
 }
 
-/** Glyph and tone per state, shared by both shapes. The word beside the glyph is
- *  what actually carries the state — color never does — so an unrecognized state
- *  (wire drift) falls through to the neutral dot without losing meaning. */
-const STATE_PILL: Record<string, StatePill | undefined> = {
-  OPEN: { Icon: CircleDashedIcon, className: "text-success" },
-  MERGED: { Icon: GitMergeIcon, className: "text-merged" },
-  DRAFT: { Icon: CircleDashedIcon, className: "text-muted-foreground" },
+/** The issue flavor's OPEN and CLOSED glyphs, mirroring the related-issue
+ *  `StateIcon`: importing it would close a cycle, since the issue module reaches
+ *  markdown. */
+const ISSUE_PILL: Partial<Record<string, StatePill>> = {
+  OPEN: { Icon: CircleDashedIcon, tone: "text-success" },
+  CLOSED: { Icon: CheckCircleIcon, tone: "text-merged" },
 };
 
-/** CLOSED is the one state the app's two conventions part on: a closed issue is
- *  resolved (the related-issue `StateIcon`), a closed pull request is abandoned
- *  (`prPresentation` in IssueDevelopment), and a card that borrowed one for the
- *  other would name the right state beside the wrong glyph. */
-const CLOSED_PILL: Record<RefItem["flavor"], StatePill> = {
-  issue: { Icon: CheckCircleIcon, className: "text-merged" },
-  pr: { Icon: GitPullRequestIcon, className: "text-destructive" },
-};
-
+/** An issue state this build doesn't know: the word beside the glyph still
+ *  carries it, so a muted dot loses no meaning. */
 const NEUTRAL_PILL: StatePill = {
   Icon: CircleDashedIcon,
-  className: "text-muted-foreground",
+  tone: "text-muted-foreground",
 };
 
 /** The card's settled maximum, reserved up front: a state row, a `line-clamp-2`
@@ -348,16 +343,18 @@ function RefCardBody({
   if (item === null) {
     return <p className="text-muted-foreground">{`Couldn't load ${label}`}</p>;
   }
-  const pill =
-    (item.state === "CLOSED"
-      ? CLOSED_PILL[item.flavor]
-      : STATE_PILL[item.state]) ?? NEUTRAL_PILL;
+  const pill: StatePill =
+    item.flavor === "pr"
+      ? prPill(item.state, item.isDraft)
+      : (ISSUE_PILL[item.state] ?? NEUTRAL_PILL);
   const { createdAt } = item;
   return (
     <div className="flex flex-col gap-1.5">
       <p className="flex items-center gap-1.5">
-        <pill.Icon className={cn("size-3.5 shrink-0", pill.className)} />
-        <span className="capitalize">{item.state.toLowerCase()}</span>
+        <pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />
+        <span className="capitalize">
+          {item.isDraft ? "draft" : item.state.toLowerCase()}
+        </span>
         <span className="text-muted-foreground tabular-nums">{label}</span>
       </p>
       <p className="line-clamp-2 font-medium break-words">{item.title}</p>
