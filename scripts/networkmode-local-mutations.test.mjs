@@ -15,6 +15,12 @@
 // site. A mutationFn passed through a parameter resolves at the enclosing hook's call
 // sites in the same file (every one must agree), or is delegated to a WRAPPERS entry;
 // `useRepoMutation` must thread `opts.networkMode` per site and never default it.
+// A name that is a PARAMETER is never classified by its spelling: it resolves through
+// a named hook (a declaration, or a `const`/`let`/`var` whose whole initializer is the
+// function, annotated or not: `annotationEnd` walks any type to the initializer's
+// `=`, so such a binding is left unnamed only when it has no initializer), and a
+// parameter of any other function (a callback, a method, a parenthesized or curried
+// initializer) fails as an ambiguity.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // mutationFn reached through `.bind()`. A future unprefixed network helper named like
@@ -666,25 +672,80 @@ const paramNames = (masked, open, close) =>
     (p) => /^([\w$]+)\s*[?:=]?/.exec(p.text)?.[1] ?? null,
   );
 
-/** Every named function: `function` declarations and `const`/`let`/`var` bindings
- *  of an arrow or a function expression (async, generic, type-annotated, braced or
- *  expression-bodied). Each carries its name, parameter names (null for a destructured one),
- *  whether it is exported inline, its parameter list's `(` (undefined for a bare
- *  single-parameter arrow), and its body's span. */
+/**
+ * Index of the `=` that starts a binding's initializer, walking its type annotation
+ * from `from` (just past the `:`); -1 when the binding has no initializer (a `;` or
+ * `,` at depth 0, or a bracket closing around the binding). Every bracket counts as
+ * depth, `<` and `>` included: in masked annotation text (string and template text
+ * blanked, comments gone) they can only be generic brackets, and each `=>` is
+ * stepped over as a pair. So a function type's arrow, an object type's `;`, a
+ * tuple's `,` and a generic default's `=` all stay inside the annotation.
+ */
+function annotationEnd(masked, from) {
+  let depth = 0;
+  for (let i = from; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "=" && masked[i + 1] === ">") i++;
+    else if (c === "=" && depth === 0) return i;
+    else if (OPEN.has(c) || c === "<") depth++;
+    else if (CLOSE.has(c) || c === ">") {
+      if (--depth < 0) return -1;
+    } else if (depth === 0 && (c === ";" || c === ",")) return -1;
+  }
+  return -1;
+}
+
+/** Words that precede a `(` and a `{` without declaring a method. */
+const NOT_METHODS = new Set([...NOT_CALLS, "constructor"]);
+
+/**
+ * Every function scope: `function` declarations and expressions, arrows (async,
+ * generic, parenthesized or single-parameter, braced or expression-bodied) and
+ * object/class method shorthand. Each carries its parameter names (null for a
+ * destructured one), its body's span and its parameter list's `(` (undefined for a
+ * single-parameter arrow). A scope is NAMED when it is a declaration or the whole
+ * initializer of a `const`/`let`/`var` binding (type-annotated or not); every other
+ * scope has `name: null`, so a parameter of it can't pose as a vocabulary callee.
+ * Named scopes also carry `at` (their declaration) and whether they are exported
+ * inline.
+ */
 function functionsIn(masked) {
   const fns = [];
   const exportedAt = (at) =>
     /\bexport\s+(?:default\s+)?(?:async\s+)?$/.test(
       masked.slice(Math.max(0, at - 30), at),
     );
-  for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*([\w$]+)/g)) {
-    // A named function EXPRESSION is indexed under its binding below.
-    if (
-      /=\s*(?:async\s+)?$/.test(
-        masked.slice(Math.max(0, m.index - 20), m.index),
-      )
-    )
-      continue;
+  const bodyFrom = (from) => {
+    let s = from;
+    while (/\s/.test(masked[s] ?? "")) s++;
+    return masked[s] === "{"
+      ? [s, matchBrace(masked, s)]
+      : [s - 1, expressionEnd(masked, s)];
+  };
+  // Where each binding's initializer starts (past any `async`), so the function
+  // found there takes the binding's name.
+  const bindings = new Map();
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s+([\w$]+)\s*/g)) {
+    let i = m.index + m[0].length;
+    if (masked[i] === ":") i = annotationEnd(masked, i + 1);
+    else if (masked[i] !== "=" || masked[i + 1] === ">") continue;
+    if (i === -1) continue;
+    i++;
+    while (/\s/.test(masked[i] ?? "")) i++;
+    const asyncKw = /^async\b\s*/.exec(masked.slice(i, i + 16));
+    if (asyncKw) i += asyncKw[0].length;
+    bindings.set(i, { name: m[1], at: m.index });
+  }
+  const push = (start, scope) => {
+    const bound = bindings.get(start);
+    fns.push({
+      ...scope,
+      name: bound?.name ?? scope.name ?? null,
+      at: bound?.at ?? scope.at ?? start,
+      exported: exportedAt(bound?.at ?? scope.at ?? start),
+    });
+  };
+  for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*([\w$]*)/g)) {
     const paren = callParen(masked, m.index + m[0].length);
     if (paren === -1) continue;
     const paramsClose = matchBrace(masked, paren);
@@ -692,75 +753,101 @@ function functionsIn(masked) {
     const bodyOpen = masked.indexOf("{", paramsClose);
     const bodyClose = bodyOpen === -1 ? -1 : matchBrace(masked, bodyOpen);
     if (bodyClose === -1) continue;
-    fns.push({
-      name: m[1],
-      at: m.index,
+    // A declaration stands at a statement start; a named function EXPRESSION's
+    // name is visible only inside itself, so an unbound one stays anonymous.
+    const declaration =
+      m[1] !== "" &&
+      /(?:^|[;{}])\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?$/.test(
+        masked.slice(Math.max(0, m.index - 40), m.index),
+      );
+    push(m.index, {
+      name: declaration ? m[1] : null,
+      at: declaration ? m.index : undefined,
       paramsOpen: paren,
       params: paramNames(masked, paren, paramsClose),
-      exported: exportedAt(m.index),
       bodyOpen,
       bodyClose,
     });
   }
-  for (const m of masked.matchAll(
-    // The annotation may itself be a function type, so its `=>` doesn't end it.
-    /\b(?:const|let|var)\s+([\w$]+)\s*(?::(?:[^=;]|=>)*?)?=(?!>)\s*(?:async\s+)?/g,
-  )) {
-    const from = m.index + m[0].length;
-    const rest = masked.slice(from);
-    const single = /^([\w$]+)\s*=>\s*/.exec(rest);
-    const fnExpr = /^function\b\s*\*?\s*[\w$]*/.exec(rest);
-    let params;
-    let paramsOpen;
-    let bodyStart;
-    if (single) {
-      params = [single[1]];
-      bodyStart = from + single[0].length;
-    } else {
-      const paren = callParen(masked, fnExpr ? from + fnExpr[0].length : from);
-      // A bare `(` right after `=` is an arrow's parameter list; anything else
-      // (a call such as `= useState(…)`) is not a function binding.
-      if (paren === -1 || (!fnExpr && !/^\s*(?:<|\()/.test(rest))) continue;
-      const paramsClose = matchBrace(masked, paren);
-      if (paramsClose === -1) continue;
-      params = paramNames(masked, paren, paramsClose);
-      paramsOpen = paren;
-      if (fnExpr) bodyStart = masked.indexOf("{", paramsClose);
-      else {
-        const arrow = arrowAfter(masked, paramsClose);
-        bodyStart = arrow === -1 ? -1 : arrow + 2;
+  for (let p = masked.indexOf("("); p !== -1; p = masked.indexOf("(", p + 1)) {
+    const close = matchBrace(masked, p);
+    if (close === -1) continue;
+    let j = close + 1;
+    while (/\s/.test(masked[j] ?? "")) j++;
+    const params = paramNames(masked, p, close);
+    const arrow =
+      masked[j] === "=" && masked[j + 1] === ">"
+        ? j
+        : masked[j] === ":"
+          ? arrowAfter(masked, close)
+          : -1;
+    if (arrow !== -1) {
+      // An arrow; with type parameters it starts at their `<` (an `=>` just
+      // before the `(` is a curried arrow's, not type parameters).
+      let start = p;
+      let k = p - 1;
+      while (/\s/.test(masked[k] ?? "")) k--;
+      if (masked[k] === ">" && masked[k - 1] !== "=") {
+        for (let depth = 0; k >= 0; k--) {
+          if (masked[k] === ">") depth++;
+          else if (masked[k] === "<" && --depth === 0) break;
+        }
+        if (k >= 0) start = k;
       }
-      if (bodyStart === -1) continue;
+      const [bodyOpen, bodyClose] = bodyFrom(arrow + 2);
+      if (bodyClose !== -1)
+        push(start, { paramsOpen: p, params, bodyOpen, bodyClose });
+    } else if (masked[j] === ":" || masked[j] === "{") {
+      // A method: its name precedes the `(`.
+      const name = /([\w$]+)\s*(?:<[^()]*>)?\s*$/.exec(
+        masked.slice(Math.max(0, p - 80), p),
+      )?.[1];
+      if (!name || NOT_METHODS.has(name)) continue;
+      if (
+        /\bfunction\b\s*\*?\s*[\w$]*\s*(?:<[^()]*>)?\s*$/.test(
+          masked.slice(Math.max(0, p - 60), p),
+        )
+      )
+        continue;
+      const bodyOpen = masked[j] === "{" ? j : masked.indexOf("{", j);
+      const bodyClose = bodyOpen === -1 ? -1 : matchBrace(masked, bodyOpen);
+      if (bodyClose !== -1)
+        fns.push({ name: null, paramsOpen: p, params, bodyOpen, bodyClose });
     }
-    while (/\s/.test(masked[bodyStart] ?? "")) bodyStart++;
-    let bodyOpen;
-    let bodyClose;
-    if (masked[bodyStart] === "{") {
-      bodyOpen = bodyStart;
-      bodyClose = matchBrace(masked, bodyStart);
-    } else {
-      bodyOpen = bodyStart - 1;
-      bodyClose = expressionEnd(masked, bodyStart);
-    }
-    if (bodyClose === -1) continue;
-    fns.push({
-      name: m[1],
-      at: m.index,
-      paramsOpen,
-      params,
-      exported: exportedAt(m.index),
-      bodyOpen,
-      bodyClose,
-    });
+  }
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g)) {
+    if (NOT_CALLS.has(m[1])) continue;
+    const [bodyOpen, bodyClose] = bodyFrom(m.index + m[0].length);
+    if (bodyClose !== -1)
+      push(m.index, { params: [m[1]], bodyOpen, bodyClose });
   }
   return fns;
 }
 
-/** The innermost named function whose body holds `index`, or null. */
+/** The innermost NAMED function whose body holds `index`, or null. */
 const enclosingFn = (fns, index) =>
   fns
-    .filter((f) => f.bodyOpen < index && index < f.bodyClose)
+    .filter((f) => f.name && f.bodyOpen < index && index < f.bodyClose)
     .sort((a, b) => b.bodyOpen - a.bodyOpen)[0] ?? null;
+
+/** The innermost function scope, named or not, that holds `index` and declares
+ *  `name` as a parameter; null when `name` is no parameter there. */
+const paramOwner = (fns, index, name) =>
+  fns
+    .filter(
+      (f) =>
+        f.bodyOpen < index && index < f.bodyClose && f.params.includes(name),
+    )
+    .sort((a, b) => b.bodyOpen - a.bodyOpen)[0] ?? null;
+
+/** A mutationFn name owned by a parameter: resolved through its named hook, or
+ *  refused when the owner is anonymous (its callers can't be found by name). */
+function throughParameter(ctx, owner, name, nested) {
+  if (owner.name) return passThrough(ctx, owner, name, nested);
+  return {
+    ambiguity: `mutationFn \`${name}\` is a parameter of an anonymous function (a callback, a parenthesized initializer or a method) — its callers can't be followed; pass it through a named hook`,
+  };
+}
 
 /** The top-level `networkMode` verdict of the object literal `part`: "always",
  *  "other" (set, but to something else), or "none". */
@@ -787,9 +874,8 @@ function classifyValue(ctx, part, nested = false) {
   const ref = /^(api\.)?([A-Za-z_$][\w$]*)$/.exec(part.text);
   if (ref) {
     const name = ref[2];
-    const fn = enclosingFn(ctx.fns, part.start);
-    if (!ref[1] && fn?.params.includes(name))
-      return passThrough(ctx, fn, name, nested);
+    const owner = ref[1] ? null : paramOwner(ctx.fns, part.start, name);
+    if (owner) return throughParameter(ctx, owner, name, nested);
     const cls = classifyCallee(name);
     if (cls === "local" || cls === "network")
       return { cls, callees: [part.text] };
@@ -808,11 +894,13 @@ function classifyValue(ctx, part, nested = false) {
     const before = value.slice(0, c.index);
     if (NOT_CALLS.has(name) || /\b(?:function|new)\s*$/.test(before)) continue;
     if (declared.has(name) && !c[0].startsWith("api.")) continue;
-    const fn = c[0].startsWith("api.")
+    // Owned at the call itself, so a parameter of an arrow inside the mutationFn
+    // counts as much as one of the hook around it.
+    const owner = c[0].startsWith("api.")
       ? null
-      : enclosingFn(ctx.fns, part.start);
-    if (fn?.params.includes(name)) {
-      const v = passThrough(ctx, fn, name, nested);
+      : paramOwner(ctx.fns, part.start + c.index, name);
+    if (owner) {
+      const v = throughParameter(ctx, owner, name, nested);
       if (v.ambiguity) return v;
       if (v.cls === "delegated") return v;
       callees.push(
@@ -1353,7 +1441,23 @@ test("an arrow-bound wrapper resolves at its callers, never by its parameter's n
       'const useW = (repo, saveFn) => useRepoMutation<A, B>(repo, saveFn, { networkMode: "always" });\nuseW(r, api.gitPush);',
     "function-typed binding":
       'const useW: (repo: string, saveFn: () => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn, networkMode: "always" });\nuseW(r, api.gitPush);',
+    "object-typed parameter in a function-typed binding":
+      "const useW: (repo: string, saveFn: (a: { x: string; y: number }) => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
+    "generic default in a function-typed binding":
+      "const useW: <T = string>(repo: string, saveFn: (a: T) => Promise<void>) => unknown = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
   };
+  // Every annotation shape must walk to its initializer's `=`.
+  for (const type of [
+    "((repo: string, saveFn: () => void) => unknown) | null",
+    "Hook<Map<string, Set<number>>>",
+    "[repo: string, saveFn: () => void] extends never ? A : Hook",
+    "`use-${string}` | Hook",
+    "'a=b' | \"c;d\" | Hook",
+    "{ run?: () => void; [k: string]: unknown } & Hook",
+    "readonly Hook[] | typeof api.gitPush | keyof typeof table",
+  ])
+    forms[`annotated \`${type}\``] =
+      `const useW: ${type} = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);`;
   for (const [name, src] of Object.entries(forms)) {
     const r = verdictOf(src);
     assert.deepEqual(r.ambiguities, [], `${name}: ambiguous`);
@@ -1485,6 +1589,26 @@ test("shapes the scan can't read fail closed", () => {
       "const useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, saveThing);\nuseW(r, api.gitPush);",
     "an exported arrow pass-through":
       "export const useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, saveThing);",
+    // A parameter of a function no binding names: its callers can't be found, and
+    // its name (`saveFn`) must not pose as a vocabulary callee.
+    "a parenthesized initializer with satisfies":
+      "const useW = ((repo, saveFn) => useMutation({ mutationFn: saveFn })) satisfies Hook;\nuseW(r, api.gitPush);",
+    "a callback argument":
+      "const useW = useCallback((repo, saveFn) => useMutation({ mutationFn: saveFn }), []);\nuseW(r, api.gitPush);",
+    "an object-property arrow":
+      "const hooks = { useW: (repo, saveFn) => useMutation({ mutationFn: saveFn }) };\nhooks.useW(r, api.gitPush);",
+    "a method shorthand":
+      "const hooks = { useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); } };\nhooks.useW(r, api.gitPush);",
+    "a class-field arrow":
+      "class K { useW = (repo, saveFn) => useMutation({ mutationFn: saveFn }); }",
+    "a curried arrow":
+      "const useW = (repo) => (saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r)(api.gitPush);",
+    "a second declarator":
+      "const a = 1, useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
+    "a parameter of an arrow inside the mutationFn":
+      "useMutation({ mutationFn: (saveFn) => saveFn() });",
+    "an anonymous function-expression argument":
+      "register(function (repo, saveFn) { return useMutation({ mutationFn: saveFn }); });",
     "a renamed construction":
       'import { useMutation as useM } from "@tanstack/react-query";',
     "a renamed wrapper from another module":
