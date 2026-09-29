@@ -16,18 +16,23 @@
 // sites in the same file (every one must agree), or is delegated to a WRAPPERS entry;
 // `useRepoMutation` must thread `opts.networkMode` per site and never default it.
 // A name that is a PARAMETER or a VARIABLE is never classified by its spelling. A
-// positional parameter resolves through a named hook (a declaration, or a
-// `const`/`let`/`var` whose whole initializer is the function, annotated or not:
-// `annotationEnd` walks any type to the initializer's `=`, so such a binding is left
-// unnamed only when it has no initializer). A parameter of any other function (a
-// callback, a method, a parenthesized or curried initializer), a name bound by a
-// destructured or rest parameter, and a `const`/`let`/`var` holding a value all fail
-// as ambiguities. Only imported names and named functions meet the vocabularies.
+// positional parameter resolves through a named hook (a declaration, or the FIRST
+// declarator of a `const`/`let`/`var` whose whole initializer is the function,
+// annotated or not: `annotationEnd` walks any type to the initializer's `=`, so that
+// declarator is left unnamed only when it has no initializer). A parameter of any
+// other function (a callback, a method, a parenthesized or curried initializer, a
+// second declarator), a name bound by a destructured or rest parameter, and a
+// `const`/`let`/`var` holding a value all fail as ambiguities. Only imported names
+// and named functions meet the vocabularies.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // mutationFn reached through `.bind()`. A future unprefixed network helper named like
 // a local verb (`createRelease`) would classify local: the families trade that hole
-// for totality, so a network write must be named in NETWORK_CALLEES on purpose.
+// for totality, so a network write must be named in NETWORK_CALLEES on purpose. A
+// return type whose object type follows a keyword (`keyof { … }`, `x is { … }`), or a
+// template-literal return type (its `${…}` brace), reads as the function's body
+// (`bodyAfter`), so the real body's parameters go unseen and could classify by
+// spelling.
 //
 // Deliberately separate from networkmode-local-queries.test.mjs: that scan keys on
 // `queryFn:` spelling, and a read's vocabulary (git|list|load|get|read|detect) is not
@@ -555,7 +560,9 @@ const CALL_RE = new RegExp(
   String.raw`(?:\bapi\.|(?<![\w$.]))([A-Za-z_$][\w$]*)(?=\s*(?:${TYPE_ARGS}\s*)?\()`,
   "g",
 );
-/** Names a mutationFn declares for itself: calls to them are scanned in place. */
+/** Names a mutationFn declares for itself, closures and values alike: a call to a
+ *  closure (a named scope declared there) is scanned in place, a call to a value
+ *  fails as an alias. */
 const DECLARED_RE =
   /\b(?:(?:const|let|var)\s+([\w$]+)\s*[=:]|function\s+([\w$]+))/g;
 const INVOKE_COMMAND_RE = /^invoke\s*(?:<[^()]*?>)?\s*\(\s*(["'])([\w-]+)\1/;
@@ -687,20 +694,41 @@ const patternBound = (masked, open, close) =>
       .flatMap((p) => p.text.match(IDENTIFIER_RE) ?? []),
   );
 
-/** Names a `const`/`let`/`var` binds to a VALUE rather than naming a function: a
- *  simple binding that is no named scope's declaration, and every identifier of a
- *  destructuring one (over-collected, as in `patternBound`). */
+/** Names a `const`/`let`/`var` binds to a VALUE rather than naming a function:
+ *  every declarator of every declaration, walked across its depth-0 commas, except
+ *  a first declarator that is a named scope's declaration; a destructuring one
+ *  contributes every identifier in its pattern (over-collected, as in
+ *  `patternBound`). `as const` is an assertion, not a declaration. */
 function variableNames(masked, fns) {
   const named = new Set(fns.filter((f) => f.name).map((f) => f.at));
   const names = new Set();
-  for (const m of masked.matchAll(/\b(?:const|let|var)\s+([\w$]+)/g))
-    if (!named.has(m.index)) names.add(m[1]);
-  for (const m of masked.matchAll(/\b(?:const|let|var)\s*([{[])/g)) {
-    const open = m.index + m[0].length - 1;
-    const close = matchBrace(masked, open);
-    if (close === -1) continue;
-    for (const id of masked.slice(open, close).match(IDENTIFIER_RE) ?? [])
-      names.add(id);
+  for (const m of masked.matchAll(/(?<!\bas\s+)\b(?:const|let|var)\b\s*/g)) {
+    let i = m.index + m[0].length;
+    for (let first = true; ; first = false) {
+      while (/\s/.test(masked[i] ?? "")) i++;
+      if (masked[i] === "{" || masked[i] === "[") {
+        const close = matchBrace(masked, i);
+        if (close === -1) break;
+        for (const id of masked.slice(i, close).match(IDENTIFIER_RE) ?? [])
+          names.add(id);
+        i = close + 1;
+      } else {
+        const id = /^[A-Za-z_$][\w$]*/.exec(masked.slice(i, i + 200))?.[0];
+        if (!id) break;
+        if (!(first && named.has(m.index))) names.add(id);
+        i += id.length;
+      }
+      // Past any definite-assignment `!`, annotation and initializer to the
+      // comma that starts the next declarator; anything else ends the statement.
+      while (/\s/.test(masked[i] ?? "")) i++;
+      if (masked[i] === "!") i++;
+      while (/\s/.test(masked[i] ?? "")) i++;
+      if (masked[i] === ":") i = annotationStop(masked, i + 1);
+      if (i !== -1 && masked[i] === "=" && masked[i + 1] !== ">")
+        i = expressionEnd(masked, i + 1);
+      if (i === -1 || masked[i] !== ",") break;
+      i++;
+    }
   }
   return names;
 }
@@ -715,15 +743,20 @@ function variableNames(masked, fns) {
  * tuple's `,` and a generic default's `=` all stay inside the annotation.
  */
 function annotationEnd(masked, from) {
+  const stop = annotationStop(masked, from);
+  return masked[stop] === "=" ? stop : -1;
+}
+
+/** Where `annotationEnd`'s walk stops: the depth-0 `=`, `;` or `,` ending the
+ *  annotation, or -1 when a bracket closes around it first. */
+function annotationStop(masked, from) {
   let depth = 0;
   for (let i = from; i < masked.length; i++) {
     const c = masked[i];
     if (c === "=" && masked[i + 1] === ">") i++;
-    else if (c === "=" && depth === 0) return i;
+    else if (depth === 0 && (c === "=" || c === ";" || c === ",")) return i;
     else if (OPEN.has(c) || c === "<") depth++;
-    else if (CLOSE.has(c) || c === ">") {
-      if (--depth < 0) return -1;
-    } else if (depth === 0 && (c === ";" || c === ",")) return -1;
+    else if ((CLOSE.has(c) || c === ">") && --depth < 0) return -1;
   }
   return -1;
 }
@@ -732,13 +765,49 @@ function annotationEnd(masked, from) {
 const NOT_METHODS = new Set([...NOT_CALLS, "constructor"]);
 
 /**
+ * Index of the `{` opening the body after a parameter list closing at
+ * `paramsClose`, past any return-type annotation; -1 for a bodiless signature (an
+ * overload, an interface or abstract member), whose first depth-0 token after the
+ * type is a `;` or `,`. Brackets count as depth, `<`/`>` included (masked type text
+ * holds no comparisons), and each `=>` is stepped over as a pair. A depth-0 `{`
+ * right after a type-operand token (`:`, `|`, `&`, `?`, `=>`) opens an object TYPE;
+ * the first `{` after anything else opens the body. An object type after a keyword
+ * (`keyof { … }`, `x is { … }`) and a template-literal type's `${` still read as
+ * the body: see the header.
+ */
+function bodyAfter(masked, paramsClose) {
+  let depth = 0;
+  let operand = false;
+  for (let i = paramsClose + 1; i < masked.length; i++) {
+    const c = masked[i];
+    if (/\s/.test(c)) continue;
+    if (c === "=" && masked[i + 1] === ">") {
+      i++;
+      if (depth === 0) operand = true;
+      continue;
+    }
+    if (depth === 0) {
+      if (c === "{" && !operand) return i;
+      if (c === ";" || c === ",") return -1;
+    }
+    if (OPEN.has(c) || c === "<") depth++;
+    else if ((CLOSE.has(c) || c === ">") && --depth < 0) return -1;
+    if (depth === 0) operand = ":|&?".includes(c);
+  }
+  return -1;
+}
+
+/**
  * Every function scope: `function` declarations and expressions, arrows (async,
  * generic, parenthesized or single-parameter, braced or expression-bodied) and
  * object/class method shorthand. Each carries its parameter names (null for a
- * destructured one), its body's span and its parameter list's `(` (undefined for a
- * single-parameter arrow). A scope is NAMED when it is a declaration or the whole
- * initializer of a `const`/`let`/`var` binding (type-annotated or not); every other
- * scope has `name: null`, so a parameter of it can't pose as a vocabulary callee.
+ * destructured or rest one; `bound` holds every name such a part may bind), its
+ * body's span and its parameter list's `(` (undefined for a single-parameter
+ * arrow). A scope is NAMED when it is a declaration or the whole
+ * initializer of the first declarator of a `const`/`let`/`var` (type-annotated or
+ * not); every other scope, a second declarator's included, has `name: null`, so a
+ * parameter of it can't pose as a vocabulary callee. A bodiless signature (an
+ * overload, an interface member) makes no scope.
  * Named scopes also carry `at` (their declaration) and whether they are exported
  * inline.
  */
@@ -778,12 +847,16 @@ function functionsIn(masked) {
       exported: exportedAt(bound?.at ?? scope.at ?? start),
     });
   };
+  // A `function`'s own parameter list, so the arrow/method pass below never
+  // re-reads it (and never runs past its body to a later arrow).
+  const functionParens = new Set();
   for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*([\w$]*)/g)) {
     const paren = callParen(masked, m.index + m[0].length);
     if (paren === -1) continue;
+    functionParens.add(paren);
     const paramsClose = matchBrace(masked, paren);
     if (paramsClose === -1) continue;
-    const bodyOpen = masked.indexOf("{", paramsClose);
+    const bodyOpen = bodyAfter(masked, paramsClose);
     const bodyClose = bodyOpen === -1 ? -1 : matchBrace(masked, bodyOpen);
     if (bodyClose === -1) continue;
     // A declaration stands at a statement start; a named function EXPRESSION's
@@ -804,17 +877,22 @@ function functionsIn(masked) {
     });
   }
   for (let p = masked.indexOf("("); p !== -1; p = masked.indexOf("(", p + 1)) {
+    if (functionParens.has(p)) continue;
     const close = matchBrace(masked, p);
     if (close === -1) continue;
     let j = close + 1;
     while (/\s/.test(masked[j] ?? "")) j++;
     const params = paramNames(masked, p, close);
     const bound = patternBound(masked, p, close);
+    // After a return type, a body `{` before any `=>` means a method: the `=>`
+    // arrowAfter would reach lies in or past that body.
+    const body = masked[j] === ":" ? bodyAfter(masked, close) : -1;
+    const typed = masked[j] === ":" ? arrowAfter(masked, close) : -1;
     const arrow =
       masked[j] === "=" && masked[j + 1] === ">"
         ? j
-        : masked[j] === ":"
-          ? arrowAfter(masked, close)
+        : typed !== -1 && (body === -1 || typed < body)
+          ? typed
           : -1;
     if (arrow !== -1) {
       // An arrow; with type parameters it starts at their `<` (an `=>` just
@@ -841,13 +919,7 @@ function functionsIn(masked) {
         masked.slice(Math.max(0, p - 80), p),
       )?.[1];
       if (!name || NOT_METHODS.has(name)) continue;
-      if (
-        /\bfunction\b\s*\*?\s*[\w$]*\s*(?:<[^()]*>)?\s*$/.test(
-          masked.slice(Math.max(0, p - 60), p),
-        )
-      )
-        continue;
-      const bodyOpen = masked[j] === "{" ? j : masked.indexOf("{", j);
+      const bodyOpen = masked[j] === "{" ? j : body;
       const bodyClose = bodyOpen === -1 ? -1 : matchBrace(masked, bodyOpen);
       if (bodyClose !== -1)
         fns.push({
@@ -950,11 +1022,21 @@ function classifyValue(ctx, part, nested = false) {
   const declared = new Set(
     [...value.matchAll(DECLARED_RE)].map((d) => d[1] ?? d[2]),
   );
+  const closures = new Set(
+    ctx.fns
+      .filter((f) => f.name && f.at >= part.start && f.at < part.end)
+      .map((f) => f.name),
+  );
   for (const c of value.matchAll(CALL_RE)) {
     const name = c[1];
     const before = value.slice(0, c.index);
     if (NOT_CALLS.has(name) || /\b(?:function|new)\s*$/.test(before)) continue;
-    if (declared.has(name) && !c[0].startsWith("api.")) continue;
+    // A name the mutationFn declares itself outranks any parameter it shadows: a
+    // closure's body is scanned in place here, a value it holds is not followed.
+    if (declared.has(name) && !c[0].startsWith("api.")) {
+      if (closures.has(name)) continue;
+      return aliasAmbiguity(name);
+    }
     // Owned at the call itself, so a parameter of an arrow inside the mutationFn
     // counts as much as one of the hook around it.
     const owner = c[0].startsWith("api.")
@@ -1026,6 +1108,13 @@ function passThrough(ctx, fn, name, nested) {
   const re = new RegExp(String.raw`(?<![\w$.])${escapeRe(fn.name)}\b`, "g");
   for (const m of ctx.masked.matchAll(re)) {
     if (m.index === fn.at + ctx.masked.slice(fn.at).indexOf(fn.name)) continue;
+    // An overload signature declares the hook again; it calls nothing.
+    if (
+      /\bfunction\s*\*?\s*$/.test(
+        ctx.masked.slice(Math.max(0, m.index - 20), m.index),
+      )
+    )
+      continue;
     const at = `${ctx.file}:${lineOf(ctx.source, m.index)}`;
     const paren = callParen(ctx.masked, m.index + m[0].length);
     if (paren === -1) {
@@ -1519,6 +1608,17 @@ test("an arrow-bound wrapper resolves at its callers, never by its parameter's n
       "const useW = <T extends () => void>(repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
     "a function-type default in the arrow's type parameters":
       "const useW = <T = () => void>(repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
+    // The body is the first `{` after the return type, not the type's own braces.
+    "an object-type return annotation":
+      'function useW(repo: string, saveFn: () => Promise<void>): { mutate: () => void } { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW(r, api.gitPush);',
+    "an object type inside a generic return annotation":
+      'function useW(repo: string, saveFn: () => Promise<void>): Promise<{ ok: boolean }> { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW(r, api.gitPush);',
+    "an overload signature before the hook":
+      "function useW(repo: string, saveFn: F): R;\nfunction useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(r, api.gitPush);",
+    "an interface member signature before the hook":
+      "interface X { save(saveFn: string): void; }\nfunction useW(repo, saveFn) { return useMutation({ mutationFn: saveFn }); }\nuseW(r, api.gitPush);",
+    "a typed declaration before an arrow wrapper":
+      "function useA(fn: X): Y { return fn; }\nconst useW = (repo, fn) => useMutation({ mutationFn: fn });\nuseW(r, api.gitPush);",
   };
   // Every annotation shape must walk to its initializer's `=`.
   for (const type of [
@@ -1695,6 +1795,24 @@ test("shapes the scan can't read fail closed", () => {
       'function useW(...[saveFn]) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW(api.gitPush);',
     "a destructured arrow wrapper, called":
       'const useW = ({ saveFn } = {}) => useMutation({ mutationFn: (a) => saveFn(a), networkMode: "always" });\nuseW({ saveFn: api.gitPush });',
+    "a destructured parameter after a positional one":
+      'const useW = (repo, { saveFn }) => useMutation({ mutationFn: saveFn, networkMode: "always" });\nuseW(r, { saveFn: api.gitPush });',
+    "a destructured parameter after a positional one, called":
+      'const useW = (repo, { saveFn }) => useMutation({ mutationFn: (a) => saveFn(a), networkMode: "always" });\nuseW(r, { saveFn: api.gitPush });',
+    "a rest array pattern after a positional one":
+      'const useW = (repo, ...[saveFn]) => useMutation({ mutationFn: saveFn, networkMode: "always" });\nuseW(r, api.gitPush);',
+    "a method with an object-type return annotation":
+      'const hooks = { useW(repo: string, saveFn: () => Promise<void>): { mutate: () => void } { return useMutation({ mutationFn: saveFn, networkMode: "always" }); } };\nhooks.useW(r, api.gitPush);',
+    "a value the mutationFn declares, called":
+      'useMutation({ mutationFn: async () => { const push = api.gitPush; await push(r); await saveThing(r); }, networkMode: "always" });',
+    "a value in a later declarator":
+      'const a = 1, saveFn = api.gitPush;\nuseMutation({ mutationFn: saveFn, networkMode: "always" });',
+    "a destructured later declarator":
+      'let a: number = 1, { saveFn } = opts;\nuseMutation({ mutationFn: () => saveFn(), networkMode: "always" });',
+    // An in-body value shadowing a hook parameter must not resolve through the
+    // hook's callers (here: a local write).
+    "an in-body value shadowing a parameter":
+      'function useW(repo, saveFn) { return useMutation({ mutationFn: async () => { const saveFn = api.gitPush; await saveFn(); }, networkMode: "always" }); }\nuseW(r, saveThing);',
     "a local alias":
       'function useW() { const saveFn = api.gitPush; return useMutation({ mutationFn: saveFn, networkMode: "always" }); }',
     "a destructured local alias":
@@ -1737,6 +1855,9 @@ test("the scan passes what it should", () => {
     "a construction in a comment": "// useMutation(options)\nconst x = 1;",
     "type arguments with a comma":
       'useMutation({ mutationFn: () => trackBoardWrite<A, B>(r, () => saveThing(r)), networkMode: "always" });',
+    // A typed method's parameters must not reach a later arrow's body.
+    "a typed class method before an arrow field":
+      'import { saveThing } from "./x";\nclass K {\n  m(repo: string, saveThing: F): R { return saveThing; }\n  run = () => useMutation({ mutationFn: saveThing, networkMode: "always" });\n}',
   };
   for (const [name, src] of Object.entries(cases)) {
     const r = scan(src);
