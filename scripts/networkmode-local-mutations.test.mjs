@@ -15,12 +15,14 @@
 // site. A mutationFn passed through a parameter resolves at the enclosing hook's call
 // sites in the same file (every one must agree), or is delegated to a WRAPPERS entry;
 // `useRepoMutation` must thread `opts.networkMode` per site and never default it.
-// A name that is a PARAMETER is never classified by its spelling: it resolves through
-// a named hook (a declaration, or a `const`/`let`/`var` whose whole initializer is the
-// function, annotated or not: `annotationEnd` walks any type to the initializer's
-// `=`, so such a binding is left unnamed only when it has no initializer), and a
-// parameter of any other function (a callback, a method, a parenthesized or curried
-// initializer) fails as an ambiguity.
+// A name that is a PARAMETER or a VARIABLE is never classified by its spelling. A
+// positional parameter resolves through a named hook (a declaration, or a
+// `const`/`let`/`var` whose whole initializer is the function, annotated or not:
+// `annotationEnd` walks any type to the initializer's `=`, so such a binding is left
+// unnamed only when it has no initializer). A parameter of any other function (a
+// callback, a method, a parenthesized or curried initializer), a name bound by a
+// destructured or rest parameter, and a `const`/`let`/`var` holding a value all fail
+// as ambiguities. Only imported names and named functions meet the vocabularies.
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // mutationFn reached through `.bind()`. A future unprefixed network helper named like
@@ -672,6 +674,37 @@ const paramNames = (masked, open, close) =>
     (p) => /^([\w$]+)\s*[?:=]?/.exec(p.text)?.[1] ?? null,
   );
 
+const IDENTIFIER_RE = /[A-Za-z_$][\w$]*/g;
+
+/** Names a destructured or rest parameter may bind (the parts `paramNames` leaves
+ *  null): every identifier in each such part. Over-collects on purpose, since keys,
+ *  defaults and TYPE-annotation names come along: an extra name only ever turns a
+ *  site ambiguous, never hides one. */
+const patternBound = (masked, open, close) =>
+  new Set(
+    splitTopLevel(masked, open, close, true)
+      .filter((p) => !/^[\w$]/.test(p.text))
+      .flatMap((p) => p.text.match(IDENTIFIER_RE) ?? []),
+  );
+
+/** Names a `const`/`let`/`var` binds to a VALUE rather than naming a function: a
+ *  simple binding that is no named scope's declaration, and every identifier of a
+ *  destructuring one (over-collected, as in `patternBound`). */
+function variableNames(masked, fns) {
+  const named = new Set(fns.filter((f) => f.name).map((f) => f.at));
+  const names = new Set();
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s+([\w$]+)/g))
+    if (!named.has(m.index)) names.add(m[1]);
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s*([{[])/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchBrace(masked, open);
+    if (close === -1) continue;
+    for (const id of masked.slice(open, close).match(IDENTIFIER_RE) ?? [])
+      names.add(id);
+  }
+  return names;
+}
+
 /**
  * Index of the `=` that starts a binding's initializer, walking its type annotation
  * from `from` (just past the `:`); -1 when the binding has no initializer (a `;` or
@@ -765,6 +798,7 @@ function functionsIn(masked) {
       at: declaration ? m.index : undefined,
       paramsOpen: paren,
       params: paramNames(masked, paren, paramsClose),
+      bound: patternBound(masked, paren, paramsClose),
       bodyOpen,
       bodyClose,
     });
@@ -775,6 +809,7 @@ function functionsIn(masked) {
     let j = close + 1;
     while (/\s/.test(masked[j] ?? "")) j++;
     const params = paramNames(masked, p, close);
+    const bound = patternBound(masked, p, close);
     const arrow =
       masked[j] === "=" && masked[j + 1] === ">"
         ? j
@@ -799,7 +834,7 @@ function functionsIn(masked) {
       }
       const [bodyOpen, bodyClose] = bodyFrom(arrow + 2);
       if (bodyClose !== -1)
-        push(start, { paramsOpen: p, params, bodyOpen, bodyClose });
+        push(start, { paramsOpen: p, params, bound, bodyOpen, bodyClose });
     } else if (masked[j] === ":" || masked[j] === "{") {
       // A method: its name precedes the `(`.
       const name = /([\w$]+)\s*(?:<[^()]*>)?\s*$/.exec(
@@ -815,14 +850,21 @@ function functionsIn(masked) {
       const bodyOpen = masked[j] === "{" ? j : masked.indexOf("{", j);
       const bodyClose = bodyOpen === -1 ? -1 : matchBrace(masked, bodyOpen);
       if (bodyClose !== -1)
-        fns.push({ name: null, paramsOpen: p, params, bodyOpen, bodyClose });
+        fns.push({
+          name: null,
+          paramsOpen: p,
+          params,
+          bound,
+          bodyOpen,
+          bodyClose,
+        });
     }
   }
   for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g)) {
     if (NOT_CALLS.has(m[1])) continue;
     const [bodyOpen, bodyClose] = bodyFrom(m.index + m[0].length);
     if (bodyClose !== -1)
-      push(m.index, { params: [m[1]], bodyOpen, bodyClose });
+      push(m.index, { params: [m[1]], bound: new Set(), bodyOpen, bodyClose });
   }
   return fns;
 }
@@ -833,19 +875,28 @@ const enclosingFn = (fns, index) =>
     .filter((f) => f.name && f.bodyOpen < index && index < f.bodyClose)
     .sort((a, b) => b.bodyOpen - a.bodyOpen)[0] ?? null;
 
-/** The innermost function scope, named or not, that holds `index` and declares
+/** Whether scope `f` binds `name` as a parameter: a positional one, or a name a
+ *  destructured or rest parameter may bind. */
+const bindsParam = (f, name) => f.params.includes(name) || f.bound.has(name);
+
+/** The innermost function scope, named or not, that holds `index` and binds
  *  `name` as a parameter; null when `name` is no parameter there. */
 const paramOwner = (fns, index, name) =>
   fns
     .filter(
-      (f) =>
-        f.bodyOpen < index && index < f.bodyClose && f.params.includes(name),
+      (f) => f.bodyOpen < index && index < f.bodyClose && bindsParam(f, name),
     )
     .sort((a, b) => b.bodyOpen - a.bodyOpen)[0] ?? null;
 
-/** A mutationFn name owned by a parameter: resolved through its named hook, or
- *  refused when the owner is anonymous (its callers can't be found by name). */
+/** A mutationFn name owned by a parameter: resolved through its named hook when
+ *  positional; refused when the owner is anonymous (its callers can't be found by
+ *  name) or the name comes out of a destructured or rest parameter (a caller's
+ *  object keys or spread can't be mapped to it). */
 function throughParameter(ctx, owner, name, nested) {
+  if (!owner.params.includes(name))
+    return {
+      ambiguity: `mutationFn \`${name}\` is bound by a destructured or rest parameter${owner.name ? ` of \`${owner.name}\`` : ""} — the scan can't map a caller's object keys or spread to it; pass it through a simple parameter, or EXEMPT the hook with a reason`,
+    };
   if (owner.name) return passThrough(ctx, owner, name, nested);
   return {
     ambiguity: `mutationFn \`${name}\` is a parameter of an anonymous function (a callback, a parenthesized initializer or a method) — its callers can't be followed; pass it through a named hook`,
@@ -866,6 +917,12 @@ function networkModeOf(ctx, part) {
   return mode;
 }
 
+/** A name a `const`/`let`/`var` binds to a value: its spelling says nothing about
+ *  what it holds, so it is never classified by the vocabularies. */
+const aliasAmbiguity = (name) => ({
+  ambiguity: `mutationFn \`${name}\` is a variable holding a value, not a named function — call the function it holds directly, or EXEMPT the hook with a reason`,
+});
+
 /**
  * Classifies the mutationFn expression `part`: `{ cls }` with cls "local",
  * "network" or "delegated" (a WRAPPERS definition passing its own parameter on), and
@@ -879,6 +936,7 @@ function classifyValue(ctx, part, nested = false) {
     const name = ref[2];
     const owner = ref[1] ? null : paramOwner(ctx.fns, part.start, name);
     if (owner) return throughParameter(ctx, owner, name, nested);
+    if (!ref[1] && ctx.variables.has(name)) return aliasAmbiguity(name);
     const cls = classifyCallee(name);
     if (cls === "local" || cls === "network")
       return { cls, callees: [part.text] };
@@ -911,6 +969,8 @@ function classifyValue(ctx, part, nested = false) {
       );
       continue;
     }
+    if (!c[0].startsWith("api.") && ctx.variables.has(name))
+      return aliasAmbiguity(name);
     if (name === "invoke") {
       const command = INVOKE_COMMAND_RE.exec(
         source.slice(part.start + c.index),
@@ -1105,7 +1165,14 @@ function scanSource(source, file) {
         });
     }
   }
-  const ctx = { source, masked, file, fns: functionsIn(masked) };
+  const fns = functionsIn(masked);
+  const ctx = {
+    source,
+    masked,
+    file,
+    fns,
+    variables: variableNames(masked, fns),
+  };
   for (const m of masked.matchAll(CONSTRUCTION_RE)) {
     const wrapper = m[1];
     const spec = WRAPPERS[wrapper];
@@ -1614,6 +1681,26 @@ test("shapes the scan can't read fail closed", () => {
       "const a = 1, useW = (repo, saveFn) => useMutation({ mutationFn: saveFn });\nuseW(r, api.gitPush);",
     "a parameter of an arrow inside the mutationFn":
       "useMutation({ mutationFn: (saveFn) => saveFn() });",
+    // A name bound by a destructured or rest parameter, or by a variable, says
+    // nothing about the function it holds: never classified by its spelling.
+    "a destructured parameter":
+      'function useW({ saveFn }) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW({ saveFn: api.gitPush });',
+    "a rest parameter":
+      'function useW(...saveFn) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW(api.gitPush);',
+    "a default-valued, typed destructure":
+      'function useW({ saveFn }: { saveFn: () => Promise<void> } = x) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW({ saveFn: api.gitPush });',
+    "a nested, renamed pattern":
+      'function useW({ a: { fn: saveFn } }) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW({ a: { fn: api.gitPush } });',
+    "an array pattern behind a rest":
+      'function useW(...[saveFn]) { return useMutation({ mutationFn: saveFn, networkMode: "always" }); }\nuseW(api.gitPush);',
+    "a destructured arrow wrapper, called":
+      'const useW = ({ saveFn } = {}) => useMutation({ mutationFn: (a) => saveFn(a), networkMode: "always" });\nuseW({ saveFn: api.gitPush });',
+    "a local alias":
+      'function useW() { const saveFn = api.gitPush; return useMutation({ mutationFn: saveFn, networkMode: "always" }); }',
+    "a destructured local alias":
+      'function useW(opts) { const { saveFn } = opts; return useMutation({ mutationFn: () => saveFn(), networkMode: "always" }); }',
+    "a loop variable":
+      'function useW(fns) { for (const saveFn of fns) useMutation({ mutationFn: saveFn, networkMode: "always" }); }',
     "an anonymous function-expression argument":
       "register(function (repo, saveFn) { return useMutation({ mutationFn: saveFn }); });",
     "a renamed construction":
