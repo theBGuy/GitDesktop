@@ -17,6 +17,7 @@ import { ConversationListPanel } from "@/features/conversations/ConversationList
 import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
+import { DEGRADED_ACTION_CLASS } from "@/features/conversations/remote-section-state";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
 import {
@@ -740,7 +741,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               type="button"
               aria-label={`Reconnect ${link.projectKey}`}
               onClick={() => setJiraOpen(true)}
-              className="cursor-pointer underline underline-offset-2 hover:text-foreground"
+              className={DEGRADED_ACTION_CLASS}
             >
               Reconnect
             </button>

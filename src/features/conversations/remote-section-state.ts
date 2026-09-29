@@ -1,6 +1,10 @@
 // Pure, import-free: scripts/remote-list-state.test.mjs imports this file
 // through Node's type stripping, which resolves no aliases.
 
+/** The degraded notice's link-style action; extra actions wear it too. */
+export const DEGRADED_ACTION_CLASS =
+  "cursor-pointer underline underline-offset-2 hover:text-foreground";
+
 /** What a remote list section draws. "rows-degraded" is rows plus a notice
  *  that the last refresh failed. */
 export type RemoteSectionState =

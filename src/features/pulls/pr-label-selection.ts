@@ -25,6 +25,27 @@ export function applyAiProposal(
   return { names: [...names], sig };
 }
 
+/** The user's picks and removals after checking (`on`) or unchecking a label.
+ *  Each move clears the opposite set's entry, so re-checking a removed name
+ *  lifts its tombstone. Returns fresh sets; the inputs are never mutated. */
+export function toggleLabelSets(
+  added: ReadonlySet<string>,
+  removed: ReadonlySet<string>,
+  name: string,
+  on: boolean,
+): { added: Set<string>; removed: Set<string> } {
+  const nextAdded = new Set(added);
+  const nextRemoved = new Set(removed);
+  if (on) {
+    nextAdded.add(name);
+    nextRemoved.delete(name);
+  } else {
+    nextRemoved.add(name);
+    nextAdded.delete(name);
+  }
+  return { added: nextAdded, removed: nextRemoved };
+}
+
 /** The selected labels for the `current` target: the AI's proposal when it was
  *  made for this target, plus the user's own picks, minus the user's removals.
  *  Removals are tombstones that outlast later proposals, so a name the user

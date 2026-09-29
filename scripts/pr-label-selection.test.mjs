@@ -14,6 +14,7 @@ import {
   applyAiProposal,
   deriveSelectedLabels,
   sameLabelTarget,
+  toggleLabelSets,
 } from "../src/features/pulls/pr-label-selection.ts";
 
 const FORK = { repoPath: "C:/repos/app", lens: "origin" };
@@ -131,4 +132,47 @@ test("applyAiProposal copies its input, so a later mutation can't leak in", () =
   const ai = applyAiProposal(names, FORK);
   names.push("docs");
   assert.deepEqual(derive(ai, FORK), ["bug"]);
+});
+
+// The dialog's checkbox: `toggleLabelSets` is the whole of its arithmetic.
+const toggle = (edits, name, on) =>
+  toggleLabelSets(edits.added, edits.removed, name, on);
+const NO_EDITS = { added: new Set(), removed: new Set() };
+
+test("unchecking a proposed name and checking it again brings it back to stay", () => {
+  let ai = applyAiProposal(["bug", "docs"], FORK);
+  let edits = toggle(NO_EDITS, "bug", false);
+  assert.deepEqual(derive(ai, FORK, edits.added, edits.removed), ["docs"]);
+  edits = toggle(edits, "bug", true);
+  assert.deepEqual(derive(ai, FORK, edits.added, edits.removed), [
+    "bug",
+    "docs",
+  ]);
+  // The lifted tombstone stays lifted when a later proposal carries the name.
+  ai = applyAiProposal(["bug"], FORK);
+  assert.deepEqual(derive(ai, FORK, edits.added, edits.removed), ["bug"]);
+  assert.deepEqual([...edits.removed], []);
+});
+
+test("checking a name and unchecking it again leaves it removed", () => {
+  let edits = toggle(NO_EDITS, "perf", true);
+  assert.deepEqual(derive(null, FORK, edits.added, edits.removed), ["perf"]);
+  edits = toggle(edits, "perf", false);
+  assert.deepEqual([...edits.added], []);
+  assert.deepEqual([...edits.removed], ["perf"]);
+  // Now a tombstone: a later proposal carrying it can't bring it back.
+  const ai = applyAiProposal(["perf", "bug"], FORK);
+  assert.deepEqual(derive(ai, FORK, edits.added, edits.removed), ["bug"]);
+});
+
+test("toggling returns fresh sets and leaves its inputs untouched", () => {
+  const added = new Set(["a"]);
+  const removed = new Set(["b"]);
+  const next = toggleLabelSets(added, removed, "b", true);
+  assert.notEqual(next.added, added);
+  assert.notEqual(next.removed, removed);
+  assert.deepEqual([...added], ["a"]);
+  assert.deepEqual([...removed], ["b"]);
+  assert.deepEqual([...next.added], ["a", "b"]);
+  assert.deepEqual([...next.removed], []);
 });

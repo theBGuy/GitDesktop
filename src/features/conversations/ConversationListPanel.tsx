@@ -19,7 +19,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { cn } from "@/lib/utils";
 import { LoadMoreRow } from "./LoadMoreRow";
-import { resolveRemoteSection } from "./remote-section-state";
+import {
+  DEGRADED_ACTION_CLASS,
+  resolveRemoteSection,
+} from "./remote-section-state";
 
 /** The "New ▾" dropdown's items (GitHub + local, plus an optional third for a
  *  linked Jira project on the issues panel). */
@@ -131,7 +134,7 @@ export function DegradedListNotice(props: {
           type="button"
           aria-label={`Retry loading ${noun}`}
           onClick={onRetry}
-          className="cursor-pointer underline underline-offset-2 hover:text-foreground"
+          className={DEGRADED_ACTION_CLASS}
         >
           Retry
         </button>
@@ -226,7 +229,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
    *  replaces the empty state so a failed load doesn't read as "no items"; with
    *  cached rows, they stay on screen under a degraded notice. */
   remoteError?: boolean;
-  /** Rendered in place of the remote list on error (e.g. a Retry prompt). */
+  /** Rendered in place of the remote list on error when no rows are drawn
+   *  (e.g. a Retry prompt); cached rows keep rendering under the degraded
+   *  notice. */
   remoteErrorSlot?: ReactNode;
   /** The degraded notice's Retry; omit and the notice renders without one. */
   remoteRetry?: () => void;

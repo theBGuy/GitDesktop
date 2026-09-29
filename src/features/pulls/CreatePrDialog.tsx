@@ -99,6 +99,7 @@ import {
   deriveSelectedLabels,
   type LabelTargetSig,
   sameLabelTarget,
+  toggleLabelSets,
 } from "./pr-label-selection";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
@@ -110,6 +111,12 @@ import {
   useJiraMentionChips,
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
+
+/** No picks, no removals. Shared safely: `toggleLabelSets` never mutates. */
+const NO_LABEL_EDITS: {
+  added: ReadonlySet<string>;
+  removed: ReadonlySet<string>;
+} = { added: new Set(), removed: new Set() };
 
 /** The hint for label names the model proposed that the repo doesn't have:
  *  `Suggested label "x" isn't a repo label.`, plural `"a", "b" and "c"`.
@@ -253,8 +260,9 @@ export function CreatePrDialog({
   // and the user's removals, which stay tombstoned until the next seed so no
   // later chunk, pick, or run can bring a removed name back.
   const [aiProposal, setAiProposal] = useState<AiLabelProposal>(null);
-  const [addedLabels, setAddedLabels] = useState<Set<string>>(new Set());
-  const [removedLabels, setRemovedLabels] = useState<Set<string>>(new Set());
+  // Picks and removals share one state so a toggle updates both from the same
+  // previous value, however many toggles React batches.
+  const [labelEdits, setLabelEdits] = useState(NO_LABEL_EDITS);
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
   // Label names a FINISHED generation proposed that the repo doesn't have — only
   // ever set from the resolved draft, since a mid-stream chunk can hold a
@@ -714,8 +722,7 @@ export function CreatePrDialog({
     aiDescriptionRef.current = false;
     setReviewers([]);
     setAiProposal(null);
-    setAddedLabels(new Set());
-    setRemovedLabels(new Set());
+    setLabelEdits(NO_LABEL_EDITS);
     setDroppedLabels([]);
     setAssignees([]);
     // Reset the linked-issue chips (and their dismissed/probed refs) — the create
@@ -910,24 +917,15 @@ export function CreatePrDialog({
   }, [repoPath, createLens]);
 
   function toggleLabel(name: string, on: boolean) {
-    setAddedLabels((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(name);
-      else next.delete(name);
-      return next;
-    });
-    setRemovedLabels((prev) => {
-      const next = new Set(prev);
-      if (on) next.delete(name);
-      else next.add(name);
-      return next;
-    });
+    setLabelEdits((prev) =>
+      toggleLabelSets(prev.added, prev.removed, name, on),
+    );
   }
 
   const selectedLabels = deriveSelectedLabels({
     ai: aiProposal,
-    added: addedLabels,
-    removed: removedLabels,
+    added: labelEdits.added,
+    removed: labelEdits.removed,
     current: labelTarget,
   });
   // What renders is exactly what submits: names the current target doesn't
