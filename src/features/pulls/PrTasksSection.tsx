@@ -291,8 +291,16 @@ export function PrTasksSection({
   // Wait for the first load so a PR with no tasks doesn't flash an empty section
   // before it resolves (IssueSubIssues idiom). A first load parked offline shows
   // instead: it has no timeout, so hiding it would hide the section until the
-  // connection returns with nothing saying why.
-  if (!tasks && !tasksQuery.isError && !tasksQuery.isPaused) return null;
+  // connection returns with nothing saying why. A section that has already
+  // failed stays mounted through its Retry: the refetch resets a no-data read to
+  // pending, and unmounting then would drop focus with no wrapper to catch it.
+  if (
+    !tasks &&
+    !tasksQuery.isError &&
+    !tasksQuery.isPaused &&
+    tasksQuery.errorUpdateCount === 0
+  )
+    return null;
 
   const notice = sectionReadNotice({
     noun: "tasks",

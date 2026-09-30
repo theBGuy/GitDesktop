@@ -892,6 +892,16 @@ pub(crate) async fn run_capture(
     Ok((code, text))
 }
 
+/// The verdict of a LOCAL auth-status command, whose exit code is the whole answer;
+/// shared by `agent_detect` and the About screen's agent-CLI rows.
+pub(crate) fn exit_code_auth(result: AppResult<(i32, String)>) -> AuthStatus {
+    match result {
+        Ok((0, _)) => AuthStatus::Authed,
+        Ok(_) => AuthStatus::NotAuthed,
+        Err(_) => AuthStatus::Unknown,
+    }
+}
+
 #[tauri::command]
 pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResult<AgentInfo> {
     let Some(binary) = resolve(kind, bin_path.as_deref()).await else {
@@ -912,11 +922,7 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
 
     let authed = match kind.auth_status_args() {
         None => AuthStatus::Unknown,
-        Some(args) => match run_capture(&binary, args, DETECT_TIMEOUT).await {
-            Ok((0, _)) => AuthStatus::Authed,
-            Ok(_) => AuthStatus::NotAuthed,
-            Err(_) => AuthStatus::Unknown,
-        },
+        Some(args) => exit_code_auth(run_capture(&binary, args, DETECT_TIMEOUT).await),
     };
 
     Ok(AgentInfo {
@@ -3770,6 +3776,20 @@ opencode/x-preview-f-free
         assert_eq!(wire(AuthStatus::NotAuthed), "notAuthed");
         assert_eq!(wire(AuthStatus::Unreachable), "unreachable");
         assert_eq!(wire(AuthStatus::Unknown), "unknown");
+    }
+
+    #[test]
+    fn exit_code_auth_keeps_its_local_verdicts() {
+        assert_eq!(exit_code_auth(Ok((0, String::new()))), AuthStatus::Authed);
+        assert_eq!(
+            exit_code_auth(Ok((1, String::new()))),
+            AuthStatus::NotAuthed
+        );
+        // A local probe never claims an outage.
+        assert_eq!(
+            exit_code_auth(Err(AppError::Timeout(20))),
+            AuthStatus::Unknown
+        );
     }
 
     #[test]

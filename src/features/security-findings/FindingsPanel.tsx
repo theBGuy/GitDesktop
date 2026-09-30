@@ -36,6 +36,7 @@ import {
   type DetailPaneState,
   type ListNoticeCause,
   listNotice,
+  OFFLINE_ROWS_NOTICE,
   offlinePendingMessage,
   refreshFailed,
   resolveDetailPane,
@@ -486,19 +487,12 @@ function ReasonCard({
 
 /** A card's Retry. Its owner passes no `onRetry` while the read is parked
  *  offline, where a retry would only park again and reconnecting resumes the
- *  read by itself, so the slot says that instead. */
-function CardRetry({
-  category,
-  onRetry,
-}: {
-  category: string;
-  onRetry?: () => void;
-}) {
+ *  read by itself, so the slot says that instead. The card sits over a loaded
+ *  verdict, so the line is the one for retained content. */
+function CardRetry({ onRetry }: { onRetry?: () => void }) {
   if (!onRetry)
     return (
-      <p className="text-xs text-muted-foreground">
-        {offlinePendingMessage(category)}
-      </p>
+      <p className="text-xs text-muted-foreground">{OFFLINE_ROWS_NOTICE}</p>
     );
   return (
     <Button variant="outline" size="sm" onClick={onRetry}>
@@ -542,7 +536,7 @@ function UnavailableCard({
       Open security settings
     </Button>
   ) : undefined;
-  const retryAction = <CardRetry category={category} onRetry={onRetry} />;
+  const retryAction = <CardRetry onRetry={onRetry} />;
 
   if (availability === "notEnabled") {
     // The category's own sentence is how a non-admin learns what to ask for, so
@@ -873,7 +867,7 @@ function GlNoPipelineCard({
   /** Omitted while the read is parked offline. */
   onRetry?: () => void;
 }) {
-  const retryAction = <CardRetry category="findings" onRetry={onRetry} />;
+  const retryAction = <CardRetry onRetry={onRetry} />;
   const setupUrl = glScanningSetupUrl(data);
 
   if (state === "none") {
@@ -977,7 +971,7 @@ function GlUnavailableCard({
   onRetry?: () => void;
   onSetup?: () => void;
 }) {
-  const retryAction = <CardRetry category={category} onRetry={onRetry} />;
+  const retryAction = <CardRetry onRetry={onRetry} />;
 
   if (availability === "notConfigured") {
     return (
@@ -1625,7 +1619,7 @@ function BbUnavailableCard({
   /** Omitted while the read is parked offline. */
   onRetry?: () => void;
 }) {
-  const retryAction = <CardRetry category="findings" onRetry={onRetry} />;
+  const retryAction = <CardRetry onRetry={onRetry} />;
 
   if (state === "noReports") {
     // No settings deep link: Bitbucket has no Code Insights toggle to open —

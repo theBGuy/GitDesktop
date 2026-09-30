@@ -32,7 +32,10 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
-import { offlinePendingMessage } from "./remote-section-state";
+import {
+  OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
+} from "./remote-section-state";
 
 /** The two holds every Projects surface states the same way — exported beside
  *  {@link projectScopeReadOnly} for the same reason that predicate is: a claim
@@ -367,7 +370,9 @@ export function ProjectsPopover({
                     resumes both reads by itself. */}
                 {readsParked && (readError !== null || catalogPending) && (
                   <p className="px-1 py-1 text-xs text-muted-foreground">
-                    {offlinePendingMessage("projects")}
+                    {rows.length > 0
+                      ? OFFLINE_ROWS_NOTICE
+                      : offlinePendingMessage("projects")}
                   </p>
                 )}
                 {readError !== null && !readsParked && (

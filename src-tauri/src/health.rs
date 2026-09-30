@@ -6,9 +6,15 @@
 
 use serde::Serialize;
 
-use crate::agent::{run_capture, resolve_named, AuthStatus, DETECT_TIMEOUT};
+use std::path::Path;
+
+use crate::agent::{exit_code_auth, resolve_named, run_capture, AuthStatus, DETECT_TIMEOUT};
 use crate::error::{AppError, AppResult};
-use crate::forge::session::{classify_glab_failure, gh_cli_auth_status, GlabFailure};
+use crate::forge::futures_join_all;
+use crate::forge::glab::{is_addressable_host, known_hosts, run_glab_raw};
+use crate::forge::session::{
+    classify_glab_failure, gh_cli_auth_status, worst_host_auth, GlabFailure,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,21 +77,14 @@ enum AuthProbe {
     ExitCode(&'static [&'static str]),
     /// gh's per-account `--json` report, which tells an outage from a rejected token.
     Gh,
-    /// `glab auth status`, whose failure text is classified as session health's is.
+    /// `glab auth status` per configured host, each classified as session health's is.
     Glab,
 }
 
-/// The exit-code verdict of a local auth-status command.
-fn exit_code_auth(result: AppResult<(i32, String)>) -> AuthStatus {
-    match result {
-        Ok((0, _)) => AuthStatus::Authed,
-        Ok(_) => AuthStatus::NotAuthed,
-        Err(_) => AuthStatus::Unknown,
-    }
-}
-
-/// `glab auth status` validates online, so its failure text decides between a
-/// rejected credential and an outage; a probe that timed out is an outage too.
+/// One host's `glab auth status` verdict. The command validates online, so its
+/// failure text decides between a rejected credential and an outage; a probe that
+/// timed out is an outage too. The classifier's precedence assumes ONE host's
+/// output, so a multi-host report must be split per host before it gets here.
 fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
     match result {
         Ok((0, _)) => AuthStatus::Authed,
@@ -96,6 +95,32 @@ fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
         Err(AppError::Timeout(_)) => AuthStatus::Unreachable,
         Err(_) => AuthStatus::Unknown,
     }
+}
+
+/// glab's sign-in across the hosts its own config names, probed concurrently (the
+/// load waits on the slowest host, not their sum) and reduced by
+/// [`worst_host_auth`], as gh's row is. Deliberately not `gitlab_accounts_health`:
+/// its expiry reads and anti-flap re-probe sleep don't belong in this load.
+async fn glab_cli_auth(binary: &Path) -> AuthStatus {
+    let hosts: Vec<String> = known_hosts()
+        .await
+        .into_iter()
+        .filter(|h| is_addressable_host(h))
+        .collect();
+    if hosts.is_empty() {
+        // run_capture_parts already applies sanitize_child_env; only token stripping
+        // is exempt here. Bare `glab auth status` follows glab's own precedence to
+        // the token's target, so this probe cannot address a foreign host.
+        return glab_auth(run_capture(binary, &["auth", "status"], DETECT_TIMEOUT).await);
+    }
+    // run_glab_raw strips the environment's token for every host that isn't its
+    // own target, so a pinned probe never sends one host's token to another.
+    let probes = hosts.iter().map(|host| async move {
+        let args = ["auth", "status", "--hostname", host.as_str()];
+        let out = run_glab_raw(None, &args, DETECT_TIMEOUT).await;
+        glab_auth(out.map(|o| (o.code, format!("{}\n{}", o.stdout_lossy(), o.stderr))))
+    });
+    worst_host_auth(futures_join_all(probes).await)
 }
 
 /// Detect one CLI: resolve it, read `--version`, and (when it has a login) its
@@ -120,12 +145,7 @@ async fn detect(id: &str, names: &[&str], auth: AuthProbe) -> ToolStatus {
             exit_code_auth(run_capture(&binary, args, DETECT_TIMEOUT).await)
         }
         AuthProbe::Gh => gh_cli_auth_status().await,
-        // run_capture_parts already applies sanitize_child_env; only token stripping
-        // is exempt here. Bare `glab auth status` follows glab's own precedence to the
-        // token's target, so this probe cannot address a foreign host.
-        AuthProbe::Glab => {
-            glab_auth(run_capture(&binary, &["auth", "status"], DETECT_TIMEOUT).await)
-        }
+        AuthProbe::Glab => glab_cli_auth(&binary).await,
     };
 
     ToolStatus {
@@ -251,15 +271,18 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_auth_keeps_its_local_verdicts() {
-        assert_eq!(exit_code_auth(Ok((0, String::new()))), AuthStatus::Authed);
+    fn glab_rejected_host_outranks_an_unreachable_one() {
+        let host = |output: &str| glab_auth(Ok((1, output.to_string())));
+        let revoked = host("gitlab.com: API call failed: 401 Unauthorized");
+        // One host rejects its token while another can't be reached: signed out.
+        let offline = host("Get \"https://vpn.example/api/v4/user\": dial tcp: i/o timeout");
+        assert_eq!(worst_host_auth([offline, revoked]), AuthStatus::NotAuthed);
+        let throttled = host("429 Too Many Requests");
+        assert_eq!(worst_host_auth([throttled, revoked]), AuthStatus::NotAuthed);
+        // Every other host fine, one unreachable: can't reach.
         assert_eq!(
-            exit_code_auth(Ok((1, String::new()))),
-            AuthStatus::NotAuthed
-        );
-        assert_eq!(
-            exit_code_auth(Err(AppError::Timeout(20))),
-            AuthStatus::Unknown
+            worst_host_auth([AuthStatus::Authed, offline]),
+            AuthStatus::Unreachable
         );
     }
 }

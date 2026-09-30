@@ -524,8 +524,7 @@ pub(crate) async fn gh_cli_auth_status() -> AuthStatus {
 }
 
 /// The pure step behind [`gh_cli_auth_status`]; `None` defers to the old-gh text
-/// fallback. The worst host wins, a rejected credential anywhere ahead of an
-/// unreachable host: "signed in" must hold for every host gh holds a login for.
+/// fallback. Hosts reduce through [`worst_host_auth`].
 fn gh_cli_auth_from_probe(probe: AppResult<GhJsonProbe>) -> Option<AuthStatus> {
     let map = match probe {
         Ok(GhJsonProbe::Parsed(map)) => map,
@@ -534,18 +533,26 @@ fn gh_cli_auth_from_probe(probe: AppResult<GhJsonProbe>) -> Option<AuthStatus> {
         Err(AppError::Timeout(_)) => return Some(AuthStatus::Unreachable),
         Err(_) => return Some(AuthStatus::Unknown),
     };
-    let hosts: Vec<AuthStatus> = map
-        .values()
-        .map(|accounts| session_auth_status(classify_gh_host(accounts).state))
-        .collect();
-    let status = if hosts.is_empty() || hosts.contains(&AuthStatus::NotAuthed) {
-        AuthStatus::NotAuthed
-    } else if hosts.contains(&AuthStatus::Unreachable) {
-        AuthStatus::Unreachable
-    } else {
-        AuthStatus::Authed
+    Some(worst_host_auth(map.values().map(|accounts| {
+        session_auth_status(classify_gh_host(accounts).state)
+    })))
+}
+
+/// One CLI's About-screen sign-in over its per-host readings, shared by the gh and
+/// glab rows. The worst host wins (rejected, then unreachable, then unknown) since
+/// "signed in" must hold for every host the CLI holds a login for; no host at all
+/// reads signed out.
+pub(crate) fn worst_host_auth(hosts: impl IntoIterator<Item = AuthStatus>) -> AuthStatus {
+    let rank = |status: &AuthStatus| match status {
+        AuthStatus::Authed => 0,
+        AuthStatus::Unknown => 1,
+        AuthStatus::Unreachable => 2,
+        AuthStatus::NotAuthed => 3,
     };
-    Some(status)
+    hosts
+        .into_iter()
+        .max_by_key(rank)
+        .unwrap_or(AuthStatus::NotAuthed)
 }
 
 /// A session reading as the About screen's sign-in state. A rate limit is
@@ -2594,6 +2601,45 @@ check your internet connection or https://githubstatus.com";
             gh_cli_auth_from_probe(Err(AppError::GhNotFound)),
             Some(AuthStatus::Unknown)
         );
+    }
+
+    #[test]
+    fn worst_host_auth_ranks_rejected_then_unreachable_then_unknown() {
+        use AuthStatus::{Authed, NotAuthed, Unknown, Unreachable};
+        assert_eq!(worst_host_auth([]), NotAuthed);
+        assert_eq!(worst_host_auth([Authed, Authed]), Authed);
+        assert_eq!(worst_host_auth([Authed, Unknown]), Unknown);
+        assert_eq!(worst_host_auth([Unknown, Unreachable, Authed]), Unreachable);
+        assert_eq!(
+            worst_host_auth([Unreachable, NotAuthed, Unknown]),
+            NotAuthed
+        );
+    }
+
+    #[test]
+    fn gh_host_readings_are_never_unknown() {
+        // Keeps gh's row on the rejected > unreachable > signed-in ranking it had
+        // before the shared reducer added an Unknown tier.
+        let mut readings: Vec<_> = [
+            ("success", None),
+            ("error", Some(GH_401)),
+            ("error", Some(GH_403_PRIMARY)),
+            (
+                "error",
+                Some("Get \"https://api.github.com/\": unexpected EOF"),
+            ),
+            ("timeout", None),
+            ("", None),
+            ("something_new", None),
+        ]
+        .into_iter()
+        .map(|(state, error)| one_account(state, error))
+        .collect();
+        readings.push(parse_hosts(r#"{"hosts":{"github.com":[]}}"#));
+        for map in readings {
+            let status = session_auth_status(classify_gh_host(&map["github.com"]).state);
+            assert_ne!(status, AuthStatus::Unknown);
+        }
     }
 
     // ── github_health's confirmed-Broken disproof ──
