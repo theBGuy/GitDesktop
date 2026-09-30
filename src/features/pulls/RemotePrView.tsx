@@ -69,6 +69,7 @@ import { ReactionBar } from "@/features/conversations/ReactionBar";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
@@ -2022,9 +2023,10 @@ export function RemotePrView({
     );
   }
 
+  const detailFailed = refreshFailed(details);
   const detailNotice = detailNoticeMessage({
     noun: prNoun,
-    isError: details.isError,
+    isError: detailFailed,
     stale: detailsStale,
   });
 
@@ -2598,9 +2600,7 @@ export function RemotePrView({
         noun={`this ${prNoun}`}
         degraded={detailPane === "content-degraded"}
         message={detailNotice}
-        // Only a failed refresh gets a Retry: offline, it would park again at
-        // once, and reconnecting resumes the read by itself.
-        onRetry={details.isError ? () => details.refetch() : undefined}
+        onRetry={detailFailed ? () => details.refetch() : undefined}
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">

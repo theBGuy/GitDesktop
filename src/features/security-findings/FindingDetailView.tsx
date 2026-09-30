@@ -13,6 +13,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import {
   detailNoticeMessage,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import type {
@@ -1009,12 +1010,10 @@ export function FindingDetailView({
           // as placeholder.
           message={detailNoticeMessage({
             noun: "finding",
-            isError: query.isError,
+            isError: refreshFailed(query),
             stale: false,
           })}
-          // Only a failed refresh gets a Retry: offline, it would park again at
-          // once, and reconnecting resumes the read by itself.
-          onRetry={query.isError ? () => query.refetch() : undefined}
+          onRetry={refreshFailed(query) ? () => query.refetch() : undefined}
           className="shrink-0 border-b px-4 py-1.5"
         />
         <div className="min-h-0 flex-1">{detail}</div>

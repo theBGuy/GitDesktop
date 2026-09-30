@@ -30,6 +30,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import {
   detailNoticeMessage,
   offlinePendingMessage,
+  refreshFailed,
 } from "@/features/conversations/remote-section-state";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
@@ -1337,9 +1338,7 @@ export function DiffContent({
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
 
-  // Offline outranks a failure it follows: a retry would park at once, and
-  // reconnecting resumes the read by itself, so it gets offline words, no Retry.
-  const failed = isError && !isPaused;
+  const failed = refreshFailed({ isError, isPaused });
   const notice = (
     <DegradedListNotice
       noun="this diff"

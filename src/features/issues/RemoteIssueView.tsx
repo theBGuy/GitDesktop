@@ -39,6 +39,7 @@ import { ReactionBar } from "@/features/conversations/ReactionBar";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import {
@@ -370,9 +371,10 @@ export function RemoteIssueView({
   // BELOW any permission reason wherever both hold: that one never lifts on its
   // own and is the one still true once the new issue is on screen.
   const staleReason = detailsStale ? "Loading this issue…" : undefined;
+  const detailFailed = refreshFailed(details);
   const detailNotice = detailNoticeMessage({
     noun: "issue",
-    isError: details.isError,
+    isError: detailFailed,
     stale: detailsStale,
   });
   const busy =
@@ -872,9 +874,7 @@ export function RemoteIssueView({
         noun="this issue"
         degraded={detailPane === "content-degraded"}
         message={detailNotice}
-        // Only a failed refresh gets a Retry: offline, it would park again at
-        // once, and reconnecting resumes the read by itself.
-        onRetry={details.isError ? () => details.refetch() : undefined}
+        onRetry={detailFailed ? () => details.refetch() : undefined}
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="space-y-2 border-b px-4 py-3">

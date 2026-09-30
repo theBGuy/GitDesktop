@@ -11,6 +11,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import {
   detailNoticeMessage,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -179,9 +180,7 @@ export function PrCommitDetail({
     hasData: diff.data !== undefined,
     paused: diff.isPaused,
   });
-  // Offline outranks a failure it follows: a retry would park at once, and
-  // reconnecting resumes the read by itself, so it gets offline words, no Retry.
-  const failed = diff.isError && !diff.isPaused;
+  const failed = refreshFailed(diff);
 
   return (
     <div className="flex h-full flex-col">

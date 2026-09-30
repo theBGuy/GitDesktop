@@ -15,6 +15,16 @@ export function offlinePendingMessage(subject: string): string {
   return `You're offline — ${subject} will load once you're back online.`;
 }
 
+/** Whether a read's notice speaks of a failed refresh and offers Retry.
+ *  Offline outranks a failure it follows: a retry would park at once, and
+ *  reconnecting resumes the read by itself. */
+export function refreshFailed(q: {
+  isError: boolean;
+  isPaused: boolean;
+}): boolean {
+  return q.isError && !q.isPaused;
+}
+
 /** The notice over a detail pane's retained content. `noun` is bare ("pull
  *  request"); `stale` is a switch still showing the PREVIOUS item as
  *  placeholder, which a parked read can't call this one's last loaded version. */

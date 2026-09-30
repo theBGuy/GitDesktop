@@ -20,6 +20,7 @@ import {
   normalizeNoticeMessage,
   OFFLINE_ROWS_NOTICE,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
   resolveRemoteSection,
   stepLoadMoreGuard,
@@ -190,6 +191,23 @@ test("a detail refresh that fails over cached data keeps the content", () => {
     }),
     "offline",
   );
+});
+
+test("a failure counts only while not parked offline (full truth table)", () => {
+  // Offline outranks a failure it follows: the notice speaks of the connection
+  // and offers no Retry, even though react-query still reports the error.
+  for (const [isError, isPaused, expected] of [
+    [true, true, false],
+    [true, false, true],
+    [false, true, false],
+    [false, false, false],
+  ]) {
+    assert.equal(
+      refreshFailed({ isError, isPaused }),
+      expected,
+      `isError=${isError} isPaused=${isPaused}`,
+    );
+  }
 });
 
 const LIST = { noun: "pull requests", hasRows: true };
