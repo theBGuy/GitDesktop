@@ -4,14 +4,14 @@
 //! detection behaves identically to the AI-provider setup (PATH + login-shell
 //! fallback, Windows `.cmd` shims, …).
 
-use serde::Serialize;
-
 use std::path::Path;
+
+use serde::Serialize;
 
 use crate::agent::{exit_code_auth, resolve_named, run_capture, AuthStatus, DETECT_TIMEOUT};
 use crate::error::{AppError, AppResult};
 use crate::forge::futures_join_all;
-use crate::forge::glab::{is_addressable_host, known_hosts, run_glab_raw};
+use crate::forge::glab::{account_hostname, account_hosts, is_addressable_host, run_glab_raw};
 use crate::forge::session::{
     classify_glab_failure, gh_cli_auth_status, worst_host_auth, GlabFailure,
 };
@@ -97,30 +97,51 @@ fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
     }
 }
 
-/// glab's sign-in across the hosts its own config names, probed concurrently (the
-/// load waits on the slowest host, not their sum) and reduced by
-/// [`worst_host_auth`], as gh's row is. Deliberately not `gitlab_accounts_health`:
-/// its expiry reads and anti-flap re-probe sleep don't belong in this load.
-async fn glab_cli_auth(binary: &Path) -> AuthStatus {
-    let hosts: Vec<String> = known_hosts()
-        .await
+/// The glab sign-in probes that cover every account: `--hostname` for each host
+/// that flag can address, plus ONE bare probe (the `bool`) when glab's own routing
+/// target can't be addressed (a non-default port, which `--hostname` refuses) or
+/// nothing else would run. The bare probe follows glab's native routing, so a
+/// ported login is checked at its real authority with its own token.
+fn glab_probe_plan(hosts: Vec<String>, target: &str) -> (Vec<String>, bool) {
+    let pinned: Vec<String> = hosts
         .into_iter()
         .filter(|h| is_addressable_host(h))
         .collect();
-    if hosts.is_empty() {
-        // run_capture_parts already applies sanitize_child_env; only token stripping
-        // is exempt here. Bare `glab auth status` follows glab's own precedence to
-        // the token's target, so this probe cannot address a foreign host.
-        return glab_auth(run_capture(binary, &["auth", "status"], DETECT_TIMEOUT).await);
-    }
+    let bare = pinned.is_empty() || !is_addressable_host(target);
+    (pinned, bare)
+}
+
+/// glab's sign-in across its account hosts, probed concurrently (the load waits on
+/// the slowest host, not their sum) and reduced by [`worst_host_auth`], as gh's row
+/// is. `account_hosts` rather than `known_hosts`: it drops the port-stripped twin
+/// of a ported `GITLAB_HOST` and adds an addressable token target. The bare probe's
+/// multi-host report still reads with single-host precedence for the hosts it
+/// covers; a pinned host's rejection outranks it either way. Deliberately not
+/// `gitlab_accounts_health`: its expiry reads and anti-flap re-probe sleep don't
+/// belong in this load.
+async fn glab_cli_auth(binary: &Path) -> AuthStatus {
+    let (pinned, bare) = glab_probe_plan(account_hosts().await, &account_hostname().await);
     // run_glab_raw strips the environment's token for every host that isn't its
     // own target, so a pinned probe never sends one host's token to another.
-    let probes = hosts.iter().map(|host| async move {
+    let probes = pinned.iter().map(|host| async move {
         let args = ["auth", "status", "--hostname", host.as_str()];
         let out = run_glab_raw(None, &args, DETECT_TIMEOUT).await;
         glab_auth(out.map(|o| (o.code, format!("{}\n{}", o.stdout_lossy(), o.stderr))))
     });
-    worst_host_auth(futures_join_all(probes).await)
+    // run_capture_parts already applies sanitize_child_env; only token stripping is
+    // exempt here. Bare `glab auth status` follows glab's own precedence to the
+    // token's target, so this probe cannot address a foreign host.
+    let bare_probe = async {
+        if bare {
+            Some(glab_auth(
+                run_capture(binary, &["auth", "status"], DETECT_TIMEOUT).await,
+            ))
+        } else {
+            None
+        }
+    };
+    let (pinned_readings, bare_reading) = tokio::join!(futures_join_all(probes), bare_probe);
+    worst_host_auth(pinned_readings.into_iter().chain(bare_reading))
 }
 
 /// Detect one CLI: resolve it, read `--version`, and (when it has a login) its
@@ -268,6 +289,46 @@ mod tests {
         }
         assert_eq!(glab_auth(Ok((0, String::new()))), AuthStatus::Authed);
         assert_eq!(glab_auth(Err(AppError::GlabNotFound)), AuthStatus::Unknown);
+    }
+
+    #[test]
+    fn glab_ported_login_rides_the_bare_probe() {
+        let hosts = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+        // Env-only login at a ported authority: nothing `--hostname` can address, so
+        // the bare probe (glab's native routing, token intact) is the whole verdict.
+        let (pinned, bare) =
+            glab_probe_plan(hosts(&["gitlab.example:8443"]), "gitlab.example:8443");
+        assert!(pinned.is_empty());
+        assert!(bare);
+        let bare_verdict = glab_auth(Ok((0, String::new())));
+        assert_eq!(worst_host_auth([bare_verdict]), AuthStatus::Authed);
+
+        // Mixed: the addressable host is probed pinned, the ported target bare, and
+        // both readings reduce together.
+        let (pinned, bare) = glab_probe_plan(
+            hosts(&["gitlab.com", "gitlab.example:8443"]),
+            "gitlab.example:8443",
+        );
+        assert_eq!(pinned, ["gitlab.com"]);
+        assert!(bare);
+        let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())));
+        assert_eq!(
+            worst_host_auth([revoked, bare_verdict]),
+            AuthStatus::NotAuthed
+        );
+        assert_eq!(
+            worst_host_auth([AuthStatus::Authed, bare_verdict]),
+            AuthStatus::Authed
+        );
+
+        // Every account addressable: pinned probes only; none at all: bare only.
+        let (pinned, bare) = glab_probe_plan(hosts(&["gitlab.com"]), "gitlab.com");
+        assert_eq!(pinned, ["gitlab.com"]);
+        assert!(!bare);
+        assert_eq!(
+            glab_probe_plan(Vec::new(), "gitlab.com"),
+            (Vec::new(), true)
+        );
     }
 
     #[test]

@@ -2618,8 +2618,9 @@ check your internet connection or https://githubstatus.com";
 
     #[test]
     fn gh_host_readings_are_never_unknown() {
-        // Keeps gh's row on the rejected > unreachable > signed-in ranking it had
-        // before the shared reducer added an Unknown tier.
+        // gh's per-host readings never map to Unknown, so gh's row never reaches
+        // the shared reducer's Unknown tier — its verdict stays a pure
+        // rejected > unreachable > signed-in ranking.
         let mut readings: Vec<_> = [
             ("success", None),
             ("error", Some(GH_401)),
