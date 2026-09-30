@@ -761,15 +761,18 @@ const FINDINGS_KEY_SEGMENT: Record<SelectedFinding["type"], string> = {
 };
 
 /**
- * The largest-limit page of one findings category already in the cache, read
- * only while `segment` is set. A failed Load more leaves the shared limit on the
- * failed size until the panel's rollback syncs it, and never syncs while the
- * panel sits in a hidden `<Activity>`; this page is the one the rollback lands
- * on. Read in render and on every cache change, so no effect gates it.
+ * The largest-limit page of one findings category already in the cache that
+ * `holds` the selected finding, read only while `segment` is set. A failed Load
+ * more leaves the shared limit on the failed size until the panel's rollback
+ * syncs it, and never syncs while the panel sits in a hidden `<Activity>`. Pages
+ * are tried largest first, since a bigger page can still lack a finding a
+ * smaller one holds. Read in render and on every cache change, so no effect
+ * gates it.
  */
 function useCachedFindingsPage(
   repoPath: string,
   segment: string | null,
+  holds: (page: unknown) => boolean,
 ): unknown {
   const cache = useQueryClient().getQueryCache();
   // Subscribes only while a fallback is wanted: every cache event re-runs the
@@ -785,17 +788,17 @@ function useCachedFindingsPage(
   // entry is unchanged, as useSyncExternalStore requires of a snapshot.
   const getSnapshot = useCallback((): unknown => {
     if (segment === null) return undefined;
-    let best: { limit: number; data: unknown } | null = null;
-    for (const q of cache.findAll({
-      queryKey: ["repo", repoPath, "findings", segment],
-    })) {
-      const limit = q.queryKey[4];
-      if (q.state.data === undefined || typeof limit !== "number") continue;
-      if (best === null || limit > best.limit)
-        best = { limit, data: q.state.data };
-    }
-    return best?.data;
-  }, [cache, repoPath, segment]);
+    const pages = cache
+      .findAll({ queryKey: ["repo", repoPath, "findings", segment] })
+      .flatMap((q) => {
+        const limit = q.queryKey[4];
+        return q.state.data === undefined || typeof limit !== "number"
+          ? []
+          : [{ limit, data: q.state.data }];
+      })
+      .sort((a, b) => b.limit - a.limit);
+    return pages.find((p) => holds(p.data))?.data;
+  }, [cache, repoPath, segment, holds]);
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
@@ -871,49 +874,32 @@ export function FindingDetailView({
   };
   const query = selectedFinding ? queryByType[selectedFinding.type] : alerts;
 
-  // The exact-limit read has nothing to show (a failed Load more still keys it
-  // on the failed limit), so the category's cached page stands in.
-  const cachedPage = useCachedFindingsPage(
-    repoPath,
-    selectedFinding &&
-      enabled &&
-      query.data === undefined &&
-      (query.isError || query.isPending)
-      ? FINDINGS_KEY_SEGMENT[selectedFinding.type]
-      : null,
-  );
-  /** A category's own data, else the cached page, which is only ever set for
-   *  the selected category and so read only in its branch below. Same key
-   *  family, so the same shape. */
-  function withCached<T>(data: T | undefined): T | undefined {
-    return data ?? (cachedPage as T | undefined);
-  }
-
-  /** The selected finding's detail from the loaded data, or null when it isn't
-   *  in the list. */
-  function findingDetail(): ReactNode {
+  /** The selected finding's detail from `page`, one page of its category's
+   *  data (the exact read's, or a cached page of the same key family and so the
+   *  same shape), or null when that page doesn't hold it. */
+  function detailIn(page: unknown): ReactNode {
     if (selectedFinding?.type === "alert") {
-      const alert = withCached(alerts.data)?.alerts.find(
+      const alert = (page as typeof alerts.data)?.alerts.find(
         (a) => a.number === selectedFinding.number,
       );
       if (alert) return <AlertDetail alert={alert} />;
     } else if (selectedFinding?.type === "codeScanning") {
-      const alert = withCached(codeScanning.data)?.alerts.find(
+      const alert = (page as typeof codeScanning.data)?.alerts.find(
         (a) => a.number === selectedFinding.number,
       );
       if (alert) return <CodeScanningDetail alert={alert} />;
     } else if (selectedFinding?.type === "secretScanning") {
-      const alert = withCached(secrets.data)?.alerts.find(
+      const alert = (page as typeof secrets.data)?.alerts.find(
         (a) => a.number === selectedFinding.number,
       );
       if (alert) return <SecretScanningDetail alert={alert} />;
     } else if (selectedFinding?.type === "advisory") {
-      const advisory = withCached(advisories.data)?.advisories.find(
+      const advisory = (page as typeof advisories.data)?.advisories.find(
         (a) => a.ghsaId === selectedFinding.ghsaId,
       );
       if (advisory) return <AdvisoryDetail advisory={advisory} />;
     } else if (selectedFinding?.type === "glFinding") {
-      const data = withCached(gl.data);
+      const data = page as typeof gl.data;
       if (!data) return null;
       if (selectedFinding.category === "codeQuality") {
         const finding = data.codeQuality.findings.find(
@@ -942,7 +928,7 @@ export function FindingDetailView({
           );
       }
     } else if (selectedFinding?.type === "bbFinding") {
-      const report = withCached(bb.data)?.reports.find(
+      const report = (page as typeof bb.data)?.reports.find(
         (r) => r.uuid === selectedFinding.reportUuid,
       );
       const annotation = report?.annotations.find(
@@ -954,17 +940,29 @@ export function FindingDetailView({
     return null;
   }
 
-  const detail = findingDetail();
+  // The exact-limit read has nothing to show (a failed Load more still keys it
+  // on the failed limit), so a cached page holding this finding stands in.
+  const cachedPage = useCachedFindingsPage(
+    repoPath,
+    selectedFinding &&
+      enabled &&
+      query.data === undefined &&
+      (query.isError || query.isPending)
+      ? FINDINGS_KEY_SEGMENT[selectedFinding.type]
+      : null,
+    (page) => detailIn(page) !== null,
+  );
+
+  const detail = detailIn(query.data ?? cachedPage);
   // Loaded data always renders: a refresh that fails or waits offline keeps
   // the finding under a notice. Pending is gated on `enabled`: a disabled query
   // stays `isPending` forever, so an ungated skeleton would spin here if the
-  // repo lost the capability mid-session. The cached page counts as data only
-  // when it holds this finding, so a miss there still reads as the error.
+  // repo lost the capability mid-session. A cached page is only ever one that
+  // holds this finding, so with none a miss still reads as the error.
   const pane = resolveDetailPane({
     pending: enabled && query.isPending,
     error: query.isError,
-    hasData:
-      query.data !== undefined || (cachedPage !== undefined && detail !== null),
+    hasData: query.data !== undefined || cachedPage !== undefined,
     paused: query.isPaused,
   });
   if (pane === "skeleton") {

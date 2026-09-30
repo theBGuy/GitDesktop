@@ -1337,18 +1337,19 @@ export function DiffContent({
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
 
+  // Offline outranks a failure it follows: a retry would park at once, and
+  // reconnecting resumes the read by itself, so it gets offline words, no Retry.
+  const failed = isError && !isPaused;
   const notice = (
     <DegradedListNotice
       noun="this diff"
       degraded={isError || isPaused}
       message={detailNoticeMessage({
         noun: "diff",
-        isError,
+        isError: failed,
         stale: dataIsPlaceholder ?? false,
       })}
-      // Offline gets no Retry: it would park again at once, and reconnecting
-      // resumes the read by itself.
-      onRetry={isError ? onRetry : undefined}
+      onRetry={failed ? onRetry : undefined}
       className="shrink-0 border-b py-1.5"
     />
   );

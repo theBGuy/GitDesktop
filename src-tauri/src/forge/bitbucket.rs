@@ -151,7 +151,9 @@ pub(crate) async fn account_status(host: &str) -> AppResult<ForgeStatus> {
 /// got a 5xx rejects: react-query keeps the last good status on a rejection, where
 /// `false` would tell the user to reconnect a token nothing disproved. A 403 is a
 /// valid scope-limited token; a 401 and a 429 read false (a rate limit is session
-/// health's to report). The login comes only from a parsed 2xx body.
+/// health's to report). A 2xx body that isn't a user also rejects, since unreadable
+/// bytes prove nothing about the token; a parsed user without a name leaves the login
+/// to the caller's stored-username fallback.
 fn bitbucket_auth_outcome(probe: AppResult<(u16, String)>) -> AppResult<(bool, Option<String>)> {
     let (status, body) = probe.map_err(|e| {
         AppError::Bitbucket(format!(
@@ -160,10 +162,10 @@ fn bitbucket_auth_outcome(probe: AppResult<(u16, String)>) -> AppResult<(bool, O
     })?;
     match status {
         200..=299 => {
-            let login = serde_json::from_str::<BbUser>(&body)
-                .ok()
-                .and_then(|user| user.username.or(user.display_name));
-            Ok((true, login))
+            let user = serde_json::from_str::<BbUser>(&body).map_err(|e| {
+                http::bb_unreadable("user", format!("could not parse Bitbucket user: {e}"))
+            })?;
+            Ok((true, user.username.or(user.display_name)))
         }
         403 => Ok((true, None)),
         500..=599 => Err(AppError::Bitbucket(format!(
@@ -6109,6 +6111,15 @@ mod tests {
             unreachable!("asserted above");
         };
         assert!(message.ends_with("connection failed"), "{message}");
+        // An answered 2xx whose body isn't a user proves nothing about the token.
+        for body in ["not json", "", r#""a string""#, r#"{"username":42}"#] {
+            let outcome = bitbucket_auth_outcome(answered(200, body));
+            assert!(
+                matches!(&outcome, Err(AppError::Bitbucket(m))
+                    if m.starts_with("Couldn't read the user from Bitbucket.\n")),
+                "{body:?}: {outcome:?}"
+            );
+        }
         for (label, probe, expected) in [
             (
                 "200",
@@ -6119,6 +6130,13 @@ mod tests {
                 "200 display name only",
                 answered(200, r#"{"display_name":"Me"}"#),
                 (true, Some("Me".to_string())),
+            ),
+            // A parsed user without a name authenticates; `None` hands the login to
+            // account_status's stored-username fallback.
+            (
+                "200 parsed user without a name",
+                answered(200, r#"{"uuid":"{u}","username":null}"#),
+                (true, None),
             ),
             ("401", answered(401, "expired"), (false, None)),
             ("403", answered(403, "privilege scopes"), (true, None)),

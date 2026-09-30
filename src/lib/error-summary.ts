@@ -354,7 +354,7 @@ function pushProtectionSummary(text: string): string | null {
  *  list, not Rust's bare `NETWORKISH` words (forge/session.rs): those were tuned
  *  for sign-in probe text, and in arbitrary command errors they match repo,
  *  branch and path names (`acme/network-tools`, `feature/tls-upgrade`). Every
- *  entry is multi-word or a Go-only token, so no name can carry it. */
+ *  entry holds a space, which no repo, branch or ref name can. */
 const TRANSPORT_PHRASES = [
   "dial tcp",
   "no such host",
@@ -367,7 +367,7 @@ const TRANSPORT_PHRASES = [
   "could not resolve host",
   "network is unreachable",
   "forcibly closed by the remote host",
-  "proxyconnect",
+  "proxyconnect tcp",
 ];
 
 /** gh's proxy and server-outage answers, which Rust's `GH_NETWORKISH_EXTRA`
@@ -399,8 +399,11 @@ const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
   glab: "GitLab",
   bitbucket: "Bitbucket",
   jira: "Jira",
-  timeout: "the server",
 };
+
+/** URLs and Jira issue keys, whose path segments and numbers (`/pullrequests/403/`,
+ *  `ABC-401`) would otherwise read as an answered status. */
+const IDENTIFIER_TOKENS = /https?:\/\/[^\s"')]+|\b[A-Z][A-Z0-9_]+-\d+\b/g;
 
 function isAsciiAlphanumeric(c: string | undefined): boolean {
   return c !== undefined && /[a-z0-9]/i.test(c);
@@ -431,7 +434,9 @@ function networkSummary(
   const host = NETWORK_KIND_HOSTS[kind];
   if (host === undefined || message.trimStart().startsWith("Couldn't reach"))
     return null;
-  const text = message.toLowerCase();
+  // Both scans read the masked text: every transport phrase has a space, which
+  // a masked URL or key can't hold, so masking hides no transport signal.
+  const text = message.replace(IDENTIFIER_TOKENS, " ").toLowerCase();
   if (
     hasStandaloneWord(text, "401") ||
     hasStandaloneWord(text, "403") ||

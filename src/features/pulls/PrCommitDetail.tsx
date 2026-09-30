@@ -179,6 +179,9 @@ export function PrCommitDetail({
     hasData: diff.data !== undefined,
     paused: diff.isPaused,
   });
+  // Offline outranks a failure it follows: a retry would park at once, and
+  // reconnecting resumes the read by itself, so it gets offline words, no Retry.
+  const failed = diff.isError && !diff.isPaused;
 
   return (
     <div className="flex h-full flex-col">
@@ -256,12 +259,10 @@ export function PrCommitDetail({
                   // placeholder, so the retained patch is always its own.
                   message={detailNoticeMessage({
                     noun: "commit's changes",
-                    isError: diff.isError,
+                    isError: failed,
                     stale: false,
                   })}
-                  // Offline gets no Retry: it would park again at once, and
-                  // reconnecting resumes the read by itself.
-                  onRetry={diff.isError ? () => void diff.refetch() : undefined}
+                  onRetry={failed ? () => void diff.refetch() : undefined}
                   className="shrink-0 border-b px-4 py-1.5"
                 />
                 <DetailRailRow>
@@ -334,13 +335,9 @@ export function PrCommitDetail({
                       canComment={canCommentCommits}
                       remoteLabel={remoteLabel}
                       diffSections={sections}
-                      // While placeholder, `sections` belongs to the previously
-                      // selected commit, so a position-derived line would
-                      // resolve against the wrong patch. A failed refresh keeps
-                      // this commit's own patch, which still resolves.
-                      diffReady={
-                        diff.data !== undefined && !diff.isPlaceholderData
-                      }
+                      // A failed refresh keeps this commit's own patch, which
+                      // still resolves.
+                      diffReady={diff.data !== undefined}
                       selectedPath={effectivePath}
                       onSelectFile={setSelectedPath}
                       lens={lens}

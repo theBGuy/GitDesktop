@@ -255,9 +255,10 @@ const NO_FORGE_STATUS: ForgeStatus = {
 /**
  * Provider-neutral hosted-integration status — the gate every hosted panel reads
  * (GitHub, GitLab and Bitbucket all dispatch behind it). Honors the cold-start test
- * mode; the probe hits the real CLIs otherwise. A GitHub probe that can't reach its
- * host REJECTS rather than reading signed-out, so an outage keeps the last good
- * status in `data` (beside `error`) until a later refetch succeeds.
+ * mode; the probe hits the real CLIs otherwise. A GitHub, GitLab or Bitbucket probe
+ * that can't reach its host REJECTS rather than reading signed-out, so an outage
+ * keeps the last good status in `data` (beside `error`) until a later refetch
+ * succeeds.
  */
 export function useForgeStatus(repo: string) {
   return useQuery({

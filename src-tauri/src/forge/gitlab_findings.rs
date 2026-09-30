@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
 use crate::forge::gitlab::{encode_project, glab_output_is_404, project_path};
-use crate::forge::glab::{run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT};
+use crate::forge::glab::{run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
 use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit};
 
 /// A report bigger than this is refused rather than parsed. `run_glab_raw` has
@@ -1069,46 +1069,77 @@ fn artifact_endpoint(enc: &str, job_id: u64, filename: &str) -> String {
     )
 }
 
-/// Every candidate report of one category, downloaded.
+/// Every candidate report of one category, downloaded. `outage` is shared by every
+/// category of one read; see [`fetch_category_with`].
 async fn fetch_category(
     repo_path: &str,
     enc: &str,
     jobs: &[RawJob],
     file_type: &str,
     now: DateTime<Utc>,
+    outage: &mut Option<AppError>,
 ) -> AppResult<CategoryFetch> {
     let download = |endpoint: String| async move {
         run_glab_raw(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await
     };
-    fetch_category_with(candidates(jobs, file_type), enc, download, now).await
+    let reachable = || async move {
+        run_glab_raw(
+            Some(repo_path),
+            &["api", &format!("projects/{enc}")],
+            GLAB_TIMEOUT,
+        )
+        .await
+        .is_ok_and(|out| out.code == 0)
+    };
+    let refs = candidates(jobs, file_type);
+    fetch_category_with(refs, enc, download, reachable, now, outage).await
 }
 
-/// [`fetch_category`] over an injected download. A classified failure (404, expiry,
-/// oversize, refusal) stays in the envelope. The first failure that never reached
-/// GitLab stops the walk (an outage fails each remaining serial download the same
-/// way, at up to `GLAB_NETWORK_TIMEOUT` apiece) and rejects unless a report already
-/// arrived: the findings are one cached query, so an `Ok` envelope would blank every
-/// category's held rows. A report in hand is kept, the unread candidates counted lost.
-async fn fetch_category_with<D, DF>(
+/// The detail a report download that ran out of time carries while GitLab answers.
+const DOWNLOAD_TIMED_OUT: &str = "the report download timed out";
+
+/// [`fetch_category`] over an injected download and reachability probe. Classified
+/// failures (404, expiry, oversize, refusal) stay in the envelope, as does a download
+/// timeout while GitLab answers the probe (reports are uncapped, so a slow link times
+/// out a large one). Any other failure that never reached GitLab stops every remaining
+/// download of the read and rejects, since an `Ok` envelope would blank the held rows;
+/// a category already holding a report keeps it and latches the error in `outage` for
+/// the next category with candidates to reject with before it downloads anything.
+async fn fetch_category_with<D, DF, P, PF>(
     refs: Vec<ArtifactRef>,
     enc: &str,
     mut download: D,
+    mut reachable: P,
     now: DateTime<Utc>,
+    outage: &mut Option<AppError>,
 ) -> AppResult<CategoryFetch>
 where
     D: FnMut(String) -> DF,
     DF: std::future::Future<Output = AppResult<GlabOutput>>,
+    P: FnMut() -> PF,
+    PF: std::future::Future<Output = bool>,
 {
     let mut fetch = CategoryFetch {
         had_candidates: !refs.is_empty(),
         ..CategoryFetch::default()
     };
+    if fetch.had_candidates {
+        if let Some(error) = outage.take() {
+            return Err(error);
+        }
+    }
     let total = refs.len();
     for (index, artifact) in refs.into_iter().enumerate() {
         let endpoint = artifact_endpoint(enc, artifact.job_id, &artifact.filename);
-        let outcome = download(endpoint)
-            .await
-            .and_then(|out| artifact_outcome(out, artifact.expire_at.as_deref(), now));
+        let outcome = match download(endpoint).await {
+            Err(AppError::Timeout(_)) if reachable().await => Ok(Err((
+                GlFindingAvailability::Indeterminate,
+                Some(DOWNLOAD_TIMED_OUT.to_string()),
+            ))),
+            result => {
+                result.and_then(|out| artifact_outcome(out, artifact.expire_at.as_deref(), now))
+            }
+        };
         match outcome {
             Ok(Ok(body)) => fetch.bodies.push(body),
             Ok(Err(failure)) => {
@@ -1120,6 +1151,7 @@ where
                     return Err(error);
                 }
                 fetch.lost_reports += total - index;
+                *outage = Some(error);
                 break;
             }
         }
@@ -1263,9 +1295,26 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     }
 
     let now = Utc::now();
-    let sast = fetch_category(repo_path, &enc, &jobs, SAST_FILE_TYPE, now).await?;
-    let secrets = fetch_category(repo_path, &enc, &jobs, SECRET_DETECTION_FILE_TYPE, now).await?;
-    let quality = fetch_category(repo_path, &enc, &jobs, CODE_QUALITY_FILE_TYPE, now).await?;
+    let mut outage = None;
+    let sast = fetch_category(repo_path, &enc, &jobs, SAST_FILE_TYPE, now, &mut outage).await?;
+    let secrets = fetch_category(
+        repo_path,
+        &enc,
+        &jobs,
+        SECRET_DETECTION_FILE_TYPE,
+        now,
+        &mut outage,
+    )
+    .await?;
+    let quality = fetch_category(
+        repo_path,
+        &enc,
+        &jobs,
+        CODE_QUALITY_FILE_TYPE,
+        now,
+        &mut outage,
+    )
+    .await?;
 
     Ok(GlFindingsOut {
         pipeline_state: GlPipelineState::Found,
@@ -1700,32 +1749,51 @@ mod tests {
         }
     }
 
-    /// Runs the category walk over `outcomes`, one per candidate job in order, and
-    /// returns the result with how many downloads were attempted.
+    /// What one scripted category walk did.
+    struct Walk {
+        result: AppResult<CategoryFetch>,
+        downloads: usize,
+        probes: usize,
+    }
+
+    /// Runs the category walk over `outcomes`, one per candidate job in order, with a
+    /// reachability probe answering `reachable` and the read's shared `outage` latch.
     async fn scripted_category(
         outcomes: Vec<AppResult<GlabOutput>>,
         expire_at: Option<&str>,
-    ) -> (AppResult<CategoryFetch>, usize) {
+        reachable: bool,
+        outage: &mut Option<AppError>,
+    ) -> Walk {
         let refs = (1..=outcomes.len() as u64)
             .map(|id| artifact(id, expire_at))
             .collect();
         let mut outcomes = std::collections::VecDeque::from(outcomes);
-        let mut calls = 0;
+        let mut downloads = 0;
+        let mut probes = 0;
         let result = fetch_category_with(
             refs,
             "g%2Fp",
             |endpoint| {
-                calls += 1;
+                downloads += 1;
                 assert_eq!(
                     endpoint,
-                    format!("projects/g%2Fp/jobs/{calls}/artifacts/gl-sast-report.json")
+                    format!("projects/g%2Fp/jobs/{downloads}/artifacts/gl-sast-report.json")
                 );
                 std::future::ready(outcomes.pop_front().expect("unexpected download"))
             },
+            || {
+                probes += 1;
+                std::future::ready(reachable)
+            },
             now(),
+            outage,
         )
         .await;
-        (result, calls)
+        Walk {
+            result,
+            downloads,
+            probes,
+        }
     }
 
     #[tokio::test]
@@ -1744,42 +1812,55 @@ mod tests {
                 Ok(failed_output("", "glab: HTTP 502 Bad Gateway")),
             ),
         ] {
-            // Three candidates, but the walk stops after the first outage.
+            // Three candidates, but the walk stops after the first outage. Only the
+            // runner timeout asks the probe, which fails.
+            let probes = usize::from(matches!(first, Err(AppError::Timeout(_))));
             let outcomes = vec![first, Ok(ok_output(b"{}")), Ok(ok_output(b"{}"))];
-            let (result, calls) = scripted_category(outcomes, None).await;
-            assert!(result.is_err(), "{label}");
-            assert_eq!(calls, 1, "{label}");
+            let mut outage = None;
+            let walk = scripted_category(outcomes, None, false, &mut outage).await;
+            assert!(walk.result.is_err(), "{label}");
+            assert_eq!(walk.downloads, 1, "{label}");
+            assert_eq!(walk.probes, probes, "{label}");
+            // The rejection itself is the surfaced error; nothing is left latched.
+            assert!(outage.is_none(), "{label}");
         }
         // A classified failure before the outage doesn't turn the unread report into
         // a verdict: nothing arrived, so the category still rejects.
-        let (result, calls) = scripted_category(
+        let mut outage = None;
+        let walk = scripted_category(
             vec![
                 Ok(failed_output("404 page not found", "glab: HTTP 404")),
                 Err(AppError::Timeout(120)),
                 Ok(ok_output(SAST_REPORT.as_bytes())),
             ],
             None,
+            false,
+            &mut outage,
         )
         .await;
-        assert!(matches!(result, Err(AppError::Timeout(120))));
-        assert_eq!(calls, 2);
+        assert!(matches!(walk.result, Err(AppError::Timeout(120))));
+        assert_eq!((walk.downloads, walk.probes), (2, 1));
     }
 
     #[tokio::test]
     async fn an_outage_after_a_report_arrives_keeps_it_and_counts_the_rest_lost() {
-        let (result, calls) = scripted_category(
+        let mut outage = None;
+        let walk = scripted_category(
             vec![
                 Ok(ok_output(SAST_REPORT.as_bytes())),
                 Err(AppError::Timeout(120)),
                 Ok(ok_output(SAST_REPORT.as_bytes())),
             ],
             None,
+            false,
+            &mut outage,
         )
         .await;
-        let fetch = result.expect("a partial category keeps its envelope");
-        assert_eq!(calls, 2);
+        let fetch = walk.result.expect("a partial category keeps its envelope");
+        assert_eq!((walk.downloads, walk.probes), (2, 1));
         assert_eq!(fetch.bodies.len(), 1);
         assert_eq!(fetch.lost_reports, 2);
+        assert!(matches!(outage, Some(AppError::Timeout(120))));
         let envelope = secure_envelope(fetch, 100);
         assert_eq!(envelope.availability, GlFindingAvailability::Available);
         assert_eq!(envelope.findings.len(), 2);
@@ -1787,6 +1868,71 @@ mod tests {
             envelope.detail.as_deref(),
             Some("2 reports couldn't be read")
         );
+    }
+
+    #[tokio::test]
+    async fn a_latched_outage_rejects_the_next_category_without_downloading() {
+        let mut outage = None;
+        let first = scripted_category(
+            vec![
+                Ok(ok_output(SAST_REPORT.as_bytes())),
+                Err(AppError::Timeout(120)),
+            ],
+            None,
+            false,
+            &mut outage,
+        )
+        .await;
+        assert!(first.result.is_ok());
+        // A category with no candidates has nothing to misread, so it keeps the latch.
+        let unconfigured = scripted_category(Vec::new(), None, false, &mut outage).await;
+        assert!(!unconfigured.result.unwrap().had_candidates);
+        assert!(outage.is_some());
+        // The next category with candidates rejects before any download or probe, and
+        // takes the latch so the rejection surfaces once.
+        let second = scripted_category(
+            vec![Ok(ok_output(SAST_REPORT.as_bytes()))],
+            None,
+            true,
+            &mut outage,
+        )
+        .await;
+        assert!(matches!(second.result, Err(AppError::Timeout(120))));
+        assert_eq!((second.downloads, second.probes), (0, 0));
+        assert!(outage.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_download_timeout_while_gitlab_answers_keeps_the_walk_going() {
+        // A large report on a slow link: the probe answers, so the timeout is that
+        // report's own failure and the remaining candidates still download.
+        let mut outage = None;
+        let walk = scripted_category(
+            vec![
+                Err(AppError::Timeout(120)),
+                Ok(ok_output(SAST_REPORT.as_bytes())),
+            ],
+            None,
+            true,
+            &mut outage,
+        )
+        .await;
+        let fetch = walk.result.expect("a reachable GitLab keeps the envelope");
+        assert_eq!((walk.downloads, walk.probes), (2, 1));
+        assert!(outage.is_none());
+        let envelope = secure_envelope(fetch, 100);
+        assert_eq!(envelope.availability, GlFindingAvailability::Available);
+        assert_eq!(
+            envelope.detail.as_deref(),
+            Some("1 report couldn't be read")
+        );
+        // With nothing else arriving, the category says why instead of rejecting.
+        let walk =
+            scripted_category(vec![Err(AppError::Timeout(120))], None, true, &mut outage).await;
+        let envelope = secure_envelope(walk.result.expect("kept"), 100);
+        assert_eq!(envelope.availability, GlFindingAvailability::Indeterminate);
+        assert_eq!(envelope.detail.as_deref(), Some(DOWNLOAD_TIMED_OUT));
+        assert!(outage.is_none());
     }
 
     #[tokio::test]
@@ -1830,9 +1976,13 @@ mod tests {
                 stderr: outcome.stderr.clone(),
                 code: outcome.code,
             };
-            let (result, calls) = scripted_category(vec![Ok(outcome), Ok(second)], expire_at).await;
-            let fetch = result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
-            assert_eq!(calls, 2, "{label}");
+            let mut outage = None;
+            let walk =
+                scripted_category(vec![Ok(outcome), Ok(second)], expire_at, false, &mut outage)
+                    .await;
+            let fetch = walk.result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!((walk.downloads, walk.probes), (2, 0), "{label}");
+            assert!(outage.is_none(), "{label}");
             assert_eq!(fetch.lost_reports, 2, "{label}");
             let envelope = secure_envelope(fetch, 100);
             assert_eq!(envelope.availability, availability, "{label}");

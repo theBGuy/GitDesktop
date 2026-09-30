@@ -653,7 +653,6 @@ const HOST_BY_KIND = {
   glab: "GitLab",
   bitbucket: "Bitbucket",
   jira: "Jira",
-  timeout: "the server",
 };
 const reach = (host) =>
   `Couldn't reach ${host} — check your network connection.`;
@@ -672,7 +671,7 @@ const TRANSPORT_PHRASES = [
   "Could not resolve host",
   "network is unreachable",
   "forcibly closed by the remote host",
-  "proxyconnect",
+  "proxyconnect tcp",
 ];
 /** gh's outage answers, read for gh alone. */
 const GH_ONLY_PHRASES = [
@@ -793,7 +792,7 @@ test("io errors are never rewritten, even with transport wording", () => {
 });
 
 test("gh-only outage phrases stay gh's: other kinds keep their raw line", () => {
-  for (const kind of ["glab", "bitbucket", "jira", "timeout"]) {
+  for (const kind of ["glab", "bitbucket", "jira"]) {
     for (const word of GH_ONLY_PHRASES) {
       const message = `request failed: ${word}`;
       assert.equal(
@@ -815,6 +814,7 @@ test("bare transport words and phrases inside identifiers never classify", () =>
     "connections refused by policy",
     "reconnection refused",
     "the dial tcpip adapter is disabled",
+    "repository acme/proxyconnect not found",
     "port 5030 rejected the token",
     "request id 1503-a rejected",
     "thereof",
@@ -854,15 +854,44 @@ test("a message Rust already wrote as Couldn't reach keeps its own words", () =>
 });
 
 test("non-network kinds and git's own transport lines are untouched", () => {
-  for (const kind of ["command", "keyring", "invalidArgument"]) {
-    const message = "connection failed";
-    assert.equal(presentError(appError(kind, message)).summary, message);
+  for (const [kind, message] of [
+    ["command", "connection failed"],
+    ["keyring", "connection failed"],
+    ["invalidArgument", "connection failed"],
+    // The Rust Timeout variant's own message, which names no host.
+    ["timeout", "git operation timed out after 120s"],
+  ]) {
+    assert.equal(presentError(appError(kind, message)).summary, message, kind);
   }
   // git-kind stderr keeps its first line (see the first-contact test above).
   const p = presentError(
     gitError("fatal: unable to access 'x': Could not resolve host: connection"),
   );
-  assert.notEqual(p.summary, reach("the server"));
+  assert.ok(!p.summary.startsWith("Couldn't reach"), p.summary);
+});
+
+test("status-like numbers in URLs and Jira keys don't suppress the rewrite", () => {
+  for (const [kind, message] of [
+    [
+      "bitbucket",
+      "Bitbucket request to https://api.bitbucket.org/2.0/repositories/acme/app/pullrequests/403/diff: connection failed",
+    ],
+    [
+      "jira",
+      "Jira request to https://acme.atlassian.net/rest/api/3/issue/ABC-401: request timed out",
+    ],
+    ["jira", "Couldn't load ABC-401: connection failed"],
+    [
+      "gh",
+      'Get "https://api.github.com/repos/acme/app/pulls/429": dial tcp: lookup api.github.com: no such host',
+    ],
+  ]) {
+    assert.equal(
+      presentError(appError(kind, message)).summary,
+      reach(HOST_BY_KIND[kind]),
+      message,
+    );
+  }
 });
 
 test("empty messages fall through to a non-blank summary", () => {
