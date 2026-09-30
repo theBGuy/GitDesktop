@@ -440,9 +440,10 @@ fn flow_depth_after(depth: usize, text: &str) -> usize {
 /// quote into the hostname. An unbalanced quote yields None — the module's bias is
 /// never to drop a host, but a line whose quoting is broken has no readable key,
 /// and a corrupted entry (a junk account row Settings then probes) is worse than
-/// one dropped hand-mangled line. Both readers of a key line share this split, so
-/// a well-formed key ends in the same place for host extraction and for flow-depth
-/// tracking. None means BOTH stand down: an unbalanced-quote line that also opens a
+/// one dropped hand-mangled line. Detection's key reader and flow-depth tracking
+/// share this split, so a well-formed key ends in the same place for both
+/// (`authority_from_key_line` instead ends an unquoted key at the YAML separator).
+/// None means BOTH stand down: an unbalanced-quote line that also opens a
 /// flow map has its depth left untracked, so its wrapped continuation can still be
 /// scanned as a key — accepted, since only triple-mangled input reaches it.
 ///
@@ -519,6 +520,11 @@ fn authority_from_key_line(trimmed: &str) -> Option<String> {
     normalize_authority(key)
 }
 
+/// The port-blind host keys of the `hosts:` section, for detection.
+fn hosts_from_config(text: &str) -> Vec<String> {
+    config_host_keys(text, host_from_key_line)
+}
+
 /// The host keys of the `hosts:` section of a glab config.yml. A minimal line
 /// scanner, not a YAML parser: it accepts the hand-written forms glab's own
 /// writer never emits (anchors, aliases, comments, quoted keys) because a
@@ -527,13 +533,10 @@ fn authority_from_key_line(trimmed: &str) -> Option<String> {
 /// are never inspected at all. A non-host key under `hosts:` (an anchor-definition
 /// block, an alias key) is therefore reported as a host — parity with glab, which
 /// unmarshals the section as host→config and reads that key as a host too.
-fn hosts_from_config(text: &str) -> Vec<String> {
-    config_host_keys(text, host_from_key_line)
-}
-
-/// The `hosts:` key scan behind [`hosts_from_config`], each key line read by
-/// `host_of`: port-blind for detection, [`authority_from_key_line`] for the About
-/// sign-in probe, which must not collapse a ported login onto its bare host.
+///
+/// Each key line is read by `host_of`, which must return the key name only:
+/// port-blind for detection, [`authority_from_key_line`] for the About sign-in
+/// probe, which must not collapse a ported login onto its bare host.
 fn config_host_keys(text: &str, host_of: fn(&str) -> Option<String>) -> Vec<String> {
     let mut hosts = Vec::new();
     let mut in_hosts = false;
@@ -2120,6 +2123,10 @@ hosts:
         assert_eq!(
             account_authorities_from(None, None, Some("t")),
             vec!["gitlab.com"]
+        );
+        assert_eq!(
+            account_authorities_from(Some("hosts:\n  gitlab.example:8443:\n"), None, Some("t")),
+            vec!["gitlab.example:8443", "gitlab.com"]
         );
     }
 

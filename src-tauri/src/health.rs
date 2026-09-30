@@ -86,7 +86,8 @@ enum AuthProbe {
 /// One host's `glab auth status` verdict. The command validates online, so its
 /// failure text decides between a rejected credential and an outage; a probe that
 /// timed out is an outage too. The classifier's precedence assumes ONE host's
-/// output, so a multi-host report must be split per host before it gets here.
+/// output; the one multi-host report it reads is the bare probe's, whose limit
+/// [`glab_cli_auth`] documents.
 fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
     match result {
         Ok((0, _)) => AuthStatus::Authed,
@@ -103,9 +104,9 @@ fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
 /// that flag can address, plus ONE bare probe (the `bool`) when a listed host or
 /// glab's own routing target can't be addressed by name (a non-default port, which
 /// `--hostname` refuses), or when nothing else would run. `hosts` must carry
-/// authorities with their ports: the bare probe
-/// follows glab's native routing, so a ported login is checked at its real
-/// authority with its own token, never as its bare host.
+/// authorities with their ports: the bare probe follows glab's native routing, so
+/// a ported login is checked at its real authority with its own token, never as
+/// its bare host.
 fn glab_probe_plan(hosts: Vec<String>, target: &str) -> (Vec<String>, bool) {
     let listed = hosts.len();
     let pinned: Vec<String> = hosts
@@ -309,15 +310,15 @@ mod tests {
         let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())));
 
         // A ported saved key is never probed as its bare host: the bare probe covers
-        // it, so a working session reads signed in whatever the default target is.
+        // it whatever the default target is.
         let ported_key = "hosts:\n  gitlab.example:8443:\n    token: x\n";
-        for target in ["gitlab.com", "gitlab.example:8443"] {
-            let (pinned, bare) = plan(Some(ported_key), None, target);
-            assert!(!pinned.contains(&"gitlab.example".to_string()), "{target}");
-            assert!(bare, "{target}");
-            let readings = pinned.iter().map(|_| signed_in).chain([signed_in]);
-            assert_eq!(worst_host_auth(readings), AuthStatus::Authed);
-        }
+        let (pinned, bare) = plan(Some(ported_key), None, "gitlab.com");
+        assert!(!pinned.contains(&"gitlab.example".to_string()));
+        assert!(bare);
+        let ported_default =
+            "host: gitlab.example:8443\nhosts:\n  gitlab.example:8443:\n    token: x\n";
+        let (pinned, bare) = plan(Some(ported_default), None, "gitlab.example:8443");
+        assert_eq!((pinned, bare), (Vec::<String>::new(), true));
 
         // Env-only login at a ported authority: the same shape.
         let (pinned, bare) = plan(
