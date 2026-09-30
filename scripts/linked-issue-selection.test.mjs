@@ -320,8 +320,8 @@ test("a probe fired before a reset lands nowhere after it", () => {
 
 test("a write stamped with the just-advanced generation lands on the fresh seed", () => {
   // The hook advances its counter to N+1 and seeds with that value in one
-  // step, so the reset's own title probes, fired before it renders, carry the
-  // new value (extraction bails in that flush and re-runs after the render).
+  // step, so a write stamped with the counter before the reset renders lands
+  // on the fresh seed, whichever transition it carries.
   const warm = seed(K_FORK, [chip(7)]);
   const advanced = warm.generation + 1;
   const reseeded = seedBuckets(advanced, K_FORK, []);

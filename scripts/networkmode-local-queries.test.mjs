@@ -805,7 +805,7 @@ test('a networked read under "always" is seen, with its refetchOnReconnect', () 
   }
 });
 
-test('every local query in src/ sets networkMode: "always"', () => {
+test('every local query in src/ sets networkMode: "always", and every networked one under it is sanctioned and states refetchOnReconnect', () => {
   const files = [...sourceFiles(SRC)];
   assert.ok(
     files.length >= FILE_FLOOR,
