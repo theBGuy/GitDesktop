@@ -1050,14 +1050,14 @@ const VALUE_WRAPPERS = /^(?:\*\*|__|`|["'‘’“”])+|(?:\*\*|__|`|["'‘’�
 /** Sentence punctuation a model ends a directive value with. */
 const TRAILING_PUNCT = /[.!,;]+$/;
 
+/** The list marker `DIRECTIVE_LINE` tolerates before a directive keyword. */
+const LIST_MARKER = /^[-*+]\s+/;
+
 /** A partial directive line as the nascent check reads it: list marker and every
  *  markup marker dropped, so a streaming `**Labels` is recognized. A line that is
  *  ONLY markup normalizes to empty and stops the peel, exactly as it did unnormalized. */
 function normalizeDirectiveLine(line: string): string {
-  return line
-    .replace(/^[-*+]\s+/, "")
-    .replace(DIRECTIVE_MARKUP, "")
-    .trim();
+  return line.replace(LIST_MARKER, "").replace(DIRECTIVE_MARKUP, "").trim();
 }
 
 /** One comma-split directive value with the model's edge wrappers removed. Label
@@ -1076,6 +1076,17 @@ function bareDirectiveValue(part: string): string {
   );
 }
 
+/** Whether a `DIRECTIVE_LINE` match is really a prose list item: a BULLETED
+ *  `Closes:`/`Relates:` line with a value holding internal whitespace, which no
+ *  issue ref or Jira key has. `Labels:` is exempt because label names may contain
+ *  spaces. */
+function isBulletedRefProse(line: string, m: RegExpMatchArray): boolean {
+  if (m[3].toLowerCase() === "labels" || !LIST_MARKER.test(line)) return false;
+  return (m[4] ?? "")
+    .split(",")
+    .some((part) => /\s/.test(bareDirectiveValue(part)));
+}
+
 /**
  * Splits a (possibly still streaming) PR/MR response into title, body, validated
  * label NAMES, and validated `closes` / `relates` issue numbers. Reuses
@@ -1086,9 +1097,11 @@ function bareDirectiveValue(part: string): string {
  *   and `normalizeDirectiveLine` so list markers and bold/code markup don't hide a
  *   directive; first-from-end wins per kind and a repeat of a seen kind STOPS the
  *   loop. It runs on EVERY chunk so a partial line never flickers into the rendered
- *   body — which is why the peel is unconditional even with no candidates fed; a
- *   prose final line starting with one of those tokens is deliberately sacrificed to
- *   that guarantee.
+ *   body — which is why the peel is unconditional even with no candidates fed; an
+ *   un-bulleted prose final line starting with one of those tokens is deliberately
+ *   sacrificed to that guarantee. A BULLETED `Closes:`/`Relates:` line whose value
+ *   holds internal whitespace ({@link isBulletedRefProse}) stays body instead, on
+ *   every chunk alike, so it shows once its second word streams in.
  * - Labels match case-insensitively against `availableLabels`, trying three forms of
  *   each value in order: as written, edge-unwrapped, then also without trailing
  *   sentence punctuation. They come back in the repo's canonical casing; anything not
@@ -1132,15 +1145,17 @@ export function extractPrDraft(
   let bodyEnd = lines.length;
   let cursor = lines.length - 1;
   while (cursor >= 0) {
-    if (lines[cursor].trim() === "") {
+    const trimmed = lines[cursor].trim();
+    if (trimmed === "") {
       cursor--;
       continue;
     }
-    const line = normalizeDirectiveLine(lines[cursor].trim());
+    const line = normalizeDirectiveLine(trimmed);
     // Require the colon so a normal sentence merely starting with the keyword
     // (e.g. "Closes the gap …") is not mistaken for a directive line; the nascent
     // pre-colon case is handled just below.
-    const m = lines[cursor].trim().match(DIRECTIVE_LINE);
+    const m = trimmed.match(DIRECTIVE_LINE);
+    if (m && isBulletedRefProse(trimmed, m)) break;
     // A trailing bare `Labels`/`Closes`/`Relates` prefix mid-stream (no colon
     // yet) also counts as a nascent line to strip so it doesn't briefly render.
     const nascent =

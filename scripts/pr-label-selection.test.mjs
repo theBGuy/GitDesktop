@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   applyAiProposal,
   deriveSelectedLabels,
+  namesForTarget,
   sameLabelTarget,
   toggleLabelSets,
 } from "../src/features/pulls/pr-label-selection.ts";
@@ -35,6 +36,23 @@ test("targets match only on the same repo AND the same lens", () => {
   assert.equal(sameLabelTarget(FORK, PARENT), false);
   // both differ
   assert.equal(sameLabelTarget(FORK, OTHER_REPO_PARENT), false);
+});
+
+test("a finished run's dropped names show only under the run's own target", () => {
+  // The dialog stamps `final.droppedLabels` with the run's target; a parent run
+  // that dropped names must not surface them under the fork's picker.
+  const dropped = applyAiProposal(["needs-triage", "p1"], PARENT);
+  assert.deepEqual(namesForTarget(dropped, PARENT), ["needs-triage", "p1"]);
+  for (const current of [FORK, OTHER_REPO, OTHER_REPO_PARENT])
+    assert.deepEqual(
+      namesForTarget(dropped, current),
+      [],
+      JSON.stringify(current),
+    );
+  // Cleared (reseed or a new run) shows nothing anywhere.
+  assert.deepEqual(namesForTarget(null, PARENT), []);
+  // A run that dropped nothing shows nothing on its own target either.
+  assert.deepEqual(namesForTarget(applyAiProposal([], FORK), FORK), []);
 });
 
 test("proposals of 0, 1 and 3 names derive as given under their own target", () => {

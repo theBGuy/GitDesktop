@@ -107,8 +107,25 @@ export function extractResolvedContent(raw: string): string {
     const afterOpen = text.indexOf("\n", open);
     const close = text.lastIndexOf("```");
     if (afterOpen !== -1 && close > afterOpen) {
-      return text.slice(afterOpen + 1, close).replace(/\n$/, "");
+      // `\r?`: a CRLF response must not leave a dangling `\r` on the last line.
+      return text.slice(afterOpen + 1, close).replace(/\r?\n$/, "");
     }
   }
-  return text.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "");
+  return text.replace(/^```[^\n]*\n?/, "").replace(/(?:\r?\n)?```$/, "");
+}
+
+/**
+ * Gives an extracted proposal the trailing newline `reference` (the side it is
+ * reviewed against) ends with. Extraction trims the fenced body's final newline,
+ * and the accept writes content as-is, so without this every accepted file would
+ * lose it. Only ever adds, in the proposal's own line-ending style; a proposal
+ * that already ends in a newline, and an empty one, come back unchanged.
+ */
+export function withReferenceTrailingNewline(
+  proposal: string,
+  reference: string,
+): string {
+  if (proposal === "" || proposal.endsWith("\n") || !reference.endsWith("\n"))
+    return proposal;
+  return proposal + (proposal.includes("\r\n") ? "\r\n" : "\n");
 }

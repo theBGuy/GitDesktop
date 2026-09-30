@@ -98,6 +98,7 @@ import {
   applyAiProposal,
   deriveSelectedLabels,
   type LabelTargetSig,
+  namesForTarget,
   sameLabelTarget,
   toggleLabelSets,
 } from "./pr-label-selection";
@@ -266,8 +267,10 @@ export function CreatePrDialog({
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
   // Label names a FINISHED generation proposed that the repo doesn't have — only
   // ever set from the resolved draft, since a mid-stream chunk can hold a
-  // half-streamed name that would flash as a mismatch.
-  const [droppedLabels, setDroppedLabels] = useState<string[]>([]);
+  // half-streamed name that would flash as a mismatch. Stamped with the run's
+  // target like the proposal: the names were checked against that target's
+  // labels, so the hint shows only while the dialog is on it.
+  const [droppedLabels, setDroppedLabels] = useState<AiLabelProposal>(null);
 
   // Linked issues: repo issues referenced on create (extraction-seeded, AI-proposed
   // or manual). They become `Closes #N`/`Relates to #N` body LINES, not create-
@@ -727,7 +730,7 @@ export function CreatePrDialog({
     setReviewers([]);
     setAiProposal(null);
     setLabelEdits(NO_LABEL_EDITS);
-    setDroppedLabels([]);
+    setDroppedLabels(null);
     setAssignees([]);
     // Reset the linked-issue chips (and their dismissed/probed refs) — the create
     // dialog opens with no seeded body refs; extraction/AI seeding repopulates.
@@ -939,11 +942,12 @@ export function CreatePrDialog({
   const selectedChips = (repoLabels.data ?? []).filter((l) =>
     selectedLabels.has(l.name),
   );
+  const shownDroppedLabels = namesForTarget(droppedLabels, labelTarget);
 
   // AI title+description generation — shared by the Generate button and the
   // dialog-local generate chord.
   function runGenerate() {
-    setDroppedLabels([]);
+    setDroppedLabels(null);
     // The target this run's labels and issue candidates are validated against —
     // the one `repoLabels` and `buildIssueCandidates` feed the prompt below.
     const runTarget = labelTarget;
@@ -1002,7 +1006,7 @@ export function CreatePrDialog({
     ).then(
       (final) => {
         if (final) {
-          setDroppedLabels(final.droppedLabels);
+          setDroppedLabels(applyAiProposal(final.droppedLabels, runTarget));
           // The post-stream label pick arrives only here, so title and body the
           // user edited meanwhile stay theirs. It replaces the streamed proposal
           // under the same target stamp.
@@ -1336,8 +1340,8 @@ export function CreatePrDialog({
                       // label pick runs, so say what the wait is for.
                       case pickingLabels:
                         return "Choosing labels…";
-                      case droppedLabels.length > 0:
-                        return droppedLabelsHint(droppedLabels);
+                      case shownDroppedLabels.length > 0:
+                        return droppedLabelsHint(shownDroppedLabels);
                       default:
                         return "";
                     }

@@ -17,6 +17,7 @@ import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   buildConflictPrompt,
   extractResolvedContent,
+  withReferenceTrailingNewline,
 } from "@/lib/ai/conflict-prompt";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";
@@ -143,7 +144,12 @@ export function ConflictResolveView({
       return;
     }
 
-    const merged = extractResolvedContent(textRef.current);
+    // The diff's own reference side decides the trailing newline; a modify/delete
+    // with no OURS falls back to the surviving file on disk.
+    const merged = withReferenceTrailingNewline(
+      extractResolvedContent(textRef.current),
+      resolved.ours ?? resolved.working,
+    );
     if (!merged.trim()) {
       // Nothing usable came back (empty response / immediate cancel) — let the
       // user retry rather than showing an empty diff.
@@ -157,6 +163,7 @@ export function ConflictResolveView({
     }
     if (gen !== genRef.current) return;
     setPreviewDiff(diffText);
+    // An empty diff (identical to ours) opens on the proposed file, like no diff.
     setView(diffText ? "diff" : "proposed");
     setPhase("ready");
   }
@@ -248,8 +255,12 @@ export function ConflictResolveView({
     : "the review model";
   const model = reviewAi?.model || "review model";
 
+  // `git diff --no-index` prints nothing for identical files. That empty diff gets
+  // no tab (it would render blank) and a caption instead. The switcher only
+  // mounts once the diff is settled, so the tab never vanishes under focus.
+  const matchesOurs = previewDiff === "";
   const sideViews: { key: ViewKey; label: string; body: string | null }[] = [
-    { key: "diff", label: "Diff", body: previewDiff },
+    { key: "diff", label: "Diff", body: matchesOurs ? null : previewDiff },
     { key: "proposed", label: "Proposed", body: proposed },
     { key: "ours", label: "Ours", body: sides?.ours ?? null },
     { key: "theirs", label: "Theirs", body: sides?.theirs ?? null },
@@ -313,9 +324,16 @@ export function ConflictResolveView({
               ))}
           </ButtonGroup>
           <span className="ml-auto text-[11px] text-muted-foreground">
-            {view === "diff"
-              ? "Proposed changes vs. your side"
-              : "Full file (read-only)"}
+            {(() => {
+              switch (true) {
+                case view === "diff":
+                  return "Proposed changes vs. your side";
+                case matchesOurs && view === "proposed":
+                  return "Matches your side exactly, so accepting keeps your version";
+                default:
+                  return "Full file (read-only)";
+              }
+            })()}
           </span>
         </div>
       )}

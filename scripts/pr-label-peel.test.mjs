@@ -292,6 +292,58 @@ test("a prose final line is still body, and reports no Labels line", () => {
   assert.equal(d.labelsAnswered, false);
 });
 
+test("a bulleted Closes/Relates line with a prose value stays in the body", () => {
+  for (const trailer of [
+    "- Closes: the gap where the cache outlived the repo.",
+    "- Relates: see the earlier discussion",
+    "* **Closes:** the flaky retry path",
+    "- Closes: #12, and the follow-up",
+    // Streaming: from the value's second word on, every chunk keeps the line.
+    "- Closes: the gap",
+  ]) {
+    const d = extractPrDraft(draft(trailer), LABELS, [12], ["ABC-12"]);
+    assert.equal(d.body, `Guards the null path.\n\n${trailer}`, trailer);
+    assert.deepEqual(d.closes, [], trailer);
+    assert.deepEqual(d.relates, [], trailer);
+  }
+  // A Labels line peeled BELOW the prose bullet still peels; the bullet stops the
+  // walk, so it and everything above it stay body.
+  const d = extractPrDraft(
+    draft("- Closes: the stale cache\nLabels: bug"),
+    LABELS,
+    [12],
+  );
+  assert.equal(d.body, "Guards the null path.\n\n- Closes: the stale cache");
+  assert.deepEqual(d.labels, ["bug"]);
+});
+
+test("bulleted ref-shaped Closes/Relates lines and spaced label names still peel", () => {
+  for (const [trailer, closes, relates] of [
+    ["- Closes: #12", [12], []],
+    ["- Closes: #12, #14", [12, 14], []],
+    ["- Relates: #14, ABC-12", [], [14]],
+    ["* Closes: `#12`.", [12], []],
+  ]) {
+    const d = extractPrDraft(draft(trailer), LABELS, [12, 14], ["ABC-12"]);
+    assert.equal(d.body, "Guards the null path.", trailer);
+    assert.deepEqual(d.closes, closes, trailer);
+    assert.deepEqual(d.relates, relates, trailer);
+  }
+  // Labels is exempt from the whitespace gate: repo label names contain spaces.
+  const labels = extractPrDraft(draft("- Labels: Needs Review"), LABELS);
+  assert.equal(labels.body, "Guards the null path.");
+  assert.deepEqual(labels.labels, ["Needs Review"]);
+});
+
+test("an UN-bulleted prose Closes line is still sacrificed to the peel (negative control)", () => {
+  // The documented trade: only the list-marker form earns the whitespace gate.
+  const d = extractPrDraft(draft("Closes: prose here"), LABELS, [12]);
+  assert.equal(d.body, "Guards the null path.");
+  assert.deepEqual(d.closes, []);
+  const relates = extractPrDraft(draft("**Relates:** the old thread"), LABELS);
+  assert.equal(relates.body, "Guards the null path.");
+});
+
 test("a Labels line counts only when it resolves to an answer", () => {
   for (const [trailer, answered] of [
     ["Labels:", false],

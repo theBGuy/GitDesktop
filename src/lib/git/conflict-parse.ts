@@ -10,7 +10,13 @@
  *   ||||||| <label>      common ancestor (diff3 only) — parsed and skipped
  *   =======              separator
  *   >>>>>>> <label>      incoming / theirs
+ *
+ * Also classifies a file the parser found no regions in (`fallbackArm`). Imports
+ * stay type-only: scripts/conflict-markers.test.mjs loads this file through
+ * Node's type stripping, which resolves no aliases or extensionless paths.
  */
+
+import type { ConflictSides } from "./conflict";
 
 export interface ConflictBlock {
   /** Current side (ours / HEAD) content; "" if that side is empty. */
@@ -60,11 +66,12 @@ function isAnyMarker(line: string): boolean {
 }
 
 /** Whether unresolved conflict markers remain — the staging gate for the two
- *  content-writing accepts (the AI accept and per-region accept), and the check
+ *  content-writing accepts (the AI accept and per-region accept), the check
  *  that keeps a marker-bearing file off ConflictFileView's externally-resolved
- *  arm. It differs from `isAnyMarker` on two axes, both deliberate. Narrower on
- *  `=`: only the angle and pipe markers count, since a bare `=======` can be a
- *  markdown underline and staging must not refuse on one. Wider on run length:
+ *  arm, and Mark resolved's confirm (`markNeedsConfirm`). It differs from
+ *  `isAnyMarker` on two axes, both deliberate. Narrower on `=`: only the angle
+ *  and pipe markers count, since a bare `=======` can be a markdown underline
+ *  and staging must not refuse on one. Wider on run length:
  *  7 or more, because a `conflict-marker-size` attribute lengthens git's
  *  markers and the exactly-7 parser never reads those as regions. */
 export function hasConflictMarkers(text: string): boolean {
@@ -198,4 +205,79 @@ export function resolveBlock(
 /** Count of conflict blocks in a parsed segment list. */
 export function conflictCount(segments: Segment[]): number {
   return segments.reduce((n, s) => n + (s.kind === "conflict" ? 1 : 0), 0);
+}
+
+/** Compare working text against a stage blob EOL-agnostically: under autocrlf
+ *  `git show :N:path` hands back raw LF while the merge wrote the working file
+ *  CRLF, so a byte comparison calls every file edited. */
+const nlf = (s: string) => s.replaceAll("\r\n", "\n");
+
+/** Which side has no version at this path, when exactly one of them does — the
+ *  modify/delete shape. `null` for a content conflict (both sides present) and
+ *  when both are absent, neither of which is about a removal to accept. */
+export function deletedSide(sides: ConflictSides): "ours" | "theirs" | null {
+  const ourGone = sides.ours == null;
+  if (ourGone === (sides.theirs == null)) return null;
+  return ourGone ? "ours" : "theirs";
+}
+
+/** The states a conflicted file can be in once the parser found no regions. */
+export type FallbackArm =
+  | "deletion"
+  | "deletionEdited"
+  | "bothDeleted"
+  | "emptiedOnDisk"
+  | "emptiedGone"
+  | "externallyResolved"
+  | "unparsed";
+
+/** The arms that offer Mark resolved, staging what's on disk as-is. `unparsed`
+ *  is among them because markers the parser can't read leave no per-region way
+ *  through; {@link markNeedsConfirm} puts a confirm in front of any stage that
+ *  would carry markers. */
+export const MARK_RESOLVED_ARMS: ReadonlySet<FallbackArm> =
+  new Set<FallbackArm>([
+    "deletionEdited",
+    "emptiedOnDisk",
+    "emptiedGone",
+    "externallyResolved",
+    "unparsed",
+  ]);
+
+export function fallbackArm(sides: ConflictSides): FallbackArm {
+  // The index stages decide first: a modify/delete leaves the SURVIVING side's
+  // content in the tree, marker-free, so the parser's null here means a removal
+  // to accept rather than markers it failed on. Ordered ahead of the empty-file
+  // check, which is a heuristic and would swallow a surviving side that is empty.
+  const deleted = deletedSide(sides);
+  if (deleted !== null) {
+    const survivor = sides.ours ?? sides.theirs ?? "";
+    const edited = sides.workingExists && nlf(sides.working) !== nlf(survivor);
+    return edited ? "deletionEdited" : "deletion";
+  }
+
+  if (sides.working.trim() === "") {
+    if (sides.ours == null && sides.theirs == null) return "bothDeleted";
+    return sides.workingExists ? "emptiedOnDisk" : "emptiedGone";
+  }
+
+  // Both stage checks are explicit rather than left to the arms above: an entry
+  // with no stages at all but real content is a file we can't classify, and it
+  // must land on the couldn't-parse arm instead of being called resolved.
+  if (
+    sides.ours != null &&
+    sides.theirs != null &&
+    !hasConflictMarkers(sides.working)
+  ) {
+    return "externallyResolved";
+  }
+
+  return "unparsed";
+}
+
+/** Whether Mark resolved must confirm before staging: the working file still
+ *  holds conflict markers. Staging is a plain `git add`, so without this an
+ *  edited deletion survivor or an unparsed file would stage its markers. */
+export function markNeedsConfirm(sides: ConflictSides): boolean {
+  return hasConflictMarkers(sides.working);
 }

@@ -15,6 +15,16 @@ export function sameLabelTarget(a: LabelTargetSig, b: LabelTargetSig): boolean {
   return a.repoPath === b.repoPath && a.lens === b.lens;
 }
 
+/** The names of a target-stamped list (a proposal, or a finished run's dropped
+ *  names) that apply under `current`: all of them on the stamp's own target,
+ *  none on any other. */
+export function namesForTarget(
+  stamped: AiLabelProposal,
+  current: LabelTargetSig,
+): string[] {
+  return stamped && sameLabelTarget(stamped.sig, current) ? stamped.names : [];
+}
+
 /** A proposal REPLACES the previous one: every stream chunk is a parse of the
  *  whole buffer so far, so the latest parse supersedes a half-typed name an
  *  earlier chunk matched, and never re-adds one the model has since dropped. */
@@ -57,9 +67,8 @@ export function deriveSelectedLabels(input: {
   current: LabelTargetSig;
 }): Set<string> {
   const { ai, added, removed, current } = input;
-  const proposed = ai && sameLabelTarget(ai.sig, current) ? ai.names : [];
   const selected = new Set<string>();
-  for (const name of [...proposed, ...added])
+  for (const name of [...namesForTarget(ai, current), ...added])
     if (!removed.has(name)) selected.add(name);
   return selected;
 }

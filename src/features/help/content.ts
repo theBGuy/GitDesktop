@@ -1009,8 +1009,10 @@ a file, the editor names the removal instead of showing regions, and the same wh
 accept actions choose between keeping the file and taking the deletion; when you've edited
 the surviving file yourself, **Mark resolved** keeps that edit. A file you resolved outside
 GitDesktop (its conflict markers gone, but Git still listing it as conflicted) offers
-**Mark resolved** too, staging it exactly as it is on disk, and so does one you emptied, or
-deleted while both sides still have a version of it. The command palette offers all of
+**Mark resolved** too, staging it exactly as it is on disk, and so does one you emptied,
+deleted while both sides still have a version of it, or left with markers the editor can't
+split into regions. **Mark resolved** asks before staging a file that still has conflict
+markers, giving you the chance to clean them up first. The command palette offers all of
 these as **Mark conflict resolved**.
 
 {{ai}}## Resolve conflicts with AI
@@ -1024,9 +1026,10 @@ it — nothing is written until you accept. **Regenerate** for another attempt, 
 **Discard** to drop the proposal. When a proposal still has conflict markers, a warning
 says so and the button reads **Accept**: it writes the file but leaves it unstaged and
 moves on. The file stays listed as conflicted: finish it in the conflict editor, or
-edit it yourself and **Mark resolved**. The banner's **Resolve all with AI** walks every
-conflict in turn — the walk keeps its place while you peek at another tab (switching
-repositories ends it). It runs on any provider, including local Ollama and keyless
+remove the markers yourself and **Mark resolved**. When the markers left can't be split
+into regions, **Mark resolved** is offered right away and asks before staging them. The
+banner's **Resolve all with AI** walks every conflict in turn — the walk keeps its place
+while you peek at another tab (switching repositories ends it). It runs on any provider, including local Ollama and keyless
 Claude Code / Codex agents, and skips files matched by your AI ignore patterns.{{/ai}}`,
   },
   {

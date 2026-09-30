@@ -123,6 +123,13 @@ export function CollaboratorsSection({
 
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];
+  // A personal repo's owner is listed as a collaborator but can't be removed.
+  // Unknown until settings resolve, so every row keeps Remove until then; an
+  // org-owned repo has no owner row.
+  const ownerLogin =
+    settings.data && !settings.data.isOrg
+      ? settings.data.fullName.split("/")[0].toLowerCase()
+      : null;
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -257,11 +264,18 @@ export function CollaboratorsSection({
         >
           {collabRows.map((c, i) => {
             const key = `collab:${c.login}`;
+            const owner = c.login.toLowerCase() === ownerLogin;
             return (
               <PersonRow
                 key={c.login}
                 login={c.login}
                 avatarUrl={c.avatarUrl}
+                meta={owner ? "Owner" : undefined}
+                removeHeld={
+                  owner
+                    ? `${c.login} owns this repository and can't be removed`
+                    : undefined
+                }
                 dataKey={c.login}
                 dataAttr="data-collab"
                 active={i === activeCollab}
@@ -417,6 +431,7 @@ function PersonRow({
   login,
   avatarUrl,
   meta,
+  removeHeld,
   dataKey,
   dataAttr,
   active,
@@ -434,6 +449,8 @@ function PersonRow({
   login: string;
   avatarUrl: string;
   meta?: string;
+  /** Why this person can't be removed; unset leaves Remove enabled. */
+  removeHeld?: string;
   dataKey: string;
   dataAttr: string;
   active: boolean;
@@ -484,15 +501,29 @@ function PersonRow({
             heldReason={roleHeld}
             onRole={onRole}
           />
-          <Button
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-destructive"
-            onClick={onConfirm}
-            title="Remove"
-          >
-            <XIcon />
-          </Button>
+          {removeHeld !== undefined ? (
+            <DisabledReasonButton
+              size="sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              disabled
+              reason={removeHeld}
+              aria-label={`Remove ${login}`}
+            >
+              <XIcon />
+            </DisabledReasonButton>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={onConfirm}
+              title="Remove"
+              aria-label={`Remove ${login}`}
+            >
+              <XIcon />
+            </Button>
+          )}
         </>
       )}
     </div>

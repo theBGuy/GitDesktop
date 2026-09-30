@@ -9,7 +9,12 @@ import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import type { ConflictSides } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
+  deletedSide,
+  type FallbackArm,
+  fallbackArm,
   hasConflictMarkers,
+  MARK_RESOLVED_ARMS,
+  markNeedsConfirm,
   parseConflictSegments,
   resolveBlock,
 } from "@/lib/git/conflict-parse";
@@ -31,11 +36,6 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 
 const baseName = (path: string) => path.split("/").pop() || path;
-
-/** Compare working text against a stage blob EOL-agnostically: under autocrlf
- *  `git show :N:path` hands back raw LF while the merge wrote the working file
- *  CRLF, so a byte comparison calls every file edited. */
-const nlf = (s: string) => s.replaceAll("\r\n", "\n");
 
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
@@ -62,15 +62,6 @@ const ACCEPT_ALL_BODY: Record<
     `Keeps ${name} whole as the ${side} side left it, replacing what's in your working tree now. The ${other} side removed the file, and that removal is discarded.`,
 };
 
-/** Which side has no version at this path, when exactly one of them does — the
- *  modify/delete shape. `null` for a content conflict (both sides present) and
- *  when both are absent, neither of which is about a removal to accept. */
-function deletedSide(sides: ConflictSides): "ours" | "theirs" | null {
-  const ourGone = sides.ours == null;
-  if (ourGone === (sides.theirs == null)) return null;
-  return ourGone ? "ours" : "theirs";
-}
-
 /** The notice per removing side. "Removed" rather than "deleted": a side that
  *  renamed the file away also has no version at this path. */
 const DELETION_COPY = {
@@ -85,25 +76,6 @@ const DELETION_COPY = {
     keepsFile: "Accept all current",
   },
 } as const;
-
-/** The states a conflicted file can be in once the parser found no regions. */
-type FallbackArm =
-  | "deletion"
-  | "deletionEdited"
-  | "bothDeleted"
-  | "emptiedOnDisk"
-  | "emptiedGone"
-  | "externallyResolved"
-  | "unparsed";
-
-/** The arms where what's on disk IS the resolution, so staging it as-is is the
- *  way through. Every other arm routes through the header's whole-file accepts. */
-const MARK_RESOLVED_ARMS: ReadonlySet<FallbackArm> = new Set<FallbackArm>([
-  "deletionEdited",
-  "emptiedOnDisk",
-  "emptiedGone",
-  "externallyResolved",
-]);
 
 /** The two working-file states with no text to show, each worded for what
  *  staging it actually records (content vs. a removal). */
@@ -121,43 +93,12 @@ const EMPTIED_COPY: Record<
   },
 };
 
-function fallbackArm(sides: ConflictSides): FallbackArm {
-  // The index stages decide first: a modify/delete leaves the SURVIVING side's
-  // content in the tree, marker-free, so the parser's null here means a removal
-  // to accept rather than markers it failed on. Ordered ahead of the empty-file
-  // check, which is a heuristic and would swallow a surviving side that is empty.
-  const deleted = deletedSide(sides);
-  if (deleted !== null) {
-    const survivor = sides.ours ?? sides.theirs ?? "";
-    const edited = sides.workingExists && nlf(sides.working) !== nlf(survivor);
-    return edited ? "deletionEdited" : "deletion";
-  }
-
-  if (sides.working.trim() === "") {
-    if (sides.ours == null && sides.theirs == null) return "bothDeleted";
-    return sides.workingExists ? "emptiedOnDisk" : "emptiedGone";
-  }
-
-  // Both stage checks are explicit rather than left to the arms above: an entry
-  // with no stages at all but real content is a file we can't classify, and it
-  // must land on the couldn't-parse arm instead of being called resolved.
-  if (
-    sides.ours != null &&
-    sides.theirs != null &&
-    !hasConflictMarkers(sides.working)
-  ) {
-    return "externallyResolved";
-  }
-
-  return "unparsed";
-}
-
 /**
  * What a conflicted file shows when the parser found no regions to resolve: a
  * side with no version at this path, an empty file, content already resolved
  * outside the app, or markers it can't trust. Each keeps the header's
- * whole-file actions as the way through; the arms whose disk content is itself
- * the resolution also offer Mark resolved.
+ * whole-file actions as the way through; the arms in `MARK_RESOLVED_ARMS` also
+ * offer Mark resolved, which confirms first while markers remain.
  */
 function ConflictFallback({
   path,
@@ -182,6 +123,7 @@ function ConflictFallback({
       Mark resolved
     </Button>
   ) : null;
+  const markersRemain = markNeedsConfirm(sides);
 
   if (arm === "deletion" || arm === "deletionEdited") {
     // The arm doesn't carry WHICH side removed the file, and the notice names
@@ -202,6 +144,8 @@ function ConflictFallback({
               {lead} You've edited this file —{" "}
               <span className="font-medium">Mark resolved</span> keeps it
               exactly as shown.
+              {markersRemain &&
+                " It still has conflict markers, so you'll be asked before they're staged."}
             </p>
             {markButton}
           </div>
@@ -257,14 +201,30 @@ function ConflictFallback({
   }
 
   // Couldn't parse the markers cleanly (malformed or ambiguous, e.g. a bare
-  // 7-char marker inside the content) — show the raw file so nothing is hidden,
-  // and keep the whole-file actions in the header.
+  // 7-char marker inside the content) — show the raw file so nothing is hidden.
+  // The markerless form is an entry with no index stages but real content.
   return (
     <>
-      <p className="border-b bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
-        Couldn't cleanly parse the conflict markers in this file. Resolve it
-        with the header actions or in your editor.
-      </p>
+      <div className="flex items-center gap-2 border-b bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+        <p className="min-w-0 flex-1">
+          {markersRemain ? (
+            <>
+              Couldn't cleanly parse the conflict markers in this file. Resolve
+              it with the header actions or in your editor, then{" "}
+              <span className="font-medium">Mark resolved</span> to stage it.
+              While markers remain, you'll be asked before they're staged.
+            </>
+          ) : (
+            <>
+              Couldn't tell how this conflict should resolve. Review the file,
+              then <span className="font-medium">Mark resolved</span> to stage
+              it exactly as it is on disk, or take a side with the header
+              actions.
+            </>
+          )}
+        </p>
+        {markButton}
+      </div>
       <HighlightedCode path={path} content={sides.working} />
     </>
   );
@@ -381,7 +341,19 @@ export function ConflictFileView({
       : null;
   const canMarkResolved = arm !== null && MARK_RESOLVED_ARMS.has(arm);
 
+  // The button and the palette action both land here, so this is the one gate:
+  // staging is a plain `git add`, which would take any remaining markers along.
   async function markResolved() {
+    if (file.data && markNeedsConfirm(file.data)) {
+      const name = baseName(path);
+      const ok = await useConfirm.getState().ask({
+        title: `Stage ${name} with conflict markers?`,
+        body: `${name} still has conflict markers. Staging it marks the conflict resolved with the markers in the file, and they'll be committed unless you remove them first.`,
+        confirmLabel: "Stage anyway",
+        confirmVariant: "destructive",
+      });
+      if (!ok) return;
+    }
     try {
       await markResolve.mutateAsync(path);
       toast.success(`Resolved ${baseName(path)}`);
