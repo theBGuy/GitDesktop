@@ -4,7 +4,41 @@
 // joined into `aria-describedby`, hover text on a wrapper span. A reason-less
 // disable stays native rather than becoming a mute tab stop. JSX stays per-caller
 // (the vendored Button and a raw `<button>` differ); this owns the derivations.
-import { type MouseEventHandler, useId } from "react";
+import type { BaseUIEvent } from "@base-ui/react/types";
+import {
+  type MouseEventHandler,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useId,
+} from "react";
+
+type KeyChord = Pick<
+  KeyboardEvent,
+  "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey"
+>;
+
+/** A button's own activation gesture: a bare Enter or Space. Any modifier,
+ *  Shift included, makes it a chord the app may bind (mod+Enter commits) —
+ *  and a click the browser still synthesizes from one is refused by useButton's
+ *  onClick while disabled, so letting it through can't activate the button. */
+export function isActivationKey(e: KeyChord): boolean {
+  return (
+    (e.key === "Enter" || e.key === " ") &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !e.shiftKey
+  );
+}
+
+/** keydown for the `render` element of a Base UI button that is disabled and
+ *  `focusableWhenDisabled`. Base UI preventDefaults every key but Tab there, and
+ *  the window hotkey and Escape listeners skip prevented events — so every key
+ *  but activation skips its handler, leaving activation the only swallow. */
+export function passThroughNonActivationKeys(
+  e: BaseUIEvent<ReactKeyboardEvent<HTMLButtonElement>>,
+) {
+  if (!isActivationKey(e)) e.preventBaseUIHandler();
+}
 
 /** The dim `aria-disabled` needs: the vendored `disabled:` variants can't see
  *  it, and it lifts under focus so a keyboard user isn't left tracking a

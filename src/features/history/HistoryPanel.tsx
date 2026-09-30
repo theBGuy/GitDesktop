@@ -412,6 +412,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               the log lands. */}
           <Input
             disabled
+            value={filterText}
             placeholder={FILTER_PLACEHOLDER}
             className="h-7"
             autoComplete="off"

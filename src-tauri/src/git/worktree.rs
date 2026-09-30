@@ -110,6 +110,18 @@ fn build_session_worktree_add_args<'a>(
     vec!["worktree", "add", "--no-track", "-b", branch, path, base]
 }
 
+/// The start point a new worktree branches from: trimmed, `HEAD` when absent or
+/// blank, and otherwise through the shared ref chokepoint before it reaches argv,
+/// where a leading `-` would parse as a `worktree add` option.
+fn worktree_base_ref(base: Option<&str>) -> AppResult<&str> {
+    let base = base
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HEAD");
+    crate::git::branches::validate_ref_name(base)?;
+    Ok(base)
+}
+
 /// Creates a throwaway worktree off `base_ref` (default HEAD) on a fresh
 /// `gd/session/<id>` branch, under the app-data worktree root. Returns the new
 /// worktree's id/path/branch.
@@ -120,17 +132,13 @@ pub async fn git_worktree_create(
     repo_path: String,
     base_ref: Option<String>,
 ) -> AppResult<WorktreeInfo> {
+    let base = worktree_base_ref(base_ref.as_deref())?;
     let id = new_session_id();
     let branch = format!("gd/session/{id}");
     let root = worktree_root(&app, &repo_path)?;
     std::fs::create_dir_all(&root)?;
     let path = root.join(&id);
     let path_str = path.to_string_lossy().into_owned();
-    let base = base_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("HEAD");
     run_git_worktree_admin(
         &state,
         &repo_path,
@@ -280,11 +288,7 @@ pub async fn git_worktree_add_user(
             "{path} already exists — choose a new folder"
         )));
     }
-    let base = base_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("HEAD");
+    let base = worktree_base_ref(base_ref.as_deref())?;
     let mut args: Vec<&str> = vec!["worktree", "add"];
     if new_branch {
         args.extend_from_slice(&["-b", branch, path, base]);
@@ -1210,6 +1214,32 @@ prunable gitdir file points to non-existent location
                 "HEAD"
             ]
         );
+    }
+
+    /// Absent or blank defaults to HEAD, rev syntax passes, and anything git would
+    /// parse as an option never reaches the `worktree add` argv.
+    #[test]
+    fn worktree_base_ref_defaults_and_refuses_option_shapes() {
+        for (input, want) in [
+            (None, Some("HEAD")),
+            (Some(""), Some("HEAD")),
+            (Some("  "), Some("HEAD")),
+            (Some(" main "), Some("main")),
+            (Some("main~2"), Some("main~2")),
+            (Some("origin/main"), Some("origin/main")),
+            (Some("-x"), None),
+            (Some("--force"), None),
+            (Some(" --force"), None),
+        ] {
+            let got = worktree_base_ref(input);
+            match want {
+                Some(w) => assert_eq!(got.ok(), Some(w), "input {input:?}"),
+                None => assert!(
+                    matches!(got, Err(AppError::InvalidArgument(_))),
+                    "input {input:?} must be refused, got {got:?}"
+                ),
+            }
+        }
     }
 
     /// Under `branch.autoSetupMerge = always` a session branch created from the

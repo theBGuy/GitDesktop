@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import {
   ARIA_DISABLED_CLASS,
+  passThroughNonActivationKeys,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,8 @@ type DisabledReasonButtonProps = React.ComponentProps<typeof Button> & {
  * `<Trigger disabled render={<Button/>}/>` is hover-only, so keyboard/AT reach
  * takes `<Trigger render={<DisabledReasonButton disabled reason/>}/>` instead —
  * disabled on the button, never the trigger, whose open handler the inner
- * `useButton` then swallows.
+ * `useButton` then swallows. While blocked, focus on it keeps every key but
+ * activation reaching app hotkeys (`passThroughNonActivationKeys`).
  */
 export function DisabledReasonButton({
   reason,
@@ -54,6 +56,22 @@ export function DisabledReasonButton({
         title={title}
         className={cn(ARIA_DISABLED_CLASS, className)}
         aria-describedby={describedBy}
+        // A native <button> (nativeButton) with no `type`: render props merge
+        // last, so one here would override a caller's type="submit". No caller
+        // passes its own `render`, which this would replace while blocked.
+        // Pointer clicks never reach it (pointer-events-none), so onClick only
+        // sees clicks a let-through modified Enter/Space synthesizes: keep them
+        // off clickable ancestors. useButton's own preventDefault still runs.
+        render={
+          blockedReason ? (
+            <button
+              onKeyDown={passThroughNonActivationKeys}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            props.render
+          )
+        }
       />
       {blockedReason ? (
         <span id={reasonId} className="sr-only">
