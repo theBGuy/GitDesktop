@@ -17,10 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
-import {
-  offlinePendingMessage,
-  refreshFailed,
-} from "@/features/conversations/remote-section-state";
+import { reviewCommentsNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import type {
@@ -1079,11 +1076,12 @@ export function ReviewThreadList({
 /**
  * The residual "Review comments" block for the Conversation tab: the threads NOT
  * shown inline under a review — all threads on GitLab/Bitbucket (which don't model
- * reviews), plus standalone line comments on GitHub. Renders nothing when there are
- * none or while loading (the data arrives after the PR body, so a spinner would
- * only cause layout shift). A failed or parked read never replaces cached threads:
- * a notice sits above them instead. `heading` lets the caller retitle it when
- * reviews DID claim threads above.
+ * reviews), plus standalone line comments on GitHub. A healthy read with no threads,
+ * or one still loading, shows nothing visible (the data arrives after the PR body,
+ * so a spinner would only cause layout shift). A failed or parked read shows a
+ * notice between the heading and the list and never replaces threads already
+ * loaded; {@link reviewCommentsNotice} picks its line. `heading` lets the caller
+ * retitle the block when reviews DID claim threads above.
  */
 export function ReviewThreadsBlock({
   threads,
@@ -1134,24 +1132,11 @@ export function ReviewThreadsBlock({
   onRevealed?: () => void;
 } & ThreadCallbacks) {
   const drawn = threads !== undefined && threads.length > 0;
-  const failed = refreshFailed({ isError, isPaused });
-  // A loaded empty answer stays quiet offline, like a list's empty rung.
-  const notice = ((): string | null => {
-    switch (true) {
-      case failed && drawn:
-        return "Couldn't refresh review comments — showing the last loaded ones.";
-      case failed && threads !== undefined:
-        return "Couldn't refresh review comments.";
-      case failed:
-        return "Couldn't load review comments.";
-      case isPaused && drawn:
-        return "You're offline — showing the last loaded review comments.";
-      case isPaused && threads === undefined:
-        return offlinePendingMessage("review comments");
-      default:
-        return null;
-    }
-  })();
+  const notice = reviewCommentsNotice({
+    threadCount: threads?.length,
+    isError,
+    isPaused,
+  });
   // Nothing visible while loading (undefined) or when there are no threads.
   const idle = !drawn && notice === null;
 
@@ -1172,8 +1157,8 @@ export function ReviewThreadsBlock({
       <DegradedListNotice
         noun="review comments"
         degraded={notice !== null}
-        message={notice ?? undefined}
-        onRetry={failed ? onRetry : undefined}
+        message={notice?.message}
+        onRetry={notice?.retry ? onRetry : undefined}
         className="px-0 pb-0"
       />
       {drawn && (

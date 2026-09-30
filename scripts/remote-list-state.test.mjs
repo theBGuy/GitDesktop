@@ -17,6 +17,7 @@ import {
   guardedLimit,
   guardObservation,
   initialLoadMoreGuard,
+  isPermanentListError,
   listNotice,
   normalizeNoticeMessage,
   OFFLINE_ROWS_NOTICE,
@@ -24,6 +25,7 @@ import {
   refreshFailed,
   resolveDetailPane,
   resolveRemoteSection,
+  reviewCommentsNotice,
   stepLoadMoreGuard,
 } from "../src/features/conversations/remote-section-state.ts";
 
@@ -194,6 +196,113 @@ test("a failed read parked offline lands the list on the detail pane's rung", ()
     });
     assert.equal(PANE_FOR_LIST[list], pane, JSON.stringify({ rowCount, list }));
   }
+});
+
+test("only a disabled feature or a refused filter reads as permanent", () => {
+  assert.equal(
+    isPermanentListError({ kind: "issuesDisabled", message: "" }),
+    true,
+  );
+  assert.equal(
+    isPermanentListError({ kind: "invalidArgument", message: "" }),
+    true,
+  );
+  // Negative control: transport and forge failures are transient here.
+  for (const kind of ["gh", "glab", "bitbucket", "jira", "io", "timeout"])
+    assert.equal(isPermanentListError({ kind, message: "" }), false, kind);
+  for (const value of [null, undefined, "issuesDisabled", {}, { kind: 5 }])
+    assert.equal(isPermanentListError(value), false, String(value));
+});
+
+// The ladder takes `paused` as given, so the permanence gate lives at the list
+// panels' call sites (`remotePaused={isPaused && !isPermanentListError(error)}`);
+// this drives the ladder through that same expression.
+test("a park never hides a permanent verdict with nothing drawn", () => {
+  const atCallSite = (error, isPaused) =>
+    resolveRemoteSection({
+      ghPending: false,
+      ghReady: true,
+      listPending: false,
+      error: true,
+      rowCount: 0,
+      paused: isPaused && !isPermanentListError(error),
+    });
+  const disabled = { kind: "issuesDisabled", message: "" };
+  const refused = { kind: "invalidArgument", message: "" };
+  assert.equal(atCallSite(disabled, true), "error");
+  assert.equal(atCallSite(refused, true), "error");
+  // Negative control: a transient failure parked still reads as offline.
+  assert.equal(atCallSite({ kind: "io", message: "" }, true), "offline");
+  assert.equal(atCallSite(disabled, false), "error");
+});
+
+/** The review-comments notice, rung by rung. */
+function expectedReviewNotice({ threadCount, isError, isPaused }) {
+  const failed = isError && !isPaused;
+  const drawn = threadCount !== undefined && threadCount > 0;
+  if (failed && drawn) return ["refresh-drawn", true];
+  if (failed && threadCount !== undefined) return ["refresh-empty", true];
+  if (failed) return ["load", true];
+  if (isPaused && drawn) return ["offline-drawn", false];
+  if (isPaused && threadCount === undefined) return ["offline-pending", false];
+  return null;
+}
+const REVIEW_LINES = {
+  "Couldn't refresh review comments — showing the last loaded ones.":
+    "refresh-drawn",
+  "Couldn't refresh review comments.": "refresh-empty",
+  "Couldn't load review comments.": "load",
+  "You're offline — showing the last loaded review comments.": "offline-drawn",
+  [offlinePendingMessage("review comments")]: "offline-pending",
+};
+
+test("every review-comments input resolves to its line (full truth table)", () => {
+  let cases = 0;
+  for (const threadCount of [undefined, 0, 1])
+    for (const isError of BOOLS)
+      for (const isPaused of BOOLS) {
+        const input = { threadCount, isError, isPaused };
+        const notice = reviewCommentsNotice(input);
+        assert.deepEqual(
+          notice === null
+            ? null
+            : [REVIEW_LINES[notice.message] ?? notice.message, notice.retry],
+          expectedReviewNotice(input),
+          JSON.stringify(input),
+        );
+        cases++;
+      }
+  assert.equal(cases, 12);
+});
+
+test("review comments: a park outranks the failure, and a loaded empty answer stays quiet", () => {
+  // Parked over a failure with threads drawn: the offline line, no Retry.
+  assert.deepEqual(
+    reviewCommentsNotice({ threadCount: 3, isError: true, isPaused: true }),
+    {
+      message: "You're offline — showing the last loaded review comments.",
+      retry: false,
+    },
+  );
+  // Parked over a loaded empty answer: nothing to say.
+  assert.equal(
+    reviewCommentsNotice({ threadCount: 0, isError: false, isPaused: true }),
+    null,
+  );
+  // A first load that fails online: the load line, with Retry.
+  assert.deepEqual(
+    reviewCommentsNotice({
+      threadCount: undefined,
+      isError: true,
+      isPaused: false,
+    }),
+    { message: "Couldn't load review comments.", retry: true },
+  );
+  // Negative control: healthy threads raise no notice at all.
+  assert.equal(
+    reviewCommentsNotice({ threadCount: 3, isError: false, isPaused: false }),
+    null,
+  );
 });
 
 /** The detail pane's ladder, rung by rung. */

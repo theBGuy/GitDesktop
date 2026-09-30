@@ -85,6 +85,65 @@ export function resolveRemoteSection(input: {
   return rowCount === 0 ? "empty" : "rows";
 }
 
+/** Error kinds a retry can't change for the same list key: a feature the repo
+ *  has turned off, or a filter the forge refuses. Reconnecting can't clear one
+ *  either, so a caller withholds `paused` from {@link resolveRemoteSection}
+ *  while one stands, keeping its explanation on screen instead of the
+ *  "will load once you're back online" line. Structural, since this file
+ *  stays import-free. */
+const PERMANENT_LIST_ERROR_KINDS: ReadonlySet<string> = new Set([
+  "issuesDisabled",
+  "invalidArgument",
+]);
+
+export function isPermanentListError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "kind" in error &&
+    typeof error.kind === "string" &&
+    PERMANENT_LIST_ERROR_KINDS.has(error.kind)
+  );
+}
+
+/** The one line the review-comments block shows, or null. `threadCount` is
+ *  the threads it draws, `undefined` until the read has loaded. A failure
+ *  offers Retry; a park never does, and it outranks the failure it follows.
+ *  A loaded empty answer stays quiet offline, like a list's empty rung. */
+export function reviewCommentsNotice(input: {
+  threadCount: number | undefined;
+  isError: boolean;
+  isPaused: boolean;
+}): { message: string; retry: boolean } | null {
+  const { threadCount, isPaused } = input;
+  const failed = refreshFailed(input);
+  const drawn = threadCount !== undefined && threadCount > 0;
+  switch (true) {
+    case failed && drawn:
+      return {
+        message:
+          "Couldn't refresh review comments — showing the last loaded ones.",
+        retry: true,
+      };
+    case failed && threadCount !== undefined:
+      return { message: "Couldn't refresh review comments.", retry: true };
+    case failed:
+      return { message: "Couldn't load review comments.", retry: true };
+    case isPaused && drawn:
+      return {
+        message: "You're offline — showing the last loaded review comments.",
+        retry: false,
+      };
+    case isPaused && threadCount === undefined:
+      return {
+        message: offlinePendingMessage("review comments"),
+        retry: false,
+      };
+    default:
+      return null;
+  }
+}
+
 export type ListNoticeCause = "refresh" | "load-more" | "offline";
 
 /** The one line a list's notice shows, or null when healthy. A failing or

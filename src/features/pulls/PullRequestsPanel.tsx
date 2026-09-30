@@ -26,6 +26,7 @@ import { ConversationListPanel } from "@/features/conversations/ConversationList
 import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
+import { isPermanentListError } from "@/features/conversations/remote-section-state";
 import {
   type ReviewGroupKind,
   useCollapsedSections,
@@ -1108,28 +1109,33 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             {/* The filter refusals this panel can provoke — a fan-out too wide for
                 the provider, a rejected author/label/team term, an advanced search
                 the host doesn't offer — are PERMANENT, and each already carries the
-                sentence that says how to get out of it. Retry stays for the
-                transient half, which can't tell itself apart from here. */}
+                sentence that says how to get out of it. Retry is withheld from the
+                ones typed as permanent and stays for the rest, which can't tell a
+                refusal from a transient failure. */}
             {prList.error != null && (
               <p className="text-[11px]">
                 {presentError(prList.error).summary}
               </p>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer"
-              onClick={refreshPrList}
-            >
-              Retry
-            </Button>
+            {!isPermanentListError(prList.error) && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={refreshPrList}
+              >
+                Retry
+              </Button>
+            )}
           </div>
         }
         // Both Retries take the toolbar's refresh: the CI, mergeability and
         // review-state chips are separate reads, and an errored one whose key
         // is unchanged is never re-run by a refetch of the list alone.
         remoteRetry={refreshPrList}
-        remotePaused={prList.isPaused}
+        // A park can't clear a refused filter, so its explanation stays up
+        // instead of the offline line.
+        remotePaused={prList.isPaused && !isPermanentListError(prList.error)}
         remotePlaceholder={prList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}

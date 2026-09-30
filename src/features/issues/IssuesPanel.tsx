@@ -17,7 +17,10 @@ import { ConversationListPanel } from "@/features/conversations/ConversationList
 import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
-import { DEGRADED_ACTION_CLASS } from "@/features/conversations/remote-section-state";
+import {
+  DEGRADED_ACTION_CLASS,
+  isPermanentListError,
+} from "@/features/conversations/remote-section-state";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
@@ -589,27 +592,34 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               {/* The filter refusals this panel can provoke — a fan-out too wide
                   for the provider, a rejected author/label term, an advanced search
                   the host doesn't offer — are PERMANENT, and each already carries
-                  the sentence that says how to get out of it. Retry stays for the
-                  transient half, which can't tell itself apart from here. */}
+                  the sentence that says how to get out of it. Retry is withheld
+                  from the ones typed as permanent and stays for the rest, which
+                  can't tell a refusal from a transient failure. */}
               {issueList.error != null && (
                 <p className="text-[11px]">
                   {presentError(issueList.error).summary}
                 </p>
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                onClick={() => issueList.refetch()}
-              >
-                Retry
-              </Button>
+              {!isPermanentListError(issueList.error) && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => issueList.refetch()}
+                >
+                  Retry
+                </Button>
+              )}
             </div>
           )
         }
         // Disabled issues are a permanent repo condition a retry can't clear.
         remoteRetry={issuesDisabled ? undefined : () => issueList.refetch()}
-        remotePaused={issueList.isPaused}
+        // A park can't clear a permanent verdict (disabled issues, a refused
+        // filter), so its explanation stays up instead of the offline line.
+        remotePaused={
+          issueList.isPaused && !isPermanentListError(issueList.error)
+        }
         remotePlaceholder={issueList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}
