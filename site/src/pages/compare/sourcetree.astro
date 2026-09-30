@@ -7,7 +7,7 @@
 // (2026-07-30) via primary Atlassian sources (release notes, support KBs,
 // jira.atlassian.com tickets). When a row changes upstream, update
 // verifiedOn.sourcetree in src/lib/compare.ts (plus the ST_* constants, the
-// meta description's month, and the maintenance FAQ's release versions) in
+// meta description's month, and the maintenance FAQ's release months) in
 // the same edit — a stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
@@ -271,11 +271,11 @@ const faqs = [
   },
   {
     q: "Do you need an Atlassian account to use Sourcetree?",
-    a: "Per Atlassian, yes. Its install documentation says you need an Atlassian account to use Sourcetree, and the app asks you to register at first launch with a Bitbucket Cloud (Atlassian) account or your company's Bitbucket Server login. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
+    a: "Usually. Atlassian's install documentation says you need an Atlassian account to use Sourcetree, and the app asks you to register at first launch; a company Bitbucket Server login can register it instead. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
   },
   {
     q: "Is Sourcetree still maintained?",
-    a: "Yes, in a steady-patch sense: both apps shipped point releases through summer 2026 (Windows 3.4.32 in August, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open.",
+    a: `Yes, in a steady-patch sense: both apps shipped point releases through summer 2026 (Windows ${ST_WIN_VERSION} in August, Mac ${ST_MAC_VERSION} in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open.`,
   },
 ];
 ---
