@@ -85,17 +85,17 @@ export function resolveRemoteSection(input: {
   return rowCount === 0 ? "empty" : "rows";
 }
 
-/** Error kinds a retry can't change for the same list key: a feature the repo
- *  has turned off, or a filter the forge refuses. Reconnecting can't clear one
- *  either, so a caller withholds `paused` from {@link resolveRemoteSection}
- *  while one stands, keeping its explanation on screen instead of the
- *  "will load once you're back online" line. Structural, since this file
- *  stays import-free. */
 const PERMANENT_LIST_ERROR_KINDS: ReadonlySet<string> = new Set([
   "issuesDisabled",
   "invalidArgument",
 ]);
 
+/** Whether a list read's error is a verdict neither a retry nor a reconnect can
+ *  change for the same key: a feature the repo has turned off, or a filter the
+ *  forge refuses. A list's error slot withholds its Retry for one, and the
+ *  ladder is fed {@link parkedUnlessPermanent} so its explanation stays on
+ *  screen instead of the "will load once you're back online" line. Structural,
+ *  since this file stays import-free. */
 export function isPermanentListError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -104,6 +104,16 @@ export function isPermanentListError(error: unknown): boolean {
     typeof error.kind === "string" &&
     PERMANENT_LIST_ERROR_KINDS.has(error.kind)
   );
+}
+
+/** The `paused` a list section passes {@link resolveRemoteSection}: the read's
+ *  park, except while {@link isPermanentListError} holds, which a park can't
+ *  clear. */
+export function parkedUnlessPermanent(q: {
+  isPaused: boolean;
+  error: unknown;
+}): boolean {
+  return q.isPaused && !isPermanentListError(q.error);
 }
 
 /** The one line the review-comments block shows, or null. `threadCount` is

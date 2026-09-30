@@ -1,5 +1,7 @@
 // Pins the remote list section's render ladder, the detail pane's ladder, the
-// list notice, the "Load more" guard, and the board's failure-notice grouping.
+// list notice, the "Load more" guard, the permanent-error predicate and the
+// park it withholds, the review-comments notice, and the board's
+// failure-notice grouping.
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
@@ -22,6 +24,7 @@ import {
   normalizeNoticeMessage,
   OFFLINE_ROWS_NOTICE,
   offlinePendingMessage,
+  parkedUnlessPermanent,
   refreshFailed,
   resolveDetailPane,
   resolveRemoteSection,
@@ -214,9 +217,8 @@ test("only a disabled feature or a refused filter reads as permanent", () => {
     assert.equal(isPermanentListError(value), false, String(value));
 });
 
-// The ladder takes `paused` as given, so the permanence gate lives at the list
-// panels' call sites (`remotePaused={isPaused && !isPermanentListError(error)}`);
-// this drives the ladder through that same expression.
+// The ladder takes `paused` as given; both list panels feed it
+// `parkedUnlessPermanent(query)`, so this drives the ladder through that helper.
 test("a park never hides a permanent verdict with nothing drawn", () => {
   const atCallSite = (error, isPaused) =>
     resolveRemoteSection({
@@ -225,7 +227,7 @@ test("a park never hides a permanent verdict with nothing drawn", () => {
       listPending: false,
       error: true,
       rowCount: 0,
-      paused: isPaused && !isPermanentListError(error),
+      paused: parkedUnlessPermanent({ isPaused, error }),
     });
   const disabled = { kind: "issuesDisabled", message: "" };
   const refused = { kind: "invalidArgument", message: "" };

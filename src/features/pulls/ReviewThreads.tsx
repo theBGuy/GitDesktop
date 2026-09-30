@@ -1078,10 +1078,11 @@ export function ReviewThreadList({
  * shown inline under a review — all threads on GitLab/Bitbucket (which don't model
  * reviews), plus standalone line comments on GitHub. A healthy read with no threads,
  * or one still loading, shows nothing visible (the data arrives after the PR body,
- * so a spinner would only cause layout shift). A failed or parked read shows a
- * notice between the heading and the list and never replaces threads already
- * loaded; {@link reviewCommentsNotice} picks its line. `heading` lets the caller
- * retitle the block when reviews DID claim threads above.
+ * so a spinner would only cause layout shift). A failed read, or a parked one with
+ * threads to keep or none loaded yet, shows a notice between the heading and the
+ * list; a parked read that already loaded an empty answer stays quiet. Threads
+ * already loaded are never replaced; {@link reviewCommentsNotice} picks the line.
+ * `heading` lets the caller retitle the block when reviews DID claim threads above.
  */
 export function ReviewThreadsBlock({
   threads,

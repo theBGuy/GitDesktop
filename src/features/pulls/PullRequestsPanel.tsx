@@ -26,7 +26,10 @@ import { ConversationListPanel } from "@/features/conversations/ConversationList
 import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
-import { isPermanentListError } from "@/features/conversations/remote-section-state";
+import {
+  isPermanentListError,
+  parkedUnlessPermanent,
+} from "@/features/conversations/remote-section-state";
 import {
   type ReviewGroupKind,
   useCollapsedSections,
@@ -1135,7 +1138,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         remoteRetry={refreshPrList}
         // A park can't clear a refused filter, so its explanation stays up
         // instead of the offline line.
-        remotePaused={prList.isPaused && !isPermanentListError(prList.error)}
+        remotePaused={parkedUnlessPermanent(prList)}
         remotePlaceholder={prList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}

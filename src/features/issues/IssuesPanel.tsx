@@ -20,6 +20,7 @@ import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import {
   DEGRADED_ACTION_CLASS,
   isPermanentListError,
+  parkedUnlessPermanent,
 } from "@/features/conversations/remote-section-state";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
@@ -617,9 +618,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         remoteRetry={issuesDisabled ? undefined : () => issueList.refetch()}
         // A park can't clear a permanent verdict (disabled issues, a refused
         // filter), so its explanation stays up instead of the offline line.
-        remotePaused={
-          issueList.isPaused && !isPermanentListError(issueList.error)
-        }
+        remotePaused={parkedUnlessPermanent(issueList)}
         remotePlaceholder={issueList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}
