@@ -617,24 +617,15 @@ export function useJiraMentionChips(opts: {
   // a MANUAL pick clears it (explicit intent overrides). Reset in resetWith.
   const dismissedRef = useRef<Set<string>>(new Set());
   // Keys already probed this reset-cycle (present-or-absent from the open page),
-  // so the per-key fetch runs at most once per key per reset. Stamped with its
-  // generation: only a probe of that generation may mark it.
-  const probedRef = useRef<{ generation: number; keys: Set<string> }>({
-    generation: 0,
-    keys: new Set(),
-  });
+  // so the per-key fetch runs at most once per key per reset.
+  const probedRef = useRef<Set<string>>(new Set());
   // The exact candidate set last fed to the AI generate — `upsertFromDraft`
   // resolves an AI-proposed key's summary/status from here.
   const lastCandidatesRef = useRef<Map<string, JiraCandidate>>(new Map());
 
-  // A probe from a superseded generation never marks the current set, so it
-  // can't stop the key being probed again after the reset.
-  function markProbed(gen: number, key: string) {
-    if (probedRef.current.generation === gen) probedRef.current.keys.add(key);
-  }
   // Resolve a chip's summary/status once; a failed probe leaves the chip as it is.
   function probeSummary(gen: number, siteHost: string, key: string) {
-    markProbed(gen, key);
+    probedRef.current.add(key);
     jiraIssueView(siteHost, key)
       .then((issue) => {
         if (generationRef.current !== gen) return;
@@ -662,7 +653,7 @@ export function useJiraMentionChips(opts: {
     generationRef.current += 1;
     const gen = generationRef.current;
     dismissedRef.current = new Set();
-    probedRef.current = { generation: gen, keys: new Set() };
+    probedRef.current = new Set();
     lastCandidatesRef.current = new Map();
     const seen = new Set<string>();
     const seeded: JiraMentionChip[] = [];
@@ -716,7 +707,7 @@ export function useJiraMentionChips(opts: {
       });
       // Probe any still-unresolved chip not on the open page, once per key.
       for (const c of current) {
-        if (c.summary !== "" || probedRef.current.keys.has(c.key)) continue;
+        if (c.summary !== "" || probedRef.current.has(c.key)) continue;
         if (openIssues.some((i) => i.key === c.key)) continue;
         probeSummary(gen, siteHost, c.key);
       }
@@ -739,7 +730,7 @@ export function useJiraMentionChips(opts: {
   // the effect re-probe this key.
   function pick(key: string) {
     dismissedRef.current.delete(key);
-    probedRef.current.keys.delete(key);
+    probedRef.current.delete(key);
     const found = (issueList.data ?? []).find((i) => i.key === key);
     setChips((prev) => {
       if (prev.some((c) => c.key === key)) return prev;
@@ -791,8 +782,8 @@ export function useJiraMentionChips(opts: {
         // hasn't loaded yet (a later run resolves it) so we don't probe keys that
         // would have matched the page.
         if (!openIssues) continue;
-        if (probedRef.current.keys.has(key) || !link) continue;
-        markProbed(gen, key);
+        if (probedRef.current.has(key) || !link) continue;
+        probedRef.current.add(key);
         jiraIssueView(link.siteHost, key)
           .then((issue) => {
             if (generationRef.current !== gen) return;

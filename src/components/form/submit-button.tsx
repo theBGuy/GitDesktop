@@ -9,7 +9,8 @@ import { passThroughNonActivationKeys } from "@/lib/use-disabled-reason";
  * disabled until the form can submit, spinner while submitting. Extra
  * `disabled` reasons (e.g. an AI generation in flight) are OR'd in, and every
  * other prop reaches the Button — a caller explaining a disabled submit points
- * `aria-describedby` at its own hint.
+ * `aria-describedby` at its own hint. The exception is `render`, which a
+ * reasoned hold replaces while it stands (no caller passes one).
  */
 export function SubmitButton({
   children,
