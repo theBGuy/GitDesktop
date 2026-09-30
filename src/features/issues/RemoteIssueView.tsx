@@ -36,7 +36,11 @@ import {
 } from "@/features/conversations/EditTitleBodyDialog";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
-import { resolveDetailPane } from "@/features/conversations/remote-section-state";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import {
   AuthorAvatar,
   hasVisibleBody,
@@ -320,9 +324,7 @@ export function RemoteIssueView({
     );
   }
   if (detailPane === "offline") {
-    return (
-      <DiffPlaceholder message="You're offline — this issue will load once you're back online." />
-    );
+    return <DiffPlaceholder message={offlinePendingMessage("this issue")} />;
   }
   if (detailPane === "error" || !issue) {
     // The failure class isn't knowable here, so the headline claims only which
@@ -368,18 +370,11 @@ export function RemoteIssueView({
   // BELOW any permission reason wherever both hold: that one never lifts on its
   // own and is the one still true once the new issue is on screen.
   const staleReason = detailsStale ? "Loading this issue…" : undefined;
-  // While a switch serves the previous issue as placeholder, a parked read
-  // hasn't shown this one at all, so the offline line names what is on screen.
-  const detailNotice = (() => {
-    switch (true) {
-      case details.isError:
-        return "Couldn't refresh this issue — showing the last loaded version.";
-      case detailsStale:
-        return "You're offline — showing the last opened issue; this one will load once you're back online.";
-      default:
-        return "You're offline — showing the last loaded version.";
-    }
-  })();
+  const detailNotice = detailNoticeMessage({
+    noun: "issue",
+    isError: details.isError,
+    stale: detailsStale,
+  });
   const busy =
     comment.isPending ||
     closeIssue.isPending ||
@@ -877,7 +872,9 @@ export function RemoteIssueView({
         noun="this issue"
         degraded={detailPane === "content-degraded"}
         message={detailNotice}
-        onRetry={() => details.refetch()}
+        // Only a failed refresh gets a Retry: offline, it would park again at
+        // once, and reconnecting resumes the read by itself.
+        onRetry={details.isError ? () => details.refetch() : undefined}
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="space-y-2 border-b px-4 py-3">

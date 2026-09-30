@@ -9,6 +9,28 @@ export const DEGRADED_ACTION_CLASS =
 export const OFFLINE_ROWS_NOTICE =
   "You're offline — showing the last loaded results.";
 
+/** What stands in for `subject` ("pull requests", "this issue") while its
+ *  first read waits for a connection, where a skeleton would spin forever. */
+export function offlinePendingMessage(subject: string): string {
+  return `You're offline — ${subject} will load once you're back online.`;
+}
+
+/** The notice over a detail pane's retained content. `noun` is bare ("pull
+ *  request"); `stale` is a switch still showing the PREVIOUS item as
+ *  placeholder, which a parked read can't call this one's last loaded version. */
+export function detailNoticeMessage(input: {
+  noun: string;
+  isError: boolean;
+  stale: boolean;
+}): string {
+  const { noun } = input;
+  if (input.isError)
+    return `Couldn't refresh this ${noun} — showing the last loaded version.`;
+  if (input.stale)
+    return `You're offline — showing the last opened ${noun}; this one will load once you're back online.`;
+  return "You're offline — showing the last loaded version.";
+}
+
 /** What a remote list section draws. "rows-degraded" is rows plus a notice
  *  that the last refresh failed; "rows-offline" is rows plus a notice that the
  *  refresh is waiting for a connection; "offline" says the list will load once
@@ -49,10 +71,14 @@ export function resolveRemoteSection(input: {
   return rowCount === 0 ? "empty" : "rows";
 }
 
+export type ListNoticeCause = "refresh" | "load-more" | "offline";
+
 /** The one line a list's notice shows, or null when healthy. A failing or
  *  parked list outranks a failed Load more, whose retry would meet the same
  *  outage. `cause` tells the caller which Retry to wire: a refetch of the list
- *  ("refresh") or growing the limit again ("load-more"). `placeholder` says the
+ *  ("refresh"), growing the limit again ("load-more"), or none ("offline": a
+ *  retry while offline parks again at once, and reconnecting resumes the read
+ *  by itself, so the button would do nothing). `placeholder` says the
  *  drawn rows were loaded for ANOTHER view (a state tab, filter or category
  *  switch), so offline they can't be called this list's last loaded results.
  *  `hasRows` is whether rows are drawn at all: a section showing only an
@@ -66,7 +92,7 @@ export function listNotice(input: {
   hasRows: boolean;
   loadMoreFailed: boolean;
 }): {
-  cause: "refresh" | "load-more";
+  cause: ListNoticeCause;
   message: string;
   retryLabel: string;
 } | null {
@@ -81,9 +107,9 @@ export function listNotice(input: {
     };
   if (input.offline && input.hasRows)
     return {
-      cause: "refresh",
+      cause: "offline",
       message: input.placeholder
-        ? `You're offline — ${noun} for this view will load once you're back online.`
+        ? offlinePendingMessage(`${noun} for this view`)
         : OFFLINE_ROWS_NOTICE,
       retryLabel: `Retry loading ${noun}`,
     };

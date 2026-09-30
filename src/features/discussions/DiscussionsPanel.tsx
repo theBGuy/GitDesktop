@@ -23,7 +23,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import {
+  type ListNoticeCause,
   listNotice,
+  offlinePendingMessage,
   resolveRemoteSection,
 } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
@@ -188,7 +190,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   );
   const offlineState = (
     <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-      You're offline — discussions will load once you're back online.
+      {offlinePendingMessage("discussions")}
     </p>
   );
   const emptyCopy = (() => {
@@ -340,6 +342,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     hasRows: true,
     loadMoreFailed: loadMore.loadMoreFailed,
   });
+  // Offline mounts no Retry: a retry while offline parks again at once, and
+  // reconnecting resumes the read by itself.
+  const noticeRetry: Record<ListNoticeCause, (() => void) | undefined> = {
+    refresh: retry,
+    "load-more": loadMore.retryLoadMore,
+    offline: undefined,
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -434,9 +443,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
             degraded={notice !== null}
             message={notice?.message}
             retryLabel={notice?.retryLabel}
-            onRetry={
-              notice?.cause === "load-more" ? loadMore.retryLoadMore : retry
-            }
+            onRetry={notice ? noticeRetry[notice.cause] : undefined}
             className="pt-2"
           />
           {listContent}

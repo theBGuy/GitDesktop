@@ -34,7 +34,9 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import {
   type DetailPaneState,
+  type ListNoticeCause,
   listNotice,
+  offlinePendingMessage,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
@@ -608,7 +610,7 @@ function LoadFailed({
 function LoadOffline({ category }: { category: string }) {
   return (
     <p className="border-b px-3 py-3 text-xs text-muted-foreground">
-      You're offline — {category} will load once you're back online.
+      {offlinePendingMessage(category)}
     </p>
   );
 }
@@ -686,13 +688,20 @@ function FindingsNotice({
     hasRows,
     loadMoreFailed: loadMore.loadMoreFailed,
   });
+  // Offline mounts no Retry: a retry while offline parks again at once, and
+  // reconnecting resumes the read by itself.
+  const retryFor: Record<ListNoticeCause, (() => void) | undefined> = {
+    refresh: onRetry,
+    "load-more": loadMore.retryLoadMore,
+    offline: undefined,
+  };
   return (
     <DegradedListNotice
       noun={noun}
       degraded={notice !== null}
       message={notice?.message}
       retryLabel={notice?.retryLabel}
-      onRetry={notice?.cause === "load-more" ? loadMore.retryLoadMore : onRetry}
+      onRetry={notice ? retryFor[notice.cause] : undefined}
       className="border-b py-1.5"
     />
   );
@@ -2210,9 +2219,9 @@ export function FindingsPanel({
                 (bbOut.availability !== "available" ||
                 bbOut.reports.length === 0 ? (
                   /* Zero reports is `noReports` on the wire, so the second arm only
-               catches a backend that ever sends "available" with none — a blank
-               region would be the one reading of an empty list that claims the
-               commit is clean. */
+                     catches a backend that ever sends "available" with none — a blank
+                     region would be the one reading of an empty list that claims the
+                     commit is clean. */
                   <BbUnavailableCard
                     state={
                       bbOut.availability === "available"
@@ -2238,9 +2247,9 @@ export function FindingsPanel({
                       />
                     ))}
                     {/* States the cap without offering to lift it: the report walk is
-                  bounded server-side independently of `limit`, so a Load-more
-                  here would refetch the same reports. Each report's annotation
-                  tail below does grow — those limits are real. */}
+                        bounded server-side independently of `limit`, so a Load-more
+                        here would refetch the same reports. Each report's annotation
+                        tail below does grow — those limits are real. */}
                     {bbOut.truncated ? (
                       <p className="border-t px-3 py-3 text-xs text-muted-foreground">
                         Showing the first{" "}
@@ -2280,7 +2289,7 @@ export function FindingsPanel({
                     {glUniformState &&
                     glOut.sast.availability !== "available" ? (
                       /* One cause, one card — and no section headers, since naming
-                   three empty sections would only restate it. */
+                         three empty sections would only restate it. */
                       <GlUnavailableCard
                         availability={glOut.sast.availability}
                         detail={glOut.sast.detail}
@@ -2473,7 +2482,7 @@ export function FindingsPanel({
                                 </span>
                               </p>
                               {/* The summary owns its own full-width line — sharing
-                              one with the chip left it cramped and truncating early. */}
+                                  one with the chip left it cramped and truncating early. */}
                               <p
                                 className="mt-1 truncate text-xs font-medium"
                                 title={a.summary}
@@ -2564,7 +2573,7 @@ export function FindingsPanel({
                               {group.label}
                             </span>
                             {/* The raw id, alongside a named rule. Suppressed when
-                            the id is itself empty — the label already covers it. */}
+                                the id is itself empty — the label already covers it. */}
                             {group.key && group.label !== group.key ? (
                               <span
                                 className="min-w-0 shrink truncate font-mono"
@@ -2716,7 +2725,7 @@ export function FindingsPanel({
                               <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
                                 <ValidityChip validity={a.validity} />
                                 {/* Only ever rendered for a confirmed public leak —
-                                a null `publiclyLeaked` means GitHub didn't say. */}
+                                    a null `publiclyLeaked` means GitHub didn't say. */}
                                 {a.publiclyLeaked === true ? (
                                   <Badge
                                     variant="outline"
@@ -2726,15 +2735,15 @@ export function FindingsPanel({
                                   </Badge>
                                 ) : null}
                                 {/* Rows in a group share a type and often a date, so
-                                the alert number is what tells them apart — but a
-                                tolerated alert numbered 0 has none to show. */}
+                                    the alert number is what tells them apart — but a
+                                    tolerated alert numbered 0 has none to show. */}
                                 {a.number === 0 ? null : (
                                   <span className="ml-auto shrink-0 tabular-nums">
                                     #{a.number}
                                   </span>
                                 )}
                                 {/* The number span normally carries `ml-auto`;
-                                without it the date takes over pushing right. */}
+                                    without it the date takes over pushing right. */}
                                 <span
                                   className={cn(
                                     "shrink-0",
@@ -2842,7 +2851,7 @@ export function FindingsPanel({
                                 </span>
                               ) : null}
                               {/* The GHSA span normally carries `ml-auto`; without
-                              it the state takes over pushing the row right. */}
+                                  it the state takes over pushing the row right. */}
                               <span
                                 className={cn(
                                   "shrink-0",

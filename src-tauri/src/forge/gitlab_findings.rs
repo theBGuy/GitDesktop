@@ -1014,6 +1014,35 @@ fn downstream_pipeline_ids(bridges: &[RawBridge], project_id: Option<u64>) -> Ve
         .collect()
 }
 
+/// The jobs of a pipeline's same-project children. A classified envelope (a
+/// refused or unreadable bridges or jobs read) is skipped, so it can't turn an
+/// otherwise-good read into an error. A transport failure propagates: dropping
+/// the child's jobs would read as "no scanning reports" and replace findings the
+/// UI already holds.
+async fn walk_child_jobs<B, BF, J, JF>(
+    fetch_bridges: B,
+    mut fetch_child_jobs: J,
+    project_id: Option<u64>,
+) -> AppResult<Vec<RawJob>>
+where
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = AppResult<Listed<RawBridge>>>,
+    J: FnMut(u64) -> JF,
+    JF: std::future::Future<Output = AppResult<Listed<RawJob>>>,
+{
+    let bridges = match fetch_bridges().await? {
+        Listed::Items(bridges) => bridges,
+        Listed::Unavailable(..) => return Ok(Vec::new()),
+    };
+    let mut jobs = Vec::new();
+    for child_id in downstream_pipeline_ids(&bridges, project_id) {
+        if let Listed::Items(child_jobs) = fetch_child_jobs(child_id).await? {
+            jobs.extend(child_jobs);
+        }
+    }
+    Ok(jobs)
+}
+
 /// Whether a child-pipeline walk could still add anything: true when the parent's
 /// own jobs leave any category unanswered, which is the only case a child's jobs
 /// could change.
@@ -1193,16 +1222,15 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     // A monorepo that scans in a child pipeline publishes its reports on the
     // CHILD's jobs, which the parent's jobs endpoint never lists. Gated on a
     // category the parent left unanswered, since that is the only case a child
-    // could change. Failures here are swallowed on purpose: a bridges hiccup must
-    // not turn an otherwise-good read into an error.
+    // could change.
     if needs_child_jobs(&jobs) {
-        if let Ok(Listed::Items(bridges)) = fetch_bridges(repo_path, &enc, pipeline_id).await {
-            for child_id in downstream_pipeline_ids(&bridges, project_id) {
-                if let Ok(Listed::Items(child_jobs)) = fetch_jobs(repo_path, &enc, child_id).await {
-                    jobs.extend(child_jobs);
-                }
-            }
-        }
+        let child_jobs = walk_child_jobs(
+            || fetch_bridges(repo_path, &enc, pipeline_id),
+            |child_id| fetch_jobs(repo_path, &enc, child_id),
+            project_id,
+        )
+        .await?;
+        jobs.extend(child_jobs);
     }
 
     let now = Utc::now();
@@ -1834,6 +1862,88 @@ mod tests {
                 .0,
             GlFindingAvailability::Indeterminate
         );
+    }
+
+    fn bridge_to(id: u64, project_id: u64) -> RawBridge {
+        serde_json::from_value(json!({"downstream_pipeline": {"id": id, "project_id": project_id}}))
+            .unwrap()
+    }
+
+    fn job(id: u64) -> RawJob {
+        RawJob {
+            id: Some(id),
+            ..RawJob::default()
+        }
+    }
+
+    fn offline() -> crate::error::AppError {
+        AppError::Glab("dial tcp: lookup gitlab.com: no such host".to_string())
+    }
+
+    #[tokio::test]
+    async fn a_child_walk_that_loses_the_network_fails_the_whole_read() {
+        // A child's jobs read failing on the transport rejects, never an empty
+        // child that would read as "no scanning reports".
+        let result = walk_child_jobs(
+            || std::future::ready(Ok(Listed::Items(vec![bridge_to(10, 7), bridge_to(11, 7)]))),
+            |child_id| {
+                std::future::ready(if child_id == 10 {
+                    Ok(Listed::Items(vec![job(100)]))
+                } else {
+                    Err(offline())
+                })
+            },
+            Some(7),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Glab(_))), "{result:?}");
+        // The bridges read losing the network rejects the same way.
+        let result = walk_child_jobs(
+            || std::future::ready(Err::<Listed<RawBridge>, _>(offline())),
+            |_| std::future::ready(Ok(Listed::Items(Vec::new()))),
+            Some(7),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_child_walk_envelope_is_skipped_and_keeps_the_rest() {
+        // Negative control: a refused child jobs read is a classified envelope,
+        // skipped; the other child's jobs still land.
+        let jobs = walk_child_jobs(
+            || std::future::ready(Ok(Listed::Items(vec![bridge_to(10, 7), bridge_to(11, 7)]))),
+            |child_id| {
+                std::future::ready(Ok(if child_id == 10 {
+                    Listed::Items(vec![job(100)])
+                } else {
+                    Listed::Unavailable(GlFindingAvailability::Forbidden, None)
+                }))
+            },
+            Some(7),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+            vec![Some(100)]
+        );
+        // A refused bridges read skips the walk; the parent's read stays intact.
+        let jobs = walk_child_jobs(
+            || {
+                std::future::ready(Ok(Listed::<RawBridge>::Unavailable(
+                    GlFindingAvailability::Indeterminate,
+                    Some("could not read GitLab's pipeline bridges".to_string()),
+                )))
+            },
+            |_| -> std::future::Ready<AppResult<Listed<RawJob>>> {
+                panic!("no child is walked without bridges")
+            },
+            Some(7),
+        )
+        .await
+        .unwrap();
+        assert!(jobs.is_empty());
     }
 
     #[test]

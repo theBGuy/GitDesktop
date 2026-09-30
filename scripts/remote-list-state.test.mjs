@@ -12,12 +12,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  detailNoticeMessage,
   groupNoticesByMessage,
   guardedLimit,
   initialLoadMoreGuard,
   listNotice,
   normalizeNoticeMessage,
   OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
   resolveDetailPane,
   resolveRemoteSection,
   stepLoadMoreGuard,
@@ -209,7 +211,8 @@ test("the list notice names one reason, failure first, then offline, then Load m
     offline: true,
     loadMoreFailed: true,
   });
-  assert.equal(offline.cause, "refresh");
+  // Offline wires no Retry: a retry parks again at once.
+  assert.equal(offline.cause, "offline");
   assert.equal(offline.message, OFFLINE_ROWS_NOTICE);
   const more = listNotice({
     ...LIST,
@@ -245,14 +248,14 @@ function expectedNotice({
   if (failed && hasRows) return ["refresh", "failed"];
   if (failed) return ["refresh", "failed-bare"];
   if (offline && hasRows && placeholder)
-    return ["refresh", "offline-other-view"];
-  if (offline && hasRows) return ["refresh", "offline-last-loaded"];
+    return ["offline", "offline-other-view"];
+  if (offline && hasRows) return ["offline", "offline-last-loaded"];
   if (loadMoreFailed) return ["load-more", "load-more"];
   return null;
 }
 const noticeKind = (n) => {
   if (n === null) return null;
-  if (/^Couldn't refresh .*.$/.test(n.message) && !n.message.includes("—"))
+  if (/^Couldn't refresh [^—]*\.$/.test(n.message))
     return [n.cause, "failed-bare"];
   if (n.message.startsWith("Couldn't refresh")) return [n.cause, "failed"];
   if (n.message === OFFLINE_ROWS_NOTICE)
@@ -617,5 +620,44 @@ test("a failed refresh over a card-only section still reports, without the rows 
   assert.equal(
     listNotice({ ...base, failed: false, offline: true, hasRows: false }),
     null,
+  );
+});
+
+test("the offline and detail notice strings are the ones every surface shows", () => {
+  assert.equal(
+    offlinePendingMessage("pull requests"),
+    "You're offline — pull requests will load once you're back online.",
+  );
+  assert.equal(
+    offlinePendingMessage("this finding"),
+    "You're offline — this finding will load once you're back online.",
+  );
+  const detail = (isError, stale) =>
+    detailNoticeMessage({ noun: "pull request", isError, stale });
+  assert.equal(
+    detail(true, false),
+    "Couldn't refresh this pull request — showing the last loaded version.",
+  );
+  // A failed refresh outranks the switch window: its content is still cached.
+  assert.equal(detail(true, true), detail(true, false));
+  assert.equal(
+    detail(false, true),
+    "You're offline — showing the last opened pull request; this one will load once you're back online.",
+  );
+  assert.equal(
+    detail(false, false),
+    "You're offline — showing the last loaded version.",
+  );
+  // The list notice's other-view line is the same pending sentence.
+  assert.equal(
+    listNotice({
+      noun: "issues",
+      failed: false,
+      offline: true,
+      placeholder: true,
+      hasRows: true,
+      loadMoreFailed: false,
+    }).message,
+    offlinePendingMessage("issues for this view"),
   );
 });

@@ -9,7 +9,11 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
-import { resolveDetailPane } from "@/features/conversations/remote-section-state";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import type {
   BbAnnotationOut,
   BbReportOut,
@@ -901,7 +905,7 @@ export function FindingDetailView({
   if (pane === "offline") {
     return (
       <div className="p-6 text-center text-sm text-muted-foreground">
-        You're offline — this finding will load once you're back online.
+        {offlinePendingMessage("this finding")}
       </div>
     );
   }
@@ -929,12 +933,16 @@ export function FindingDetailView({
         <DegradedListNotice
           noun="this finding"
           degraded={pane === "content-degraded"}
-          message={
-            query.isError
-              ? "Couldn't refresh this finding — showing the last loaded version."
-              : "You're offline — showing the last loaded version."
-          }
-          onRetry={() => query.refetch()}
+          // Keyed per finding by its host, so no switch placeholder is ever
+          // shown here.
+          message={detailNoticeMessage({
+            noun: "finding",
+            isError: query.isError,
+            stale: false,
+          })}
+          // Only a failed refresh gets a Retry: offline, it would park again at
+          // once, and reconnecting resumes the read by itself.
+          onRetry={query.isError ? () => query.refetch() : undefined}
           className="shrink-0 border-b px-4 py-1.5"
         />
         <div className="min-h-0 flex-1">{detail}</div>

@@ -1,5 +1,4 @@
 import { useQueryClient } from "@tanstack/react-query";
-import type React from "react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { issueDetailsOptions, useIssueList } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
@@ -256,7 +255,6 @@ export function useLinkedIssueChips(opts: {
   commitSubjects: string[];
 }): {
   chips: LinkedIssueChip[];
-  setChips: React.Dispatch<React.SetStateAction<LinkedIssueChip[]>>;
   resetWith: (refs: BodyRef[]) => void;
   toggleKeyword: (n: number) => void;
   remove: (n: number) => void;
@@ -433,12 +431,6 @@ export function useLinkedIssueChips(opts: {
       }),
     );
   }
-  function setChips(action: React.SetStateAction<LinkedIssueChip[]>) {
-    route(targetKey, generationRef.current, (b) => ({
-      ...b,
-      chips: typeof action === "function" ? action(b.chips) : action,
-    }));
-  }
 
   // Extraction seeding: pull candidate issue numbers from the head branch name and
   // commit subjects, then add a chip for each that's a real repo issue — resolved
@@ -546,7 +538,6 @@ export function useLinkedIssueChips(opts: {
 
   return {
     chips,
-    setChips,
     resetWith,
     toggleKeyword,
     remove,

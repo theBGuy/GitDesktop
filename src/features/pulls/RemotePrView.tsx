@@ -66,7 +66,11 @@ import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues"
 import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
-import { resolveDetailPane } from "@/features/conversations/remote-section-state";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
@@ -1977,9 +1981,7 @@ export function RemotePrView({
   }
   if (detailPane === "offline") {
     return (
-      <DiffPlaceholder
-        message={`You're offline — this ${prNoun} will load once you're back online.`}
-      />
+      <DiffPlaceholder message={offlinePendingMessage(`this ${prNoun}`)} />
     );
   }
   if (detailPane === "error" || !pr) {
@@ -2020,18 +2022,11 @@ export function RemotePrView({
     );
   }
 
-  // While a switch serves the previous PR as placeholder, a parked read hasn't
-  // shown this one at all, so the offline line names what is on screen instead.
-  const detailNotice = (() => {
-    switch (true) {
-      case details.isError:
-        return `Couldn't refresh this ${prNoun} — showing the last loaded version.`;
-      case detailsStale:
-        return `You're offline — showing the last opened ${prNoun}; this one will load once you're back online.`;
-      default:
-        return "You're offline — showing the last loaded version.";
-    }
-  })();
+  const detailNotice = detailNoticeMessage({
+    noun: prNoun,
+    isError: details.isError,
+    stale: detailsStale,
+  });
 
   // Open the Edit dialog: the chips OWN the trailing ref block, so peel any exact
   // `Closes #N` / `Relates to #N` lines off the body into chips (keyword preserved)
@@ -2600,7 +2595,9 @@ export function RemotePrView({
         noun={`this ${prNoun}`}
         degraded={detailPane === "content-degraded"}
         message={detailNotice}
-        onRetry={() => details.refetch()}
+        // Only a failed refresh gets a Retry: offline, it would park again at
+        // once, and reconnecting resumes the read by itself.
+        onRetry={details.isError ? () => details.refetch() : undefined}
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">

@@ -21,7 +21,9 @@ import { cn } from "@/lib/utils";
 import { LoadMoreRow } from "./LoadMoreRow";
 import {
   DEGRADED_ACTION_CLASS,
+  type ListNoticeCause,
   listNotice,
+  offlinePendingMessage,
   resolveRemoteSection,
 } from "./remote-section-state";
 
@@ -495,12 +497,19 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     hasRows: true,
     loadMoreFailed: loadMoreFailed ?? false,
   });
+  // Offline mounts no Retry: a retry while offline parks again at once, and
+  // reconnecting resumes the read by itself.
+  const remoteNoticeRetry: Record<ListNoticeCause, (() => void) | undefined> = {
+    refresh: remoteRetry,
+    "load-more": onRetryLoadMore,
+    offline: undefined,
+  };
   const remoteContent = ((): ReactNode => {
     switch (remoteState) {
       case "offline":
         return (
           <p className="px-3 py-4 text-xs text-muted-foreground">
-            You're offline — {remoteNoun} will load once you're back online.
+            {offlinePendingMessage(remoteNoun)}
           </p>
         );
       case "gh-skeleton":
@@ -573,7 +582,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       case "offline":
         return (
           <p className="px-3 py-4 text-xs text-muted-foreground">
-            You're offline — Jira issues will load once you're back online.
+            {offlinePendingMessage("Jira issues")}
           </p>
         );
       case "error":
@@ -776,9 +785,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
               message={remoteNotice?.message}
               retryLabel={remoteNotice?.retryLabel}
               onRetry={
-                remoteNotice?.cause === "load-more"
-                  ? onRetryLoadMore
-                  : remoteRetry
+                remoteNotice ? remoteNoticeRetry[remoteNotice.cause] : undefined
               }
             />
           )}
@@ -798,7 +805,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
                 degraded={jiraNotice !== null}
                 message={jiraNotice?.message}
                 retryLabel={jiraNotice?.retryLabel}
-                onRetry={jiraRetry}
+                onRetry={
+                  jiraNotice?.cause === "refresh" ? jiraRetry : undefined
+                }
                 extraAction={
                   jiraState === "rows-degraded" ? jiraDegradedAction : undefined
                 }
