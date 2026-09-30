@@ -994,6 +994,10 @@ export const CHECKS = [
       // tabAdvances excludes every modified Tab symmetrically — not a
       // platform-modifier read, so isMac derivation would be wrong here.
       "src/lib/list-keyboard-nav.ts",
+      // The disabled-button activation predicate asks "is this a bare
+      // Enter/Space press?" — every modifier excluded symmetrically, not a
+      // platform-modifier read the registry could own.
+      "src/lib/use-disabled-reason.ts",
     ],
     message:
       "derive the platform modifier via the hotkeys helpers (formatBinding/isMac) — new hand-rolled ctrl/meta checks need an allowlist entry with rationale",
