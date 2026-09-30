@@ -20,10 +20,10 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.tower;
-const TOWER_MAC_VERSION = "17.1.1";
-const TOWER_MAC_RELEASED = "August 11, 2026";
-const TOWER_WIN_VERSION = "13.2";
-const TOWER_WIN_RELEASED = "August 18, 2026";
+const TOWER_MAC_VERSION = "17.3";
+const TOWER_MAC_RELEASED = "September 17, 2026";
+const TOWER_WIN_VERSION = "14.0";
+const TOWER_WIN_RELEASED = "September 15, 2026";
 const TOWER_MAC_MAJOR = TOWER_MAC_VERSION.split(".")[0];
 const TOWER_WIN_MAJOR = TOWER_WIN_VERSION.split(".")[0];
 
@@ -59,7 +59,7 @@ const groups: Group[] = [
         label: "Same features on every platform",
         them: {
           state: "no",
-          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features are Mac-only`,
+          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; AI commit messages are Mac-only, Gitea support Windows-only`,
         },
         gd: {
           state: "yes",
@@ -70,11 +70,11 @@ const groups: Group[] = [
         label: "Hosting services",
         them: {
           state: "yes",
-          note: "GitHub, GitLab, Bitbucket, Azure DevOps, Beanstalk & Perforce GitSwarm",
+          note: "GitHub, GitLab, Bitbucket, Azure DevOps, Beanstalk & Perforce GitSwarm, plus Gitea on Windows",
         },
         gd: {
           state: "yes",
-          note: "GitHub (+ Enterprise), GitLab (+ self-managed) & Bitbucket — Bitbucket issues via linked Jira",
+          note: "GitHub (+ Enterprise), GitLab (+ self-managed) & Bitbucket Cloud — Bitbucket issues via linked Jira",
         },
       },
     ],
@@ -98,7 +98,7 @@ const groups: Group[] = [
         them: { state: "no", note: "one flat conversation per pull request" },
         gd: {
           state: "yes",
-          note: "single lines or dragged ranges; drafts batch and survive a restart",
+          note: "single lines or dragged ranges (ranges on GitHub & GitLab); drafts batch and survive a restart",
         },
       },
       {
@@ -110,7 +110,7 @@ const groups: Group[] = [
         label: "Create, comment & merge in-app",
         them: {
           state: "yes",
-          note: "on GitHub, GitLab, Bitbucket & Azure DevOps",
+          note: "on GitHub, GitLab, Bitbucket & Azure DevOps (Azure DevOps comments read-only)",
         },
         gd: {
           state: "yes",
@@ -121,7 +121,7 @@ const groups: Group[] = [
         label: "Stacked branches, locally",
         them: {
           state: "yes",
-          note: "parent-child dependencies stored in Git config; a Pro line item on its pricing page",
+          note: "Tower Pro, Mac & Windows; the Mac app stores parent-child links in Git config",
         },
         gd: {
           state: "no",
@@ -142,7 +142,10 @@ const groups: Group[] = [
       {
         label: "Local PRs with no remote at all",
         them: { state: "no" },
-        gd: { state: "yes", note: "review & merge offline, promote later" },
+        gd: {
+          state: "yes",
+          note: "review & merge offline, promote to GitHub, GitLab, or Bitbucket later",
+        },
       },
     ],
   },
@@ -151,7 +154,7 @@ const groups: Group[] = [
     rows: [
       {
         label: "See & control CI runs",
-        them: { state: "no", note: "no CI surface" },
+        them: { state: "no", note: "no documented CI view or controls" },
         gd: {
           state: "yes",
           note: "runs, jobs & logs; re-run, cancel & dispatch (GitHub, GitLab & Bitbucket)",
@@ -178,7 +181,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab)",
+          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab); Code Insights reports (Bitbucket)",
         },
       },
     ],
@@ -194,7 +197,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "GitHub & GitLab issues (sub-issues on GitHub, related issues on GitLab), plus private local issues",
+          note: "GitHub & GitLab issues (sub-issues & dependencies on GitHub, related issues on GitLab), GitHub Projects boards, plus private local issues",
         },
       },
       {
@@ -208,7 +211,21 @@ const groups: Group[] = [
       {
         label: "GitHub Discussions",
         them: { state: "no" },
-        gd: { state: "yes", note: "read, comment, mark answers" },
+        gd: {
+          state: "yes",
+          note: "create, comment, react, mark answers, close & lock",
+        },
+      },
+      {
+        label: "Your PRs & issues across repositories",
+        them: {
+          state: "no",
+          note: "PRs listed per repository, one remote at a time",
+        },
+        gd: {
+          state: "yes",
+          note: "a My work inbox: GitHub & GitLab PRs & issues account-wide, Bitbucket PRs from recent repos",
+        },
       },
     ],
   },
@@ -223,18 +240,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "partial",
-          note: "the last commit, one click; riskier operations are journaled for recovery, not one-key undone",
-        },
-      },
-      {
-        label: "Clean up squash-merged branches",
-        them: {
-          state: "partial",
-          note: "on Mac (Tower 17), by matching merged PRs; not in Tower for Windows",
-        },
-        gd: {
-          state: "yes",
-          note: "PR-aware on every platform, so squash & rebase merges count",
+          note: "the last unpushed commit, ⌘Z / Ctrl+Z in the History tab; riskier operations are journaled for recovery, not one-key undone",
         },
       },
     ],
@@ -250,7 +256,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "every platform — your own keys (Anthropic, OpenAI, Google, OpenRouter), local Ollama, or the same keyless CLIs",
+          note: "every platform — your own API keys, local Ollama, or keyless Claude Code, Codex, Copilot & opencode CLIs",
         },
       },
       {
@@ -304,7 +310,7 @@ const faqs = [
   },
   {
     q: "Is Tower the same app on Windows and on a Mac?",
-    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) and pull-request-based merge detection in branch cleanup (Tower 17) exist only in the Mac app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
+    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) exist only in the Mac app, and Gitea support only in the Windows app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
   },
 ];
 ---
@@ -377,19 +383,20 @@ const faqs = [
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
-            <span class="text-ink">Branch dependencies.</span> Tower stores
-            parent-child branch relationships in Git config as part of its
-            Custom Workflows. GitDesktop stacks pull requests on the forge
-            instead; local chains are yours to rebase.
+            <span class="text-ink">Local stacked branches.</span> Tower Pro's
+            Stacked Branches track parent-child branch relationships on Mac and
+            Windows (the Mac app keeps them in Git config). GitDesktop stacks
+            pull requests on the forge instead; local chains are yours to
+            rebase.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
             <span class="text-ink">Hosting-service breadth.</span> Azure DevOps
-            and its Server variant, Beanstalk, and Perforce GitSwarm, alongside
-            the big three. GitDesktop stops at GitHub, GitLab, and Bitbucket,
-            with Jira Cloud for issues.
+            (its Server variant on Tower Pro), Beanstalk, Perforce GitSwarm,
+            and Gitea on Windows, alongside the big three. GitDesktop stops at
+            GitHub, GitLab, and Bitbucket Cloud, with Jira Cloud for issues.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
@@ -467,9 +474,9 @@ const faqs = [
           Approval, request-changes, and line-anchored review comments aren't
           among them; a review still means the browser. In GitDesktop the whole
           review lives next to your staging and history: comments on exact
-          lines or dragged ranges, suggestions applied to your working tree,
-          approve or request changes, and the merge, on GitHub, GitLab, and
-          Bitbucket.
+          lines or dragged ranges (ranges on GitHub and GitLab), suggestions
+          applied to your working tree, approve or request changes, and the
+          merge, on GitHub, GitLab, and Bitbucket.
         </p>
       </div>
       <figure data-reveal style="transition-delay:120ms" class="window mt-10">

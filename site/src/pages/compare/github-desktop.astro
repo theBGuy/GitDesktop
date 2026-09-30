@@ -3,8 +3,8 @@
 // ("github desktop alternative") against the slowest-moving competitor.
 //
 // Every row below is distilled from the local competitive audit, re-grounded
-// 2026-08-20 against GitHub Desktop stable 3.6.4 (released 2026-08-13 —
-// dependency bumps only; its stable channel is feature-free since 3.6.0).
+// 2026-09-30 against GitHub Desktop stable 3.6.6 (released 2026-09-21 —
+// small fixes and hardening; its stable channel is feature-free since 3.6.0).
 // The verified-on stamp is rendered on the page; when a row changes upstream,
 // update verifiedOn["github-desktop"] in src/lib/compare.ts (and the meta
 // description's month) in the same edit. A stale comparison is worse than
@@ -20,7 +20,7 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn["github-desktop"];
-const GHD_VERSION = "3.6.4";
+const GHD_VERSION = "3.6.6";
 
 // Distilled to the rows where the two clients genuinely diverge (plus a few
 // load-bearing parity rows). The full matrix behind this runs ~130 rows; both
@@ -72,12 +72,23 @@ const groups: Group[] = [
       {
         label: "Merge a PR in-app",
         them: { state: "no" },
-        gd: { state: "yes", note: "merge / squash / rebase" },
+        gd: {
+          state: "yes",
+          note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
+        },
       },
       {
         label: "Edit title, labels, reviewers",
         them: { state: "no" },
         gd: { state: "yes" },
+      },
+      {
+        label: "Stacked PRs",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "create, extend & dissolve stacks (GitHub); MR chains detected (GitLab)",
+        },
       },
       {
         label: "Local PRs with no remote at all",
@@ -90,7 +101,7 @@ const groups: Group[] = [
     ],
   },
   {
-    title: "CI",
+    title: "CI, releases & findings",
     rows: [
       {
         label: "PR checks rollup",
@@ -112,6 +123,25 @@ const groups: Group[] = [
         them: { state: "no" },
         gd: { state: "yes" },
       },
+      {
+        label: "Publish releases",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "create, edit & upload assets (GitHub & GitLab)",
+        },
+      },
+      {
+        label: "Security findings in-app",
+        them: {
+          state: "no",
+          note: "a secret-scanning push-protection dialog; no alerts view",
+        },
+        gd: {
+          state: "yes",
+          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab); Code Insights reports (Bitbucket)",
+        },
+      },
     ],
   },
   {
@@ -126,6 +156,22 @@ const groups: Group[] = [
         label: "GitHub Discussions",
         them: { state: "no" },
         gd: { state: "yes" },
+      },
+      {
+        label: "GitHub Projects",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "board, table & roadmap views with field edits",
+        },
+      },
+      {
+        label: "Your PRs & issues across repositories",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "a My work inbox: GitHub & GitLab PRs & issues account-wide, Bitbucket PRs from recent repos",
+        },
       },
     ],
   },
@@ -147,10 +193,13 @@ const groups: Group[] = [
       },
       {
         label: "Predict a merge before running it",
-        them: { state: "no" },
+        them: {
+          state: "partial",
+          note: "clean, or a count of conflicted files, in the merge dialog",
+        },
         gd: {
           state: "yes",
-          note: "fast-forward / clean / conflicts, previewed in memory",
+          note: "fast-forward / clean / conflicts, previewed in memory (Git 2.38+)",
         },
       },
       {
@@ -160,10 +209,13 @@ const groups: Group[] = [
       },
       {
         label: "Force push",
-        them: { state: "partial", note: "plain force push" },
+        them: {
+          state: "partial",
+          note: "--force-with-lease alone; its background fetch can void the lease",
+        },
         gd: {
           state: "yes",
-          note: "--force-with-lease + --force-if-includes (Git 2.30+), behind divergence detection, never plain --force",
+          note: "--force-with-lease + --force-if-includes (Git 2.30+), behind divergence detection",
         },
       },
       {
@@ -176,10 +228,13 @@ const groups: Group[] = [
       },
       {
         label: "Git hooks management",
-        them: { state: "no" },
+        them: {
+          state: "no",
+          note: "runs hooks and can bypass commit hooks; no management UI",
+        },
         gd: {
           state: "yes",
-          note: "view / edit / disable, templates, husky & pre-commit aware",
+          note: "view / edit / disable, templates, husky, pre-commit & lefthook aware",
         },
       },
       {
@@ -243,26 +298,26 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a GitHub Desktop alternative?",
-    a: "Yes. GitDesktop is a free, open-source (Apache-2.0) GitHub Desktop alternative for Windows, macOS, and Linux. GitDesktop covers the same daily loop (staging, branches, history, diffs, sync) and adds the parts GitHub Desktop hands to the browser: reading, reviewing, and merging pull requests, browsing CI runs, and working issues, across GitHub, GitLab, and Bitbucket.",
+    a: "Yes. GitDesktop is a free, open-source (Apache-2.0) GitHub Desktop alternative for Windows, macOS, and Linux. GitDesktop covers the same daily loop (staging, branches, history, diffs, sync) and adds the parts GitHub Desktop hands to the browser: reading, reviewing, and merging pull requests, browsing CI runs, and working issues, across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project).",
   },
   {
     q: "Does GitHub Desktop work with GitLab or Bitbucket?",
-    a: "No. GitHub Desktop can push and pull any git remote, but its hosted features (pull requests, checks, sign-in) are GitHub-only. GitDesktop runs the same pull-request, CI, and issue panels against GitHub, GitLab, and Bitbucket, each on its own authenticated identity.",
+    a: "No. GitHub Desktop can push and pull any git remote, but its hosted features (pull requests, checks, sign-in) are GitHub-only. GitDesktop runs the same pull-request, CI, and issue panels against GitHub, GitLab, and Bitbucket, each on its own authenticated identity (Bitbucket issues come from a linked Jira Cloud project).",
   },
   {
     q: "Do you need GitHub Copilot for AI features?",
-    a: "In GitHub Desktop, yes: its commit messages and conflict resolution are Copilot-powered and require Copilot access, even when bringing your own key. In GitDesktop, no. AI runs on your own Anthropic, OpenAI, Google AI Studio, or OpenRouter key, a local Ollama model, or a keyless CLI agent, and one setting hides every AI surface entirely.",
+    a: "In GitHub Desktop, yes: its commit messages and conflict resolution are Copilot-powered and require Copilot access, even when bringing your own key. In GitDesktop, no. AI runs on your own Anthropic, OpenAI, Google AI Studio, OpenRouter, or Ollama Cloud key, an OpenAI-compatible endpoint, a local Ollama model, or a keyless CLI agent such as Claude Code or Codex, and one setting hides every AI surface entirely.",
   },
   {
     q: "What about the GitHub Copilot app?",
-    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell with no manual Git surface (no staging, branching, or diffs you drive yourself), and GitHub-only. GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
+    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell. It can show diffs, sync, and merge a pull request, but those controls live inside agent sessions, with no staging step you drive yourself, and it signs in with a GitHub account (Azure DevOps and Jira arrive through integrations). GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs GitHub Desktop — a verified comparison"
-  description="GitDesktop vs GitHub Desktop, verified August 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
+  description="GitDesktop vs GitHub Desktop, verified September 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
   ogTitle="GitDesktop vs GitHub Desktop"
   ogDescription="Forges, the PR loop, CI, issues, recovery tooling, and optional AI — a verified, dated comparison."
   breadcrumbs={[
@@ -289,9 +344,10 @@ const faqs = [
       >
         GitDesktop is a free, open-source GitHub Desktop alternative that keeps
         the same approachable daily loop and adds what GitHub Desktop sends to
-        the browser: the full pull-request loop, CI, and issues, across
-        <span class="text-ink">GitHub, GitLab, and Bitbucket</span>, with AI
-        that runs on your own models, or switches off entirely.
+        the browser: the full pull-request loop, CI runs and logs, and issues,
+        across <span class="text-ink">GitHub, GitLab, and Bitbucket</span> (on
+        Bitbucket, issues go through a linked Jira project), with AI that
+        runs on your own models, or switches off entirely.
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
         Verified against GitHub Desktop {GHD_VERSION} (stable) on {VERIFIED_ON}.
@@ -316,8 +372,9 @@ const faqs = [
             <span class="text-ink">Zero prerequisites.</span> GitHub Desktop bundles
             its own Git and signs in with a browser OAuth flow. GitDesktop needs
             system Git, plus <code class="text-ink">gh</code> or
-            <code class="text-ink">glab</code> for forge features. Sign-in is
-            guided from inside the app, but it's still a real first-run step.
+            <code class="text-ink">glab</code> for GitHub and GitLab features
+            (Bitbucket needs only an API token). Sign-in is guided from inside
+            the app, but it's still a real first-run step.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
@@ -402,7 +459,7 @@ const faqs = [
       <figure data-reveal style="transition-delay:120ms" class="window mt-10">
         <Image
           src={appGithubPr}
-          alt="A GitHub pull request in GitDesktop: CI checks with per-job status, an automated AI review, and the merge action — none of which GitHub Desktop shows in-app"
+          alt="A GitHub pull request in GitDesktop: CI checks with per-job status, an automated AI review, and the merge action. GitHub Desktop shows the checks, but not the review or the merge."
           widths={[720, 1080, 1440]}
           sizes="(min-width: 1024px) 1100px, 94vw"
           format="webp"

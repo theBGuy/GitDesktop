@@ -2,7 +2,7 @@
 // GitDesktop vs GitKraken — the strongest competitor in the set, and the
 // sharpest free-tier boundary: GitKraken Community covers public GitHub and
 // GitLab repos only, so every private-repo searcher for "gitkraken
-// alternative" is winnable. Re-grounded against GitKraken Desktop 12.4.0 on
+// alternative" is winnable. Re-grounded against GitKraken Desktop 12.5.0 on
 // the date in VERIFIED_ON (current then; release date in GK_RELEASED) via:
 // help.gitkraken.com release notes and integration pages plus the
 // gitkraken.com/pricing plan matrix. That page's dollar figures don't render
@@ -21,8 +21,8 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.gitkraken;
-const GK_VERSION = "12.4.0";
-const GK_RELEASED = "August 5, 2026";
+const GK_VERSION = "12.5.0";
+const GK_RELEASED = "September 15, 2026";
 
 const groups: Group[] = [
   {
@@ -54,7 +54,7 @@ const groups: Group[] = [
         label: "Works without a vendor account",
         them: {
           state: "no",
-          note: "every plan, including the free one, runs through a GitKraken account",
+          note: "every plan on its pricing page runs through a GitKraken account; only the separate on-premise editions skip it",
         },
         gd: { state: "yes", note: "sign in only to the forges you use" },
       },
@@ -93,7 +93,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "single lines or dragged ranges; drafts batch and survive a restart",
+          note: "single lines or dragged ranges (ranges on GitHub & GitLab); drafts batch and survive a restart",
         },
       },
       {
@@ -153,7 +153,7 @@ const groups: Group[] = [
         them: { state: "no" },
         gd: {
           state: "yes",
-          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab)",
+          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab); Code Insights reports (Bitbucket)",
         },
       },
     ],
@@ -165,17 +165,20 @@ const groups: Group[] = [
         label: "Issue trackers",
         them: {
           state: "yes",
-          note: "GitHub, GitLab, Jira, Trello & Azure Boards; view-only on the free plan",
+          note: "GitHub, GitLab, Jira & Trello; on the free plan Jira & Trello are view-only and GitHub & GitLab issue edits cover public repos only",
         },
         gd: {
           state: "yes",
-          note: "GitHub & GitLab in-app (sub-issues & dependencies on GitHub, related issues on GitLab); Jira Cloud linked per repo; local issues too",
+          note: "GitHub & GitLab in-app (sub-issues & dependencies on GitHub, related issues on GitLab); GitHub Projects boards; Jira Cloud linked per repo; local issues too",
         },
       },
       {
         label: "GitHub Discussions",
         them: { state: "no" },
-        gd: { state: "yes", note: "read, comment, mark answers" },
+        gd: {
+          state: "yes",
+          note: "create, comment, react, mark answers, close & lock",
+        },
       },
     ],
   },
@@ -189,10 +192,13 @@ const groups: Group[] = [
       },
       {
         label: "Predict a merge before running it",
-        them: { state: "no" },
+        them: {
+          state: "partial",
+          note: "conflict alerts vs a configured target branch (Pro+)",
+        },
         gd: {
           state: "yes",
-          note: "fast-forward / clean / conflicts, previewed in memory",
+          note: "fast-forward / clean / conflicts, previewed in memory (Git 2.38+)",
         },
       },
       {
@@ -205,7 +211,7 @@ const groups: Group[] = [
       },
       {
         label: "Operation journal & crash recovery",
-        them: { state: "no" },
+        them: { state: "no", note: "single-step undo of the last action" },
         gd: {
           state: "yes",
           note: "risky operations are journaled and recoverable",
@@ -251,11 +257,11 @@ const groups: Group[] = [
         label: "Bring your own key",
         them: {
           state: "partial",
-          note: "supported, but the paid plan still applies",
+          note: "supported, but the paid plan still applies and some AI credits are still drawn",
         },
         gd: {
           state: "yes",
-          note: "Anthropic, OpenAI, Google AI Studio, OpenRouter, or any OpenAI-compatible endpoint",
+          note: "Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama Cloud, or an OpenAI-compatible endpoint",
         },
       },
       {
@@ -288,7 +294,7 @@ const groups: Group[] = [
         label: "Delegate to agents in parallel worktrees",
         them: {
           state: "yes",
-          note: "Claude Code, Codex, Copilot, Gemini & opencode",
+          note: "Claude Code, Codex, Copilot, Cursor, Gemini & opencode",
         },
         gd: { state: "yes", note: "Claude Code, Codex, Copilot & opencode" },
       },
@@ -304,15 +310,15 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a free GitKraken alternative?",
-    a: "For the Git and forge loop, yes. GitDesktop is free, open source (Apache-2.0), works on private repositories, needs no vendor account, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project). It does not have GitKraken's commit graph, multi-repo Workspaces, Launchpad board, or GitLens editor presence — the sections above count both directions.",
+    a: "For the Git and forge loop, yes. GitDesktop is free, open source (Apache-2.0), works on private repositories, needs no vendor account, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project). It does not have GitKraken's commit graph, multi-repo Workspaces, or GitLens editor presence, and its My work inbox of your open PRs and issues across repositories covers only part of Launchpad — the sections above count both directions.",
   },
   {
     q: "Is GitKraken free for private repositories?",
-    a: "No. GitKraken's integration docs limit the free Community plan to public GitHub and GitLab repositories; self-hosted servers such as GitLab Self-Managed need a paid tier, and cloud issue trackers are view-only. Working on private repositories means a per-seat subscription. GitDesktop has no repository-visibility restriction and no paid plan.",
+    a: "No. GitKraken's integration docs limit the free Community plan to public GitHub and GitLab repositories; self-hosted servers such as GitLab Self-Managed need a paid tier, and Jira and Trello issues are view-only. Working on private repositories means a per-seat subscription. GitDesktop has no repository-visibility restriction and no paid plan.",
   },
   {
     q: "Does GitKraken AI work without a paid plan?",
-    a: "No. GitKraken's help center states that GitKraken AI requires a paid GitKraken subscription, usage is metered in weekly credits per user, and bringing your own API key still sits behind the plan. GitDesktop's AI runs on your own Anthropic, OpenAI, Google AI Studio, or OpenRouter key, a local Ollama model, or a keyless CLI agent such as Claude Code — unmetered, and hidden entirely by one setting if you want no AI at all.",
+    a: "No. GitKraken's help center states that GitKraken AI requires a paid GitKraken subscription, usage is metered in weekly credits per user, and bringing your own API key keeps the plan requirement and still draws some credits. GitDesktop's AI runs on your own Anthropic, OpenAI, Google AI Studio, OpenRouter, or Ollama Cloud key, an OpenAI-compatible endpoint, a local Ollama model, or a keyless CLI agent such as Claude Code — unmetered, and hidden entirely by one setting if you want no AI at all.",
   },
   {
     q: "Can GitKraken approve pull requests in the desktop app?",
@@ -323,7 +329,7 @@ const faqs = [
 
 <SiteLayout
   title="GitDesktop vs GitKraken — a verified comparison"
-  description="GitDesktop vs GitKraken, verified August 2026: private repos on the free plan, the PR review loop in-app, unmetered AI on your own keys, sandboxed agents — plus what GitKraken still does better."
+  description="GitDesktop vs GitKraken, verified September 2026: private repos on the free plan, the PR review loop in-app, unmetered AI on your own keys, sandboxed agents — plus what GitKraken still does better."
   ogTitle="GitDesktop vs GitKraken"
   ogDescription="Free on private repos, review in-app, AI without a meter — a verified, dated comparison."
   breadcrumbs={[
@@ -388,17 +394,19 @@ const faqs = [
           <span>
             <span class="text-ink">Multi-repo Workspaces and Launchpad.</span>
             Named groups of repositories with cross-repo actions, and one board
-            of PRs, issues, and WIP across forges and trackers. GitDesktop is
-            one repo at a time. (Launchpad needs a cloud workspace; team views
-            sit on higher tiers.)
+            of PRs, issues, and WIP across forges and trackers. GitDesktop's My
+            work inbox gathers your open PRs and issues across repositories, but
+            has no repo groups, cross-repo actions, WIP, or Jira and Trello
+            items.
+            (Launchpad's Team View needs GitKraken's Advanced tier or higher.)
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
             <span class="text-ink">It reaches into your editor.</span> GitLens
-            puts GitKraken inside VS Code, Cursor, and Windsurf. GitDesktop is
-            its own window.
+            puts GitKraken inside VS Code, Cursor, Windsurf, Trae, and Kiro.
+            GitDesktop is its own window.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
@@ -413,11 +421,13 @@ const faqs = [
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
-            <span class="text-ink">Agent breadth and controls.</span> Five agent
-            CLIs including Gemini, per-repo setup commands that prepare a fresh
-            worktree before each session, and per-action permission prompts in
-            the panel. GitDesktop answers with container sandboxing, plan mode,
-            and research mode, but the breadth is theirs.
+            <span class="text-ink">Agent breadth and controls.</span> Six agent
+            CLIs including Gemini and Cursor, per-repo setup commands that
+            prepare a fresh worktree before each session, and in-app allow/deny
+            prompts for Claude Code, Codex, and Copilot permission requests.
+            GitDesktop answers with container sandboxing, plan mode, research
+            mode, and best-of-N runs that fan one task out to several agents,
+            but the breadth is theirs.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">

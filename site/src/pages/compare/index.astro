@@ -18,7 +18,7 @@ const download = `${base}download/`;
 const entries: Record<CompareSlug, { name: string; hook: string }> = {
   "github-desktop": {
     name: "GitHub Desktop",
-    hook: "The familiar baseline. Where the daily loop matches, and what GitDesktop keeps in the app that GitHub Desktop sends to the browser: the pull-request loop, CI, and issues.",
+    hook: "The familiar baseline. Where the daily loop matches, and what GitDesktop keeps in the app that GitHub Desktop sends to the browser: the pull-request loop, CI runs and logs, and issues.",
   },
   sourcetree: {
     name: "Sourcetree",
@@ -112,8 +112,9 @@ const entryList = (Object.keys(verifiedOn) as CompareSlug[]).map((slug) => {
         don't have. These pages are built the other way around: claims come
         from the vendor's own release notes, documentation, and pricing pages
         where those exist, checked per platform when the Mac and Windows apps
-        differ, and each page carries the date it was last verified. Rows where both clients
-        are simply fine are left out on purpose. Spot something stale?
+        differ, and each page carries the date it was last verified.
+        Rows where both clients are simply fine are left out on purpose.
+        Spot something stale?
         <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
           >Open an issue</a
         >.

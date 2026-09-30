@@ -3,12 +3,12 @@
 // and Sourcetree ships Windows+macOS only, so every Linux searcher is
 // winnable. Windows and Mac Sourcetree are SEPARATE apps on separate release
 // lines; rows say which platform a fact applies to when they differ.
-// Re-grounded 2026-08-11 against Windows 3.4.31 (2026-06-09) and Mac 4.2.19
+// Re-grounded 2026-09-30 against Windows 3.4.32 (2026-08-28) and Mac 4.2.19
 // (2026-07-30) via primary Atlassian sources (release notes, support KBs,
 // jira.atlassian.com tickets). When a row changes upstream, update
-// verifiedOn.sourcetree in src/lib/compare.ts (plus the ST_* constants and
-// the meta description's month) in the same edit — a stale comparison is
-// worse than none.
+// verifiedOn.sourcetree in src/lib/compare.ts (plus the ST_* constants, the
+// meta description's month, and the maintenance FAQ's release versions) in
+// the same edit — a stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
@@ -20,7 +20,7 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.sourcetree;
-const ST_WIN_VERSION = "3.4.31";
+const ST_WIN_VERSION = "3.4.32";
 const ST_MAC_VERSION = "4.2.19";
 
 const groups: Group[] = [
@@ -36,7 +36,7 @@ const groups: Group[] = [
         label: "Works without a vendor account",
         them: {
           state: "no",
-          note: "an Atlassian account is required to use the app",
+          note: "first-launch registration asks for an Atlassian or Bitbucket Server login",
         },
         gd: { state: "yes", note: "sign in only to the forges you use" },
       },
@@ -74,7 +74,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "in-app: reviewers, labels, linked issues, drafts",
+          note: "in-app, with drafts; labels & linked issues on GitHub & GitLab",
         },
       },
       {
@@ -98,7 +98,7 @@ const groups: Group[] = [
         them: { state: "no" },
         gd: {
           state: "yes",
-          note: "in a hidden worktree; your checkout untouched",
+          note: "non-fork PRs, in a hidden worktree; your checkout untouched",
         },
       },
       {
@@ -107,6 +107,14 @@ const groups: Group[] = [
         gd: {
           state: "yes",
           note: "review & merge offline, promote to GitHub, GitLab, or Bitbucket later",
+        },
+      },
+      {
+        label: "Your PRs & issues across repositories",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "a My work inbox: GitHub & GitLab PRs & issues account-wide, Bitbucket PRs from recent repos",
         },
       },
     ],
@@ -122,7 +130,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "all three forges; GitHub & GitLab failed-step logs in-app",
+          note: "all three forges; step logs, re-run, cancel & manual runs in-app",
         },
       },
       {
@@ -157,7 +165,7 @@ const groups: Group[] = [
         label: "Run your own scripts",
         them: {
           state: "yes",
-          note: "custom actions on the toolbar & context menu",
+          note: "custom actions in the Actions menu, context menus & shortcuts",
         },
         gd: {
           state: "yes",
@@ -196,7 +204,7 @@ const groups: Group[] = [
         them: { state: "no", note: "conflicts surface after the merge runs" },
         gd: {
           state: "yes",
-          note: "fast-forward / clean / conflicts, previewed in memory",
+          note: "fast-forward / clean / conflicts, previewed in memory (Git 2.38+)",
         },
       },
       {
@@ -211,7 +219,7 @@ const groups: Group[] = [
         label: "Recover dropped stashes",
         them: {
           state: "no",
-          note: "the community answer is git fsck in a terminal",
+          note: "command line only; requested in-app (Windows tracker) since 2016",
         },
         gd: { state: "yes", note: "a git fsck scan finds and restores them" },
       },
@@ -255,26 +263,26 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a good Sourcetree alternative?",
-    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for (staging by file, hunk, or line, interactive rebase, stashes, submodules) and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket. On Bitbucket, issues go through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those, and the table above says so.",
+    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for (staging by file, hunk, or line, interactive rebase, stashes, submodules) and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs and their step logs, and issues, across GitHub, GitLab, and Bitbucket. On Bitbucket, issues go through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those, and the table above says so.",
   },
   {
     q: "Is there a Sourcetree for Linux?",
-    a: "No. Atlassian ships Sourcetree for Windows and macOS only, and community answers as recent as April 2026 say Linux isn't on the roadmap. GitDesktop ships Windows, macOS, and Linux builds, including an AppImage and a Homebrew cask.",
+    a: "No. Atlassian ships Sourcetree for Windows and macOS only, and its staff said in July 2026 that there are no plans to add Linux support. GitDesktop ships Windows, macOS, and Linux builds, including an AppImage and a Homebrew cask.",
   },
   {
     q: "Do you need an Atlassian account to use Sourcetree?",
-    a: "Yes. Atlassian's own install documentation says an Atlassian account is required to use Sourcetree, regardless of which forge your code lives on. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
+    a: "Per Atlassian, yes. Its install documentation says you need an Atlassian account to use Sourcetree, and the app asks you to register at first launch with a Bitbucket Cloud (Atlassian) account or your company's Bitbucket Server login. GitDesktop has no vendor account at all: you sign in only to the forges you actually use (GitHub via gh, GitLab via glab, Bitbucket with an API token), and none of it is needed for local-only work.",
   },
   {
     q: "Is Sourcetree still maintained?",
-    a: "Yes, in a steady-patch sense: both apps shipped point releases through mid-2026 (Windows 3.4.31 in June, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open. It's stable, not evolving.",
+    a: "Yes, in a steady-patch sense: both apps shipped point releases through summer 2026 (Windows 3.4.32 in August, Mac 4.2.19 in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open.",
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs Sourcetree — a verified comparison"
-  description="GitDesktop vs Sourcetree, verified August 2026: Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — plus what Sourcetree still does better."
+  description="GitDesktop vs Sourcetree, verified September 2026: Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — plus what Sourcetree still does better."
   ogTitle="GitDesktop vs Sourcetree"
   ogDescription="Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — a verified, dated comparison."
   breadcrumbs={[
@@ -357,9 +365,9 @@ const faqs = [
           <span class="mt-px select-none text-add" aria-hidden="true">+</span>
           <span>
             <span class="text-ink">Scripts bound into the UI.</span>
-            Custom actions put your scripts on the toolbar and context menus.
-            GitDesktop's Tasks tab runs saved and inline scripts in a
-            terminal, without menu binding.
+            Custom actions put your scripts in the Actions menu and context
+            menus, with optional keyboard shortcuts. GitDesktop's Tasks tab
+            runs saved and inline scripts in a terminal, without menu binding.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
