@@ -223,9 +223,9 @@ click to jump to it in History.
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
   (a conflict rolls it back), or **edit** a commit to pause and amend its
-  contents in a real, resumable rebase (GitHub Desktop stops at squashing,
-  reordering, and amending the latest commit). Cherry-pick onto the current
-  or another branch, too.
+  contents in a real, resumable rebase (GitHub Desktop's history editing
+  stops at squashing and reordering, plus amending only the latest commit).
+  Cherry-pick onto the current or another branch, too.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
