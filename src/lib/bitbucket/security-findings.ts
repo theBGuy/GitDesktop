@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { keepPreviousDataForRepo } from "@/lib/git/queries";
+import { keepPreviousDataForRepo, repoKeys } from "@/lib/git/queries";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs behind `forge_bb_commit_findings`) ────────
@@ -201,7 +201,7 @@ export function useBitbucketFindings(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "bitbucket", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "bitbucket", limit),
     queryFn: () => bbCommitFindings(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,

@@ -27,7 +27,12 @@ import {
   linkOutLabel,
   useBitbucketFindings,
 } from "@/lib/bitbucket/security-findings";
-import { forgeReady, forgeSupports, useForgeStatus } from "@/lib/git/queries";
+import {
+  forgeReady,
+  forgeSupports,
+  repoKeys,
+  useForgeStatus,
+} from "@/lib/git/queries";
 import type {
   CodeScanningAlertOut,
   CvssOut,
@@ -53,7 +58,11 @@ import {
   secureFindingId,
   useGitLabFindings,
 } from "@/lib/gitlab/security-findings";
-import { type SelectedFinding, useUiStore } from "@/lib/stores/ui";
+import {
+  type FindingsLimits,
+  type SelectedFinding,
+  useUiStore,
+} from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { cveUrl, cweUrl, ghsaUrl, repoAdvisoryGhsaUrl } from "./advisory-links";
 import {
@@ -749,10 +758,12 @@ function BbAnnotationDetail({
   );
 }
 
-/** Each category's key segment in its hook's `["repo", repo, "findings",
- *  <segment>, limit]` key (lib/github, lib/gitlab, lib/bitbucket
- *  security-findings); keep in step with those literals. */
-const FINDINGS_KEY_SEGMENT: Record<SelectedFinding["type"], string> = {
+/** Each selection type's section in the findings key family
+ *  (`repoKeys.findingsPage`), which the category hooks key on. */
+const FINDINGS_KEY_SEGMENT: Record<
+  SelectedFinding["type"],
+  keyof FindingsLimits
+> = {
   alert: "alerts",
   codeScanning: "codeScanning",
   secretScanning: "secretScanning",
@@ -772,7 +783,7 @@ const FINDINGS_KEY_SEGMENT: Record<SelectedFinding["type"], string> = {
  */
 function useCachedFindingsPage(
   repoPath: string,
-  segment: string | null,
+  segment: keyof FindingsLimits | null,
   holds: (page: unknown) => boolean,
 ): unknown {
   const cache = useQueryClient().getQueryCache();
@@ -790,7 +801,7 @@ function useCachedFindingsPage(
   const getSnapshot = useCallback((): unknown => {
     if (segment === null) return undefined;
     const pages = cache
-      .findAll({ queryKey: ["repo", repoPath, "findings", segment] })
+      .findAll({ queryKey: repoKeys.findingsSection(repoPath, segment) })
       .flatMap((q) => {
         const limit = q.queryKey[4];
         return q.state.data === undefined || typeof limit !== "number"

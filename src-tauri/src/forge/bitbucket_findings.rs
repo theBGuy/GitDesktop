@@ -487,6 +487,7 @@ where
             continue;
         }
         out.reports = reports;
+        let mut read_lists = 0;
         let mut unreadable_lists = 0;
         let mut unreadable_rows = 0;
         let mut first_annotation_failure = None;
@@ -504,12 +505,22 @@ where
                     report.annotations = annotations;
                     report.annotations_unreadable = unreadable > 0;
                     unreadable_rows += unreadable;
+                    read_lists += 1;
                 }
                 Err((availability, detail, cause)) => {
+                    // An outage before any list is read rejects, so the UI keeps the
+                    // annotations it holds instead of an all-unreadable envelope.
+                    if cause == FailureCause::Transport && read_lists == 0 {
+                        return Err((availability, detail, cause));
+                    }
                     report.annotations_unreadable = true;
                     unreadable_lists += 1;
                     first_annotation_failure.get_or_insert(detail);
+                    // Transport stops the walk but a 5xx does not: each further fetch
+                    // against an unreachable host waits out its own timeout, while a
+                    // 5xx answers fast and says nothing about the next report.
                     if cause == FailureCause::Status(429)
+                        || cause == FailureCause::Transport
                         || availability == BbFindingsAvailability::Forbidden
                     {
                         for pending in pending_reports.by_ref() {
@@ -541,8 +552,9 @@ where
 /// Indeterminate one from an outage (no answer, or a 5xx): an `Ok` envelope would
 /// replace the findings the UI already holds with an empty list, so it rejects as
 /// the GitHub and GitLab `classify_or_reject` do. Named verdicts, rate limits and
-/// unreadable bodies keep their envelopes; a partial read that already holds
-/// reports never reaches here (annotation losses ride its detail).
+/// unreadable bodies keep their envelopes. From the annotation walk only a Transport
+/// failure before any list is read arrives here; a 5xx there marks that report's list
+/// unreadable and the walk moves on, so its loss rides the envelope's detail.
 async fn findings_with<F, Fut>(
     get: &mut F,
     base: &str,
@@ -1270,7 +1282,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_outage_after_reports_arrive_keeps_them_with_a_loss_note() {
+    async fn an_outage_mid_walk_stops_it_and_keeps_the_lists_already_read() {
+        // r3's list is never requested: the scripted getter fails on unconsumed or
+        // unexpected requests.
         let out = scripted_result(
             "topic",
             None,
@@ -1279,26 +1293,75 @@ mod tests {
                 ("/refs/branches/topic", Some((200, TIP))),
                 (
                     "/commit/abc/reports?pagelen=100",
-                    Some((200, r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#)),
+                    Some((
+                        200,
+                        r#"{"values":[{"uuid":"r1"},{"uuid":"r2"},{"uuid":"r3"}]}"#,
+                    )),
                 ),
-                ("/commit/abc/reports/r1/annotations?pagelen=100", None),
                 (
-                    "/commit/abc/reports/r2/annotations?pagelen=100",
+                    "/commit/abc/reports/r1/annotations?pagelen=100",
                     Some((200, ANNOTATION_FIXTURE)),
                 ),
+                ("/commit/abc/reports/r2/annotations?pagelen=100", None),
             ],
         )
         .await
         .expect("a partial read keeps its envelope");
         assert_eq!(out.availability, BbFindingsAvailability::Available);
-        assert!(out.reports[0].annotations_unreadable);
-        assert_eq!(out.reports[1].annotations.len(), 3);
+        assert_eq!(out.reports[0].annotations.len(), 3);
+        assert!(!out.reports[0].annotations_unreadable);
+        assert!(out.reports[1..]
+            .iter()
+            .all(|report| report.annotations_unreadable && report.annotations.is_empty()));
         let detail = out.detail.unwrap();
         assert!(
-            detail.starts_with("1 annotation list couldn't be read — first failure: "),
+            detail.starts_with("2 annotation lists couldn't be read — first failure: "),
             "{detail}"
         );
         assert!(detail.ends_with(http::TRANSPORT_CONNECT_FAILED), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn an_outage_before_any_annotation_list_is_read_rejects_the_whole_read() {
+        // A per-report 500 first still leaves nothing read when the outage lands.
+        for (label, annotations) in [
+            (
+                "first list transport",
+                vec![("/commit/abc/reports/r1/annotations?pagelen=100", None)],
+            ),
+            (
+                "500 then transport",
+                vec![
+                    (
+                        "/commit/abc/reports/r1/annotations?pagelen=100",
+                        Some((500, "upstream unavailable")),
+                    ),
+                    ("/commit/abc/reports/r2/annotations?pagelen=100", None),
+                ],
+            ),
+        ] {
+            let mut responses = vec![
+                ("", Some((200, REPO))),
+                ("/refs/branches/topic", Some((200, TIP))),
+                (
+                    "/commit/abc/reports?pagelen=100",
+                    Some((
+                        200,
+                        r#"{"values":[{"uuid":"r1"},{"uuid":"r2"},{"uuid":"r3"}]}"#,
+                    )),
+                ),
+            ];
+            responses.extend(annotations);
+            let result = scripted_result("topic", None, responses).await;
+            let Err(AppError::Bitbucket(message)) = result else {
+                panic!("{label}: expected a rejection, got {result:?}");
+            };
+            assert!(message.starts_with(UNREACHABLE), "{label}: {message}");
+            assert!(
+                message.ends_with(http::TRANSPORT_CONNECT_FAILED),
+                "{label}: {message}"
+            );
+        }
     }
 
     #[tokio::test]

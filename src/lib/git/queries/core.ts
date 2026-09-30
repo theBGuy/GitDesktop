@@ -5,6 +5,7 @@ import {
   type QueryKey,
   useQuery,
 } from "@tanstack/react-query";
+import type { FindingsLimits } from "@/lib/stores/ui";
 import { COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "../api";
 import { repoIdentityQueryOptions } from "../repo-identity-query";
@@ -100,6 +101,14 @@ export const repoKeys = {
   prMergeability: (repo: string) => ["repo", repo, "pr-mergeability"] as const,
   prReviewState: (repo: string) => ["repo", repo, "pr-review-state"] as const,
   issueList: (repo: string) => ["repo", repo, "issue-list"] as const,
+  // The findings family: one key per category, sections named by the store's
+  // limits so a category and its limit share one spelling. The limit sits at
+  // index 4, which the detail view reads positionally off cached pages.
+  findings: (repo: string) => ["repo", repo, "findings"] as const,
+  findingsSection: (repo: string, section: keyof FindingsLimits) =>
+    ["repo", repo, "findings", section] as const,
+  findingsPage: (repo: string, section: keyof FindingsLimits, limit: number) =>
+    ["repo", repo, "findings", section, limit] as const,
 };
 
 /** The one healer every whole-repo settle shares, so its already-watched set spans

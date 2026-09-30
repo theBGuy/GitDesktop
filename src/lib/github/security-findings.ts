@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { keepPreviousDataForRepo } from "@/lib/git/queries";
+import { keepPreviousDataForRepo, repoKeys } from "@/lib/git/queries";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs in github/security_findings.rs) ───────────
@@ -197,7 +197,7 @@ export function useDependabotAlerts(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "alerts", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "alerts", limit),
     queryFn: () => ghDependabotAlerts(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,
@@ -212,7 +212,7 @@ export function useRepoAdvisories(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "advisories", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "advisories", limit),
     queryFn: () => ghRepoAdvisories(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,
@@ -227,7 +227,7 @@ export function useCodeScanningAlerts(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "codeScanning", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "codeScanning", limit),
     queryFn: () => ghCodeScanningAlerts(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,
@@ -242,7 +242,7 @@ export function useSecretScanningAlerts(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "secretScanning", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "secretScanning", limit),
     queryFn: () => ghSecretScanningAlerts(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,

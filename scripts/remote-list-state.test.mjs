@@ -15,6 +15,7 @@ import {
   detailNoticeMessage,
   groupNoticesByMessage,
   guardedLimit,
+  guardObservation,
   initialLoadMoreGuard,
   listNotice,
   normalizeNoticeMessage,
@@ -29,7 +30,8 @@ import {
 const BOOLS = [false, true];
 const ROW_COUNTS = [0, 1, 7];
 
-/** The ladder in the order the section checks it, written out rung by rung. */
+/** The ladder in the order the section checks it, written out rung by rung. A
+ *  park outranks a failed refresh at every altitude, as in the detail pane. */
 function expected({
   ghPending,
   ghReady,
@@ -42,9 +44,10 @@ function expected({
   if (!ghReady) return "not-ready";
   if (listPending && paused) return "offline";
   if (listPending) return "list-skeleton";
+  if (paused && rowCount > 0) return "rows-offline";
+  if (paused && error) return "offline";
   if (error && rowCount === 0) return "error";
   if (error) return "rows-degraded";
-  if (paused && rowCount > 0) return "rows-offline";
   if (rowCount === 0) return "empty";
   return "rows";
 }
@@ -119,11 +122,6 @@ test("a parked refresh keeps its rows under the offline rung (negative control)"
     resolveRemoteSection({ ...ready, error: false, rowCount: 0, paused: true }),
     "empty",
   );
-  // A failed refresh outranks the park: the existing degraded rung stands.
-  assert.equal(
-    resolveRemoteSection({ ...ready, error: true, rowCount: 4, paused: true }),
-    "rows-degraded",
-  );
   assert.equal(
     resolveRemoteSection({
       ...ready,
@@ -133,6 +131,69 @@ test("a parked refresh keeps its rows under the offline rung (negative control)"
     }),
     "rows",
   );
+});
+
+test("a park outranks the failed refresh it follows: offline, never a Retry", () => {
+  const ready = { ghPending: false, ghReady: true, listPending: false };
+  // A retry after a failure, parked over cached rows: the rows stay under the
+  // offline notice, whose cause wires no Retry.
+  const withRows = resolveRemoteSection({
+    ...ready,
+    error: true,
+    rowCount: 4,
+    paused: true,
+  });
+  assert.equal(withRows, "rows-offline");
+  const notice = listNotice({
+    noun: "pull requests",
+    failed: withRows === "rows-degraded",
+    offline: withRows === "rows-offline",
+    placeholder: false,
+    hasRows: true,
+    loadMoreFailed: false,
+  });
+  assert.equal(notice.cause, "offline");
+  // The same park with nothing drawn, past the first load: the offline line,
+  // never the error slot and its Retry.
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: true, rowCount: 0, paused: true }),
+    "offline",
+  );
+  // Negative control: the failure alone, online, keeps its degraded rungs.
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: true, rowCount: 4, paused: false }),
+    "rows-degraded",
+  );
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: true, rowCount: 0, paused: false }),
+    "error",
+  );
+});
+
+test("a failed read parked offline lands the list on the detail pane's rung", () => {
+  // The list rung each pane state corresponds to; an unmapped list rung (the
+  // degraded or error rungs a park must never reach) fails the comparison.
+  const PANE_FOR_LIST = {
+    "rows-offline": "content-degraded",
+    offline: "offline",
+  };
+  for (const rowCount of ROW_COUNTS) {
+    const list = resolveRemoteSection({
+      ghPending: false,
+      ghReady: true,
+      listPending: false,
+      error: true,
+      rowCount,
+      paused: true,
+    });
+    const pane = resolveDetailPane({
+      pending: false,
+      error: true,
+      hasData: rowCount > 0,
+      paused: true,
+    });
+    assert.equal(PANE_FOR_LIST[list], pane, JSON.stringify({ rowCount, list }));
+  }
 });
 
 /** The detail pane's ladder, rung by rung. */
@@ -425,6 +486,44 @@ test("a retry that fails again redirects again", () => {
   assert.deepEqual(ranAt, [100, 200, 100, 200, 200]);
   assert.deepEqual(state.rollback, { from: 200, to: 100 });
   assert.equal(state.failed, 200);
+});
+
+test("a grown page parked offline is no failure: no rollback, no Load more Retry", () => {
+  const read = {
+    isSuccess: false,
+    isError: true,
+    isPlaceholderData: true,
+    isFetching: false,
+  };
+  // A retry of the errored grown key, parked: the error is still reported.
+  const parked = guardObservation({ ...read, isPaused: true });
+  assert.deepEqual(parked, { loaded: false, failed: false });
+  const { state } = run([ok(100), { requested: 200, ...parked }]);
+  assert.equal(state.failed, null);
+  assert.equal(state.rollback, null);
+  // Negative control: the same settled error online records the failure.
+  const settled = guardObservation({ ...read, isPaused: false });
+  assert.deepEqual(settled, { loaded: false, failed: true });
+  assert.equal(
+    run([ok(100), { requested: 200, ...settled }]).state.failed,
+    200,
+  );
+  // A fetch in flight is unsettled too, as before.
+  assert.equal(
+    guardObservation({ ...read, isFetching: true, isPaused: false }).failed,
+    false,
+  );
+  // Real data loads whatever the park: placeholder rows never count.
+  assert.deepEqual(
+    guardObservation({
+      isSuccess: true,
+      isError: false,
+      isPlaceholderData: false,
+      isFetching: false,
+      isPaused: true,
+    }),
+    { loaded: true, failed: false },
+  );
 });
 
 test("a new list identity starts a fresh guard, dropping the old failure", () => {

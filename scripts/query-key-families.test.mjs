@@ -1,4 +1,4 @@
-// Guard: the five forge LIST query-key families are declared once, as builders on
+// Guard: the forge LIST query-key families are declared once, as builders on
 // `repoKeys` in src/lib/git/queries/core.ts. A hand-spelled array literal elsewhere is
 // what this refuses — a typo in an invalidation's spelling throws no error, it just
 // leaves the surface stale, which is invisible until a user notices stale rows.
@@ -22,6 +22,7 @@ const FAMILIES = [
   { name: "pr-mergeability", builder: "repoKeys.prMergeability" },
   { name: "pr-review-state", builder: "repoKeys.prReviewState" },
   { name: "issue-list", builder: "repoKeys.issueList" },
+  { name: "findings", builder: "repoKeys.findings" },
 ];
 
 // Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
@@ -83,6 +84,17 @@ test("every hand-spelled shape is matched (negative control)", () => {
       "pr-ci",
     ),
     "the composed scan stopped at a NESTED argument's closing paren",
+  );
+  // Through the table, so dropping the entry fails here rather than silently
+  // unguarding the family.
+  const findings = FAMILIES.find((f) => f.builder === "repoKeys.findings");
+  assert.ok(findings, "FAMILIES no longer guards the findings family");
+  assert.ok(
+    spellsFamily(
+      '  queryKey: ["repo", repo, "findings", "alerts", limit] as const,',
+      findings.name,
+    ),
+    "a hand-spelled findings category key went unmatched",
   );
   assert.equal(
     spellsFamily('[...repoKeys.all(repo, "pr-ci"', "pr-ci"),

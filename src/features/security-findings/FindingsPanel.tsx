@@ -37,6 +37,7 @@ import {
   type ListNoticeCause,
   listNotice,
   offlinePendingMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
@@ -62,6 +63,7 @@ import {
   forgeFeatureReady,
   forgeReady,
   forgeSupports,
+  repoKeys,
   useForgeStatus,
   useRepoAdmin,
 } from "@/lib/git/queries";
@@ -663,12 +665,14 @@ function FindingsLoadGate({
 /** The always-mounted notice over a findings section's retained rows: a failed
  *  or parked refresh, or a failed Load more. `hasRows` is whether the section
  *  draws its list: a section showing only an explanation card claims no loaded
- *  results, so it still reports a failed refresh but says nothing offline. */
+ *  results, so it still reports a failed refresh but says nothing offline. A
+ *  park outranks the failure it follows, so an offline section offers no Retry. */
 function FindingsNotice({
   noun,
   pane,
   hasRows,
   isError,
+  isPaused,
   onRetry,
   loadMore,
 }: {
@@ -676,13 +680,15 @@ function FindingsNotice({
   pane: DetailPaneState;
   hasRows: boolean;
   isError: boolean;
+  isPaused: boolean;
   onRetry: () => void;
   loadMore: { loadMoreFailed: boolean; retryLoadMore: () => void };
 }) {
+  const failed = refreshFailed({ isError, isPaused });
   const notice = listNotice({
     noun,
-    failed: pane === "content-degraded" && isError,
-    offline: pane === "content-degraded" && !isError,
+    failed: pane === "content-degraded" && failed,
+    offline: pane === "content-degraded" && !failed,
     // Findings keys differ only by limit, so placeholder rows are this list's.
     placeholder: false,
     hasRows,
@@ -2165,7 +2171,7 @@ export function FindingsPanel({
             title={refreshReason}
             onClick={() =>
               queryClient.invalidateQueries({
-                queryKey: ["repo", repoPath, "findings"],
+                queryKey: repoKeys.findings(repoPath),
               })
             }
           >
@@ -2206,6 +2212,7 @@ export function FindingsPanel({
               pane={bbPane}
               hasRows={bbShown}
               isError={bb.isError}
+              isPaused={bb.isPaused}
               onRetry={() => bb.refetch()}
               loadMore={bbMore}
             />
@@ -2267,6 +2274,7 @@ export function FindingsPanel({
               pane={glPane}
               hasRows={glSastShown || glSecretsShown || glQualityShown}
               isError={gl.isError}
+              isPaused={gl.isPaused}
               onRetry={() => gl.refetch()}
               loadMore={glMore}
             />
@@ -2396,6 +2404,7 @@ export function FindingsPanel({
               pane={alertsPane}
               hasRows={alertsShown}
               isError={alerts.isError}
+              isPaused={alerts.isPaused}
               onRetry={() => alerts.refetch()}
               loadMore={alertsMore}
             />
@@ -2513,6 +2522,7 @@ export function FindingsPanel({
               pane={codeScanningPane}
               hasRows={codeScanningShown}
               isError={codeScanning.isError}
+              isPaused={codeScanning.isPaused}
               onRetry={() => codeScanning.refetch()}
               loadMore={codeScanningMore}
             />
@@ -2647,6 +2657,7 @@ export function FindingsPanel({
               pane={secretsPane}
               hasRows={secretsShown}
               isError={secrets.isError}
+              isPaused={secrets.isPaused}
               onRetry={() => secrets.refetch()}
               loadMore={secretsMore}
             />
@@ -2784,6 +2795,7 @@ export function FindingsPanel({
               pane={advisoriesPane}
               hasRows={advisoriesShown}
               isError={advisories.isError}
+              isPaused={advisories.isPaused}
               onRetry={() => advisories.refetch()}
               loadMore={advisoriesMore}
             />

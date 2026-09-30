@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { keepPreviousDataForRepo } from "@/lib/git/queries";
+import { keepPreviousDataForRepo, repoKeys } from "@/lib/git/queries";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs behind `forge_gl_pipeline_findings`) ──────
@@ -154,7 +154,7 @@ export function useGitLabFindings(
   limit: number,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "findings", "gitlab", limit] as const,
+    queryKey: repoKeys.findingsPage(repo, "gitlab", limit),
     queryFn: () => glPipelineFindings(repo, limit),
     enabled: enabled && active,
     staleTime: 5 * 60_000,

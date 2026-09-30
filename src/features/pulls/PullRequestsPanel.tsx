@@ -1119,13 +1119,16 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               variant="outline"
               size="sm"
               className="cursor-pointer"
-              onClick={() => prList.refetch()}
+              onClick={refreshPrList}
             >
               Retry
             </Button>
           </div>
         }
-        remoteRetry={() => prList.refetch()}
+        // Both Retries take the toolbar's refresh: the CI, mergeability and
+        // review-state chips are separate reads, and an errored one whose key
+        // is unchanged is never re-run by a refetch of the list alone.
+        remoteRetry={refreshPrList}
         remotePaused={prList.isPaused}
         remotePlaceholder={prList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}

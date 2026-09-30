@@ -283,8 +283,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         );
       case meta.isPending:
         return meta.isPaused ? offlineState : probeSkeleton;
+      // A parked probe outranks its earlier failure, as in the list ladder:
+      // the Retry would only park again.
       case meta.isError && visible.length === 0:
-        return errorState("Couldn't load discussions for this repository.");
+        return meta.isPaused
+          ? offlineState
+          : errorState("Couldn't load discussions for this repository.");
       case !meta.isError && !enabled:
         return (
           <p className="px-3 py-6 text-center text-xs text-muted-foreground">
@@ -303,7 +307,8 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           listPending: list.isPending,
           error: meta.isError || list.isError,
           rowCount: visible.length,
-          paused: list.isPaused,
+          // The meta probe's error feeds `error`, so its park must count too.
+          paused: meta.isPaused || list.isPaused,
         })
       : null;
   const listContent = ((): ReactNode => {

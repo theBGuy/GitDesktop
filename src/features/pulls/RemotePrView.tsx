@@ -3060,13 +3060,21 @@ export function RemotePrView({
                   standalone line comments on GitHub. Retitled when reviews claimed
                   threads above so it doesn't read as a duplicate. */}
               <ReviewThreadsBlock
-                threads={threadClaims.residualThreads}
+                // `undefined` until the read lands, so the block can tell a
+                // first load parked offline from a loaded empty answer.
+                threads={
+                  threadClaims.visibleThreads === undefined
+                    ? undefined
+                    : threadClaims.residualThreads
+                }
                 heading={
                   threadClaims.claimedThreadIds.size > 0
                     ? "Other line comments"
                     : "Review comments"
                 }
                 isError={reviewThreads.isError}
+                isPaused={reviewThreads.isPaused}
+                onRetry={() => void reviewThreads.refetch()}
                 onQuote={detailsStale ? undefined : quoteReply}
                 onReply={
                   canThreadReply

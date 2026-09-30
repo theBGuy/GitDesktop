@@ -1,17 +1,13 @@
 import { useEffect, useEffectEvent, useState } from "react";
 import {
   guardedLimit,
+  guardObservation,
   initialLoadMoreGuard,
   type LoadMoreGuardState,
   stepLoadMoreGuard,
 } from "./remote-section-state";
 
-type GuardedQuery = {
-  isSuccess: boolean;
-  isError: boolean;
-  isPlaceholderData: boolean;
-  isFetching: boolean;
-};
+type GuardedQuery = Parameters<typeof guardObservation>[0];
 
 /**
  * Keeps a limit-keyed list's rows when "Load more" fails. Growing the limit
@@ -69,10 +65,7 @@ export function useLoadMoreGuard(opts: {
       identity,
       requested,
       limit,
-      loaded: query.isSuccess && !query.isPlaceholderData,
-      // Settled only: a retry refetches the errored key, which stays `isError`
-      // until that fetch starts.
-      failed: query.isError && !query.isFetching,
+      ...guardObservation(query),
     });
     // Adjusting state while rendering (React's "storing information from
     // previous renders" pattern, this component's own state only): React
