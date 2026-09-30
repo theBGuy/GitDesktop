@@ -195,19 +195,43 @@ test("upserts union within one target and skip numbers the run never offered", (
 
 test("a close proposal upgrades an existing chip and a relate never downgrades it", () => {
   let bucket = seed(K_FORK, [chip(4)]).byTarget.get(K_FORK);
-  bucket = upsertAiIssues(bucket, { closes: [4], relates: [] }, new Map());
+  bucket = upsertAiIssues(bucket, { closes: [4], relates: [] }, fedOf(4));
   assert.equal(bucket.chips[0].aiSuggestedClose, true);
   // The upgrade keeps the user's keyword and source.
   assert.equal(bucket.chips[0].keyword, "relates");
   assert.equal(bucket.chips[0].source, "manual");
-  bucket = upsertAiIssues(bucket, { closes: [], relates: [4] }, new Map());
+  bucket = upsertAiIssues(bucket, { closes: [], relates: [4] }, fedOf(4));
   assert.equal(bucket.chips[0].aiSuggestedClose, true);
+});
+
+test("proposals from a run that was fed nothing leave the bucket as it is", () => {
+  // A chunk settling after a reset reads the cleared fed set: it must not flag
+  // chips of the new cycle that it was never told about.
+  const buckets = seed(K_FORK, [chip(4), chip(5, { title: "" })]);
+  const bucket = buckets.byTarget.get(K_FORK);
+  const same = upsertAiIssues(
+    bucket,
+    { closes: [4, 5, 6], relates: [7] },
+    new Map(),
+  );
+  assert.equal(same, bucket);
+  assert.equal(
+    route(buckets, K_FORK, (b) =>
+      upsertAiIssues(b, { closes: [4], relates: [] }, new Map()),
+    ),
+    buckets,
+  );
+  // Negative control: any fed set keeps today's upgrade of a present chip, even
+  // one the set doesn't carry.
+  const fed = upsertAiIssues(bucket, { closes: [4], relates: [] }, fedOf(9));
+  assert.equal(fed.chips[0].aiSuggestedClose, true);
+  assert.deepEqual(numbers(fed), [4, 5]);
 });
 
 test("a no-op write returns the same bucket and the same map", () => {
   const buckets = seed(K_FORK, [chip(1)]);
   const same = route(buckets, K_FORK, (b) =>
-    upsertAiIssues(b, { closes: [], relates: [1] }, new Map()),
+    upsertAiIssues(b, { closes: [], relates: [1] }, fedOf(1)),
   );
   assert.equal(same, buckets);
   const alsoSame = route(buckets, K_PARENT, (b) =>
@@ -296,7 +320,8 @@ test("a probe fired before a reset lands nowhere after it", () => {
 
 test("a write stamped with the just-advanced generation lands on the fresh seed", () => {
   // The hook advances its counter to N+1 and seeds with that value in one
-  // step; a same-flush extraction seed reads the counter, not the stale render.
+  // step, so the reset's own title probes, fired before it renders, carry the
+  // new value (extraction bails in that flush and re-runs after the render).
   const warm = seed(K_FORK, [chip(7)]);
   const advanced = warm.generation + 1;
   const reseeded = seedBuckets(advanced, K_FORK, []);

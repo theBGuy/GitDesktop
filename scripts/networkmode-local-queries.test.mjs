@@ -15,6 +15,14 @@
 // also claims the rare networked git IPC inside a queryFn, forcing "always" there —
 // failing fast instead of parking, sanctioned only where the queryFn absorbs that
 // failure (CreatePrDialog's upstream fetch).
+//
+// Second rule: an "always" object whose queryFn crosses the network (NETWORK_CALLEES,
+// NETWORK_COMMANDS, MIXED_COMMANDS) must be listed in NETWORKED_ALWAYS and state
+// `refetchOnReconnect` at its own top level. query-core defaults that option to false
+// under "always", so an unset one silently loses recovery when the connection returns.
+// Its blind spot mirrors the first rule's: a spread placed AFTER a stated
+// `refetchOnReconnect` reads as present here but can override it at runtime.
+//
 // Known loud false ambiguities (fail-closed, not bugs): a postfix `x++ / y`, a
 // `<const T,>` generic arrow, and a function-typed JSX prop's type argument.
 //
@@ -52,10 +60,48 @@ const LOCAL_CALLEES = [
   "resolveTaskInterpreter",
 ];
 
+/** Reads that cross the network, whatever family their name fits. */
+const NETWORK_CALLEES = [
+  "gitFetch",
+  "gitFetchRemote",
+  "gitFetchObjects",
+  "gitPull",
+  "gitPush",
+  "forgeStatus",
+];
+
 /** Tauri commands a queryFn may `invoke` directly, classified. An unlisted command
- *  fails the guard: a raw invoke carries no name for the families to match. */
-const LOCAL_COMMANDS = ["system_health", "resolve_task_script"];
+ *  fails the guard: a raw invoke carries no name for the families to match. A MIXED
+ *  command reads local state AND crosses the network, so both rules apply to it. */
+const LOCAL_COMMANDS = ["resolve_task_script"];
 const NETWORK_COMMANDS = [];
+// system_health probes local CLIs, but its gh/glab auth checks validate online.
+const MIXED_COMMANDS = ["system_health"];
+
+/** The sanctioned networked reads under "always", each absorbing its transport
+ *  failure rather than parking offline. Matched like EXEMPT; an entry matching no
+ *  networked "always" object fails, and so does a networked "always" object missing
+ *  from this list. */
+const NETWORKED_ALWAYS = [
+  {
+    file: "src/features/pulls/CreatePrDialog.tsx",
+    queryKey: '["repo", repoPath, "create-pr-parent-branches"]',
+    reason:
+      "the upstream fetch's failure is caught, so offline still lists the local upstream refs",
+  },
+  {
+    file: "src/lib/git/queries/accounts.ts",
+    queryKey: '["repo", repo, "forge-status"]',
+    reason:
+      "a probe that can't reach its host rejects, settling on the can't-reach arm",
+  },
+  {
+    file: "src/lib/system/health.ts",
+    queryKey: '["system-health"]',
+    reason:
+      "the About screen's diagnostics are most wanted offline; a failed auth check maps to a status",
+  },
+];
 
 /** Justified misses: the file, the query's key literal as its source spells it (so a
  *  second query in the file is never exempted along with it), and why the object stays
@@ -87,6 +133,10 @@ const CALLEE_NAME = String.raw`(?:(?:${LOCAL_CALLEE_FAMILIES.join("|")})(?=[A-Z]
 // never a mere argument such as a `gitRef` variable.
 const LOCAL_CALL_RE = new RegExp(
   String.raw`(?:\bapi\.|(?<![\w$.]))${CALLEE_NAME}(?=\s*(?:[(<]|$))`,
+  "g",
+);
+const NETWORK_CALL_RE = new RegExp(
+  String.raw`(?:\bapi\.|(?<![\w$.]))(?:${NETWORK_CALLEES.map(escapeRe).join("|")})(?![\w$])(?=\s*(?:[(<]|$))`,
   "g",
 );
 const NAMED_LOCAL_RE = new RegExp(`^${CALLEE_NAME}$`);
@@ -366,11 +416,14 @@ function atTopLevel(masked, from, index) {
 
 /**
  * One file's verdict: `sites` counts queryFns making a local read, `offenders` are
- * those whose object lacks a top-level `networkMode: "always"`, and `ambiguities` are
- * shapes the scan can't read (each fails the guard).
+ * those whose object lacks a top-level `networkMode: "always"`, `networked` are the
+ * "always" objects whose queryFn crosses the network (each noting whether it states
+ * `refetchOnReconnect`), and `ambiguities` are shapes the scan can't read (each fails
+ * the guard).
  */
 function scanSource(source, file) {
   const offenders = [];
+  const networked = [];
   const ambiguities = [];
   let sites = 0;
   let keys = 0;
@@ -379,7 +432,13 @@ function scanSource(source, file) {
     masked = maskNonCode(source, file.endsWith(".tsx"));
   } catch (e) {
     if (!(e instanceof ScanError)) throw e;
-    return { keys, sites, offenders, ambiguities: [`${file}: ${e.message}`] };
+    return {
+      keys,
+      sites,
+      offenders,
+      networked,
+      ambiguities: [`${file}: ${e.message}`],
+    };
   }
   // A renamed import hides a local callee from the name match: `* as x` of a
   // first-party module, or `{ gitStatus as s }`. Read from the SOURCE (the mask blanks
@@ -449,38 +508,58 @@ function scanSource(source, file) {
     }
     const value = masked.slice(valueStart, valueEnd);
     const calls = [...value.matchAll(LOCAL_CALL_RE)].map((c) => c[0]);
+    const netCalls = [...value.matchAll(NETWORK_CALL_RE)].map((c) => c[0]);
     for (const inv of value.matchAll(INVOKE_RE)) {
       const command = INVOKE_COMMAND_RE.exec(
         source.slice(valueStart + inv.index),
       )?.[2];
-      if (command && LOCAL_COMMANDS.includes(command))
-        calls.push(`invoke:${command}`);
-      else if (!command || !NETWORK_COMMANDS.includes(command))
+      const local =
+        LOCAL_COMMANDS.includes(command) || MIXED_COMMANDS.includes(command);
+      const network =
+        NETWORK_COMMANDS.includes(command) || MIXED_COMMANDS.includes(command);
+      if (local) calls.push(`invoke:${command}`);
+      if (network) netCalls.push(`invoke:${command}`);
+      if (!local && !network)
         ambiguities.push(
-          `${site}: queryFn invokes ${command ? `"${command}"` : "a non-literal command"} — classify it in LOCAL_COMMANDS or NETWORK_COMMANDS`,
+          `${site}: queryFn invokes ${command ? `"${command}"` : "a non-literal command"} — classify it in LOCAL_COMMANDS, NETWORK_COMMANDS or MIXED_COMMANDS`,
         );
     }
-    if (calls.length === 0) continue;
-    sites++;
-    const modes = [
-      ...masked.slice(open + 1, close).matchAll(/\bnetworkMode\s*:/g),
-    ].filter((k) => atTopLevel(masked, open + 1, open + 1 + k.index));
+    if (calls.length === 0 && netCalls.length === 0) continue;
+    const topLevelKeys = (name) =>
+      [
+        ...masked
+          .slice(open + 1, close)
+          .matchAll(new RegExp(String.raw`\b${name}\s*:`, "g")),
+      ].filter((k) => atTopLevel(masked, open + 1, open + 1 + k.index));
+    const modes = topLevelKeys("networkMode");
     // The value is read from the SOURCE: the mask blanks string contents.
     const always = modes.some((k) =>
       /^networkMode\s*:\s*(["'])always\1/.test(
         source.slice(open + 1 + k.index),
       ),
     );
-    if (!always)
-      offenders.push({
+    const object = source.slice(open, close + 1);
+    if (calls.length > 0) {
+      sites++;
+      if (!always)
+        offenders.push({
+          site,
+          file,
+          calls: [...new Set(calls)],
+          why: modes.length > 0 ? "sets another networkMode" : "sets none",
+          object,
+        });
+    }
+    if (netCalls.length > 0 && always)
+      networked.push({
         site,
         file,
-        calls: [...new Set(calls)],
-        why: modes.length > 0 ? "sets another networkMode" : "sets none",
-        object: source.slice(open, close + 1),
+        calls: [...new Set(netCalls)],
+        reconnect: topLevelKeys("refetchOnReconnect").length > 0,
+        object,
       });
   }
-  return { keys, sites, offenders, ambiguities };
+  return { keys, sites, offenders, networked, ambiguities };
 }
 
 function* sourceFiles(dir) {
@@ -511,7 +590,7 @@ test("the scan flags a local queryFn without networkMode (negative control)", ()
     const r = scanSource(`useQuery({ queryFn: () => ${callee}(r) });`, "f.ts");
     assert.equal(r.offenders.length, 1, `${callee} no longer counts as local`);
   }
-  for (const command of LOCAL_COMMANDS) {
+  for (const command of [...LOCAL_COMMANDS, ...MIXED_COMMANDS]) {
     const r = scanSource(
       `useQuery({ queryFn: () => invoke<X>("${command}", {}) });`,
       "f.ts",
@@ -656,6 +735,76 @@ test("shapes the scan can't read fail closed", () => {
   assert.notDeepEqual(jsx.ambiguities, [], "unterminated JSX read cleanly");
 });
 
+test('a networked read under "always" is seen, with its refetchOnReconnect', () => {
+  for (const callee of NETWORK_CALLEES) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => api.${callee}(r), networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.equal(
+      r.networked.length,
+      1,
+      `${callee} no longer counts as networked`,
+    );
+    assert.equal(
+      r.networked[0].reconnect,
+      false,
+      `${callee}: an unset refetchOnReconnect read as stated`,
+    );
+  }
+  for (const command of [...NETWORK_COMMANDS, ...MIXED_COMMANDS]) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => invoke<X>("${command}"), networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.equal(r.networked.length, 1, `"${command}" no longer counts`);
+  }
+
+  const stated = scanSource(
+    'useQuery({ queryFn: () => api.gitFetchRemote(r, "u"), networkMode: "always", refetchOnReconnect: true });',
+    "fixture.ts",
+  );
+  assert.equal(
+    stated.networked[0].reconnect,
+    true,
+    "a stated option was missed",
+  );
+  const statedAlways = scanSource(
+    'useQuery({ queryFn: () => api.forgeStatus(r), networkMode: "always", refetchOnReconnect: "always" });',
+    "fixture.ts",
+  );
+  assert.equal(
+    statedAlways.networked[0].reconnect,
+    true,
+    'refetchOnReconnect: "always" was missed',
+  );
+
+  const nested = scanSource(
+    'useQuery({\n  queryFn: async () => {\n    await c.fetchQuery({ queryKey: k, queryFn: f, refetchOnReconnect: true });\n    return api.forgeStatus(r);\n  },\n  networkMode: "always",\n});\n',
+    "fixture.ts",
+  );
+  assert.equal(nested.networked.length, 1);
+  assert.equal(
+    nested.networked[0].reconnect,
+    false,
+    "a refetchOnReconnect nested inside the queryFn body satisfied the OUTER object",
+  );
+
+  const cases = {
+    "default online mode keeps the reconnect default":
+      "useQuery({ queryFn: () => api.forgeStatus(r) });",
+    "a longer name in a networked family":
+      'useQuery({ queryFn: () => api.gitFetchRemoteLog(r), networkMode: "always" });',
+    "networked call only in a comment":
+      'useQuery({ queryFn: () => /* api.gitFetch */ api.gitLog(r), networkMode: "always" });',
+  };
+  for (const [name, src] of Object.entries(cases)) {
+    const r = scanSource(src, "fixture.ts");
+    assert.deepEqual(r.networked, [], `${name}: read as networked`);
+    assert.deepEqual(r.ambiguities, [], `${name}: ambiguous`);
+  }
+});
+
 test('every local query in src/ sets networkMode: "always"', () => {
   const files = [...sourceFiles(SRC)];
   assert.ok(
@@ -665,6 +814,7 @@ test('every local query in src/ sets networkMode: "always"', () => {
   let keys = 0;
   let sites = 0;
   const offenders = [];
+  const networked = [];
   const ambiguities = [];
   for (const full of files) {
     const file = relative(REPO_ROOT, full).split(/[\\/]/).join("/");
@@ -672,6 +822,7 @@ test('every local query in src/ sets networkMode: "always"', () => {
     keys += r.keys;
     sites += r.sites;
     offenders.push(...r.offenders);
+    networked.push(...r.networked);
     ambiguities.push(...r.ambiguities);
   }
   assert.ok(
@@ -707,5 +858,40 @@ test('every local query in src/ sets networkMode: "always"', () => {
     bare,
     [],
     `Local reads park offline without networkMode "always":\n${bare.join("\n")}`,
+  );
+
+  const sanctioned = (n) =>
+    NETWORKED_ALWAYS.find(
+      (e) => e.file === n.file && n.object.includes(e.queryKey),
+    );
+  const staleNetworked = NETWORKED_ALWAYS.filter(
+    (e) => !networked.some((n) => sanctioned(n) === e),
+  ).map((e) => `${e.file}: ${e.queryKey}`);
+  assert.deepEqual(
+    staleNetworked,
+    [],
+    `Stale NETWORKED_ALWAYS entries (they match no networked "always" query — drop them, or the networked match went inert):\n${staleNetworked.join("\n")}`,
+  );
+  const unsanctioned = networked
+    .filter((n) => !sanctioned(n))
+    .map(
+      (n) =>
+        `${n.site}: queryFn calls ${n.calls.join(", ")} under networkMode "always" — list it in NETWORKED_ALWAYS with the reason its transport failure can't strand the surface`,
+    );
+  assert.deepEqual(
+    unsanctioned,
+    [],
+    `Networked reads under "always" not in NETWORKED_ALWAYS:\n${unsanctioned.join("\n")}`,
+  );
+  const noReconnect = networked
+    .filter((n) => !n.reconnect)
+    .map(
+      (n) =>
+        `${n.site}: queryFn calls ${n.calls.join(", ")} under networkMode "always" without \`refetchOnReconnect\` — query-core defaults it to false in that mode; state it`,
+    );
+  assert.deepEqual(
+    noReconnect,
+    [],
+    `Networked "always" reads that won't recover on reconnect:\n${noReconnect.join("\n")}`,
   );
 });

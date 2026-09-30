@@ -368,6 +368,10 @@ export function CreatePrDialog({
     // The fetch's failure is already absorbed above, so offline must run through
     // to the local refs rather than park on the default "online" mode.
     networkMode: "always",
+    // query-core defaults this off under "always". "always", not true: even
+    // inside the staleTime, a reconnect re-runs the fetch so an offline
+    // fetchError doesn't outlive the outage.
+    refetchOnReconnect: "always",
   });
   const parentNames = parentBranches.data?.names ?? [];
   const parentItems = Object.fromEntries(parentNames.map((n) => [n, n]));

@@ -13,7 +13,6 @@ import {
   backfillFromOpenPage,
   bucketFor,
   dismissIssue,
-  EMPTY_LINKED_ISSUE_BUCKET,
   fillIssueMeta,
   INITIAL_LINKED_ISSUE_BUCKETS,
   type LinkedIssueBucket,
@@ -284,22 +283,16 @@ export function useLinkedIssueChips(opts: {
     INITIAL_LINKED_ISSUE_BUCKETS,
   );
   // The generation's source of truth; `buckets.generation` is its applied
-  // mirror. It advances synchronously in `resetWith` because the create
-  // dialogs declare their open-seed effect before this hook: in one passive
-  // flush the reset runs first and the extraction seed right after it, reading
-  // a render that predates the reset, so a rendered generation would be stale.
+  // mirror. It advances synchronously in `resetWith`, so the reset's own probes
+  // carry the new value. The two differ only between a reset and its render —
+  // the create dialogs reset in an effect of the same passive flush as this
+  // hook's — so effects reading rendered inputs bail then and re-run once it
+  // renders.
   const generationRef = useRef(INITIAL_LINKED_ISSUE_BUCKETS.generation);
   const chips = bucketFor(buckets, targetKey).chips;
   // Per target: numbers already probed this reset-cycle (present-or-absent from
   // the open page), so each probe runs at most once per number per target.
-  // Stamped with its generation: only a probe of that generation may mark it.
-  const probedRef = useRef<{
-    generation: number;
-    byTarget: Map<string, Set<number>>;
-  }>({
-    generation: INITIAL_LINKED_ISSUE_BUCKETS.generation,
-    byTarget: new Map(),
-  });
+  const probedRef = useRef<Map<string, Set<number>>>(new Map());
   // Per target: the exact candidate set last fed to the AI generate —
   // `upsertFromDraft` resolves an AI-proposed number's title/state from the
   // run's own target's set.
@@ -308,18 +301,12 @@ export function useLinkedIssueChips(opts: {
   );
 
   function probedFor(key: string): Set<number> {
-    const { byTarget } = probedRef.current;
-    let probed = byTarget.get(key);
+    let probed = probedRef.current.get(key);
     if (!probed) {
       probed = new Set();
-      byTarget.set(key, probed);
+      probedRef.current.set(key, probed);
     }
     return probed;
-  }
-  // A probe from a superseded generation never marks the current set, so it
-  // can't stop the number being probed again after the reset.
-  function markProbed(key: string, gen: number, n: number) {
-    if (probedRef.current.generation === gen) probedFor(key).add(n);
   }
   function route(
     key: string,
@@ -330,7 +317,7 @@ export function useLinkedIssueChips(opts: {
   }
   // Resolve a chip's title/state once; a failed probe leaves the chip as it is.
   function probeTitle(key: string, gen: number, n: number) {
-    markProbed(key, gen, n);
+    probedFor(key).add(n);
     queryClient
       .fetchQuery(issueDetailsOptions(repoPath, n, lens))
       .then((issue) => route(key, gen, (b) => fillIssueMeta(b, n, issue)))
@@ -347,7 +334,7 @@ export function useLinkedIssueChips(opts: {
     // generation must stay in lockstep.
     generationRef.current += 1;
     const gen = generationRef.current;
-    probedRef.current = { generation: gen, byTarget: new Map() };
+    probedRef.current = new Map();
     lastCandidatesRef.current = new Map();
     // Seed a chip per body ref, keyword preserved, source "manual"; title/state
     // fill in lazily below. A repeated number keeps its first appearance.
@@ -386,6 +373,9 @@ export function useLinkedIssueChips(opts: {
       current: LinkedIssueChip[],
     ) => {
       const gen = generationRef.current;
+      // Rendered chips from before a reset in this same flush would mark their
+      // numbers probed for the new cycle; the reset's own render re-runs this.
+      if (buckets.generation !== gen) return;
       route(key, gen, (b) => backfillFromOpenPage(b, openIssues));
       // Probe any still-unresolved chip not on the open page, once per number.
       const probed = probedFor(key);
@@ -438,15 +428,17 @@ export function useLinkedIssueChips(opts: {
   // issue, or noise). Dismissed/present numbers skipped; once per number per
   // reset, per target, so returning to a target re-seeds only what it lacks.
   const seedExtractedIssues = useEffectEvent(
-    (key: string, numbers: number[], openIssues: typeof issueList.data) => {
+    (
+      key: string,
+      numbers: number[],
+      openIssues: typeof issueList.data,
+      renderedGeneration: number,
+    ) => {
       const gen = generationRef.current;
-      // A reset queued in this same flush hasn't rendered yet, so the rendered
-      // bucket is the previous open's; skip only against a current one (each
-      // write re-checks presence and dismissal against the applied state).
-      const current =
-        buckets.generation === gen
-          ? bucketFor(buckets, key)
-          : EMPTY_LINKED_ISSUE_BUCKET;
+      // A reset queued in this same flush hasn't rendered yet, so `numbers` came
+      // from the previous draft's head and commits; its render re-runs this.
+      if (renderedGeneration !== gen) return;
+      const current = bucketFor(buckets, key);
       const existing = new Set(current.chips.map((c) => c.number));
       const probed = probedFor(key);
       for (const n of numbers) {
@@ -463,7 +455,7 @@ export function useLinkedIssueChips(opts: {
         if (probed.has(n)) continue;
         // `gen` was read at fire time: a reset before this settles makes the
         // seed stale.
-        markProbed(key, gen, n);
+        probed.add(n);
         queryClient
           .fetchQuery(issueDetailsOptions(repoPath, n, lens))
           .then((issue) =>
@@ -475,14 +467,23 @@ export function useLinkedIssueChips(opts: {
   );
   // Join the subjects into a stable string so a fresh `commitSubjects` array each
   // render doesn't re-fire this effect (the seeder is idempotent, but keep it to
-  // real changes). `targetKey` re-runs it on a flip to seed the incoming target.
+  // real changes). `targetKey` re-runs it on a flip to seed the incoming target,
+  // and the rendered generation once a reset renders.
   const subjectsText = commitSubjects.join("\n");
+  const renderedGeneration = buckets.generation;
   useEffect(() => {
     if (!enabled) return;
     const numbers = extractIssueNumbers(`${headBranch ?? ""}\n${subjectsText}`);
     if (numbers.length === 0) return;
-    seedExtractedIssues(targetKey, numbers, issueList.data);
-  }, [enabled, headBranch, subjectsText, issueList.data, targetKey]);
+    seedExtractedIssues(targetKey, numbers, issueList.data, renderedGeneration);
+  }, [
+    enabled,
+    headBranch,
+    subjectsText,
+    issueList.data,
+    targetKey,
+    renderedGeneration,
+  ]);
 
   // chips ∪ validated extraction ∪ top-ranked open issues, cap 8 — for generate().
   // Current chips are pinned first; then the highest-scoring OPEN issues by
@@ -751,14 +752,16 @@ export function useJiraMentionChips(opts: {
   // the open page or probed once (dropped on any error). Dismissed/present keys
   // skipped; once per key per reset.
   const seedExtractedKeys = useEffectEvent(
-    (keys: string[], openIssues: typeof issueList.data) => {
-      // Read at call time, never bumped here: a reset queued in this same flush
-      // hasn't rendered yet, so the rendered chips count as present only when
-      // they belong to the current generation (the updaters below dedupe again).
+    (
+      keys: string[],
+      openIssues: typeof issueList.data,
+      renderedGeneration: number,
+    ) => {
+      // A reset queued in this same flush hasn't rendered yet, so `keys` came
+      // from the previous draft's head and commits; its render re-runs this.
       const gen = generationRef.current;
-      const existing = new Set(
-        chipsGeneration === gen ? chips.map((c) => c.key) : [],
-      );
+      if (renderedGeneration !== gen) return;
+      const existing = new Set(chips.map((c) => c.key));
       for (const key of keys) {
         if (existing.has(key) || dismissedRef.current.has(key)) continue;
         const hit = openIssues?.find((i) => i.key === key);
@@ -814,8 +817,8 @@ export function useJiraMentionChips(opts: {
       link.projectKey,
     );
     if (keys.length === 0) return;
-    seedExtractedKeys(keys, issueList.data);
-  }, [active, link, headBranch, subjectsText, issueList.data]);
+    seedExtractedKeys(keys, issueList.data, chipsGeneration);
+  }, [active, link, headBranch, subjectsText, issueList.data, chipsGeneration]);
 
   // chips ∪ extraction ∪ top-ranked open issues, cap 8 — for generate(). Chips
   // pinned first, then highest shared-token overlap, `updatedAt` desc tie-break.

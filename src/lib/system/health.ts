@@ -110,8 +110,12 @@ export function useSystemHealth() {
     queryKey: ["system-health"] as const,
     queryFn: () => invoke<SystemHealth>("system_health"),
     staleTime: 30_000,
-    // Local CLI probes: react-query's default "online" mode would park them
-    // offline, which is exactly when this diagnostics screen is wanted.
+    // Mostly local CLI probes: react-query's default "online" mode would park
+    // them offline, which is exactly when this diagnostics screen is wanted.
     networkMode: "always",
+    // The gh/glab auth checks validate online, and query-core defaults this off
+    // under "always". "always", not true: a reconnect inside the 30s staleTime
+    // must still refresh a sign-in status read while offline.
+    refetchOnReconnect: "always",
   });
 }

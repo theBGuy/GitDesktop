@@ -86,12 +86,15 @@ export function seedBuckets(
 /** Union the model's proposed numbers into one target's bucket. Both kinds land
  *  as `relates` (the user toggles up); a close proposal sets `aiSuggestedClose`,
  *  upgrading an existing chip without ever downgrading one. Dismissed numbers
- *  and numbers missing from `fed` (never offered to the model) are skipped. */
+ *  and numbers missing from `fed` (never offered to the model) are skipped.
+ *  An empty `fed` changes nothing: the run offered the model no issue (or a
+ *  reset cleared its set), so no proposal can name one of these chips. */
 export function upsertAiIssues(
   bucket: LinkedIssueBucket,
   draft: { closes: number[]; relates: number[] },
   fed: ReadonlyMap<number, IssueMeta>,
 ): LinkedIssueBucket {
+  if (fed.size === 0) return bucket;
   const closeSet = new Set(draft.closes);
   let next = bucket.chips;
   for (const n of new Set([...draft.closes, ...draft.relates])) {
