@@ -29,7 +29,9 @@ import {
   resolveDetailPane,
   resolveRemoteSection,
   reviewCommentsNotice,
+  sectionReadNotice,
   stepLoadMoreGuard,
+  ungroupedReason,
 } from "../src/features/conversations/remote-section-state.ts";
 
 const BOOLS = [false, true];
@@ -887,5 +889,172 @@ test("the offline and detail notice strings are the ones every surface shows", (
       loadMoreFailed: false,
     }).message,
     offlinePendingMessage("issues for this view"),
+  );
+});
+
+/** A single-read section's notice, rung by rung. */
+function expectedSectionNotice({ rowCount, isError, isPaused }) {
+  const failed = isError && !isPaused;
+  if (rowCount === undefined) {
+    if (isPaused) return ["offline-pending", false];
+    return failed ? ["load", true] : null;
+  }
+  if (failed) return [rowCount > 0 ? "refresh-drawn" : "refresh-empty", true];
+  if (isPaused && rowCount > 0) return ["offline-drawn", false];
+  return null;
+}
+const SECTION_LINES = {
+  "Couldn't refresh tasks — showing the last loaded results.": "refresh-drawn",
+  "Couldn't refresh tasks.": "refresh-empty",
+  "Couldn't load tasks.": "load",
+  [OFFLINE_ROWS_NOTICE]: "offline-drawn",
+  [offlinePendingMessage("tasks")]: "offline-pending",
+};
+
+test("every single-read section input resolves to its line (full truth table)", () => {
+  let cases = 0;
+  for (const rowCount of [undefined, 0, 1, 4])
+    for (const isError of BOOLS)
+      for (const isPaused of BOOLS) {
+        const input = { rowCount, isError, isPaused };
+        const notice = sectionReadNotice({
+          noun: "tasks",
+          loadFailed: "Couldn't load tasks.",
+          ...input,
+        });
+        assert.deepEqual(
+          notice === null
+            ? null
+            : [SECTION_LINES[notice.message] ?? notice.message, notice.retry],
+          expectedSectionNotice(input),
+          JSON.stringify(input),
+        );
+        if (notice !== null)
+          assert.equal(notice.retryLabel, "Retry loading tasks");
+        cases++;
+      }
+  assert.equal(cases, 16);
+});
+
+test("a single-read section keeps its rows through a failure and a park", () => {
+  // The failure over loaded rows is the list notice's line, with Retry.
+  assert.deepEqual(
+    sectionReadNotice({
+      noun: "comments",
+      loadFailed: "Couldn't load comments for this commit.",
+      rowCount: 2,
+      isError: true,
+      isPaused: false,
+    }),
+    {
+      message: "Couldn't refresh comments — showing the last loaded results.",
+      retryLabel: "Retry loading comments",
+      retry: true,
+    },
+  );
+  // The same failure parked offline: the offline line, no Retry.
+  assert.deepEqual(
+    sectionReadNotice({
+      noun: "comments",
+      loadFailed: "Couldn't load comments for this commit.",
+      rowCount: 2,
+      isError: true,
+      isPaused: true,
+    }),
+    {
+      message: OFFLINE_ROWS_NOTICE,
+      retryLabel: "Retry loading comments",
+      retry: false,
+    },
+  );
+  // Negative controls: healthy loaded rows raise nothing, and a loaded empty
+  // answer stays quiet offline, like a list's empty rung.
+  for (const rowCount of [2, 0])
+    assert.equal(
+      sectionReadNotice({
+        noun: "comments",
+        loadFailed: "Couldn't load comments for this commit.",
+        rowCount,
+        isError: false,
+        isPaused: rowCount === 0,
+      }),
+      null,
+      String(rowCount),
+    );
+});
+
+/** Why the review-grouped list is flat, rung by rung. */
+function expectedUngrouped({
+  requested,
+  grouped,
+  isError,
+  isPaused,
+  truncated,
+}) {
+  if (!requested || grouped) return null;
+  if (truncated) return "truncated";
+  if (isPaused) return "offline";
+  if (isError) return "error";
+  return null;
+}
+
+test("every grouping input resolves to its note (full truth table)", () => {
+  let cases = 0;
+  for (const requested of BOOLS)
+    for (const grouped of BOOLS)
+      for (const isError of BOOLS)
+        for (const isPaused of BOOLS)
+          for (const truncated of BOOLS) {
+            const input = { requested, grouped, isError, isPaused, truncated };
+            assert.equal(
+              ungroupedReason(input),
+              expectedUngrouped(input),
+              JSON.stringify(input),
+            );
+            cases++;
+          }
+  assert.equal(cases, 32);
+});
+
+test("grouped and flat lists × error, paused, and fresh review state", () => {
+  const note = (grouped, state) =>
+    ungroupedReason({
+      requested: true,
+      grouped,
+      isError: state === "error" || state === "error-paused",
+      isPaused: state === "paused" || state === "error-paused",
+      truncated: false,
+    });
+  // A grouped list explains nothing, whatever the review read is doing.
+  for (const state of ["fresh", "error", "paused", "error-paused"])
+    assert.equal(note(true, state), null, state);
+  // A flat list names why: offline outranks the failure it follows, and a
+  // first load parked offline is said, not left silent.
+  assert.equal(note(false, "error"), "error");
+  assert.equal(note(false, "error-paused"), "offline");
+  assert.equal(note(false, "paused"), "offline");
+  // Negative control: a map still fetching stays silent by design.
+  assert.equal(note(false, "fresh"), null);
+  // A loaded but truncated map keeps its own verdict through a park.
+  assert.equal(
+    ungroupedReason({
+      requested: true,
+      grouped: false,
+      isError: false,
+      isPaused: true,
+      truncated: true,
+    }),
+    "truncated",
+  );
+  // Grouping never asked for: nothing to explain.
+  assert.equal(
+    ungroupedReason({
+      requested: false,
+      grouped: false,
+      isError: true,
+      isPaused: true,
+      truncated: false,
+    }),
+    null,
   );
 });

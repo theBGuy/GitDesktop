@@ -6,7 +6,9 @@ import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
+import { sectionReadNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
@@ -299,6 +301,13 @@ export function CommitComments({
   }
 
   const list = comments.data ?? [];
+  const notice = sectionReadNotice({
+    noun: "comments",
+    loadFailed: "Couldn't load comments for this commit.",
+    rowCount: comments.data?.length,
+    isError: comments.isError,
+    isPaused: comments.isPaused,
+  });
   const whole = list.filter((c) => c.path == null);
   const anchored = list.filter((c) => c.path != null);
 
@@ -403,11 +412,15 @@ export function CommitComments({
   return (
     <div className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t">
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
-        {comments.isError ? (
-          <p className="text-xs text-destructive">
-            Couldn't load comments for this commit.
-          </p>
-        ) : (
+        <DegradedListNotice
+          noun="comments"
+          degraded={notice !== null}
+          message={notice?.message}
+          retryLabel={notice?.retryLabel}
+          onRetry={notice?.retry ? () => void comments.refetch() : undefined}
+          className="px-0 pb-0"
+        />
+        {comments.data !== undefined && (
           <>
             {whole.map((c) => (
               <Thread
@@ -514,7 +527,7 @@ export function CommitComments({
               </div>
             )}
 
-            {!comments.isPending && list.length === 0 && (
+            {list.length === 0 && (
               <p className="text-xs text-muted-foreground">
                 No comments on this commit yet.
               </p>

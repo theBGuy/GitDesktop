@@ -205,6 +205,66 @@ export function listNotice(input: {
   return null;
 }
 
+/** The one line a small section over a single read (a pull request's tasks, a
+ *  commit's comments) shows, or null. `rowCount` is `undefined` until the read
+ *  has loaded; loaded rows stay drawn under {@link listNotice}'s line. With
+ *  nothing loaded, a park says the section waits for a connection and a failure
+ *  says `loadFailed`, offering Retry. */
+export function sectionReadNotice(input: {
+  noun: string;
+  loadFailed: string;
+  rowCount: number | undefined;
+  isError: boolean;
+  isPaused: boolean;
+}): { message: string; retryLabel: string; retry: boolean } | null {
+  const { noun, rowCount, isPaused } = input;
+  const failed = refreshFailed(input);
+  const retryLabel = `Retry loading ${noun}`;
+  if (rowCount === undefined) {
+    if (isPaused)
+      return { message: offlinePendingMessage(noun), retryLabel, retry: false };
+    return failed
+      ? { message: input.loadFailed, retryLabel, retry: true }
+      : null;
+  }
+  const notice = listNotice({
+    noun,
+    failed,
+    offline: isPaused,
+    placeholder: false,
+    hasRows: rowCount > 0,
+    loadMoreFailed: false,
+  });
+  return (
+    notice && {
+      message: notice.message,
+      retryLabel: notice.retryLabel,
+      retry: notice.cause === "refresh",
+    }
+  );
+}
+
+export type UngroupedReason = "offline" | "error" | "truncated";
+
+/** Why a list the user asked to group by review state is drawn flat, or null
+ *  when it is grouped or there is nothing to explain yet (a map still fetching).
+ *  `truncated` is a loaded map too short to bucket every row, a verdict a park
+ *  can't change; a park outranks a failure it follows, since a retry would only
+ *  park again, and it covers a first load that would otherwise wait unexplained. */
+export function ungroupedReason(input: {
+  requested: boolean;
+  grouped: boolean;
+  isError: boolean;
+  isPaused: boolean;
+  truncated: boolean;
+}): UngroupedReason | null {
+  if (!input.requested || input.grouped) return null;
+  if (input.truncated) return "truncated";
+  if (input.isPaused) return "offline";
+  if (input.isError) return "error";
+  return null;
+}
+
 /** What a detail pane (one pull request, one issue) draws. */
 export type DetailPaneState =
   | "skeleton"

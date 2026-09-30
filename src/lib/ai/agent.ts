@@ -19,7 +19,9 @@ export function isAgentKind(value: unknown): value is AgentKind {
   );
 }
 
-export type AuthStatus = "authed" | "notAuthed" | "unknown";
+/** Mirrors the Rust `AuthStatus`. `unreachable` = the sign-in check never got an
+ *  answer on the credential (an outage); only About's gh/glab rows produce it. */
+export type AuthStatus = "authed" | "notAuthed" | "unreachable" | "unknown";
 
 export interface AgentInfo {
   found: boolean;

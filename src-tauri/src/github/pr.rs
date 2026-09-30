@@ -2580,6 +2580,21 @@ pub struct PrCiRefIn {
     pub head_sha: String,
 }
 
+/// The verdict of a best-effort CI list read, shared by every forge's
+/// `forge_pr_list_ci` arm: a read whose attempts ALL failed rejects with the last
+/// failure, since an `Ok` of no rows would erase the icons the list already shows;
+/// one successful chunk or probe keeps the partial rows, and no attempt is `Ok`.
+pub(crate) fn ci_list_outcome<T>(
+    rows: T,
+    succeeded: usize,
+    last_failure: Option<AppError>,
+) -> AppResult<T> {
+    match last_failure {
+        Some(e) if succeeded == 0 => Err(e),
+        _ => Ok(rows),
+    }
+}
+
 /// Map GitHub's *precomputed* single-enum `statusCheckRollup.state` to the neutral
 /// list-row CI signal. `None` = the rollup was null (no checks configured) → `"none"`;
 /// an empty state string is treated the same. Unrecognized states bias to `"pending"`
@@ -2653,8 +2668,9 @@ fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
 /// `statusCheckRollup` expansion 504s on large repos), so row icons hydrate here.
 /// `sample_url` is any PR html url from the SAME list page: it fixes
 /// owner/name/host, which is load-bearing for forks. Queries ≤50 numbers per call;
-/// a chunk that errors is omitted rather than failing the whole call. Red rows are
-/// then confirmed through `gh_confirm_red_rollups`.
+/// a chunk that errors is omitted, and only a read whose every chunk failed errors
+/// (see [`ci_list_outcome`]). Red rows are then confirmed through
+/// `gh_confirm_red_rollups`.
 pub async fn gh_pr_list_ci(
     repo_path: &str,
     numbers: Vec<u64>,
@@ -2668,6 +2684,8 @@ pub async fn gh_pr_list_ci(
 
     let mut result: Vec<PrCiStatus> = Vec::with_capacity(numbers.len());
     let mut red: Vec<RedRollupRow> = Vec::new();
+    let mut succeeded = 0;
+    let mut last_failure = None;
     for chunk in numbers.chunks(50) {
         // Numbers are u64 (digits only) → safe to embed directly. Owner/name are
         // passed as GraphQL variables (validated above), never interpolated.
@@ -2698,21 +2716,31 @@ pub async fn gh_pr_list_ci(
         args.push(&name_arg);
 
         // Per-chunk tolerance: any failure drops this chunk's icons.
-        let Ok(out) = run_gh_raw(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await else {
-            continue;
+        let out = match run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await {
+            Ok(out) => out,
+            Err(e) => {
+                last_failure = Some(e);
+                continue;
+            }
         };
-        if out.code != 0 {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) else {
-            continue;
+        let value = match serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) {
+            Ok(value) => value,
+            Err(e) => {
+                last_failure = Some(gh_unreadable("the CI status", e.to_string()));
+                continue;
+            }
         };
         let Some(repo_obj) = value
             .pointer("/data/repository")
             .and_then(|v| v.as_object())
         else {
+            last_failure = Some(gh_unreadable(
+                "the CI status",
+                "the response carried no repository".to_string(),
+            ));
             continue;
         };
+        succeeded += 1;
         for n in chunk {
             // Per-node guard: a missing/null alias (e.g. a number that isn't a PR
             // in this repo) is skipped, not defaulted to a misleading value.
@@ -2749,7 +2777,7 @@ pub async fn gh_pr_list_ci(
             }
         }
     }
-    Ok(result)
+    ci_list_outcome(result, succeeded, last_failure)
 }
 
 /// Whether a precomputed rollup enum gets the red-row confirm fetch: a failing row
@@ -8358,6 +8386,32 @@ mod tests {
         assert_eq!(rollup_state_to_ci(Some("")), "none");
         // An unrecognized state biases to pending (conservative).
         assert_eq!(rollup_state_to_ci(Some("SOMETHING_NEW")), "pending");
+    }
+
+    #[test]
+    fn ci_list_outcome_rejects_only_when_every_attempt_failed() {
+        use super::ci_list_outcome;
+        let offline = || Some(AppError::Gh("dial tcp: lookup api.github.com".to_string()));
+        // No attempt (an empty page) is an empty success, never an error.
+        assert!(matches!(
+            ci_list_outcome(Vec::<u64>::new(), 0, None),
+            Ok(rows) if rows.is_empty()
+        ));
+        // Every attempt failed: the last failure rejects, so the list keeps its icons.
+        assert!(matches!(
+            ci_list_outcome(Vec::<u64>::new(), 0, offline()),
+            Err(AppError::Gh(msg)) if msg.contains("lookup")
+        ));
+        // First failed, second succeeded: the partial rows stay best-effort Ok.
+        assert!(matches!(
+            ci_list_outcome(vec![7_u64], 1, offline()),
+            Ok(rows) if rows == [7]
+        ));
+        // Every attempt succeeded.
+        assert!(matches!(
+            ci_list_outcome(vec![7_u64, 8], 2, None),
+            Ok(rows) if rows == [7, 8]
+        ));
     }
 
     #[test]

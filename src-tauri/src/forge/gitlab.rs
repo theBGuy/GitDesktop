@@ -1601,9 +1601,10 @@ fn parse_mr_url_project(url: &str) -> AppResult<(String, String)> {
 /// batched call per ≤50-iid chunk suffices — no N+1. `sample_url` (any MR web url
 /// from the same page) fixes the host + project full path; `fullPath` rides as a
 /// GraphQL variable, iids are digits-only and embedded as quoted strings (`[ID!]`).
-/// A chunk that errors or won't parse is omitted (its rows show no icon), never
-/// failing the whole call. The sample URL supplies the explicitly pinned instance;
-/// the repository argument is retained for the dispatcher's existing signature.
+/// A chunk that errors or won't parse is omitted (its rows show no icon); only a read
+/// whose every chunk failed errors (see [`crate::github::pr::ci_list_outcome`]). The
+/// sample URL supplies the explicitly pinned instance; the repository argument is
+/// retained for the dispatcher's existing signature.
 pub async fn pr_list_ci(
     _repo_path: &str,
     iids: Vec<u64>,
@@ -1615,6 +1616,8 @@ pub async fn pr_list_ci(
     let (host, full_path) = parse_mr_url_project(sample_url)?;
 
     let mut result: Vec<PrCiStatus> = Vec::with_capacity(iids.len());
+    let mut succeeded = 0;
+    let mut last_failure = None;
     for chunk in iids.chunks(50) {
         // Safe to interpolate: iids are u64 (digits only). fullPath rides as a
         // GraphQL variable, never interpolated.
@@ -1629,18 +1632,31 @@ pub async fn pr_list_ci(
         let query_arg = format!("query={query}");
         let path_arg = format!("path={full_path}");
         let args = ["graphql", "-f", &query_arg, "-f", &path_arg];
-        let Ok(out) = run_glab_api_for_repo_host(&host, &args, GLAB_NETWORK_TIMEOUT).await else {
-            continue;
+        let out = match run_glab_api_for_repo_host(&host, &args, GLAB_NETWORK_TIMEOUT).await {
+            Ok(out) => out,
+            Err(e) => {
+                last_failure = Some(e);
+                continue;
+            }
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) else {
-            continue;
+        let value = match serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) {
+            Ok(value) => value,
+            Err(e) => {
+                last_failure = Some(gl_unreadable("the pipeline status", e.to_string()));
+                continue;
+            }
         };
         let Some(nodes) = value
             .pointer("/data/project/mergeRequests/nodes")
             .and_then(|v| v.as_array())
         else {
+            last_failure = Some(gl_unreadable(
+                "the pipeline status",
+                "the response carried no merge requests".to_string(),
+            ));
             continue;
         };
+        succeeded += 1;
         for node in nodes {
             // iid comes back as a STRING; parse it back to a number for the neutral key.
             let Some(iid) = node
@@ -1660,7 +1676,7 @@ pub async fn pr_list_ci(
             });
         }
     }
-    Ok(result)
+    crate::github::pr::ci_list_outcome(result, succeeded, last_failure)
 }
 
 /// Map a GitLab MR's list state onto the neutral poll state the notification poller

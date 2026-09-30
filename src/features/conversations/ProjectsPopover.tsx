@@ -32,6 +32,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
+import { offlinePendingMessage } from "./remote-section-state";
 
 /** The two holds every Projects surface states the same way — exported beside
  *  {@link projectScopeReadOnly} for the same reason that predicate is: a claim
@@ -150,8 +151,11 @@ export function ProjectsPopover({
   const editProjects = useEditItemProjects(repoPath, kind, number, lens);
   // Gated on `canRead` so a disabled query — the missing-scope path, whose whole
   // point is the popup's Reconnect button — can't hold the trigger shut forever.
-  // An ERRORED read likewise mustn't hold it: the popup owns the Retry.
-  const loadingMemberships = canRead && memberships.isPending;
+  // An ERRORED read likewise mustn't hold it: the popup owns the Retry. A first
+  // load parked offline waits with no timeout, so it says so instead of loading.
+  const membershipsPending = canRead && memberships.isPending;
+  const membershipsParked = membershipsPending && memberships.isPaused;
+  const loadingMemberships = membershipsPending && !memberships.isPaused;
   // Ranked: the caller's reason outranks a write the viewer started, which
   // outranks the first load.
   const heldReason = (() => {
@@ -165,6 +169,8 @@ export function ProjectsPopover({
       // gone by the time it frees.
       case editProjects.isPending:
         return "Saving your last change…";
+      case membershipsParked:
+        return offlinePendingMessage("projects");
       case loadingMemberships:
         return "Loading projects…";
       default:
@@ -186,6 +192,10 @@ export function ProjectsPopover({
   }
   const rows = [...byId.values()];
   const readError = memberships.error ?? available.error;
+  const readsParked = memberships.isPaused || available.isPaused;
+  // `canRead` keeps a DISABLED catalog query, permanently "pending", from
+  // reading as one in flight.
+  const catalogPending = canRead && available.isPending;
   // Locked rows are skipped by the arrow keys rather than made focus black holes:
   // a natively-disabled checkbox can't take focus. An unsettled memberships read
   // outranks the scope: the catalog and the memberships are separate gh calls, so
@@ -352,7 +362,15 @@ export function ProjectsPopover({
               </ScopeGapBlock>
             ) : (
               <>
-                {readError !== null && (
+                {/* One line for a failed or still-loading read parked offline,
+                    and no Retry: it would only park again, and reconnecting
+                    resumes both reads by itself. */}
+                {readsParked && (readError !== null || catalogPending) && (
+                  <p className="px-1 py-1 text-xs text-muted-foreground">
+                    {offlinePendingMessage("projects")}
+                  </p>
+                )}
+                {readError !== null && !readsParked && (
                   <div className="px-1 py-1 text-xs">
                     <p className="text-muted-foreground">
                       {presentError(readError).summary}
@@ -384,20 +402,17 @@ export function ProjectsPopover({
                 )}
                 {/* Not gated on an empty list: membership rows render from
                       their own query, so the catalog can still be in flight
-                      under a list that already looks complete. `canRead` keeps a
-                      DISABLED query — permanently "pending" — from reading as one. */}
-                {canRead && available.isPending && (
+                      under a list that already looks complete. */}
+                {catalogPending && !readsParked && (
                   <p className="px-1 py-1 text-xs text-muted-foreground">
                     Loading projects…
                   </p>
                 )}
-                {rows.length === 0 &&
-                  readError === null &&
-                  !(canRead && available.isPending) && (
-                    <p className="px-1 py-1 text-xs text-muted-foreground">
-                      No open projects in this repository or its owner.
-                    </p>
-                  )}
+                {rows.length === 0 && readError === null && !catalogPending && (
+                  <p className="px-1 py-1 text-xs text-muted-foreground">
+                    No open projects in this repository or its owner.
+                  </p>
+                )}
                 {rows.length > 0 && (
                   // py-2 contains the Checkbox touch-target's 8px vertical bleed
                   // (after:-inset-y-2) — without it the pseudo adds scrollable
@@ -467,6 +482,12 @@ export function ProjectsPopover({
           return chips;
         case loadingMemberships:
           return <Skeleton className="h-5 w-24" aria-hidden />;
+        case membershipsParked:
+          return (
+            <span className="text-[11px] text-muted-foreground">
+              {offlinePendingMessage("projects")}
+            </span>
+          );
         // A settled empty read never renders this: `empty` on the cell takes it.
         default:
           return (

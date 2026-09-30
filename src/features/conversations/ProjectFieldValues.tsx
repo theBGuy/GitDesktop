@@ -18,6 +18,7 @@ import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { parseableDate } from "@/lib/time";
 import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
+import { offlinePendingMessage } from "./remote-section-state";
 
 const FIELD_LABEL = "Project fields";
 
@@ -399,12 +400,21 @@ export function ProjectFieldValues({
   // fields still needs that line named, and an unlinked board stops counting the
   // moment its chip goes.
   const showTitles = entries.length > 1;
-  // A disabled query is not loading — it is the resolved "no boards" answer.
-  const loading =
+  // A disabled query is not loading — it is the resolved "no boards" answer. A
+  // first load parked offline isn't either: it waits with no timeout. A parked
+  // failure offers no Retry, which would only park again.
+  const unloaded =
     canRead &&
     boardsKnown &&
     values.data === undefined &&
     values.error === null;
+  const loading = unloaded && !values.isPaused;
+  const parked =
+    canRead &&
+    boardsKnown &&
+    values.isPaused &&
+    (values.data === undefined || values.error !== null);
+  const offlineMessage = offlinePendingMessage(FIELD_LABEL.toLowerCase());
 
   const content = (() => {
     switch (true) {
@@ -425,6 +435,12 @@ export function ProjectFieldValues({
         );
       case loading:
         return <Skeleton className="h-4 w-40" aria-hidden />;
+      case parked:
+        return (
+          <span className="text-[11px] text-muted-foreground">
+            {offlineMessage}
+          </span>
+        );
       // Still gated: a disabled query keeps whatever error it last cached, so an
       // item whose boards — or whose scope — have since gone stays silent.
       case canRead && values.error !== null && boardsKnown:
@@ -479,6 +495,8 @@ export function ProjectFieldValues({
         return undefined;
       case loading:
         return "Loading project fields…";
+      case parked:
+        return offlineMessage;
       // Reachable with no error and nothing to retry — a values read that settled
       // empty against live memberships lands here, so this names no control.
       default:

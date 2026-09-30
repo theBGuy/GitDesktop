@@ -28,7 +28,10 @@ import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import {
   isPermanentListError,
+  offlinePendingMessage,
   parkedUnlessPermanent,
+  type UngroupedReason,
+  ungroupedReason,
 } from "@/features/conversations/remote-section-state";
 import {
   type ReviewGroupKind,
@@ -111,10 +114,11 @@ const HOLD_POLL_MS = 5_000;
 const HOLD_POLL_LIMIT = 8;
 
 /** Why the list is flat despite the grouping toggle being on. */
-const UNGROUPED_NOTE = {
+const UNGROUPED_NOTE: Record<UngroupedReason, string> = {
+  offline: offlinePendingMessage("the review grouping"),
   error: "Couldn't load your review state — the list is ungrouped.",
   truncated: "Couldn't check every review — the list is ungrouped.",
-} as const;
+};
 
 /** Which tab a local PR's status belongs on — the Closed tab covers merged and
  *  closed alike. Total over {@link LocalPrStatus}, so a new status has to be
@@ -652,14 +656,16 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           };
         })
       : undefined;
-  // Both ways the grouping can fail say so: silently falling back to a flat list
+  // Every way the grouping can fail says so: silently falling back to a flat list
   // would read as "the toggle did nothing".
-  const groupingNote = (() => {
-    if (!groupingRequested) return undefined;
-    if (reviewState.isError) return UNGROUPED_NOTE.error;
-    if (groupingAsked && reviewPage?.truncated) return UNGROUPED_NOTE.truncated;
-    return undefined;
-  })();
+  const ungrouped = ungroupedReason({
+    requested: groupingRequested,
+    grouped: remoteGroups !== undefined,
+    isError: reviewState.isError,
+    isPaused: reviewState.isPaused,
+    truncated: groupingAsked && reviewPage?.truncated === true,
+  });
+  const groupingNote = ungrouped ? UNGROUPED_NOTE[ungrouped] : undefined;
   // Two independent notes over one channel: SCOPE (which rows these are) before
   // ARRANGEMENT (how they're ordered), because the first changes what the second
   // describes. Deliberately not folded into UNGROUPED_NOTE — that Record is about

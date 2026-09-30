@@ -3109,11 +3109,14 @@ export function RemotePrView({
               {/* What the FEED holds, not what the payload does: the viewer's own
                   pending review and its draft line comments are carried by the notice
                   strip, so counting either here would silence this line over an empty
-                  feed. */}
+                  feed. Threads and timeline must have LOADED: an unread one counts
+                  zero, and "no activity" is a claim about what was read. */}
               {threadClaims.renderedReviews.length === 0 &&
                 pr.comments.length === 0 &&
                 pr.commits.length === 0 &&
-                !timeline.data?.length &&
+                timeline.data !== undefined &&
+                timeline.data.length === 0 &&
+                threadClaims.visibleThreads !== undefined &&
                 threadClaims.visibleThreadCount === 0 && (
                   <p className="text-xs text-muted-foreground">
                     No activity yet.

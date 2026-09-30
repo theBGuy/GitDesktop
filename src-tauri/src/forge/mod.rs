@@ -1346,7 +1346,8 @@ pub async fn forge_my_teams(
 /// GitLab `headPipeline.status` by iid (one batched call each); Bitbucket has no batch
 /// endpoint and probes per-commit statuses by `head_sha`. `sample_url` fixes which
 /// repo the numbers belong to — load-bearing for forks, where the list resolves to the
-/// parent while origin points at the fork. Best-effort: an unfetchable PR gets no icon.
+/// parent while origin points at the fork. Best-effort per PR: an unfetchable PR gets
+/// no icon — but if every attempt fails the call errors, so callers keep cached rows.
 #[tauri::command]
 pub async fn forge_pr_list_ci(
     repo_path: String,

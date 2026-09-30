@@ -2,6 +2,7 @@ import {
   ArrowClockwiseIcon,
   ArrowSquareOutIcon,
   CheckCircleIcon,
+  CloudSlashIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +13,7 @@ import {
   type Monitor,
 } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -77,24 +78,36 @@ const TOOL_META: Record<
   },
 };
 
+/** Sign-in line per status; `null` renders nothing. `unreachable` names no host:
+ *  gh's reading spans every host it holds a login for. */
+const AUTH_STATE: Record<
+  AuthStatus,
+  { icon: ReactNode; label: string } | null
+> = {
+  authed: {
+    icon: <CheckCircleIcon weight="fill" className="size-3 text-success" />,
+    label: "Signed in",
+  },
+  notAuthed: {
+    icon: <WarningCircleIcon weight="fill" className="size-3 text-warning" />,
+    label: "Not signed in",
+  },
+  unreachable: {
+    icon: <CloudSlashIcon className="size-3" />,
+    label: "Can't reach the server to check sign-in",
+  },
+  unknown: null,
+};
+
 function AuthState({ authed }: { authed: AuthStatus }) {
-  if (authed === "authed") {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <CheckCircleIcon weight="fill" className="size-3 text-success" />
-        Signed in
-      </span>
-    );
-  }
-  if (authed === "notAuthed") {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <WarningCircleIcon weight="fill" className="size-3 text-warning" />
-        Not signed in
-      </span>
-    );
-  }
-  return null;
+  const state = AUTH_STATE[authed];
+  if (!state) return null;
+  return (
+    <span className="inline-flex items-center gap-1 text-muted-foreground">
+      {state.icon}
+      {state.label}
+    </span>
+  );
 }
 
 function ToolRow({ tool }: { tool: ToolStatus }) {
@@ -327,7 +340,8 @@ export function AboutSection() {
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
           </div>
-        ) : health.isError ? (
+        ) : health.isError && !health.data ? (
+          // A failed Re-check keeps the list it already has.
           <p className="py-2 text-xs text-muted-foreground">
             Couldn't check installed tools.
           </p>

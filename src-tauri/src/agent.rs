@@ -143,11 +143,15 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthStatus {
     Authed,
     NotAuthed,
+    /// The sign-in check never reached a verdict on the credential (an outage).
+    /// Only the forge CLI legs of `system_health` produce it; `agent_detect`'s
+    /// probes are local and never do.
+    Unreachable,
     Unknown,
 }
 
@@ -3756,6 +3760,16 @@ opencode/x-preview-f-free
         let (text, is_error) = claude_done(&[CL_API_ERROR]);
         assert!(is_error);
         assert!(text.starts_with("There's an issue with the selected model"));
+    }
+
+    #[test]
+    fn auth_status_wire_strings_match_the_ts_union() {
+        // Pins the TS mirror `AuthStatus` in src/lib/ai/agent.ts, value for value.
+        let wire = |s: AuthStatus| serde_json::to_value(s).expect("AuthStatus serializes");
+        assert_eq!(wire(AuthStatus::Authed), "authed");
+        assert_eq!(wire(AuthStatus::NotAuthed), "notAuthed");
+        assert_eq!(wire(AuthStatus::Unreachable), "unreachable");
+        assert_eq!(wire(AuthStatus::Unknown), "unknown");
     }
 
     #[test]

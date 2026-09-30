@@ -484,6 +484,30 @@ function ReasonCard({
   );
 }
 
+/** A card's Retry. Its owner passes no `onRetry` while the read is parked
+ *  offline, where a retry would only park again and reconnecting resumes the
+ *  read by itself, so the slot says that instead. */
+function CardRetry({
+  category,
+  onRetry,
+}: {
+  category: string;
+  onRetry?: () => void;
+}) {
+  if (!onRetry)
+    return (
+      <p className="text-xs text-muted-foreground">
+        {offlinePendingMessage(category)}
+      </p>
+    );
+  return (
+    <Button variant="outline" size="sm" onClick={onRetry}>
+      <ArrowClockwiseIcon data-icon="inline-start" />
+      Retry
+    </Button>
+  );
+}
+
 /**
  * The card for any envelope that isn't `"available"`. `notEnabledMessage` and
  * `noResultsYetMessage` are the category's own copy for those two states;
@@ -508,7 +532,8 @@ function UnavailableCard({
   Category: string;
   notEnabledMessage?: string;
   noResultsYetMessage?: string;
-  onRetry: () => void;
+  /** Omitted while the read is parked offline. */
+  onRetry?: () => void;
   onEnable?: () => void;
 }) {
   const enableAction = onEnable ? (
@@ -517,12 +542,7 @@ function UnavailableCard({
       Open security settings
     </Button>
   ) : undefined;
-  const retryAction = (
-    <Button variant="outline" size="sm" onClick={onRetry}>
-      <ArrowClockwiseIcon data-icon="inline-start" />
-      Retry
-    </Button>
-  );
+  const retryAction = <CardRetry category={category} onRetry={onRetry} />;
 
   if (availability === "notEnabled") {
     // The category's own sentence is how a non-admin learns what to ask for, so
@@ -623,6 +643,15 @@ type FindingsRead = {
   isPaused: boolean;
   data: unknown;
 };
+
+/** An explanation card's Retry for `read`: none while it is parked offline,
+ *  where {@link CardRetry} says why instead. */
+function cardRetry(read: {
+  isPaused: boolean;
+  refetch: () => unknown;
+}): (() => void) | undefined {
+  return read.isPaused ? undefined : () => read.refetch();
+}
 
 function findingsPane(read: FindingsRead): DetailPaneState {
   return resolveDetailPane({
@@ -841,14 +870,10 @@ function GlNoPipelineCard({
 }: {
   state: Exclude<GlPipelineState, "found">;
   data: GlFindingsOut;
-  onRetry: () => void;
+  /** Omitted while the read is parked offline. */
+  onRetry?: () => void;
 }) {
-  const retryAction = (
-    <Button variant="outline" size="sm" onClick={onRetry}>
-      <ArrowClockwiseIcon data-icon="inline-start" />
-      Retry
-    </Button>
-  );
+  const retryAction = <CardRetry category="findings" onRetry={onRetry} />;
   const setupUrl = glScanningSetupUrl(data);
 
   if (state === "none") {
@@ -948,15 +973,11 @@ function GlUnavailableCard({
   /** Replaces the per-category sentence where the shared template reads badly —
    *  the hoisted card speaks for all three at once. */
   notConfiguredMessage?: string;
-  onRetry: () => void;
+  /** Omitted while the read is parked offline. */
+  onRetry?: () => void;
   onSetup?: () => void;
 }) {
-  const retryAction = (
-    <Button variant="outline" size="sm" onClick={onRetry}>
-      <ArrowClockwiseIcon data-icon="inline-start" />
-      Retry
-    </Button>
-  );
+  const retryAction = <CardRetry category={category} onRetry={onRetry} />;
 
   if (availability === "notConfigured") {
     return (
@@ -1285,7 +1306,8 @@ function GlFindingsSection({
   limits: FindingsLimits;
   setLimits: (limits: FindingsLimits) => void;
   loading: boolean;
-  onRetry: () => void;
+  /** Omitted while the read is parked offline. */
+  onRetry?: () => void;
   onSetup?: () => void;
   children: ReactNode;
 }) {
@@ -1600,14 +1622,10 @@ function BbUnavailableCard({
 }: {
   state: Exclude<BbFindingsAvailability, "available">;
   data: BbFindingsOut;
-  onRetry: () => void;
+  /** Omitted while the read is parked offline. */
+  onRetry?: () => void;
 }) {
-  const retryAction = (
-    <Button variant="outline" size="sm" onClick={onRetry}>
-      <ArrowClockwiseIcon data-icon="inline-start" />
-      Retry
-    </Button>
-  );
+  const retryAction = <CardRetry category="findings" onRetry={onRetry} />;
 
   if (state === "noReports") {
     // No settings deep link: Bitbucket has no Code Insights toggle to open —
@@ -2236,7 +2254,7 @@ export function FindingsPanel({
                         : bbOut.availability
                     }
                     data={bbOut}
-                    onRetry={() => bb.refetch()}
+                    onRetry={cardRetry(bb)}
                   />
                 ) : (
                   <div>
@@ -2289,7 +2307,7 @@ export function FindingsPanel({
                   <GlNoPipelineCard
                     state={glOut.pipelineState}
                     data={glOut}
-                    onRetry={() => gl.refetch()}
+                    onRetry={cardRetry(gl)}
                   />
                 ) : (
                   <div>
@@ -2304,7 +2322,7 @@ export function FindingsPanel({
                         category="findings"
                         Category="Scanning"
                         notConfiguredMessage="This pipeline didn't publish any scanning reports — most likely scanning isn't set up yet."
-                        onRetry={() => gl.refetch()}
+                        onRetry={cardRetry(gl)}
                         onSetup={
                           glSetupUrl ? () => openUrl(glSetupUrl) : undefined
                         }
@@ -2325,7 +2343,7 @@ export function FindingsPanel({
                           limits={limits}
                           setLimits={setFindingsLimits}
                           loading={gl.isFetching || glMore.growing}
-                          onRetry={() => gl.refetch()}
+                          onRetry={cardRetry(gl)}
                           onSetup={
                             glSetupUrl ? () => openUrl(glSetupUrl) : undefined
                           }
@@ -2352,7 +2370,7 @@ export function FindingsPanel({
                           limits={limits}
                           setLimits={setFindingsLimits}
                           loading={gl.isFetching || glMore.growing}
-                          onRetry={() => gl.refetch()}
+                          onRetry={cardRetry(gl)}
                           onSetup={
                             glSetupUrl ? () => openUrl(glSetupUrl) : undefined
                           }
@@ -2379,7 +2397,7 @@ export function FindingsPanel({
                           limits={limits}
                           setLimits={setFindingsLimits}
                           loading={gl.isFetching || glMore.growing}
-                          onRetry={() => gl.refetch()}
+                          onRetry={cardRetry(gl)}
                           onSetup={
                             glSetupUrl ? () => openUrl(glSetupUrl) : undefined
                           }
@@ -2422,7 +2440,7 @@ export function FindingsPanel({
                     category="dependency alerts"
                     Category="Dependency alerts"
                     notEnabledMessage="Dependabot alerts are off for this repository. Turn them on to see vulnerable dependencies here."
-                    onRetry={() => alerts.refetch()}
+                    onRetry={cardRetry(alerts)}
                     onEnable={
                       canOpenRepoSettings
                         ? () => requestRepoSettings("security", repoPath)
@@ -2541,7 +2559,7 @@ export function FindingsPanel({
                     Category="Code scanning alerts"
                     notEnabledMessage="Code scanning is off for this repository. Turn it on to see alerts here."
                     noResultsYetMessage="Code scanning hasn't reported results for this repository yet — it may still need setting up, or its first analysis may still be running."
-                    onRetry={() => codeScanning.refetch()}
+                    onRetry={cardRetry(codeScanning)}
                     onEnable={
                       canOpenRepoSettings
                         ? () => requestRepoSettings("security", repoPath)
@@ -2675,7 +2693,7 @@ export function FindingsPanel({
                     category="secret scanning alerts"
                     Category="Secret scanning alerts"
                     notEnabledMessage="Secret scanning is off for this repository. Turn it on to catch leaked credentials."
-                    onRetry={() => secrets.refetch()}
+                    onRetry={cardRetry(secrets)}
                     onEnable={
                       canOpenRepoSettings
                         ? () => requestRepoSettings("security", repoPath)
@@ -2813,7 +2831,7 @@ export function FindingsPanel({
                     category="security advisories"
                     Category="Security advisories"
                     notEnabledMessage="Repository advisories are only published on public repositories."
-                    onRetry={() => advisories.refetch()}
+                    onRetry={cardRetry(advisories)}
                   />
                 ) : (
                   <>

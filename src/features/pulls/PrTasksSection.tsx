@@ -17,7 +17,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
+import { sectionReadNotice } from "@/features/conversations/remote-section-state";
 import {
   prTasksKey,
   useCreatePrTask,
@@ -287,9 +289,18 @@ export function PrTasksSection({
   const tasks = tasksQuery.data;
 
   // Wait for the first load so a PR with no tasks doesn't flash an empty section
-  // before it resolves (IssueSubIssues idiom).
-  if (!tasks && !tasksQuery.isError) return null;
+  // before it resolves (IssueSubIssues idiom). A first load parked offline shows
+  // instead: it has no timeout, so hiding it would hide the section until the
+  // connection returns with nothing saying why.
+  if (!tasks && !tasksQuery.isError && !tasksQuery.isPaused) return null;
 
+  const notice = sectionReadNotice({
+    noun: "tasks",
+    loadFailed: "Couldn't load tasks.",
+    rowCount: tasks?.length,
+    isError: tasksQuery.isError,
+    isPaused: tasksQuery.isPaused,
+  });
   const list = tasks ?? [];
   const total = list.length;
   const resolvedCount = total - unresolved(list);
@@ -389,7 +400,9 @@ export function PrTasksSection({
           </span>
         )}
         <span className="flex-1" />
-        {editable && !adding && (
+        {/* The add input lives with the loaded rows, so an unloaded list offers
+            no Add: its notice already says why the section is empty. */}
+        {editable && !adding && tasks !== undefined && (
           <Button
             variant="ghost"
             size="xs"
@@ -411,11 +424,16 @@ export function PrTasksSection({
         </div>
       )}
 
-      {tasksQuery.isError ? (
-        <p className="text-[11px] text-muted-foreground">
-          Couldn't load tasks.
-        </p>
-      ) : (
+      <DegradedListNotice
+        noun="tasks"
+        degraded={notice !== null}
+        message={notice?.message}
+        retryLabel={notice?.retryLabel}
+        onRetry={notice?.retry ? () => void tasksQuery.refetch() : undefined}
+        className="px-0 pb-0"
+      />
+
+      {tasks && (
         <div className="space-y-1.5" onKeyDown={onKeyDown}>
           {list.map((task) =>
             editingId === task.id ? (

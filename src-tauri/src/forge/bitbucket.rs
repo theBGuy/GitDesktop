@@ -1458,13 +1458,17 @@ fn reduce_bb_ci(states: &[String]) -> String {
 /// `forge_pr_list_ci`. Bitbucket has NO batch pipeline endpoint, so this probes each
 /// PR's head commit `.../commit/{sha}/statuses` individually. Best-effort: refs with an
 /// empty `head_sha` are skipped, the set is capped at the FIRST 50 PRs, a per-PR failure
-/// just omits that icon, and the probes run SEQUENTIALLY (no concurrency idiom in this
-/// module; a capped best-effort probe doesn't justify inventing one).
+/// just omits that icon unless every probe failed (see
+/// [`crate::github::pr::ci_list_outcome`]), and the probes run SEQUENTIALLY (no
+/// concurrency idiom in this module; a capped best-effort probe doesn't justify
+/// inventing one).
 pub async fn pr_list_ci(repo_path: &str, prs: &[PrCiRefIn]) -> AppResult<Vec<PrCiStatus>> {
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
 
     let mut result: Vec<PrCiStatus> = Vec::new();
+    let mut succeeded = 0;
+    let mut last_failure = None;
     // Cap at the first 50 PRs (best-effort decoration; no N+1 blow-up on huge pages).
     for pr in prs.iter().filter(|p| !p.head_sha.is_empty()).take(50) {
         let path = format!(
@@ -1474,23 +1478,28 @@ pub async fn pr_list_ci(repo_path: &str, prs: &[PrCiRefIn]) -> AppResult<Vec<PrC
             encode_query_value(&pr.head_sha),
         );
         // Per-call tolerance: a failed fetch just leaves this PR without an icon.
-        let Ok(page) = http::bb_get_json::<BbPage<BbCommitStatus>>(
+        let page = match http::bb_get_json::<BbPage<BbCommitStatus>>(
             &creds,
             &path,
             "statuses",
             BbOpKind::Read,
         )
         .await
-        else {
-            continue;
+        {
+            Ok(page) => page,
+            Err(e) => {
+                last_failure = Some(e);
+                continue;
+            }
         };
+        succeeded += 1;
         let states: Vec<String> = page.values.into_iter().map(|s| s.state).collect();
         result.push(PrCiStatus {
             number: pr.number,
             ci_status: reduce_bb_ci(&states),
         });
     }
-    Ok(result)
+    crate::github::pr::ci_list_outcome(result, succeeded, last_failure)
 }
 
 fn commit_headline(c: &BbCommit) -> String {
