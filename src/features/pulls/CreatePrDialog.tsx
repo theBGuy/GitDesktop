@@ -727,6 +727,8 @@ export function CreatePrDialog({
     setAssignees([]);
     // Reset the linked-issue chips (and their dismissed/probed refs) — the create
     // dialog opens with no seeded body refs; extraction/AI seeding repopulates.
+    // This seeds the PRE-flip target's bucket, before `setTarget` below: harmless
+    // only because the seed is empty and the reset clears every target anyway.
     resetLinkedIssues([]);
     // Same for the Jira mention cluster (Bitbucket + linked project).
     resetJiraChips([]);
@@ -938,8 +940,8 @@ export function CreatePrDialog({
   // dialog-local generate chord.
   function runGenerate() {
     setDroppedLabels([]);
-    // The target this run's labels are validated against — the one
-    // `repoLabels` feeds the prompt below.
+    // The target this run's labels and issue candidates are validated against —
+    // the one `repoLabels` and `buildIssueCandidates` feed the prompt below.
     const runTarget = labelTarget;
     const runAcceptsLabels = canPickLabels;
     // Grounded issue candidates the model may link: current chips pinned first,
@@ -965,9 +967,10 @@ export function CreatePrDialog({
         // Each chunk's parse supersedes the last; the user's own picks and
         // removals live beside it, untouched.
         setAiProposal(applyAiProposal(d.labels, runTarget));
-        // Union the model's proposed issue links into the chip cluster (the hook
-        // owns the relate-default / dismissed-set / AI-flag rules).
-        upsertAiIssues({ closes: d.closes, relates: d.relates });
+        // Union the model's proposed issue links into the chip cluster of the
+        // run's target: its numbers were grounded in that target's issues, so a
+        // chunk arriving after a flip must not land in the other one.
+        upsertAiIssues({ closes: d.closes, relates: d.relates }, runTarget);
         // Union the model's proposed Jira mentions into the mention cluster.
         upsertAiJira({ jiraMentions: d.jiraMentions });
       },

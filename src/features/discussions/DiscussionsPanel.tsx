@@ -22,8 +22,12 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
-import { resolveRemoteSection } from "@/features/conversations/remote-section-state";
+import {
+  listNotice,
+  resolveRemoteSection,
+} from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
+import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import {
@@ -86,8 +90,17 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const [categoryId, setCategoryId] = useState<string | null>(null);
   // How many discussions to load; "Load more" bumps it by PAGE_SIZE. A category
   // switch resets it so a filtered view starts from the first page again.
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [requestedLimit, setLimit] = useState(PAGE_SIZE);
+  // A failed "Load more" rolls the list back to the rows it had; `limit` is
+  // the guarded one, so every reader below keys on what the list really shows.
+  const more = useLoadMoreGuard({
+    identity: `${repoPath}\n${categoryId ?? ""}`,
+    limit: requestedLimit,
+    setLimit,
+  });
+  const limit = more.limit;
   const list = useDiscussionList(repoPath, listEnabled, categoryId, limit);
+  const loadMore = more.observe(list);
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
   const prefetch = usePrefetchDiscussion(repoPath);
@@ -120,7 +133,9 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const discussions = list.data ?? [];
   // More may exist server-side exactly when this page filled the requested
   // limit; compared against the raw loaded count, not the search-filtered view.
-  const hasMore = discussions.length === limit;
+  // A grow in flight serves the previous page, shorter than the new limit, so
+  // the row stays mounted and busy then, even while the read is parked.
+  const hasMore = loadMore.growing || discussions.length === limit;
   const query = filterText.trim().toLowerCase();
 
   const visible = discussions.filter(
@@ -170,6 +185,11 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         Retry
       </Button>
     </div>
+  );
+  const offlineState = (
+    <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+      You're offline — discussions will load once you're back online.
+    </p>
   );
   const emptyCopy = (() => {
     if (discussions.length > 0) return "No discussions match the filter.";
@@ -260,7 +280,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           </p>
         );
       case meta.isPending:
-        return probeSkeleton;
+        return meta.isPaused ? offlineState : probeSkeleton;
       case meta.isError && visible.length === 0:
         return errorState("Couldn't load discussions for this repository.");
       case !meta.isError && !enabled:
@@ -281,11 +301,14 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           listPending: list.isPending,
           error: meta.isError || list.isError,
           rowCount: visible.length,
+          paused: list.isPaused,
         })
       : null;
   const listContent = ((): ReactNode => {
     if (probeContent !== undefined) return probeContent;
     switch (listState) {
+      case "offline":
+        return offlineState;
       case "error":
         return errorState("Couldn't load discussions.");
       case "empty":
@@ -294,6 +317,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         );
       case "rows":
       case "rows-degraded":
+      case "rows-offline":
         return visible.map(discussionRow);
       default:
         return (
@@ -306,6 +330,16 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         );
     }
   })();
+
+  const notice = listNotice({
+    noun: "discussions",
+    failed: listState === "rows-degraded",
+    offline: listState === "rows-offline",
+    // A category switch shows the previous category's rows as placeholder.
+    placeholder: list.isPlaceholderData && !loadMore.growing,
+    hasRows: true,
+    loadMoreFailed: loadMore.loadMoreFailed,
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -397,15 +431,19 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         <div onKeyDown={onListKeyDown}>
           <DegradedListNotice
             noun="discussions"
-            degraded={listState === "rows-degraded"}
-            onRetry={retry}
+            degraded={notice !== null}
+            message={notice?.message}
+            retryLabel={notice?.retryLabel}
+            onRetry={
+              notice?.cause === "load-more" ? loadMore.retryLoadMore : retry
+            }
             className="pt-2"
           />
           {listContent}
           {listEnabled && !list.isPending && hasMore && (
             <LoadMoreRow
               count={discussions.length}
-              loading={list.isFetching}
+              loading={list.isFetching || loadMore.growing}
               onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
             />
           )}

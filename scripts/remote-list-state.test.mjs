@@ -1,7 +1,9 @@
-// Pins the remote list section's render ladder and the board's failure-notice
-// grouping. The contract under test: a failed read replaces a list only when it
-// has no rows to draw; with rows cached, the rows stay and a degraded notice
-// sits above them, so an outage never reads as data loss.
+// Pins the remote list section's render ladder, the detail pane's ladder, the
+// list notice, the "Load more" guard, and the board's failure-notice grouping.
+// The contract under test: a failed or offline read replaces a list or a pane
+// only when it has nothing to draw; with content cached, it stays and a notice
+// sits above it, so an outage never reads as data loss, and a read parked
+// offline says so instead of spinning a skeleton forever.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -11,20 +13,35 @@ import { test } from "node:test";
 
 import {
   groupNoticesByMessage,
+  guardedLimit,
+  initialLoadMoreGuard,
+  listNotice,
   normalizeNoticeMessage,
+  OFFLINE_ROWS_NOTICE,
+  resolveDetailPane,
   resolveRemoteSection,
+  stepLoadMoreGuard,
 } from "../src/features/conversations/remote-section-state.ts";
 
 const BOOLS = [false, true];
 const ROW_COUNTS = [0, 1, 7];
 
 /** The ladder in the order the section checks it, written out rung by rung. */
-function expected({ ghPending, ghReady, listPending, error, rowCount }) {
+function expected({
+  ghPending,
+  ghReady,
+  listPending,
+  error,
+  rowCount,
+  paused,
+}) {
   if (ghPending) return "gh-skeleton";
   if (!ghReady) return "not-ready";
+  if (listPending && paused) return "offline";
   if (listPending) return "list-skeleton";
   if (error && rowCount === 0) return "error";
   if (error) return "rows-degraded";
+  if (paused && rowCount > 0) return "rows-offline";
   if (rowCount === 0) return "empty";
   return "rows";
 }
@@ -35,17 +52,391 @@ test("every ladder input resolves to its rung (full truth table)", () => {
     for (const ghReady of BOOLS)
       for (const listPending of BOOLS)
         for (const error of BOOLS)
-          for (const rowCount of ROW_COUNTS) {
-            const input = { ghPending, ghReady, listPending, error, rowCount };
-            assert.equal(
-              resolveRemoteSection(input),
-              expected(input),
+          for (const paused of BOOLS)
+            for (const rowCount of ROW_COUNTS) {
+              const input = {
+                ghPending,
+                ghReady,
+                listPending,
+                error,
+                rowCount,
+                paused,
+              };
+              assert.equal(
+                resolveRemoteSection(input),
+                expected(input),
+                JSON.stringify(input),
+              );
+              cases++;
+            }
+  // 2^5 flag combinations x 3 row counts: a truncated loop fails here.
+  assert.equal(cases, 96);
+});
+
+test("an omitted paused flag reads as online, matching every older caller", () => {
+  for (const listPending of BOOLS)
+    for (const error of BOOLS)
+      for (const rowCount of ROW_COUNTS) {
+        const input = {
+          ghPending: false,
+          ghReady: true,
+          listPending,
+          error,
+          rowCount,
+        };
+        assert.equal(
+          resolveRemoteSection(input),
+          resolveRemoteSection({ ...input, paused: false }),
+          JSON.stringify(input),
+        );
+      }
+});
+
+test("a first load parked offline says offline, never an endless skeleton", () => {
+  const ready = { ghPending: false, ghReady: true, error: false, rowCount: 0 };
+  assert.equal(
+    resolveRemoteSection({ ...ready, listPending: true, paused: true }),
+    "offline",
+  );
+  // Negative control: the same first load while online still shows skeletons.
+  assert.equal(
+    resolveRemoteSection({ ...ready, listPending: true, paused: false }),
+    "list-skeleton",
+  );
+});
+
+test("a parked refresh keeps its rows under the offline rung (negative control)", () => {
+  const ready = { ghPending: false, ghReady: true, listPending: false };
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: false, rowCount: 4, paused: true }),
+    "rows-offline",
+  );
+  // A loaded-empty list stays empty: zero rows is still a loaded answer.
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: false, rowCount: 0, paused: true }),
+    "empty",
+  );
+  // A failed refresh outranks the park: the existing degraded rung stands.
+  assert.equal(
+    resolveRemoteSection({ ...ready, error: true, rowCount: 4, paused: true }),
+    "rows-degraded",
+  );
+  assert.equal(
+    resolveRemoteSection({
+      ...ready,
+      error: false,
+      rowCount: 4,
+      paused: false,
+    }),
+    "rows",
+  );
+});
+
+/** The detail pane's ladder, rung by rung. */
+function expectedPane({ pending, error, hasData, paused }) {
+  if (hasData && (error || paused)) return "content-degraded";
+  if (hasData) return "content";
+  if (paused) return "offline";
+  if (pending) return "skeleton";
+  return "error";
+}
+
+test("every detail pane input resolves to its state (full truth table)", () => {
+  let cases = 0;
+  for (const pending of BOOLS)
+    for (const error of BOOLS)
+      for (const hasData of BOOLS)
+        for (const paused of BOOLS) {
+          const input = { pending, error, hasData, paused };
+          assert.equal(
+            resolveDetailPane(input),
+            expectedPane(input),
+            JSON.stringify(input),
+          );
+          cases++;
+        }
+  assert.equal(cases, 16);
+});
+
+test("a detail refresh that fails over cached data keeps the content", () => {
+  const cached = { pending: false, hasData: true, paused: false };
+  assert.equal(
+    resolveDetailPane({ ...cached, error: true }),
+    "content-degraded",
+  );
+  // Negative control: with nothing cached the failure still takes the pane.
+  assert.equal(
+    resolveDetailPane({ ...cached, hasData: false, error: true }),
+    "error",
+  );
+  // A first load that is still running is a skeleton, a parked one is offline.
+  assert.equal(
+    resolveDetailPane({
+      pending: true,
+      error: false,
+      hasData: false,
+      paused: false,
+    }),
+    "skeleton",
+  );
+  assert.equal(
+    resolveDetailPane({
+      pending: true,
+      error: false,
+      hasData: false,
+      paused: true,
+    }),
+    "offline",
+  );
+});
+
+const LIST = { noun: "pull requests", hasRows: true };
+
+test("the list notice names one reason, failure first, then offline, then Load more", () => {
+  const all = listNotice({
+    ...LIST,
+    placeholder: false,
+    failed: true,
+    offline: true,
+    loadMoreFailed: true,
+  });
+  assert.equal(all.cause, "refresh");
+  assert.match(all.message, /^Couldn't refresh pull requests/);
+  const offline = listNotice({
+    ...LIST,
+    placeholder: false,
+    failed: false,
+    offline: true,
+    loadMoreFailed: true,
+  });
+  assert.equal(offline.cause, "refresh");
+  assert.equal(offline.message, OFFLINE_ROWS_NOTICE);
+  const more = listNotice({
+    ...LIST,
+    placeholder: false,
+    failed: false,
+    offline: false,
+    loadMoreFailed: true,
+  });
+  assert.equal(more.cause, "load-more");
+  assert.match(more.message, /^Couldn't load more pull requests/);
+  assert.equal(more.retryLabel, "Retry loading more pull requests");
+  // Negative control: a healthy list shows nothing.
+  assert.equal(
+    listNotice({
+      ...LIST,
+      placeholder: false,
+      failed: false,
+      offline: false,
+      loadMoreFailed: false,
+    }),
+    null,
+  );
+});
+
+/** The notice selection, rung by rung. */
+function expectedNotice({
+  failed,
+  offline,
+  placeholder,
+  hasRows,
+  loadMoreFailed,
+}) {
+  if (failed && hasRows) return ["refresh", "failed"];
+  if (failed) return ["refresh", "failed-bare"];
+  if (offline && hasRows && placeholder)
+    return ["refresh", "offline-other-view"];
+  if (offline && hasRows) return ["refresh", "offline-last-loaded"];
+  if (loadMoreFailed) return ["load-more", "load-more"];
+  return null;
+}
+const noticeKind = (n) => {
+  if (n === null) return null;
+  if (/^Couldn't refresh .*.$/.test(n.message) && !n.message.includes("—"))
+    return [n.cause, "failed-bare"];
+  if (n.message.startsWith("Couldn't refresh")) return [n.cause, "failed"];
+  if (n.message === OFFLINE_ROWS_NOTICE)
+    return [n.cause, "offline-last-loaded"];
+  if (n.message.includes("for this view will load"))
+    return [n.cause, "offline-other-view"];
+  if (n.message.startsWith("Couldn't load more")) return [n.cause, "load-more"];
+  return [n.cause, `unknown: ${n.message}`];
+};
+
+test("every list notice input resolves to its line (full truth table)", () => {
+  let cases = 0;
+  for (const failed of BOOLS)
+    for (const offline of BOOLS)
+      for (const placeholder of BOOLS)
+        for (const hasRows of BOOLS)
+          for (const loadMoreFailed of BOOLS) {
+            const input = {
+              failed,
+              offline,
+              placeholder,
+              hasRows,
+              loadMoreFailed,
+            };
+            assert.deepEqual(
+              noticeKind(listNotice({ ...LIST, ...input })),
+              expectedNotice(input),
               JSON.stringify(input),
             );
             cases++;
           }
-  // 2^4 flag combinations x 3 row counts: a truncated loop fails here.
-  assert.equal(cases, 48);
+  assert.equal(cases, 32);
+});
+
+test("offline over another view's placeholder rows never calls them this list's", () => {
+  const base = { ...LIST, failed: false, offline: true, loadMoreFailed: false };
+  const other = listNotice({ ...base, placeholder: true });
+  assert.equal(
+    other.message,
+    "You're offline — pull requests for this view will load once you're back online.",
+  );
+  assert.notEqual(other.message, OFFLINE_ROWS_NOTICE);
+  // Negative control: the list's own rows keep the last-loaded claim.
+  assert.equal(
+    listNotice({ ...base, placeholder: false }).message,
+    OFFLINE_ROWS_NOTICE,
+  );
+  // Placeholder rows alone, online, raise no notice at all.
+  assert.equal(
+    listNotice({ ...base, offline: false, placeholder: true }),
+    null,
+  );
+});
+
+/**
+ * Drives a guard the way the hook does: each observation names the caller's
+ * requested limit and what the query did at the GUARDED limit, and after every
+ * step the loop re-observes until the state stops changing — the render-phase
+ * pass. Returns the settled state plus the limit each step's query ran at.
+ */
+function run(observations, start = initialLoadMoreGuard("repo-a")) {
+  let state = start;
+  const ranAt = [];
+  for (const o of observations) {
+    const identity = o.identity ?? "repo-a";
+    const limit = guardedLimit(state, identity, o.requested);
+    ranAt.push(limit);
+    let next = stepLoadMoreGuard(state, { ...o, identity, limit });
+    // A settled step is a fixpoint: re-observing its own result changes nothing.
+    for (let pass = 0; next !== state && pass < 3; pass++) {
+      state = next;
+      next = stepLoadMoreGuard(state, {
+        ...o,
+        identity,
+        limit: guardedLimit(state, identity, o.requested),
+        // The re-render queries the redirected limit, whose cache loaded.
+        loaded:
+          o.loaded || guardedLimit(state, identity, o.requested) !== limit,
+        failed: false,
+      });
+    }
+    assert.equal(next, state, `no fixpoint for ${JSON.stringify(o)}`);
+  }
+  return { state, ranAt };
+}
+const ok = (requested, identity) => ({
+  identity,
+  requested,
+  loaded: true,
+  failed: false,
+});
+const bad = (requested, identity) => ({
+  identity,
+  requested,
+  loaded: false,
+  failed: true,
+});
+const busy = (requested, identity) => ({
+  identity,
+  requested,
+  loaded: false,
+  failed: false,
+});
+
+test("a grown page that fails after one loaded page redirects to it at once", () => {
+  const { state } = run([ok(100), busy(200), bad(200)]);
+  assert.equal(state.failed, 200);
+  assert.equal(state.lastGood, 100);
+  assert.deepEqual(state.rollback, { from: 200, to: 100 });
+  // While the caller still asks for 200, the query keys on the loaded 100.
+  assert.equal(guardedLimit(state, "repo-a", 200), 100);
+  // Negative control: under another identity the redirect never applies.
+  assert.equal(guardedLimit(state, "repo-b", 200), 200);
+});
+
+test("the caller catching up retires the redirect but keeps the failure", () => {
+  const { state } = run([ok(100), bad(200), ok(100)]);
+  assert.equal(state.rollback, null);
+  assert.equal(state.failed, 200);
+  // Growing again (Retry or Load more) is no longer redirected.
+  assert.equal(guardedLimit(state, "repo-a", 200), 200);
+});
+
+test("a first-load failure is the list's own error, never a rollback (negative control)", () => {
+  const { state, ranAt } = run([busy(100), bad(100)]);
+  assert.equal(state.failed, null);
+  assert.equal(state.rollback, null);
+  assert.deepEqual(ranAt, [100, 100]);
+  // A refresh failing over the loaded page is not a grow failure either.
+  const again = run([ok(100), bad(100)]);
+  assert.equal(again.state.failed, null);
+  assert.equal(again.state.rollback, null);
+});
+
+test("a retry that reaches the failed limit clears the failure", () => {
+  const { state } = run([ok(100), bad(200), ok(100), busy(200), ok(200)]);
+  assert.equal(state.failed, null);
+  assert.equal(state.lastGood, 200);
+});
+
+test("a retry that fails again redirects again", () => {
+  const { state, ranAt } = run([
+    ok(100),
+    bad(200),
+    ok(100),
+    busy(200),
+    bad(200),
+  ]);
+  assert.deepEqual(ranAt, [100, 200, 100, 200, 200]);
+  assert.deepEqual(state.rollback, { from: 200, to: 100 });
+  assert.equal(state.failed, 200);
+});
+
+test("a new list identity starts a fresh guard, dropping the old failure", () => {
+  const { state } = run([ok(100), bad(200), ok(100)]);
+  // Another lens or filter at a grown limit: no loaded page there yet, so its
+  // failure is that list's own error.
+  const switched = stepLoadMoreGuard(state, {
+    ...bad(200, "repo-a-upstream"),
+    identity: "repo-a-upstream",
+    limit: 200,
+  });
+  assert.equal(switched.identity, "repo-a-upstream");
+  assert.equal(switched.failed, null);
+  assert.equal(switched.lastGood, null);
+  assert.equal(switched.rollback, null);
+});
+
+test("an unchanged observation returns the same guard state", () => {
+  const { state } = run([ok(100)]);
+  const at = (o) =>
+    stepLoadMoreGuard(state, { ...o, identity: "repo-a", limit: o.requested });
+  assert.equal(at(ok(100)), state);
+  assert.equal(at(busy(200)), state);
+  // The redirected render re-observing its own result is a fixpoint too.
+  const failed = run([ok(100), bad(200)]).state;
+  assert.equal(
+    stepLoadMoreGuard(failed, {
+      ...ok(200),
+      identity: "repo-a",
+      limit: guardedLimit(failed, "repo-a", 200),
+    }),
+    failed,
+  );
 });
 
 test("a failed refresh with cached rows keeps the rows (negative control)", () => {
@@ -203,4 +594,28 @@ test("masking touches address:port tokens only, never bare numbers", () => {
     notice("views", "HTTP 500 from 1.2.3"),
   ]);
   assert.deepEqual(keys(groups), [["projects"], ["fields"], ["views"]]);
+});
+
+test("a failed refresh over a card-only section still reports, without the rows claim", () => {
+  const base = {
+    noun: "code scanning alerts",
+    failed: true,
+    offline: false,
+    placeholder: false,
+    loadMoreFailed: false,
+  };
+  const card = listNotice({ ...base, hasRows: false });
+  assert.equal(card.message, "Couldn't refresh code scanning alerts.");
+  assert.equal(card.cause, "refresh");
+  assert.equal(card.retryLabel, "Retry loading code scanning alerts");
+  // Negative control: with rows drawn the claim stays.
+  assert.equal(
+    listNotice({ ...base, hasRows: true }).message,
+    "Couldn't refresh code scanning alerts — showing the last loaded results.",
+  );
+  // Offline over a card says nothing: there are no loaded results to claim.
+  assert.equal(
+    listNotice({ ...base, failed: false, offline: true, hasRows: false }),
+    null,
+  );
 });

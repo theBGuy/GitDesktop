@@ -30,7 +30,14 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
+import {
+  type DetailPaneState,
+  listNotice,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
+import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import type {
   BbAnnotationOut,
@@ -594,6 +601,116 @@ function LoadFailed({
       </Button>
     </div>
   );
+}
+
+/** A read parked offline with nothing loaded: react-query waits there with no
+ *  timeout, so skeletons would spin until the connection returns. */
+function LoadOffline({ category }: { category: string }) {
+  return (
+    <p className="border-b px-3 py-3 text-xs text-muted-foreground">
+      You're offline — {category} will load once you're back online.
+    </p>
+  );
+}
+
+type FindingsRead = {
+  isPending: boolean;
+  isError: boolean;
+  isPaused: boolean;
+  data: unknown;
+};
+
+function findingsPane(read: FindingsRead): DetailPaneState {
+  return resolveDetailPane({
+    pending: read.isPending,
+    error: read.isError,
+    hasData: read.data !== undefined,
+    paused: read.isPaused,
+  });
+}
+
+/** What a findings read draws before its rows. A failed or parked read replaces
+ *  them only when nothing is loaded: react-query keeps the last good data
+ *  beside `isError`, and those rows stay under {@link FindingsNotice}. */
+function FindingsLoadGate({
+  pane,
+  category,
+  skeletonName,
+  onRetry,
+  children,
+}: {
+  pane: DetailPaneState;
+  category: string;
+  skeletonName: string;
+  onRetry: () => void;
+  children: ReactNode;
+}) {
+  switch (pane) {
+    case "error":
+      return <LoadFailed category={category} onRetry={onRetry} />;
+    case "offline":
+      return <LoadOffline category={category} />;
+    case "skeleton":
+      return <RowSkeletons name={skeletonName} />;
+    case "content":
+    case "content-degraded":
+      return children;
+  }
+}
+
+/** The always-mounted notice over a findings section's retained rows: a failed
+ *  or parked refresh, or a failed Load more. `hasRows` is whether the section
+ *  draws its list: a section showing only an explanation card claims no loaded
+ *  results, so it still reports a failed refresh but says nothing offline. */
+function FindingsNotice({
+  noun,
+  pane,
+  hasRows,
+  isError,
+  onRetry,
+  loadMore,
+}: {
+  noun: string;
+  pane: DetailPaneState;
+  hasRows: boolean;
+  isError: boolean;
+  onRetry: () => void;
+  loadMore: { loadMoreFailed: boolean; retryLoadMore: () => void };
+}) {
+  const notice = listNotice({
+    noun,
+    failed: pane === "content-degraded" && isError,
+    offline: pane === "content-degraded" && !isError,
+    // Findings keys differ only by limit, so placeholder rows are this list's.
+    placeholder: false,
+    hasRows,
+    loadMoreFailed: loadMore.loadMoreFailed,
+  });
+  return (
+    <DegradedListNotice
+      noun={noun}
+      degraded={notice !== null}
+      message={notice?.message}
+      retryLabel={notice?.retryLabel}
+      onRetry={notice?.cause === "load-more" ? loadMore.retryLoadMore : onRetry}
+      className="border-b py-1.5"
+    />
+  );
+}
+
+/** {@link useLoadMoreGuard} over one category's limit in the shared findings
+ *  limits; its `limit` is what that category's query keys on. The write reads
+ *  the store fresh, so two categories syncing a rollback in the same commit
+ *  can't overwrite each other with a stale object. */
+function useFindingsLoadMore(repoPath: string, key: keyof FindingsLimits) {
+  const limit = useUiStore((s) => s.findingsLimits[key]);
+  const setFindingsLimits = useUiStore((s) => s.setFindingsLimits);
+  return useLoadMoreGuard({
+    identity: repoPath,
+    limit,
+    setLimit: (n) =>
+      setFindingsLimits({ ...useUiStore.getState().findingsLimits, [key]: n }),
+  });
 }
 
 /** `"HEAD"` is the wire's sentinel for a ref we cannot name: a detached checkout,
@@ -1754,38 +1871,65 @@ export function FindingsPanel({
   const selectFinding = useUiStore((s) => s.selectFinding);
   const requestRepoSettings = useUiStore((s) => s.requestRepoSettings);
 
+  // A failed "Load more" rolls a category back to the rows it had; each query
+  // keys on its guard's limit, which redirects until the store catches up.
+  const alertsGuard = useFindingsLoadMore(repoPath, "alerts");
+  const codeScanningGuard = useFindingsLoadMore(repoPath, "codeScanning");
+  const secretsGuard = useFindingsLoadMore(repoPath, "secretScanning");
+  const advisoriesGuard = useFindingsLoadMore(repoPath, "advisories");
+  const glGuard = useFindingsLoadMore(repoPath, "gitlab");
+  const bbGuard = useFindingsLoadMore(repoPath, "bitbucket");
+
   const onGitHub = enabled && provider === "github";
-  const alerts = useDependabotAlerts(repoPath, onGitHub, active, limits.alerts);
+  const alerts = useDependabotAlerts(
+    repoPath,
+    onGitHub,
+    active,
+    alertsGuard.limit,
+  );
   const codeScanning = useCodeScanningAlerts(
     repoPath,
     onGitHub,
     active,
-    limits.codeScanning,
+    codeScanningGuard.limit,
   );
   const secrets = useSecretScanningAlerts(
     repoPath,
     onGitHub,
     active,
-    limits.secretScanning,
+    secretsGuard.limit,
   );
   const advisories = useRepoAdvisories(
     repoPath,
     onGitHub,
     active,
-    limits.advisories,
+    advisoriesGuard.limit,
   );
   const gl = useGitLabFindings(
     repoPath,
     enabled && provider === "gitlab",
     active,
-    limits.gitlab,
+    glGuard.limit,
   );
   const bb = useBitbucketFindings(
     repoPath,
     enabled && provider === "bitbucket",
     active,
-    limits.bitbucket,
+    bbGuard.limit,
   );
+
+  const alertsPane = findingsPane(alerts);
+  const codeScanningPane = findingsPane(codeScanning);
+  const secretsPane = findingsPane(secrets);
+  const advisoriesPane = findingsPane(advisories);
+  const glPane = findingsPane(gl);
+  const bbPane = findingsPane(bb);
+  const alertsMore = alertsGuard.observe(alerts);
+  const codeScanningMore = codeScanningGuard.observe(codeScanning);
+  const secretsMore = secretsGuard.observe(secrets);
+  const advisoriesMore = advisoriesGuard.observe(advisories);
+  const glMore = glGuard.observe(gl);
+  const bbMore = bbGuard.observe(bb);
 
   const [filterText, setFilterText] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -1842,14 +1986,12 @@ export function FindingsPanel({
   const bbOut = bb.data;
   const bbSections = buildBbSections(bbOut?.reports ?? [], query);
 
-  const alertsShown =
-    !alerts.isError && alertsOut?.availability === "available";
-  const codeScanningShown =
-    !codeScanning.isError && codeScanningOut?.availability === "available";
-  const secretsShown =
-    !secrets.isError && secretsOut?.availability === "available";
-  const advisoriesShown =
-    !advisories.isError && advisoriesOut?.availability === "available";
+  // Rows render whenever data is loaded, including rows kept under a failed
+  // refresh, so navigation follows the data rather than the last read's status.
+  const alertsShown = alertsOut?.availability === "available";
+  const codeScanningShown = codeScanningOut?.availability === "available";
+  const secretsShown = secretsOut?.availability === "available";
+  const advisoriesShown = advisoriesOut?.availability === "available";
   // Equal availability AND equal detail across all three — what a pipeline-wide
   // cause (a jobs-fetch failure, a pipeline with no scanning jobs) produces.
   const glUniformState =
@@ -1860,13 +2002,13 @@ export function FindingsPanel({
     glOut.sast.detail === glOut.codeQuality.detail;
   // Every GitLab category hangs off one pipeline, so a state other than "found"
   // hides all three at once.
-  const glFound = !gl.isError && glOut?.pipelineState === "found";
+  const glFound = glOut?.pipelineState === "found";
   const glSastShown = glFound && glOut?.sast.availability === "available";
   const glSecretsShown =
     glFound && glOut?.secretDetection.availability === "available";
   const glQualityShown =
     glFound && glOut?.codeQuality.availability === "available";
-  const bbShown = !bb.isError && bbOut?.availability === "available";
+  const bbShown = bbOut?.availability === "available";
 
   // Flat, document-order nav list: the grouped rows of each section in the order
   // the sections render. Group headers and the Load-more buttons are skipped.
@@ -2049,610 +2191,695 @@ export function FindingsPanel({
             Security findings aren't available on this repository's host.
           </p>
         ) : provider === "bitbucket" ? (
-          bb.isError ? (
-            <LoadFailed category="findings" onRetry={() => bb.refetch()} />
-          ) : !bbOut ? (
-            <RowSkeletons name="security findings" />
-          ) : bbOut.availability !== "available" ||
-            bbOut.reports.length === 0 ? (
-            /* Zero reports is `noReports` on the wire, so the second arm only
+          <div onKeyDown={onListKeyDown}>
+            <FindingsNotice
+              noun="findings"
+              pane={bbPane}
+              hasRows={bbShown}
+              isError={bb.isError}
+              onRetry={() => bb.refetch()}
+              loadMore={bbMore}
+            />
+            <FindingsLoadGate
+              pane={bbPane}
+              category="findings"
+              skeletonName="security findings"
+              onRetry={() => bb.refetch()}
+            >
+              {bbOut &&
+                (bbOut.availability !== "available" ||
+                bbOut.reports.length === 0 ? (
+                  /* Zero reports is `noReports` on the wire, so the second arm only
                catches a backend that ever sends "available" with none — a blank
                region would be the one reading of an empty list that claims the
                commit is clean. */
-            <BbUnavailableCard
-              state={
-                bbOut.availability === "available"
-                  ? "noReports"
-                  : bbOut.availability
-              }
-              data={bbOut}
-              onRetry={() => bb.refetch()}
-            />
-          ) : (
-            <div onKeyDown={onListKeyDown}>
-              <BbCommitProvenance data={bbOut} />
-              <BbPartialDetail detail={bbOut.detail} />
-              {bbSections.map((section) => (
-                <BbReportSectionView
-                  key={section.report.uuid}
-                  section={section}
-                  limits={limits}
-                  setLimits={setFindingsLimits}
-                  loading={bb.isFetching}
-                  selectedRowId={selectedRowId}
-                  onSelect={selectFinding}
-                />
-              ))}
-              {/* States the cap without offering to lift it: the report walk is
+                  <BbUnavailableCard
+                    state={
+                      bbOut.availability === "available"
+                        ? "noReports"
+                        : bbOut.availability
+                    }
+                    data={bbOut}
+                    onRetry={() => bb.refetch()}
+                  />
+                ) : (
+                  <div>
+                    <BbCommitProvenance data={bbOut} />
+                    <BbPartialDetail detail={bbOut.detail} />
+                    {bbSections.map((section) => (
+                      <BbReportSectionView
+                        key={section.report.uuid}
+                        section={section}
+                        limits={limits}
+                        setLimits={setFindingsLimits}
+                        loading={bb.isFetching || bbMore.growing}
+                        selectedRowId={selectedRowId}
+                        onSelect={selectFinding}
+                      />
+                    ))}
+                    {/* States the cap without offering to lift it: the report walk is
                   bounded server-side independently of `limit`, so a Load-more
                   here would refetch the same reports. Each report's annotation
                   tail below does grow — those limits are real. */}
-              {bbOut.truncated ? (
-                <p className="border-t px-3 py-3 text-xs text-muted-foreground">
-                  Showing the first {bbOut.reports.length.toLocaleString()}{" "}
-                  reports.
-                </p>
-              ) : null}
-            </div>
-          )
+                    {bbOut.truncated ? (
+                      <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                        Showing the first{" "}
+                        {bbOut.reports.length.toLocaleString()} reports.
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+            </FindingsLoadGate>
+          </div>
         ) : provider === "gitlab" ? (
-          gl.isError ? (
-            <LoadFailed category="findings" onRetry={() => gl.refetch()} />
-          ) : !glOut ? (
-            <RowSkeletons name="security findings" />
-          ) : glOut.pipelineState !== "found" ? (
-            <GlNoPipelineCard
-              state={glOut.pipelineState}
-              data={glOut}
+          <div onKeyDown={onListKeyDown}>
+            <FindingsNotice
+              noun="findings"
+              pane={glPane}
+              hasRows={glSastShown || glSecretsShown || glQualityShown}
+              isError={gl.isError}
               onRetry={() => gl.refetch()}
+              loadMore={glMore}
             />
-          ) : (
-            <div onKeyDown={onListKeyDown}>
-              <PipelineProvenance data={glOut} />
-              {glUniformState && glOut.sast.availability !== "available" ? (
-                /* One cause, one card — and no section headers, since naming
+            <FindingsLoadGate
+              pane={glPane}
+              category="findings"
+              skeletonName="security findings"
+              onRetry={() => gl.refetch()}
+            >
+              {glOut &&
+                (glOut.pipelineState !== "found" ? (
+                  <GlNoPipelineCard
+                    state={glOut.pipelineState}
+                    data={glOut}
+                    onRetry={() => gl.refetch()}
+                  />
+                ) : (
+                  <div>
+                    <PipelineProvenance data={glOut} />
+                    {glUniformState &&
+                    glOut.sast.availability !== "available" ? (
+                      /* One cause, one card — and no section headers, since naming
                    three empty sections would only restate it. */
-                <GlUnavailableCard
-                  availability={glOut.sast.availability}
-                  detail={glOut.sast.detail}
-                  category="findings"
-                  Category="Scanning"
-                  notConfiguredMessage="This pipeline didn't publish any scanning reports — most likely scanning isn't set up yet."
-                  onRetry={() => gl.refetch()}
-                  onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                />
-              ) : (
-                <>
-                  <GlFindingsSection
-                    title="SAST"
-                    availability={glOut.sast.availability}
-                    detail={glOut.sast.detail}
-                    category="SAST"
-                    Category="SAST"
-                    cleanTitle="No SAST findings in this pipeline"
-                    noun="SAST findings"
-                    hasGroups={glSastGroups.length > 0}
-                    loaded={allGlSast.length}
-                    truncated={glOut.sast.truncated}
-                    limits={limits}
-                    setLimits={setFindingsLimits}
-                    loading={gl.isFetching}
-                    onRetry={() => gl.refetch()}
-                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                  >
-                    <GlSecureRows
-                      groups={glSastGroups}
-                      category="sast"
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
-                    />
-                  </GlFindingsSection>
+                      <GlUnavailableCard
+                        availability={glOut.sast.availability}
+                        detail={glOut.sast.detail}
+                        category="findings"
+                        Category="Scanning"
+                        notConfiguredMessage="This pipeline didn't publish any scanning reports — most likely scanning isn't set up yet."
+                        onRetry={() => gl.refetch()}
+                        onSetup={
+                          glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                        }
+                      />
+                    ) : (
+                      <>
+                        <GlFindingsSection
+                          title="SAST"
+                          availability={glOut.sast.availability}
+                          detail={glOut.sast.detail}
+                          category="SAST"
+                          Category="SAST"
+                          cleanTitle="No SAST findings in this pipeline"
+                          noun="SAST findings"
+                          hasGroups={glSastGroups.length > 0}
+                          loaded={allGlSast.length}
+                          truncated={glOut.sast.truncated}
+                          limits={limits}
+                          setLimits={setFindingsLimits}
+                          loading={gl.isFetching || glMore.growing}
+                          onRetry={() => gl.refetch()}
+                          onSetup={
+                            glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                          }
+                        >
+                          <GlSecureRows
+                            groups={glSastGroups}
+                            category="sast"
+                            selectedRowId={selectedRowId}
+                            onSelect={selectFinding}
+                          />
+                        </GlFindingsSection>
 
-                  <GlFindingsSection
-                    title="Secret detection"
-                    availability={glOut.secretDetection.availability}
-                    detail={glOut.secretDetection.detail}
-                    category="secret detection"
-                    Category="Secret detection"
-                    cleanTitle="No secrets detected in this pipeline"
-                    noun="secret findings"
-                    hasGroups={glSecretGroups.length > 0}
-                    loaded={allGlSecrets.length}
-                    truncated={glOut.secretDetection.truncated}
-                    limits={limits}
-                    setLimits={setFindingsLimits}
-                    loading={gl.isFetching}
-                    onRetry={() => gl.refetch()}
-                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                  >
-                    <GlSecureRows
-                      groups={glSecretGroups}
-                      category="secretDetection"
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
-                    />
-                  </GlFindingsSection>
+                        <GlFindingsSection
+                          title="Secret detection"
+                          availability={glOut.secretDetection.availability}
+                          detail={glOut.secretDetection.detail}
+                          category="secret detection"
+                          Category="Secret detection"
+                          cleanTitle="No secrets detected in this pipeline"
+                          noun="secret findings"
+                          hasGroups={glSecretGroups.length > 0}
+                          loaded={allGlSecrets.length}
+                          truncated={glOut.secretDetection.truncated}
+                          limits={limits}
+                          setLimits={setFindingsLimits}
+                          loading={gl.isFetching || glMore.growing}
+                          onRetry={() => gl.refetch()}
+                          onSetup={
+                            glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                          }
+                        >
+                          <GlSecureRows
+                            groups={glSecretGroups}
+                            category="secretDetection"
+                            selectedRowId={selectedRowId}
+                            onSelect={selectFinding}
+                          />
+                        </GlFindingsSection>
 
-                  <GlFindingsSection
-                    title="Code quality"
-                    availability={glOut.codeQuality.availability}
-                    detail={glOut.codeQuality.detail}
-                    category="code quality"
-                    Category="Code quality"
-                    cleanTitle="No code quality findings in this pipeline"
-                    noun="code quality findings"
-                    hasGroups={glQualityGroups.length > 0}
-                    loaded={allGlQuality.length}
-                    truncated={glOut.codeQuality.truncated}
-                    limits={limits}
-                    setLimits={setFindingsLimits}
-                    loading={gl.isFetching}
-                    onRetry={() => gl.refetch()}
-                    onSetup={glSetupUrl ? () => openUrl(glSetupUrl) : undefined}
-                  >
-                    <GlQualityRows
-                      groups={glQualityGroups}
-                      selectedRowId={selectedRowId}
-                      onSelect={selectFinding}
-                    />
-                  </GlFindingsSection>
-                </>
-              )}
-            </div>
-          )
+                        <GlFindingsSection
+                          title="Code quality"
+                          availability={glOut.codeQuality.availability}
+                          detail={glOut.codeQuality.detail}
+                          category="code quality"
+                          Category="Code quality"
+                          cleanTitle="No code quality findings in this pipeline"
+                          noun="code quality findings"
+                          hasGroups={glQualityGroups.length > 0}
+                          loaded={allGlQuality.length}
+                          truncated={glOut.codeQuality.truncated}
+                          limits={limits}
+                          setLimits={setFindingsLimits}
+                          loading={gl.isFetching || glMore.growing}
+                          onRetry={() => gl.refetch()}
+                          onSetup={
+                            glSetupUrl ? () => openUrl(glSetupUrl) : undefined
+                          }
+                        >
+                          <GlQualityRows
+                            groups={glQualityGroups}
+                            selectedRowId={selectedRowId}
+                            onSelect={selectFinding}
+                          />
+                        </GlFindingsSection>
+                      </>
+                    )}
+                  </div>
+                ))}
+            </FindingsLoadGate>
+          </div>
         ) : (
           <div onKeyDown={onListKeyDown}>
             <SectionHeader title="Dependency alerts" />
-            {alerts.isError ? (
-              <LoadFailed
-                category="dependency alerts"
-                onRetry={() => alerts.refetch()}
-              />
-            ) : !alertsOut ? (
-              <RowSkeletons name="dependency alerts" />
-            ) : alertsOut.availability !== "available" ? (
-              <UnavailableCard
-                availability={alertsOut.availability}
-                detail={alertsOut.detail}
-                category="dependency alerts"
-                Category="Dependency alerts"
-                notEnabledMessage="Dependabot alerts are off for this repository. Turn them on to see vulnerable dependencies here."
-                onRetry={() => alerts.refetch()}
-                onEnable={
-                  canOpenRepoSettings
-                    ? () => requestRepoSettings("security", repoPath)
-                    : undefined
-                }
-              />
-            ) : (
-              <>
-                {alertGroups.length === 0 ? (
-                  allAlerts.length > 0 ? (
-                    <p className="px-3 py-4 text-xs text-muted-foreground">
-                      No alerts match the filter.
-                    </p>
-                  ) : (
-                    <Empty className="py-8">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ShieldCheckIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>No open Dependabot alerts</EmptyTitle>
-                      </EmptyHeader>
-                    </Empty>
-                  )
+            <FindingsNotice
+              noun="dependency alerts"
+              pane={alertsPane}
+              hasRows={alertsShown}
+              isError={alerts.isError}
+              onRetry={() => alerts.refetch()}
+              loadMore={alertsMore}
+            />
+            <FindingsLoadGate
+              pane={alertsPane}
+              category="dependency alerts"
+              skeletonName="dependency alerts"
+              onRetry={() => alerts.refetch()}
+            >
+              {alertsOut &&
+                (alertsOut.availability !== "available" ? (
+                  <UnavailableCard
+                    availability={alertsOut.availability}
+                    detail={alertsOut.detail}
+                    category="dependency alerts"
+                    Category="Dependency alerts"
+                    notEnabledMessage="Dependabot alerts are off for this repository. Turn them on to see vulnerable dependencies here."
+                    onRetry={() => alerts.refetch()}
+                    onEnable={
+                      canOpenRepoSettings
+                        ? () => requestRepoSettings("security", repoPath)
+                        : undefined
+                    }
+                  />
                 ) : (
-                  alertGroups.map((group) => (
-                    <div key={group.key}>
-                      <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
-                        <span
-                          className="truncate font-mono text-foreground"
-                          title={group.packageName || "Unknown package"}
-                        >
-                          {group.packageName || "Unknown package"}
-                        </span>
-                        <span className="shrink-0">{group.ecosystem}</span>
-                        <span className="ml-auto shrink-0 tabular-nums">
-                          {group.rows.length}
-                        </span>
-                      </div>
-                      {group.rows.map(({ id, alert: a }) => (
-                        <button
-                          type="button"
-                          key={id}
-                          data-row={id}
-                          className={cn(
-                            "block w-full border-b px-3 py-2 text-left",
-                            selectedRowId === id
-                              ? "bg-accent text-accent-foreground"
-                              : "hover:bg-muted/60",
-                          )}
-                          onClick={() =>
-                            selectFinding({ type: "alert", number: a.number })
-                          }
-                        >
-                          <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                            <SeverityChip severity={a.severity} />
-                            <span className="ml-auto min-w-0 truncate">
-                              {a.firstPatchedVersion
-                                ? `fix: ${a.firstPatchedVersion}`
-                                : "no patch yet"}
+                  <>
+                    {alertGroups.length === 0 ? (
+                      allAlerts.length > 0 ? (
+                        <p className="px-3 py-4 text-xs text-muted-foreground">
+                          No alerts match the filter.
+                        </p>
+                      ) : (
+                        <Empty className="py-8">
+                          <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                              <ShieldCheckIcon />
+                            </EmptyMedia>
+                            <EmptyTitle>No open Dependabot alerts</EmptyTitle>
+                          </EmptyHeader>
+                        </Empty>
+                      )
+                    ) : (
+                      alertGroups.map((group) => (
+                        <div key={group.key}>
+                          <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
+                            <span
+                              className="truncate font-mono text-foreground"
+                              title={group.packageName || "Unknown package"}
+                            >
+                              {group.packageName || "Unknown package"}
                             </span>
-                            <span className="shrink-0">
-                              <RelativeTime date={a.createdAt} />
+                            <span className="shrink-0">{group.ecosystem}</span>
+                            <span className="ml-auto shrink-0 tabular-nums">
+                              {group.rows.length}
                             </span>
-                          </p>
-                          {/* The summary owns its own full-width line — sharing
+                          </div>
+                          {group.rows.map(({ id, alert: a }) => (
+                            <button
+                              type="button"
+                              key={id}
+                              data-row={id}
+                              className={cn(
+                                "block w-full border-b px-3 py-2 text-left",
+                                selectedRowId === id
+                                  ? "bg-accent text-accent-foreground"
+                                  : "hover:bg-muted/60",
+                              )}
+                              onClick={() =>
+                                selectFinding({
+                                  type: "alert",
+                                  number: a.number,
+                                })
+                              }
+                            >
+                              <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                                <SeverityChip severity={a.severity} />
+                                <span className="ml-auto min-w-0 truncate">
+                                  {a.firstPatchedVersion
+                                    ? `fix: ${a.firstPatchedVersion}`
+                                    : "no patch yet"}
+                                </span>
+                                <span className="shrink-0">
+                                  <RelativeTime date={a.createdAt} />
+                                </span>
+                              </p>
+                              {/* The summary owns its own full-width line — sharing
                               one with the chip left it cramped and truncating early. */}
-                          <p
-                            className="mt-1 truncate text-xs font-medium"
-                            title={a.summary}
-                          >
-                            {a.summary}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                  ))
-                )}
-                <FindingsTruncationTail
-                  truncated={alertsOut.truncated}
-                  loaded={allAlerts.length}
-                  noun="dependency alerts"
-                  limits={limits}
-                  limitKey="alerts"
-                  setLimits={setFindingsLimits}
-                  loading={alerts.isFetching}
-                />
-              </>
-            )}
+                              <p
+                                className="mt-1 truncate text-xs font-medium"
+                                title={a.summary}
+                              >
+                                {a.summary}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      ))
+                    )}
+                    <FindingsTruncationTail
+                      truncated={alertsOut.truncated}
+                      loaded={allAlerts.length}
+                      noun="dependency alerts"
+                      limits={limits}
+                      limitKey="alerts"
+                      setLimits={setFindingsLimits}
+                      loading={alerts.isFetching || alertsMore.growing}
+                    />
+                  </>
+                ))}
+            </FindingsLoadGate>
 
             <SectionHeader title="Code scanning" />
-            {codeScanning.isError ? (
-              <LoadFailed
-                category="code scanning alerts"
-                onRetry={() => codeScanning.refetch()}
-              />
-            ) : !codeScanningOut ? (
-              <RowSkeletons name="code scanning alerts" />
-            ) : codeScanningOut.availability !== "available" ? (
-              <UnavailableCard
-                availability={codeScanningOut.availability}
-                detail={codeScanningOut.detail}
-                category="code scanning alerts"
-                Category="Code scanning alerts"
-                notEnabledMessage="Code scanning is off for this repository. Turn it on to see alerts here."
-                noResultsYetMessage="Code scanning hasn't reported results for this repository yet — it may still need setting up, or its first analysis may still be running."
-                onRetry={() => codeScanning.refetch()}
-                onEnable={
-                  canOpenRepoSettings
-                    ? () => requestRepoSettings("security", repoPath)
-                    : undefined
-                }
-              />
-            ) : (
-              <>
-                {codeScanningGroups.length === 0 ? (
-                  allCodeScanning.length > 0 ? (
-                    <p className="px-3 py-4 text-xs text-muted-foreground">
-                      No code scanning alerts match the filter.
-                    </p>
-                  ) : (
-                    <Empty className="py-8">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ShieldCheckIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>No open code scanning alerts</EmptyTitle>
-                      </EmptyHeader>
-                    </Empty>
-                  )
+            <FindingsNotice
+              noun="code scanning alerts"
+              pane={codeScanningPane}
+              hasRows={codeScanningShown}
+              isError={codeScanning.isError}
+              onRetry={() => codeScanning.refetch()}
+              loadMore={codeScanningMore}
+            />
+            <FindingsLoadGate
+              pane={codeScanningPane}
+              category="code scanning alerts"
+              skeletonName="code scanning alerts"
+              onRetry={() => codeScanning.refetch()}
+            >
+              {codeScanningOut &&
+                (codeScanningOut.availability !== "available" ? (
+                  <UnavailableCard
+                    availability={codeScanningOut.availability}
+                    detail={codeScanningOut.detail}
+                    category="code scanning alerts"
+                    Category="Code scanning alerts"
+                    notEnabledMessage="Code scanning is off for this repository. Turn it on to see alerts here."
+                    noResultsYetMessage="Code scanning hasn't reported results for this repository yet — it may still need setting up, or its first analysis may still be running."
+                    onRetry={() => codeScanning.refetch()}
+                    onEnable={
+                      canOpenRepoSettings
+                        ? () => requestRepoSettings("security", repoPath)
+                        : undefined
+                    }
+                  />
                 ) : (
-                  codeScanningGroups.map((group) => (
-                    <div key={group.key}>
-                      <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
-                        <span
-                          className={cn(
-                            "truncate text-foreground",
-                            // A rule with no name falls back to its id, which
-                            // reads as an identifier, so it gets the mono face.
-                            group.label === group.key && "font-mono",
-                          )}
-                          title={group.label}
-                        >
-                          {group.label}
-                        </span>
-                        {/* The raw id, alongside a named rule. Suppressed when
-                            the id is itself empty — the label already covers it. */}
-                        {group.key && group.label !== group.key ? (
-                          <span
-                            className="min-w-0 shrink truncate font-mono"
-                            title={group.key}
-                          >
-                            {group.key}
-                          </span>
-                        ) : null}
-                        <span className="ml-auto shrink-0 tabular-nums">
-                          {group.rows.length}
-                        </span>
-                      </div>
-                      {group.rows.map(({ id, alert: a }) => (
-                        <button
-                          type="button"
-                          key={id}
-                          data-row={id}
-                          className={cn(
-                            "block w-full border-b px-3 py-2 text-left",
-                            selectedRowId === id
-                              ? "bg-accent text-accent-foreground"
-                              : "hover:bg-muted/60",
-                          )}
-                          onClick={() =>
-                            selectFinding({
-                              type: "codeScanning",
-                              number: a.number,
-                            })
-                          }
-                        >
-                          <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                            <CodeScanningChip
-                              securitySeverity={a.securitySeverity}
-                              severity={a.severity}
-                            />
-                            <PathLabel path={a.path} line={a.startLine} />
-                            <span className="shrink-0">
-                              <RelativeTime date={a.createdAt} />
-                            </span>
-                          </p>
-                          {/* Full-width message line, matching the alert rows. */}
-                          <p
-                            className="mt-1 truncate text-xs font-medium"
-                            title={a.message}
-                          >
-                            {a.message}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                  ))
-                )}
-                <FindingsTruncationTail
-                  truncated={codeScanningOut.truncated}
-                  loaded={allCodeScanning.length}
-                  noun="code scanning alerts"
-                  limits={limits}
-                  limitKey="codeScanning"
-                  setLimits={setFindingsLimits}
-                  loading={codeScanning.isFetching}
-                />
-              </>
-            )}
-
-            <SectionHeader title="Secret scanning" />
-            {secrets.isError ? (
-              <LoadFailed
-                category="secret scanning alerts"
-                onRetry={() => secrets.refetch()}
-              />
-            ) : !secretsOut ? (
-              <RowSkeletons name="secret scanning alerts" />
-            ) : secretsOut.availability !== "available" ? (
-              <UnavailableCard
-                availability={secretsOut.availability}
-                detail={secretsOut.detail}
-                category="secret scanning alerts"
-                Category="Secret scanning alerts"
-                notEnabledMessage="Secret scanning is off for this repository. Turn it on to catch leaked credentials."
-                onRetry={() => secrets.refetch()}
-                onEnable={
-                  canOpenRepoSettings
-                    ? () => requestRepoSettings("security", repoPath)
-                    : undefined
-                }
-              />
-            ) : (
-              <>
-                {secretGroups.length === 0 ? (
-                  allSecrets.length > 0 ? (
-                    <p className="px-3 py-4 text-xs text-muted-foreground">
-                      No secret scanning alerts match the filter.
-                    </p>
-                  ) : (
-                    <Empty className="py-8">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ShieldCheckIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>No open secret scanning alerts</EmptyTitle>
-                      </EmptyHeader>
-                    </Empty>
-                  )
-                ) : (
-                  secretGroups.map((group) => (
-                    <div key={group.key}>
-                      <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
-                        <span
-                          className="truncate text-foreground"
-                          title={group.label}
-                        >
-                          {group.label}
-                        </span>
-                        <span className="ml-auto shrink-0 tabular-nums">
-                          {group.rows.length}
-                        </span>
-                      </div>
-                      {group.rows.map(({ id, alert: a }) => (
-                        <button
-                          type="button"
-                          key={id}
-                          data-row={id}
-                          className={cn(
-                            "block w-full border-b px-3 py-2 text-left",
-                            selectedRowId === id
-                              ? "bg-accent text-accent-foreground"
-                              : "hover:bg-muted/60",
-                          )}
-                          onClick={() =>
-                            selectFinding({
-                              type: "secretScanning",
-                              number: a.number,
-                            })
-                          }
-                        >
-                          <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                            <ValidityChip validity={a.validity} />
-                            {/* Only ever rendered for a confirmed public leak —
-                                a null `publiclyLeaked` means GitHub didn't say. */}
-                            {a.publiclyLeaked === true ? (
-                              <Badge
-                                variant="outline"
-                                className="text-destructive"
-                              >
-                                Publicly leaked
-                              </Badge>
-                            ) : null}
-                            {/* Rows in a group share a type and often a date, so
-                                the alert number is what tells them apart — but a
-                                tolerated alert numbered 0 has none to show. */}
-                            {a.number === 0 ? null : (
-                              <span className="ml-auto shrink-0 tabular-nums">
-                                #{a.number}
-                              </span>
-                            )}
-                            {/* The number span normally carries `ml-auto`;
-                                without it the date takes over pushing right. */}
+                  <>
+                    {codeScanningGroups.length === 0 ? (
+                      allCodeScanning.length > 0 ? (
+                        <p className="px-3 py-4 text-xs text-muted-foreground">
+                          No code scanning alerts match the filter.
+                        </p>
+                      ) : (
+                        <Empty className="py-8">
+                          <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                              <ShieldCheckIcon />
+                            </EmptyMedia>
+                            <EmptyTitle>
+                              No open code scanning alerts
+                            </EmptyTitle>
+                          </EmptyHeader>
+                        </Empty>
+                      )
+                    ) : (
+                      codeScanningGroups.map((group) => (
+                        <div key={group.key}>
+                          <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
                             <span
                               className={cn(
-                                "shrink-0",
-                                a.number === 0 && "ml-auto",
+                                "truncate text-foreground",
+                                // A rule with no name falls back to its id, which
+                                // reads as an identifier, so it gets the mono face.
+                                group.label === group.key && "font-mono",
                               )}
+                              title={group.label}
                             >
-                              <RelativeTime date={a.createdAt} />
+                              {group.label}
                             </span>
-                          </p>
-                          {/* Full-width type line, matching the alert rows. */}
-                          <p
-                            className="mt-1 truncate text-xs font-medium"
-                            title={secretTypeLabel(a)}
-                          >
-                            {secretTypeLabel(a)}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                  ))
-                )}
-                <FindingsTruncationTail
-                  truncated={secretsOut.truncated}
-                  loaded={allSecrets.length}
-                  noun="secret scanning alerts"
-                  limits={limits}
-                  limitKey="secretScanning"
-                  setLimits={setFindingsLimits}
-                  loading={secrets.isFetching}
-                />
-              </>
-            )}
+                            {/* The raw id, alongside a named rule. Suppressed when
+                            the id is itself empty — the label already covers it. */}
+                            {group.key && group.label !== group.key ? (
+                              <span
+                                className="min-w-0 shrink truncate font-mono"
+                                title={group.key}
+                              >
+                                {group.key}
+                              </span>
+                            ) : null}
+                            <span className="ml-auto shrink-0 tabular-nums">
+                              {group.rows.length}
+                            </span>
+                          </div>
+                          {group.rows.map(({ id, alert: a }) => (
+                            <button
+                              type="button"
+                              key={id}
+                              data-row={id}
+                              className={cn(
+                                "block w-full border-b px-3 py-2 text-left",
+                                selectedRowId === id
+                                  ? "bg-accent text-accent-foreground"
+                                  : "hover:bg-muted/60",
+                              )}
+                              onClick={() =>
+                                selectFinding({
+                                  type: "codeScanning",
+                                  number: a.number,
+                                })
+                              }
+                            >
+                              <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                                <CodeScanningChip
+                                  securitySeverity={a.securitySeverity}
+                                  severity={a.severity}
+                                />
+                                <PathLabel path={a.path} line={a.startLine} />
+                                <span className="shrink-0">
+                                  <RelativeTime date={a.createdAt} />
+                                </span>
+                              </p>
+                              {/* Full-width message line, matching the alert rows. */}
+                              <p
+                                className="mt-1 truncate text-xs font-medium"
+                                title={a.message}
+                              >
+                                {a.message}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      ))
+                    )}
+                    <FindingsTruncationTail
+                      truncated={codeScanningOut.truncated}
+                      loaded={allCodeScanning.length}
+                      noun="code scanning alerts"
+                      limits={limits}
+                      limitKey="codeScanning"
+                      setLimits={setFindingsLimits}
+                      loading={
+                        codeScanning.isFetching || codeScanningMore.growing
+                      }
+                    />
+                  </>
+                ))}
+            </FindingsLoadGate>
+
+            <SectionHeader title="Secret scanning" />
+            <FindingsNotice
+              noun="secret scanning alerts"
+              pane={secretsPane}
+              hasRows={secretsShown}
+              isError={secrets.isError}
+              onRetry={() => secrets.refetch()}
+              loadMore={secretsMore}
+            />
+            <FindingsLoadGate
+              pane={secretsPane}
+              category="secret scanning alerts"
+              skeletonName="secret scanning alerts"
+              onRetry={() => secrets.refetch()}
+            >
+              {secretsOut &&
+                (secretsOut.availability !== "available" ? (
+                  <UnavailableCard
+                    availability={secretsOut.availability}
+                    detail={secretsOut.detail}
+                    category="secret scanning alerts"
+                    Category="Secret scanning alerts"
+                    notEnabledMessage="Secret scanning is off for this repository. Turn it on to catch leaked credentials."
+                    onRetry={() => secrets.refetch()}
+                    onEnable={
+                      canOpenRepoSettings
+                        ? () => requestRepoSettings("security", repoPath)
+                        : undefined
+                    }
+                  />
+                ) : (
+                  <>
+                    {secretGroups.length === 0 ? (
+                      allSecrets.length > 0 ? (
+                        <p className="px-3 py-4 text-xs text-muted-foreground">
+                          No secret scanning alerts match the filter.
+                        </p>
+                      ) : (
+                        <Empty className="py-8">
+                          <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                              <ShieldCheckIcon />
+                            </EmptyMedia>
+                            <EmptyTitle>
+                              No open secret scanning alerts
+                            </EmptyTitle>
+                          </EmptyHeader>
+                        </Empty>
+                      )
+                    ) : (
+                      secretGroups.map((group) => (
+                        <div key={group.key}>
+                          <div className="flex items-baseline gap-2 px-3 py-1 text-[11px] text-muted-foreground">
+                            <span
+                              className="truncate text-foreground"
+                              title={group.label}
+                            >
+                              {group.label}
+                            </span>
+                            <span className="ml-auto shrink-0 tabular-nums">
+                              {group.rows.length}
+                            </span>
+                          </div>
+                          {group.rows.map(({ id, alert: a }) => (
+                            <button
+                              type="button"
+                              key={id}
+                              data-row={id}
+                              className={cn(
+                                "block w-full border-b px-3 py-2 text-left",
+                                selectedRowId === id
+                                  ? "bg-accent text-accent-foreground"
+                                  : "hover:bg-muted/60",
+                              )}
+                              onClick={() =>
+                                selectFinding({
+                                  type: "secretScanning",
+                                  number: a.number,
+                                })
+                              }
+                            >
+                              <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                                <ValidityChip validity={a.validity} />
+                                {/* Only ever rendered for a confirmed public leak —
+                                a null `publiclyLeaked` means GitHub didn't say. */}
+                                {a.publiclyLeaked === true ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-destructive"
+                                  >
+                                    Publicly leaked
+                                  </Badge>
+                                ) : null}
+                                {/* Rows in a group share a type and often a date, so
+                                the alert number is what tells them apart — but a
+                                tolerated alert numbered 0 has none to show. */}
+                                {a.number === 0 ? null : (
+                                  <span className="ml-auto shrink-0 tabular-nums">
+                                    #{a.number}
+                                  </span>
+                                )}
+                                {/* The number span normally carries `ml-auto`;
+                                without it the date takes over pushing right. */}
+                                <span
+                                  className={cn(
+                                    "shrink-0",
+                                    a.number === 0 && "ml-auto",
+                                  )}
+                                >
+                                  <RelativeTime date={a.createdAt} />
+                                </span>
+                              </p>
+                              {/* Full-width type line, matching the alert rows. */}
+                              <p
+                                className="mt-1 truncate text-xs font-medium"
+                                title={secretTypeLabel(a)}
+                              >
+                                {secretTypeLabel(a)}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      ))
+                    )}
+                    <FindingsTruncationTail
+                      truncated={secretsOut.truncated}
+                      loaded={allSecrets.length}
+                      noun="secret scanning alerts"
+                      limits={limits}
+                      limitKey="secretScanning"
+                      setLimits={setFindingsLimits}
+                      loading={secrets.isFetching || secretsMore.growing}
+                    />
+                  </>
+                ))}
+            </FindingsLoadGate>
 
             <SectionHeader title="Advisories" />
-            {advisories.isError ? (
-              <LoadFailed
-                category="security advisories"
-                onRetry={() => advisories.refetch()}
-              />
-            ) : !advisoriesOut ? (
-              <RowSkeletons name="advisories" />
-            ) : advisoriesOut.availability !== "available" ? (
-              <UnavailableCard
-                availability={advisoriesOut.availability}
-                detail={advisoriesOut.detail}
-                category="security advisories"
-                Category="Security advisories"
-                notEnabledMessage="Repository advisories are only published on public repositories."
-                onRetry={() => advisories.refetch()}
-              />
-            ) : (
-              <>
-                {advisoryRows.length === 0 ? (
-                  allAdvisories.length > 0 ? (
-                    <p className="px-3 py-4 text-xs text-muted-foreground">
-                      No advisories match the filter.
-                    </p>
-                  ) : (
-                    <Empty className="py-8">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ShieldCheckIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>No security advisories</EmptyTitle>
-                      </EmptyHeader>
-                    </Empty>
-                  )
+            <FindingsNotice
+              noun="security advisories"
+              pane={advisoriesPane}
+              hasRows={advisoriesShown}
+              isError={advisories.isError}
+              onRetry={() => advisories.refetch()}
+              loadMore={advisoriesMore}
+            />
+            <FindingsLoadGate
+              pane={advisoriesPane}
+              category="security advisories"
+              skeletonName="advisories"
+              onRetry={() => advisories.refetch()}
+            >
+              {advisoriesOut &&
+                (advisoriesOut.availability !== "available" ? (
+                  <UnavailableCard
+                    availability={advisoriesOut.availability}
+                    detail={advisoriesOut.detail}
+                    category="security advisories"
+                    Category="Security advisories"
+                    notEnabledMessage="Repository advisories are only published on public repositories."
+                    onRetry={() => advisories.refetch()}
+                  />
                 ) : (
-                  advisoryRows.map(({ id, advisory: adv }) => {
-                    // Published is the meaningful date; fall back to updated, and
-                    // render nothing when both are absent — never invent one.
-                    const when = adv.publishedAt ?? adv.updatedAt;
-                    return (
-                      <button
-                        type="button"
-                        key={id}
-                        data-row={id}
-                        className={cn(
-                          "block w-full border-b px-3 py-2 text-left",
-                          selectedRowId === id
-                            ? "bg-accent text-accent-foreground"
-                            : "hover:bg-muted/60",
-                        )}
-                        onClick={() =>
-                          selectFinding({
-                            type: "advisory",
-                            ghsaId: adv.ghsaId,
-                          })
-                        }
-                      >
-                        <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                          <SeverityChip severity={adv.severity} />
-                          {adv.ghsaId ? (
-                            <span className="ml-auto min-w-0 truncate font-mono">
-                              {adv.ghsaId}
-                            </span>
-                          ) : null}
-                          {/* The GHSA span normally carries `ml-auto`; without
-                              it the state takes over pushing the row right. */}
-                          <span
-                            className={cn("shrink-0", !adv.ghsaId && "ml-auto")}
+                  <>
+                    {advisoryRows.length === 0 ? (
+                      allAdvisories.length > 0 ? (
+                        <p className="px-3 py-4 text-xs text-muted-foreground">
+                          No advisories match the filter.
+                        </p>
+                      ) : (
+                        <Empty className="py-8">
+                          <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                              <ShieldCheckIcon />
+                            </EmptyMedia>
+                            <EmptyTitle>No security advisories</EmptyTitle>
+                          </EmptyHeader>
+                        </Empty>
+                      )
+                    ) : (
+                      advisoryRows.map(({ id, advisory: adv }) => {
+                        // Published is the meaningful date; fall back to updated, and
+                        // render nothing when both are absent — never invent one.
+                        const when = adv.publishedAt ?? adv.updatedAt;
+                        return (
+                          <button
+                            type="button"
+                            key={id}
+                            data-row={id}
+                            className={cn(
+                              "block w-full border-b px-3 py-2 text-left",
+                              selectedRowId === id
+                                ? "bg-accent text-accent-foreground"
+                                : "hover:bg-muted/60",
+                            )}
+                            onClick={() =>
+                              selectFinding({
+                                type: "advisory",
+                                ghsaId: adv.ghsaId,
+                              })
+                            }
                           >
-                            {adv.state}
-                          </span>
-                          {when ? (
-                            <span className="shrink-0">
-                              <RelativeTime date={when} />
-                            </span>
-                          ) : null}
-                        </p>
-                        {/* Full-width summary line, matching the alert rows. */}
-                        <p
-                          className="mt-1 truncate text-xs font-medium"
-                          title={adv.summary}
-                        >
-                          {adv.summary}
-                        </p>
-                      </button>
-                    );
-                  })
-                )}
-                <FindingsTruncationTail
-                  truncated={advisoriesOut.truncated}
-                  loaded={allAdvisories.length}
-                  noun="security advisories"
-                  limits={limits}
-                  limitKey="advisories"
-                  setLimits={setFindingsLimits}
-                  loading={advisories.isFetching}
-                />
-              </>
-            )}
+                            <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                              <SeverityChip severity={adv.severity} />
+                              {adv.ghsaId ? (
+                                <span className="ml-auto min-w-0 truncate font-mono">
+                                  {adv.ghsaId}
+                                </span>
+                              ) : null}
+                              {/* The GHSA span normally carries `ml-auto`; without
+                              it the state takes over pushing the row right. */}
+                              <span
+                                className={cn(
+                                  "shrink-0",
+                                  !adv.ghsaId && "ml-auto",
+                                )}
+                              >
+                                {adv.state}
+                              </span>
+                              {when ? (
+                                <span className="shrink-0">
+                                  <RelativeTime date={when} />
+                                </span>
+                              ) : null}
+                            </p>
+                            {/* Full-width summary line, matching the alert rows. */}
+                            <p
+                              className="mt-1 truncate text-xs font-medium"
+                              title={adv.summary}
+                            >
+                              {adv.summary}
+                            </p>
+                          </button>
+                        );
+                      })
+                    )}
+                    <FindingsTruncationTail
+                      truncated={advisoriesOut.truncated}
+                      loaded={allAdvisories.length}
+                      noun="security advisories"
+                      limits={limits}
+                      limitKey="advisories"
+                      setLimits={setFindingsLimits}
+                      loading={advisories.isFetching || advisoriesMore.growing}
+                    />
+                  </>
+                ))}
+            </FindingsLoadGate>
           </div>
         )}
       </ScrollArea>

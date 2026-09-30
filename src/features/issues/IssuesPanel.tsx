@@ -19,6 +19,7 @@ import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { DEGRADED_ACTION_CLASS } from "@/features/conversations/remote-section-state";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
+import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
 import {
   gitlabAxisCap,
@@ -34,7 +35,11 @@ import {
   useIssueList,
   usePrefetchIssue,
 } from "@/lib/git/queries";
-import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import {
+  type ForgeProvider,
+  providerLabel,
+  remoteListFilterKey,
+} from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalIssues } from "@/lib/issues/local";
 import { localIssueKey, useLocalIssues } from "@/lib/issues/queries";
@@ -136,7 +141,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const canFilterLabel = forgeFeatureReady(gh.data, "issueLabels");
   const [stateFilter, setStateFilter] = useState<IssueStateFilter>("open");
   // How many remote issues to load; "Load more" bumps it. A tab switch resets it.
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [requestedLimit, setLimit] = useState(PAGE_SIZE);
   const onIssuesTab = useUiStore((s) => s.repoTab) === "issues";
   // Issues carry the assignee axis only — no reviewers, no teams, no grouping.
   const listFilter = useRemoteListFilter({
@@ -150,6 +155,14 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     canGroupByReview: false,
     tabActive: onIssuesTab,
   });
+  // A failed "Load more" rolls the list back to the rows it had; `limit` is
+  // the guarded one, so every reader below keys on what the list really shows.
+  const more = useLoadMoreGuard({
+    identity: `${repoPath}\n${lens}\n${stateFilter}\n${remoteListFilterKey(listFilter.filter)}`,
+    limit: requestedLimit,
+    setLimit,
+  });
+  const limit = more.limit;
   // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
   // once unfiltered and again filtered, flashing rows the scope excludes. The wait
   // is covered by the same skeletons a cold load already shows (a held query reports
@@ -167,6 +180,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     lens,
     listFilter.filter,
   );
+  const loadMore = more.observe(issueList);
   // A fork (issues off by default on GitHub) surfaces a typed error here. It's a
   // permanent repo condition, not a transient fetch failure, so the section shows
   // an informative notice with no Retry — and issue creation is offered as
@@ -595,11 +609,17 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         }
         // Disabled issues are a permanent repo condition a retry can't clear.
         remoteRetry={issuesDisabled ? undefined : () => issueList.refetch()}
+        remotePaused={issueList.isPaused}
+        remotePlaceholder={issueList.isPlaceholderData && !loadMore.growing}
+        loadMoreFailed={loadMore.loadMoreFailed}
+        onRetryLoadMore={loadMore.retryLoadMore}
         // More may exist server-side exactly when this page filled the requested
         // limit (compared against the raw loaded count, not the filtered view).
-        hasMore={(issueList.data?.length ?? 0) === limit}
+        // A grow in flight serves the previous page, shorter than the new limit,
+        // so the row stays mounted and busy then, even while the read is parked.
+        hasMore={loadMore.growing || (issueList.data?.length ?? 0) === limit}
         remoteCount={issueList.data?.length ?? 0}
-        loadingMore={issueList.isFetching}
+        loadingMore={issueList.isFetching || loadMore.growing}
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
         stateRemote={issues}
         visibleRemote={visible}
@@ -659,6 +679,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                 ),
                 pending: jiraIssues.isPending,
                 isError: jiraIssues.isError,
+                paused: jiraIssues.isPaused,
                 errorSlot: (
                   <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
                     <p>
@@ -734,7 +755,8 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         }
         jiraRetry={() => jiraIssues.refetch()}
         // Beside Retry, since an expired credential fails every retry and
-        // cached rows keep the no-rows Reconnect slot from rendering.
+        // cached rows keep the no-rows Reconnect slot from rendering. The panel
+        // offers it on a failed refresh only, never under the offline notice.
         jiraDegradedAction={
           link ? (
             <button

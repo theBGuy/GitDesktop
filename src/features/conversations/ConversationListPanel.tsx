@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import { LoadMoreRow } from "./LoadMoreRow";
 import {
   DEGRADED_ACTION_CLASS,
+  listNotice,
   resolveRemoteSection,
 } from "./remote-section-state";
 
@@ -97,8 +98,9 @@ function SectionHeader(props: {
   );
 }
 
-/** The in-flow line a list section shows while it draws cached rows its last
- *  refresh couldn't replace. The words carry the state, never color alone.
+/** The in-flow line a list section or detail pane shows while it draws cached
+ *  content its last read couldn't replace: a failed refresh, a read parked
+ *  offline, a failed Load more. The words carry the state, never color alone.
  *  Mount it whenever the section renders: the live region only announces text
  *  that arrives after it is in the DOM, so a healthy section keeps it empty
  *  and sr-only (never display:none, which drops it from the a11y tree). The
@@ -107,12 +109,25 @@ export function DegradedListNotice(props: {
   noun: string;
   degraded: boolean;
   onRetry?: () => void;
+  /** Replaces the default refresh-failed sentence (offline, a failed Load
+   *  more, a detail pane's "last loaded version"). */
+  message?: string;
+  /** Replaces the Retry button's default "Retry loading {noun}" name. */
+  retryLabel?: string;
   /** A second recovery action beside Retry, e.g. a reconnect. */
   extraAction?: ReactNode;
   /** Spacing for the visible line; the healthy state ignores it. */
   className?: string;
 }) {
-  const { noun, degraded, onRetry, extraAction, className } = props;
+  const {
+    noun,
+    degraded,
+    onRetry,
+    message,
+    retryLabel,
+    extraAction,
+    className,
+  } = props;
   return (
     <div
       className={
@@ -126,13 +141,14 @@ export function DegradedListNotice(props: {
     >
       <p role="status">
         {degraded
-          ? `Couldn't refresh ${noun} — showing the last loaded results.`
+          ? (message ??
+            `Couldn't refresh ${noun} — showing the last loaded results.`)
           : null}
       </p>
       {degraded && onRetry && (
         <button
           type="button"
-          aria-label={`Retry loading ${noun}`}
+          aria-label={retryLabel ?? `Retry loading ${noun}`}
           onClick={onRetry}
           className={DEGRADED_ACTION_CLASS}
         >
@@ -235,6 +251,17 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   remoteErrorSlot?: ReactNode;
   /** The degraded notice's Retry; omit and the notice renders without one. */
   remoteRetry?: () => void;
+  /** The remote list's read is parked waiting for a connection (react-query's
+   *  `isPaused`): cached rows stay under an offline notice, and with none the
+   *  section says it's offline instead of showing skeletons. */
+  remotePaused?: boolean;
+  /** The drawn remote rows are placeholder rows loaded for ANOTHER view (a
+   *  state tab or filter switch still loading), not this list's own. */
+  remotePlaceholder?: boolean;
+  /** A grown "Load more" page failed and the list is back on the rows it had
+   *  (`useLoadMoreGuard`); the notice's Retry calls `onRetryLoadMore`. */
+  loadMoreFailed?: boolean;
+  onRetryLoadMore?: () => void;
   /** A muted line under the remote header, above its rows — e.g. why a requested
    *  grouping couldn't be applied. Omit (the default) and nothing renders. */
   remoteNote?: ReactNode;
@@ -287,6 +314,8 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     headerAction?: ReactNode;
     pending: boolean;
     isError: boolean;
+    /** The Jira read is parked waiting for a connection. */
+    paused?: boolean;
     /** Rendered in place of the list on error when no rows are cached (e.g. a
      *  Reconnect prompt); cached rows keep rendering under a degraded notice. */
     errorSlot?: ReactNode;
@@ -302,7 +331,8 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   /** The Jira section's degraded-notice Retry. */
   jiraRetry?: () => void;
   /** A second action on the Jira degraded notice, beside Retry. Jira errors
-   *  carry no typed auth kind, so a caller offers its reconnect here too. */
+   *  carry no typed auth kind, so a caller offers its reconnect here too. Shown
+   *  only for a failed refresh: offline, a credential action is the wrong fix. */
   jiraDegradedAction?: ReactNode;
   /** "Load more" for the REMOTE section: true when the remote list filled its
    *  requested limit (more may exist server-side). Renders a focusable row at the
@@ -362,6 +392,10 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     remoteError,
     remoteErrorSlot,
     remoteRetry,
+    remotePaused,
+    remotePlaceholder,
+    loadMoreFailed,
+    onRetryLoadMore,
     remoteNote,
     remotePinned,
     remoteGroups,
@@ -450,9 +484,25 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     listPending,
     error: remoteError ?? false,
     rowCount: visibleRemote.length,
+    paused: remotePaused,
+  });
+  const remoteNotice = listNotice({
+    noun: remoteNoun,
+    failed: remoteState === "rows-degraded",
+    offline: remoteState === "rows-offline",
+    placeholder: remotePlaceholder ?? false,
+    // Both degraded rungs are reached only with rows drawn.
+    hasRows: true,
+    loadMoreFailed: loadMoreFailed ?? false,
   });
   const remoteContent = ((): ReactNode => {
     switch (remoteState) {
+      case "offline":
+        return (
+          <p className="px-3 py-4 text-xs text-muted-foreground">
+            You're offline — {remoteNoun} will load once you're back online.
+          </p>
+        );
       case "gh-skeleton":
         return (
           <ListRowSkeletons
@@ -493,6 +543,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
         );
       case "rows":
       case "rows-degraded":
+      case "rows-offline":
         return remoteBody;
     }
   })();
@@ -506,10 +557,25 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       listPending: jira.pending,
       error: jira.isError,
       rowCount: jira.items.length,
+      paused: jira.paused,
     });
+  const jiraNotice = listNotice({
+    noun: "Jira issues",
+    failed: jiraState === "rows-degraded",
+    offline: jiraState === "rows-offline",
+    placeholder: false,
+    hasRows: true,
+    loadMoreFailed: false,
+  });
   const jiraContent = ((): ReactNode => {
     if (!jira) return null;
     switch (jiraState) {
+      case "offline":
+        return (
+          <p className="px-3 py-4 text-xs text-muted-foreground">
+            You're offline — Jira issues will load once you're back online.
+          </p>
+        );
       case "error":
         return (
           jira.errorSlot ?? (
@@ -526,6 +592,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
         );
       case "rows":
       case "rows-degraded":
+      case "rows-offline":
         return jira.items.map((item) => (
           <button
             type="button"
@@ -705,8 +772,14 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
           {!remoteCollapsed && (
             <DegradedListNotice
               noun={remoteNoun}
-              degraded={remoteState === "rows-degraded"}
-              onRetry={remoteRetry}
+              degraded={remoteNotice !== null}
+              message={remoteNotice?.message}
+              retryLabel={remoteNotice?.retryLabel}
+              onRetry={
+                remoteNotice?.cause === "load-more"
+                  ? onRetryLoadMore
+                  : remoteRetry
+              }
             />
           )}
           {!remoteCollapsed && pinnedBody}
@@ -722,9 +795,13 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
               </div>
               <DegradedListNotice
                 noun="Jira issues"
-                degraded={jiraState === "rows-degraded"}
+                degraded={jiraNotice !== null}
+                message={jiraNotice?.message}
+                retryLabel={jiraNotice?.retryLabel}
                 onRetry={jiraRetry}
-                extraAction={jiraDegradedAction}
+                extraAction={
+                  jiraState === "rows-degraded" ? jiraDegradedAction : undefined
+                }
               />
               {jiraContent}
             </>

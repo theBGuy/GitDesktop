@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
@@ -35,6 +36,7 @@ import {
 } from "@/features/conversations/EditTitleBodyDialog";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
+import { resolveDetailPane } from "@/features/conversations/remote-section-state";
 import {
   AuthorAvatar,
   hasVisibleBody,
@@ -291,11 +293,7 @@ export function RemoteIssueView({
 
   const issue = details.data;
 
-  const threadActive =
-    isSelectedIssue &&
-    !!issue &&
-    !details.isPlaceholderData &&
-    !details.isError;
+  const threadActive = isSelectedIssue && !!issue && !details.isPlaceholderData;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
@@ -306,7 +304,13 @@ export function RemoteIssueView({
     threadActive && canComment,
   );
 
-  if (details.isPending) {
+  const detailPane = resolveDetailPane({
+    pending: details.isPending,
+    error: details.isError,
+    hasData: issue !== undefined,
+    paused: details.isPaused,
+  });
+  if (detailPane === "skeleton") {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
@@ -315,24 +319,40 @@ export function RemoteIssueView({
       </div>
     );
   }
-  if (details.isError || !issue) {
+  if (detailPane === "offline") {
+    return (
+      <DiffPlaceholder message="You're offline — this issue will load once you're back online." />
+    );
+  }
+  if (detailPane === "error" || !issue) {
+    // The failure class isn't knowable here, so the headline claims only which
+    // host the read was aimed at and the summary beneath carries the reason. The
+    // host goes unnamed while its own probe hasn't answered, rather than guessed.
+    const loadFailed = provider
+      ? `Couldn't load this issue from ${remoteLabel}.`
+      : "Couldn't load this issue from the remote.";
+    const errorSummary = details.error
+      ? presentError(details.error).summary
+      : null;
     return (
       <DiffPlaceholder
-        message={
-          details.error
-            ? presentError(details.error).summary
-            : "Could not load this issue"
-        }
+        message={details.isError ? loadFailed : "Could not load this issue"}
         action={
           details.isError ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer"
-              onClick={() => details.refetch()}
-            >
-              Retry
-            </Button>
+            <div className="flex flex-col items-center gap-2">
+              {errorSummary ? (
+                <p className="max-w-md text-center text-xs">{errorSummary}</p>
+              ) : null}
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={details.isFetching}
+                onClick={() => details.refetch()}
+              >
+                {details.isFetching ? "Retrying…" : "Retry"}
+              </Button>
+            </div>
           ) : undefined
         }
       />
@@ -348,6 +368,18 @@ export function RemoteIssueView({
   // BELOW any permission reason wherever both hold: that one never lifts on its
   // own and is the one still true once the new issue is on screen.
   const staleReason = detailsStale ? "Loading this issue…" : undefined;
+  // While a switch serves the previous issue as placeholder, a parked read
+  // hasn't shown this one at all, so the offline line names what is on screen.
+  const detailNotice = (() => {
+    switch (true) {
+      case details.isError:
+        return "Couldn't refresh this issue — showing the last loaded version.";
+      case detailsStale:
+        return "You're offline — showing the last opened issue; this one will load once you're back online.";
+      default:
+        return "You're offline — showing the last loaded version.";
+    }
+  })();
   const busy =
     comment.isPending ||
     closeIssue.isPending ||
@@ -841,6 +873,13 @@ export function RemoteIssueView({
 
   return (
     <div className="@container/issue-detail flex h-full flex-col">
+      <DegradedListNotice
+        noun="this issue"
+        degraded={detailPane === "content-degraded"}
+        message={detailNotice}
+        onRetry={() => details.refetch()}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <header className="space-y-2 border-b px-4 py-3">
         {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
             the actions would stay put and the title collapse instead. Growing also

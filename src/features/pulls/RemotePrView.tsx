@@ -54,6 +54,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
@@ -65,6 +66,7 @@ import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues"
 import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
+import { resolveDetailPane } from "@/features/conversations/remote-section-state";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
@@ -1915,8 +1917,9 @@ export function RemotePrView({
   // this to one attempt against the finished layout. A DISABLED timeline (no
   // provider resolved yet) is neither, so the reveal waits and fires once the
   // probe answers; if it never does, the request simply lapses.
+  // Retained content counts as settled: a failed refresh keeps rendering it.
   const revealInputsSettled =
-    details.isSuccess &&
+    (details.isSuccess || (details.isError && details.data !== undefined)) &&
     !detailsStale &&
     (reviewThreads.isSuccess || reviewThreads.isError) &&
     (timeline.isSuccess || timeline.isError);
@@ -1945,8 +1948,7 @@ export function RemotePrView({
     section === "conversation" &&
     !resolve &&
     !!pr &&
-    !details.isPlaceholderData &&
-    !details.isError;
+    !details.isPlaceholderData;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Every term the composer itself is
   // gated on rides here too, so the action is offered only where there is a box
@@ -1958,7 +1960,13 @@ export function RemotePrView({
     threadActive && canComment,
   );
 
-  if (details.isPending) {
+  const detailPane = resolveDetailPane({
+    pending: details.isPending,
+    error: details.isError,
+    hasData: details.data !== undefined,
+    paused: details.isPaused,
+  });
+  if (detailPane === "skeleton") {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
@@ -1967,7 +1975,14 @@ export function RemotePrView({
       </div>
     );
   }
-  if (details.isError || !pr) {
+  if (detailPane === "offline") {
+    return (
+      <DiffPlaceholder
+        message={`You're offline — this ${prNoun} will load once you're back online.`}
+      />
+    );
+  }
+  if (detailPane === "error" || !pr) {
     // Offline, deleted, access lost — the class isn't knowable here, so the headline
     // claims only what is: which host the read was aimed at. Naming one class would
     // demote the true reason to the summary beneath. The host goes unnamed when its
@@ -2004,6 +2019,19 @@ export function RemotePrView({
       />
     );
   }
+
+  // While a switch serves the previous PR as placeholder, a parked read hasn't
+  // shown this one at all, so the offline line names what is on screen instead.
+  const detailNotice = (() => {
+    switch (true) {
+      case details.isError:
+        return `Couldn't refresh this ${prNoun} — showing the last loaded version.`;
+      case detailsStale:
+        return `You're offline — showing the last opened ${prNoun}; this one will load once you're back online.`;
+      default:
+        return "You're offline — showing the last loaded version.";
+    }
+  })();
 
   // Open the Edit dialog: the chips OWN the trailing ref block, so peel any exact
   // `Closes #N` / `Relates to #N` lines off the body into chips (keyword preserved)
@@ -2568,6 +2596,13 @@ export function RemotePrView({
 
   return (
     <div className="flex h-full flex-col">
+      <DegradedListNotice
+        noun={`this ${prNoun}`}
+        degraded={detailPane === "content-degraded"}
+        message={detailNotice}
+        onRetry={() => details.refetch()}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
         {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
             the actions would stay put and the title collapse instead. Growing also

@@ -30,6 +30,7 @@ import {
   type ReviewGroupKind,
   useCollapsedSections,
 } from "@/features/conversations/useCollapsedSections";
+import { useLoadMoreGuard } from "@/features/conversations/useLoadMoreGuard";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
 import {
   gitlabAxisCap,
@@ -52,7 +53,11 @@ import {
   usePrListMergeability,
   usePrReviewState,
 } from "@/lib/git/queries";
-import { providerLabel, type ReviewStateEntry } from "@/lib/git/types";
+import {
+  providerLabel,
+  type ReviewStateEntry,
+  remoteListFilterKey,
+} from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { type LocalPrStatus, reloadLocalPrs } from "@/lib/pulls/local";
@@ -166,7 +171,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const [stateFilter, setStateFilter] = useState<PrStateFilter>("open");
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
   // resets to the first page.
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [requestedLimit, setLimit] = useState(PAGE_SIZE);
   // Read once, high: three gates below key off it (team membership, mergeability,
   // review state) — every network read this panel owns beyond the list itself.
   const repoTab = useUiStore((s) => s.repoTab);
@@ -199,6 +204,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // Scope for the row-focus rescue below: every query it makes runs inside this
   // panel, never the document.
   const panelRef = useRef<HTMLDivElement>(null);
+  // A failed "Load more" rolls the list back to the rows it had; `limit` is
+  // the guarded one, so every reader below keys on what the list really shows.
+  const more = useLoadMoreGuard({
+    identity: `${repoPath}\n${lens}\n${stateFilter}\n${remoteListFilterKey(listFilter.filter)}`,
+    limit: requestedLimit,
+    setLimit,
+  });
+  const limit = more.limit;
   // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
   // once under a DIFFERENT scope and again under the saved one — unfiltered before
   // the prefs land, or whole-repo before a saved team choice validates. The wait is
@@ -214,6 +227,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     listFilter.filter,
     holdPollMs,
   );
+  const loadMore = more.observe(prList);
   // Row CI icons hydrate separately from the list, so the list paints immediately; the
   // backend routes GitHub/GitLab/Bitbucket, so `ghReady` is the readiness gate. Idle
   // while the list serves placeholder rows (tab switch or Load more): otherwise the
@@ -1112,11 +1126,17 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           </div>
         }
         remoteRetry={() => prList.refetch()}
+        remotePaused={prList.isPaused}
+        remotePlaceholder={prList.isPlaceholderData && !loadMore.growing}
+        loadMoreFailed={loadMore.loadMoreFailed}
+        onRetryLoadMore={loadMore.retryLoadMore}
         // More may exist server-side exactly when this page filled the requested
         // limit (compared against the raw loaded count, not the filtered view).
-        hasMore={(prList.data?.length ?? 0) === limit}
+        // A grow in flight serves the previous page, shorter than the new limit,
+        // so the row stays mounted and busy then, even while the read is parked.
+        hasMore={loadMore.growing || (prList.data?.length ?? 0) === limit}
         remoteCount={prList.data?.length ?? 0}
-        loadingMore={prList.isFetching}
+        loadingMore={prList.isFetching || loadMore.growing}
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
         stateRemote={stateRemote}
         visibleRemote={visibleRemote}

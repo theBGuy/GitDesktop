@@ -6,9 +6,11 @@
 //! reads those. Each category rides an availability envelope: scanning never
 //! configured, an expired artifact, a report the API won't serve, and an
 //! unrecognized failure are all distinct from "genuinely clean" — an empty list
-//! only renders as clean when a parsed report says so. Only a missing `glab`
-//! binary or a timeout escapes as `Err`; every completed-but-failed call is
-//! classified into the envelope instead.
+//! only renders as clean when a parsed report says so. A missing `glab` binary,
+//! a timeout, and a project, pipeline or job read that never reached GitLab's
+//! verdict (the network or the server gave out) escape as `Err`, so the UI
+//! keeps the findings it already holds; every other completed-but-failed call
+//! is classified into the envelope.
 
 use std::collections::HashSet;
 
@@ -16,10 +18,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
 use crate::forge::gitlab::{encode_project, glab_output_is_404, project_path};
 use crate::forge::glab::{run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT};
+use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit};
 
 /// A report bigger than this is refused rather than parsed. `run_glab_raw` has
 /// already buffered the whole artifact by the time we look, so the cap bounds the
@@ -447,6 +450,28 @@ fn classify_call_failure(stdout: &str, stderr: &str) -> (GlFindingAvailability, 
     }
 }
 
+/// `classify_call_failure`, except that a failure it can only call
+/// `Indeterminate` whose stderr names a transport or server outage rejects: an
+/// `Ok` envelope would replace findings the UI already holds. A 403 and a rate
+/// limit keep their envelopes. glab's transport wording shares gh's vocabulary.
+fn classify_or_reject(
+    stdout: &str,
+    stderr: &str,
+) -> AppResult<(GlFindingAvailability, Option<String>)> {
+    let (availability, detail) = classify_call_failure(stdout, stderr);
+    let rate_limited = gh_error_is_rate_limit(Some(stderr))
+        || stderr.to_ascii_lowercase().contains("too many requests");
+    if availability == GlFindingAvailability::Indeterminate
+        && !rate_limited
+        && gh_error_is_network(Some(stderr))
+    {
+        return Err(AppError::Glab(detail.unwrap_or_else(|| {
+            "Couldn't reach GitLab to load the security findings.".to_string()
+        })));
+    }
+    Ok((availability, detail))
+}
+
 /// Whether a job's artifacts are past their expiry. An absent or unparseable
 /// timestamp reads as "not expired" — guessing expiry would mislabel a report
 /// GitLab is simply refusing to serve.
@@ -869,7 +894,7 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
     let out = run_glab_raw(Some(repo_path), &["api", endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let stdout = out.stdout_lossy();
     if out.code != 0 {
-        let (availability, detail) = classify_call_failure(&stdout, &out.stderr);
+        let (availability, detail) = classify_or_reject(&stdout, &out.stderr)?;
         return Ok(Listed::Unavailable(availability, detail));
     }
     match serde_json::from_str::<Vec<T>>(stdout.trim()) {
@@ -1066,7 +1091,7 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     .await?;
     let stdout = out.stdout_lossy();
     if out.code != 0 {
-        let (availability, detail) = classify_call_failure(&stdout, &out.stderr);
+        let (availability, detail) = classify_or_reject(&stdout, &out.stderr)?;
         return Ok(uniform_out(
             GlPipelineState::Unavailable,
             None,
@@ -1776,6 +1801,38 @@ mod tests {
         assert_eq!(
             code_quality_envelope(bodies(&[report]), 100).findings.len(),
             2
+        );
+    }
+
+    #[test]
+    fn a_read_that_never_reached_gitlab_rejects_instead_of_emptying_the_findings() {
+        for stderr in [
+            "Get \"https://gitlab.com/api/v4/projects/g%2Fp\": dial tcp: lookup gitlab.com: no such host",
+            "glab: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+            "glab: HTTP 502 Bad Gateway",
+        ] {
+            let err = classify_or_reject("", stderr).expect_err(stderr);
+            assert!(matches!(err, AppError::Glab(ref m) if m == stderr), "{err:?}");
+        }
+        // Negative controls: a refusal, a rate limit and an unrecognized failure
+        // keep their envelopes, even where the stderr carries a transport word.
+        assert_eq!(
+            classify_or_reject("", "glab: HTTP 403 Forbidden (connection kept)")
+                .unwrap()
+                .0,
+            GlFindingAvailability::Forbidden
+        );
+        assert_eq!(
+            classify_or_reject("", "glab: 429 Too Many Requests, connection throttled")
+                .unwrap()
+                .0,
+            GlFindingAvailability::Indeterminate
+        );
+        assert_eq!(
+            classify_or_reject(r#"{"message":"404 Project Not Found"}"#, "glab: HTTP 404")
+                .unwrap()
+                .0,
+            GlFindingAvailability::Indeterminate
         );
     }
 

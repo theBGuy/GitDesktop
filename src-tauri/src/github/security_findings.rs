@@ -5,14 +5,16 @@
 //! Every list rides an availability envelope. A repo with the feature off, a token
 //! without access, and an unrecognized failure are all distinct from "genuinely
 //! clean" — collapsing them into an empty list would tell the user they have no
-//! vulnerabilities when we simply couldn't look. Only a missing `gh` binary or a
-//! timeout escapes as `Err`; every completed-but-failed call is classified into
-//! the envelope instead.
+//! vulnerabilities when we simply couldn't look. A missing `gh` binary, a
+//! timeout, and a failure that never reached GitHub's verdict (the network or
+//! the server gave out) escape as `Err`, so the UI keeps the rows it already
+//! holds; every other completed-but-failed call is classified into the envelope.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit};
 use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh_raw, GH_NETWORK_TIMEOUT};
 
@@ -894,6 +896,26 @@ fn classify_failure(stdout_body: &str, stderr: &str) -> (FindingAvailability, Op
     }
 }
 
+/// `classify_failure`, except that a failure it can only call `Indeterminate`
+/// whose stderr names a transport or server outage rejects: an `Ok` envelope
+/// would replace rows the UI already holds with an empty list. A named verdict
+/// (disabled, forbidden, no analysis) and a rate limit keep their envelopes.
+fn classify_or_reject(
+    stdout_body: &str,
+    stderr: &str,
+) -> AppResult<(FindingAvailability, Option<String>)> {
+    let (availability, detail) = classify_failure(stdout_body, stderr);
+    if availability == FindingAvailability::Indeterminate
+        && !gh_error_is_rate_limit(Some(stderr))
+        && gh_error_is_network(Some(stderr))
+    {
+        return Err(AppError::Gh(detail.unwrap_or_else(|| {
+            "Couldn't reach GitHub to load the security findings.".to_string()
+        })));
+    }
+    Ok((availability, detail))
+}
+
 /// Outcome of a bounded page walk: raw items, or a classified unavailability.
 enum Fetched {
     Items {
@@ -969,7 +991,7 @@ async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResul
         let raw = out.stdout_lossy();
         let (headers, body) = split_response(&raw);
         if out.code != 0 {
-            let (availability, detail) = classify_failure(body, &out.stderr);
+            let (availability, detail) = classify_or_reject(body, &out.stderr)?;
             return Ok(Fetched::Unavailable {
                 availability,
                 detail,
@@ -1310,6 +1332,95 @@ mod tests {
         // The literal word "Forbidden" classifies the same way.
         let (availability, _) = classify_failure(r#"{"message":"Forbidden"}"#, "");
         assert_eq!(availability, FindingAvailability::Forbidden);
+    }
+
+    #[test]
+    fn a_failure_that_never_reached_github_rejects_instead_of_emptying_the_list() {
+        // gh's offline wordings: no server body, only the transport's own text.
+        for stderr in [
+            "error connecting to api.github.com
+check your internet connection or https://githubstatus.com",
+            "Get \"https://api.github.com/repos/o/r/dependabot/alerts?per_page=100\": dial tcp: lookup api.github.com: no such host",
+            "Get \"https://api.github.com/repos/o/r/code-scanning/alerts\": net/http: TLS handshake timeout",
+        ] {
+            let err = classify_or_reject("", stderr).expect_err(stderr);
+            assert!(matches!(err, AppError::Gh(ref m) if m == stderr.trim()), "{err:?}");
+        }
+        // A server outage reached GitHub but no verdict on the feature.
+        assert!(classify_or_reject("<html>502 Bad Gateway</html>", "gh: HTTP 502").is_err());
+        assert!(classify_or_reject(
+            r#"{"message":"Server Error"}"#,
+            "gh: Server Error (HTTP 503)"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn named_verdicts_and_rate_limits_keep_their_envelopes() {
+        // Negative controls: every one of these must stay an Ok envelope, even
+        // where the stderr happens to carry a transport word.
+        let disabled =
+            r#"{"message":"Dependabot alerts are disabled for this repository.","status":"403"}"#;
+        assert_eq!(
+            classify_or_reject(
+                disabled,
+                "gh: Dependabot alerts are disabled for this repository. (HTTP 403)"
+            )
+            .unwrap()
+            .0,
+            FindingAvailability::NotEnabled
+        );
+        assert_eq!(
+            classify_or_reject(
+                r#"{"message":"Secret scanning is disabled on this repository."}"#,
+                "gh: connection reset while reading the error (HTTP 404)"
+            )
+            .unwrap()
+            .0,
+            FindingAvailability::NotEnabled
+        );
+        assert_eq!(
+            classify_or_reject(
+                r#"{"message":"Resource not accessible by integration"}"#,
+                "gh: Resource not accessible by integration (HTTP 403)"
+            )
+            .unwrap()
+            .0,
+            FindingAvailability::Forbidden
+        );
+        assert_eq!(
+            classify_or_reject(
+                r#"{"message":"no analysis found"}"#,
+                "gh: no analysis found (HTTP 404)"
+            )
+            .unwrap()
+            .0,
+            FindingAvailability::NoResultsYet
+        );
+        // A private repo's advisories 404 stays for the arm's own remap.
+        assert_eq!(
+            classify_or_reject(r#"{"message":"Not Found"}"#, "gh: Not Found (HTTP 404)")
+                .unwrap()
+                .0,
+            FindingAvailability::Indeterminate
+        );
+        // A rate limit outranks transport words: retrying can't clear it sooner.
+        assert_eq!(
+            classify_or_reject(
+                r#"{"message":"You have exceeded a secondary rate limit."}"#,
+                "gh: HTTP 429: You have exceeded a secondary rate limit, connection throttled"
+            )
+            .unwrap()
+            .0,
+            FindingAvailability::Indeterminate
+        );
+        // An unrecognized non-transport failure is still an indeterminate envelope.
+        assert_eq!(
+            classify_or_reject("", "gh: something unexpected happened")
+                .unwrap()
+                .0,
+            FindingAvailability::Indeterminate
+        );
     }
 
     #[test]

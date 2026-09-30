@@ -9,6 +9,24 @@ import { extractJiraKeys } from "@/lib/jira/keys";
 import { useJiraIssues } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import type { JiraMentionChip, LinkedIssueChip } from "./LinkedIssuesField";
+import {
+  addExtractedIssue,
+  backfillFromOpenPage,
+  bucketFor,
+  dismissIssue,
+  EMPTY_LINKED_ISSUE_BUCKET,
+  fillIssueMeta,
+  INITIAL_LINKED_ISSUE_BUCKETS,
+  type LinkedIssueBucket,
+  type LinkedIssueBuckets,
+  type LinkedIssueTargetSig,
+  linkedIssueTargetKey,
+  pickIssue,
+  routeBucketUpdate,
+  seedBuckets,
+  toggleIssueKeyword,
+  upsertAiIssues,
+} from "./linked-issue-selection";
 
 /** A validated real issue the model may link (grounded candidate for the AI
  *  generate). Structurally matches `useGeneratePrDescription`'s IssueCandidate. */
@@ -222,6 +240,11 @@ function byUpdatedAtDesc(a: string, b: string): number {
  * so a caller can mount it unconditionally and gate on forge/dialog state. Knows
  * only the forge's own issue tracker — the Jira sibling is
  * {@link useJiraMentionChips}.
+ *
+ * All of it is per TARGET (`repoPath` + `lens`): an issue number means a
+ * different issue on another target, so a flip shows that target's own cluster
+ * and a flip back restores this one. Async writes land in the bucket of the
+ * target they were started under, never whichever one is on screen by then.
  */
 export function useLinkedIssueChips(opts: {
   repoPath: string;
@@ -239,40 +262,100 @@ export function useLinkedIssueChips(opts: {
   remove: (n: number) => void;
   pick: (n: number) => void;
   buildCandidates: () => IssueCandidate[];
-  upsertFromDraft: (draft: { closes: number[]; relates: number[] }) => void;
+  /** `sig` names the target the draft's run was started under; omitted, the
+   *  target of the render that produced this function. */
+  upsertFromDraft: (
+    draft: { closes: number[]; relates: number[] },
+    sig?: LinkedIssueTargetSig,
+  ) => void;
 } {
   const { repoPath, lens, enabled, headBranch, commitSubjects } = opts;
   const queryClient = useQueryClient();
+  const targetKey = linkedIssueTargetKey({ repoPath, lens });
 
   // Open issues (page of 50) to validate seeds against and to rank as prompt
   // candidates. Uses the caller's lens, so the parent target reads the parent's
-  // issues.
+  // issues; its placeholder is lens-matched, so a flip never reads another
+  // target's page.
   const issueList = useIssueList(repoPath, enabled, "open", 50, lens);
 
-  const [chips, setChips] = useState<LinkedIssueChip[]>([]);
-  // A number the user removed (or that came in dismissed): upserts (seed/AI) skip
-  // it; a MANUAL pick clears it (explicit intent overrides). Reset in resetWith.
-  const dismissedIssuesRef = useRef<Set<number>>(new Set());
-  // Numbers already probed this reset-cycle (present-or-absent from the open
-  // page), so the fetchQuery probe runs at most once per number per reset.
-  const probedIssuesRef = useRef<Set<number>>(new Set());
-  // The exact candidate set last fed to the AI generate — `upsertFromDraft`
-  // resolves an AI-proposed number's title/state from here.
-  const lastCandidatesRef = useRef<Map<number, IssueCandidate>>(new Map());
+  // Every target's chips + dismissals; the visible cluster is the current one.
+  // Each async write carries the reset generation it was fired in, so one that
+  // settles after a reset is dropped instead of reviving a cleared cluster.
+  const [buckets, setBuckets] = useState<LinkedIssueBuckets>(
+    INITIAL_LINKED_ISSUE_BUCKETS,
+  );
+  // The generation's source of truth; `buckets.generation` is its applied
+  // mirror. It advances synchronously in `resetWith` because the create
+  // dialogs declare their open-seed effect before this hook: in one passive
+  // flush the reset runs first and the extraction seed right after it, reading
+  // a render that predates the reset, so a rendered generation would be stale.
+  const generationRef = useRef(INITIAL_LINKED_ISSUE_BUCKETS.generation);
+  const chips = bucketFor(buckets, targetKey).chips;
+  // Per target: numbers already probed this reset-cycle (present-or-absent from
+  // the open page), so each probe runs at most once per number per target.
+  // Stamped with its generation: only a probe of that generation may mark it.
+  const probedRef = useRef<{
+    generation: number;
+    byTarget: Map<string, Set<number>>;
+  }>({
+    generation: INITIAL_LINKED_ISSUE_BUCKETS.generation,
+    byTarget: new Map(),
+  });
+  // Per target: the exact candidate set last fed to the AI generate —
+  // `upsertFromDraft` resolves an AI-proposed number's title/state from the
+  // run's own target's set.
+  const lastCandidatesRef = useRef<Map<string, Map<number, IssueCandidate>>>(
+    new Map(),
+  );
 
-  // Reset the chip state and seed from body-parsed refs. An unresolvable
-  // body-parsed ref KEEPS its chip with title "" (the author's existing content
-  // must never be silently dropped; contrast extraction seeds, which drop when
-  // unverified). Resolves titles/states lazily from the open page or a one-shot
-  // probe.
+  function probedFor(key: string): Set<number> {
+    const { byTarget } = probedRef.current;
+    let probed = byTarget.get(key);
+    if (!probed) {
+      probed = new Set();
+      byTarget.set(key, probed);
+    }
+    return probed;
+  }
+  // A probe from a superseded generation never marks the current set, so it
+  // can't stop the number being probed again after the reset.
+  function markProbed(key: string, gen: number, n: number) {
+    if (probedRef.current.generation === gen) probedFor(key).add(n);
+  }
+  function route(
+    key: string,
+    gen: number,
+    update: (bucket: LinkedIssueBucket) => LinkedIssueBucket,
+  ) {
+    setBuckets((prev) => routeBucketUpdate(prev, key, gen, update));
+  }
+  // Resolve a chip's title/state once; a failed probe leaves the chip as it is.
+  function probeTitle(key: string, gen: number, n: number) {
+    markProbed(key, gen, n);
+    queryClient
+      .fetchQuery(issueDetailsOptions(repoPath, n, lens))
+      .then((issue) => route(key, gen, (b) => fillIssueMeta(b, n, issue)))
+      .catch(() => undefined);
+  }
+
+  // Reset EVERY target's chip state and seed the current one from body-parsed
+  // refs. An unresolvable body-parsed ref KEEPS its chip with title "" (the
+  // author's existing content must never be silently dropped; contrast
+  // extraction seeds, which drop when unverified). Resolves titles/states
+  // lazily from the open page or a one-shot probe.
   const resetWith = useEffectEvent((refs: BodyRef[]) => {
-    dismissedIssuesRef.current = new Set();
-    probedIssuesRef.current = new Set();
+    // Advance first, then seed with that value: the counter and the applied
+    // generation must stay in lockstep.
+    generationRef.current += 1;
+    const gen = generationRef.current;
+    probedRef.current = { generation: gen, byTarget: new Map() };
     lastCandidatesRef.current = new Map();
     // Seed a chip per body ref, keyword preserved, source "manual"; title/state
     // fill in lazily below. A repeated number keeps its first appearance.
     const seen = new Set<number>();
     const seeded: LinkedIssueChip[] = [];
+    const unresolved: number[] = [];
     for (const r of refs) {
       if (seen.has(r.number)) continue;
       seen.add(r.number);
@@ -285,25 +368,12 @@ export function useLinkedIssueChips(opts: {
         source: "manual",
         aiSuggestedClose: false,
       });
-      // Not on the open page yet — probe once to resolve title/state, but keep
-      // the chip regardless of the probe outcome (author content is preserved).
-      if (!hit && enabled) {
-        probedIssuesRef.current.add(r.number);
-        queryClient
-          .fetchQuery(issueDetailsOptions(repoPath, r.number, lens))
-          .then((issue) => {
-            setChips((prev) =>
-              prev.map((c) =>
-                c.number === r.number && c.title === ""
-                  ? { ...c, title: issue.title, state: issue.state }
-                  : c,
-              ),
-            );
-          })
-          .catch(() => undefined);
-      }
+      if (!hit) unresolved.push(r.number);
     }
-    setChips(seeded);
+    setBuckets(seedBuckets(gen, targetKey, seeded));
+    // Not on the open page yet — probe once to resolve title/state, but keep
+    // the chip regardless of the probe outcome (author content is preserved).
+    if (enabled) for (const n of unresolved) probeTitle(targetKey, gen, n);
   });
 
   // Backfill a body-parsed chip's title/state once the open-issues page arrives.
@@ -311,51 +381,37 @@ export function useLinkedIssueChips(opts: {
   // user edit. A chip NOT on the open page is probed once here — resetWith's own
   // probe is skipped when `enabled` still reflects the pre-open render, so this is
   // the reliable resolution point. A failed probe leaves the chip intact (title "").
+  const backfillTitles = useEffectEvent(
+    (
+      key: string,
+      openIssues: NonNullable<typeof issueList.data>,
+      current: LinkedIssueChip[],
+    ) => {
+      const gen = generationRef.current;
+      route(key, gen, (b) => backfillFromOpenPage(b, openIssues));
+      // Probe any still-unresolved chip not on the open page, once per number.
+      const probed = probedFor(key);
+      for (const c of current) {
+        if (c.title !== "" || probed.has(c.number)) continue;
+        if (openIssues.some((i) => i.number === c.number)) continue;
+        probeTitle(key, gen, c.number);
+      }
+    },
+  );
   useEffect(() => {
     if (!enabled || !issueList.data) return;
-    setChips((prev) => {
-      let changed = false;
-      const next = prev.map((c) => {
-        if (c.title !== "") return c;
-        const hit = issueList.data?.find((i) => i.number === c.number);
-        if (!hit) return c;
-        changed = true;
-        return { ...c, title: hit.title, state: hit.state };
-      });
-      return changed ? next : prev;
-    });
-    // Probe any still-unresolved chip not on the open page, once per number.
-    for (const c of chips) {
-      if (c.title !== "" || probedIssuesRef.current.has(c.number)) continue;
-      if (issueList.data.some((i) => i.number === c.number)) continue;
-      probedIssuesRef.current.add(c.number);
-      queryClient
-        .fetchQuery(issueDetailsOptions(repoPath, c.number, lens))
-        .then((issue) => {
-          setChips((prev) =>
-            prev.map((cc) =>
-              cc.number === c.number && cc.title === ""
-                ? { ...cc, title: issue.title, state: issue.state }
-                : cc,
-            ),
-          );
-        })
-        .catch(() => undefined);
-    }
-  }, [enabled, issueList.data, chips, queryClient, repoPath, lens]);
+    backfillTitles(targetKey, issueList.data, chips);
+  }, [enabled, issueList.data, chips, targetKey]);
 
   function toggleKeyword(issueNumber: number) {
-    setChips((prev) =>
-      prev.map((c) =>
-        c.number === issueNumber
-          ? { ...c, keyword: c.keyword === "closes" ? "relates" : "closes" }
-          : c,
-      ),
+    route(targetKey, generationRef.current, (b) =>
+      toggleIssueKeyword(b, issueNumber),
     );
   }
   function remove(issueNumber: number) {
-    dismissedIssuesRef.current.add(issueNumber);
-    setChips((prev) => prev.filter((c) => c.number !== issueNumber));
+    route(targetKey, generationRef.current, (b) =>
+      dismissIssue(b, issueNumber),
+    );
   }
   // Manual pick: explicit intent, so it clears any prior dismissal and adds a
   // `manual` relates chip (the picker already excludes current chips). The picker
@@ -364,101 +420,86 @@ export function useLinkedIssueChips(opts: {
   // `#N`/OPEN would be a permanent lie: that effect only targets empty titles).
   // Clearing the probed marker lets the effect re-probe this number.
   function pick(issueNumber: number) {
-    dismissedIssuesRef.current.delete(issueNumber);
-    probedIssuesRef.current.delete(issueNumber);
+    probedFor(targetKey).delete(issueNumber);
     const found = (issueList.data ?? []).find((i) => i.number === issueNumber);
-    setChips((prev) => {
-      if (prev.some((c) => c.number === issueNumber)) return prev;
-      return [
-        ...prev,
-        {
-          number: issueNumber,
-          title: found?.title ?? "",
-          state: found?.state ?? "",
-          keyword: "relates",
-          source: "manual",
-          aiSuggestedClose: false,
-        },
-      ];
-    });
+    route(targetKey, generationRef.current, (b) =>
+      pickIssue(b, {
+        number: issueNumber,
+        title: found?.title ?? "",
+        state: found?.state ?? "",
+        keyword: "relates",
+        source: "manual",
+        aiSuggestedClose: false,
+      }),
+    );
+  }
+  function setChips(action: React.SetStateAction<LinkedIssueChip[]>) {
+    route(targetKey, generationRef.current, (b) => ({
+      ...b,
+      chips: typeof action === "function" ? action(b.chips) : action,
+    }));
   }
 
   // Extraction seeding: pull candidate issue numbers from the head branch name and
   // commit subjects, then add a chip for each that's a real repo issue — resolved
   // from the open page or probed once (dropped on any error: a PR number, a deleted
-  // issue, or noise). Dismissed/present numbers skipped; once per number per reset.
+  // issue, or noise). Dismissed/present numbers skipped; once per number per
+  // reset, per target, so returning to a target re-seeds only what it lacks.
   const seedExtractedIssues = useEffectEvent(
-    (numbers: number[], openIssues: typeof issueList.data) => {
-      const existing = new Set(chips.map((c) => c.number));
+    (key: string, numbers: number[], openIssues: typeof issueList.data) => {
+      const gen = generationRef.current;
+      // A reset queued in this same flush hasn't rendered yet, so the rendered
+      // bucket is the previous open's; skip only against a current one (each
+      // write re-checks presence and dismissal against the applied state).
+      const current =
+        buckets.generation === gen
+          ? bucketFor(buckets, key)
+          : EMPTY_LINKED_ISSUE_BUCKET;
+      const existing = new Set(current.chips.map((c) => c.number));
+      const probed = probedFor(key);
       for (const n of numbers) {
-        if (existing.has(n) || dismissedIssuesRef.current.has(n)) continue;
+        if (existing.has(n) || current.dismissed.has(n)) continue;
         const hit = openIssues?.find((i) => i.number === n);
         if (hit) {
-          setChips((prev) =>
-            prev.some((c) => c.number === n)
-              ? prev
-              : [
-                  ...prev,
-                  {
-                    number: n,
-                    title: hit.title,
-                    state: hit.state,
-                    keyword: "relates",
-                    source: "extraction",
-                    aiSuggestedClose: false,
-                  },
-                ],
-          );
+          route(key, gen, (b) => addExtractedIssue(b, extractedChip(hit)));
           continue;
         }
         // Not on the open page — probe the tracker once. Skip if the open list
         // hasn't loaded yet (a later run resolves it) so we don't probe numbers
         // that would have matched the page.
         if (!openIssues) continue;
-        if (probedIssuesRef.current.has(n)) continue;
-        probedIssuesRef.current.add(n);
+        if (probed.has(n)) continue;
+        // `gen` was read at fire time: a reset before this settles makes the
+        // seed stale.
+        markProbed(key, gen, n);
         queryClient
           .fetchQuery(issueDetailsOptions(repoPath, n, lens))
-          .then((issue) => {
-            if (dismissedIssuesRef.current.has(n)) return;
-            setChips((prev) =>
-              prev.some((c) => c.number === n)
-                ? prev
-                : [
-                    ...prev,
-                    {
-                      number: issue.number,
-                      title: issue.title,
-                      state: issue.state,
-                      keyword: "relates",
-                      source: "extraction",
-                      aiSuggestedClose: false,
-                    },
-                  ],
-            );
-          })
+          .then((issue) =>
+            route(key, gen, (b) => addExtractedIssue(b, extractedChip(issue))),
+          )
           .catch(() => undefined);
       }
     },
   );
   // Join the subjects into a stable string so a fresh `commitSubjects` array each
   // render doesn't re-fire this effect (the seeder is idempotent, but keep it to
-  // real changes).
+  // real changes). `targetKey` re-runs it on a flip to seed the incoming target.
   const subjectsText = commitSubjects.join("\n");
   useEffect(() => {
     if (!enabled) return;
     const numbers = extractIssueNumbers(`${headBranch ?? ""}\n${subjectsText}`);
     if (numbers.length === 0) return;
-    seedExtractedIssues(numbers, issueList.data);
-  }, [enabled, headBranch, subjectsText, issueList.data]);
+    seedExtractedIssues(targetKey, numbers, issueList.data);
+  }, [enabled, headBranch, subjectsText, issueList.data, targetKey]);
 
   // chips ∪ validated extraction ∪ top-ranked open issues, cap 8 — for generate().
   // Current chips are pinned first; then the highest-scoring OPEN issues by
   // shared-token overlap between the title and the branch + commit subjects.
-  // Records the exact set fed so `upsertFromDraft` can resolve title/state.
+  // Records the exact set fed, under the current target, so `upsertFromDraft`
+  // can resolve title/state.
   function buildCandidates(): IssueCandidate[] {
     if (!enabled) {
-      lastCandidatesRef.current = new Map();
+      lastCandidatesRef.current.delete(targetKey);
       return [];
     }
     const chipNumbers = new Set(chips.map((c) => c.number));
@@ -484,48 +525,23 @@ export function useLinkedIssueChips(opts: {
         state: r.issue.state,
       }));
     const candidates = [...chipCandidates, ...ranked].slice(0, 8);
-    lastCandidatesRef.current = new Map(candidates.map((c) => [c.number, c]));
+    lastCandidatesRef.current.set(
+      targetKey,
+      new Map(candidates.map((c) => [c.number, c])),
+    );
     return candidates;
   }
 
-  // Union the model's proposed close/relate numbers into the chip cluster. A `closes`
-  // proposal marks `aiSuggestedClose`; both land as `relates` chips (the safe default
-  // the user can toggle up). Skip dismissed numbers; never downgrade an existing
-  // chip. New chips resolve title/state from the last-built candidates.
-  function upsertFromDraft(draft: { closes: number[]; relates: number[] }) {
-    const fed = lastCandidatesRef.current;
-    const closeSet = new Set(draft.closes);
-    const all = [...new Set([...draft.closes, ...draft.relates])];
-    setChips((prev) => {
-      let next = prev;
-      for (const n of all) {
-        if (dismissedIssuesRef.current.has(n)) continue;
-        const suggestedClose = closeSet.has(n);
-        const existingIdx = next.findIndex((c) => c.number === n);
-        if (existingIdx >= 0) {
-          if (suggestedClose && !next[existingIdx].aiSuggestedClose) {
-            next = next.map((c, i) =>
-              i === existingIdx ? { ...c, aiSuggestedClose: true } : c,
-            );
-          }
-          continue;
-        }
-        const meta = fed.get(n);
-        if (!meta) continue;
-        next = [
-          ...next,
-          {
-            number: n,
-            title: meta.title,
-            state: meta.state,
-            keyword: "relates",
-            source: "ai",
-            aiSuggestedClose: suggestedClose,
-          },
-        ];
-      }
-      return next;
-    });
+  // Union the model's proposed close/relate numbers into the run target's chip
+  // cluster — a chunk arriving after a flip lands in the target the run was
+  // grounded against, whose candidates resolve its titles.
+  function upsertFromDraft(
+    draft: { closes: number[]; relates: number[] },
+    sig?: LinkedIssueTargetSig,
+  ) {
+    const key = sig ? linkedIssueTargetKey(sig) : targetKey;
+    const fed = lastCandidatesRef.current.get(key) ?? new Map();
+    route(key, generationRef.current, (b) => upsertAiIssues(b, draft, fed));
   }
 
   return {
@@ -537,6 +553,22 @@ export function useLinkedIssueChips(opts: {
     pick,
     buildCandidates,
     upsertFromDraft,
+  };
+}
+
+/** An extraction-seeded chip for a validated issue. */
+function extractedChip(issue: {
+  number: number;
+  title: string;
+  state: string;
+}): LinkedIssueChip {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    keyword: "relates",
+    source: "extraction",
+    aiSuggestedClose: false,
   };
 }
 
