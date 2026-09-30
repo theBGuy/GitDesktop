@@ -485,7 +485,8 @@ function PersonRow({
         </p>
         {meta && <p className="truncate text-muted-foreground">{meta}</p>}
       </div>
-      {confirming ? (
+      {/* A confirm opened before settings named the owner yields to the hold. */}
+      {confirming && removeHeld === undefined ? (
         <InlineConfirm
           prompt="Remove?"
           actLabel="Remove"

@@ -209,10 +209,10 @@ function ConflictFallback({
         <p className="min-w-0 flex-1">
           {markersRemain ? (
             <>
-              Couldn't cleanly parse the conflict markers in this file. Resolve
-              it with the header actions or in your editor, then{" "}
-              <span className="font-medium">Mark resolved</span> to stage it.
-              While markers remain, you'll be asked before they're staged.
+              Couldn't cleanly parse the conflict markers in this file. Take a
+              side with the header actions, or fix it in your editor and then{" "}
+              <span className="font-medium">Mark resolved</span>. While markers
+              remain, you'll be asked before they're staged.
             </>
           ) : (
             <>

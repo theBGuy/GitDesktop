@@ -41,7 +41,7 @@ test("targets match only on the same repo AND the same lens", () => {
 test("a finished run's dropped names show only under the run's own target", () => {
   // The dialog stamps `final.droppedLabels` with the run's target; a parent run
   // that dropped names must not surface them under the fork's picker.
-  const dropped = applyAiProposal(["needs-triage", "p1"], PARENT);
+  const dropped = { names: ["needs-triage", "p1"], sig: PARENT };
   assert.deepEqual(namesForTarget(dropped, PARENT), ["needs-triage", "p1"]);
   for (const current of [FORK, OTHER_REPO, OTHER_REPO_PARENT])
     assert.deepEqual(
@@ -52,7 +52,7 @@ test("a finished run's dropped names show only under the run's own target", () =
   // Cleared (reseed or a new run) shows nothing anywhere.
   assert.deepEqual(namesForTarget(null, PARENT), []);
   // A run that dropped nothing shows nothing on its own target either.
-  assert.deepEqual(namesForTarget(applyAiProposal([], FORK), FORK), []);
+  assert.deepEqual(namesForTarget({ names: [], sig: FORK }, FORK), []);
 });
 
 test("proposals of 0, 1 and 3 names derive as given under their own target", () => {

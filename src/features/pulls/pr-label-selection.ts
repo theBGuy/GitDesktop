@@ -7,9 +7,12 @@ import type { RemoteLens } from "@/lib/git/types";
  *  was produced for. */
 export type LabelTargetSig = { repoPath: string; lens: RemoteLens };
 
+/** Label names stamped with the target they were validated against. */
+export type StampedLabels = { names: string[]; sig: LabelTargetSig } | null;
+
 /** The AI's current label proposal, stamped with the target it was validated
  *  against. */
-export type AiLabelProposal = { names: string[]; sig: LabelTargetSig } | null;
+export type AiLabelProposal = StampedLabels;
 
 export function sameLabelTarget(a: LabelTargetSig, b: LabelTargetSig): boolean {
   return a.repoPath === b.repoPath && a.lens === b.lens;
@@ -19,7 +22,7 @@ export function sameLabelTarget(a: LabelTargetSig, b: LabelTargetSig): boolean {
  *  names) that apply under `current`: all of them on the stamp's own target,
  *  none on any other. */
 export function namesForTarget(
-  stamped: AiLabelProposal,
+  stamped: StampedLabels,
   current: LabelTargetSig,
 ): string[] {
   return stamped && sameLabelTarget(stamped.sig, current) ? stamped.names : [];

@@ -99,6 +99,7 @@ import {
   deriveSelectedLabels,
   type LabelTargetSig,
   namesForTarget,
+  type StampedLabels,
   sameLabelTarget,
   toggleLabelSets,
 } from "./pr-label-selection";
@@ -270,7 +271,7 @@ export function CreatePrDialog({
   // half-streamed name that would flash as a mismatch. Stamped with the run's
   // target like the proposal: the names were checked against that target's
   // labels, so the hint shows only while the dialog is on it.
-  const [droppedLabels, setDroppedLabels] = useState<AiLabelProposal>(null);
+  const [droppedLabels, setDroppedLabels] = useState<StampedLabels>(null);
 
   // Linked issues: repo issues referenced on create (extraction-seeded, AI-proposed
   // or manual). They become `Closes #N`/`Relates to #N` body LINES, not create-
@@ -1006,7 +1007,7 @@ export function CreatePrDialog({
     ).then(
       (final) => {
         if (final) {
-          setDroppedLabels(applyAiProposal(final.droppedLabels, runTarget));
+          setDroppedLabels({ names: final.droppedLabels, sig: runTarget });
           // The post-stream label pick arrives only here, so title and body the
           // user edited meanwhile stay theirs. It replaces the streamed proposal
           // under the same target stamp.

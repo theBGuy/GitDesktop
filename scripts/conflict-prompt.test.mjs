@@ -1,5 +1,5 @@
-// Pins the AI conflict proposal's trailing newline. Extraction trims the fenced
-// body's final newline and the accept writes the proposal as-is, so the view
+// Pins the AI conflict proposal's trailing newline. Extraction drops the file's
+// last line break and the accept writes the proposal as-is, so the view
 // restores the newline its reference side ends with: without it every accepted
 // file loses its trailing newline, and a proposal identical to ours previews as
 // a one-line "\ No newline" diff instead of an empty one.
@@ -18,12 +18,43 @@ const { extractResolvedContent, withReferenceTrailingNewline } = await import(
   "@/lib/ai/conflict-prompt"
 );
 
-test("extraction drops the whole newline, LF or CRLF, before the closing fence", () => {
-  // The premise the helper exists for; if extraction ever keeps it, the helper
-  // becomes a no-op rather than a double newline (it only adds when missing).
-  assert.equal(extractResolvedContent("```ts\na\nb\n```"), "a\nb");
-  // A CRLF response leaves no dangling `\r` for the helper to misread.
-  assert.equal(extractResolvedContent("```\r\na\r\nb\r\n```"), "a\r\nb");
+test("extraction never keeps the file's last line break, on every path", () => {
+  // The contract the helper appends against: a closing fence takes exactly one
+  // break with it, and the trim leaves none anywhere else.
+  for (const [name, raw, want] of [
+    ["fenced", "```\na\nb\n```", "a\nb"],
+    ["fenced + language", "```ts\na\nb\n```", "a\nb"],
+    ["fenced CRLF", "```\r\na\r\nb\r\n```", "a\r\nb"],
+    ["fenced, blank last line", "```\na\n\n```", "a\n"],
+    ["fenced, prose around", "Here:\n```\na\n```\nDone.", "a"],
+    ["unterminated opener", "```\na\nb\n", "a\nb"],
+    ["closing fence only", "a\nb\n```", "a\nb"],
+    ["closing fence only, blank last line", "a\n\n```", "a\n"],
+    ["closing fence only CRLF", "a\r\nb\r\n```", "a\r\nb"],
+    ["plain, trimmed", "a\nb\n\n", "a\nb"],
+  ]) {
+    assert.equal(extractResolvedContent(raw), want, name);
+  }
+});
+
+test("a file ending in a blank line round-trips through extraction", () => {
+  for (const ours of ["fn a() {}\n\n", "a\r\n\r\n"]) {
+    const merged = withReferenceTrailingNewline(
+      extractResolvedContent(`\`\`\`\n${ours}\`\`\``),
+      ours,
+    );
+    assert.equal(merged, ours, JSON.stringify(ours));
+  }
+});
+
+test("a single-line proposal takes the reference's line ending", () => {
+  const ours = "a\r\n";
+  const merged = withReferenceTrailingNewline(
+    extractResolvedContent("```\r\na\r\n```"),
+    ours,
+  );
+  assert.equal(merged, ours);
+  assert.equal(withReferenceTrailingNewline("a", "b\n"), "a\n");
 });
 
 test("CRLF round trip through extraction comes back byte-equal to ours", () => {
@@ -61,7 +92,7 @@ test("a proposal missing the reference's trailing newline gets it back", () => {
     withReferenceTrailingNewline("a\r\nb", "a\r\nc\r\n"),
     "a\r\nb\r\n",
   );
-  // An LF proposal against a CRLF reference stays LF (no mixed endings).
+  // A multi-line LF proposal against a CRLF reference stays LF (no mixed endings).
   assert.equal(withReferenceTrailingNewline("a\nb", "a\r\nc\r\n"), "a\nb\n");
 });
 
@@ -83,9 +114,10 @@ test("an empty proposal stays empty", () => {
   assert.equal(withReferenceTrailingNewline("", "a\n"), "");
 });
 
-test("an existing newline tail is never grown or trimmed", () => {
-  assert.equal(withReferenceTrailingNewline("a\n", "a\n"), "a\n");
-  assert.equal(withReferenceTrailingNewline("a\n\n", "a\n"), "a\n\n");
-  // The helper only restores: a tail the reference lacks is left in place.
+test("a proposal ending in a blank line still gets the stripped break back", () => {
+  // Extraction removed one break, so a remaining `\n` is a blank last line.
+  assert.equal(withReferenceTrailingNewline("a\n", "a\n\n"), "a\n\n");
+  assert.equal(withReferenceTrailingNewline("a\r\n", "a\r\n\r\n"), "a\r\n\r\n");
+  // A reference without a trailing newline adds nothing, whatever the tail.
   assert.equal(withReferenceTrailingNewline("a\n\n", "a"), "a\n\n");
 });
