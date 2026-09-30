@@ -60,12 +60,13 @@ function isAnyMarker(line: string): boolean {
 }
 
 /** Whether unresolved conflict markers remain — the staging gate for the two
- *  content-writing accepts (the AI accept and per-region accept). It differs from
- *  `isAnyMarker` on two axes, both deliberate. Narrower on `=`: only the angle and
- *  pipe markers count, since a bare `=======` can be a markdown underline and
- *  staging must not refuse on one. Wider on run length: 7 or more, because a
- *  `conflict-marker-size` attribute lengthens git's markers; the parser stays
- *  exactly-7 and sends such files to its unparsed arm, so only staging needs it. */
+ *  content-writing accepts (the AI accept and per-region accept), and the check
+ *  that keeps a marker-bearing file off ConflictFileView's externally-resolved
+ *  arm. It differs from `isAnyMarker` on two axes, both deliberate. Narrower on
+ *  `=`: only the angle and pipe markers count, since a bare `=======` can be a
+ *  markdown underline and staging must not refuse on one. Wider on run length:
+ *  7 or more, because a `conflict-marker-size` attribute lengthens git's
+ *  markers and the exactly-7 parser never reads those as regions. */
 export function hasConflictMarkers(text: string): boolean {
   return (
     /^<{7,}( |\t|$)/m.test(text) ||

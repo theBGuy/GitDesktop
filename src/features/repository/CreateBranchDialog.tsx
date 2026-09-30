@@ -43,7 +43,7 @@ import {
 
 /** Whitespace, glob syntax, and characters git refuses in a ref name: a hint
  *  entry carrying any of them is prose or a pattern, never a creatable name. */
-const NOT_A_BRANCH_NAME = /[\s*?[\]{}~^:\\]|\.\.|@\{|^-/;
+const NOT_A_BRANCH_NAME = /[\s*?[\]{}~^:\\]|\.\.|^-/;
 
 /**
  * Create-branch dialog: names a new branch (with optional AI generation from
