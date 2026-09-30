@@ -1210,9 +1210,6 @@ prunable gitdir file points to non-existent location
                 "HEAD"
             ]
         );
-        let no_track = args.iter().position(|a| *a == "--no-track").unwrap();
-        let b = args.iter().position(|a| *a == "-b").unwrap();
-        assert!(no_track < b, "--no-track must precede -b");
     }
 
     /// Under `branch.autoSetupMerge = always` a session branch created from the

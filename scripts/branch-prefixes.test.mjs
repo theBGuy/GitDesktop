@@ -160,7 +160,7 @@ test("trunk names never set the convention", () => {
     "feature/my-change",
   );
   assert.equal(
-    branchNamePlaceholder(TRUNK_BRANCH_NAMES, { fallback: "feature/login" }),
+    branchNamePlaceholder(TRUNK_BRANCH_NAMES, { sample: "login" }),
     "feature/login",
   );
 });
@@ -169,10 +169,10 @@ test("trunk names match whole, never as a prefix", () => {
   assert.equal(branchNamePlaceholder(["main", "mainline"]), "my-change");
 });
 
-test("no branches falls back, to the caller's literal when given", () => {
+test("no branches falls back to feature/<sample>", () => {
   assert.equal(branchNamePlaceholder([]), "feature/my-change");
   assert.equal(
-    branchNamePlaceholder([], { fallback: "feature/from-commit" }),
+    branchNamePlaceholder([], { sample: "from-commit" }),
     "feature/from-commit",
   );
 });

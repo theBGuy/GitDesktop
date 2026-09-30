@@ -828,7 +828,7 @@ function CreateWorktree({
     () =>
       branchNamePlaceholder(
         (branchesQuery.data ?? []).map((b) => b.name),
-        { fallback: "feature/login", sample: "login" },
+        { sample: "login" },
       ),
     [branchesQuery.data],
   );

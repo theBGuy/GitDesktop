@@ -62,13 +62,14 @@ export const TRUNK_BRANCH_NAMES: readonly string[] = [
 ];
 
 /** A branch-name placeholder in the repository's dominant prefix convention:
- *  `<prefix><sample>`, the bare sample when unprefixed names lead, or `fallback`
- *  with nothing to count. Agent-session branches are dropped first, as the MCP
- *  caller does before counting, and trunk names after them, since neither says
- *  how the user names work branches. GUI-only: no Rust mirror. */
+ *  `<prefix><sample>`, the bare sample when unprefixed names lead, or
+ *  `feature/<sample>` with nothing to count. Agent-session branches are dropped
+ *  first, as the MCP caller does before counting, and trunk names after them,
+ *  since neither says how the user names work branches. GUI-only: no Rust
+ *  mirror. */
 export function branchNamePlaceholder(
   names: string[],
-  opts: { fallback?: string; sample?: string } = {},
+  opts: { sample?: string } = {},
 ): string {
   const sample = opts.sample ?? "my-change";
   const top = branchPrefixCounts(
@@ -76,7 +77,7 @@ export function branchNamePlaceholder(
       (n) => !n.startsWith("gd/session/") && !TRUNK_BRANCH_NAMES.includes(n),
     ),
   )[0];
-  if (!top) return opts.fallback ?? `feature/${sample}`;
+  if (!top) return `feature/${sample}`;
   return top.prefix === NO_BRANCH_PREFIX ? sample : `${top.prefix}${sample}`;
 }
 

@@ -113,7 +113,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     () =>
       branchNamePlaceholder(
         (branches.data ?? []).map((b) => b.name),
-        { fallback: "feature/from-commit", sample: "from-commit" },
+        { sample: "from-commit" },
       ),
     [branches.data],
   );

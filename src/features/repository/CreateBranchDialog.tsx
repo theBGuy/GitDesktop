@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
-import { branchNameError, branchNameHint } from "@/lib/branch-rules/match";
+import {
+  branchNameError,
+  branchNameHint,
+  namingRequirement,
+} from "@/lib/branch-rules/match";
 import type { BranchRulesConfig } from "@/lib/branch-rules/types";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateBranch } from "@/lib/git/queries";
@@ -36,6 +40,10 @@ import {
   type CommittedNameSource,
   useGenerateBranchName,
 } from "./useGenerateBranchName";
+
+/** Whitespace, glob syntax, and characters git refuses in a ref name: a hint
+ *  entry carrying any of them is prose or a pattern, never a creatable name. */
+const NOT_A_BRANCH_NAME = /[\s*?[\]{}~^:\\]|\.\.|@\{|^-/;
 
 /**
  * Create-branch dialog: names a new branch (with optional AI generation from
@@ -145,18 +153,24 @@ export function CreateBranchDialog({
   // unaffected — uncommitted changes come along whatever the base.
   const baseIsHead = createBase === "" || createBase === currentName;
 
-  // An active naming policy's own example outranks the inferred convention: it
-  // is the rule the Create button enforces. The hint is a free-form comma list,
-  // so its first entry is the example.
-  const { naming } = rulesConfig;
+  // An active naming policy's example outranks the inferred convention: it is
+  // the rule the Create button enforces. The placeholder takes the first hint
+  // entry that is itself a name the rule accepts; globs and prose fall through
+  // to the inferred convention.
   const policyExample =
-    naming.enabled && naming.pattern.trim() !== ""
-      ? (naming.hint.split(",")[0] ?? "").trim()
-      : "";
+    namingRequirement(rulesConfig) === null
+      ? undefined
+      : rulesConfig.naming.hint
+          .split(",")
+          .map((entry) => entry.trim())
+          .find(
+            (entry) =>
+              entry !== "" &&
+              !NOT_A_BRANCH_NAME.test(entry) &&
+              branchNameError(rulesConfig, entry) === null,
+          );
   const namePlaceholder = useMemo(
-    () =>
-      policyExample ||
-      branchNamePlaceholder(allBranchNames, { fallback: "feature/my-change" }),
+    () => policyExample ?? branchNamePlaceholder(allBranchNames),
     [policyExample, allBranchNames],
   );
 

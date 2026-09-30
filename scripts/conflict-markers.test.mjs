@@ -1,6 +1,7 @@
-// Pins the staging gate for conflict resolutions: every accept path stages a file
-// only when `hasConflictMarkers` finds none, so a false negative lets markers
-// ride Continue's commit and a false positive strands a clean file unstaged.
+// Pins the staging gate for the content-writing conflict accepts (the AI accept
+// and per-region accept): each stages a file only when `hasConflictMarkers` finds
+// none, so a false negative lets markers ride Continue's commit and a false
+// positive strands a clean file unstaged.
 //
 // The import reaches straight into `src/` under Node's type stripping, so
 // `conflict-parse.ts` must stay free of runtime and aliased imports.
@@ -18,10 +19,18 @@ test("angle and pipe markers are detected with a space, tab, or EOL tail", () =>
   }
 });
 
-test("6- and 8-char runs are not markers", () => {
+test("6-char runs are not markers", () => {
   for (const char of ["<", ">", "|"]) {
     assert.ok(!hasConflictMarkers(`a\n${char.repeat(6)} x\nb`), `${char}x6`);
-    assert.ok(!hasConflictMarkers(`a\n${char.repeat(8)} x\nb`), `${char}x8`);
+  }
+});
+
+// A `conflict-marker-size` attribute lengthens git's markers; staging must
+// still refuse them even though the parser only reads 7-char runs.
+test("longer runs are markers", () => {
+  for (const char of ["<", ">", "|"]) {
+    assert.ok(hasConflictMarkers(`a\n${char.repeat(8)} x\nb`), `${char}x8`);
+    assert.ok(hasConflictMarkers(`a\n${char.repeat(12)}\nb`), `${char}x12`);
   }
 });
 
@@ -39,7 +48,8 @@ test("CRLF input is handled", () => {
   assert.ok(hasConflictMarkers("a\r\n<<<<<<<\r\nb\r\n"));
   assert.ok(hasConflictMarkers("a\r\n>>>>>>> theirs\r\n"));
   assert.ok(!hasConflictMarkers("Title\r\n=======\r\nbody\r\n"));
-  assert.ok(!hasConflictMarkers("a\r\n<<<<<<<<\r\n"));
+  assert.ok(hasConflictMarkers("a\r\n<<<<<<<<\r\n"));
+  assert.ok(!hasConflictMarkers("a\r\n<<<<<<\r\n"));
 });
 
 // The two AI-proposal shapes the accept gate branches on.
