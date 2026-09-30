@@ -933,8 +933,9 @@ export function FindingDetailView({
         <DegradedListNotice
           noun="this finding"
           degraded={pane === "content-degraded"}
-          // Keyed per finding by its host, so no switch placeholder is ever
-          // shown here.
+          // The finding is read from its category's list, whose key doesn't
+          // change with the selection, so no previous finding is ever shown
+          // as placeholder.
           message={detailNoticeMessage({
             noun: "finding",
             isError: query.isError,

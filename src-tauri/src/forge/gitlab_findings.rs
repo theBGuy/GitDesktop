@@ -7,10 +7,10 @@
 //! configured, an expired artifact, a report the API won't serve, and an
 //! unrecognized failure are all distinct from "genuinely clean" — an empty list
 //! only renders as clean when a parsed report says so. A missing `glab` binary,
-//! a timeout, and a project, pipeline or job read that never reached GitLab's
-//! verdict (the network or the server gave out) escape as `Err`, so the UI
-//! keeps the findings it already holds; every other completed-but-failed call
-//! is classified into the envelope.
+//! a timeout, and a project, pipeline, job or bridges read that never
+//! reached GitLab's verdict (the network or the server gave out) escape as
+//! `Err`, so the UI keeps the findings it already holds; every other
+//! completed-but-failed call is classified into the envelope.
 
 use std::collections::HashSet;
 
@@ -1876,7 +1876,7 @@ mod tests {
         }
     }
 
-    fn offline() -> crate::error::AppError {
+    fn offline() -> AppError {
         AppError::Glab("dial tcp: lookup gitlab.com: no such host".to_string())
     }
 
