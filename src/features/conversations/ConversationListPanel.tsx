@@ -5,6 +5,7 @@ import {
   type ReactElement,
   type ReactNode,
   type Ref,
+  useCallback,
   useLayoutEffect,
   useRef,
 } from "react";
@@ -137,13 +138,26 @@ export function DegradedListNotice(props: {
   const wrapRef = useRef<HTMLDivElement>(null);
   const retryShown = degraded && onRetry !== undefined;
   const retryWasShown = useRef(retryShown);
+  // Whether THIS notice's Retry held focus as it left the DOM, so a sibling
+  // notice losing its Retry in the same commit can't claim focus it never had.
+  // Read in the ref cleanup, which React runs just before removing the node,
+  // while focus still sits on it.
+  const retryHeldFocus = useRef(false);
+  const retryRef = useCallback(
+    (node: HTMLButtonElement | null) => () => {
+      retryHeldFocus.current = document.activeElement === node;
+    },
+    [],
+  );
   // Only Retry going away can drop focus, so only that edge rescues, and only
-  // from `<body>` (never focus placed elsewhere); preventScroll keeps the
-  // viewer's scroll position.
+  // from `<body>`; preventScroll keeps the viewer's scroll position.
   useLayoutEffect(() => {
     const was = retryWasShown.current;
     retryWasShown.current = retryShown;
-    if (was && !retryShown && document.activeElement === document.body)
+    if (!was || retryShown) return;
+    const owned = retryHeldFocus.current;
+    retryHeldFocus.current = false;
+    if (owned && document.activeElement === document.body)
       wrapRef.current?.focus({ preventScroll: true });
   }, [retryShown]);
   return (
@@ -167,6 +181,7 @@ export function DegradedListNotice(props: {
       </p>
       {degraded && onRetry && (
         <button
+          ref={retryRef}
           type="button"
           aria-label={retryLabel ?? `Retry loading ${noun}`}
           onClick={onRetry}
