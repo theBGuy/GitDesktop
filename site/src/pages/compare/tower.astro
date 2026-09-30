@@ -59,7 +59,7 @@ const groups: Group[] = [
         label: "Same features on every platform",
         them: {
           state: "no",
-          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; AI commit messages are Mac-only, Gitea support Windows-only`,
+          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features differ by platform, such as AI commit messages (Mac only) and Gitea (Windows only)`,
         },
         gd: {
           state: "yes",
@@ -298,7 +298,7 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a free Tower alternative?",
-    a: "For the daily Git loop and the forge loop, yes. GitDesktop is free and open source (Apache-2.0), runs on Windows, macOS, and Linux, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project), with releases on GitHub and GitLab. It does not have Tower's one-keystroke undo for every operation, its local branch dependencies, or its Azure DevOps and Beanstalk support — the sections above count both directions.",
+    a: "For the daily Git loop and the forge loop, yes. GitDesktop is free and open source (Apache-2.0), runs on Windows, macOS, and Linux, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project), with releases on GitHub and GitLab. It does not have Tower's one-keystroke undo for every operation, its local stacked branches, or its Azure DevOps and Beanstalk support — the sections above count both directions.",
   },
   {
     q: "Can Tower approve pull requests?",
@@ -376,8 +376,8 @@ const faqs = [
             <span class="text-ink">Undo, everywhere.</span> ⌘Z on a Mac, Ctrl+Z
             on Windows, across commits, merges, rebases, branch operations, and
             stashes. GitDesktop journals risky operations, restores dropped
-            stashes, and undoes the last commit; it has no one-keystroke undo
-            for every operation.
+            stashes, and undoes the last unpushed commit; it has no
+            one-keystroke undo for every operation.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">

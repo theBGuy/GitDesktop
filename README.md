@@ -166,13 +166,14 @@ PR badge.
   it; pre-checking still comes from your own history: merged into the
   default branch, or idle past that window. The dialog names pull requests
   only where it read them, so its wording matches the checks behind the list.
-- **Advanced merge tooling** ⭐: predicts a merge's result in memory before
-  you commit (fast-forward, already up to date, clean, or exactly which
-  files will conflict), with `--no-ff` and a clearly cautioned auto-resolve
-  strategy (`-X ours/theirs`); GitHub Desktop offers none of this. This is
-  the *local* prediction; a remote PR's conflict state comes from the forge
-  itself, and falls back to this prediction only where the forge publishes
-  none.
+- **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
+  memory before you commit (fast-forward, already up to date, clean, or
+  exactly which files will conflict), with `--no-ff` and a clearly cautioned
+  auto-resolve strategy (`-X ours/theirs`); GitHub Desktop's merge dialog
+  reports up to date, clean, or a count of conflicted files, with no
+  `--no-ff` or `-X` option. This is the *local* prediction; a remote PR's
+  conflict state comes from the forge itself, and falls back to this
+  prediction only where the forge publishes none.
 - **Change base** ⭐: rebase a branch onto a different base when it was
   branched off the wrong one, replaying only its own commits (the wrong
   base's are left behind), with a preview of exactly which commits will
@@ -222,8 +223,9 @@ click to jump to it in History.
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
   (a conflict rolls it back), or **edit** a commit to pause and amend its
-  contents in a real, resumable rebase (GitHub Desktop offers neither).
-  Cherry-pick onto the current or another branch, too.
+  contents in a real, resumable rebase (GitHub Desktop stops at squashing,
+  reordering, and amending the latest commit). Cherry-pick onto the current
+  or another branch, too.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
@@ -691,7 +693,8 @@ with a comment you've drafted posted alongside.
 
 A dedicated tab with live run status, run detail, re-run (all, failed
 only, or one job), cancel, manual dispatch, and inline failed-step logs
-(none of which GitHub Desktop does), plus a current-branch CI badge in
+(GitHub Desktop re-runs a checked-out pull request's checks, with no runs
+tab, cancel, dispatch, or in-app logs), plus a current-branch CI badge in
 the header and run-completion notifications. Right-click any run in the
 list to re-run or cancel it, run its workflow again with the picker
 already on that workflow, open it on the forge, or copy its link; those

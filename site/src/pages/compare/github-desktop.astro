@@ -35,7 +35,7 @@ const groups: Group[] = [
         them: { state: "partial", note: "GitHub only" },
         gd: {
           state: "yes",
-          note: "GitHub, GitLab & Bitbucket — Bitbucket issues via linked Jira",
+          note: "GitHub, GitLab & Bitbucket Cloud — Bitbucket issues via linked Jira",
         },
       },
       {
@@ -195,7 +195,7 @@ const groups: Group[] = [
         label: "Predict a merge before running it",
         them: {
           state: "partial",
-          note: "clean, or a count of conflicted files, in the merge dialog",
+          note: "up to date, clean, or a conflicted-file count, in the merge dialog",
         },
         gd: {
           state: "yes",
@@ -310,7 +310,7 @@ const faqs = [
   },
   {
     q: "What about the GitHub Copilot app?",
-    a: "The GitHub Copilot app is GitHub's second desktop product: an agent-orchestration shell. It can show diffs, sync, and merge a pull request, but those controls live inside agent sessions, with no staging step you drive yourself, and it signs in with a GitHub account (Azure DevOps and Jira arrive through integrations). GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
+    a: "The GitHub Copilot app is GitHub's second desktop product, built around agents. It has its own pull-request and issue views and a merge drawer, but commits and pushes come from agent sessions, with no staging you drive yourself, and it signs in with a GitHub account (Azure DevOps and Jira arrive through integrations). GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
   },
 ];
 ---
@@ -373,8 +373,8 @@ const faqs = [
             its own Git and signs in with a browser OAuth flow. GitDesktop needs
             system Git, plus <code class="text-ink">gh</code> or
             <code class="text-ink">glab</code> for GitHub and GitLab features
-            (Bitbucket needs only an API token). Sign-in is guided from inside
-            the app, but it's still a real first-run step.
+            (Bitbucket skips the CLI and signs in with an API token). Sign-in
+            is guided from inside the app, but it's still a real first-run step.
           </span>
         </li>
         <li class="flex items-start gap-2.5 leading-relaxed text-body">
@@ -452,8 +452,8 @@ const faqs = [
         </h2>
         <p data-reveal class="mt-5 leading-relaxed text-body">
           The single biggest daily difference: a pull request's conversation,
-          changed files, CI checks, review actions, and the merge itself all
-          happen in the same window as your staging and history.
+          changed files, CI runs and logs, review actions, and the merge itself
+          all happen in the same window as your staging and history.
         </p>
       </div>
       <figure data-reveal style="transition-delay:120ms" class="window mt-10">
