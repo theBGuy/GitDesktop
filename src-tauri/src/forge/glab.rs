@@ -493,6 +493,32 @@ fn host_from_key_line(trimmed: &str) -> Option<String> {
     normalize_host(key)
 }
 
+/// [`host_from_key_line`] with the PORT KEPT. An unquoted key ends at the first
+/// colon YAML reads as the separator (one followed by whitespace or the line end),
+/// so `gitlab.example:8443:` keeps its port where the first-colon split cuts it;
+/// a line with no such colon falls back to that split.
+fn authority_from_key_line(trimmed: &str) -> Option<String> {
+    let unquoted = !trimmed.starts_with(['\'', '"']);
+    let yaml_key = unquoted
+        .then(|| {
+            let rest = strip_scheme(trimmed);
+            rest.char_indices()
+                .find(|&(i, c)| {
+                    c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace)
+                })
+                .map(|(i, _)| &rest[..i])
+        })
+        .flatten();
+    let key = match yaml_key {
+        Some(key) => key.trim(),
+        None => split_key_value(trimmed)?.0.trim(),
+    };
+    if key == "<<" || key.contains(char::is_whitespace) || key.contains(',') {
+        return None;
+    }
+    normalize_authority(key)
+}
+
 /// The host keys of the `hosts:` section of a glab config.yml. A minimal line
 /// scanner, not a YAML parser: it accepts the hand-written forms glab's own
 /// writer never emits (anchors, aliases, comments, quoted keys) because a
@@ -502,6 +528,13 @@ fn host_from_key_line(trimmed: &str) -> Option<String> {
 /// block, an alias key) is therefore reported as a host — parity with glab, which
 /// unmarshals the section as host→config and reads that key as a host too.
 fn hosts_from_config(text: &str) -> Vec<String> {
+    config_host_keys(text, host_from_key_line)
+}
+
+/// The `hosts:` key scan behind [`hosts_from_config`], each key line read by
+/// `host_of`: port-blind for detection, [`authority_from_key_line`] for the About
+/// sign-in probe, which must not collapse a ported login onto its bare host.
+fn config_host_keys(text: &str, host_of: fn(&str) -> Option<String>) -> Vec<String> {
     let mut hosts = Vec::new();
     let mut in_hosts = false;
     let mut key_indent: Option<usize> = None;
@@ -537,7 +570,7 @@ fn hosts_from_config(text: &str) -> Vec<String> {
         if indent < level {
             break;
         }
-        if let Some(host) = host_from_key_line(trimmed) {
+        if let Some(host) = host_of(trimmed) {
             hosts.push(host);
         }
         flow_depth = flow_open_depth(trimmed);
@@ -856,6 +889,38 @@ pub async fn account_hosts() -> Vec<String> {
     };
     let target = token_target_from(text.as_deref(), raw_env_host.as_deref());
     account_hosts_from(known, Some(&target), None, token.as_deref())
+}
+
+/// The accounts the About screen's glab sign-in probe covers: the saved `hosts:`
+/// keys and `GITLAB_HOST`, each with its PORT KEPT, plus the addressable token
+/// target as [`account_hosts`] appends it. A ported authority never collapses onto
+/// its bare host, so the probe can route it to glab's native resolution instead
+/// of asking `--hostname` about a host that holds no login.
+pub(crate) async fn account_authorities() -> Vec<String> {
+    let env_host = std::env::var("GITLAB_HOST").ok();
+    let text = read_config_text(&glab_config_paths()).await;
+    account_authorities_from(text.as_deref(), env_host.as_deref(), env_token().as_deref())
+}
+
+/// The env-free core of [`account_authorities`].
+pub(crate) fn account_authorities_from(
+    config_text: Option<&str>,
+    env_host: Option<&str>,
+    env_token: Option<&str>,
+) -> Vec<String> {
+    let mut hosts = config_text
+        .map(|text| config_host_keys(text, authority_from_key_line))
+        .unwrap_or_default();
+    if let Some(env) = env_host.and_then(normalize_authority) {
+        if !hosts.contains(&env) {
+            hosts.push(env);
+        }
+    }
+    // Eligibility reads the bare host, so a ported spelling of another provider's
+    // canonical host is refused like the bare one.
+    hosts.retain(|h| normalize_host(h).is_some_and(|bare| is_gitlab_eligible_host(&bare)));
+    let target = token_target_from(config_text, env_host);
+    account_hosts_from(hosts, Some(&target), None, env_token)
 }
 
 /// [`token_vars_to_strip`] against the live environment: which variables a call
@@ -2004,6 +2069,58 @@ mod known_hosts_tests {
         for (label, config, expected) in cases {
             assert_eq!(hosts_from_config(config), *expected, "case: {label}");
         }
+    }
+
+    #[test]
+    fn account_authorities_keep_the_port_detection_strips() {
+        use super::account_authorities_from;
+        let config = "\
+hosts:
+  gitlab.com: # see https://docs.gitlab.com
+    token: glpat-never-returned
+  gitlab.example:8443:
+    token: glpat-never-returned
+  https://GitLab.Scheme:9443/:
+    token: x
+  \"gitlab.quoted:7443\": {token: x}
+  github.com:8443:
+    token: x
+";
+        // Detection's view collapses every ported key onto its bare host.
+        assert_eq!(
+            hosts_from_config(config),
+            vec![
+                "gitlab.com",
+                "gitlab.example",
+                "gitlab.scheme",
+                "gitlab.quoted",
+                "github.com"
+            ]
+        );
+        // The About enumeration keeps each authority, unquoted, schemed or quoted;
+        // another provider's canonical host stays refused whatever its port.
+        let saved = vec![
+            "gitlab.com",
+            "gitlab.example:8443",
+            "gitlab.scheme:9443",
+            "gitlab.quoted:7443",
+        ];
+        assert_eq!(account_authorities_from(Some(config), None, None), saved);
+        // A ported GITLAB_HOST keeps its port too, and a ported token target is
+        // never appended (it can't be addressed by name).
+        assert_eq!(
+            account_authorities_from(None, Some("https://gitlab.env:8443"), Some("t")),
+            vec!["gitlab.env:8443"]
+        );
+        // An addressable token target joins once, after the saved keys.
+        assert_eq!(
+            account_authorities_from(Some(config), None, Some("t")),
+            saved
+        );
+        assert_eq!(
+            account_authorities_from(None, None, Some("t")),
+            vec!["gitlab.com"]
+        );
     }
 
     #[test]

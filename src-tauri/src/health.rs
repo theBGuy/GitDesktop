@@ -11,7 +11,9 @@ use serde::Serialize;
 use crate::agent::{exit_code_auth, resolve_named, run_capture, AuthStatus, DETECT_TIMEOUT};
 use crate::error::{AppError, AppResult};
 use crate::forge::futures_join_all;
-use crate::forge::glab::{account_hostname, account_hosts, is_addressable_host, run_glab_raw};
+use crate::forge::glab::{
+    account_authorities, account_hostname, is_addressable_host, run_glab_raw,
+};
 use crate::forge::session::{
     classify_glab_failure, gh_cli_auth_status, worst_host_auth, GlabFailure,
 };
@@ -98,29 +100,32 @@ fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
 }
 
 /// The glab sign-in probes that cover every account: `--hostname` for each host
-/// that flag can address, plus ONE bare probe (the `bool`) when glab's own routing
-/// target can't be addressed (a non-default port, which `--hostname` refuses) or
-/// nothing else would run. The bare probe follows glab's native routing, so a
-/// ported login is checked at its real authority with its own token.
+/// that flag can address, plus ONE bare probe (the `bool`) when a listed host or
+/// glab's own routing target can't be addressed by name (a non-default port, which
+/// `--hostname` refuses), or when nothing else would run. `hosts` must carry
+/// authorities with their ports: the bare probe
+/// follows glab's native routing, so a ported login is checked at its real
+/// authority with its own token, never as its bare host.
 fn glab_probe_plan(hosts: Vec<String>, target: &str) -> (Vec<String>, bool) {
+    let listed = hosts.len();
     let pinned: Vec<String> = hosts
         .into_iter()
         .filter(|h| is_addressable_host(h))
         .collect();
-    let bare = pinned.is_empty() || !is_addressable_host(target);
+    let bare = pinned.is_empty() || pinned.len() < listed || !is_addressable_host(target);
     (pinned, bare)
 }
 
-/// glab's sign-in across its account hosts, probed concurrently (the load waits on
-/// the slowest host, not their sum) and reduced by [`worst_host_auth`], as gh's row
-/// is. `account_hosts` rather than `known_hosts`: it drops the port-stripped twin
-/// of a ported `GITLAB_HOST` and adds an addressable token target. The bare probe's
-/// multi-host report still reads with single-host precedence for the hosts it
-/// covers; a pinned host's rejection outranks it either way. Deliberately not
-/// `gitlab_accounts_health`: its expiry reads and anti-flap re-probe sleep don't
-/// belong in this load.
+/// glab's sign-in across its accounts, probed concurrently (the load waits on the
+/// slowest host, not their sum) and reduced by [`worst_host_auth`], as gh's row is.
+/// The bare probe reads glab's combined multi-host report with single-host
+/// precedence, so another host's connectivity wording in it can outrank a
+/// bare-covered host's rejection: a limit inherited from that report, narrowed by
+/// the pinned probes (whose rejections outrank it) and fixable by splitting the
+/// report per host. Deliberately not `gitlab_accounts_health`: its expiry reads and
+/// anti-flap re-probe sleep don't belong in this load.
 async fn glab_cli_auth(binary: &Path) -> AuthStatus {
-    let (pinned, bare) = glab_probe_plan(account_hosts().await, &account_hostname().await);
+    let (pinned, bare) = glab_probe_plan(account_authorities().await, &account_hostname().await);
     // run_glab_raw strips the environment's token for every host that isn't its
     // own target, so a pinned probe never sends one host's token to another.
     let probes = pinned.iter().map(|host| async move {
@@ -293,40 +298,51 @@ mod tests {
 
     #[test]
     fn glab_ported_login_rides_the_bare_probe() {
-        let hosts = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
-        // Env-only login at a ported authority: nothing `--hostname` can address, so
-        // the bare probe (glab's native routing, token intact) is the whole verdict.
-        let (pinned, bare) =
-            glab_probe_plan(hosts(&["gitlab.example:8443"]), "gitlab.example:8443");
-        assert!(pinned.is_empty());
-        assert!(bare);
-        let bare_verdict = glab_auth(Ok((0, String::new())));
-        assert_eq!(worst_host_auth([bare_verdict]), AuthStatus::Authed);
+        use crate::forge::glab::account_authorities_from;
+        // Plans straight from the enumeration the probe really reads. `target` is
+        // glab's routing target (`GITLAB_HOST`, else the config `host:`, else
+        // gitlab.com), spelled out per case.
+        let plan = |config: Option<&str>, env: Option<&str>, target: &str| {
+            glab_probe_plan(account_authorities_from(config, env, Some("t")), target)
+        };
+        let signed_in = glab_auth(Ok((0, String::new())));
+        let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())));
 
-        // Mixed: the addressable host is probed pinned, the ported target bare, and
-        // both readings reduce together.
-        let (pinned, bare) = glab_probe_plan(
-            hosts(&["gitlab.com", "gitlab.example:8443"]),
+        // A ported saved key is never probed as its bare host: the bare probe covers
+        // it, so a working session reads signed in whatever the default target is.
+        let ported_key = "hosts:\n  gitlab.example:8443:\n    token: x\n";
+        for target in ["gitlab.com", "gitlab.example:8443"] {
+            let (pinned, bare) = plan(Some(ported_key), None, target);
+            assert!(!pinned.contains(&"gitlab.example".to_string()), "{target}");
+            assert!(bare, "{target}");
+            let readings = pinned.iter().map(|_| signed_in).chain([signed_in]);
+            assert_eq!(worst_host_auth(readings), AuthStatus::Authed);
+        }
+
+        // Env-only login at a ported authority: the same shape.
+        let (pinned, bare) = plan(
+            None,
+            Some("https://gitlab.example:8443"),
             "gitlab.example:8443",
         );
+        assert!(pinned.is_empty());
+        assert!(bare);
+
+        // Mixed: the addressable host is probed by name and the ported one bare,
+        // even when the default target is addressable; both readings reduce.
+        let mixed = "hosts:\n  gitlab.com:\n  gitlab.example:8443:\n";
+        let (pinned, bare) = plan(Some(mixed), None, "gitlab.com");
         assert_eq!(pinned, ["gitlab.com"]);
         assert!(bare);
-        let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())));
-        assert_eq!(
-            worst_host_auth([revoked, bare_verdict]),
-            AuthStatus::NotAuthed
-        );
-        assert_eq!(
-            worst_host_auth([AuthStatus::Authed, bare_verdict]),
-            AuthStatus::Authed
-        );
+        assert_eq!(worst_host_auth([revoked, signed_in]), AuthStatus::NotAuthed);
+        assert_eq!(worst_host_auth([signed_in, signed_in]), AuthStatus::Authed);
 
         // Every account addressable: pinned probes only; none at all: bare only.
-        let (pinned, bare) = glab_probe_plan(hosts(&["gitlab.com"]), "gitlab.com");
+        let (pinned, bare) = plan(Some("hosts:\n  gitlab.com:\n"), None, "gitlab.com");
         assert_eq!(pinned, ["gitlab.com"]);
         assert!(!bare);
         assert_eq!(
-            glab_probe_plan(Vec::new(), "gitlab.com"),
+            glab_probe_plan(account_authorities_from(None, None, None), "gitlab.com"),
             (Vec::new(), true)
         );
     }
