@@ -17,7 +17,6 @@ import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   buildConflictPrompt,
   extractResolvedContent,
-  hasConflictMarkers,
 } from "@/lib/ai/conflict-prompt";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";
@@ -28,6 +27,7 @@ import {
   conflictSides,
   diffContents,
 } from "@/lib/git/conflict";
+import { hasConflictMarkers } from "@/lib/git/conflict-parse";
 import { useResolveConflict } from "@/lib/git/queries";
 import { useReviewConfigured, useSettings } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
@@ -205,19 +205,31 @@ export function ConflictResolveView({
   // subscription down, and react-query drops per-call callbacks once an observer
   // has no listeners — the walk would stall pinned to an already-resolved file.
   async function accept() {
+    // A staged file with markers left would ride Continue's commit, so a
+    // marker-bearing proposal is written unstaged. It still leaves this view: the
+    // file stays listed as conflicted, and the hand fix (open in editor, Mark
+    // resolved) lives in the conflict editor, which this view has no counterpart to.
+    const clean = !hasConflictMarkers(proposed);
     try {
-      await resolve.mutateAsync({ path, content: proposed, stage: true });
+      await resolve.mutateAsync({ path, content: proposed, stage: clean });
       // This continuation can outlive the walk that armed it (another surface armed
       // its own walk, or the repo-switch clear fired) during the mutation, so both
       // the wording and the advance come from a fresh read gated on it still
       // being ours.
       const walk = useConflictResolve.getState();
       const owns = walk.scopePath === repoPath && walk.activePath === path;
-      toast.success(
-        owns && walk.queue.length > 0
-          ? `Resolved ${baseName(path)} — next conflict`
-          : `Resolved ${baseName(path)}`,
-      );
+      if (clean) {
+        toast.success(
+          owns && walk.queue.length > 0
+            ? `Resolved ${baseName(path)} — next conflict`
+            : `Resolved ${baseName(path)}`,
+        );
+      } else {
+        toast.warning(
+          `Applied the proposal to ${baseName(path)} but left it unstaged — conflict markers remain. Fix the rest by hand, then mark it resolved.`,
+        );
+      }
+      // An empty queue ends the session, so a single-file resolve exits too.
       if (owns) walk.advance();
     } catch (e) {
       toastError(e);
@@ -393,7 +405,7 @@ export function ConflictResolveView({
               ) : (
                 <CheckIcon data-icon="inline-start" />
               )}
-              Accept &amp; stage
+              {markersLeft ? "Accept" : "Accept & stage"}
             </Button>
           </>
         ) : (

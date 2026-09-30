@@ -12,7 +12,7 @@ import {
   TrashIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { normPath } from "@/lib/git/path";
@@ -823,6 +824,14 @@ function CreateWorktree({
   );
   const available = branches.filter((b) => !checkedOut.has(b.name));
   const currentBranch = status.data?.branch.name ?? "";
+  const newBranchPlaceholder = useMemo(
+    () =>
+      branchNamePlaceholder(
+        (branchesQuery.data ?? []).map((b) => b.name),
+        { fallback: "feature/login", sample: "login" },
+      ),
+    [branchesQuery.data],
+  );
 
   const [source, setSource] = useState<"new" | "existing">("new");
   const [newBranch, setNewBranch] = useState("");
@@ -909,7 +918,7 @@ function CreateWorktree({
               spellCheck={false}
               value={newBranch}
               onChange={(e) => setNewBranch(e.target.value)}
-              placeholder="feature/login"
+              placeholder={newBranchPlaceholder}
               className="h-7 font-mono"
             />
             <label htmlFor="wt-base" className="text-muted-foreground">

@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
@@ -171,6 +172,14 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     (b) => !b.isCurrent && !b.name.startsWith("gd/session/"),
   );
   const targetBranches = pickOntoCandidates.filter((b) => !b.archived);
+  const fromCommitPlaceholder = useMemo(
+    () =>
+      branchNamePlaceholder(
+        (branches.data ?? []).map((b) => b.name),
+        { fallback: "feature/from-commit", sample: "from-commit" },
+      ),
+    [branches.data],
+  );
 
   const branchForm = useAppForm({
     ...createRefFromCommitFormOpts,
@@ -971,7 +980,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         title="Create branch from commit"
         description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
         fieldLabel="Branch name"
-        placeholder="feature/from-commit"
+        placeholder={fromCommitPlaceholder}
         submitLabel="Create branch"
       />
 

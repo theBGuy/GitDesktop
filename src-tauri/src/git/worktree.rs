@@ -95,6 +95,21 @@ fn worktree_root(app: &AppHandle, repo_path: &str) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+/// Build the argv that adds a session worktree on a fresh branch. Pure so the
+/// flag table is unit-testable without a repo.
+///
+/// `--no-track` keeps `branch.autoSetupMerge` (`always`, or `inherit` off a
+/// tracking base) from giving the session branch an upstream, which would make
+/// it eligible for merged-branch cleanup. It stays outside the `-b <branch>`
+/// pair, which must not be split.
+fn build_session_worktree_add_args<'a>(
+    branch: &'a str,
+    path: &'a str,
+    base: &'a str,
+) -> Vec<&'a str> {
+    vec!["worktree", "add", "--no-track", "-b", branch, path, base]
+}
+
 /// Creates a throwaway worktree off `base_ref` (default HEAD) on a fresh
 /// `gd/session/<id>` branch, under the app-data worktree root. Returns the new
 /// worktree's id/path/branch.
@@ -119,7 +134,7 @@ pub async fn git_worktree_create(
     run_git_worktree_admin(
         &state,
         &repo_path,
-        &["worktree", "add", "-b", &branch, &path_str, base],
+        &build_session_worktree_add_args(&branch, &path_str, base),
         WORKTREE_OP_TIMEOUT,
     )
     .await?;
@@ -1106,7 +1121,7 @@ prunable gitdir file points to non-existent location
 
         run(
             &repo_s,
-            &["worktree", "add", "-b", "gd/session/test", &wt_s, "HEAD"],
+            &build_session_worktree_add_args("gd/session/test", &wt_s, "HEAD"),
         )
         .await;
         assert!(wt.join("a.txt").exists(), "worktree checkout has the file");
@@ -1154,7 +1169,7 @@ prunable gitdir file points to non-existent location
         // Session: worktree on a fresh branch, makes a commit (the "kept" work).
         run(
             &repo_s,
-            &["worktree", "add", "-b", "gd/session/keep", &wt_s, "HEAD"],
+            &build_session_worktree_add_args("gd/session/keep", &wt_s, "HEAD"),
         )
         .await;
         std::fs::write(wt.join("b.txt"), "work\n").unwrap();
@@ -1177,6 +1192,71 @@ prunable gitdir file points to non-existent location
         assert!(
             list.iter().any(|w| w.branch == "gd/session/keep"),
             "branch is checked out in a worktree again after resume"
+        );
+    }
+
+    #[test]
+    fn session_worktree_add_args_suppress_tracking_before_branch_flag() {
+        let args = build_session_worktree_add_args("gd/session/x", "/wt/x", "HEAD");
+        assert_eq!(
+            args,
+            [
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                "gd/session/x",
+                "/wt/x",
+                "HEAD"
+            ]
+        );
+        let no_track = args.iter().position(|a| *a == "--no-track").unwrap();
+        let b = args.iter().position(|a| *a == "-b").unwrap();
+        assert!(no_track < b, "--no-track must precede -b");
+    }
+
+    /// Under `branch.autoSetupMerge = always` a session branch created from the
+    /// builder's argv has NO upstream; the control arm drops `--no-track` and must
+    /// pick one up, proving the config is live in this repo.
+    #[tokio::test]
+    async fn session_worktree_branch_has_no_upstream_under_autosetupmerge_always() {
+        let (base, repo_s) = setup_repo("no-track").await;
+        run(&repo_s, &["config", "branch.autoSetupMerge", "always"]).await;
+
+        let wt_s = base.path().join("wt").to_string_lossy().into_owned();
+        run(
+            &repo_s,
+            &build_session_worktree_add_args("gd/session/nt", &wt_s, "HEAD"),
+        )
+        .await;
+        // The runner pins LC_ALL=C, so git's English refusal is stable to match.
+        let upstream = run_git(
+            Some(&repo_s),
+            &["rev-parse", "--abbrev-ref", "gd/session/nt@{upstream}"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .err();
+        assert!(
+            matches!(&upstream, Some(AppError::Git { stderr, .. }) if stderr.contains("no upstream")),
+            "session branch must have no upstream, got {upstream:?}"
+        );
+
+        let ctl_s = base.path().join("ctl").to_string_lossy().into_owned();
+        let tracking: Vec<&str> = build_session_worktree_add_args("gd/session/ctl", &ctl_s, "HEAD")
+            .into_iter()
+            .filter(|a| *a != "--no-track")
+            .collect();
+        run(&repo_s, &tracking).await;
+        assert!(
+            !run(
+                &repo_s,
+                &["rev-parse", "--abbrev-ref", "gd/session/ctl@{upstream}"]
+            )
+            .await
+            .trim()
+            .is_empty(),
+            "control branch without --no-track should track its base"
         );
     }
 

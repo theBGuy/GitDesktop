@@ -112,14 +112,3 @@ export function extractResolvedContent(raw: string): string {
   }
   return text.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "");
 }
-
-/** Whether unresolved conflict markers remain — a sign the model didn't finish
- *  the merge. Uses only the unambiguous angle/pipe markers (a bare `=======`
- *  line can be a legit markdown underline), so it won't false-positive. */
-export function hasConflictMarkers(text: string): boolean {
-  return (
-    /^<{7}( |\t|$)/m.test(text) ||
-    /^>{7}( |\t|$)/m.test(text) ||
-    /^\|{7}( |\t|$)/m.test(text)
-  );
-}

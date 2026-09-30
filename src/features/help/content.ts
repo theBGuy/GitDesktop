@@ -1020,11 +1020,14 @@ on the file's context menu, and in the command palette ({{kbd:command-palette}})
 **Resolve conflict with AI**). Your configured **Review** model (Settings → AI) merges the
 file's sides and streams a proposal; you review it as a diff against your side, flip to the
 proposed file or the *ours* / *theirs* / *base* versions, then **Accept & stage** to apply
-it — nothing is written until you accept. **Regenerate** for another attempt, or **Discard**
-to drop it. The banner's **Resolve all with AI** walks every conflict in turn — the walk
-keeps its place while you peek at another tab (switching repositories ends it). It runs on
-any provider, including local Ollama and keyless Claude Code / Codex agents, and skips
-files matched by your AI ignore patterns.{{/ai}}`,
+it — nothing is written until you accept. **Regenerate** for another attempt, or
+**Discard** to drop the proposal. When a proposal still has conflict markers, a warning
+says so and the button reads **Accept**: it writes the file but leaves it unstaged and
+moves on. The file stays listed as conflicted: finish it in the conflict editor, or
+edit it yourself and **Mark resolved**. The banner's **Resolve all with AI** walks every
+conflict in turn — the walk keeps its place while you peek at another tab (switching
+repositories ends it). It runs on any provider, including local Ollama and keyless
+Claude Code / Codex agents, and skips files matched by your AI ignore patterns.{{/ai}}`,
   },
   {
     id: "pull-requests",

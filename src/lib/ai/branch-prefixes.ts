@@ -52,6 +52,34 @@ export function branchPrefixCounts(
     .sort((a, b) => b.count - a.count || compareCodePoints(a.prefix, b.prefix));
 }
 
+/** Long-lived trunk names, matched whole. Every repo has one or two, and counted
+ *  as bare names they would outvote a prefix convention in most repositories. */
+export const TRUNK_BRANCH_NAMES: readonly string[] = [
+  "main",
+  "master",
+  "develop",
+  "trunk",
+];
+
+/** A branch-name placeholder in the repository's dominant prefix convention:
+ *  `<prefix><sample>`, the bare sample when unprefixed names lead, or `fallback`
+ *  with nothing to count. Agent-session branches are dropped first, as the MCP
+ *  caller does before counting, and trunk names after them, since neither says
+ *  how the user names work branches. GUI-only: no Rust mirror. */
+export function branchNamePlaceholder(
+  names: string[],
+  opts: { fallback?: string; sample?: string } = {},
+): string {
+  const sample = opts.sample ?? "my-change";
+  const top = branchPrefixCounts(
+    names.filter(
+      (n) => !n.startsWith("gd/session/") && !TRUNK_BRANCH_NAMES.includes(n),
+    ),
+  )[0];
+  if (!top) return opts.fallback ?? `feature/${sample}`;
+  return top.prefix === NO_BRANCH_PREFIX ? sample : `${top.prefix}${sample}`;
+}
+
 /** The prefix evidence section, or null when there are no branches to count. */
 export function branchPrefixSection(names: string[]): string | null {
   const counts = branchPrefixCounts(names);

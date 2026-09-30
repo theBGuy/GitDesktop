@@ -5,11 +5,11 @@ import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
-import { hasConflictMarkers } from "@/lib/ai/conflict-prompt";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import type { ConflictSides } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
+  hasConflictMarkers,
   parseConflictSegments,
   resolveBlock,
 } from "@/lib/git/conflict-parse";

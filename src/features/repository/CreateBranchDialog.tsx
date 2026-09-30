@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useId, useState } from "react";
+import { useEffectEvent, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { branchNameError, branchNameHint } from "@/lib/branch-rules/match";
 import type { BranchRulesConfig } from "@/lib/branch-rules/types";
 import { required, useAppForm } from "@/lib/form";
@@ -144,6 +145,21 @@ export function CreateBranchDialog({
   // unaffected — uncommitted changes come along whatever the base.
   const baseIsHead = createBase === "" || createBase === currentName;
 
+  // An active naming policy's own example outranks the inferred convention: it
+  // is the rule the Create button enforces. The hint is a free-form comma list,
+  // so its first entry is the example.
+  const { naming } = rulesConfig;
+  const policyExample =
+    naming.enabled && naming.pattern.trim() !== ""
+      ? (naming.hint.split(",")[0] ?? "").trim()
+      : "";
+  const namePlaceholder = useMemo(
+    () =>
+      policyExample ||
+      branchNamePlaceholder(allBranchNames, { fallback: "feature/my-change" }),
+    [policyExample, allBranchNames],
+  );
+
   // NOTE: seeding resets must pass keepDefaultValues — otherwise reset()
   // rewrites the form's defaultValues, and react-form's per-render options
   // sync sees "different defaults + untouched form" and clobbers the seeded
@@ -227,7 +243,7 @@ export function CreateBranchDialog({
             {(field) => (
               <field.TextField
                 label="Branch name"
-                placeholder="feature/my-change"
+                placeholder={namePlaceholder}
                 // Surface the branch-rules naming requirement (so a disabled
                 // Create button is explained), else the sanitization hint.
                 warning={(value) =>

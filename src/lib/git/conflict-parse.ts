@@ -59,6 +59,19 @@ function isAnyMarker(line: string): boolean {
   );
 }
 
+/** Whether unresolved conflict markers remain — the gate every staging path
+ *  checks before writing a resolution. Uses only the unambiguous angle/pipe
+ *  markers (a bare `=======` line can be a legit markdown underline), so it won't
+ *  false-positive. Deliberately narrower than `isAnyMarker`: the parser must treat
+ *  a bare `=======` as ambiguous, while staging must not refuse on one. */
+export function hasConflictMarkers(text: string): boolean {
+  return (
+    /^<{7}( |\t|$)/m.test(text) ||
+    /^>{7}( |\t|$)/m.test(text) ||
+    /^\|{7}( |\t|$)/m.test(text)
+  );
+}
+
 /** The label text after a `<<<<<<<` / `>>>>>>>` marker (trimmed, CR stripped). */
 function labelOf(line: string): string {
   return line.slice(7).replace(/\r$/, "").trim();

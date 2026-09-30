@@ -16,9 +16,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  branchNamePlaceholder,
   branchPrefixCounts,
   branchPrefixSection,
   compareCodePoints,
+  TRUNK_BRANCH_NAMES,
 } from "../src/lib/ai/branch-prefixes.ts";
 
 const HEADER = "## Branch name prefixes in this repository (most used first)";
@@ -125,6 +127,85 @@ test("a name with no leading segment counts as bare", () => {
   assert.deepEqual(branchPrefixCounts(["/odd"]), [
     { prefix: "(no prefix — bare names)", count: 1 },
   ]);
+});
+
+// ------------------------------------------------------- the name placeholder
+
+// GUI-only (no Rust mirror): the create-branch fields' placeholder follows the
+// dominant prefix row.
+test("the placeholder takes the dominant prefix", () => {
+  assert.equal(
+    branchNamePlaceholder(["fix/a", "fix/b", "feat/c", "main"]),
+    "fix/my-change",
+  );
+});
+
+test("a repository of bare user branches gets a bare placeholder", () => {
+  assert.equal(
+    branchNamePlaceholder(["main", "alice-fix", "quick-patch", "hotfix-login"]),
+    "my-change",
+  );
+});
+
+// Trunk names are dropped before counting: counted as bare names, the one or two
+// every repository carries would outvote its prefix convention.
+test("trunk names never set the convention", () => {
+  assert.equal(branchNamePlaceholder(["main"]), "feature/my-change");
+  assert.equal(
+    branchNamePlaceholder(["main", "feature/x"]),
+    "feature/my-change",
+  );
+  assert.equal(
+    branchNamePlaceholder(["main", "develop", "feature/a"]),
+    "feature/my-change",
+  );
+  assert.equal(
+    branchNamePlaceholder(TRUNK_BRANCH_NAMES, { fallback: "feature/login" }),
+    "feature/login",
+  );
+});
+
+test("trunk names match whole, never as a prefix", () => {
+  assert.equal(branchNamePlaceholder(["main", "mainline"]), "my-change");
+});
+
+test("no branches falls back, to the caller's literal when given", () => {
+  assert.equal(branchNamePlaceholder([]), "feature/my-change");
+  assert.equal(
+    branchNamePlaceholder([], { fallback: "feature/from-commit" }),
+    "feature/from-commit",
+  );
+});
+
+// Session branches are app-internal and must never set the convention, even
+// when they outnumber the user's own branches — or are all there is.
+test("agent-session branches are ignored before counting", () => {
+  assert.equal(
+    branchNamePlaceholder([
+      "gd/session/a",
+      "gd/session/b",
+      "gd/session/c",
+      "fix/x",
+    ]),
+    "fix/my-change",
+  );
+  assert.equal(branchNamePlaceholder(["gd/session/a"]), "feature/my-change");
+});
+
+// Inherits branchPrefixCounts' code-point tie-break.
+test("a tie goes to the prefix first in code-point order", () => {
+  assert.equal(branchNamePlaceholder(["fix/a", "chore/b"]), "chore/my-change");
+});
+
+test("a custom sample rides the prefix, or stands alone when bare", () => {
+  assert.equal(
+    branchNamePlaceholder(["feat/a"], { sample: "from-commit" }),
+    "feat/from-commit",
+  );
+  assert.equal(
+    branchNamePlaceholder(["quick-patch"], { sample: "from-commit" }),
+    "from-commit",
+  );
 });
 
 // ---------------------------------------------------------- the shipped prompt

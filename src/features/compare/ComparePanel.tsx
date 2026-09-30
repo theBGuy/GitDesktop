@@ -7,7 +7,7 @@ import {
   TagIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type MouseEvent, useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
@@ -42,6 +42,7 @@ import {
 } from "@/features/history/HistoryDialogs";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
 import {
@@ -107,6 +108,14 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // compare target auto-falls-back via the default effect below.
   const otherBranches = (branches.data ?? []).filter(
     (b) => !b.isCurrent && !b.name.startsWith("gd/session/") && !b.archived,
+  );
+  const fromCommitPlaceholder = useMemo(
+    () =>
+      branchNamePlaceholder(
+        (branches.data ?? []).map((b) => b.name),
+        { fallback: "feature/from-commit", sample: "from-commit" },
+      ),
+    [branches.data],
   );
   // Fallback when the default branch isn't offered: the most recently committed
   // other branch — the same row the picker surfaces first, so the auto-pick
@@ -524,7 +533,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         title="Create branch from commit"
         description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
         fieldLabel="Branch name"
-        placeholder="feature/from-commit"
+        placeholder={fromCommitPlaceholder}
         submitLabel="Create branch"
       />
 
