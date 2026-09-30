@@ -269,8 +269,11 @@ export function useForgeStatus(repo: string) {
     // Runs offline too, so a cold start with no connection settles on the
     // can't-reach arm instead of parking on skeletons. Safe ONLY while every
     // provider's status probe REJECTS on a transport failure: one that resolved
-    // signed-out would paint the sign-in ladder over a network outage.
+    // signed-out would paint the sign-in ladder over a network outage. Reconnect
+    // refetch is set explicitly: query-core's defaultQueryOptions flips its
+    // default to false under networkMode "always".
     networkMode: "always",
+    refetchOnReconnect: true,
     retry: false,
     // A mount-retry with no cached data resets the query to pending, so the panel
     // that mounted ForgeNotReady on the error swaps back to its skeleton and the
