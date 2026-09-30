@@ -349,6 +349,110 @@ function pushProtectionSummary(text: string): string | null {
     : null;
 }
 
+/** Transport-failure phrases from Go's net/http and the OS resolver, the
+ *  wording gh and glab print when a request never reached the host. A curated
+ *  list, not Rust's bare `NETWORKISH` words (forge/session.rs): those were tuned
+ *  for sign-in probe text, and in arbitrary command errors they match repo,
+ *  branch and path names (`acme/network-tools`, `feature/tls-upgrade`). Every
+ *  entry is multi-word or a Go-only token, so no name can carry it. */
+const TRANSPORT_PHRASES = [
+  "dial tcp",
+  "no such host",
+  "connection refused",
+  "connection reset",
+  "context deadline exceeded",
+  "tls handshake timeout",
+  "i/o timeout",
+  "error connecting to",
+  "could not resolve host",
+  "network is unreachable",
+  "forcibly closed by the remote host",
+  "proxyconnect",
+];
+
+/** gh's proxy and server-outage answers, which Rust's `GH_NETWORKISH_EXTRA`
+ *  (forge/session.rs) reads as offline for gh alone: the HTTP reason phrases,
+ *  and a 5xx only in gh's own `HTTP 503:` / `status code: 503` shapes, never as
+ *  a bare number. */
+const GH_OUTAGE_PHRASES = [
+  "bad gateway",
+  "service unavailable",
+  "gateway timeout",
+  "proxy authentication required",
+];
+const GH_OUTAGE_STATUS = /\b(?:http|status code:?)\s+50[0234]\b/;
+
+/** The literal phrases the Bitbucket and Jira HTTP clients (forge/http.rs,
+ *  forge/jira.rs) put in a transport failure, whose raw reqwest text names none
+ *  of the phrases above. A cross-language contract: this suite pins both, and a
+ *  rewording on either side must move both. */
+export const RUST_TRANSPORT_PHRASES = [
+  "connection failed",
+  "request timed out",
+] as const;
+
+/** The host a network kind's failure is named after in the summary. A kind
+ *  missing here is never rewritten; `io` stays out because local filesystem
+ *  errors name paths, and a path is no evidence of a network. */
+const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
+  gh: "GitHub",
+  glab: "GitLab",
+  bitbucket: "Bitbucket",
+  jira: "Jira",
+  timeout: "the server",
+};
+
+function isAsciiAlphanumeric(c: string | undefined): boolean {
+  return c !== undefined && /[a-z0-9]/i.test(c);
+}
+
+/** Whether `word` appears with no ASCII letter or digit on either side, the
+ *  whole-word rule of Rust's `has_standalone_word` (forge/session.rs). */
+function hasStandaloneWord(text: string, word: string): boolean {
+  for (let i = text.indexOf(word); i !== -1; i = text.indexOf(word, i + 1)) {
+    if (
+      !isAsciiAlphanumeric(text[i - 1]) &&
+      !isAsciiAlphanumeric(text[i + word.length])
+    )
+      return true;
+  }
+  return false;
+}
+
+/** The calm "couldn't reach" line for a network kind whose raw text names a
+ *  transport failure, or null. Mirrors Rust's precedence: an answered 401/403
+ *  is a credential verdict and a rate limit is its own story, whatever words
+ *  ride along; a message Rust already wrote as "Couldn't reach …" keeps its
+ *  own, more specific wording. */
+function networkSummary(
+  kind: AppError["kind"],
+  message: string,
+): string | null {
+  const host = NETWORK_KIND_HOSTS[kind];
+  if (host === undefined || message.trimStart().startsWith("Couldn't reach"))
+    return null;
+  const text = message.toLowerCase();
+  if (
+    hasStandaloneWord(text, "401") ||
+    hasStandaloneWord(text, "403") ||
+    hasStandaloneWord(text, "429") ||
+    text.includes("rate limit") ||
+    text.includes("abuse detection")
+  )
+    return null;
+  const phrases = [
+    ...TRANSPORT_PHRASES,
+    ...(kind === "gh" ? GH_OUTAGE_PHRASES : []),
+    ...RUST_TRANSPORT_PHRASES,
+  ];
+  const transport =
+    phrases.some((p) => hasStandaloneWord(text, p)) ||
+    (kind === "gh" && GH_OUTAGE_STATUS.test(text));
+  return transport
+    ? `Couldn't reach ${host} — check your network connection.`
+    : null;
+}
+
 /** The `git` kind is the only one carrying a stderr blob distinct from its
  *  message; every other kind folds its detail into `message` itself. */
 function gitStderr(e: AppError): string {
@@ -575,6 +679,7 @@ export function presentError(e: unknown): ErrorPresentation {
     // tree, so no conflict flow is actually waiting to be resolved. Push
     // protection outranks both: the remote refused the push whole, which is
     // neither a conflict nor the non-fast-forward story below.
+    const network = networkSummary(e.kind, message);
     const summary =
       pushProtectionSummary(combined) ??
       longPathSummary(combined) ??
@@ -582,11 +687,17 @@ export function presentError(e: unknown): ErrorPresentation {
         ? conflictSummary(combined)
         : (pushRejectionSummary(combined) ??
           remoteAccessSummary(combined) ??
+          network ??
           (firstMeaningfulLine(message) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
+    // A network rewrite replaces even a one-line message, so the raw text is
+    // reachable only through Details.
     const long =
-      nonEmptyLineCount(message) > 1 || distinctStderr || fullText.length > 140;
+      (network !== null && summary === network) ||
+      nonEmptyLineCount(message) > 1 ||
+      distinctStderr ||
+      fullText.length > 140;
 
     return { label, summary, fullText, long };
   }

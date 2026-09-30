@@ -266,6 +266,11 @@ export function useForgeStatus(repo: string) {
       ? (): Promise<ForgeStatus> => Promise.resolve(NO_FORGE_STATUS)
       : () => api.forgeStatus(repo),
     staleTime: 60_000,
+    // Runs offline too, so a cold start with no connection settles on the
+    // can't-reach arm instead of parking on skeletons. Safe ONLY while every
+    // provider's status probe REJECTS on a transport failure: one that resolved
+    // signed-out would paint the sign-in ladder over a network outage.
+    networkMode: "always",
     retry: false,
     // A mount-retry with no cached data resets the query to pending, so the panel
     // that mounted ForgeNotReady on the error swaps back to its skeleton and the

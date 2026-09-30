@@ -2119,16 +2119,19 @@ export function RemotePrView({
     );
   }
 
-  const fileDiff = effectivePath
-    ? {
-        filePath: effectivePath,
-        text: fileSections.get(effectivePath) ?? "",
-        isBinary: (fileSections.get(effectivePath) ?? "").includes(
-          "Binary files ",
-        ),
-        isTruncated: false,
-      }
-    : undefined;
+  // No diff loaded means no file diff: an empty section synthesized from the
+  // missing text would render as "No changes to show" through a cold outage.
+  const fileDiff =
+    effectivePath && prDiff.data !== undefined
+      ? {
+          filePath: effectivePath,
+          text: fileSections.get(effectivePath) ?? "",
+          isBinary: (fileSections.get(effectivePath) ?? "").includes(
+            "Binary files ",
+          ),
+          isTruncated: false,
+        }
+      : undefined;
 
   // A file's unified-diff section by path, so the in-diff thread cards (Files tab)
   // and the Conversation suggestion threads can synthesize a hunk on hunk-less
@@ -3331,6 +3334,9 @@ export function RemotePrView({
             fileDiff={fileDiff}
             isPending={prDiff.isPending}
             isError={prDiff.isError}
+            isPaused={prDiff.isPaused}
+            onRetry={() => void prDiff.refetch()}
+            dataIsPlaceholder={prDiff.isPlaceholderData}
             // The same threads + handlers/gates the Conversation block uses — one
             // filtered list off the top-level read, not a second fetch, so an
             // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than

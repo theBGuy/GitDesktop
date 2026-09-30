@@ -292,6 +292,29 @@ pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
     }
 }
 
+/// Cause suffixes a failed send carries so the frontend's error classifier can tell
+/// an unreachable host from a server answer. Cross-IPC contract: the literals are
+/// matched in src/lib/error-summary.ts and pinned by scripts/error-summary.test.mjs.
+pub(crate) const TRANSPORT_TIMED_OUT: &str = "request timed out";
+pub(crate) const TRANSPORT_CONNECT_FAILED: &str = "connection failed";
+
+/// `{prefix}: {e}` for a request that never got a response, plus the transport
+/// cause when reqwest names one. A timeout is checked first: a connect timeout is
+/// both, and waiting is what the user saw.
+pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> String {
+    let cause = if e.is_timeout() {
+        Some(TRANSPORT_TIMED_OUT)
+    } else if e.is_connect() {
+        Some(TRANSPORT_CONNECT_FAILED)
+    } else {
+        None
+    };
+    match cause {
+        Some(cause) => format!("{prefix}: {e}: {cause}"),
+        None => format!("{prefix}: {e}"),
+    }
+}
+
 /// Resolve a relative path against the API base, or pass an absolute URL through.
 /// (Bitbucket's pagination `next` is a full URL; single-endpoint calls pass a
 /// relative path like `workspaces` or `repositories/{ws}`.)
@@ -330,7 +353,9 @@ async fn bb_get_status(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
+        .map_err(|e| {
+            AppError::Bitbucket(transport_failure_message("Bitbucket request failed", &e))
+        })?;
     let status = resp.status().as_u16();
     let body = resp
         .text()
@@ -416,7 +441,9 @@ pub async fn bb_send(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
+        .map_err(|e| {
+            AppError::Bitbucket(transport_failure_message("Bitbucket request failed", &e))
+        })?;
     let status = resp.status().as_u16();
     let location = resp
         .headers()
@@ -666,6 +693,52 @@ mod tests {
             }
             other => panic!("expected Bitbucket error, got {other:?}"),
         }
+    }
+
+    /// Canary for the frontend's transport markers: `error-summary.ts` matches these
+    /// literals in Bitbucket and Jira errors (pinned by scripts/error-summary.test.mjs),
+    /// so a reworded suffix here must change both sides together.
+    #[test]
+    fn transport_cause_literals_still_match_the_frontend_markers() {
+        assert_eq!(TRANSPORT_TIMED_OUT, "request timed out");
+        assert_eq!(TRANSPORT_CONNECT_FAILED, "connection failed");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_carries_the_connect_marker() {
+        // A just-released ephemeral port refuses the connection.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = Client::new()
+            .get(format!("http://127.0.0.1:{port}/fixture"))
+            .send()
+            .await
+            .unwrap_err();
+        let message = transport_failure_message("Bitbucket request failed", &error);
+        assert!(
+            message.starts_with("Bitbucket request failed: "),
+            "{message}"
+        );
+        assert!(message.ends_with(": connection failed"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_request_past_its_deadline_carries_the_timeout_marker() {
+        // Accepts the connection and never answers, so only the deadline ends it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let client = Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let error = client.get(url).send().await.unwrap_err();
+        drop(listener);
+        let message = transport_failure_message("Jira request failed", &error);
+        assert!(message.ends_with(": request timed out"), "{message}");
+        assert!(!message.contains(TRANSPORT_CONNECT_FAILED), "{message}");
     }
 
     #[test]

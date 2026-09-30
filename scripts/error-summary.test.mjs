@@ -20,9 +20,8 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const { composedErrorPresentation, presentError } = await import(
-  "@/lib/error-summary"
-);
+const { composedErrorPresentation, presentError, RUST_TRANSPORT_PHRASES } =
+  await import("@/lib/error-summary");
 
 const REMOTE = "https://gitlab.com/x/y.git";
 const REJECTED = " ! [rejected]        main -> main (non-fast-forward)";
@@ -645,6 +644,225 @@ test("ssh's key refusal after other text on its line falls through", () => {
   const p = presentError(gitError(line));
   assert.notEqual(p.summary, SSH_KEY_REFUSED_SUMMARY);
   assert.equal(p.summary, line);
+});
+
+// ── Network classification for the forge and transport kinds ──
+
+const HOST_BY_KIND = {
+  gh: "GitHub",
+  glab: "GitLab",
+  bitbucket: "Bitbucket",
+  jira: "Jira",
+  timeout: "the server",
+};
+const reach = (host) =>
+  `Couldn't reach ${host} — check your network connection.`;
+const appError = (kind, message) => ({ kind, message });
+
+/** The curated transport phrases every network kind reads. */
+const TRANSPORT_PHRASES = [
+  "dial tcp",
+  "no such host",
+  "connection refused",
+  "connection reset",
+  "context deadline exceeded",
+  "TLS handshake timeout",
+  "i/o timeout",
+  "error connecting to",
+  "Could not resolve host",
+  "network is unreachable",
+  "forcibly closed by the remote host",
+  "proxyconnect",
+];
+/** gh's outage answers, read for gh alone. */
+const GH_ONLY_PHRASES = [
+  "Bad Gateway",
+  "Service Unavailable",
+  "Gateway Timeout",
+  "Proxy Authentication Required",
+  "HTTP 500",
+  "HTTP 502",
+  "HTTP 503",
+  "HTTP 504",
+  "status code: 503",
+];
+
+test("the Rust transport phrases are pinned (cross-language canary)", () => {
+  // forge/http.rs and forge/jira.rs put these literals in a transport failure;
+  // rewording either side without the other silently drops the friendly copy.
+  assert.deepEqual(
+    [...RUST_TRANSPORT_PHRASES],
+    ["connection failed", "request timed out"],
+  );
+  for (const kind of ["bitbucket", "jira"]) {
+    for (const phrase of RUST_TRANSPORT_PHRASES) {
+      const message = `request to https://example.com/rest/x: ${phrase}`;
+      const p = presentError(appError(kind, message));
+      assert.equal(p.summary, reach(HOST_BY_KIND[kind]), `${kind}: ${phrase}`);
+    }
+  }
+});
+
+test("every transport phrase classifies for every network kind that reads it", () => {
+  for (const [kind, host] of Object.entries(HOST_BY_KIND)) {
+    const phrases = [
+      ...TRANSPORT_PHRASES,
+      ...RUST_TRANSPORT_PHRASES,
+      ...(kind === "gh" ? GH_ONLY_PHRASES : []),
+    ];
+    for (const phrase of phrases) {
+      const message = `request failed: ${phrase} (https://example.com/)`;
+      const p = presentError(appError(kind, message));
+      assert.equal(p.summary, reach(host), `${kind}: ${phrase}`);
+      assert.equal(p.fullText, message, "fullText keeps the raw text");
+      assert.equal(p.long, true, "the raw text stays reachable via Details");
+    }
+  }
+});
+
+test("realistic transport lines classify", () => {
+  // gh lines measured behind a failing proxy (forge/session.rs
+  // GH_NETWORK_ERRORS); the rest are Go's and git's resolver wording.
+  for (const [kind, message] of [
+    [
+      "gh",
+      'Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host',
+    ],
+    [
+      "gh",
+      'Get "https://api.github.com/": dial tcp 140.82.112.6:443: connect: connection refused',
+    ],
+    ["gh", 'Get "https://api.github.com/": net/http: TLS handshake timeout'],
+    [
+      "gh",
+      'Get "https://api.github.com/": proxyconnect tcp: dial tcp 10.0.0.1:8080: i/o timeout',
+    ],
+    ["gh", 'Get "https://api.github.com/": context deadline exceeded'],
+    [
+      "gh",
+      'Get "https://api.github.com/": read tcp 127.0.0.1:50615->127.0.0.1:9902: wsarecv: An existing connection was forcibly closed by the remote host.',
+    ],
+    ["gh", 'Get "https://api.github.com/": Bad Gateway'],
+    ["gh", 'Get "https://api.github.com/": Proxy Authentication Required'],
+    ["gh", "HTTP 503: Service Unavailable (http://api.github.localhost/)"],
+    ["gh", "HTTP 500: Server Error (http://api.github.localhost/)"],
+    ["gh", 'non-200 OK status code: 503 Service Unavailable body: "{}"'],
+    [
+      "gh",
+      "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+    ],
+    [
+      "glab",
+      'Get "https://gitlab.com/api/v4/user": dial tcp: lookup gitlab.com: no such host',
+    ],
+    ["glab", "fatal: unable to access: Could not resolve host: gitlab.com"],
+  ]) {
+    assert.equal(
+      presentError(appError(kind, message)).summary,
+      reach(HOST_BY_KIND[kind]),
+      message,
+    );
+  }
+});
+
+test("names, paths and bare numbers never classify (measured misfires)", () => {
+  for (const [kind, message] of [
+    [
+      "gh",
+      "GraphQL: Could not resolve to a Repository with the name 'acme/network-tools'",
+    ],
+    ["gh", "No commits between main and feature/tls-upgrade"],
+    ["gh", "HTTP 422: Validation Failed ... (maximum is 500 characters)"],
+    [
+      "io",
+      "failed to read C:/Users/x/repos/network-lib/.git/config (os error 3)",
+    ],
+    ["bitbucket", "repository acme/dns-lookup not found"],
+  ]) {
+    assert.equal(
+      presentError(appError(kind, message)).summary,
+      message,
+      `${kind}: ${message}`,
+    );
+  }
+});
+
+test("io errors are never rewritten, even with transport wording", () => {
+  const message = "io error: connection refused (os error 111)";
+  assert.equal(presentError(appError("io", message)).summary, message);
+});
+
+test("gh-only outage phrases stay gh's: other kinds keep their raw line", () => {
+  for (const kind of ["glab", "bitbucket", "jira", "timeout"]) {
+    for (const word of GH_ONLY_PHRASES) {
+      const message = `request failed: ${word}`;
+      assert.equal(
+        presentError(appError(kind, message)).summary,
+        message,
+        `${kind}: ${word}`,
+      );
+    }
+  }
+});
+
+test("bare transport words and phrases inside identifiers never classify", () => {
+  for (const message of [
+    "network error",
+    "connection closed",
+    "lookup failed",
+    "timeout",
+    "unexpected EOF",
+    "connections refused by policy",
+    "reconnection refused",
+    "the dial tcpip adapter is disabled",
+    "port 5030 rejected the token",
+    "request id 1503-a rejected",
+    "thereof",
+  ]) {
+    for (const kind of ["gh", "bitbucket"]) {
+      assert.equal(
+        presentError(appError(kind, message)).summary,
+        message,
+        `${kind}: ${message}`,
+      );
+    }
+  }
+});
+
+test("an answered 401/403 or a rate limit outranks transport phrases", () => {
+  // Each carries a phrase that classifies on its own, so the precedence is
+  // what keeps the raw line.
+  for (const message of [
+    "HTTP 401: token revoked; connection refused on retry (https://api.github.com/)",
+    "HTTP 403: Resource protected by organization SAML enforcement; connection reset",
+    "HTTP 401: Bad credentials from proxy after HTTP 503",
+    "HTTP 403: API rate limit exceeded; context deadline exceeded",
+    "HTTP 429: too many requests, connection refused",
+    "API rate limit exceeded; connection failed",
+  ]) {
+    const p = presentError(appError("gh", message));
+    assert.notEqual(p.summary, reach("GitHub"), message);
+    assert.equal(p.summary, message);
+  }
+});
+
+test("a message Rust already wrote as Couldn't reach keeps its own words", () => {
+  const message =
+    "Couldn't reach github.com to check the GitHub sign-in: dial tcp: lookup github.com: no such host";
+  const p = presentError(appError("gh", message));
+  assert.equal(p.summary, message);
+});
+
+test("non-network kinds and git's own transport lines are untouched", () => {
+  for (const kind of ["command", "keyring", "invalidArgument"]) {
+    const message = "connection failed";
+    assert.equal(presentError(appError(kind, message)).summary, message);
+  }
+  // git-kind stderr keeps its first line (see the first-contact test above).
+  const p = presentError(
+    gitError("fatal: unable to access 'x': Could not resolve host: connection"),
+  );
+  assert.notEqual(p.summary, reach("the server"));
 });
 
 test("empty messages fall through to a non-blank summary", () => {

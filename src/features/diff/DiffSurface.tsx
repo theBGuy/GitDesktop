@@ -26,6 +26,11 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+} from "@/features/conversations/remote-section-state";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
@@ -1188,6 +1193,8 @@ export function DiffSurface({
       data={diff.data}
       isPending={diff.isPending}
       isError={diff.isError}
+      isPaused={diff.isPaused}
+      onRetry={() => void diff.refetch()}
       repoPath={repoPath}
       imageRevs={imageRevs}
       contentRevs={contentRevs}
@@ -1208,6 +1215,8 @@ export function DiffContent({
   data,
   isPending,
   isError,
+  isPaused = false,
+  onRetry,
   repoPath,
   imageRevs,
   contentRevs,
@@ -1217,9 +1226,17 @@ export function DiffContent({
   lineWidget,
 }: {
   filePath: string;
+  /** Absent only when the source query has nothing to show; never an empty
+   *  stand-in, which would read as "No changes to show". */
   data: FileDiff | undefined;
   isPending: boolean;
+  /** Beside `data`, a failed refresh: the diff stays up under a notice. */
   isError: boolean;
+  /** The source read is parked offline (react-query's `isPaused`). */
+  isPaused?: boolean;
+  /** Refetches the source query; offered only on a failed refresh, since a
+   *  parked read resumes by itself once back online. */
+  onRetry?: () => void;
   /** With `imageRevs`, binary image files render as an image comparison. */
   repoPath?: string;
   imageRevs?: ImageRevs;
@@ -1272,9 +1289,9 @@ export function DiffContent({
   // the text is trimmed once) because the registrations below are hooks: offer
   // each action only in the states that actually render its control.
   const emptyDiff = data !== undefined && data.text.trim() === "";
+  // A failed refresh keeps the diff, and its toolbar, on screen.
   const showsToolbar =
     !isPending &&
-    !isError &&
     data !== undefined &&
     data.filePath === filePath &&
     !data.isBinary &&
@@ -1303,25 +1320,58 @@ export function DiffContent({
 
   // Diffs load near-instantly from local git, so a skeleton only adds a flash
   // and a layout shift on the way to the real content — render nothing until
-  // it's ready.
-  if (isPending) return null;
+  // it's ready. A read parked offline would render nothing forever, so it says
+  // why instead.
+  if (isPending) {
+    return isPaused ? (
+      <DiffPlaceholder message={offlinePendingMessage("this diff")} />
+    ) : null;
+  }
   // Every backend diff command echoes the requested path back verbatim, so a
   // mismatch means `data` is a stale placeholder from the previously selected
   // file's key. Re-scope this if the backend ever normalizes the path it returns.
   if (data && data.filePath !== filePath) return null;
-  if (isError || !data) {
+  // Only a failure with nothing to show replaces the pane: react-query keeps the
+  // last good diff beside `isError`, and that stays up under a notice.
+  if (!data) {
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
+
+  const notice = (
+    <DegradedListNotice
+      noun="this diff"
+      degraded={isError || isPaused}
+      message={detailNoticeMessage({
+        noun: "diff",
+        isError,
+        stale: dataIsPlaceholder ?? false,
+      })}
+      // Offline gets no Retry: it would park again at once, and reconnecting
+      // resumes the read by itself.
+      onRetry={isError ? onRetry : undefined}
+      className="shrink-0 border-b py-1.5"
+    />
+  );
+  // The binary, image and empty arms draw retained data too, so they carry the
+  // same notice as the text diff.
+  const withNotice = (arm: ReactNode) => (
+    <div className="flex h-full flex-col">
+      {notice}
+      <div className="min-h-0 flex-1">{arm}</div>
+    </div>
+  );
   if (data.isBinary) {
     if (repoPath && imageRevs && imageMime(filePath)) {
-      return (
-        <ImageDiff repoPath={repoPath} filePath={filePath} revs={imageRevs} />
+      return withNotice(
+        <ImageDiff repoPath={repoPath} filePath={filePath} revs={imageRevs} />,
       );
     }
-    return <DiffPlaceholder message="Binary file — no text diff available" />;
+    return withNotice(
+      <DiffPlaceholder message="Binary file — no text diff available" />,
+    );
   }
   if (emptyDiff) {
-    return <DiffPlaceholder message="No changes to show" />;
+    return withNotice(<DiffPlaceholder message="No changes to show" />);
   }
 
   // SVGs are text, but they're also images: show the rendered old/new
@@ -1337,6 +1387,7 @@ export function DiffContent({
       ref={paneRef}
       className="ph-no-capture @container/diff-pane flex h-full flex-col"
     >
+      {notice}
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
         <PathText
           path={filePath}

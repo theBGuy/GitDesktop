@@ -481,24 +481,28 @@ fn artifacts_expired(expire_at: Option<&str>, now: DateTime<Utc>) -> bool {
         .is_some_and(|t| t.with_timezone(&Utc) <= now)
 }
 
-/// A downloaded report's bytes, or why they're unusable.
+/// Why a downloaded report is unusable, as its category's envelope states it.
+type ArtifactFailure = (GlFindingAvailability, Option<String>);
+
+/// A downloaded report's bytes, or why they're unusable. A failure that never
+/// reached GitLab is the outer `Err`, on `classify_or_reject`'s boundary.
 fn artifact_outcome(
     out: GlabOutput,
     expire_at: Option<&str>,
     now: DateTime<Utc>,
-) -> Result<Vec<u8>, (GlFindingAvailability, Option<String>)> {
+) -> AppResult<Result<Vec<u8>, ArtifactFailure>> {
     if out.code == 0 {
         if out.stdout.len() > MAX_REPORT_BYTES {
-            return Err((
+            return Ok(Err((
                 GlFindingAvailability::Indeterminate,
                 Some("the report was too large to read".to_string()),
-            ));
+            )));
         }
-        return Ok(out.stdout);
+        return Ok(Ok(out.stdout));
     }
     let stdout = out.stdout_lossy();
     if glab_output_is_404(&out.stderr, &stdout) {
-        return Err(if artifacts_expired(expire_at, now) {
+        return Ok(Err(if artifacts_expired(expire_at, now) {
             (
                 GlFindingAvailability::Expired,
                 expire_at.map(|e| format!("the job's artifacts expired on {e}")),
@@ -511,9 +515,9 @@ fn artifact_outcome(
                 GlFindingAvailability::ReportNotReadable,
                 Some("the job lists this report but GitLab returned 404 for the file".to_string()),
             )
-        });
+        }));
     }
-    Err(classify_call_failure(&stdout, &out.stderr))
+    Ok(Err(classify_or_reject(&stdout, &out.stderr)?))
 }
 
 // ── Selection ────────────────────────────────────────────────────────────────
@@ -1065,37 +1069,62 @@ fn artifact_endpoint(enc: &str, job_id: u64, filename: &str) -> String {
     )
 }
 
-/// Every candidate report of one category, downloaded. A transport failure is
-/// contained here: escaping as `Err` would take the pipeline provenance and both
-/// sibling categories down with one slow download.
+/// Every candidate report of one category, downloaded.
 async fn fetch_category(
     repo_path: &str,
     enc: &str,
     jobs: &[RawJob],
     file_type: &str,
     now: DateTime<Utc>,
-) -> CategoryFetch {
-    let refs = candidates(jobs, file_type);
+) -> AppResult<CategoryFetch> {
+    let download = |endpoint: String| async move {
+        run_glab_raw(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await
+    };
+    fetch_category_with(candidates(jobs, file_type), enc, download, now).await
+}
+
+/// [`fetch_category`] over an injected download. A classified failure (404, expiry,
+/// oversize, refusal) stays in the envelope. The first failure that never reached
+/// GitLab stops the walk (an outage fails each remaining serial download the same
+/// way, at up to `GLAB_NETWORK_TIMEOUT` apiece) and rejects unless a report already
+/// arrived: the findings are one cached query, so an `Ok` envelope would blank every
+/// category's held rows. A report in hand is kept, the unread candidates counted lost.
+async fn fetch_category_with<D, DF>(
+    refs: Vec<ArtifactRef>,
+    enc: &str,
+    mut download: D,
+    now: DateTime<Utc>,
+) -> AppResult<CategoryFetch>
+where
+    D: FnMut(String) -> DF,
+    DF: std::future::Future<Output = AppResult<GlabOutput>>,
+{
     let mut fetch = CategoryFetch {
         had_candidates: !refs.is_empty(),
         ..CategoryFetch::default()
     };
-    for artifact in refs {
+    let total = refs.len();
+    for (index, artifact) in refs.into_iter().enumerate() {
         let endpoint = artifact_endpoint(enc, artifact.job_id, &artifact.filename);
-        let outcome =
-            match run_glab_raw(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await {
-                Ok(out) => artifact_outcome(out, artifact.expire_at.as_deref(), now),
-                Err(e) => Err((GlFindingAvailability::Indeterminate, Some(e.to_string()))),
-            };
+        let outcome = download(endpoint)
+            .await
+            .and_then(|out| artifact_outcome(out, artifact.expire_at.as_deref(), now));
         match outcome {
-            Ok(body) => fetch.bodies.push(body),
-            Err(failure) => {
+            Ok(Ok(body)) => fetch.bodies.push(body),
+            Ok(Err(failure)) => {
                 fetch.lost_reports += 1;
                 fetch.failure.get_or_insert(failure);
             }
+            Err(error) => {
+                if fetch.bodies.is_empty() {
+                    return Err(error);
+                }
+                fetch.lost_reports += total - index;
+                break;
+            }
         }
     }
-    fetch
+    Ok(fetch)
 }
 
 /// The security and quality findings of the newest completed pipeline on the
@@ -1234,9 +1263,9 @@ pub async fn pipeline_findings(repo_path: &str, limit: Option<u32>) -> AppResult
     }
 
     let now = Utc::now();
-    let sast = fetch_category(repo_path, &enc, &jobs, SAST_FILE_TYPE, now).await;
-    let secrets = fetch_category(repo_path, &enc, &jobs, SECRET_DETECTION_FILE_TYPE, now).await;
-    let quality = fetch_category(repo_path, &enc, &jobs, CODE_QUALITY_FILE_TYPE, now).await;
+    let sast = fetch_category(repo_path, &enc, &jobs, SAST_FILE_TYPE, now).await?;
+    let secrets = fetch_category(repo_path, &enc, &jobs, SECRET_DETECTION_FILE_TYPE, now).await?;
+    let quality = fetch_category(repo_path, &enc, &jobs, CODE_QUALITY_FILE_TYPE, now).await?;
 
     Ok(GlFindingsOut {
         pipeline_state: GlPipelineState::Found,
@@ -1605,7 +1634,7 @@ mod tests {
     fn a_bare_403_reads_as_forbidden() {
         // GitLab Free sends no explanation at all with a paywalled/unauthorized read.
         let out = failed_output(r#"{"message":"403 Forbidden"}"#, "glab: HTTP 403");
-        let Err((availability, detail)) = artifact_outcome(out, None, now()) else {
+        let Ok(Err((availability, detail))) = artifact_outcome(out, None, now()) else {
             panic!("a 403 is not a readable report");
         };
         assert_eq!(availability, GlFindingAvailability::Forbidden);
@@ -1622,7 +1651,8 @@ mod tests {
             failed_output("404 page not found", "glab: HTTP 404"),
             Some("2026-08-01T12:00:00Z"),
             now(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             expired.unwrap_err().0,
             GlFindingAvailability::Expired,
@@ -1633,7 +1663,8 @@ mod tests {
             failed_output("404 page not found", "glab: HTTP 404"),
             None,
             now(),
-        );
+        )
+        .unwrap();
         let (availability, detail) = not_readable.unwrap_err();
         assert_eq!(availability, GlFindingAvailability::ReportNotReadable);
         assert_eq!(
@@ -1645,7 +1676,8 @@ mod tests {
             failed_output("404 page not found", "glab: HTTP 404"),
             Some("2026-09-10T17:11:43.795Z"),
             now(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             future.unwrap_err().0,
             GlFindingAvailability::ReportNotReadable
@@ -1655,9 +1687,157 @@ mod tests {
     #[test]
     fn an_oversized_report_is_refused_rather_than_parsed() {
         let outcome = artifact_outcome(ok_output(&vec![b'x'; MAX_REPORT_BYTES + 1]), None, now());
-        let (availability, detail) = outcome.unwrap_err();
+        let (availability, detail) = outcome.unwrap().unwrap_err();
         assert_eq!(availability, GlFindingAvailability::Indeterminate);
         assert_eq!(detail.as_deref(), Some("the report was too large to read"));
+    }
+
+    fn artifact(job_id: u64, expire_at: Option<&str>) -> ArtifactRef {
+        ArtifactRef {
+            job_id,
+            filename: "gl-sast-report.json".to_string(),
+            expire_at: expire_at.map(str::to_string),
+        }
+    }
+
+    /// Runs the category walk over `outcomes`, one per candidate job in order, and
+    /// returns the result with how many downloads were attempted.
+    async fn scripted_category(
+        outcomes: Vec<AppResult<GlabOutput>>,
+        expire_at: Option<&str>,
+    ) -> (AppResult<CategoryFetch>, usize) {
+        let refs = (1..=outcomes.len() as u64)
+            .map(|id| artifact(id, expire_at))
+            .collect();
+        let mut outcomes = std::collections::VecDeque::from(outcomes);
+        let mut calls = 0;
+        let result = fetch_category_with(
+            refs,
+            "g%2Fp",
+            |endpoint| {
+                calls += 1;
+                assert_eq!(
+                    endpoint,
+                    format!("projects/g%2Fp/jobs/{calls}/artifacts/gl-sast-report.json")
+                );
+                std::future::ready(outcomes.pop_front().expect("unexpected download"))
+            },
+            now(),
+        )
+        .await;
+        (result, calls)
+    }
+
+    #[tokio::test]
+    async fn a_category_that_never_reached_gitlab_rejects_and_stops_downloading() {
+        for (label, first) in [
+            ("runner timeout", Err(AppError::Timeout(120))),
+            (
+                "network stderr",
+                Ok(failed_output(
+                    "",
+                    "dial tcp: lookup gitlab.com: no such host",
+                )),
+            ),
+            (
+                "5xx stderr",
+                Ok(failed_output("", "glab: HTTP 502 Bad Gateway")),
+            ),
+        ] {
+            // Three candidates, but the walk stops after the first outage.
+            let outcomes = vec![first, Ok(ok_output(b"{}")), Ok(ok_output(b"{}"))];
+            let (result, calls) = scripted_category(outcomes, None).await;
+            assert!(result.is_err(), "{label}");
+            assert_eq!(calls, 1, "{label}");
+        }
+        // A classified failure before the outage doesn't turn the unread report into
+        // a verdict: nothing arrived, so the category still rejects.
+        let (result, calls) = scripted_category(
+            vec![
+                Ok(failed_output("404 page not found", "glab: HTTP 404")),
+                Err(AppError::Timeout(120)),
+                Ok(ok_output(SAST_REPORT.as_bytes())),
+            ],
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Timeout(120))));
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn an_outage_after_a_report_arrives_keeps_it_and_counts_the_rest_lost() {
+        let (result, calls) = scripted_category(
+            vec![
+                Ok(ok_output(SAST_REPORT.as_bytes())),
+                Err(AppError::Timeout(120)),
+                Ok(ok_output(SAST_REPORT.as_bytes())),
+            ],
+            None,
+        )
+        .await;
+        let fetch = result.expect("a partial category keeps its envelope");
+        assert_eq!(calls, 2);
+        assert_eq!(fetch.bodies.len(), 1);
+        assert_eq!(fetch.lost_reports, 2);
+        let envelope = secure_envelope(fetch, 100);
+        assert_eq!(envelope.availability, GlFindingAvailability::Available);
+        assert_eq!(envelope.findings.len(), 2);
+        assert_eq!(
+            envelope.detail.as_deref(),
+            Some("2 reports couldn't be read")
+        );
+    }
+
+    #[tokio::test]
+    async fn classified_download_failures_keep_their_envelopes() {
+        // Negative controls: none of these is an outage, so every candidate is tried
+        // and the first failure's classification settles the category.
+        for (label, outcome, expire_at, availability) in [
+            (
+                "404",
+                failed_output("404 page not found", "glab: HTTP 404"),
+                None,
+                GlFindingAvailability::ReportNotReadable,
+            ),
+            (
+                "expired",
+                failed_output("404 page not found", "glab: HTTP 404"),
+                Some("2026-08-01T12:00:00Z"),
+                GlFindingAvailability::Expired,
+            ),
+            (
+                "oversize",
+                ok_output(&vec![b'x'; MAX_REPORT_BYTES + 1]),
+                None,
+                GlFindingAvailability::Indeterminate,
+            ),
+            (
+                "403",
+                failed_output(r#"{"message":"403 Forbidden"}"#, "glab: HTTP 403"),
+                None,
+                GlFindingAvailability::Forbidden,
+            ),
+            (
+                "429",
+                failed_output("", "glab: 429 Too Many Requests, connection throttled"),
+                None,
+                GlFindingAvailability::Indeterminate,
+            ),
+        ] {
+            let second = GlabOutput {
+                stdout: outcome.stdout.clone(),
+                stderr: outcome.stderr.clone(),
+                code: outcome.code,
+            };
+            let (result, calls) = scripted_category(vec![Ok(outcome), Ok(second)], expire_at).await;
+            let fetch = result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!(calls, 2, "{label}");
+            assert_eq!(fetch.lost_reports, 2, "{label}");
+            let envelope = secure_envelope(fetch, 100);
+            assert_eq!(envelope.availability, availability, "{label}");
+            assert!(envelope.findings.is_empty(), "{label}");
+        }
     }
 
     #[test]

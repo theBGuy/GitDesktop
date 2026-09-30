@@ -17,7 +17,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{
     account_hostname, run_glab, run_glab_api_for_account, run_glab_api_for_host,
-    run_glab_api_for_repo_host, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
+    run_glab_api_for_repo_host, run_glab_ex, run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT,
+    GLAB_TIMEOUT,
 };
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
@@ -27,6 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
+use crate::forge::session::{classify_glab_failure, GlabFailure};
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
     FORK_POLL_DELAY, README_CANDIDATES,
@@ -101,11 +103,13 @@ impl Forge for GitLabForge {
             Ok(_) => {}
         }
         // The runner pins `glab auth status` to the resolved repository host,
-        // so authentication describes that instance rather than the default.
-        let authenticated = run_glab_raw(Some(repo_path), &["auth", "status"], GLAB_TIMEOUT)
-            .await
-            .map(|o| o.code == 0)
-            .unwrap_or(false);
+        // so authentication describes that instance rather than the default. An
+        // unreachable host rejects before the login lookup, which would spend another
+        // network timeout on the same outage.
+        let authenticated = gitlab_auth_outcome(
+            run_glab_raw(Some(repo_path), &["auth", "status"], GLAB_TIMEOUT).await,
+            &self.host,
+        )?;
         // The project's path (group/name), derived from the origin remote — this is
         // both how we address the glab API and what flips the integration ready.
         let repo = project_path(repo_path).await.ok();
@@ -117,15 +121,46 @@ impl Forge for GitLabForge {
 /// [`GitLabForge::status`]'s auth and login for every repo on `host`, with `repo`
 /// unset, for the background tick. `repo_path` must be a repo whose origin pins
 /// `host`: the runner addresses both probes through it. A missing glab reads as
-/// not installed, so no `--version` spawn is needed.
+/// not installed, so no `--version` spawn is needed. A probe that couldn't reach
+/// `host` reads as unauthenticated without the login lookup: the tick takes any
+/// failed probe as not ready, and a second network call would only time out again.
 pub(crate) async fn host_status(repo_path: &str, host: &str) -> ForgeStatus {
-    let authenticated = match run_glab_raw(Some(repo_path), &["auth", "status"], GLAB_TIMEOUT).await
-    {
+    let probe = match run_glab_raw(Some(repo_path), &["auth", "status"], GLAB_TIMEOUT).await {
         Err(AppError::GlabNotFound) => return gitlab_status(false, false, host, None, None),
-        probe => probe.is_ok_and(|o| o.code == 0),
+        probe => probe,
+    };
+    let Ok(authenticated) = gitlab_auth_outcome(probe, host) else {
+        return gitlab_status(true, false, host, None, None);
     };
     let login = cached_host_status_login(host, repo_path).await;
     gitlab_status(true, authenticated, host, None, login)
+}
+
+/// Whether a `glab auth status` probe signs `host` in. A probe that never reached
+/// `host` (a timeout, or a failure `classify_glab_failure` reads as Offline) is an
+/// error, never a signed-out verdict: react-query keeps the last good status on a
+/// rejection, where `false` would unmount every GitLab panel for an outage. Other
+/// failures, rate limits included, read false (the session-health arms own those).
+fn gitlab_auth_outcome(probe: AppResult<GlabOutput>, host: &str) -> AppResult<bool> {
+    let unreachable = || {
+        AppError::Glab(format!(
+            "Couldn't reach {host} to check the GitLab sign-in."
+        ))
+    };
+    match probe {
+        Ok(out) if out.code == 0 => Ok(true),
+        Ok(out) => {
+            let combined = format!("{}\n{}", out.stdout_lossy(), out.stderr).to_lowercase();
+            match classify_glab_failure(&combined) {
+                GlabFailure::Offline => Err(unreachable()),
+                GlabFailure::NotConnected | GlabFailure::RateLimited | GlabFailure::Broken => {
+                    Ok(false)
+                }
+            }
+        }
+        Err(AppError::Timeout(_)) => Err(unreachable()),
+        Err(e) => Err(e),
+    }
 }
 
 // ── Repository listing (clone browser) ───────────────────────────────────────
@@ -9992,6 +10027,79 @@ mod my_work_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreachable_host_rejects_the_sign_in_probe_instead_of_signing_out() {
+        let exit = |code: i32, stderr: &str| {
+            Ok(GlabOutput {
+                stdout: Vec::new(),
+                stderr: stderr.to_string(),
+                code,
+            })
+        };
+        let unreachable = "Couldn't reach gitlab.example to check the GitLab sign-in.";
+        for (label, probe, expected) in [
+            ("signed in", exit(0, ""), Ok(true)),
+            (
+                "network stderr",
+                exit(1, "dial tcp: lookup gitlab.example: no such host"),
+                Err(unreachable),
+            ),
+            (
+                "runner timeout",
+                Err(AppError::Timeout(30)),
+                Err(unreachable),
+            ),
+            (
+                // Measured verbatim through a local 502 proxy.
+                "502 proxy",
+                exit(1, r#"Post "https://gitlab.com/oauth/token": Bad Gateway"#),
+                Err(unreachable),
+            ),
+            (
+                "503",
+                exit(1, r#"Post "https://gitlab.com/oauth/token": Service Unavailable"#),
+                Err(unreachable),
+            ),
+            (
+                "revoked session",
+                exit(
+                    1,
+                    r#"Post "https://gitlab.com/oauth/token": oauth2: "invalid_grant" "The provided authorization grant is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client.""#,
+                ),
+                Ok(false),
+            ),
+            ("401", exit(1, "401 Unauthorized: invalid token"), Ok(false)),
+            (
+                "not logged in",
+                exit(1, "x gitlab.example: not logged in"),
+                Ok(false),
+            ),
+            (
+                "rate limit",
+                exit(1, "429 Too Many Requests: retry later"),
+                Ok(false),
+            ),
+        ] {
+            let outcome = gitlab_auth_outcome(probe, "gitlab.example");
+            match expected {
+                Ok(authenticated) => {
+                    assert_eq!(outcome.ok(), Some(authenticated), "{label}");
+                }
+                Err(message) => {
+                    assert!(
+                        matches!(&outcome, Err(AppError::Glab(m)) if m == message),
+                        "{label}: {outcome:?}"
+                    );
+                }
+            }
+        }
+        // Any other runner failure is not reinterpreted.
+        assert!(matches!(
+            gitlab_auth_outcome(Err(AppError::GlabNotFound), "gitlab.example"),
+            Err(AppError::GlabNotFound)
+        ));
+    }
 
     #[test]
     fn publish_create_timeout_keeps_timeout_first_and_appends_hedge() {

@@ -8,7 +8,7 @@ use tauri_plugin_http::reqwest::Url;
 
 use super::bitbucket::{next_page_url, workspace_slug, BbPage, BB_MAX_PAGES};
 use super::{encode_query_value, http};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -209,10 +209,34 @@ fn clamp_limit(limit: Option<u32>) -> usize {
 // twelve concurrent reports accepted), so the bound is fetch cost, not a
 // platform limit; past it the walk reports truncated and the cap sentence shows.
 const BB_MAX_REPORTS: usize = 100;
-type Failure = (BbFindingsAvailability, String, Option<u16>);
+type Failure = (BbFindingsAvailability, String, FailureCause);
+
+/// Where a failure came from: the boundary between a verdict worth an envelope and
+/// an outage that must reject.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FailureCause {
+    /// An HTTP answer that classified as a failure.
+    Status(u16),
+    /// No answer at all: the classified read errs only on transport.
+    Transport,
+    /// An answer whose body couldn't establish a verdict.
+    Content,
+}
+
+impl FailureCause {
+    /// The GitHub and GitLab `classify_or_reject` boundary: no answer or a 5xx is
+    /// an outage; a 429 is a rate limit and keeps its envelope.
+    fn is_transport_class(self) -> bool {
+        matches!(self, Self::Transport | Self::Status(500..=599))
+    }
+}
 
 fn indeterminate(detail: impl Into<String>) -> Failure {
-    (BbFindingsAvailability::Indeterminate, detail.into(), None)
+    (
+        BbFindingsAvailability::Indeterminate,
+        detail.into(),
+        FailureCause::Content,
+    )
 }
 
 fn classify(status: u16, body: &str) -> Result<(), Failure> {
@@ -223,12 +247,12 @@ fn classify(status: u16, body: &str) -> Result<(), Failure> {
         401 | 403 => Err((
             BbFindingsAvailability::Forbidden,
             http::bb_error_detail(status, body, http::BbOpKind::Read),
-            Some(status),
+            FailureCause::Status(status),
         )),
         _ => Err((
             BbFindingsAvailability::Indeterminate,
             http::bb_error_detail(status, body, http::BbOpKind::Read),
-            Some(status),
+            FailureCause::Status(status),
         )),
     }
 }
@@ -238,9 +262,13 @@ where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = AppResult<(u16, String)>>,
 {
-    get(url)
-        .await
-        .map_err(|error| indeterminate(error.to_string()))
+    get(url).await.map_err(|error| {
+        (
+            BbFindingsAvailability::Indeterminate,
+            error.to_string(),
+            FailureCause::Transport,
+        )
+    })
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(body: &str) -> Result<T, Failure> {
@@ -477,11 +505,13 @@ where
                     report.annotations_unreadable = unreadable > 0;
                     unreadable_rows += unreadable;
                 }
-                Err((availability, detail, status)) => {
+                Err((availability, detail, cause)) => {
                     report.annotations_unreadable = true;
                     unreadable_lists += 1;
                     first_annotation_failure.get_or_insert(detail);
-                    if status == Some(429) || availability == BbFindingsAvailability::Forbidden {
+                    if cause == FailureCause::Status(429)
+                        || availability == BbFindingsAvailability::Forbidden
+                    {
                         for pending in pending_reports.by_ref() {
                             pending.annotations_unreadable = true;
                             unreadable_lists += 1;
@@ -507,24 +537,35 @@ where
     Ok(())
 }
 
+/// A failure that settles the whole read keeps its envelope, except an
+/// Indeterminate one from an outage (no answer, or a 5xx): an `Ok` envelope would
+/// replace the findings the UI already holds with an empty list, so it rejects as
+/// the GitHub and GitLab `classify_or_reject` do. Named verdicts, rate limits and
+/// unreadable bodies keep their envelopes; a partial read that already holds
+/// reports never reaches here (annotation losses ride its detail).
 async fn findings_with<F, Fut>(
     get: &mut F,
     base: &str,
     requested_ref: String,
     limit: Option<u32>,
-) -> BbFindingsOut
+) -> AppResult<BbFindingsOut>
 where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = AppResult<(u16, String)>>,
 {
     let mut out = empty_out(requested_ref);
-    if let Err((availability, detail, _)) =
+    if let Err((availability, detail, cause)) =
         read_findings(get, base, clamp_limit(limit), &mut out).await
     {
+        if availability == BbFindingsAvailability::Indeterminate && cause.is_transport_class() {
+            return Err(AppError::Bitbucket(format!(
+                "Couldn't reach Bitbucket to load the security findings.\n{detail}"
+            )));
+        }
         out.availability = availability;
         out.detail = Some(detail);
     }
-    out
+    Ok(out)
 }
 
 async fn current_branch(repo_path: &str) -> String {
@@ -551,7 +592,7 @@ pub async fn commit_findings(repo_path: &str, limit: Option<u32>) -> AppResult<B
         encode_query_value(&slug)
     );
     let mut get = |url: String| async move { http::bb_get_classified(creds, &url).await };
-    Ok(findings_with(&mut get, &base, requested_ref, limit).await)
+    findings_with(&mut get, &base, requested_ref, limit).await
 }
 
 #[cfg(test)]
@@ -596,23 +637,48 @@ mod tests {
     const REPORT: &str = r#"{"values":[{"uuid":"r1"}]}"#;
     const BASE: &str = "repositories/ws/slug";
 
-    async fn scripted_findings(
+    /// A scripted response: an HTTP answer, or `None` for a request that never got one.
+    type Scripted<'a> = (&'a str, Option<(u16, &'a str)>);
+
+    async fn scripted_result(
         requested: &str,
         limit: Option<u32>,
-        responses: Vec<(&str, u16, &str)>,
-    ) -> BbFindingsOut {
+        responses: Vec<Scripted<'_>>,
+    ) -> AppResult<BbFindingsOut> {
         let mut responses = VecDeque::from(responses);
         let out = {
             let mut get = |url: String| {
-                let (suffix, status, body) = responses.pop_front().expect("unexpected request");
+                let (suffix, answer) = responses.pop_front().expect("unexpected request");
                 assert_eq!(url, format!("{BASE}{suffix}"));
-                ready(Ok((status, body.to_string())))
+                ready(match answer {
+                    Some((status, body)) => Ok((status, body.to_string())),
+                    None => Err(AppError::Bitbucket(format!(
+                        "Bitbucket request failed: error sending request for url ({url}): {}",
+                        http::TRANSPORT_CONNECT_FAILED
+                    ))),
+                })
             };
             findings_with(&mut get, BASE, requested.into(), limit).await
         };
         assert!(responses.is_empty(), "unconsumed requests");
         out
     }
+
+    async fn scripted_findings(
+        requested: &str,
+        limit: Option<u32>,
+        responses: Vec<(&str, u16, &str)>,
+    ) -> BbFindingsOut {
+        let responses = responses
+            .into_iter()
+            .map(|(suffix, status, body)| (suffix, Some((status, body))))
+            .collect();
+        scripted_result(requested, limit, responses)
+            .await
+            .expect("a classified read keeps its envelope")
+    }
+
+    const UNREACHABLE: &str = "Couldn't reach Bitbucket to load the security findings.\n";
 
     #[test]
     fn availability_and_envelope_wire_strings_are_pinned() {
@@ -1087,7 +1153,7 @@ mod tests {
             (200, r#"{"values":[{"title":"missing uuid"}]}"#),
             (404, "report-service.report.not-found"),
             (404, "There is no API hosted at this URL"),
-            (500, "upstream unavailable"),
+            (429, "rate limited"),
             (403, "  unmeasured reason  "),
         ] {
             let out = scripted_findings(
@@ -1120,11 +1186,119 @@ mod tests {
         let out = scripted_findings("topic", None, vec![("", 403, " raw body ")]).await;
         assert_eq!(out.availability, BbFindingsAvailability::Forbidden);
         assert_eq!(out.detail.as_deref(), Some("HTTP 403: raw body"));
-        let mut get =
-            |_: String| ready(Err(crate::error::AppError::Bitbucket("read failed".into())));
-        let out = findings_with(&mut get, BASE, "topic".into(), None).await;
-        assert_eq!(out.availability, BbFindingsAvailability::Indeterminate);
-        assert!(out.detail.unwrap().contains("read failed"));
+    }
+
+    #[tokio::test]
+    async fn an_outage_with_nothing_read_rejects_instead_of_emptying_the_findings() {
+        // Every stage a total read can stop at: the repo, a ref, the report walk.
+        let reports = "/commit/abc/reports?pagelen=100";
+        for (label, responses) in [
+            ("repo transport", vec![("", None)]),
+            ("repo 503", vec![("", Some((503, "upstream unavailable")))]),
+            (
+                "ref transport",
+                vec![("", Some((200, REPO))), ("/refs/branches/topic", None)],
+            ),
+            (
+                "reports transport",
+                vec![
+                    ("", Some((200, REPO))),
+                    ("/refs/branches/topic", Some((200, TIP))),
+                    (reports, None),
+                ],
+            ),
+            (
+                "reports 500",
+                vec![
+                    ("", Some((200, REPO))),
+                    ("/refs/branches/topic", Some((200, TIP))),
+                    (reports, Some((500, "upstream unavailable"))),
+                ],
+            ),
+            (
+                // The requested ref proved empty, but the fallback never answered.
+                "fallback transport",
+                vec![
+                    ("", Some((200, REPO))),
+                    ("/refs/branches/topic", Some((200, TIP))),
+                    (reports, Some((200, EMPTY))),
+                    ("/refs/branches/main", None),
+                ],
+            ),
+        ] {
+            let result = scripted_result("topic", None, responses).await;
+            let Err(AppError::Bitbucket(message)) = result else {
+                panic!("{label}: expected a rejection, got {result:?}");
+            };
+            assert!(message.starts_with(UNREACHABLE), "{label}: {message}");
+        }
+        let result = scripted_result("topic", None, vec![("", None)]).await;
+        let Err(AppError::Bitbucket(message)) = result else {
+            unreachable!("asserted above");
+        };
+        // The transport marker rides the detail line for the frontend's classifier.
+        assert!(
+            message.ends_with(http::TRANSPORT_CONNECT_FAILED),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn named_verdicts_and_rate_limits_keep_their_envelopes_through_an_outage_boundary() {
+        // Negative controls for the rejection: none of these is an outage.
+        for (status, body, availability) in [
+            (429, "rate limited", BbFindingsAvailability::Indeterminate),
+            (403, "privilege scopes", BbFindingsAvailability::Forbidden),
+            (401, "expired", BbFindingsAvailability::Forbidden),
+            (200, "not json", BbFindingsAvailability::Indeterminate),
+        ] {
+            for stage in ["repo", "reports"] {
+                let responses = if stage == "repo" {
+                    vec![("", status, body)]
+                } else {
+                    vec![
+                        ("", 200, REPO),
+                        ("/refs/branches/topic", 200, TIP),
+                        ("/commit/abc/reports?pagelen=100", status, body),
+                    ]
+                };
+                let out = scripted_findings("topic", None, responses).await;
+                assert_eq!(out.availability, availability, "{status} at {stage}");
+                assert!(out.reports.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_outage_after_reports_arrive_keeps_them_with_a_loss_note() {
+        let out = scripted_result(
+            "topic",
+            None,
+            vec![
+                ("", Some((200, REPO))),
+                ("/refs/branches/topic", Some((200, TIP))),
+                (
+                    "/commit/abc/reports?pagelen=100",
+                    Some((200, r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#)),
+                ),
+                ("/commit/abc/reports/r1/annotations?pagelen=100", None),
+                (
+                    "/commit/abc/reports/r2/annotations?pagelen=100",
+                    Some((200, ANNOTATION_FIXTURE)),
+                ),
+            ],
+        )
+        .await
+        .expect("a partial read keeps its envelope");
+        assert_eq!(out.availability, BbFindingsAvailability::Available);
+        assert!(out.reports[0].annotations_unreadable);
+        assert_eq!(out.reports[1].annotations.len(), 3);
+        let detail = out.detail.unwrap();
+        assert!(
+            detail.starts_with("1 annotation list couldn't be read — first failure: "),
+            "{detail}"
+        );
+        assert!(detail.ends_with(http::TRANSPORT_CONNECT_FAILED), "{detail}");
     }
 
     #[tokio::test]
@@ -1167,7 +1341,10 @@ mod tests {
                 "report-service.report.not-found",
             ),
         ] {
-            assert_eq!(classify(status, body), Err((availability, expected.into(), Some(status))));
+            assert_eq!(
+                classify(status, body),
+                Err((availability, expected.into(), FailureCause::Status(status)))
+            );
             let write_expected = if status == 403 && body.contains("privilege scopes") {
                 "Bitbucket rejected the request (403) — your API token is missing a required write scope. Reconnect it in Settings → Accounts with pull request / repository / pipeline write scopes."
             } else {
@@ -1196,7 +1373,7 @@ mod tests {
             Err((
                 BbFindingsAvailability::Indeterminate,
                 "HTTP 500".into(),
-                Some(500)
+                FailureCause::Status(500)
             ))
         );
         let long_body = format!("  {}  ", "é".repeat(301));
@@ -1205,18 +1382,37 @@ mod tests {
             Err((
                 BbFindingsAvailability::Indeterminate,
                 format!("HTTP 500: {}", "é".repeat(300)),
-                Some(500)
+                FailureCause::Status(500)
             ))
         );
-        assert_eq!(indeterminate("unknown").2, None);
-        assert_eq!(parse_json::<Value>("not json").unwrap_err().2, None);
-        assert_eq!(parse_page("{}").err().unwrap().2, None);
+        assert_eq!(indeterminate("unknown").2, FailureCause::Content);
+        assert_eq!(
+            parse_json::<Value>("not json").unwrap_err().2,
+            FailureCause::Content
+        );
+        assert_eq!(parse_page("{}").err().unwrap().2, FailureCause::Content);
         let mut get = |_: String| {
             ready(Err(crate::error::AppError::Bitbucket(
                 "transport failure".into(),
             )))
         };
-        assert_eq!(fetch(&mut get, "unused".into()).await.unwrap_err().2, None);
+        assert_eq!(
+            fetch(&mut get, "unused".into()).await.unwrap_err().2,
+            FailureCause::Transport
+        );
+        // The rejection boundary: no answer and a 5xx are outages; nothing else is.
+        for (cause, outage) in [
+            (FailureCause::Transport, true),
+            (FailureCause::Status(500), true),
+            (FailureCause::Status(503), true),
+            (FailureCause::Status(599), true),
+            (FailureCause::Status(429), false),
+            (FailureCause::Status(404), false),
+            (FailureCause::Status(403), false),
+            (FailureCause::Content, false),
+        ] {
+            assert_eq!(cause.is_transport_class(), outage, "{cause:?}");
+        }
     }
 
     #[test]

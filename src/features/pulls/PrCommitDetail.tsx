@@ -7,6 +7,12 @@ import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
@@ -165,6 +171,15 @@ export function PrCommitDetail({
     lens,
   ]);
 
+  // A failed or parked refresh keeps the loaded commit under a notice; only a
+  // read with nothing loaded replaces the rail and pane.
+  const pane = resolveDetailPane({
+    pending: diff.isPending,
+    error: diff.isError,
+    hasData: diff.data !== undefined,
+    paused: diff.isPaused,
+  });
+
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-1 border-b px-4 py-3">
@@ -211,92 +226,131 @@ export function PrCommitDetail({
         </div>
       </header>
 
-      {diff.isPending ? (
-        <div className="space-y-3 p-4">
-          <Skeleton className="h-4 w-1/3" />
-          <Skeleton className="h-32 w-full" />
-        </div>
-      ) : diff.isError ? (
-        <DiffPlaceholder message="Could not load this commit's changes" />
-      ) : (
-        <DetailRailRow>
-          <DetailRail
-            ariaLabel="Changed files"
-            header={
-              <p className="truncate text-xs text-muted-foreground">
-                {files.length} changed file{files.length === 1 ? "" : "s"}
-              </p>
-            }
-          >
-            {/* overflow-hidden contains the list's natural height (vendored Root
-                is `relative`-only) so a long file list can't leak a window scrollbar. */}
-            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-              <FileRowActions
-                repoPath={repoPath}
-                blameRev={commit.oid}
-                onKeyDown={onFilesKeyDown}
-              >
-                {files.map((file) => (
-                  <button
-                    type="button"
-                    key={file.path}
-                    data-path={file.path}
-                    className={cn(
-                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
-                      effectivePath === file.path
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-muted/60",
-                    )}
-                    onClick={() => setSelectedPath(file.path)}
-                  >
-                    <PathText path={file.path} className="flex-1 font-mono" />
-                    <DiffStat
-                      added={file.added}
-                      deleted={file.deleted}
-                      isBinary={file.isBinary}
-                    />
-                  </button>
-                ))}
-              </FileRowActions>
-            </ScrollArea>
-          </DetailRail>
-          <main className="flex min-w-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1">
-              {effectivePath && fileDiff ? (
-                <DiffContent
-                  filePath={effectivePath}
-                  data={fileDiff}
-                  isPending={false}
-                  isError={false}
-                  repoPath={repoPath}
-                  previewRev={
-                    commitPresent.data === true ? commit.oid : undefined
-                  }
-                  lineAnchors={lineAnchors}
-                  lineWidget={lineWidget}
+      {(() => {
+        switch (pane) {
+          case "skeleton":
+            return (
+              <div className="space-y-3 p-4">
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-32 w-full" />
+              </div>
+            );
+          case "offline":
+            return (
+              <DiffPlaceholder
+                message={offlinePendingMessage("this commit's changes")}
+              />
+            );
+          case "error":
+            return (
+              <DiffPlaceholder message="Could not load this commit's changes" />
+            );
+          case "content":
+          case "content-degraded":
+            return (
+              <>
+                <DegradedListNotice
+                  noun="this commit's changes"
+                  degraded={pane === "content-degraded"}
+                  // The diff is keyed on this commit alone and serves no
+                  // placeholder, so the retained patch is always its own.
+                  message={detailNoticeMessage({
+                    noun: "commit's changes",
+                    isError: diff.isError,
+                    stale: false,
+                  })}
+                  // Offline gets no Retry: it would park again at once, and
+                  // reconnecting resumes the read by itself.
+                  onRetry={diff.isError ? () => void diff.refetch() : undefined}
+                  className="shrink-0 border-b px-4 py-1.5"
                 />
-              ) : (
-                <DiffPlaceholder message="No file changes in this commit" />
-              )}
-            </div>
-            <CommitComments
-              repoPath={repoPath}
-              sha={commit.oid}
-              canComment={canCommentCommits}
-              remoteLabel={remoteLabel}
-              diffSections={sections}
-              // While placeholder, `sections` belongs to the previously selected
-              // commit, so a position-derived line would resolve against the wrong
-              // patch. (This mounts only once the diff settled, so load/error
-              // windows never reach it.)
-              diffReady={diff.isSuccess && !diff.isPlaceholderData}
-              selectedPath={effectivePath}
-              onSelectFile={setSelectedPath}
-              lens={lens}
-            />
-          </main>
-        </DetailRailRow>
-      )}
+                <DetailRailRow>
+                  <DetailRail
+                    ariaLabel="Changed files"
+                    header={
+                      <p className="truncate text-xs text-muted-foreground">
+                        {files.length} changed file
+                        {files.length === 1 ? "" : "s"}
+                      </p>
+                    }
+                  >
+                    {/* overflow-hidden contains the list's natural height (vendored Root
+                        is `relative`-only) so a long file list can't leak a window scrollbar. */}
+                    <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+                      <FileRowActions
+                        repoPath={repoPath}
+                        blameRev={commit.oid}
+                        onKeyDown={onFilesKeyDown}
+                      >
+                        {files.map((file) => (
+                          <button
+                            type="button"
+                            key={file.path}
+                            data-path={file.path}
+                            className={cn(
+                              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+                              effectivePath === file.path
+                                ? "bg-accent text-accent-foreground"
+                                : "hover:bg-muted/60",
+                            )}
+                            onClick={() => setSelectedPath(file.path)}
+                          >
+                            <PathText
+                              path={file.path}
+                              className="flex-1 font-mono"
+                            />
+                            <DiffStat
+                              added={file.added}
+                              deleted={file.deleted}
+                              isBinary={file.isBinary}
+                            />
+                          </button>
+                        ))}
+                      </FileRowActions>
+                    </ScrollArea>
+                  </DetailRail>
+                  <main className="flex min-w-0 flex-1 flex-col">
+                    <div className="min-h-0 flex-1">
+                      {effectivePath && fileDiff ? (
+                        <DiffContent
+                          filePath={effectivePath}
+                          data={fileDiff}
+                          isPending={false}
+                          isError={false}
+                          repoPath={repoPath}
+                          previewRev={
+                            commitPresent.data === true ? commit.oid : undefined
+                          }
+                          lineAnchors={lineAnchors}
+                          lineWidget={lineWidget}
+                        />
+                      ) : (
+                        <DiffPlaceholder message="No file changes in this commit" />
+                      )}
+                    </div>
+                    <CommitComments
+                      repoPath={repoPath}
+                      sha={commit.oid}
+                      canComment={canCommentCommits}
+                      remoteLabel={remoteLabel}
+                      diffSections={sections}
+                      // While placeholder, `sections` belongs to the previously
+                      // selected commit, so a position-derived line would
+                      // resolve against the wrong patch. A failed refresh keeps
+                      // this commit's own patch, which still resolves.
+                      diffReady={
+                        diff.data !== undefined && !diff.isPlaceholderData
+                      }
+                      selectedPath={effectivePath}
+                      onSelectFile={setSelectedPath}
+                      lens={lens}
+                    />
+                  </main>
+                </DetailRailRow>
+              </>
+            );
+        }
+      })()}
     </div>
   );
 }

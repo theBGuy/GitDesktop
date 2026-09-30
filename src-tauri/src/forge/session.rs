@@ -804,7 +804,7 @@ fn response_header_value(body: &str, header: &str) -> Option<String> {
 
 /// Which failure bucket a `glab auth status` non-zero result falls into.
 #[derive(PartialEq, Eq, Debug)]
-enum GlabFailure {
+pub(crate) enum GlabFailure {
     NotConnected,
     Offline,
     /// Never re-probed: another probe spends quota and can only confirm it.
@@ -817,8 +817,17 @@ enum GlabFailure {
 /// Classify combined lowercased stdout+stderr from a failed `glab auth status`.
 /// Unknown text degrades to `Broken` (never a panic) so an unrecognized glab message
 /// still surfaces as an actionable "reconnect" rather than being swallowed.
-fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
+pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
+    // Proxy/server outage status text (measured via a 502 proxy: `Post "…/oauth/token":
+    // Bad Gateway`) is Offline as for gh, in session health and the sign-in probe, never
+    // Broken. Multi-word only: this is a bare-substring match, and hostnames carry digits.
+    const OFFLINE_STATUS: [&str; 4] = [
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "proxy authentication required",
+    ];
     // NETWORKISH matches as bare substrings here. Source-derived, not live-reproduced:
     // glab 1.105.0's client-go (v2.40.1) retries a 429 until its Ratelimit-Reset inside
     // the context budget, so a long throttle can surface as Go's bare "context deadline
@@ -834,7 +843,11 @@ fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
         GlabFailure::RateLimited
     } else if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
         GlabFailure::NotConnected
-    } else if NETWORKISH.iter().any(|n| combined_lower.contains(n)) {
+    } else if NETWORKISH
+        .iter()
+        .chain(OFFLINE_STATUS.iter())
+        .any(|n| combined_lower.contains(n))
+    {
         GlabFailure::Offline
     } else {
         GlabFailure::Broken
@@ -2815,6 +2828,37 @@ check your internet connection or https://githubstatus.com";
                 classify_glab_failure(not_throttled),
                 GlabFailure::RateLimited,
                 "{not_throttled}"
+            );
+        }
+    }
+
+    #[test]
+    fn glab_proxy_and_server_outage_status_text_is_offline() {
+        for outage in [
+            // Measured verbatim through a local 502 proxy.
+            r#"Post "https://gitlab.com/oauth/token": Bad Gateway"#,
+            // SYNTHETIC: the same shape for the sibling statuses.
+            r#"Post "https://gitlab.com/oauth/token": Service Unavailable"#,
+            r#"Get "https://gitlab.com/api/v4/user": Gateway Timeout"#,
+            r#"Get "https://gitlab.com/api/v4/user": Proxy Authentication Required"#,
+        ] {
+            assert_eq!(
+                classify_glab_failure(&outage.to_lowercase()),
+                GlabFailure::Offline,
+                "{outage}"
+            );
+        }
+        // Negative controls: a revoked session still earns the reconnect prompt, and a
+        // status number inside a hostname is not an outage.
+        for credential in [
+            r#"Post "https://gitlab.com/oauth/token": oauth2: "invalid_grant" "The provided authorization grant is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client.""#,
+            "x gitlab502.example.com: 401 unauthorized",
+            "x gitlab503.example.com: api call failed",
+        ] {
+            assert_eq!(
+                classify_glab_failure(&credential.to_lowercase()),
+                GlabFailure::Broken,
+                "{credential}"
             );
         }
     }

@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use tauri_plugin_http::reqwest::{self, Client};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::http::transport_failure_message;
 use crate::forge::model::ForgeUserRef;
 
 /// Keep the summary on line one and the original detail available on line two.
@@ -421,7 +422,7 @@ async fn raw_request(
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+        .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
     let body = resp
         .text()
@@ -658,7 +659,7 @@ async fn fetch_cloud_id(site: &str) -> AppResult<String> {
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+        .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
     let body = resp
         .text()
@@ -1543,7 +1544,7 @@ async fn get_json_agile<T: serde::de::DeserializeOwned>(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|e| AppError::Jira(format!("Jira request failed: {e}")))?;
+        .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
     let body = resp
         .text()

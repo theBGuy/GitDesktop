@@ -124,6 +124,9 @@ export function PrFilesPane({
   fileDiff,
   isPending,
   isError,
+  isPaused,
+  onRetry,
+  dataIsPlaceholder,
   threads,
   drafts,
   repoPath,
@@ -145,6 +148,9 @@ export function PrFilesPane({
   fileDiff: ComponentProps<typeof DiffContent>["data"];
   isPending: boolean;
   isError: boolean;
+  isPaused?: boolean;
+  onRetry?: () => void;
+  dataIsPlaceholder?: boolean;
   /** All PR review threads; the pane anchors those on the selected file. */
   threads?: ReviewThreadOut[];
   /** Pending-review drafts; those on the selected file render as anchored cards
@@ -305,6 +311,9 @@ export function PrFilesPane({
             data={fileDiff}
             isPending={isPending}
             isError={isError}
+            isPaused={isPaused}
+            onRetry={onRetry}
+            dataIsPlaceholder={dataIsPlaceholder}
             repoPath={repoPath}
             previewRev={previewRev}
             lineAnchors={lineAnchors}
