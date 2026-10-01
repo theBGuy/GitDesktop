@@ -4164,6 +4164,14 @@ pub struct PrDetails {
     pub maintainer_can_modify: Option<bool>,
 }
 
+/// Unknown checks are always empty; successful reads, including empty ones, are known.
+pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrCheckOut>, bool) {
+    match read {
+        Ok(checks) => (checks, false),
+        Err(_) => (Vec::new(), true),
+    }
+}
+
 /// A merge/pull request's approval summary — who has approved and whether the
 /// viewer has. Provider-neutral, produced by GitLab and Bitbucket: GitHub
 /// surfaces approval through the review flow (`reviewDecision` + the Review menu),
@@ -6900,7 +6908,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
+        apply_stack_join, checks_or_unknown, classify_gh_merge_refusal, classify_merge_async,
         external_items_from_thread_nodes, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
@@ -6917,7 +6925,7 @@ mod tests {
         PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
-        GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
+        GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrCheckOut, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
         ForgeTimelineEventOut,
         batch_check_present, build_divergence_compare_path, oid_outside_origin_graph,
@@ -7129,6 +7137,31 @@ mod tests {
             },
             author: None,
         }
+    }
+
+    #[test]
+    fn checks_or_unknown_preserves_successful_reads() {
+        let check = PrCheckOut {
+            name: "build".to_string(),
+            status: "SUCCESS".to_string(),
+            ..Default::default()
+        };
+        let (checks, unknown) = checks_or_unknown::<()>(Ok(vec![check]));
+        assert!(!unknown);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].status, "SUCCESS");
+
+        let (checks, unknown) = checks_or_unknown::<()>(Ok(Vec::new()));
+        assert!(checks.is_empty());
+        assert!(!unknown);
+    }
+
+    #[test]
+    fn checks_or_unknown_marks_failed_reads() {
+        let (checks, unknown) = checks_or_unknown(Err("checks unavailable"));
+        assert!(checks.is_empty());
+        assert!(unknown);
     }
 
     /// A `PrDetails` with everything empty but the stack fields — the wire shape

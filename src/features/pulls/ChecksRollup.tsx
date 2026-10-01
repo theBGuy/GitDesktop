@@ -1104,6 +1104,7 @@ export function ChecksRollup({
     },
   ].filter((s) => s.count > 0);
 
+  const prNoun = provider === "gitlab" ? "merge request" : "pull request";
   return (
     <>
       {watchers}
@@ -1115,7 +1116,7 @@ export function ChecksRollup({
         message={
           detailsPaused
             ? offlinePendingMessage("the checks")
-            : `Couldn't load this ${provider === "gitlab" ? "merge request" : "pull request"}'s checks.`
+            : `Couldn't load this ${prNoun}'s checks.`
         }
         onRetry={detailsPaused ? undefined : onRetryChecks}
         className="px-0 pb-0"

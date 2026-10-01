@@ -37,10 +37,10 @@ use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
-    ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
-    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability,
-    PrPollInfo, PrRef, PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut,
-    ReviewThreadOut, STACKS_TIMEOUT,
+    checks_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem,
+    PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo,
+    PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember, PrThreadOut,
+    RepoLabel, ReviewSubmitOut, ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -1803,8 +1803,7 @@ struct GlabMrChanges {
     #[serde(default, deserialize_with = "null_to_default")]
     changes: Vec<GlabChange>,
     /// The head commit's pipeline (`null` when the MR has no CI). Its jobs become the
-    /// PR-view check rollup. `id` addresses the jobs endpoint; the frontend routes the
-    /// per-job `job_id` back through `forge_ci_job_logs` for the inline log peek.
+    /// check rollup; pipelines outside the target project expose link-out checks only.
     #[serde(default)]
     head_pipeline: Option<GlabHeadPipeline>,
     /// Mergeability, carried server-side on the `/changes` payload — so the detail
@@ -1823,11 +1822,12 @@ struct GlabMrChanges {
     target_project_id: Option<u64>,
 }
 
-/// The `head_pipeline` object embedded in an MR payload — only `id` (the jobs
-/// fetch) is needed; each check links via its own per-job `web_url`.
+/// The MR's head pipeline and its owning project, which can differ from the target.
 #[derive(Deserialize)]
 struct GlabHeadPipeline {
     id: u64,
+    #[serde(default, deserialize_with = "null_to_default")]
+    project_id: Option<u64>,
 }
 
 /// Count added/deleted lines in a GitLab per-file diff. The input is hunk-only
@@ -2213,10 +2213,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // Checks are additive: a failed jobs read leaves the view available with an
     // explicitly unknown list; an absent pipeline is a known empty list.
     let (checks, checks_unknown) = match &mr.head_pipeline {
-        Some(p) => match pipeline_checks(repo_path, &enc, p.id).await {
-            Ok(checks) => (checks, false),
-            Err(_) => (Vec::new(), true),
-        },
+        Some(p) => {
+            let cross_project_id = p
+                .project_id
+                .filter(|id| mr.target_project_id.is_some_and(|target| target != *id));
+            checks_or_unknown(pipeline_checks(repo_path, &enc, p.id, cross_project_id).await)
+        }
         None => (Vec::new(), false),
     };
 
@@ -6833,30 +6835,37 @@ fn map_job_check_status(status: &str) -> String {
     .to_string()
 }
 
-/// The MR head pipeline's checks; fetch and parse failures stay errors so the view
-/// can mark the list unknown. The pipeline id lands in `run_id` and the job id in
-/// `job_id` (stringified — GitLab ids exceed the JS safe-int range); a present
-/// `job_id` is what routes the frontend's inline log peek through `forge_ci_job_logs`.
+/// Read checks from the pipeline's owning project. Read failures, including denied
+/// cross-project access, leave the view's checks unknown. Cross-project checks link
+/// out without run/job ids because log, detail and retry routes use the target project.
+/// Same-project ids are stringified to preserve JS precision.
 async fn pipeline_checks(
     repo_path: &str,
     enc: &str,
     pipeline_id: u64,
+    cross_project_id: Option<u64>,
 ) -> AppResult<Vec<PrCheckOut>> {
-    let endpoint = format!("projects/{enc}/pipelines/{pipeline_id}/jobs?per_page=100");
+    let cross_project = cross_project_id.map(|id| id.to_string());
+    let project = cross_project.as_deref().unwrap_or(enc);
+    let endpoint = format!("projects/{project}/pipelines/{pipeline_id}/jobs?per_page=100");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    pipeline_checks_from(&out.stdout_lossy(), pipeline_id)
+    pipeline_checks_from(&out.stdout_lossy(), pipeline_id, cross_project_id.is_some())
 }
 
-fn pipeline_checks_from(body: &str, pipeline_id: u64) -> AppResult<Vec<PrCheckOut>> {
+fn pipeline_checks_from(
+    body: &str,
+    pipeline_id: u64,
+    cross_project: bool,
+) -> AppResult<Vec<PrCheckOut>> {
     let jobs = pipeline_jobs_from(body)?;
-    let run_id = pipeline_id.to_string();
+    let run_id = (!cross_project).then(|| pipeline_id.to_string());
     Ok(jobs.into_iter()
         .map(|j| PrCheckOut {
             name: j.name,
             status: map_job_check_status(&j.status),
             details_url: Some(j.web_url).filter(|u| !u.is_empty()),
-            run_id: Some(run_id.clone()),
-            job_id: Some(j.id.to_string()),
+            run_id: run_id.clone(),
+            job_id: (!cross_project).then(|| j.id.to_string()),
             started_at: Some(j.started_at).filter(|s| !s.is_empty()),
             completed_at: Some(j.finished_at).filter(|s| !s.is_empty()),
         })
@@ -12844,16 +12853,34 @@ mod tests {
     #[test]
     fn pipeline_checks_body_preserves_failed_and_empty_reads() {
         for body in ["", "<html>502 Bad Gateway</html>", r#"{"message":"404 Not found"}"#] {
-            assert!(pipeline_checks_from(body, 42).is_err(), "{body}");
+            assert!(pipeline_checks_from(body, 42, false).is_err(), "{body}");
         }
-        assert!(pipeline_checks_from("[]", 42).unwrap().is_empty());
+        assert!(pipeline_checks_from("[]", 42, false).unwrap().is_empty());
         let checks =
-            pipeline_checks_from(r#"[{"id":7,"status":"failed","name":"test"}]"#, 42)
+            pipeline_checks_from(r#"[{"id":7,"status":"failed","name":"test"}]"#, 42, false)
                 .unwrap();
         assert_eq!(checks[0].name, "test");
         assert_eq!(checks[0].status, "FAILURE");
         assert_eq!(checks[0].run_id.as_deref(), Some("42"));
         assert_eq!(checks[0].job_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn pipeline_checks_from_cross_project_preserves_link_without_action_ids() {
+        let checks = pipeline_checks_from(
+            r#"[{"id":7,"status":"failed","name":"test",
+                 "web_url":"https://gitlab.com/fork/repo/-/jobs/7"}]"#,
+            42,
+            true,
+        )
+        .unwrap();
+        assert_eq!(checks[0].status, "FAILURE");
+        assert!(checks[0].run_id.is_none());
+        assert!(checks[0].job_id.is_none());
+        assert_eq!(
+            checks[0].details_url.as_deref(),
+            Some("https://gitlab.com/fork/repo/-/jobs/7")
+        );
     }
 
     #[test]

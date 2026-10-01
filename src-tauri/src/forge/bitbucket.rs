@@ -45,9 +45,9 @@ use crate::forge::{
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
-    ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut,
-    PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef,
-    PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
+    checks_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn,
+    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel,
+    PrMergeability, PrPollInfo, PrRef, PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
 };
 
 /// Whether this process has SUCCESSFULLY seeded git's credential store this session
@@ -1007,6 +1007,14 @@ struct BbPr {
     created_on: String,
 }
 
+fn view_head_sha(pr: &BbPr) -> &str {
+    pr.source
+        .as_ref()
+        .and_then(|s| s.commit.as_ref())
+        .map(|c| c.hash.as_str())
+        .unwrap_or_default()
+}
+
 /// Best display login for a Bitbucket user: display_name else nickname (other users
 /// carry no username — only the authenticated self does).
 fn user_login(u: &BbUser) -> String {
@@ -1638,12 +1646,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // The core PR's head scopes checks independently of the best-effort commits
     // fetch; `pullrequests/{id}/statuses` includes superseded commits. Missing head
     // or failed statuses leave checks unknown without failing the view.
-    let head_sha = pr
-        .source
-        .as_ref()
-        .and_then(|s| s.commit.as_ref())
-        .map(|c| c.hash.as_str())
-        .unwrap_or_default();
+    let head_sha = view_head_sha(&pr);
     let (checks, checks_unknown) = if head_sha.is_empty() {
         (Vec::new(), true)
     } else {
@@ -1674,10 +1677,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
                 })
                 .collect()
         });
-        match checks {
-            Ok(checks) => (checks, false),
-            Err(_) => (Vec::new(), true),
-        }
+        checks_or_unknown(checks)
     };
 
     // Completed reviewers = participants who acted, derived from participant state
@@ -6586,6 +6586,18 @@ mod tests {
         // Undated first, then the true chronological order — the reverse of the
         // strings for the dated pair.
         assert_eq!(dates, vec!["", utc_late, local_evening]);
+    }
+
+    #[test]
+    fn view_head_sha_reads_the_core_pr_or_stays_unavailable() {
+        for (body, expected) in [
+            (r#"{"source":{"commit":{"hash":"abc123def456"}}}"#, "abc123def456"),
+            (r#"{"source":{"commit":null}}"#, ""),
+            ("{}", ""),
+        ] {
+            let pr: BbPr = serde_json::from_str(body).unwrap();
+            assert_eq!(view_head_sha(&pr), expected, "{body}");
+        }
     }
 
     #[test]
