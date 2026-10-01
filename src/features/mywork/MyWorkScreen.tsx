@@ -1330,9 +1330,9 @@ function MyWorkNotices({
     // its last loaded ones only when they aren't another key's placeholder.
     if (leg.query.isPaused) {
       if (bodyOffline) return [];
-      return leg.query.data === undefined || leg.query.isPlaceholderData
-        ? [offlinePendingMessage(`${providerLabel(leg.provider)} work`)]
-        : [OFFLINE_ROWS_NOTICE];
+      return hasOwnData(leg)
+        ? [OFFLINE_ROWS_NOTICE]
+        : [offlinePendingMessage(`${providerLabel(leg.provider)} work`)];
     }
     if (refreshFailed(leg.query)) return [FAILURE_NOTICE[leg.provider]];
     return settledNow(leg) ? [] : [FETCH_NOTICE[leg.provider]];

@@ -2338,7 +2338,8 @@ async fn gh_pr_stack(repo_path: &str, slug: &str, number: u64) -> PrStackProbe {
 }
 
 /// One stack's members bottom→top, or `None` when the fetch failed (spawn,
-/// non-zero exit, unparseable body) — distinct from a genuinely short list.
+/// non-zero exit, unparseable body, or an empty member list) — distinct from
+/// a genuinely short list.
 async fn gh_stack_members(
     repo_path: &str,
     slug: &str,
