@@ -1165,7 +1165,9 @@ check **peeks its job log inline** instead, so you never leave the PR. You can
 **copy** the log with the button in its top-right corner, or follow the
 **Open full run** link. An external check (Vercel and the like) links straight
 out to its details. **GitLab MRs** get the same rollup from the MR's pipeline
-jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
+jobs, with the same **inline log peek** (a merge request whose pipeline runs in
+the contributor's fork lists its jobs as links out instead, with no inline log
+or re-run); **Bitbucket PRs** get it from the PR's
 commit build statuses, but those **link out only** (name, state, and URL —
 Bitbucket exposes no fetchable job logs).
 

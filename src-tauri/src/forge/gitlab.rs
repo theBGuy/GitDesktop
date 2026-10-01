@@ -1830,6 +1830,13 @@ struct GlabHeadPipeline {
     project_id: Option<u64>,
 }
 
+impl GlabHeadPipeline {
+    /// The owner when it differs from the MR target; either id unknown keeps the target route.
+    fn cross_project_id(&self, target_project_id: Option<u64>) -> Option<u64> {
+        self.project_id.filter(|id| target_project_id.is_some_and(|target| target != *id))
+    }
+}
+
 /// Count added/deleted lines in a GitLab per-file diff. The input is hunk-only
 /// (no `---`/`+++` file headers — `reconstruct_file_diff` adds those), so a
 /// leading `+`/`-` is always real content; `@@` hunk headers start with `@`.
@@ -2214,9 +2221,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // explicitly unknown list; an absent pipeline is a known empty list.
     let (checks, checks_unknown) = match &mr.head_pipeline {
         Some(p) => {
-            let cross_project_id = p
-                .project_id
-                .filter(|id| mr.target_project_id.is_some_and(|target| target != *id));
+            let cross_project_id = p.cross_project_id(mr.target_project_id);
             checks_or_unknown(pipeline_checks(repo_path, &enc, p.id, cross_project_id).await)
         }
         None => (Vec::new(), false),
@@ -12427,6 +12432,35 @@ mod tests {
         );
         assert_eq!(m.state, "checking");
         assert_eq!(m.detail, None);
+    }
+
+    #[test]
+    fn mr_changes_head_pipeline_selects_only_a_known_different_project() {
+        let base = r#""iid": 6, "web_url": "u", "title": "t", "target_branch": "main",
+            "source_branch": "feat", "state": "opened", "source_project_id": 2"#;
+        for (fields, expected) in [
+            (
+                r#""head_pipeline":{"id":42,"project_id":2},"target_project_id":1"#,
+                Some(2),
+            ),
+            (
+                r#""head_pipeline":{"id":42,"project_id":1},"target_project_id":1"#,
+                None,
+            ),
+            (
+                r#""head_pipeline":{"id":42,"project_id":null},"target_project_id":1"#,
+                None,
+            ),
+            (r#""head_pipeline":{"id":42,"project_id":2}"#, None),
+        ] {
+            let mr: GlabMrChanges =
+                serde_json::from_str(&format!("{{ {base}, {fields} }}")).unwrap();
+            assert_eq!(
+                mr.head_pipeline.unwrap().cross_project_id(mr.target_project_id),
+                expected,
+                "{fields}"
+            );
+        }
     }
 
     /// The `/changes` payload the MR view already fetches carries the conflict and
