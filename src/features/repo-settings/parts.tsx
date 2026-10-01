@@ -67,12 +67,11 @@ export function AsyncErrorCard({
 }
 
 /**
- * The shared loading / error / empty / list shell for the repo-settings async
- * lists (secrets, collaborators, rulesets, webhooks). Renders skeletons while
- * loading, a destructive error card (optionally with a `gh auth refresh` scope
- * hint or a custom hint) on error, a dashed placeholder when empty, else the rows.
- * Extracting it keeps these sections consistent and stops the error/scope copy
- * from drifting per-section.
+ * {@link RemoteListSection}'s body: skeletons while loading, a destructive error
+ * card (optionally with a `gh auth refresh` scope hint or a custom hint) on
+ * error, a dashed placeholder when empty, else the rows. Module-private on
+ * purpose: a section handing it a raw query error would swap retained rows for
+ * the error card, so sections reach it only through the ladder.
  */
 function AsyncListBody({
   loading,
@@ -137,7 +136,6 @@ export function RemoteListSection({
   noun,
   loadFailed,
   extraPaused = false,
-  extraAction,
   emptyLabel,
   skeletonClassName,
   errorTitle,
@@ -157,13 +155,12 @@ export function RemoteListSection({
   rowCount: number;
   /** Plural, as the notice reads it ("webhooks"). */
   noun: string;
-  /** The notice's line for a failure with nothing loaded. */
+  /** `sectionReadNotice`'s line for a failure with nothing loaded. Never shown
+   *  here: that failure draws the error card, and the notice stays silent. */
   loadFailed: string;
   /** A park the list read can't report itself: a read it depends on waiting
    *  for a connection leaves this one idle, not paused. */
   extraPaused?: boolean;
-  /** A second recovery action beside the notice's Retry. */
-  extraAction?: ReactNode;
   emptyLabel: string;
   skeletonClassName?: string;
   errorTitle?: string;
@@ -208,7 +205,6 @@ export function RemoteListSection({
         onRetry={
           listState === "rows-degraded" ? () => void query.refetch() : undefined
         }
-        extraAction={extraAction}
         className="px-0 pb-0"
       />
       {listState !== "offline" && (
