@@ -21,7 +21,7 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketHook } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 /** Bitbucket's webhook events, curated to the ones people wire, in display
  *  order. */
@@ -97,14 +97,15 @@ export function BitbucketWebhooksSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={hooks.isPending}
-        error={hooks.error}
-        empty={hooks.data?.length === 0}
+      <RemoteListSection
+        query={hooks}
+        rowCount={hooks.data?.length ?? 0}
+        noun="webhooks"
+        loadFailed="Couldn't load webhooks."
         emptyLabel="No webhooks yet."
         skeletonClassName="h-14 w-full"
         errorTitle="Couldn't load webhooks."
-        errorHint="Managing webhooks needs admin on this repository."
+        errorHint="If this is a permissions error, managing webhooks needs admin on this repository."
       >
         {hooks.data?.map((h) => (
           <div key={h.uuid} className="rounded-md border p-2 text-xs">
@@ -157,7 +158,7 @@ export function BitbucketWebhooksSection({
             </div>
           </div>
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

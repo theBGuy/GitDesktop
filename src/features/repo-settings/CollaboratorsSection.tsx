@@ -7,13 +7,6 @@ import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import {
   useAddCollaborator,
@@ -28,12 +21,8 @@ import type { RepoRole } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import {
-  ARIA_DISABLED_CLASS,
-  useDisabledReason,
-} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { HeldRoleSelect, InlineConfirm, RemoteListSection } from "./parts";
 
 const ROLES: { value: RepoRole; label: string }[] = [
   { value: "read", label: "Read" },
@@ -240,14 +229,15 @@ export function CollaboratorsSection({
         )}
       </div>
 
-      <AsyncListBody
-        loading={collaborators.isPending}
-        error={collaborators.error}
-        empty={collaborators.data?.length === 0}
+      <RemoteListSection
+        query={collaborators}
+        rowCount={collabRows.length}
+        noun="collaborators"
+        loadFailed="Couldn't load collaborators."
         emptyLabel="No collaborators yet."
         skeletonClassName="h-11 w-full"
         errorTitle="Couldn't load collaborators."
-        errorHint="Managing collaborators needs repo-admin access."
+        errorHint="If this is a permissions error, managing collaborators needs repo-admin access."
       >
         <div
           role="listbox"
@@ -293,7 +283,7 @@ export function CollaboratorsSection({
             );
           })}
         </div>
-      </AsyncListBody>
+      </RemoteListSection>
 
       {inviteRows.length > 0 && (
         <div className="space-y-2">
@@ -368,12 +358,6 @@ function RoleSlot({
   heldReason?: string;
   onRole: (role: RepoRole) => void;
 }) {
-  const held = heldReason !== undefined;
-  const reason = useDisabledReason({ disabled: held, reason: heldReason });
-  // Held by readOnly + a gated open state, never Base UI's `disabled`: that sets
-  // the trigger's tabIndex to -1, taking the picker and its reason out of reach.
-  const [open, setOpen] = useState(false);
-  if (held && open) setOpen(false);
   if (personal)
     return (
       <span className="flex h-7 w-28 shrink-0 items-center pl-2.5 text-xs">
@@ -382,48 +366,13 @@ function RoleSlot({
       </span>
     );
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0",
-        reason.blockedReason !== null && "cursor-not-allowed",
-      )}
-      title={reason.wrapperTitle}
-    >
-      <Select
-        items={ROLE_ITEMS}
-        value={value}
-        onValueChange={(v) => v && onRole(v as RepoRole)}
-        readOnly={held}
-        open={open}
-        onOpenChange={(next) => {
-          if (!held) setOpen(next);
-        }}
-      >
-        <SelectTrigger
-          size="sm"
-          className={cn("w-28", ARIA_DISABLED_CLASS)}
-          aria-label="Role"
-          aria-disabled={held || undefined}
-          aria-describedby={reason.describedBy}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {ROLES.map((r) => (
-            <SelectItem key={r.value} value={r.value}>
-              {r.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {/* `hidden` rather than sr-only: a description may point at hidden text, and
-          an sr-only sibling would be read again as page text after the trigger. */}
-      {reason.blockedReason !== null && (
-        <span id={reason.reasonId} hidden>
-          {reason.blockedReason}
-        </span>
-      )}
-    </span>
+    <HeldRoleSelect
+      value={value}
+      heldReason={heldReason}
+      onRole={(v) => onRole(v as RepoRole)}
+      options={ROLES}
+      items={ROLE_ITEMS}
+    />
   );
 }
 

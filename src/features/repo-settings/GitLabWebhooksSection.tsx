@@ -29,7 +29,7 @@ import {
 import type { GitLabHook, GitLabHookDelivery } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, DeliveryPayload, InlineConfirm } from "./parts";
+import { DeliveryPayload, InlineConfirm, RemoteListSection } from "./parts";
 
 /** GitLab's per-hook event flags, in display order (no "send everything" —
  *  GitLab models events as independent booleans). */
@@ -126,14 +126,15 @@ export function GitLabWebhooksSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={hooks.isPending}
-        error={hooks.error}
-        empty={hooks.data?.length === 0}
+      <RemoteListSection
+        query={hooks}
+        rowCount={hooks.data?.length ?? 0}
+        noun="webhooks"
+        loadFailed="Couldn't load webhooks."
         emptyLabel="No webhooks yet."
         skeletonClassName="h-14 w-full"
         errorTitle="Couldn't load webhooks."
-        errorHint="Managing webhooks needs the Maintainer role."
+        errorHint="If this is a permissions error, managing webhooks needs the Maintainer role."
       >
         {hooks.data?.map((h) => (
           <div key={h.id} className="rounded-md border p-2 text-xs">
@@ -208,7 +209,7 @@ export function GitLabWebhooksSection({
             </div>
           </div>
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }
@@ -380,10 +381,11 @@ function HookDeliveries({
         </p>
       </div>
 
-      <AsyncListBody
-        loading={events.isPending}
-        error={events.error}
-        empty={events.data?.length === 0}
+      <RemoteListSection
+        query={events}
+        rowCount={events.data?.length ?? 0}
+        noun="deliveries"
+        loadFailed="Couldn't load the delivery log."
         emptyLabel="No deliveries recorded yet — send a test event."
         skeletonClassName="h-10 w-full"
         errorTitle="Couldn't load the delivery log."
@@ -398,7 +400,7 @@ function HookDeliveries({
             onResend={() => handleResend(d.id)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

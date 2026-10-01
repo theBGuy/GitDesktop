@@ -62,7 +62,7 @@ export function PagesSection({
       <AsyncErrorCard
         title="Couldn't load Pages."
         error={pages.error}
-        hint="This needs repo-admin access."
+        hint="If this is a permissions error, managing Pages needs repo-admin access."
       />
     );
   }

@@ -17,7 +17,7 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { userRefHint } from "../pulls/ReviewersPopover";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 /** Bitbucket default reviewers: the accounts auto-added to every new pull
  *  request. List the current reviewers (arrow-key navigable), add from the
@@ -75,14 +75,15 @@ export function BitbucketDefaultReviewersSection({
         />
       </div>
 
-      <AsyncListBody
-        loading={reviewers.isPending}
-        error={reviewers.error}
-        empty={rows.length === 0}
+      <RemoteListSection
+        query={reviewers}
+        rowCount={rows.length}
+        noun="default reviewers"
+        loadFailed="Couldn't load default reviewers."
         emptyLabel="No default reviewers — new pull requests start with no reviewers."
         skeletonClassName="h-11 w-full"
         errorTitle="Couldn't load default reviewers."
-        errorHint="Managing default reviewers needs admin on this repository."
+        errorHint="If this is a permissions error, managing default reviewers needs admin on this repository."
       >
         <div
           role="listbox"
@@ -112,7 +113,7 @@ export function BitbucketDefaultReviewersSection({
             />
           ))}
         </div>
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

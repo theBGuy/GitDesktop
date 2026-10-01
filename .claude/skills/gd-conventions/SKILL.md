@@ -393,6 +393,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Empty-picker copy** — a picker's line while it draws no options rides
   `emptyPickerCopy` (remote-section-state); a read parked with nothing loaded,
   or over a failure, says offline; only a successful read may claim none.
+- **Settings list retention** — a repo-settings list read renders through
+  `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
+  query error: a failed or parked refresh keeps loaded rows under a notice.
+  Settled by omission (no `fetching`), so Retry survives its own press.
+- **Held role pickers** — a row's role select held while saving rides
+  `HeldRoleSelect` (repo-settings/parts): readOnly + gated open, never Base
+  UI's `disabled`, which drops the trigger and its reason from the tab order.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

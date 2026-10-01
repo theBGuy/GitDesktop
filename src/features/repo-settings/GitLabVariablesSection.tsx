@@ -15,7 +15,7 @@ import {
 } from "@/lib/git/queries";
 import type { GitLabVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 function validKey(k: string): boolean {
   return /^[A-Za-z0-9_]{1,255}$/.test(k);
@@ -158,14 +158,15 @@ export function GitLabVariablesSection({
         {keyWarning && <p className="text-[11px] text-warning">{keyWarning}</p>}
       </div>
 
-      <AsyncListBody
-        loading={variables.isPending}
-        error={variables.error}
-        empty={variables.data?.length === 0}
+      <RemoteListSection
+        query={variables}
+        rowCount={variables.data?.length ?? 0}
+        noun="variables"
+        loadFailed="Couldn't load variables."
         emptyLabel="No CI/CD variables yet."
         skeletonClassName="h-11 w-full"
         errorTitle="Couldn't load variables."
-        errorHint="Managing CI/CD variables needs the Maintainer role."
+        errorHint="If this is a permissions error, managing CI/CD variables needs the Maintainer role."
       >
         {variables.data?.map((v) => {
           // A key can repeat at different environment scopes — address both.
@@ -184,7 +185,7 @@ export function GitLabVariablesSection({
             />
           );
         })}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

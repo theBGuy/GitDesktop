@@ -28,7 +28,7 @@ import type { SecretApp } from "@/lib/git/types";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 const APPS: { value: SecretApp; label: string }[] = [
   { value: "actions", label: "Actions" },
@@ -249,10 +249,11 @@ function SecretsList({
         </p>
       </div>
 
-      <AsyncListBody
-        loading={secrets.isPending}
-        error={secrets.error}
-        empty={secrets.data?.length === 0}
+      <RemoteListSection
+        query={secrets}
+        rowCount={secrets.data?.length ?? 0}
+        noun="secrets"
+        loadFailed="Couldn't load secrets."
         emptyLabel="No secrets here yet."
         errorScope="repo"
       >
@@ -272,7 +273,7 @@ function SecretsList({
             onDelete={() => remove(s.name)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }
@@ -354,10 +355,11 @@ function VariablesList({
         </p>
       </div>
 
-      <AsyncListBody
-        loading={variables.isPending}
-        error={variables.error}
-        empty={variables.data?.length === 0}
+      <RemoteListSection
+        query={variables}
+        rowCount={variables.data?.length ?? 0}
+        noun="variables"
+        loadFailed="Couldn't load variables."
         emptyLabel="No variables here yet."
         errorScope="repo"
       >
@@ -378,7 +380,7 @@ function VariablesList({
             onDelete={() => remove(v.name)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

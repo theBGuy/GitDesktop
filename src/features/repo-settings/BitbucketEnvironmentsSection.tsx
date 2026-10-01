@@ -13,7 +13,7 @@ import {
   PipelinesConfigErrorCard,
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
-import { AsyncListBody } from "./parts";
+import { RemoteListSection } from "./parts";
 
 /** Bitbucket deployment environments (read-only). Environments are created and
  *  managed on Bitbucket — there's no create/edit here — so this section just
@@ -81,19 +81,21 @@ export function BitbucketEnvironmentsSection({
         )}
       </div>
 
-      <AsyncListBody
-        loading={environments.isPending}
-        error={environments.error}
-        empty={environments.data?.length === 0}
+      <RemoteListSection
+        query={environments}
+        rowCount={environments.data?.length ?? 0}
+        noun="environments"
+        loadFailed="Couldn't load environments."
+        extraPaused={config.isPaused}
         emptyLabel="No deployment environments."
         skeletonClassName="h-11 w-full"
         errorTitle="Couldn't load environments"
-        errorHint="Viewing deployment environments needs admin on this repository."
+        errorHint="If this is a permissions error, viewing deployment environments needs admin on this repository."
       >
         {environments.data?.map((env) => (
           <EnvironmentRow key={env.uuid} environment={env} />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

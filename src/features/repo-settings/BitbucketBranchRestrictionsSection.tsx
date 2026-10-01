@@ -20,7 +20,7 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketBranchRestriction } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 /** The restriction kinds the app offers, with human labels. `needsValue` kinds
  *  carry a numeric argument (a required count). Only "push" and
@@ -111,14 +111,15 @@ export function BitbucketBranchRestrictionsSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={restrictions.isPending}
-        error={restrictions.error}
-        empty={restrictions.data?.length === 0}
+      <RemoteListSection
+        query={restrictions}
+        rowCount={restrictions.data?.length ?? 0}
+        noun="branch restrictions"
+        loadFailed="Couldn't load branch restrictions."
         emptyLabel="No branch restrictions yet."
         skeletonClassName="h-12 w-full"
         errorTitle="Couldn't load branch restrictions."
-        errorHint="Managing branch restrictions needs admin on this repository."
+        errorHint="If this is a permissions error, managing branch restrictions needs admin on this repository."
       >
         {restrictions.data?.map((r) => (
           <div key={r.id} className="rounded-md border p-2 text-xs">
@@ -163,7 +164,7 @@ export function BitbucketBranchRestrictionsSection({
             </div>
           </div>
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

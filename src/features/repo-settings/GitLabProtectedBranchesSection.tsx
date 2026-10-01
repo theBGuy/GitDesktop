@@ -26,7 +26,7 @@ import type {
   GitLabProtectedBranch,
 } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 /** GitLab's protectable access levels, for both the "allowed to push" and
  *  "allowed to merge" allow lists. Free tier exposes these three roles; the
@@ -121,14 +121,15 @@ export function GitLabProtectedBranchesSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={branches.isPending}
-        error={branches.error}
-        empty={branches.data?.length === 0}
+      <RemoteListSection
+        query={branches}
+        rowCount={branches.data?.length ?? 0}
+        noun="protected branches"
+        loadFailed="Couldn't load protected branches."
         emptyLabel="No protected branches."
         skeletonClassName="h-14 w-full"
         errorTitle="Couldn't load protected branches."
-        errorHint="Managing protected branches needs the Maintainer role."
+        errorHint="If this is a permissions error, managing protected branches needs the Maintainer role."
       >
         {branches.data?.map((b) => (
           <ProtectedBranchRow
@@ -147,7 +148,7 @@ export function GitLabProtectedBranchesSection({
             onUnprotect={() => handleUnprotect(b.name)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

@@ -1,8 +1,22 @@
-import { Fragment, type ReactNode, useMemo } from "react";
+import { Fragment, type ReactNode, useMemo, useState } from "react";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  offlinePendingMessage,
+  parkedUnlessPermanent,
+  resolveRemoteSection,
+  sectionReadNotice,
+} from "@/features/conversations/remote-section-state";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -12,6 +26,10 @@ import {
 } from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 /**
@@ -56,7 +74,7 @@ export function AsyncErrorCard({
  * Extracting it keeps these sections consistent and stops the error/scope copy
  * from drifting per-section.
  */
-export function AsyncListBody({
+function AsyncListBody({
   loading,
   error,
   empty,
@@ -104,6 +122,185 @@ export function AsyncListBody({
     );
   }
   return <div className="space-y-2">{children}</div>;
+}
+
+/**
+ * A repo-settings list over one read, on the remote-section ladder: a failed or
+ * parked refresh keeps the loaded rows under a notice, and only a read with
+ * nothing loaded falls back to the error card or the offline line. Settled by
+ * omission: the resolvers get no `fetching`, so the notice and its Retry stay
+ * mounted through an in-flight retry rather than unmounting under the press.
+ */
+export function RemoteListSection({
+  query,
+  rowCount,
+  noun,
+  loadFailed,
+  extraPaused = false,
+  extraAction,
+  emptyLabel,
+  skeletonClassName,
+  errorTitle,
+  errorScope,
+  errorHint,
+  children,
+}: {
+  query: {
+    data: unknown;
+    error: unknown;
+    isPending: boolean;
+    isError: boolean;
+    isPaused: boolean;
+    refetch: () => unknown;
+  };
+  /** The rows drawn, which the notice reads only once data has loaded. */
+  rowCount: number;
+  /** Plural, as the notice reads it ("webhooks"). */
+  noun: string;
+  /** The notice's line for a failure with nothing loaded. */
+  loadFailed: string;
+  /** A park the list read can't report itself: a read it depends on waiting
+   *  for a connection leaves this one idle, not paused. */
+  extraPaused?: boolean;
+  /** A second recovery action beside the notice's Retry. */
+  extraAction?: ReactNode;
+  emptyLabel: string;
+  skeletonClassName?: string;
+  errorTitle?: string;
+  errorScope?: string;
+  errorHint?: ReactNode;
+  children: ReactNode;
+}) {
+  const parked = parkedUnlessPermanent(query) || extraPaused;
+  const listState = resolveRemoteSection({
+    ghPending: false,
+    ghReady: true,
+    listPending: query.isPending,
+    error: query.isError,
+    rowCount,
+    paused: parked,
+  });
+  const notice = sectionReadNotice({
+    noun,
+    loadFailed,
+    rowCount: query.data === undefined ? undefined : rowCount,
+    isError: query.isError,
+    isPaused: parked,
+  });
+  const noticeMessage = (() => {
+    switch (listState) {
+      case "offline":
+        return offlinePendingMessage(noun);
+      case "rows-degraded":
+      case "rows-offline":
+        return notice?.message;
+      default:
+        return undefined;
+    }
+  })();
+  return (
+    <div className="space-y-2">
+      <DegradedListNotice
+        noun={noun}
+        degraded={noticeMessage !== undefined}
+        message={noticeMessage}
+        retryLabel={notice?.retryLabel}
+        onRetry={
+          listState === "rows-degraded" ? () => void query.refetch() : undefined
+        }
+        extraAction={extraAction}
+        className="px-0 pb-0"
+      />
+      {listState !== "offline" && (
+        <AsyncListBody
+          loading={listState === "list-skeleton"}
+          error={listState === "error" ? query.error : null}
+          empty={listState === "empty"}
+          emptyLabel={emptyLabel}
+          skeletonClassName={skeletonClassName}
+          errorTitle={errorTitle}
+          errorScope={errorScope}
+          errorHint={errorHint}
+        >
+          {children}
+        </AsyncListBody>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A row's role picker, held with a reason while a change saves or the roles
+ * are unknown. Labels come from `items` (Base UI's value → label map) or, for
+ * a value outside the offered roles, an explicit `valueLabel`.
+ */
+export function HeldRoleSelect({
+  value,
+  heldReason,
+  onRole,
+  options,
+  items,
+  valueLabel,
+}: {
+  value: string;
+  /** Why the picker is held, as its hover text and accessible description. */
+  heldReason?: string;
+  onRole: (value: string) => void;
+  /** The roles offered, in order. */
+  options: readonly { value: string; label: string }[];
+  items?: Record<string, string>;
+  valueLabel?: ReactNode;
+}) {
+  const held = heldReason !== undefined;
+  const reason = useDisabledReason({ disabled: held, reason: heldReason });
+  // Held by readOnly + a gated open state, never Base UI's `disabled`: that sets
+  // the trigger's tabIndex to -1, taking the picker and its reason out of reach.
+  const [open, setOpen] = useState(false);
+  if (held && open) setOpen(false);
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0",
+        reason.blockedReason !== null && "cursor-not-allowed",
+      )}
+      title={reason.wrapperTitle}
+    >
+      <Select
+        items={items}
+        value={value}
+        onValueChange={(v) => v && onRole(v)}
+        readOnly={held}
+        open={open}
+        onOpenChange={(next) => {
+          if (!held) setOpen(next);
+        }}
+      >
+        <SelectTrigger
+          size="sm"
+          className={cn("w-28", ARIA_DISABLED_CLASS)}
+          aria-label="Role"
+          aria-disabled={held || undefined}
+          aria-describedby={reason.describedBy}
+        >
+          <SelectValue>{valueLabel}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((r) => (
+            <SelectItem key={r.value} value={r.value}>
+              {r.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* `hidden` rather than sr-only: a description may point at hidden text, and
+          an sr-only sibling would be read again as page text after the trigger. */}
+      {reason.blockedReason !== null && (
+        <span id={reason.reasonId} hidden>
+          {reason.blockedReason}
+        </span>
+      )}
+    </span>
+  );
 }
 
 /**

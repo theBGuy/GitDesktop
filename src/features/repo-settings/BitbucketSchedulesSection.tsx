@@ -32,7 +32,7 @@ import {
   PipelinesConfigErrorCard,
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteListSection } from "./parts";
 
 const bbSchedulesKey = (repo: string) => ["repo", repo, "bb-schedules"];
 
@@ -160,14 +160,16 @@ export function BitbucketSchedulesSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={schedules.isPending}
-        error={schedules.error}
-        empty={schedules.data?.length === 0}
+      <RemoteListSection
+        query={schedules}
+        rowCount={schedules.data?.length ?? 0}
+        noun="schedules"
+        loadFailed="Couldn't load schedules."
+        extraPaused={config.isPaused}
         emptyLabel="No schedules yet — a schedule runs a branch's pipeline on a recurring cron."
         skeletonClassName="h-12 w-full"
         errorTitle="Couldn't load schedules."
-        errorHint="Managing schedules needs admin on this repository."
+        errorHint="If this is a permissions error, managing schedules needs admin on this repository."
       >
         {schedules.data?.map((s) => (
           <ScheduleRow
@@ -185,7 +187,7 @@ export function BitbucketSchedulesSection({
             onRemove={() => handleRemove(s.uuid)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

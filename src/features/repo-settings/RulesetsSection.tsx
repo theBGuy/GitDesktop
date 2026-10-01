@@ -29,7 +29,7 @@ import {
 } from "@/lib/git/queries";
 import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncErrorCard, AsyncListBody, InlineConfirm } from "./parts";
+import { AsyncErrorCard, InlineConfirm, RemoteListSection } from "./parts";
 
 const ENFORCEMENTS: { value: RulesetEnforcement; label: string }[] = [
   { value: "active", label: "Active" },
@@ -52,7 +52,8 @@ const REF_SCOPE_ITEMS: Record<string, string> = {
 
 /** Shown by both ruleset surfaces when a load fails — a 403 is the likeliest
  *  reason, and rulesets are admin-only on GitHub. */
-const ADMIN_HINT = "Managing rulesets needs repo-admin access.";
+const ADMIN_HINT =
+  "If this is a permissions error, managing rulesets needs repo-admin access.";
 
 /** Rule types we model in the editor. Any others on an edited ruleset are
  *  preserved untouched (so advanced rules aren't dropped). */
@@ -403,10 +404,11 @@ function RulesetList({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={rulesets.isPending}
-        error={rulesets.error}
-        empty={rulesets.data?.length === 0}
+      <RemoteListSection
+        query={rulesets}
+        rowCount={rulesets.data?.length ?? 0}
+        noun="rulesets"
+        loadFailed="Couldn't load rulesets."
         emptyLabel="No rulesets yet."
         skeletonClassName="h-12 w-full"
         errorTitle="Couldn't load rulesets."
@@ -485,7 +487,7 @@ function RulesetList({
             </div>
           );
         })}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }

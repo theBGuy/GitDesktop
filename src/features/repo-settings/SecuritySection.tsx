@@ -174,7 +174,7 @@ export function SecuritySection({
       <AsyncErrorCard
         title="Couldn't load security."
         error={security.error}
-        hint="These settings need repo-admin access."
+        hint="If this is a permissions error, these settings need repo-admin access."
       />
     );
   }

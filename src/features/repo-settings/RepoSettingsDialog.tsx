@@ -86,7 +86,7 @@ import { GitLabProtectedBranchesSection } from "./GitLabProtectedBranchesSection
 import { GitLabVariablesSection } from "./GitLabVariablesSection";
 import { GitLabWebhooksSection } from "./GitLabWebhooksSection";
 import { PagesSection } from "./PagesSection";
-import { AsyncListBody, DeliveryPayload, InlineConfirm } from "./parts";
+import { DeliveryPayload, InlineConfirm, RemoteListSection } from "./parts";
 import { RulesetsSection } from "./RulesetsSection";
 import { SecretsSection } from "./SecretsSection";
 import { SecuritySection } from "./SecuritySection";
@@ -509,10 +509,11 @@ function WebhooksSection({
         </Button>
       </div>
 
-      <AsyncListBody
-        loading={hooks.isPending}
-        error={hooks.error}
-        empty={hooks.data?.length === 0}
+      <RemoteListSection
+        query={hooks}
+        rowCount={hooks.data?.length ?? 0}
+        noun="webhooks"
+        loadFailed="Couldn't load webhooks."
         emptyLabel="No webhooks yet."
         skeletonClassName="h-16 w-full"
         errorTitle="Couldn't load webhooks."
@@ -527,7 +528,7 @@ function WebhooksSection({
             onDeliveries={() => setDeliveriesFor(hook)}
           />
         ))}
-      </AsyncListBody>
+      </RemoteListSection>
     </div>
   );
 }
