@@ -1035,19 +1035,28 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     }
 }
 
-/// A known host, including undotted labels and numeric ports, cannot vote on
-/// failure kind. Input text is lowercased as for `classify_glab_failure`.
+/// Mask identifiable host tokens while preserving ambiguous bare diagnostic words.
+/// Input text is lowercased as for `classify_glab_failure`.
 pub(crate) fn classify_glab_failure_for_host(combined_lower: &str, host: &str) -> GlabFailure {
     let host = host.to_ascii_lowercase();
     let bare_host = host
         .rsplit_once(':')
         .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
         .map_or(host.as_str(), |(bare, _)| bare);
+    // A diagnostic-word host may falsely vote Offline on a bare mention.
+    // Keep that safe rejection (and the last good status) rather than turn
+    // a real outage into a signed-out verdict.
+    let diagnostic_host = bare_host == "429"
+        || NETWORKISH
+            .iter()
+            .any(|word| !word.contains(' ') && *word == bare_host);
     let residue = combined_lower
         .split_whitespace()
         .map(|word| {
             let trimmed = trim_host_token_suffix(word);
-            if trimmed.eq_ignore_ascii_case(&host) || trimmed.eq_ignore_ascii_case(bare_host) {
+            if (trimmed.eq_ignore_ascii_case(&host) || trimmed.eq_ignore_ascii_case(bare_host))
+                && (trimmed != word || !diagnostic_host)
+            {
                 // Keep the token slot so masking cannot join diagnostic phrases.
                 // Punctuation supplies no classifier words or digits.
                 "?"
@@ -3414,6 +3423,64 @@ check your internet connection or https://githubstatus.com";
             classify_glab_failure_for_host("x gitlab-429: 401 unauthorized", "gitlab"),
             GlabFailure::RateLimited
         );
+    }
+
+    #[test]
+    fn glab_diagnostic_host_preserves_outages_and_masks_identifiable_host_tokens() {
+        for (host, text, hosted, unhosted) in [
+            (
+                "timeout",
+                "read tcp 10.0.0.5:443: i/o timeout",
+                GlabFailure::Offline,
+                GlabFailure::Offline,
+            ),
+            (
+                "timeout",
+                "x timeout: 401 unauthorized",
+                GlabFailure::Broken,
+                GlabFailure::Offline,
+            ),
+            (
+                "timeout:8443",
+                "x timeout:8443: 401 unauthorized",
+                GlabFailure::Broken,
+                GlabFailure::Offline,
+            ),
+            (
+                "gitlab-429",
+                "x gitlab-429: 401 unauthorized",
+                GlabFailure::Broken,
+                GlabFailure::RateLimited,
+            ),
+            (
+                "timeout",
+                "x https://timeout/user: 401 unauthorized",
+                GlabFailure::Broken,
+                GlabFailure::Broken,
+            ),
+        ] {
+            assert_eq!(classify_glab_failure_for_host(text, host), hosted, "{text}");
+            assert_eq!(classify_glab_failure(text), unhosted, "{text}");
+        }
+    }
+
+    #[test]
+    fn glab_bare_diagnostic_hosts_keep_each_single_token_signal() {
+        for word in NETWORKISH.iter().filter(|word| !word.contains(' ')) {
+            for host in [word.to_string(), format!("{word}:8443")] {
+                assert_eq!(
+                    classify_glab_failure_for_host(word, &host),
+                    GlabFailure::Offline,
+                    "{word} / {host}"
+                );
+            }
+        }
+        for host in ["429", "429:8443"] {
+            assert_eq!(
+                classify_glab_failure_for_host("429", host),
+                GlabFailure::RateLimited
+            );
+        }
     }
 
     #[test]
