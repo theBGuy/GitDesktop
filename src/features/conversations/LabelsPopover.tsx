@@ -10,7 +10,17 @@ import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
+import { emptyPickerCopy } from "./remote-section-state";
 import { LabelChip } from "./Thread";
+
+/** The repo-labels picker's empty-list words, shared with the create dialogs'
+ *  own label pickers so the three can't drift. */
+export const LABELS_PICKER_COPY = {
+  noun: "labels",
+  loadFailed: "Couldn't load labels.",
+  empty: "This repository has no labels.",
+  loading: "Loading labels…",
+};
 
 /**
  * Labels editor + chips, shared by the issue, PR and discussion views (labels
@@ -145,9 +155,7 @@ export function LabelsPopover({
             </Popover.Title>
             {rows.length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
-                {repoLabels.isPending
-                  ? "Loading labels…"
-                  : "This repository has no labels."}
+                {emptyPickerCopy(repoLabels, LABELS_PICKER_COPY)}
               </p>
             )}
             {/* Unstyled but NOT removable — see `useRovingRows`. */}

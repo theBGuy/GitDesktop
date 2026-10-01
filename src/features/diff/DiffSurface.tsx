@@ -1195,6 +1195,7 @@ export function DiffSurface({
       isPending={diff.isPending}
       isError={diff.isError}
       isPaused={diff.isPaused}
+      isFetching={diff.isFetching}
       onRetry={() => void diff.refetch()}
       repoPath={repoPath}
       imageRevs={imageRevs}
@@ -1217,6 +1218,7 @@ export function DiffContent({
   isPending,
   isError,
   isPaused = false,
+  isFetching = false,
   onRetry,
   repoPath,
   imageRevs,
@@ -1235,6 +1237,9 @@ export function DiffContent({
   isError: boolean;
   /** The source read is parked offline (react-query's `isPaused`). */
   isPaused?: boolean;
+  /** The source read has a fetch in flight; over `isError` it hasn't settled
+   *  yet. Omitted, an error reads as settled. */
+  isFetching?: boolean;
   /** Refetches the source query; offered only on a failed refresh, since a
    *  parked read resumes by itself once back online. */
   onRetry?: () => void;
@@ -1338,11 +1343,15 @@ export function DiffContent({
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
 
-  const failed = refreshFailed({ isError, isPaused });
+  // Error + fetching (a reconnect's resumed read) is unsettled: no notice. A
+  // settled error says it failed, with Retry; a park (alone, or over an error)
+  // says offline, without one. The gate and the copy key on the same two arms,
+  // so an unsettled error can never fall through to the offline sentence.
+  const failed = refreshFailed({ isError, isPaused, isFetching });
   const notice = (
     <DegradedListNotice
       noun="this diff"
-      degraded={isError || isPaused}
+      degraded={failed || isPaused}
       message={detailNoticeMessage({
         noun: "diff",
         isError: failed,

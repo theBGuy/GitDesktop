@@ -30,6 +30,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { LABELS_PICKER_COPY } from "@/features/conversations/LabelsPopover";
+import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
@@ -1288,11 +1290,7 @@ export function CreatePrDialog({
                           </p>
                           {(repoLabels.data ?? []).length === 0 && (
                             <p className="px-1 py-1 text-xs text-muted-foreground">
-                              {repoLabels.isPending
-                                ? "Loading labels…"
-                                : repoLabels.isError
-                                  ? "Couldn't load labels."
-                                  : "This repository has no labels."}
+                              {emptyPickerCopy(repoLabels, LABELS_PICKER_COPY)}
                             </p>
                           )}
                           {(repoLabels.data ?? []).map((label) => (

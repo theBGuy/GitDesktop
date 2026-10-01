@@ -1,7 +1,7 @@
 // Pins the remote list section's render ladder, the detail pane's ladder, the
 // list notice, the "Load more" guard, the permanent-error predicate and the
-// park it withholds, the review-comments notice, and the board's
-// failure-notice grouping.
+// park it withholds, the review-comments notice, the empty-picker line, and
+// the board's failure-notice grouping.
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
@@ -16,6 +16,7 @@ import { test } from "node:test";
 
 import {
   detailNoticeMessage,
+  emptyPickerCopy,
   groupNoticesByMessage,
   guardedLimit,
   guardObservation,
@@ -1221,5 +1222,83 @@ test("grouped and flat lists × error, paused, and fresh review state", () => {
       truncated: false,
     }),
     null,
+  );
+});
+
+const PICKER_COPY = {
+  noun: "milestones",
+  loadFailed: "Couldn't load milestones.",
+  empty: "No open milestones",
+};
+const PICKER_OFFLINE = offlinePendingMessage("milestones");
+
+test("every empty-picker read state resolves to its line (truth table)", () => {
+  const read = (over) => ({
+    data: undefined,
+    isPending: false,
+    isError: false,
+    isPaused: false,
+    isFetching: false,
+    ...over,
+  });
+  const rows = [
+    [
+      "first load fetching",
+      read({ isPending: true, isFetching: true }),
+      "Loading…",
+    ],
+    [
+      "first load parked",
+      read({ isPending: true, isPaused: true }),
+      PICKER_OFFLINE,
+    ],
+    [
+      "settled failure, nothing loaded",
+      read({ isError: true }),
+      PICKER_COPY.loadFailed,
+    ],
+    [
+      "failure being refetched over a cached empty list",
+      read({ data: [], isError: true, isFetching: true }),
+      "Loading…",
+    ],
+    [
+      "failure parked over a cached empty list",
+      read({ data: [], isError: true, isPaused: true }),
+      PICKER_OFFLINE,
+    ],
+    ["loaded empty", read({ data: [] }), PICKER_COPY.empty],
+    [
+      "a parked refetch over a loaded empty list keeps the empty copy",
+      read({ data: [], isPaused: true }),
+      PICKER_COPY.empty,
+    ],
+  ];
+  for (const [name, q, want] of rows)
+    assert.equal(emptyPickerCopy(q, PICKER_COPY), want, name);
+  // A site's own loading words replace the default, and nothing else.
+  const own = { ...PICKER_COPY, loading: "Loading milestones…" };
+  for (const [name, q, want] of rows)
+    assert.equal(
+      emptyPickerCopy(q, own),
+      want === "Loading…" ? own.loading : want,
+      name,
+    );
+});
+
+test("only a successful read may claim the picker is empty (negative control)", () => {
+  // A settled failure with cached empty data is unknown, never "none".
+  assert.equal(
+    emptyPickerCopy(
+      {
+        data: [],
+        isPending: false,
+        isError: true,
+        isPaused: false,
+        isFetching: false,
+      },
+      PICKER_COPY,
+    ),
+    PICKER_COPY.loadFailed,
   );
 });

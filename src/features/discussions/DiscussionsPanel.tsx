@@ -20,12 +20,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import {
   type ListNoticeCause,
   listNotice,
   offlinePendingMessage,
+  refreshFailed,
   resolveRemoteSection,
 } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
@@ -47,6 +51,15 @@ import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { CreateDiscussionDialog } from "./CreateDiscussionDialog";
+
+/** What the forge and meta probes draw in place of the list, ahead of it. */
+type ProbeArm =
+  | "skeleton"
+  | "not-ready"
+  | "unsupported"
+  | "offline"
+  | "error"
+  | "disabled";
 
 export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
@@ -81,7 +94,11 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
         return signedOutReason;
       case !supportsDiscussions:
         return "Discussions aren't available on this repository's host";
-      case meta.isPending:
+      // A park outranks the failure it follows; a failure being refetched
+      // still loads.
+      case meta.isPaused && (meta.isPending || meta.isError):
+        return offlinePendingMessage("discussions");
+      case meta.isPending || (meta.isError && meta.isFetching):
         return "Loading discussions…";
       case meta.isError:
         return "Couldn't load discussions for this repository";
@@ -175,19 +192,6 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     void meta.refetch();
     if (listEnabled) void list.refetch();
   };
-  const errorState = (copy: string) => (
-    <div className="space-y-2 px-3 py-6 text-center text-xs text-muted-foreground">
-      <p>{copy}</p>
-      <Button
-        variant="outline"
-        size="sm"
-        className="cursor-pointer"
-        onClick={retry}
-      >
-        Retry
-      </Button>
-    </div>
-  );
   const offlineState = (
     <p className="px-3 py-6 text-center text-xs text-muted-foreground">
       {offlinePendingMessage("discussions")}
@@ -268,39 +272,33 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   // A failed meta or list read replaces the list only when no rows are drawn:
   // react-query keeps the last good data beside `isError`, and those rows stay
   // on screen under the degraded notice instead. Past a failed probe, `enabled`
-  // is the last KNOWN answer, so it can't stand in for "turned off".
-  const probeContent = ((): ReactElement | undefined => {
+  // is the last KNOWN answer, so it can't stand in for "turned off". A probe
+  // failure being refetched has settled nothing, so it falls to the list
+  // ladder, which loads.
+  const probeArm = ((): ProbeArm | null => {
     switch (true) {
       case gh.isPending:
-        return probeSkeleton;
+        return "skeleton";
       case !ghReady:
-        return <ForgeNotReady repoPath={repoPath} feature="discussions" />;
+        return "not-ready";
       case !supportsDiscussions:
-        return (
-          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-            Discussions aren't available on this repository's host.
-          </p>
-        );
+        return "unsupported";
       case meta.isPending:
-        return meta.isPaused ? offlineState : probeSkeleton;
+        return meta.isPaused ? "offline" : "skeleton";
       // A parked probe outranks its earlier failure, as in the list ladder:
       // the Retry would only park again.
-      case meta.isError && visible.length === 0:
-        return meta.isPaused
-          ? offlineState
-          : errorState("Couldn't load discussions for this repository.");
+      case meta.isError && meta.isPaused && visible.length === 0:
+        return "offline";
+      case refreshFailed(meta) && visible.length === 0:
+        return "error";
       case !meta.isError && !enabled:
-        return (
-          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-            Discussions aren't enabled for this repository.
-          </p>
-        );
+        return "disabled";
       default:
-        return undefined;
+        return null;
     }
   })();
   const listState =
-    probeContent === undefined
+    probeArm === null
       ? resolveRemoteSection({
           ghPending: false,
           ghReady: true,
@@ -316,6 +314,58 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
             (!list.isError || list.isFetching),
         })
       : null;
+  // Every Retry here (ForgeNotReady's, the probe's and the list's error card)
+  // resets a never-loaded read to pending, swapping its card for skeletons.
+  // Keyed on the card being mounted, a superset of ForgeNotReady's Retry.
+  const rescue = useRetryFocusRescue(
+    probeArm === "not-ready" || probeArm === "error" || listState === "error",
+  );
+  const errorState = (copy: string) => (
+    <div className="space-y-2 px-3 py-6 text-center text-xs text-muted-foreground">
+      <p>{copy}</p>
+      <Button
+        ref={rescue.retryRef}
+        variant="outline"
+        size="sm"
+        className="cursor-pointer"
+        onClick={retry}
+      >
+        Retry
+      </Button>
+    </div>
+  );
+  const probeContent = ((): ReactElement | undefined => {
+    switch (probeArm) {
+      case "skeleton":
+        return probeSkeleton;
+      case "not-ready":
+        return (
+          <ForgeNotReady
+            repoPath={repoPath}
+            feature="discussions"
+            retryRef={rescue.retryRef}
+          />
+        );
+      case "unsupported":
+        return (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Discussions aren't available on this repository's host.
+          </p>
+        );
+      case "offline":
+        return offlineState;
+      case "error":
+        return errorState("Couldn't load discussions for this repository.");
+      case "disabled":
+        return (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Discussions aren't enabled for this repository.
+          </p>
+        );
+      case null:
+        return undefined;
+    }
+  })();
   const listContent = ((): ReactNode => {
     if (probeContent !== undefined) return probeContent;
     switch (listState) {
@@ -446,7 +496,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           (`relative` only), so without containment the list's natural height
           leaks into the document once it exceeds the viewport (a window
           scrollbar over a black void). The Viewport still scrolls internally. */}
-      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <ScrollArea
+        // The host every arm below swaps inside, so a Retry's focus lands here.
+        ref={rescue.hostRef}
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-hidden outline-none"
+      >
         <div onKeyDown={onListKeyDown}>
           <DegradedListNotice
             noun="discussions"

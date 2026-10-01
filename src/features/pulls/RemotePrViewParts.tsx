@@ -125,6 +125,7 @@ export function PrFilesPane({
   isPending,
   isError,
   isPaused,
+  isFetching,
   onRetry,
   dataIsPlaceholder,
   threads,
@@ -149,6 +150,8 @@ export function PrFilesPane({
   isPending: boolean;
   isError: boolean;
   isPaused?: boolean;
+  /** The diff read has a fetch in flight; over `isError` it hasn't settled. */
+  isFetching: boolean;
   onRetry?: () => void;
   dataIsPlaceholder?: boolean;
   /** All PR review threads; the pane anchors those on the selected file. */
@@ -312,6 +315,7 @@ export function PrFilesPane({
             isPending={isPending}
             isError={isError}
             isPaused={isPaused}
+            isFetching={isFetching}
             onRetry={onRetry}
             dataIsPlaceholder={dataIsPlaceholder}
             repoPath={repoPath}

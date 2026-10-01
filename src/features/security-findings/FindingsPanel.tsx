@@ -719,6 +719,7 @@ function FindingsNotice({
   hasRows,
   isError,
   isPaused,
+  isFetching,
   onRetry,
   loadMore,
 }: {
@@ -727,14 +728,17 @@ function FindingsNotice({
   hasRows: boolean;
   isError: boolean;
   isPaused: boolean;
+  isFetching: boolean;
   onRetry: () => void;
   loadMore: { loadMoreFailed: boolean; retryLoadMore: () => void };
 }) {
-  const failed = refreshFailed({ isError, isPaused });
+  // Both arms read the query itself, never the pane alone: a failure being
+  // refetched claims neither, whatever the pane derived.
+  const failed = refreshFailed({ isError, isPaused, isFetching });
   const notice = listNotice({
     noun,
     failed: pane === "content-degraded" && failed,
-    offline: pane === "content-degraded" && !failed,
+    offline: pane === "content-degraded" && isPaused,
     // Findings keys differ only by limit, so placeholder rows are this list's.
     placeholder: false,
     hasRows,
@@ -2261,6 +2265,7 @@ export function FindingsPanel({
               hasRows={bbShown}
               isError={bb.isError}
               isPaused={bb.isPaused}
+              isFetching={bb.isFetching}
               onRetry={() => bb.refetch()}
               loadMore={bbMore}
             />
@@ -2323,6 +2328,7 @@ export function FindingsPanel({
               hasRows={glSastShown || glSecretsShown || glQualityShown}
               isError={gl.isError}
               isPaused={gl.isPaused}
+              isFetching={gl.isFetching}
               onRetry={() => gl.refetch()}
               loadMore={glMore}
             />
@@ -2453,6 +2459,7 @@ export function FindingsPanel({
               hasRows={alertsShown}
               isError={alerts.isError}
               isPaused={alerts.isPaused}
+              isFetching={alerts.isFetching}
               onRetry={() => alerts.refetch()}
               loadMore={alertsMore}
             />
@@ -2571,6 +2578,7 @@ export function FindingsPanel({
               hasRows={codeScanningShown}
               isError={codeScanning.isError}
               isPaused={codeScanning.isPaused}
+              isFetching={codeScanning.isFetching}
               onRetry={() => codeScanning.refetch()}
               loadMore={codeScanningMore}
             />
@@ -2706,6 +2714,7 @@ export function FindingsPanel({
               hasRows={secretsShown}
               isError={secrets.isError}
               isPaused={secrets.isPaused}
+              isFetching={secrets.isFetching}
               onRetry={() => secrets.refetch()}
               loadMore={secretsMore}
             />
@@ -2844,6 +2853,7 @@ export function FindingsPanel({
               hasRows={advisoriesShown}
               isError={advisories.isError}
               isPaused={advisories.isPaused}
+              isFetching={advisories.isFetching}
               onRetry={() => advisories.refetch()}
               loadMore={advisoriesMore}
             />

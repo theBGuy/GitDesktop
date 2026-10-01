@@ -29,6 +29,27 @@ export function refreshFailed(q: {
   return q.isError && !q.isPaused && !q.isFetching;
 }
 
+/** The line a picker shows while it draws no options. A park outranks the
+ *  failure it follows, a failure being refetched still loads, and `empty` is
+ *  said only once a read has answered with none: a parked refetch over a
+ *  loaded empty list keeps it, being a loaded answer. */
+export function emptyPickerCopy(
+  q: {
+    data: unknown;
+    isPending: boolean;
+    isError: boolean;
+    isPaused: boolean;
+    isFetching: boolean;
+  },
+  copy: { noun: string; loadFailed: string; empty: string; loading?: string },
+): string {
+  if (q.isPaused && (q.data === undefined || q.isError))
+    return offlinePendingMessage(copy.noun);
+  if (refreshFailed(q)) return copy.loadFailed;
+  if (q.isPending || q.isError) return copy.loading ?? "Loading…";
+  return copy.empty;
+}
+
 /** The notice over a detail pane's retained content. `noun` is bare ("pull
  *  request"); `stale` is a switch still showing the PREVIOUS item as
  *  placeholder, which a parked read can't call this one's last loaded version. */

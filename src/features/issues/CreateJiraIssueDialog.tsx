@@ -28,6 +28,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import {
+  DEGRADED_ACTION_CLASS,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
@@ -187,6 +193,13 @@ export function CreateJiraIssueDialog({
 
   const typeItems = Object.fromEntries(creatable.map((t) => [t.id, t.name]));
   const noTypes = !types.isPending && !types.isError && creatable.length === 0;
+  // Only a settled failure counts, and it replaces the picker only with nothing
+  // to pick: cached types (and the pick made from them) stay under a line.
+  const typesRefreshFailed = refreshFailed(types);
+  const typesFailed = typesRefreshFailed && creatable.length === 0;
+  const typesParked = types.isPaused && types.data === undefined;
+  // Either Retry unmounts on press: the field's box takes the focus.
+  const typesRescue = useRetryFocusRescue(typesRefreshFailed);
   // Why the submit is held, for both the hover wrapper and the sr-only node.
   const submitReason = generating
     ? "Wait for the AI draft to finish"
@@ -272,14 +285,19 @@ export function CreateJiraIssueDialog({
               )}
             </form.AppField>
 
-            <div className="space-y-2">
+            <div
+              ref={typesRescue.hostRef}
+              tabIndex={-1}
+              className="space-y-2 outline-none"
+            >
               <Label htmlFor={issueTypeSelectId}>Issue type</Label>
-              {types.isError ? (
+              {typesFailed ? (
                 <div className="flex items-center gap-2 border px-3 py-2 text-xs text-muted-foreground">
                   <span className="flex-1">
                     Couldn't load issue types for {link.projectKey}.
                   </span>
                   <Button
+                    ref={typesRescue.retryRef}
                     type="button"
                     variant="outline"
                     size="xs"
@@ -305,7 +323,12 @@ export function CreateJiraIssueDialog({
                   <SelectTrigger id={issueTypeSelectId} className="w-full">
                     <SelectValue
                       placeholder={
-                        types.isPending ? "Loading types…" : "Select a type"
+                        typesParked
+                          ? offlinePendingMessage("issue types")
+                          : types.isPending ||
+                              (types.isFetching && creatable.length === 0)
+                            ? "Loading types…"
+                            : "Select a type"
                       }
                     />
                   </SelectTrigger>
@@ -317,6 +340,20 @@ export function CreateJiraIssueDialog({
                     ))}
                   </SelectContent>
                 </Select>
+              )}
+              {typesRefreshFailed && !typesFailed && (
+                <p className="text-xs text-muted-foreground">
+                  Couldn't refresh issue types — showing the last loaded ones.{" "}
+                  <button
+                    ref={typesRescue.retryRef}
+                    type="button"
+                    aria-label="Retry loading issue types"
+                    onClick={() => void types.refetch()}
+                    className={DEGRADED_ACTION_CLASS}
+                  >
+                    Retry
+                  </button>
+                </p>
               )}
             </div>
 

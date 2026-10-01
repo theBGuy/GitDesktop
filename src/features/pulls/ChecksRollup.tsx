@@ -35,6 +35,11 @@ import {
   StatusIcon,
   statusLabel,
 } from "@/features/actions/status";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  offlinePendingMessage,
+  sectionReadNotice,
+} from "@/features/conversations/remote-section-state";
 import { clipTitle } from "@/lib/clip-title";
 import {
   forgeFeatureReady,
@@ -182,6 +187,14 @@ function CheckLogTail({
   const runLogs = useRunFailedLogs(repoPath, runId, jobId === null);
   const logs = jobId !== null ? jobLogs : runLogs;
 
+  // A read parked before it ever loaded would skeleton until reconnect.
+  if (logs.data === undefined && logs.isPaused) {
+    return (
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        {offlinePendingMessage("logs")}
+      </p>
+    );
+  }
   if (logs.isPending) {
     return (
       <div className="mt-1.5 space-y-1.5">
@@ -191,7 +204,7 @@ function CheckLogTail({
       </div>
     );
   }
-  if (logs.isError) {
+  if (logs.data === undefined) {
     return (
       <p className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
         Couldn't load logs.
@@ -208,12 +221,28 @@ function CheckLogTail({
       </p>
     );
   }
+  // A cached tail outlives a failed or parked refresh, under a line saying which.
+  const notice = sectionReadNotice({
+    noun: "logs",
+    loadFailed: "Couldn't load logs.",
+    // A log is one block, so "rows" is whether it has any text to show.
+    rowCount: logs.data === "" ? 0 : 1,
+    isError: logs.isError,
+    isPaused: logs.isPaused,
+    isFetching: logs.isFetching,
+  });
   return (
-    <LogBlock
-      text={logs.data ?? ""}
-      maxHeightClass="max-h-72"
-      className="mt-1.5"
-    />
+    <div className="mt-1.5">
+      <DegradedListNotice
+        noun="logs"
+        degraded={notice !== null}
+        message={notice?.message}
+        retryLabel={notice?.retryLabel}
+        onRetry={notice?.retry ? () => void logs.refetch() : undefined}
+        className="px-0 pb-1"
+      />
+      <LogBlock text={logs.data} maxHeightClass="max-h-72" />
+    </div>
   );
 }
 

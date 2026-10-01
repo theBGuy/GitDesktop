@@ -281,22 +281,26 @@ export function RunWorkflowDialog({
     }
   }
 
-  // A list parked before it ever loaded would say "Loading…" until reconnect,
-  // and an empty claim would be false: it says it waits for the connection.
-  const workflowsParked = workflows.isPaused && workflows.data === undefined;
+  // Only a read whose latest answer succeeded may call the picker empty: after
+  // a failure the cached empty list is unknown, not empty.
+  const emptyUnknown = workflows.isError && dispatchable.length === 0;
+  // A list parked before it ever loaded (or over a failure that left nothing to
+  // pick) would say "Loading…" until reconnect: it says it waits instead.
+  const workflowsParked =
+    workflows.isPaused && (workflows.data === undefined || emptyUnknown);
   // A failure being refetched has nothing to judge yet, so it still loads.
   const workflowsLoading =
     !workflowsParked &&
     (workflows.isPending ||
-      (workflows.isFetching && workflows.data === undefined));
-  // A settled failure with nothing loaded: the list is unknown, never empty.
+      (workflows.isFetching && (workflows.data === undefined || emptyUnknown)));
+  // A settled failure with nothing to pick: the list is unknown, never empty.
   const workflowsFailed =
-    !isPipelines && workflows.data === undefined && refreshFailed(workflows);
-  // The empty claim needs a loaded list behind it.
+    !isPipelines && dispatchable.length === 0 && refreshFailed(workflows);
   const noneDispatchable =
-    !isPipelines && workflows.data !== undefined && dispatchable.length === 0;
-  // The Retry below resets the never-loaded list to pending, which unmounts it:
-  // the field's own box survives and takes the focus.
+    !isPipelines && workflows.isSuccess && dispatchable.length === 0;
+  // The Retry below unmounts on press: a never-loaded list resets to pending,
+  // and a cached empty one keeps `isError` while fetching, which loads. The
+  // field's own box survives either way and takes the focus.
   const workflowsRescue = useRetryFocusRescue(workflowsFailed);
   // The one status line (offline or failed) the picker points at for AT.
   const workflowHintId = `${idBase}-workflow-hint`;

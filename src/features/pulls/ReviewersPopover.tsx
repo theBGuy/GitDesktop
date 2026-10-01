@@ -6,6 +6,7 @@ import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Checkbox } from "@/components/ui/checkbox";
+import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
 import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
@@ -168,11 +169,12 @@ export function ReviewersPopover({
             </Popover.Title>
             {(candidates.data ?? []).length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
-                {candidates.isPending
-                  ? "Loading…"
-                  : candidates.isError
-                    ? "Couldn't load workspace members."
-                    : "No eligible reviewers — the workspace has no other members."}
+                {emptyPickerCopy(candidates, {
+                  noun: "reviewers",
+                  loadFailed: "Couldn't load workspace members.",
+                  empty:
+                    "No eligible reviewers — the workspace has no other members.",
+                })}
               </p>
             )}
             {/* Unstyled but NOT removable — see `useRovingRows`. */}

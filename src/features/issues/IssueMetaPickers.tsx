@@ -17,6 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   useAssignableUsers,
@@ -180,7 +181,11 @@ export function AssigneesPopover({
             </Popover.Title>
             {loaded.length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
-                {users.isPending ? "Loading…" : "No assignable users."}
+                {emptyPickerCopy(users, {
+                  noun: "assignable users",
+                  loadFailed: "Couldn't load assignable users.",
+                  empty: "No assignable users.",
+                })}
               </p>
             )}
             {/* Unstyled but NOT removable — see `useRovingRows`. */}
@@ -316,7 +321,11 @@ export function MilestoneMenu({
           ))}
           {list.length === 0 && (
             <DropdownMenuItem disabled>
-              {milestones.isPending ? "Loading…" : "No open milestones"}
+              {emptyPickerCopy(milestones, {
+                noun: "milestones",
+                loadFailed: "Couldn't load milestones.",
+                empty: "No open milestones",
+              })}
             </DropdownMenuItem>
           )}
         </DropdownMenuContent>

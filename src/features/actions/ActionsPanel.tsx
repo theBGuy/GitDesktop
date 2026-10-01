@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import {
   OFFLINE_ROWS_NOTICE,
   offlinePendingMessage,
@@ -145,6 +146,10 @@ export function ActionsPanel({
 
   const branchFilter = branchOnly && currentBranch ? currentBranch : undefined;
   const runs = useWorkflowRunPages(repoPath, ghReady, active, branchFilter);
+  // ForgeNotReady's Retry resets the never-loaded probe to pending, which swaps
+  // the card for skeletons below. Keyed on the card being mounted, a superset of
+  // its Retry being mounted: the edge still rescues only a Retry that held focus.
+  const forgeRescue = useRetryFocusRescue(!forge.isPending && !ghReady);
   const queryClient = useQueryClient();
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectRun = useUiStore((s) => s.selectRun);
@@ -254,7 +259,13 @@ export function ActionsPanel({
             size="icon-sm"
             aria-label="Refresh runs"
             disabled={!ghReady || runs.isFetching}
-            reason={ghReady ? undefined : "Connect this repo to load runs"}
+            reason={
+              !ghReady
+                ? "Connect this repo to load runs"
+                : runs.isFetching
+                  ? `Refreshing ${runNoun} runs…`
+                  : undefined
+            }
             title="Refresh runs"
             // The whole Actions subtree, as the run-detail repair pass does: the
             // open run's detail is its own read, and a refresh that skipped it
@@ -284,11 +295,20 @@ export function ActionsPanel({
 
       {/* overflow-hidden: contain the list's natural height (the vendored Root
           is `relative`-only) so a long list can't leak a window scrollbar. */}
-      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <ScrollArea
+        // The host every arm below swaps inside, so a Retry's focus lands here.
+        ref={forgeRescue.hostRef}
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-hidden outline-none"
+      >
         {forge.isPending ? (
           <ListRowSkeletons rows={2} lines={3} name={ciFeature} />
         ) : !ghReady ? (
-          <ForgeNotReady repoPath={repoPath} feature={ciFeature} />
+          <ForgeNotReady
+            repoPath={repoPath}
+            feature={ciFeature}
+            retryRef={forgeRescue.retryRef}
+          />
         ) : runs.isPaused &&
           (runs.isPending || (runs.isError && allRuns.length === 0)) ? (
           // Parked with nothing to show: a skeleton would spin until reconnect,

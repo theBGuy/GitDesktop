@@ -390,6 +390,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   error arm swapping to a skeleton or notice) rides `useRetryFocusRescue`
   (ConversationListPanel) with a stable `tabIndex={-1}` host element; focus
   must never fall to `<body>` on the shown→hidden edge.
+- **Empty-picker copy** — a picker's line while it draws no options rides
+  `emptyPickerCopy` (remote-section-state); a parked read says offline, and
+  only a successful read may claim there are none.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

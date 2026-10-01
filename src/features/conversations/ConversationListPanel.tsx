@@ -106,12 +106,13 @@ function SectionHeader(props: {
 /** Keeps focus off `<body>` when a Retry leaves the DOM under the user's focus:
  *  a refresh lands, a pressed retry parks offline, or a pane swaps to its
  *  loading skeleton. `retryShown` must be true exactly while the Retry carrying
- *  `retryRef` is mounted; `hostRef` goes on an element with `tabIndex={-1}`
- *  that survives the swap. Only the shown→hidden edge rescues, and only when
- *  THIS Retry held focus as it left (read in the ref cleanup, which React runs
- *  just before removing the node), so a sibling losing its Retry in the same
- *  commit can't claim focus it never had; preventScroll keeps the viewer's
- *  scroll position. */
+ *  `retryRef` is mounted; `retryRef` may sit on the Retry itself or on a box
+ *  around a caller-supplied one. `hostRef` goes on an element with
+ *  `tabIndex={-1}` that survives the swap. Only the shown→hidden edge rescues,
+ *  and only when focus sat inside THIS ref's node as it left (read in the ref
+ *  cleanup, which React runs just before removing the node), so a sibling
+ *  losing its Retry in the same commit can't claim focus it never had;
+ *  preventScroll keeps the viewer's scroll position. */
 export function useRetryFocusRescue(retryShown: boolean) {
   const host = useRef<HTMLElement | null>(null);
   const retryWasShown = useRef(retryShown);
@@ -121,7 +122,8 @@ export function useRetryFocusRescue(retryShown: boolean) {
   }, []);
   const retryRef = useCallback(
     (node: HTMLElement | null) => () => {
-      retryHeldFocus.current = document.activeElement === node;
+      retryHeldFocus.current =
+        node !== null && node.contains(document.activeElement);
     },
     [],
   );
@@ -303,9 +305,10 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
    *  section says it's offline instead of showing skeletons. */
   remotePaused?: boolean;
   /** The remote list's read has a fetch in flight. Over an earlier failure it
-   *  hasn't settled, so its rows draw without the failure notice until it lands
-   *  (a reconnect resumes an errored read with `isError` still set). */
-  remoteFetching?: boolean;
+   *  hasn't settled, so neither the failure notice nor `remoteErrorSlot` draws
+   *  until it lands (a reconnect resumes an errored read with `isError` still
+   *  set). Required so no caller can drop the axis and flash the error. */
+  remoteFetching: boolean;
   /** The drawn remote rows are placeholder rows loaded for ANOTHER view (a
    *  state tab or filter switch still loading), not this list's own. */
   remotePlaceholder?: boolean;
@@ -557,6 +560,13 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     "load-more": onRetryLoadMore,
     offline: undefined,
   };
+  // ForgeNotReady's and the error slot's Retries reset a never-loaded read to
+  // pending, swapping the card for skeletons. Keyed on the card being mounted,
+  // a superset of its Retry: the edge still rescues only a Retry that held focus.
+  const remoteRescue = useRetryFocusRescue(
+    !remoteCollapsed &&
+      (remoteState === "not-ready" || remoteState === "error"),
+  );
   const remoteContent = ((): ReactNode => {
     switch (remoteState) {
       case "offline":
@@ -576,7 +586,11 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       case "not-ready":
         return (
           remoteNotReadySlot ?? (
-            <ForgeNotReady repoPath={repoPath} feature={feature} />
+            <ForgeNotReady
+              repoPath={repoPath}
+              feature={feature}
+              retryRef={remoteRescue.retryRef}
+            />
           )
         );
       case "list-skeleton":
@@ -589,11 +603,15 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
         );
       case "error":
         return (
-          remoteErrorSlot ?? (
-            <p className="px-3 py-4 text-xs text-muted-foreground">
-              Couldn't load {remoteNoun}.
-            </p>
-          )
+          // The slot's Retry is the caller's markup, so the box around it is
+          // what records whether focus left with it.
+          <div ref={remoteRescue.retryRef}>
+            {remoteErrorSlot ?? (
+              <p className="px-3 py-4 text-xs text-muted-foreground">
+                Couldn't load {remoteNoun}.
+              </p>
+            )}
+          </div>
         );
       case "empty":
         return (
@@ -758,7 +776,12 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
           (`relative` only), so without containment the list's natural height
           leaks into the document once it exceeds the viewport (a window
           scrollbar over a black void). The Viewport still scrolls internally. */}
-      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <ScrollArea
+        // The host every remote arm swaps inside, so a Retry's focus lands here.
+        ref={remoteRescue.hostRef}
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-hidden outline-none"
+      >
         <div onKeyDown={onListKeyDown}>
           <SectionHeader
             label="Local"

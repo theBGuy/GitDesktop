@@ -13,6 +13,7 @@ import {
   type PointerEvent,
   type ReactElement,
   type ReactNode,
+  type Ref,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -51,6 +52,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 // The read-only sentence arrives ALIASED: this panel says it about the BOARD, and
 // its own `READ_ONLY_SCOPE_REASON` below says a different thing about a card's
@@ -256,6 +258,7 @@ const NO_GROUP_FIELDS_REASON =
   "This project has no single-select or iteration fields to group its board by";
 const LOADING_FIELDS_REASON = "Loading this project's fields…";
 const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
+const FIELDS_OFFLINE_REASON = offlinePendingMessage("this project's fields");
 /** Mirrors the field editor's own wording verbatim: each surface gates on the
  *  same flag as the row it mirrors, and the two must not say it differently
  *  (ProjectFieldsEditor.tsx). The org issue-field holds are the routing module's own. */
@@ -271,6 +274,7 @@ const VIEWS_AWAIT_FIELDS_REASON = "Waiting for this project's fields…";
 const VIEWS_FIELDS_FAILED_REASON =
   "Couldn't load this project's fields, which saved views need. Retry that read and they're selectable again.";
 const VIEWS_ERROR_REASON = "Couldn't load this project's views";
+const VIEWS_OFFLINE_REASON = offlinePendingMessage("this project's views");
 const NO_VIEWS_REASON = "This project has no saved views";
 /** Said by every control that would otherwise speak for the board on screen: while
  *  a new lens loads, those cards are the PREVIOUS view's. */
@@ -924,11 +928,21 @@ function liveNoticeFor(
 /** The panel's error card: the failure's own summary plus the one control that
  *  can clear it. `presentError(...).summary` alone is the house error-card
  *  shape — the Issues and Pull Requests panels render exactly this. */
-function ErrorCard({ error, onRetry }: { error: Error; onRetry: () => void }) {
+function ErrorCard({
+  error,
+  onRetry,
+  retryRef,
+}: {
+  error: Error;
+  onRetry: () => void;
+  /** For a caller's `useRetryFocusRescue`, whose host outlives this card. */
+  retryRef?: Ref<HTMLButtonElement>;
+}) {
   return (
     <div className="px-3 py-4 text-xs">
       <p className="text-muted-foreground">{presentError(error).summary}</p>
       <Button
+        ref={retryRef}
         variant="outline"
         size="xs"
         className="mt-2"
@@ -4671,12 +4685,20 @@ export function ProjectsBoardPanel({
   // board defines no groupable field while the read is still in flight is a false
   // statement, not a placeholder.
   const fieldsPending = canRead && projectId !== null && fields.isPending;
+  // What a fields read with nothing to offer holds a control with: a park waits
+  // for the connection, a refetch still loads, and only a settled failure
+  // couldn't load.
+  const fieldsUnanswered = fields.isPaused
+    ? FIELDS_OFFLINE_REASON
+    : refreshFailed(fields)
+      ? FIELDS_ERROR_REASON
+      : LOADING_FIELDS_REASON;
   const groupHeldReason = (() => {
     switch (true) {
       case surface !== "board":
         return ROWS_GROUPING_REASON[surface];
       case fieldsPending:
-        return LOADING_FIELDS_REASON;
+        return fieldsUnanswered;
       // Ahead of the settled-empty claim: a FAILED read is neither pending nor
       // holding data, so without this arm a board whose fields call errored
       // would announce that it defines none. Gated on having NOTHING to offer,
@@ -4684,7 +4706,7 @@ export function ProjectsBoardPanel({
       // place — and those are the definitions drawing the board behind this
       // popup, so replacing the rows with a failure would be false.
       case fields.error !== null && groupFields.length === 0:
-        return FIELDS_ERROR_REASON;
+        return fieldsUnanswered;
       case groupFields.length === 0:
         return NO_GROUP_FIELDS_REASON;
       default:
@@ -4700,9 +4722,8 @@ export function ProjectsBoardPanel({
   const dateSourceHeldReason = (() => {
     switch (true) {
       case fieldsPending:
-        return LOADING_FIELDS_REASON;
       case fields.error !== null && sourceFields.length === 0:
-        return FIELDS_ERROR_REASON;
+        return fieldsUnanswered;
       case sourceFields.length === 0:
         return NO_DATE_FIELDS_REASON;
       default:
@@ -4716,10 +4737,16 @@ export function ProjectsBoardPanel({
   // arms, since those views loaded fine and the switcher is the only way back
   // to No view from inside this popup.
   const viewsPending = canRead && projectId !== null && views.isPending;
+  // The views read's counterpart to `fieldsUnanswered`.
+  const viewsUnanswered = views.isPaused
+    ? VIEWS_OFFLINE_REASON
+    : refreshFailed(views)
+      ? VIEWS_ERROR_REASON
+      : LOADING_VIEWS_REASON;
   const viewsHeldReason = (() => {
     switch (true) {
       case viewsPending:
-        return LOADING_VIEWS_REASON;
+        return viewsUnanswered;
       // The next two arms hold on the SEED'S INPUT, not on the views: `pickView`
       // reads `groupFields` at pick time, once, with no later retry. Views and
       // fields are independent `gh` calls that settle in either order, so a pick
@@ -4735,7 +4762,7 @@ export function ProjectsBoardPanel({
       case fields.error !== null && fields.data === undefined:
         return VIEWS_FIELDS_FAILED_REASON;
       case views.error !== null && viewList.length === 0:
-        return VIEWS_ERROR_REASON;
+        return viewsUnanswered;
       case viewList.length === 0:
         return NO_VIEWS_REASON;
       default:
@@ -5145,6 +5172,25 @@ export function ProjectsBoardPanel({
     [],
   );
 
+  // The forge probe's Retry (the error card below, or ForgeNotReady's) resets
+  // the never-loaded probe to pending, swapping the card for the skeleton: the
+  // panel root takes the focus. Mirrors the body's first four arms, keyed on
+  // either card being mounted.
+  const forgeRescue = useRetryFocusRescue(
+    gh.data === undefined
+      ? gh.error !== null
+      : (provider === null || isGitHub) && !forgeReady(gh.data),
+  );
+  // The root is both the body's focus landing and that rescue's host.
+  const forgeHostRef = forgeRescue.hostRef;
+  const rootHostRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      rootRef.current = node;
+      forgeHostRef(node);
+    },
+    [forgeHostRef],
+  );
+
   const body = (() => {
     switch (true) {
       // A failed forge probe with nothing cached is not "still detecting":
@@ -5152,7 +5198,13 @@ export function ProjectsBoardPanel({
       // screen can refetch it. A failed REFETCH keeps its last good status in
       // `gh.data`, so the board stays mounted through it.
       case gh.error !== null && gh.data === undefined:
-        return <ErrorCard error={gh.error} onRetry={() => void gh.refetch()} />;
+        return (
+          <ErrorCard
+            error={gh.error}
+            onRetry={() => void gh.refetch()}
+            retryRef={forgeRescue.retryRef}
+          />
+        );
       // Still detecting: `gh.data` undefined is not yet "not GitHub".
       case gh.data === undefined:
         return <BoardSkeleton />;
@@ -5176,7 +5228,11 @@ export function ProjectsBoardPanel({
       case !forgeReady(gh.data):
         return (
           <div data-body-landing="">
-            <ForgeNotReady repoPath={repoPath} feature="project boards" />
+            <ForgeNotReady
+              repoPath={repoPath}
+              feature="project boards"
+              retryRef={forgeRescue.retryRef}
+            />
           </div>
         );
       case scopeGap:
@@ -5614,7 +5670,7 @@ export function ProjectsBoardPanel({
     // (that aside really is a flex column); the content-pane idiom is this one
     // (RemoteIssueView, RemotePrView, DiffViewer).
     <div
-      ref={rootRef}
+      ref={rootHostRef}
       // The last-resort focus landing ({@link focusBodyLanding}): named, so focus
       // parked here announces where it is.
       role="region"
@@ -6589,7 +6645,7 @@ export function ProjectsBoardPanel({
         defs={fieldDefs}
         defsHeldReason={
           fieldsPending
-            ? LOADING_FIELDS_REASON
+            ? fieldsUnanswered
             : fields.data === undefined
               ? FIELDS_ERROR_REASON
               : undefined

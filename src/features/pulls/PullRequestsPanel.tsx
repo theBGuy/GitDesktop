@@ -663,6 +663,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     grouped: remoteGroups !== undefined,
     isError: reviewState.isError,
     isPaused: reviewState.isPaused,
+    isFetching: reviewState.isFetching,
     truncated: groupingAsked && reviewPage?.truncated === true,
   });
   const groupingNote = ungrouped ? UNGROUPED_NOTE[ungrouped] : undefined;

@@ -3373,6 +3373,7 @@ export function RemotePrView({
             isPending={prDiff.isPending}
             isError={prDiff.isError}
             isPaused={prDiff.isPaused}
+            isFetching={prDiff.isFetching}
             onRetry={() => void prDiff.refetch()}
             dataIsPlaceholder={prDiff.isPlaceholderData}
             // The same threads + handlers/gates the Conversation block uses — one
