@@ -642,14 +642,28 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     classify_gh_text_report(out.code, &report, host_str)
 }
 
-/// Identify dotted hostnames and scheme URLs whose words are not diagnostics.
-/// A trailing colon still counts as host-shaped.
+/// Mask dotted hosts after trailing punctuation and one numeric port; recognize scheme URLs.
+/// Never trim host prefixes: `(client.timeout` must remain a Go transport diagnostic.
 fn is_host_or_url_token(word: &str) -> bool {
-    let bare = word.trim_end_matches(':');
-    let bare = bare
-        .rsplit_once(':')
-        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
-        .map_or(bare, |(host, _)| host);
+    let mut bare = word;
+    let mut port_stripped = false;
+    loop {
+        let previous = bare;
+        bare = bare.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '.');
+        if !port_stripped {
+            if let Some((host, _)) = bare
+                .rsplit_once(':')
+                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
+            {
+                bare = host;
+                port_stripped = true;
+            }
+        }
+        bare = bare.trim_end_matches('.');
+        if bare == previous {
+            break;
+        }
+    }
     let host = bare.contains('.')
         && bare.split('.').all(|label| {
             !label.is_empty()
@@ -3235,6 +3249,79 @@ check your internet connection or https://githubstatus.com";
             "x timeout.acme.com:8443: 401 unauthorized",
         ] {
             assert_eq!(classify_glab_failure(report), GlabFailure::Broken, "{report}");
+        }
+    }
+
+    #[test]
+    fn trailing_host_punctuation_cells_are_masked() {
+        // SYNTHETIC: trailing punctuation never supplies an outage verdict.
+        for (cell, token) in [
+            ("colon", "timeout.acme.com:"),
+            ("comma", "timeout.acme.com,"),
+            ("period", "timeout.acme.com."),
+            ("semicolon", "timeout.acme.com;"),
+            ("closing parenthesis", "timeout.acme.com)"),
+            ("double quote", "timeout.acme.com\""),
+            ("single quote", "timeout.acme.com'"),
+            ("stacked delimiters", "timeout.acme.com),"),
+            ("port and stacked delimiters", "timeout.acme.com:8443\","),
+            ("port and sentence punctuation", "timeout.acme.com:8443\",."),
+            ("dotted host before port", "timeout.acme.com.:8443),"),
+        ] {
+            assert!(is_host_or_url_token(token), "{cell}");
+            assert_eq!(
+                classify_glab_failure(&format!("x {token} 401 unauthorized")),
+                GlabFailure::Broken,
+                "{cell}"
+            );
+            let report = format!(
+                "✓ Logged in to github.com as alice\nX api call failed: {token} token invalid"
+            );
+            assert_eq!(
+                classify_gh_text_report(1, &report, "github.com").state,
+                SessionState::Broken,
+                "{cell}"
+            );
+        }
+        assert_eq!(
+            classify_glab_failure("can't reach timeout.acme.com."),
+            GlabFailure::Broken
+        );
+    }
+
+    #[test]
+    fn trailing_host_punctuation_covers_the_character_class() {
+        for punctuation in (b'!'..=b'~')
+            .filter(|c| c.is_ascii_punctuation() && *c != b'-')
+            .map(char::from)
+            .chain(['…', '”', '’', '。'])
+        {
+            for token in [
+                format!("timeout.acme.com{punctuation}"),
+                format!("timeout.acme.com:8443{punctuation})."),
+            ] {
+                assert!(is_host_or_url_token(&token), "{token}");
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_host_punctuation_preserves_transport_voters_and_leading_delimiters() {
+        // SYNTHETIC: leading delimiters and undotted verdicts stay diagnostic text.
+        for token in [
+            "(client.timeout",
+            "timeout.",
+            "connection.",
+            "\"timeout.acme.com\".",
+            "timeout.acme.com:8443:443",
+        ] {
+            assert!(!is_host_or_url_token(token), "{token}");
+            assert_eq!(classify_glab_failure(token), GlabFailure::Offline, "{token}");
+            assert_eq!(
+                classify_gh_text_report(1, token, "github.com").state,
+                SessionState::Offline,
+                "{token}"
+            );
         }
     }
 
