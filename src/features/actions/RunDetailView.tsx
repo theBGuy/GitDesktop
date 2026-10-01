@@ -20,7 +20,10 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
@@ -684,10 +687,14 @@ export function RunDetailView({
     fetching: detail.isFetching,
   });
   const runNoun = ciRunNoun(provider);
+  // A pressed Retry resets the never-loaded read to pending, swapping the error
+  // for the skeleton. Every arm's root is the same host div, so React keeps that
+  // node through the swap and on into the loaded run, and focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(pane === "error");
 
   if (pane === "skeleton") {
     return (
-      <div className="space-y-3 p-4">
+      <div ref={hostRef} tabIndex={-1} className="space-y-3 p-4 outline-none">
         <Skeleton className="h-7 w-2/3" />
         <Skeleton className="h-4 w-1/2" />
         <Skeleton className="h-24 w-full" />
@@ -697,17 +704,27 @@ export function RunDetailView({
 
   if (pane === "offline") {
     return (
-      <div className="p-6 text-center text-sm text-muted-foreground">
+      <div
+        ref={hostRef}
+        tabIndex={-1}
+        className="p-6 text-center text-sm text-muted-foreground outline-none"
+      >
         {offlinePendingMessage(`this ${runNoun}`)}
       </div>
     );
   }
 
+  // `pane === "error"` exactly here: with no run, every other arm returned above.
   if (!run) {
     return (
-      <div className="flex flex-col items-center gap-2 p-6 text-center text-sm text-muted-foreground">
+      <div
+        ref={hostRef}
+        tabIndex={-1}
+        className="flex flex-col items-center gap-2 p-6 text-center text-sm text-muted-foreground outline-none"
+      >
         Couldn't load this {runNoun}.
         <Button
+          ref={retryRef}
           variant="outline"
           size="sm"
           className="cursor-pointer"
@@ -723,7 +740,11 @@ export function RunDetailView({
   const detailFailed = refreshFailed(detail);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className="flex h-full min-h-0 flex-col outline-none"
+    >
       <DegradedListNotice
         noun={`this ${runNoun}`}
         degraded={pane === "content-degraded"}

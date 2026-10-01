@@ -45,8 +45,10 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import {
+  detailNoticeMessage,
   offlinePendingMessage,
   refreshFailed,
   resolveDetailPane,
@@ -1629,6 +1631,14 @@ export function JiraIssueView({
     : issue.url;
   const detailsStale = details.isPlaceholderData;
   const staleDim = detailsStale && "opacity-80";
+  // Retained content says why it may be out of date: a failed refresh with its
+  // Retry, or a parked one (no Retry, which would only park again).
+  const detailFailed = refreshFailed(details);
+  const detailNotice = detailNoticeMessage({
+    noun: "Jira issue",
+    isError: detailFailed,
+    stale: detailsStale,
+  });
   // Which hold the composer names, ranked: the switch window outranks a write the
   // viewer started, being the hold they can't have caused themselves.
   const composerReason = (() => {
@@ -1675,6 +1685,13 @@ export function JiraIssueView({
       className="@container/jira-detail flex h-full flex-col"
       aria-busy={Boolean(staleDim)}
     >
+      <DegradedListNotice
+        noun="this Jira issue"
+        degraded={pane === "content-degraded"}
+        message={detailNotice}
+        onRetry={detailFailed ? () => void details.refetch() : undefined}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <header className="space-y-2 border-b px-4 py-3">
         {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
             the actions would stay put and the title collapse instead. Growing also
