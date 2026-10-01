@@ -298,13 +298,38 @@ pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
 pub(crate) const TRANSPORT_TIMED_OUT: &str = "request timed out";
 pub(crate) const TRANSPORT_CONNECT_FAILED: &str = "connection failed";
 
-/// `{prefix}: {e}` for a request that never got a response, plus the transport
-/// cause when reqwest names one. A timeout is checked first: a connect timeout is
-/// both, and waiting is what the user saw.
+/// Detect ConnectionReset, ConnectionAborted, or BrokenPipe in the error chain.
+/// UnexpectedEof is excluded: a truncated body is not provably a transport failure.
+pub(crate) fn has_connection_reset(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        }) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+pub(crate) fn body_read_is_transport(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || has_connection_reset(e)
+}
+
+/// Format send and body-read failures with a transport cause, including resets
+/// reqwest does not flag. Send failures deliberately receive the reset suffix too.
+/// Timeout takes precedence when a connect timeout satisfies both predicates.
 pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> String {
     let cause = if e.is_timeout() {
         Some(TRANSPORT_TIMED_OUT)
-    } else if e.is_connect() {
+    } else if body_read_is_transport(e) {
+        // Resets reuse the existing cross-IPC literal matched by error-summary.ts.
         Some(TRANSPORT_CONNECT_FAILED)
     } else {
         None
@@ -316,7 +341,7 @@ pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> Str
 }
 
 fn bb_body_read_error(e: reqwest::Error) -> AppError {
-    if e.is_timeout() || e.is_connect() {
+    if body_read_is_transport(&e) {
         AppError::Bitbucket(transport_failure_message(
             "could not read Bitbucket response",
             &e,
@@ -520,10 +545,16 @@ pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()
 // SYNTHETIC: headers arrive successfully, then the body stalls or ends early.
 #[cfg(test)]
 pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
+    incomplete_body_error_mode(timeout, false).await
+}
+
+#[cfg(test)]
+async fn incomplete_body_error_mode(timeout: bool, reset: bool) -> reqwest::Error {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+    let (body_started, wait_for_body) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
@@ -536,7 +567,11 @@ pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
             .await
             .unwrap();
-        if timeout {
+        if reset {
+            // Wait for the client to receive headers so the RST fails the body read.
+            wait_for_body.await.unwrap();
+            stream.set_zero_linger().unwrap();
+        } else if timeout {
             std::future::pending::<()>().await;
         }
     });
@@ -549,6 +584,9 @@ pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
         .send()
         .await
         .unwrap();
+    if reset {
+        body_started.send(()).unwrap();
+    }
     let error = response.text().await.unwrap_err();
     server.abort();
     assert_eq!(error.is_timeout(), timeout);
@@ -559,6 +597,59 @@ pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct NestedError(Box<dyn std::error::Error>);
+
+    impl std::fmt::Display for NestedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("synthetic body error")
+        }
+    }
+
+    impl std::error::Error for NestedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.0.as_ref())
+        }
+    }
+
+    fn nested_io_error(kind: std::io::ErrorKind) -> NestedError {
+        NestedError(Box::new(NestedError(Box::new(std::io::Error::from(kind)))))
+    }
+
+    #[test]
+    fn nested_connection_reset_is_transport() {
+        assert!(has_connection_reset(&nested_io_error(
+            std::io::ErrorKind::ConnectionReset
+        )));
+    }
+
+    #[test]
+    fn nested_connection_aborted_is_transport() {
+        assert!(has_connection_reset(&nested_io_error(
+            std::io::ErrorKind::ConnectionAborted
+        )));
+    }
+
+    #[test]
+    fn nested_broken_pipe_is_transport() {
+        assert!(has_connection_reset(&nested_io_error(
+            std::io::ErrorKind::BrokenPipe
+        )));
+    }
+
+    #[test]
+    fn nested_unexpected_eof_is_not_transport() {
+        assert!(!has_connection_reset(&nested_io_error(
+            std::io::ErrorKind::UnexpectedEof
+        )));
+        assert!(!has_connection_reset(&nested_io_error(
+            std::io::ErrorKind::Other
+        )));
+        assert!(!has_connection_reset(&std::io::Error::other(
+            "connection reset"
+        )));
+    }
 
     async fn forbidden_response(body: &'static str, json: bool, write: bool) -> String {
         use std::io::{Read, Write};
@@ -646,6 +737,16 @@ mod tests {
         let error = incomplete_body_error(true).await;
         let message = bb_body_read_error(error).to_string();
         assert!(message.ends_with(": request timed out"), "{message}");
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn bitbucket_body_read_reset_carries_the_connect_marker() {
+        let error = incomplete_body_error_mode(false, true).await;
+        assert!(has_connection_reset(&error));
+        let message = bb_body_read_error(error).to_string();
+        assert!(message.ends_with(": connection failed"), "{message}");
+        assert!(!message.contains("Couldn't read the response"), "{message}");
     }
 
     #[tokio::test]

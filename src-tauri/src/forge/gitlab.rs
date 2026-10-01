@@ -7114,7 +7114,7 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
 
     // Jobs — GitLab returns newest-first; reverse to execution order (stage order),
     // matching how view_pr reorders commits oldest-first.
-    let mut jobs: Vec<GlabJob> = run_glab(
+    let out = run_glab(
         Some(repo_path),
         &[
             "api",
@@ -7122,10 +7122,8 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
         ],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str::<Vec<GlabJob>>(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
+    .await?;
+    let mut jobs = pipeline_jobs_from(&out.stdout_lossy())?;
     jobs.reverse();
 
     // Prefer the commit subject (free, from the jobs) for the header; else the
@@ -7208,8 +7206,15 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         return Ok("No failed jobs in this pipeline.".to_string());
     }
     let mut text = String::new();
-    for job in failed {
+    let mut succeeded = 0;
+    let mut last_failure = None;
+    let mut failed_sections = Vec::new();
+    for (index, job) in failed.iter().enumerate() {
         if text.len() > CI_RUN_LOG_CAP {
+            text.push_str(&format!(
+                "({} more failed jobs not shown)\n",
+                failed.len() - index
+            ));
             break;
         }
         let trace = run_glab(
@@ -7218,13 +7223,56 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
             GLAB_NETWORK_TIMEOUT,
         )
         .await
-        .map(|o| clean_trace(&o.stdout_lossy()))
-        .unwrap_or_default();
+        .map(|o| clean_trace(&o.stdout_lossy()));
+        let section_start = text.len();
         text.push_str(&format!("===== {} =====\n", job.name));
-        text.push_str(trace.trim_end());
-        text.push_str("\n\n");
+        match trace {
+            Ok(trace) => {
+                succeeded += 1;
+                text.push_str(trace.trim_end());
+                text.push_str("\n\n");
+            }
+            Err(e) => {
+                last_failure = Some(e);
+                text.push_str("(couldn't fetch this job's log)\n\n");
+                failed_sections.push(section_start..text.len());
+            }
+        }
     }
-    Ok(tail_cap(text, CI_RUN_LOG_CAP))
+    failed_logs_outcome(
+        text,
+        succeeded,
+        last_failure,
+        &failed_sections,
+        CI_RUN_LOG_CAP,
+    )
+}
+
+fn failed_logs_outcome(
+    text: String,
+    succeeded: usize,
+    last_failure: Option<AppError>,
+    failed_sections: &[std::ops::Range<usize>],
+    cap: usize,
+) -> AppResult<String> {
+    let text = crate::github::pr::ci_list_outcome(text, succeeded, last_failure)?;
+    let mut start = text.len().saturating_sub(cap);
+    let mut notices = String::new();
+    // Failure notices survive tail truncation in job order, even when the cut
+    // crosses a notice. The byte cap applies to log output, not these notices.
+    for section in failed_sections {
+        if section.start < start {
+            notices.push_str(&text[section.clone()]);
+            start = start.max(section.end);
+        }
+    }
+    if start == notices.len() {
+        notices.push_str(&text[start..]);
+    } else {
+        let remaining = text.len() - start;
+        notices.push_str(&tail_cap(text, remaining));
+    }
+    Ok(notices)
 }
 
 /// Retry a pipeline (`run_id` = the global pipeline id the runs list carries).
@@ -12779,6 +12827,43 @@ mod tests {
         let jobs =
             pipeline_jobs_from(r#"[{"id":7,"status":"failed","name":"test"}]"#).unwrap();
         assert_eq!((jobs[0].id, jobs[0].status.as_str()), (7, "failed"));
+    }
+
+    #[test]
+    fn failed_logs_reject_total_failure_and_keep_partial_or_empty_success() {
+        let failure = || Some(AppError::Glab("trace unavailable".into()));
+        assert!(failed_logs_outcome(String::new(), 0, failure(), &[], 100).is_err());
+        assert_eq!(
+            failed_logs_outcome("trace".into(), 1, failure(), &[], 100).unwrap(),
+            "trace"
+        );
+        assert_eq!(
+            failed_logs_outcome(String::new(), 1, None, &[], 100).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn failed_log_notices_survive_tail_truncation_in_job_order() {
+        let notice = "===== build =====\n(couldn't fetch this job's log)\n\n";
+        let second = "===== test =====\n(couldn't fetch this job's log)\n\n";
+        let text = format!("{notice}{second}===== deploy =====\n{}", "é".repeat(100));
+        let sections = [0..notice.len(), notice.len()..notice.len() + second.len()];
+        for cap in [20, text.len() - notice.len() / 2, text.len()] {
+            let output = failed_logs_outcome(
+                text.clone(),
+                1,
+                Some(AppError::Glab("trace unavailable".into())),
+                &sections,
+                cap,
+            )
+            .unwrap();
+            assert!(output.starts_with(notice), "{output}");
+            assert!(output.contains(second), "{output}");
+            assert!(output.ends_with("éé"), "{output}");
+            assert_eq!(output.matches("===== build =====").count(), 1);
+            assert_eq!(output.contains("earlier output truncated"), cap == 20);
+        }
     }
 
     #[test]

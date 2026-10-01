@@ -2381,7 +2381,12 @@ async fn resolve_pipeline(
 }
 
 /// The pipeline's steps (`GET …/pipelines/{uuid}/steps/`). Braced UUID percent-encoded.
-async fn pipeline_steps(creds: &BbCredentials, ws: &str, slug: &str, uuid: &str) -> Vec<BbStep> {
+async fn pipeline_steps(
+    creds: &BbCredentials,
+    ws: &str,
+    slug: &str,
+    uuid: &str,
+) -> AppResult<Vec<BbStep>> {
     let path = format!(
         "repositories/{}/{}/pipelines/{}/steps/?pagelen=100",
         encode_query_value(ws),
@@ -2391,7 +2396,6 @@ async fn pipeline_steps(creds: &BbCredentials, ws: &str, slug: &str, uuid: &str)
     http::bb_get_json::<BbPage<BbStep>>(creds, &path, "steps", BbOpKind::Read)
         .await
         .map(|p| p.values)
-        .unwrap_or_default()
 }
 
 fn from_bb_step(index: usize, s: BbStep, pipeline_uuid: &str, url: &str) -> RunJob {
@@ -2442,7 +2446,7 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
         .map(|r| format!("Pipeline #{run_id} · {r}"))
         .unwrap_or_else(|| format!("Pipeline #{run_id}"));
 
-    let steps = pipeline_steps(&creds, &ws, &slug, &uuid).await;
+    let steps = pipeline_steps(&creds, &ws, &slug, &uuid).await?;
     let jobs = steps
         .into_iter()
         .enumerate()
@@ -2550,7 +2554,7 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
     let (ws, slug) = workspace_slug(repo_path).await?;
     let p = resolve_pipeline(&creds, &ws, &slug, run_id).await?;
     let uuid = p.uuid.clone();
-    let steps = pipeline_steps(&creds, &ws, &slug, &uuid).await;
+    let steps = pipeline_steps(&creds, &ws, &slug, &uuid).await?;
     let failed: Vec<&BbStep> = steps
         .iter()
         .filter(|s| {
@@ -2562,14 +2566,22 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         return Ok("No failed steps in this pipeline.".to_string());
     }
     let mut text = String::new();
+    let mut attempted = 0;
+    let mut succeeded = 0;
+    let mut last_failure = None;
     for (i, step) in steps.iter().enumerate() {
         let (_, result) = state_and_result(&step.state);
         if result != "FAILED" && result != "ERROR" {
             continue;
         }
         if text.len() > CI_RUN_LOG_CAP {
+            text.push_str(&format!(
+                "({} more failed jobs not shown)\n",
+                failed.len() - attempted
+            ));
             break;
         }
+        attempted += 1;
         let name = step
             .name
             .clone()
@@ -2579,16 +2591,26 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         // way make the section say so rather than leave a bare header. Calls
         // `step_log_raw` directly to avoid re-resolving creds/ws/slug per step.
         let log = match step_log_raw(&creds, &ws, &slug, &uuid, &step.uuid).await {
-            Ok(l) if l == EXPIRED_LOG_MESSAGE => "(log unavailable — expired)".to_string(),
-            Ok(l) if l.trim().is_empty() => "(log unavailable)".to_string(),
-            Ok(l) => l,
-            Err(_) => "(log unavailable)".to_string(),
+            Ok(l) => {
+                succeeded += 1;
+                if l == EXPIRED_LOG_MESSAGE {
+                    "(log unavailable — expired)".to_string()
+                } else if l.trim().is_empty() {
+                    "(log unavailable)".to_string()
+                } else {
+                    l
+                }
+            }
+            Err(e) => {
+                last_failure = Some(e);
+                "(log unavailable)".to_string()
+            }
         };
         text.push_str(&format!("===== {name} =====\n"));
         text.push_str(log.trim_end());
         text.push_str("\n\n");
     }
-    Ok(tail_cap(text, CI_RUN_LOG_CAP))
+    crate::github::pr::ci_list_outcome(tail_cap(text, CI_RUN_LOG_CAP), succeeded, last_failure)
 }
 
 /// The repo's web URL for "View on Bitbucket".
