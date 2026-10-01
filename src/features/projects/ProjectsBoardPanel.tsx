@@ -4758,7 +4758,11 @@ export function ProjectsBoardPanel({
       // definitions, never a stale flag: cached ones can seed, so neither a
       // background refetch nor a failure over them may take the rows away.
       case fieldsPending:
-        return VIEWS_AWAIT_FIELDS_REASON;
+        return fields.isPaused
+          ? FIELDS_OFFLINE_REASON
+          : VIEWS_AWAIT_FIELDS_REASON;
+      // Always a settled failure: a retry or a park resets a never-loaded
+      // errored read to pending, which the arm above takes.
       case fields.error !== null && fields.data === undefined:
         return VIEWS_FIELDS_FAILED_REASON;
       case views.error !== null && viewList.length === 0:
@@ -6551,7 +6555,9 @@ export function ProjectsBoardPanel({
             fieldDefs={fieldDefs}
             defsTruncated={fields.data?.truncated === true}
             defsPending={fieldsPending}
-            defsError={fields.error}
+            // Only a settled failure shows the dialog's error and Retry: over
+            // cached definitions a refetch or park keeps them drawing.
+            defsError={refreshFailed(fields) ? fields.error : null}
             onRetryDefs={() => void fields.refetch()}
             pending={bulkWritePending}
             heldReason={bulkFieldsHeld}
@@ -6643,6 +6649,8 @@ export function ProjectsBoardPanel({
             : NO_FIELD_IDS
         }
         defs={fieldDefs}
+        // Past pending, no data is a settled failure (a retry or a park resets
+        // a never-loaded read to pending) or a disabled read.
         defsHeldReason={
           fieldsPending
             ? fieldsUnanswered
