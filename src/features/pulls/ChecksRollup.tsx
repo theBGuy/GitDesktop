@@ -191,6 +191,9 @@ function CheckLogTail({
   // gh's own reason (no access, logs expired) is what tells a permanent failure
   // from one a Retry can fix.
   const reason = logs.error ? presentError(logs.error).summary : "";
+  // A log is one block, so "rows" is whether it has any text to show.
+  let rowCount: number | undefined;
+  if (logs.data !== undefined) rowCount = logs.data === "" ? 0 : 1;
   // With nothing loaded the notice stands in for the tail; loaded text stays
   // drawn through a failed or parked refresh, under a line saying which.
   const notice = sectionReadNotice({
@@ -198,8 +201,7 @@ function CheckLogTail({
     loadFailed: reason
       ? `Couldn't load logs: ${reason}`
       : "Couldn't load logs.",
-    // A log is one block, so "rows" is whether it has any text to show.
-    rowCount: logs.data === undefined ? undefined : logs.data === "" ? 0 : 1,
+    rowCount,
     isError: logs.isError,
     isPaused: logs.isPaused,
     isFetching: logs.isFetching,

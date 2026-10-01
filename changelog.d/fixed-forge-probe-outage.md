@@ -1,3 +1,3 @@
-- Repository settings and security-findings actions no longer disappear for
-  several minutes after a brief connection drop, and connection hiccups no longer
-  read as sign-in problems or as GitHub Pages being disabled.
+- Repository settings and security-findings actions stay available through a
+  brief connection drop, and the sign-in check and GitHub Pages settings say
+  when GitHub couldn't be reached.

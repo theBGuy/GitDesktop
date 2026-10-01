@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
 use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::forge::validate_compare_branch;
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::gh_unreadable;
@@ -157,35 +158,19 @@ enum RepoViewOutcome {
     Resolved(String, Option<String>),
 }
 
-pub(crate) fn repo_lookup_is_not_found(stderr: &str) -> bool {
-    let stderr = stderr.to_ascii_lowercase();
-    stderr.contains("could not resolve to a repository")
-        || stderr.match_indices("http 404").any(|(index, matched)| {
-            let before = stderr[..index].chars().next_back();
-            let after = stderr[index + matched.len()..].chars().next();
-            !before.is_some_and(|c| c.is_ascii_alphanumeric())
-                && !after.is_some_and(|c| c.is_ascii_alphanumeric())
-        })
-}
-
 fn classify_repo_view(result: AppResult<crate::github::runner::GhOutput>) -> RepoViewOutcome {
     let out = match result {
         Ok(out) => out,
         Err(error) => return RepoViewOutcome::Transport(error),
     };
     if out.code != 0 {
-        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
-            return RepoViewOutcome::RateLimited;
-        }
-        if repo_lookup_is_not_found(&out.stderr) {
-            return RepoViewOutcome::Unresolved;
-        }
-        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
-            return RepoViewOutcome::Transport(AppError::Gh(
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited => RepoViewOutcome::RateLimited,
+            GhFailure::NotFound | GhFailure::Answered => RepoViewOutcome::Unresolved,
+            GhFailure::Transport => RepoViewOutcome::Transport(AppError::Gh(
                 "Couldn't reach GitHub to look up the repository.".to_string(),
-            ));
-        }
-        return RepoViewOutcome::Unresolved;
+            )),
+        };
     }
     match serde_json::from_str::<RepoView>(&out.stdout_lossy()) {
         Ok(view) => {

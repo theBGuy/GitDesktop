@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_unreadable;
 use crate::github::runner::{
     run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
@@ -31,16 +32,12 @@ pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
 fn repo_admin_outcome(result: AppResult<GhOutput>) -> AppResult<bool> {
     let out = result?;
     if out.code != 0 {
-        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
-            return Err(AppError::Gh(gh_failure_reason(&out)));
-        }
-        if crate::github::pr::repo_lookup_is_not_found(&out.stderr) {
-            return Ok(false);
-        }
-        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
-            return Err(AppError::Gh(gh_failure_reason(&out)));
-        }
-        return Ok(false);
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(false),
+        };
     }
     Ok(out.stdout_lossy().trim() == "true")
 }
@@ -108,7 +105,7 @@ fn write_access_from_repo_json(repo_json: &str) -> Result<WriteAccessBits, Strin
 
 /// A one-line reason for a failed `gh` call — its first non-empty stderr line,
 /// or the exit status when gh said nothing. It reaches the UI, so keep it short.
-fn gh_failure_reason(out: &GhOutput) -> String {
+pub(crate) fn gh_failure_reason(out: &GhOutput) -> String {
     out.stderr
         .lines()
         .map(str::trim)

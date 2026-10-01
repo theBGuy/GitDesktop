@@ -315,6 +315,37 @@ pub(crate) fn gh_error_is_network(error: Option<&str>) -> bool {
     })
 }
 
+pub(crate) fn gh_error_is_not_found(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("could not resolve to a repository")
+        || stderr.match_indices("http 404").any(|(index, matched)| {
+            let before = stderr[..index].chars().next_back();
+            let after = stderr[index + matched.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric())
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+        })
+}
+
+pub(crate) enum GhFailure {
+    RateLimited,
+    NotFound,
+    Transport,
+    Answered,
+}
+
+pub(crate) fn classify_gh_failure(stderr: &str) -> GhFailure {
+    // Check not-found before network: gh's 404 text embeds network-worded slugs.
+    if gh_error_is_rate_limit(Some(stderr)) {
+        GhFailure::RateLimited
+    } else if gh_error_is_not_found(stderr) {
+        GhFailure::NotFound
+    } else if gh_error_is_network(Some(stderr)) {
+        GhFailure::Transport
+    } else {
+        GhFailure::Answered
+    }
+}
+
 /// Whether a reading, on its own, earns the anti-flap re-probe: only Broken does. A
 /// RateLimited reading never triggers one (it would spend another call against the
 /// exhausted quota), though the accounts path's SHARED re-probe, fired by another

@@ -6,7 +6,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_unreadable;
+use crate::github::repo_settings::gh_failure_reason;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Default)]
@@ -46,16 +48,12 @@ pub async fn gh_pages_get(repo_path: String) -> AppResult<Option<PagesInfo>> {
 fn pages_get_outcome(result: AppResult<GhOutput>) -> AppResult<Option<PagesInfo>> {
     let out = result?;
     if out.code != 0 {
-        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
-            return Err(AppError::Gh(out.stderr.trim().to_string()));
-        }
-        if crate::github::pr::repo_lookup_is_not_found(&out.stderr) {
-            return Ok(None);
-        }
-        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
-            return Err(AppError::Gh(out.stderr.trim().to_string()));
-        }
-        return Ok(None);
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(None),
+        };
     }
     let v: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
