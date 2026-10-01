@@ -148,8 +148,14 @@ export function ConflictBanner({
   return (
     // One calm status line — the per-file resolution actions live in the diff
     // pane's conflict view, so this just carries merge state + Continue/Abort
-    // and the batch "Resolve all with AI".
-    <div className="flex items-center justify-between gap-x-3 border-b px-3 py-1.5 text-xs">
+    // and the batch "Resolve all with AI". The AI cluster is wider than the
+    // sidebar's floor, so only then does the strip wrap; otherwise it stays one row.
+    <div
+      className={cn(
+        "flex items-center justify-between gap-x-3 border-b px-3 py-1.5 text-xs",
+        canResolveWithAi && "flex-wrap gap-y-1",
+      )}
+    >
       <span
         className={cn(
           "flex min-w-0 items-center gap-1.5",

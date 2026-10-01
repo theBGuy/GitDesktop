@@ -651,12 +651,33 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
         .iter()
         .find(|a| a.host == host_str)
         .or_else(|| accounts.first());
-    // Account metadata and dotted host/URL tokens cannot name a transport verdict.
+    // Account metadata and host/URL-shaped tokens cannot name a transport verdict.
     let transport_residue = report
         .lines()
         .filter(|line| !line.contains("Logged in to") && !line.contains("Active account:"))
         .flat_map(str::split_whitespace)
-        .map(|word| if word.contains('.') { "" } else { word })
+        .map(|word| {
+            let host = word.contains('.')
+                && word.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                });
+            // Go errors wrap URLs in quotes; status text can wrap them in parentheses.
+            let url = word
+                .trim_start_matches(['"', '\'', '('])
+                .split_once("://")
+                .is_some_and(|(scheme, _)| {
+                    scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && scheme.bytes().all(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.')
+                        })
+                });
+            if host || url {
+                ""
+            } else {
+                word
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
     // Transport words outrank the account count: a failed report can carry no
@@ -891,11 +912,6 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
         "gateway timeout",
         "proxy authentication required",
     ];
-    // Single transport words need boundaries; multi-word phrases cannot be hostnames.
-    // INFERRED from glab 1.105.0/client-go v2.40.1: retries can exhaust the context
-    // deadline with no rate-limit wording or status digits. A network hang produces
-    // the same phrase, so it means Offline.
-
     // Rate limits are checked first as the most specific signal. glab's exact wording
     // is unmeasured, so match phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
@@ -907,10 +923,13 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     } else if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
         GlabFailure::NotConnected
     } else if NETWORKISH.iter().any(|n| {
+        // INFERRED from glab 1.105.0/client-go v2.40.1: "context deadline exceeded"
+        // can mean exhausted 429 retries with no rate-limit wording or status digits,
+        // or a network hang; both read Offline.
         if n.contains(' ') {
             combined_lower.contains(n)
         } else {
-            has_standalone_word(combined_lower, n)
+            glab_has_transport_word(combined_lower, n)
         }
     }) || OFFLINE_STATUS.iter().any(|n| combined_lower.contains(n))
     {
@@ -918,6 +937,16 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     } else {
         GlabFailure::Broken
     }
+}
+
+// Hyphens join hostname labels and must not expose an embedded transport word.
+fn glab_has_transport_word(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '-';
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
 }
 
 /// Whether `429` appears as a standalone token, so a hash, id, or port that merely
@@ -2374,6 +2403,41 @@ mod tests {
 
     #[test]
     fn old_gh_text_report_reads_offline_only_on_transport_words() {
+        /// SYNTHETIC: the dotted Go diagnostic carries the only transport verdict.
+        // cli/cli v2.0.0 pkg/cmd/auth/status/status.go: CurrentLoginName uses "api call failed: %s".
+        const CLIENT_TIMEOUT: &str = "\
+  ✓ Logged in to github.com as alice
+  x github.acme.com: api call failed: Get \"https://github.acme.com/\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)";
+        assert_eq!(
+            classify_gh_text_report(1, CLIENT_TIMEOUT, "github.com").state,
+            SessionState::Offline
+        );
+        // SYNTHETIC reports around the measured/inferred transport fixtures above.
+        for error in GH_NETWORK_ERRORS {
+            let report = format!(
+                "  ✓ Logged in to github.com as alice\n  X Failed to log in to ghes.example.com account bob\n  - {error}"
+            );
+            assert_eq!(
+                classify_gh_text_report(1, &report, "github.com").state,
+                SessionState::Offline,
+                "{error}"
+            );
+        }
+        // SYNTHETIC: bare and Go-wrapped URLs cannot supply a transport verdict.
+        for address in [
+            "https://timeout.acme.com/",
+            "\"https://timeout.acme.com/\":",
+            "(http://timeout.acme.com/)",
+        ] {
+            let report = format!(
+                "  ✓ Logged in to github.com as alice\n  X api call failed: {address} token invalid"
+            );
+            assert_eq!(
+                classify_gh_text_report(1, &report, "github.com").state,
+                SessionState::Broken,
+                "{address}"
+            );
+        }
         /// SYNTHETIC: a successful account's hostname must not vote on transport.
         const NETWORK_HOST_SUCCESS: &str = "\
   ✓ Logged in to timeout.acme.com as alice
@@ -3060,6 +3124,10 @@ check your internet connection or https://githubstatus.com";
             r#"Post "https://gitlab.com/oauth/token": Service Unavailable"#,
             r#"Get "https://gitlab.com/api/v4/user": Gateway Timeout"#,
             r#"Get "https://gitlab.com/api/v4/user": Proxy Authentication Required"#,
+            // SYNTHETIC: Go transport wording with punctuation around verdict words.
+            r#"Get "https://gitlab.com/api/v4/user": net/http: TLS handshake timeout"#,
+            r#"Get "https://gitlab.com/api/v4/user": dial tcp 10.0.0.1:443: i/o timeout"#,
+            r#"Get "https://gitlab.com/api/v4/user": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"#,
         ] {
             assert_eq!(
                 classify_glab_failure(&outage.to_lowercase()),
@@ -3075,6 +3143,8 @@ check your internet connection or https://githubstatus.com";
             "x gitlab503.example.com: api call failed",
             // SYNTHETIC: embedded transport words in hosts are not outage evidence.
             "x gitlab.mynetwork.com: 401 unauthorized; token revoked",
+            "x gitlab.my-network.com: 401 unauthorized",
+            "x gitlab.network-zone.com: 401 unauthorized",
             "x gitlab.mytimeout.com: 401 unauthorized; token revoked",
             "x gitlab.myconnection.com: 401 unauthorized; token revoked",
             "x gitlab.mydial.com: 401 unauthorized; token revoked",
