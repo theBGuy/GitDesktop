@@ -35,8 +35,17 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";
+import {
+  type PendingSent,
+  reconcileTouched,
+  stampSent,
+  type TouchedEdit,
+} from "./touched-draft";
 
 const PATHS = ["/", "/docs"];
+
+/** The enabled form's editable fields, as its draft keys them. */
+type PagesField = "branch" | "path" | "cname";
 
 /** Labels for the source select — without them Base UI shows the raw value
  *  ("workflow") in the trigger; the popup renders from this map too, so the two
@@ -207,39 +216,41 @@ function PagesEnabled({
   const branches = useBranches(repoPath);
   const update = useUpdatePages(repoPath);
   const disable = useDisablePages(repoPath);
-  // Each field holds the user's edit, or null to show the server's value. An
-  // edit retires once the server reads back equal, never on the save itself: a
-  // save whose refetch failed keeps its value on screen.
-  const [branchEdit, setBranch] = useState<string | null>(null);
-  const [pathEdit, setPath] = useState<string | null>(null);
-  const [cnameEdit, setCname] = useState<string | null>(null);
-  // What a save sent, stamped with the read it was made against. A newer read
-  // with no failure after it retires those fields even when it differs (a domain
-  // GitHub normalized); a failed post-save refetch holds them, as does new typing.
-  const [pending, setPending] = useState<{
-    at: number;
-    sent: { branch?: string; path?: string; cname?: string };
-  } | null>(null);
-  const serverPath = pages.sourcePath || "/";
-  if (pending !== null && dataUpdatedAt > pending.at && !isError) {
-    setPending(null);
-    if (branchEdit !== null && branchEdit === pending.sent.branch)
-      setBranch(null);
-    if (pathEdit !== null && pathEdit === pending.sent.path) setPath(null);
-    if (cnameEdit !== null && cnameEdit === pending.sent.cname) setCname(null);
+  // An absent field shows the server's value. Touched fields retire per
+  // `reconcileTouched` — never on the save itself, so a save whose refetch
+  // failed keeps its values on screen.
+  const [edit, setEdit] = useState<TouchedEdit<PagesField, string> | null>(
+    null,
+  );
+  const [pending, setPending] = useState<PendingSent<
+    PagesField,
+    string
+  > | null>(null);
+  const server: Record<PagesField, string> = {
+    branch: pages.sourceBranch,
+    path: pages.sourcePath || "/",
+    cname: pages.cname,
+  };
+  const reconciled = reconcileTouched({
+    edit,
+    server,
+    pending,
+    dataUpdatedAt,
+    isError,
+  });
+  if (reconciled.edit !== edit) setEdit(reconciled.edit);
+  if (reconciled.pending !== pending) setPending(reconciled.pending);
+  const setField = (field: PagesField, value: string) =>
+    setEdit((e) => ({ ...e, [field]: value }));
+  const setBranch = (value: string) => setField("branch", value);
+  const setPath = (value: string) => setField("path", value);
+  const setCname = (value: string) => setField("cname", value);
+  function markSent(at: number, sent: TouchedEdit<PagesField, string>) {
+    setPending((p) => stampSent(p, at, sent));
   }
-  if (branchEdit !== null && branchEdit === pages.sourceBranch) setBranch(null);
-  if (pathEdit !== null && pathEdit === serverPath) setPath(null);
-  if (cnameEdit !== null && cnameEdit === pages.cname) setCname(null);
-  function markSent(at: number, sent: NonNullable<typeof pending>["sent"]) {
-    setPending((p) => ({
-      at: p ? Math.min(p.at, at) : at,
-      sent: { ...p?.sent, ...sent },
-    }));
-  }
-  const branch = branchEdit ?? pages.sourceBranch;
-  const path = pathEdit ?? serverPath;
-  const cname = cnameEdit ?? pages.cname;
+  const branch = edit?.branch ?? server.branch;
+  const path = edit?.path ?? server.path;
+  const cname = edit?.cname ?? server.cname;
   const [confirmingDisable, setConfirmingDisable] = useState(false);
 
   const isWorkflow = pages.buildType === "workflow";
@@ -254,8 +265,7 @@ function PagesEnabled({
       ? [pages.sourceBranch, ...filtered]
       : filtered;
   })();
-  const sourceChanged =
-    branch !== pages.sourceBranch || path !== (pages.sourcePath || "/");
+  const sourceChanged = branch !== server.branch || path !== server.path;
   // HTTPS can only be enforced once GitHub has issued the TLS certificate for a
   // custom domain. Without a custom domain (default *.github.io) there's no
   // certificate object at all and HTTPS is always available, so never gate on it.

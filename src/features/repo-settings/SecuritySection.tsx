@@ -36,6 +36,12 @@ import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { InlineConfirm, RemoteFormSection } from "./parts";
+import {
+  type PendingSent,
+  reconcileTouched,
+  stampSent,
+  type TouchedEdit,
+} from "./touched-draft";
 
 /** Dependabot / dependency-graph options GitHub exposes to NO repo-level API —
  *  they're web-UI-only. (Version updates is handled by the dependabot.yml
@@ -414,41 +420,25 @@ function SecurityForm({
 }) {
   const apply = useApplySecurity(repoPath);
   const seed = useMemo(() => toDraft(status), [status]);
-  // Only the toggles the user touched, so untouched ones ride the latest read
-  // and a save never sends another client's change back. A touched key retires
-  // once the server reads back equal, never on the save itself: a save whose
-  // refetch failed keeps its values on screen, and a refetch never wipes an edit.
-  const [edit, setEdit] = useState<Partial<Draft> | null>(null);
-  // What a save sent, stamped with the read it was made against. A newer read
-  // with no failure after it retires those keys even when it differs (a toggle
-  // GitHub refused); a failed post-save refetch holds them, as does a re-toggle.
-  const [pending, setPending] = useState<{
-    at: number;
-    sent: Partial<Draft>;
-  } | null>(null);
-  if (pending !== null && dataUpdatedAt > pending.at && !isError) {
-    setPending(null);
-    if (edit !== null) {
-      const kept = FEATURES.filter(
-        (f) => f.key in edit && edit[f.key] !== pending.sent[f.key],
-      );
-      setEdit(
-        kept.length > 0
-          ? Object.fromEntries(kept.map((f) => [f.key, edit[f.key]]))
-          : null,
-      );
-    }
-  } else if (edit !== null) {
-    const kept = FEATURES.filter(
-      (f) => f.key in edit && edit[f.key] !== seed[f.key],
-    );
-    if (kept.length !== Object.keys(edit).length)
-      setEdit(
-        kept.length > 0
-          ? Object.fromEntries(kept.map((f) => [f.key, edit[f.key]]))
-          : null,
-      );
-  }
+  // Touched toggles only, retired per `reconcileTouched` — never on the save
+  // itself, so a save whose refetch failed keeps its values on screen.
+  const [edit, setEdit] = useState<TouchedEdit<
+    SecurityFeature,
+    boolean
+  > | null>(null);
+  const [pending, setPending] = useState<PendingSent<
+    SecurityFeature,
+    boolean
+  > | null>(null);
+  const reconciled = reconcileTouched({
+    edit,
+    server: seed,
+    pending,
+    dataUpdatedAt,
+    isError,
+  });
+  if (reconciled.edit !== edit) setEdit(reconciled.edit);
+  if (reconciled.pending !== pending) setPending(reconciled.pending);
   const draft: Draft = { ...seed, ...edit };
   const dirty = edit !== null;
 
@@ -471,13 +461,10 @@ function SecurityForm({
     const at = dataUpdatedAt;
     try {
       await apply.mutateAsync(changes);
-      const sent: Partial<Draft> = Object.fromEntries(
+      const sent: TouchedEdit<SecurityFeature, boolean> = Object.fromEntries(
         changes.map((c) => [c.feature, c.enabled]),
       );
-      setPending((p) => ({
-        at: p ? Math.min(p.at, at) : at,
-        sent: { ...p?.sent, ...sent },
-      }));
+      setPending((p) => stampSent(p, at, sent));
       toast.success("Security settings saved");
     } catch (e) {
       toastError(e);

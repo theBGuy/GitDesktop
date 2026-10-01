@@ -123,7 +123,6 @@ export function RemoteFormSection<T>({
   query: {
     data: T | undefined;
     error: unknown;
-    isPending: boolean;
     isError: boolean;
     isPaused: boolean;
     refetch: () => unknown;

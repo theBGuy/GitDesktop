@@ -456,15 +456,13 @@ function networkSummary(
   const phrases = [
     ...TRANSPORT_PHRASES,
     ...(kind === "gh" ? GH_OUTAGE_PHRASES : []),
+    ...(kind === "glab" ? GLAB_OUTAGE_PHRASES : []),
     ...RUST_TRANSPORT_PHRASES,
   ];
-  // glab pads and wraps outage phrases; other phrase scans keep the raw spacing.
-  const glabOutage =
-    kind === "glab" &&
-    GLAB_OUTAGE_PHRASES.some((p) => hasStandaloneWord(collapseSpaces(text), p));
+  // glab pads and wraps all phrases; other kinds keep the raw spacing.
+  const scan = kind === "glab" ? collapseSpaces(text) : text;
   const transport =
-    phrases.some((p) => hasStandaloneWord(text, p)) ||
-    glabOutage ||
+    phrases.some((p) => hasStandaloneWord(scan, p)) ||
     (kind === "gh" && GH_OUTAGE_STATUS.test(text));
   return transport
     ? `Couldn't reach ${host} — check your network connection.`

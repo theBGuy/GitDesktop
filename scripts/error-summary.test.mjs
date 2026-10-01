@@ -849,6 +849,21 @@ test("glab's wrapped Members-list Bad Gateway classifies (whitespace-collapse re
   assert.equal(p.fullText, message);
 });
 
+test("glab's wrapped connection refused classifies (transport-collapse revert detector)", () => {
+  // The bare refusal must classify without an intact dial tcp masking the wrap.
+  for (const prefix of ["dial tcp 192.0.2.1:443: ", ""]) {
+    const message = [
+      "   ERROR  ",
+      "          ",
+      `  Get "https://example.com/api/v4/user": ${prefix}connection        `,
+      "  refused.        ",
+    ].join("\n");
+    const p = presentError(appError("glab", message));
+    assert.equal(p.summary, reach("GitLab"), message);
+    assert.equal(p.fullText, message);
+  }
+});
+
 test("glab's short single-line Bad Gateway still classifies", () => {
   const message = 'Get "https://gitlab.com/api/v4/user": Bad Gateway';
   assert.equal(

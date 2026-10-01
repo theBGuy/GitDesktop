@@ -401,7 +401,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   through `RemoteFormSection` (repo-settings/parts): gated on absent data,
   never `isError`, so a failed or parked refresh keeps the form and its draft
   under a notice above it. A draft that reseeds after a save holds only touched
-  fields and retires each when the server reads back equal — never a clear on
+  fields and retires them through `reconcileTouched` + `stampSent`
+  (repo-settings/touched-draft, pinned by its test) — never a clear on
   save (a failed post-save refetch shows the pre-save values) or a
   `dataUpdatedAt` key (every focus refetch wipes the draft); a whole-object
   draft would send another client's newer values back stale.

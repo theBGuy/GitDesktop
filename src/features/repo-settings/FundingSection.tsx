@@ -170,13 +170,13 @@ function FundingForm({
   // unmounts mid-flight — closing the dialog or switching the rail's section —
   // so the outcome would never reach the user.
   async function save() {
-    const content = generateFunding(fields);
+    const next = generateFunding(fields);
     try {
-      await set.mutateAsync(content);
+      await set.mutateAsync(next);
       // The file reads back normalized (trimmed, list spacing), so a saved field
       // takes that form or it would never match the refetch and retire. A field
       // typed into since the save started keeps the newer text.
-      const saved = toFields(content);
+      const saved = toFields(next);
       setEdit(
         (e) =>
           e &&
