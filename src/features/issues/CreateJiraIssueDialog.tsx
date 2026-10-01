@@ -197,7 +197,11 @@ export function CreateJiraIssueDialog({
   // to pick: cached types (and the pick made from them) stay under a line.
   const typesRefreshFailed = refreshFailed(types);
   const typesFailed = typesRefreshFailed && creatable.length === 0;
-  const typesParked = types.isPaused && types.data === undefined;
+  // After a failure a cached list with nothing creatable is unknown, not empty,
+  // so a park over it waits like a first load.
+  const emptyUnknown = types.isError && creatable.length === 0;
+  const typesParked =
+    types.isPaused && (types.data === undefined || emptyUnknown);
   // Either Retry unmounts on press: the field's box takes the focus.
   const typesRescue = useRetryFocusRescue(typesRefreshFailed);
   // Why the submit is held, for both the hover wrapper and the sr-only node.
