@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
@@ -29,7 +30,13 @@ import {
 import type { GitLabHook, GitLabHookDelivery } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import { DeliveryPayload, InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  DeliveryPayload,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** GitLab's per-hook event flags, in display order (no "send everything" —
  *  GitLab models events as independent booleans). */
@@ -235,9 +242,10 @@ function HookForm({
   );
 
   const pending = create.isPending || update.isPending;
+  const online = useOnline();
   const urlValid =
     url.trim().startsWith("https://") || url.trim().startsWith("http://");
-  const canSave = urlValid && events.length > 0 && !pending;
+  const canSave = urlValid && events.length > 0 && !pending && online;
   const warning = !url.trim()
     ? null
     : !urlValid
@@ -334,10 +342,15 @@ function HookForm({
           <Button variant="outline" size="sm" onClick={onDone}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!canSave} onClick={save}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canSave}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={save}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             {hook ? "Save changes" : "Create webhook"}
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
     </div>

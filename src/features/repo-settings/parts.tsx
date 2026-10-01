@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useMemo, useState } from "react";
+import { Fragment, type ReactNode, type Ref, useMemo, useState } from "react";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,8 +10,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  isPermanentListError,
   offlinePendingMessage,
   parkedUnlessPermanent,
   resolveRemoteSection,
@@ -39,18 +43,28 @@ import { cn } from "@/lib/utils";
  * rejection carries, which is not an `Error` instance.
  * `children` render between message and hint — the slot the scope note takes,
  * which needs hooks this card shouldn't own.
+ * A Retry press resets a never-loaded read to pending, which unmounts this card:
+ * the caller owns the `useRetryFocusRescue` host that `retryRef` reports to.
  */
 export function AsyncErrorCard({
   title,
   error,
   hint,
   children,
+  onRetry,
+  retryLabel,
+  retryRef,
 }: {
   title: ReactNode;
   error: unknown;
   /** A closing note in the card's own muted style (permissions, next steps). */
   hint?: ReactNode;
   children?: ReactNode;
+  /** Omitted for a failure a retry can't change. */
+  onRetry?: () => void;
+  /** The Retry button's accessible name ("Retry loading webhooks"). */
+  retryLabel?: string;
+  retryRef?: Ref<HTMLButtonElement>;
 }) {
   return (
     <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
@@ -62,6 +76,105 @@ export function AsyncErrorCard({
       )}
       {children}
       {hint && <div className="mt-2 text-muted-foreground">{hint}</div>}
+      {onRetry && (
+        <Button
+          ref={retryRef}
+          variant="outline"
+          size="xs"
+          className="mt-2"
+          aria-label={retryLabel}
+          onClick={onRetry}
+        >
+          Retry
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** The one reason every remote-write control in repo settings gives while
+ *  offline: a mutation pressed then parks silently and fires on reconnect. */
+export const OFFLINE_WRITE_REASON =
+  "You're offline — this will be available once you're back online.";
+
+/** What a {@link RemoteFormSection} with loaded fields says over them. */
+function formNoticeMessage(noun: string, failed: boolean): string {
+  return failed
+    ? `Couldn't refresh ${noun} — showing the last loaded version.`
+    : "You're offline — showing the last loaded version.";
+}
+
+/**
+ * A repo-settings form over one read. Gated on absent data, not on `isError`:
+ * react-query keeps the last good data beside a failed refetch, and swapping the
+ * form for the error card there would discard the user's draft, so a loaded form
+ * stays under a refresh notice instead. With nothing loaded, a parked read says
+ * it's offline where a skeleton would spin forever. Settled by omission, like
+ * {@link RemoteListSection}: no `fetching`, so a Retry survives its own press.
+ */
+export function RemoteFormSection<T>({
+  query,
+  noun,
+  skeleton,
+  errorTitle,
+  errorHint,
+  children,
+}: {
+  query: {
+    data: T | undefined;
+    error: unknown;
+    isPending: boolean;
+    isError: boolean;
+    isPaused: boolean;
+    refetch: () => unknown;
+  };
+  /** What the section loads, as its notices read it ("Pages settings"). */
+  noun: string;
+  skeleton: ReactNode;
+  errorTitle: string;
+  errorHint?: ReactNode;
+  children: (data: T) => ReactNode;
+}) {
+  const data = query.data;
+  const parked = parkedUnlessPermanent(query);
+  const failed = query.isError && !parked;
+  const coldRetry =
+    failed && data === undefined && !isPermanentListError(query.error);
+  const { hostRef, retryRef } = useRetryFocusRescue(coldRetry);
+  const retry = () => void query.refetch();
+  const retryLabel = `Retry loading ${noun}`;
+  const noticeMessage = (() => {
+    if (data === undefined)
+      return parked ? offlinePendingMessage(noun) : undefined;
+    return failed || parked ? formNoticeMessage(noun, failed) : undefined;
+  })();
+  const body = (() => {
+    if (data !== undefined) return children(data);
+    if (parked) return null;
+    return query.isError ? (
+      <AsyncErrorCard
+        title={errorTitle}
+        error={query.error}
+        hint={errorHint}
+        onRetry={coldRetry ? retry : undefined}
+        retryLabel={retryLabel}
+        retryRef={retryRef}
+      />
+    ) : (
+      skeleton
+    );
+  })();
+  return (
+    <div ref={hostRef} tabIndex={-1} className="min-w-0 space-y-3 outline-none">
+      <DegradedListNotice
+        noun={noun}
+        degraded={noticeMessage !== undefined}
+        message={noticeMessage}
+        retryLabel={retryLabel}
+        onRetry={data !== undefined && failed ? retry : undefined}
+        className="px-0 pb-0"
+      />
+      {body}
     </div>
   );
 }
@@ -83,6 +196,9 @@ function AsyncListBody({
   errorTitle = "Couldn't load these.",
   errorScope,
   errorHint,
+  onRetry,
+  retryLabel,
+  retryRef,
 }: {
   loading: boolean;
   error: unknown;
@@ -97,6 +213,10 @@ function AsyncListBody({
   errorScope?: string;
   /** A custom hint node in the error card, for sections without a single scope. */
   errorHint?: ReactNode;
+  /** The error card's Retry, per {@link AsyncErrorCard}. */
+  onRetry?: () => void;
+  retryLabel?: string;
+  retryRef?: Ref<HTMLButtonElement>;
 }) {
   if (loading) {
     return (
@@ -108,7 +228,14 @@ function AsyncListBody({
   }
   if (error) {
     return (
-      <AsyncErrorCard title={errorTitle} error={error} hint={errorHint}>
+      <AsyncErrorCard
+        title={errorTitle}
+        error={error}
+        hint={errorHint}
+        onRetry={onRetry}
+        retryLabel={retryLabel}
+        retryRef={retryRef}
+      >
         {errorScope && <ScopeErrorHint scope={errorScope} />}
       </AsyncErrorCard>
     );
@@ -195,8 +322,15 @@ export function RemoteListSection({
         return undefined;
     }
   })();
+  // The error card's Retry resets a never-loaded read to pending, swapping the
+  // card for skeletons; the always-mounted wrapper takes focus as it goes.
+  const coldRetry =
+    listState === "error" &&
+    notice?.retry === true &&
+    !isPermanentListError(query.error);
+  const { hostRef, retryRef } = useRetryFocusRescue(coldRetry);
   return (
-    <div className="space-y-2">
+    <div ref={hostRef} tabIndex={-1} className="space-y-2 outline-none">
       <DegradedListNotice
         noun={noun}
         degraded={noticeMessage !== undefined}
@@ -217,6 +351,9 @@ export function RemoteListSection({
           errorTitle={errorTitle}
           errorScope={errorScope}
           errorHint={errorHint}
+          onRetry={coldRetry ? () => void query.refetch() : undefined}
+          retryLabel={notice?.retryLabel}
+          retryRef={retryRef}
         >
           {children}
         </AsyncListBody>

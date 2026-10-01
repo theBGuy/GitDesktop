@@ -1,6 +1,7 @@
 import { CaretLeftIcon, PlusIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,7 +21,12 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketBranchRestriction } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** The restriction kinds the app offers, with human labels. `needsValue` kinds
  *  carry a numeric argument (a required count). Only "push" and
@@ -189,13 +195,14 @@ function RestrictionForm({
   );
 
   const pending = create.isPending || update.isPending;
+  const online = useOnline();
   const needsValue = kindNeedsValue(kind);
   const trimmed = pattern.trim();
   const numValue = Number(value);
   const valueValid =
     !needsValue ||
     (Number.isInteger(numValue) && numValue >= 1 && numValue <= 10);
-  const canSave = trimmed.length > 0 && valueValid && !pending;
+  const canSave = trimmed.length > 0 && valueValid && !pending && online;
   const warning = !trimmed
     ? "Enter a branch pattern."
     : !valueValid
@@ -298,10 +305,15 @@ function RestrictionForm({
           <Button variant="outline" size="sm" onClick={onDone}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!canSave} onClick={submit}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canSave}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={submit}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             {editing ? "Save changes" : "Add"}
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
     </div>

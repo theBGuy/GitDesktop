@@ -28,11 +28,16 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketPipelineSchedule } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import {
-  PipelinesConfigErrorCard,
+  PipelinesConfigGate,
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 const bbSchedulesKey = (repo: string) => ["repo", repo, "bb-schedules"];
 
@@ -118,77 +123,79 @@ export function BitbucketSchedulesSection({
     }
   }
 
-  // Ahead of the `creating` form as well as the banner: only a config that never
-  // loaded reaches here, and until it does this section can't tell whether
-  // schedules are available to create at all.
-  if (config.isError && !config.data) {
-    return <PipelinesConfigErrorCard error={config.error} />;
-  }
-
+  // Every arm rides the gate, the `creating` form as well as the banner: until
+  // the config loads, this section can't tell whether schedules are available
+  // to create at all.
   if (config.data && !enabled) {
     return (
-      <PipelinesDisabledBanner
-        pending={setEnabled.isPending}
-        onEnable={handleEnablePipelines}
-      />
+      <PipelinesConfigGate config={config}>
+        <PipelinesDisabledBanner
+          pending={setEnabled.isPending}
+          onEnable={handleEnablePipelines}
+        />
+      </PipelinesConfigGate>
     );
   }
 
   if (creating) {
     return (
-      <ScheduleForm
-        repoPath={repoPath}
-        branches={(branches.data ?? [])
-          .map((b) => b.name)
-          .filter((n) => !n.startsWith("gd/session/"))}
-        onPatch={patchRow}
-        onReconcile={reconcileAfterCreate}
-        onDone={() => setCreating(false)}
-      />
+      <PipelinesConfigGate config={config}>
+        <ScheduleForm
+          repoPath={repoPath}
+          branches={(branches.data ?? [])
+            .map((b) => b.name)
+            .filter((n) => !n.startsWith("gd/session/"))}
+          onPatch={patchRow}
+          onReconcile={reconcileAfterCreate}
+          onDone={() => setCreating(false)}
+        />
+      </PipelinesConfigGate>
     );
   }
 
   return (
-    <div className="min-w-0 space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">
-          Run a pipeline on a branch automatically, on a cron schedule.
-        </p>
-        <Button size="sm" onClick={() => setCreating(true)}>
-          <PlusIcon data-icon="inline-start" />
-          Add schedule
-        </Button>
-      </div>
+    <PipelinesConfigGate config={config}>
+      <div className="min-w-0 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">
+            Run a pipeline on a branch automatically, on a cron schedule.
+          </p>
+          <Button size="sm" onClick={() => setCreating(true)}>
+            <PlusIcon data-icon="inline-start" />
+            Add schedule
+          </Button>
+        </div>
 
-      <RemoteListSection
-        query={schedules}
-        rowCount={schedules.data?.length ?? 0}
-        noun="schedules"
-        loadFailed="Couldn't load schedules."
-        extraPaused={config.isPaused}
-        emptyLabel="No schedules yet — a schedule runs a branch's pipeline on a recurring cron."
-        skeletonClassName="h-12 w-full"
-        errorTitle="Couldn't load schedules."
-        errorHint="If this is a permissions error, managing schedules needs admin on this repository."
-      >
-        {schedules.data?.map((s) => (
-          <ScheduleRow
-            key={s.uuid}
-            schedule={s}
-            toggling={
-              setScheduleEnabled.isPending &&
-              setScheduleEnabled.variables?.uuid === s.uuid
-            }
-            onToggle={(next) => handleToggle(s.uuid, next)}
-            confirming={confirming === s.uuid}
-            pending={remove.isPending}
-            onConfirm={() => setConfirming(s.uuid)}
-            onCancel={() => setConfirming(null)}
-            onRemove={() => handleRemove(s.uuid)}
-          />
-        ))}
-      </RemoteListSection>
-    </div>
+        <RemoteListSection
+          query={schedules}
+          rowCount={schedules.data?.length ?? 0}
+          noun="schedules"
+          loadFailed="Couldn't load schedules."
+          extraPaused={config.isPaused}
+          emptyLabel="No schedules yet — a schedule runs a branch's pipeline on a recurring cron."
+          skeletonClassName="h-12 w-full"
+          errorTitle="Couldn't load schedules."
+          errorHint="If this is a permissions error, managing schedules needs admin on this repository."
+        >
+          {schedules.data?.map((s) => (
+            <ScheduleRow
+              key={s.uuid}
+              schedule={s}
+              toggling={
+                setScheduleEnabled.isPending &&
+                setScheduleEnabled.variables?.uuid === s.uuid
+              }
+              onToggle={(next) => handleToggle(s.uuid, next)}
+              confirming={confirming === s.uuid}
+              pending={remove.isPending}
+              onConfirm={() => setConfirming(s.uuid)}
+              onCancel={() => setConfirming(null)}
+              onRemove={() => handleRemove(s.uuid)}
+            />
+          ))}
+        </RemoteListSection>
+      </div>
+    </PipelinesConfigGate>
   );
 }
 
@@ -288,11 +295,13 @@ function ScheduleForm({
   onDone: () => void;
 }) {
   const create = useBbCreateSchedule(repoPath);
+  const online = useOnline();
   const [refName, setRefName] = useState(branches[0] ?? "");
   const [cron, setCron] = useState("");
 
   const cronValid = cron.trim().length > 0;
-  const canSave = refName.length > 0 && cronValid && !create.isPending;
+  const canSave =
+    refName.length > 0 && cronValid && !create.isPending && online;
   const warning = !refName
     ? "Pick a branch."
     : !cronValid
@@ -369,10 +378,15 @@ function ScheduleForm({
           <Button variant="outline" size="sm" onClick={onDone}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!canSave} onClick={submit}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canSave}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={submit}
+          >
             {create.isPending && <Spinner data-icon="inline-start" />}
             Add
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
     </div>

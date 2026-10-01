@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
-import { AsyncErrorCard, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteFormSection } from "./parts";
 
 const GITHUB_KEY = "github";
 const CUSTOM_KEY = "custom";
@@ -114,28 +114,24 @@ export function FundingSection({
 }) {
   const funding = useFunding(repoPath, open);
 
-  if (funding.isPending) {
-    return (
-      <div className="min-w-0 space-y-3">
-        <Skeleton className="h-9 w-full" />
-        <Skeleton className="h-9 w-full" />
-        <Skeleton className="h-20 w-full" />
-      </div>
-    );
-  }
-  if (funding.isError) {
-    return (
-      <AsyncErrorCard title="Couldn't load funding." error={funding.error} />
-    );
-  }
-
-  // Remount when the file changes so the form reseeds after a save/remove.
   return (
-    <FundingForm
-      key={funding.dataUpdatedAt}
-      repoPath={repoPath}
-      content={funding.data ?? null}
-    />
+    <RemoteFormSection
+      query={funding}
+      noun="funding links"
+      skeleton={
+        <div className="min-w-0 space-y-3">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      }
+      errorTitle="Couldn't load funding."
+    >
+      {(content) => (
+        // `null` is a loaded answer: there's no FUNDING.yml yet.
+        <FundingForm key={repoPath} repoPath={repoPath} content={content} />
+      )}
+    </RemoteFormSection>
   );
 }
 
@@ -150,19 +146,47 @@ function FundingForm({
   const set = useSetFunding(repoPath);
   const del = useDeleteFunding(repoPath);
   const seed = useMemo(() => toFields(content ?? ""), [content]);
-  const [fields, setFields] = useState(seed);
+  // Only the fields the user touched, so untouched ones ride the latest file. A
+  // touched field retires once the file reads back equal, never on the save
+  // itself: a save whose refetch failed keeps its values on screen.
+  const [edit, setEdit] = useState<Record<string, string> | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  if (edit !== null) {
+    const kept = Object.keys(edit).filter((k) => edit[k] !== seed[k]);
+    if (kept.length !== Object.keys(edit).length)
+      setEdit(
+        kept.length > 0
+          ? Object.fromEntries(kept.map((k) => [k, edit[k]]))
+          : null,
+      );
+  }
 
-  const dirty = JSON.stringify(fields) !== JSON.stringify(seed);
+  const dirty = edit !== null;
+  const fields = { ...seed, ...edit };
   const setField = (key: string, value: string) =>
-    setFields((f) => ({ ...f, [key]: value }));
+    setEdit((e) => ({ ...e, [key]: value }));
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
   // so the outcome would never reach the user.
   async function save() {
+    const content = generateFunding(fields);
     try {
-      await set.mutateAsync(generateFunding(fields));
+      await set.mutateAsync(content);
+      // The file reads back normalized (trimmed, list spacing), so a saved field
+      // takes that form or it would never match the refetch and retire. A field
+      // typed into since the save started keeps the newer text.
+      const saved = toFields(content);
+      setEdit(
+        (e) =>
+          e &&
+          Object.fromEntries(
+            Object.entries(e).map(([k, v]) => [
+              k,
+              v === fields[k] ? saved[k] : v,
+            ]),
+          ),
+      );
       toast.success("Wrote .github/FUNDING.yml — commit it to publish");
     } catch (e) {
       toastError(e);
@@ -173,6 +197,9 @@ function FundingForm({
     if (!exists) return;
     try {
       await del.mutateAsync(undefined);
+      // Removing discards the draft by intent; kept, its typed values would
+      // reappear over the emptied form as an unsaved edit.
+      setEdit(null);
       toast.success("Removed .github/FUNDING.yml — commit it to publish");
       setConfirmingRemove(false);
     } catch (e) {

@@ -1,6 +1,6 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import { isPermanentListError } from "@/features/conversations/remote-section-state";
 import {
   bbVariablesKey,
   useBbCreateVariable,
@@ -20,7 +22,13 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketPipelineVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncErrorCard, InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  AsyncErrorCard,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 function validKey(k: string): boolean {
   return /^[A-Za-z0-9_]{1,255}$/.test(k);
@@ -45,6 +53,7 @@ export function BitbucketVariablesSection({
   const create = useBbCreateVariable(repoPath);
   const remove = useBbDeleteVariable(repoPath);
   const queryClient = useQueryClient();
+  const online = useOnline();
 
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
@@ -63,22 +72,24 @@ export function BitbucketVariablesSection({
     }
   }
 
-  if (config.isError && !config.data) {
-    return <PipelinesConfigErrorCard error={config.error} />;
-  }
-
   if (config.data && !enabled) {
     return (
-      <PipelinesDisabledBanner
-        pending={setEnabled.isPending}
-        onEnable={handleEnablePipelines}
-      />
+      <PipelinesConfigGate config={config}>
+        <PipelinesDisabledBanner
+          pending={setEnabled.isPending}
+          onEnable={handleEnablePipelines}
+        />
+      </PipelinesConfigGate>
     );
   }
 
   const keyTaken = (variables.data ?? []).some((v) => v.key === key.trim());
   const canAdd =
-    validKey(key.trim()) && value.length > 0 && !keyTaken && !create.isPending;
+    validKey(key.trim()) &&
+    value.length > 0 &&
+    !keyTaken &&
+    !create.isPending &&
+    online;
   const keyWarning = key.trim()
     ? keyTaken
       ? "A variable with this key already exists — edit it below."
@@ -146,74 +157,83 @@ export function BitbucketVariablesSection({
   }
 
   return (
-    <div className="min-w-0 space-y-4">
-      <div className="space-y-2 rounded-md border p-3">
-        <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
-          <Input
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="VARIABLE_KEY"
-            autoComplete="off"
-            spellCheck={false}
-            className="font-mono"
-          />
-          <Input
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="value"
-            autoComplete="off"
-            spellCheck={false}
-            className="font-mono"
-          />
-          <Button size="sm" disabled={!canAdd} onClick={addVariable}>
-            {create.isPending ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <PlusIcon data-icon="inline-start" />
-            )}
-            Add
-          </Button>
+    <PipelinesConfigGate config={config}>
+      <div className="min-w-0 space-y-4">
+        <div className="space-y-2 rounded-md border p-3">
+          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+            <Input
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="VARIABLE_KEY"
+              autoComplete="off"
+              spellCheck={false}
+              className="font-mono"
+            />
+            <Input
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="value"
+              autoComplete="off"
+              spellCheck={false}
+              className="font-mono"
+            />
+            <DisabledReasonButton
+              size="sm"
+              disabled={!canAdd}
+              reason={online ? undefined : OFFLINE_WRITE_REASON}
+              onClick={addVariable}
+            >
+              {create.isPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlusIcon data-icon="inline-start" />
+              )}
+              Add
+            </DisabledReasonButton>
+          </div>
+          <Label className="flex items-center gap-1.5 text-xs">
+            <Checkbox
+              checked={secured}
+              onCheckedChange={(v) => setSecured(v === true)}
+            />
+            Secured
+          </Label>
+          <p className="text-[11px] text-muted-foreground">
+            A secured variable's value can't be read back.
+          </p>
+          {keyWarning && (
+            <p className="text-[11px] text-warning">{keyWarning}</p>
+          )}
         </div>
-        <Label className="flex items-center gap-1.5 text-xs">
-          <Checkbox
-            checked={secured}
-            onCheckedChange={(v) => setSecured(v === true)}
-          />
-          Secured
-        </Label>
-        <p className="text-[11px] text-muted-foreground">
-          A secured variable's value can't be read back.
-        </p>
-        {keyWarning && <p className="text-[11px] text-warning">{keyWarning}</p>}
-      </div>
 
-      <RemoteListSection
-        query={variables}
-        rowCount={variables.data?.length ?? 0}
-        noun="variables"
-        loadFailed="Couldn't load variables."
-        extraPaused={config.isPaused}
-        emptyLabel="No pipeline variables yet."
-        skeletonClassName="h-11 w-full"
-        errorTitle="Couldn't load variables."
-        errorHint="If this is a permissions error, managing pipeline variables needs admin on this repository."
-      >
-        {variables.data?.map((v) => (
-          <VariableRow
-            key={v.uuid}
-            repoPath={repoPath}
-            variable={v}
-            onPatch={patchRow}
-            onReconcile={reconcileAfterWrite}
-            confirming={confirming === v.uuid}
-            pending={remove.isPending}
-            onConfirm={() => setConfirming(v.uuid)}
-            onCancel={() => setConfirming(null)}
-            onRemove={() => handleRemove(v.uuid, v.key)}
-          />
-        ))}
-      </RemoteListSection>
-    </div>
+        <RemoteListSection
+          query={variables}
+          rowCount={variables.data?.length ?? 0}
+          noun="variables"
+          loadFailed="Couldn't load variables."
+          extraPaused={config.isPaused}
+          emptyLabel="No pipeline variables yet."
+          skeletonClassName="h-11 w-full"
+          errorTitle="Couldn't load variables."
+          errorHint="If this is a permissions error, managing pipeline variables needs admin on this repository."
+        >
+          {variables.data?.map((v) => (
+            <VariableRow
+              key={v.uuid}
+              repoPath={repoPath}
+              variable={v}
+              onPatch={patchRow}
+              onReconcile={reconcileAfterWrite}
+              confirming={confirming === v.uuid}
+              pending={remove.isPending}
+              onConfirm={() => setConfirming(v.uuid)}
+              onCancel={() => setConfirming(null)}
+              onRemove={() => handleRemove(v.uuid, v.key)}
+            />
+          ))}
+        </RemoteListSection>
+      </div>
+    </PipelinesConfigGate>
   );
 }
 
@@ -360,19 +380,43 @@ function VariableRow({
   );
 }
 
-/** The card the three Pipelines sections show when the availability check itself
- *  failed. Every call site gates it on ABSENT config data, ahead of the disabled
- *  banner: a read that never landed leaves `enabled` false with nothing to tell
+/** Wraps every arm of the three Pipelines sections, standing in an error card
+ *  for all of them when the availability check itself failed with nothing
+ *  loaded: a read that never landed leaves `enabled` false with nothing to tell
  *  it apart from "pipelines are off", and the section's list query stays
  *  disabled while it is, so no other surface reports the failure. A failed
  *  background REFETCH keeps the last good config, where tearing a working
- *  section down would be wrong. */
-export function PipelinesConfigErrorCard({ error }: { error: unknown }) {
+ *  section down would be wrong. The wrapper is the card's Retry focus host: a
+ *  press resets the check to pending, swapping the card for the section. */
+export function PipelinesConfigGate({
+  config,
+  children,
+}: {
+  config: {
+    data: unknown;
+    error: unknown;
+    isError: boolean;
+    refetch: () => unknown;
+  };
+  children: ReactNode;
+}) {
+  const failed = config.isError && config.data === undefined;
+  const retryable = failed && !isPermanentListError(config.error);
+  const { hostRef, retryRef } = useRetryFocusRescue(retryable);
   return (
-    <AsyncErrorCard
-      title="Couldn't check whether Pipelines are enabled."
-      error={error}
-    />
+    <div ref={hostRef} tabIndex={-1} className="min-w-0 outline-none">
+      {failed ? (
+        <AsyncErrorCard
+          title="Couldn't check whether Pipelines are enabled."
+          error={config.error}
+          onRetry={retryable ? () => void config.refetch() : undefined}
+          retryLabel="Retry checking whether Pipelines are enabled"
+          retryRef={retryRef}
+        />
+      ) : (
+        children
+      )}
+    </div>
   );
 }
 
@@ -385,6 +429,7 @@ export function PipelinesDisabledBanner({
   pending: boolean;
   onEnable: () => void;
 }) {
+  const online = useOnline();
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-dashed p-4 text-xs">
       <div className="min-w-0">
@@ -396,10 +441,15 @@ export function PipelinesDisabledBanner({
           deployments.
         </p>
       </div>
-      <Button size="sm" disabled={pending} onClick={onEnable}>
+      <DisabledReasonButton
+        size="sm"
+        disabled={pending || !online}
+        reason={online ? undefined : OFFLINE_WRITE_REASON}
+        onClick={onEnable}
+      >
         {pending && <Spinner data-icon="inline-start" />}
         Enable
-      </Button>
+      </DisabledReasonButton>
     </div>
   );
 }

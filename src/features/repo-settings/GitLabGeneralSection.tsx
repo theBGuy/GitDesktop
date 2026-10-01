@@ -39,7 +39,7 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { DescriptionField } from "./DescriptionField";
-import { AsyncErrorCard } from "./parts";
+import { RemoteFormSection } from "./parts";
 import { GITLAB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
@@ -57,29 +57,28 @@ export function GitLabGeneralSection({
   const settings = useGlRepoSettings(repoPath, open);
   const branches = useBranches(repoPath);
 
-  if (settings.isPending) {
-    return (
-      <div className="min-w-0 space-y-3">
-        <Skeleton className="h-9 w-full" />
-        <Skeleton className="h-9 w-full" />
-        <Skeleton className="h-20 w-full" />
-      </div>
-    );
-  }
-
-  if (settings.isError || !settings.data) {
-    return (
-      <AsyncErrorCard title="Couldn't load settings." error={settings.error} />
-    );
-  }
-
   return (
-    <GitLabGeneralForm
-      key={repoPath}
-      repoPath={repoPath}
-      settings={settings.data}
-      branches={branches.data ?? []}
-    />
+    <RemoteFormSection
+      query={settings}
+      noun="project settings"
+      skeleton={
+        <div className="min-w-0 space-y-3">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      }
+      errorTitle="Couldn't load settings."
+    >
+      {(data) => (
+        <GitLabGeneralForm
+          key={repoPath}
+          repoPath={repoPath}
+          settings={data}
+          branches={branches.data ?? []}
+        />
+      )}
+    </RemoteFormSection>
   );
 }
 

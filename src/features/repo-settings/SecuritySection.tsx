@@ -35,7 +35,7 @@ import {
 import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { AsyncErrorCard, InlineConfirm } from "./parts";
+import { InlineConfirm, RemoteFormSection } from "./parts";
 
 /** Dependabot / dependency-graph options GitHub exposes to NO repo-level API —
  *  they're web-UI-only. (Version updates is handled by the dependabot.yml
@@ -160,36 +160,33 @@ export function SecuritySection({
 }) {
   const security = useSecurity(repoPath, open);
 
-  if (security.isPending) {
-    return (
-      <div className="min-w-0 space-y-3">
-        <Skeleton className="h-12 w-full" />
-        <Skeleton className="h-12 w-full" />
-        <Skeleton className="h-12 w-full" />
-      </div>
-    );
-  }
-  if (security.isError || !security.data) {
-    return (
-      <AsyncErrorCard
-        title="Couldn't load security."
-        error={security.error}
-        hint="If this is a permissions error, these settings need repo-admin access."
-      />
-    );
-  }
-
-  // Remount on refetch so the draft reseeds after a save.
   return (
-    <div className="min-w-0 space-y-4">
-      <SecurityForm
-        key={security.dataUpdatedAt}
-        repoPath={repoPath}
-        status={security.data}
-      />
-      <DependabotVersionUpdates repoPath={repoPath} open={open} />
-      <MoreOnGitHub repoPath={repoPath} open={open} />
-    </div>
+    <RemoteFormSection
+      query={security}
+      noun="security settings"
+      skeleton={
+        <div className="min-w-0 space-y-3">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      }
+      errorTitle="Couldn't load security."
+      errorHint="If this is a permissions error, these settings need repo-admin access."
+    >
+      {(status) => (
+        <div className="min-w-0 space-y-4">
+          <SecurityForm
+            key={repoPath}
+            repoPath={repoPath}
+            status={status}
+            dataUpdatedAt={security.dataUpdatedAt}
+          />
+          <DependabotVersionUpdates repoPath={repoPath} open={open} />
+          <MoreOnGitHub repoPath={repoPath} open={open} />
+        </div>
+      )}
+    </RemoteFormSection>
   );
 }
 
@@ -404,19 +401,56 @@ function MoreOnGitHub({ repoPath, open }: { repoPath: string; open: boolean }) {
 function SecurityForm({
   repoPath,
   status,
+  dataUpdatedAt,
 }: {
   repoPath: string;
   status: SecurityStatus;
+  /** When `status` last loaded; a failed refetch doesn't advance it. */
+  dataUpdatedAt: number;
 }) {
   const apply = useApplySecurity(repoPath);
   const seed = useMemo(() => toDraft(status), [status]);
-  const [draft, setDraft] = useState(seed);
-
-  const dirty = FEATURES.some((f) => draft[f.key] !== seed[f.key]);
+  // Only the toggles the user touched, so untouched ones ride the latest read
+  // and a save never sends another client's change back. A touched key retires
+  // once the server reads back equal, never on the save itself: a save whose
+  // refetch failed keeps its values on screen, and a refetch never wipes an edit.
+  const [edit, setEdit] = useState<Partial<Draft> | null>(null);
+  // What a save sent, stamped with the read it was made against. A newer read
+  // retires those keys even when it differs (a toggle GitHub refused); a key
+  // toggled again since keeps the newer value.
+  const [pending, setPending] = useState<{
+    at: number;
+    sent: Partial<Draft>;
+  } | null>(null);
+  if (pending !== null && dataUpdatedAt > pending.at) {
+    setPending(null);
+    if (edit !== null) {
+      const kept = FEATURES.filter(
+        (f) => f.key in edit && edit[f.key] !== pending.sent[f.key],
+      );
+      setEdit(
+        kept.length > 0
+          ? Object.fromEntries(kept.map((f) => [f.key, edit[f.key]]))
+          : null,
+      );
+    }
+  } else if (edit !== null) {
+    const kept = FEATURES.filter(
+      (f) => f.key in edit && edit[f.key] !== seed[f.key],
+    );
+    if (kept.length !== Object.keys(edit).length)
+      setEdit(
+        kept.length > 0
+          ? Object.fromEntries(kept.map((f) => [f.key, edit[f.key]]))
+          : null,
+      );
+  }
+  const draft: Draft = { ...seed, ...edit };
+  const dirty = edit !== null;
 
   function set(key: SecurityFeature, value: boolean) {
-    setDraft((d) => {
-      const next = { ...d, [key]: value };
+    setEdit((e) => {
+      const next = { ...e, [key]: value };
       // Turning a parent off turns its dependents off too.
       if (!value) {
         for (const f of FEATURES) if (f.dependsOn === key) next[f.key] = false;
@@ -426,11 +460,20 @@ function SecurityForm({
   }
 
   async function save() {
-    const changes = FEATURES.filter((f) => draft[f.key] !== seed[f.key]).map(
-      (f) => ({ feature: f.key, enabled: draft[f.key] }),
-    );
+    // FEATURES order is the dependency-safe apply order.
+    const changes = FEATURES.filter(
+      (f) => edit !== null && f.key in edit && draft[f.key] !== seed[f.key],
+    ).map((f) => ({ feature: f.key, enabled: draft[f.key] }));
+    const at = dataUpdatedAt;
     try {
       await apply.mutateAsync(changes);
+      const sent: Partial<Draft> = Object.fromEntries(
+        changes.map((c) => [c.feature, c.enabled]),
+      );
+      setPending((p) => ({
+        at: p ? Math.min(p.at, at) : at,
+        sent: { ...p?.sent, ...sent },
+      }));
       toast.success("Security settings saved");
     } catch (e) {
       toastError(e);
@@ -475,7 +518,7 @@ function SecurityForm({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setDraft(seed)}
+            onClick={() => setEdit(null)}
             disabled={apply.isPending}
           >
             Discard

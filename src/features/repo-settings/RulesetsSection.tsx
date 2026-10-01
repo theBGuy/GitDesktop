@@ -18,6 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import { isPermanentListError } from "@/features/conversations/remote-section-state";
 import {
   useCheckRunApps,
   useCreateRuleset,
@@ -29,7 +31,13 @@ import {
 } from "@/lib/git/queries";
 import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncErrorCard, InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  AsyncErrorCard,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 const ENFORCEMENTS: { value: RulesetEnforcement; label: string }[] = [
   { value: "active", label: "Active" },
@@ -502,6 +510,11 @@ function RulesetEditor({
   onDone: () => void;
 }) {
   const existing = useRuleset(repoPath, id);
+  const failed = id != null && existing.isError && existing.data === undefined;
+  const retryable = failed && !isPermanentListError(existing.error);
+  // A Retry press resets the never-loaded read to pending, swapping the card for
+  // the skeleton; the column below is the focus host that survives it.
+  const { hostRef, retryRef } = useRetryFocusRescue(retryable);
   // The form only ever mounts on loaded data: a save is a full-replace PUT built
   // from `original`, so a form seeded blank would wipe the ruleset's bypass
   // actors, unmodeled rules and conditions. (The create path fetches nothing.)
@@ -521,6 +534,9 @@ function RulesetEditor({
             title="Couldn't load this ruleset."
             error={existing.error}
             hint={ADMIN_HINT}
+            onRetry={retryable ? () => void existing.refetch() : undefined}
+            retryLabel="Retry loading this ruleset"
+            retryRef={retryRef}
           />
         );
       default:
@@ -536,7 +552,7 @@ function RulesetEditor({
   })();
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div ref={hostRef} tabIndex={-1} className="min-w-0 space-y-4 outline-none">
       <button
         type="button"
         onClick={onDone}
@@ -564,6 +580,7 @@ function RulesetForm({
   const create = useCreateRuleset(repoPath);
   const update = useUpdateRuleset(repoPath);
   const pending = create.isPending || update.isPending;
+  const online = useOnline();
   const seed = useMemo(
     () => (original ? rulesetToDraft(original) : BLANK),
     [original],
@@ -772,10 +789,14 @@ function RulesetForm({
         <Button variant="outline" onClick={onDone} disabled={pending}>
           Cancel
         </Button>
-        <Button onClick={save} disabled={pending || !d.name.trim()}>
+        <DisabledReasonButton
+          onClick={save}
+          disabled={pending || !d.name.trim() || !online}
+          reason={online ? undefined : OFFLINE_WRITE_REASON}
+        >
           {pending && <Spinner data-icon="inline-start" />}
           {id != null ? "Save ruleset" : "Create ruleset"}
-        </Button>
+        </DisabledReasonButton>
       </div>
     </>
   );

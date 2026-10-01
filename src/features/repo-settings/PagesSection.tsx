@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
@@ -28,7 +29,12 @@ import {
 } from "@/lib/git/queries";
 import type { PagesInfo } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncErrorCard, InlineConfirm } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteFormSection,
+} from "./parts";
 
 const PATHS = ["/", "/docs"];
 
@@ -49,38 +55,40 @@ export function PagesSection({
 }) {
   const pages = usePages(repoPath, open);
 
-  if (pages.isPending) {
-    return (
-      <div className="min-w-0 space-y-3">
-        <Skeleton className="h-9 w-full" />
-        <Skeleton className="h-20 w-full" />
-      </div>
-    );
-  }
-  if (pages.isError) {
-    return (
-      <AsyncErrorCard
-        title="Couldn't load Pages."
-        error={pages.error}
-        hint="If this is a permissions error, managing Pages needs repo-admin access."
-      />
-    );
-  }
-
-  return pages.data ? (
-    <PagesEnabled
-      key={pages.dataUpdatedAt}
-      repoPath={repoPath}
-      pages={pages.data}
-    />
-  ) : (
-    <PagesDisabled repoPath={repoPath} />
+  return (
+    <RemoteFormSection
+      query={pages}
+      noun="Pages settings"
+      skeleton={
+        <div className="min-w-0 space-y-3">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      }
+      errorTitle="Couldn't load Pages."
+      errorHint="If this is a permissions error, managing Pages needs repo-admin access."
+    >
+      {(data) =>
+        // `null` is a loaded answer: Pages isn't enabled.
+        data ? (
+          <PagesEnabled
+            key={repoPath}
+            repoPath={repoPath}
+            pages={data}
+            dataUpdatedAt={pages.dataUpdatedAt}
+          />
+        ) : (
+          <PagesDisabled repoPath={repoPath} />
+        )
+      }
+    </RemoteFormSection>
   );
 }
 
 function PagesDisabled({ repoPath }: { repoPath: string }) {
   const branches = useBranches(repoPath);
   const enable = useEnablePages(repoPath);
+  const online = useOnline();
   const [mode, setMode] = useState<"branch" | "workflow">("branch");
   const [branch, setBranch] = useState("");
   const [path, setPath] = useState("/");
@@ -169,10 +177,15 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
           </div>
         </div>
       )}
-      <Button size="sm" disabled={!canEnable} onClick={handleEnable}>
+      <DisabledReasonButton
+        size="sm"
+        disabled={!canEnable || !online}
+        reason={online ? undefined : OFFLINE_WRITE_REASON}
+        onClick={handleEnable}
+      >
         {enable.isPending && <Spinner data-icon="inline-start" />}
         Enable Pages
-      </Button>
+      </DisabledReasonButton>
     </div>
   );
 }
@@ -180,16 +193,49 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
 function PagesEnabled({
   repoPath,
   pages,
+  dataUpdatedAt,
 }: {
   repoPath: string;
   pages: PagesInfo;
+  /** When `pages` last loaded; a failed refetch doesn't advance it. */
+  dataUpdatedAt: number;
 }) {
   const branches = useBranches(repoPath);
   const update = useUpdatePages(repoPath);
   const disable = useDisablePages(repoPath);
-  const [branch, setBranch] = useState(pages.sourceBranch);
-  const [path, setPath] = useState(pages.sourcePath || "/");
-  const [cname, setCname] = useState(pages.cname);
+  // Each field holds the user's edit, or null to show the server's value. An
+  // edit retires once the server reads back equal, never on the save itself: a
+  // save whose refetch failed keeps its value on screen.
+  const [branchEdit, setBranch] = useState<string | null>(null);
+  const [pathEdit, setPath] = useState<string | null>(null);
+  const [cnameEdit, setCname] = useState<string | null>(null);
+  // What a save sent, stamped with the read it was made against. A newer read
+  // retires those fields even when it differs (a domain GitHub normalized); one
+  // typed into since keeps the newer text.
+  const [pending, setPending] = useState<{
+    at: number;
+    sent: { branch?: string; path?: string; cname?: string };
+  } | null>(null);
+  const serverPath = pages.sourcePath || "/";
+  if (pending !== null && dataUpdatedAt > pending.at) {
+    setPending(null);
+    if (branchEdit !== null && branchEdit === pending.sent.branch)
+      setBranch(null);
+    if (pathEdit !== null && pathEdit === pending.sent.path) setPath(null);
+    if (cnameEdit !== null && cnameEdit === pending.sent.cname) setCname(null);
+  }
+  if (branchEdit !== null && branchEdit === pages.sourceBranch) setBranch(null);
+  if (pathEdit !== null && pathEdit === serverPath) setPath(null);
+  if (cnameEdit !== null && cnameEdit === pages.cname) setCname(null);
+  function markSent(at: number, sent: NonNullable<typeof pending>["sent"]) {
+    setPending((p) => ({
+      at: p ? Math.min(p.at, at) : at,
+      sent: { ...p?.sent, ...sent },
+    }));
+  }
+  const branch = branchEdit ?? pages.sourceBranch;
+  const path = pathEdit ?? serverPath;
+  const cname = cnameEdit ?? pages.cname;
   const [confirmingDisable, setConfirmingDisable] = useState(false);
 
   const isWorkflow = pages.buildType === "workflow";
@@ -220,8 +266,10 @@ function PagesEnabled({
       : "Waiting for the HTTPS certificate to be issued for this domain";
 
   async function handleUpdateSource() {
+    const at = dataUpdatedAt;
     try {
       await update.mutateAsync({ buildType: "legacy", branch, path });
+      markSent(at, { branch, path });
       toast.success("Source updated");
     } catch (e) {
       toastError(e);
@@ -229,8 +277,10 @@ function PagesEnabled({
   }
 
   async function handleSaveDomain() {
+    const at = dataUpdatedAt;
     try {
       await update.mutateAsync({ cname });
+      markSent(at, { cname });
       toast.success(cname ? "Domain saved" : "Domain removed");
     } catch (e) {
       toastError(e);

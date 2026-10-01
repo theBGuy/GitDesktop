@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
@@ -15,9 +16,14 @@ import {
 import type { ForgeUserRef } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import { userRefHint } from "../pulls/ReviewersPopover";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** Bitbucket default reviewers: the accounts auto-added to every new pull
  *  request. List the current reviewers (arrow-key navigable), add from the
@@ -198,6 +204,16 @@ function AddReviewerPopover({
   onAdd: (user: ForgeUserRef) => void;
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const online = useOnline();
+  const heldReason = !online
+    ? OFFLINE_WRITE_REASON
+    : pending
+      ? "Saving your last change…"
+      : undefined;
+  // A pick made offline would park silently, so a picker open when the
+  // connection drops closes with its trigger held. Reset, not derived into
+  // `open`: a derived close would reopen and take focus on reconnect.
+  if (!online && popoverOpen) setPopoverOpen(false);
   // Only fetch candidates once the picker opens (workspace member list is heavy).
   const candidates = useBbMemberCandidates(repoPath, open && popoverOpen);
   const [query, setQuery] = useState("");
@@ -214,6 +230,7 @@ function AddReviewerPopover({
   const active = optionCount > 0 ? Math.min(activeIndex, optionCount - 1) : 0;
 
   function add(user: ForgeUserRef) {
+    if (!online) return;
     onAdd(user);
     setQuery("");
     setActiveIndex(0);
@@ -237,7 +254,13 @@ function AddReviewerPopover({
   return (
     <Popover.Root open={popoverOpen} onOpenChange={setPopoverOpen}>
       <Popover.Trigger
-        render={<Button size="sm" disabled={pending} />}
+        render={
+          <DisabledReasonButton
+            size="sm"
+            disabled={heldReason !== undefined}
+            reason={heldReason}
+          />
+        }
         aria-label="Add default reviewer"
       >
         {pending ? (

@@ -1,6 +1,7 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,12 @@ import {
 } from "@/lib/git/queries";
 import type { GitLabVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 function validKey(k: string): boolean {
   return /^[A-Za-z0-9_]{1,255}$/.test(k);
@@ -34,6 +40,7 @@ export function GitLabVariablesSection({
   const variables = useGlVariables(repoPath, open);
   const setVariable = useGlSetVariable(repoPath);
   const deleteVariable = useGlDeleteVariable(repoPath);
+  const online = useOnline();
 
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
@@ -49,7 +56,8 @@ export function GitLabVariablesSection({
     validKey(key.trim()) &&
     value.length > 0 &&
     !keyTaken &&
-    !setVariable.isPending;
+    !setVariable.isPending &&
+    online;
   const keyWarning = key.trim()
     ? keyTaken
       ? "A variable with this key already exists — edit it below."
@@ -130,14 +138,19 @@ export function GitLabVariablesSection({
             spellCheck={false}
             className="font-mono"
           />
-          <Button size="sm" disabled={!canAdd} onClick={addVariable}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canAdd}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={addVariable}
+          >
             {setVariable.isPending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlusIcon data-icon="inline-start" />
             )}
             Add
-          </Button>
+          </DisabledReasonButton>
         </div>
         <div className="flex items-center gap-4">
           <Label className="flex items-center gap-1.5 text-xs">

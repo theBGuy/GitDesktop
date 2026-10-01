@@ -24,8 +24,14 @@ import {
 import type { GitLabMember } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
-import { HeldRoleSelect, InlineConfirm, RemoteListSection } from "./parts";
+import {
+  HeldRoleSelect,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** The roles the app offers (the classic five — Planner is newer and not
  *  accepted by older self-managed instances; it still DISPLAYS if present). */
@@ -69,13 +75,14 @@ export function GitLabMembersSection({
   const add = useGlAddMember(repoPath);
   const update = useGlUpdateMember(repoPath);
   const remove = useGlRemoveMember(repoPath);
+  const online = useOnline();
 
   const [username, setUsername] = useState("");
   const [level, setLevel] = useState(30);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
 
-  const canAdd = validUsername(username.trim()) && !add.isPending;
+  const canAdd = validUsername(username.trim()) && !add.isPending && online;
   // The username is the blocker to name first: it's the one the user can fix here.
   const addHeldReason = (() => {
     switch (true) {
@@ -83,6 +90,8 @@ export function GitLabMembersSection({
         return "Enter a GitLab username";
       case !validUsername(username.trim()):
         return "That isn't a valid GitLab username";
+      case !online:
+        return OFFLINE_WRITE_REASON;
       case add.isPending:
         return SAVING_REASON;
       default:

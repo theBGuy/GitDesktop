@@ -402,7 +402,7 @@ like this:
 ## GitLab projects
 
 The same dialog manages a **GitLab** project (it needs the **Maintainer** role; the
-menu item appears only when you have it):
+menu item is enabled only when you have it):
 
 - **General** — description and topics (AI-generate works here too), default branch,
   per-feature **access levels** (Issues, Merge requests, Wiki, Snippets, Forking — each
@@ -430,7 +430,7 @@ menu item appears only when you have it):
 ## Bitbucket repositories
 
 The same dialog manages a **Bitbucket** repository (it needs **admin** on the repo; the
-menu item appears only when you have it):
+menu item is enabled only when you have it):
 
 - **General** — description, **website**, primary **language**, **fork policy** (allow
   all forks / private forks only / no forks), and the **default branch**, saved behind a

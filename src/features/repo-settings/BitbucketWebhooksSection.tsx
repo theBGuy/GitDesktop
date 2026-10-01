@@ -6,6 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,7 +22,12 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketHook } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** Bitbucket's webhook events, curated to the ones people wire, in display
  *  order. */
@@ -183,9 +189,10 @@ function HookForm({
   const [events, setEvents] = useState<string[]>(hook?.events ?? ["repo:push"]);
 
   const pending = create.isPending || update.isPending;
+  const online = useOnline();
   const urlValid =
     url.trim().startsWith("https://") || url.trim().startsWith("http://");
-  const canSave = urlValid && events.length > 0 && !pending;
+  const canSave = urlValid && events.length > 0 && !pending && online;
   const warning =
     events.length === 0
       ? "Select at least one event."
@@ -295,10 +302,15 @@ function HookForm({
           <Button variant="outline" size="sm" onClick={onDone}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!canSave} onClick={save}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canSave}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={save}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             {hook ? "Save changes" : "Create webhook"}
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
     </div>

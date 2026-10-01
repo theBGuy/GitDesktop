@@ -1,6 +1,7 @@
 import { PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { useRelativeNow } from "@/components/relative-time";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
@@ -27,8 +28,13 @@ import {
 import type { SecretApp } from "@/lib/git/types";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 const APPS: { value: SecretApp; label: string }[] = [
   { value: "actions", label: "Actions" },
@@ -183,8 +189,9 @@ function SecretsList({
   // `meta` is a plain string prop, so the shared clock has to be threaded in by
   // hand — `<RelativeTime>` can't render there.
   const now = useRelativeNow();
+  const online = useOnline();
   const invalid = nameError(name);
-  const canAdd = !!name && !!value && !invalid && !set.isPending;
+  const canAdd = !!name && !!value && !invalid && !set.isPending && online;
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -234,14 +241,19 @@ function SecretsList({
             placeholder="Value"
             autoComplete="off"
           />
-          <Button size="sm" disabled={!canAdd} onClick={add}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canAdd}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={add}
+          >
             {set.isPending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlusIcon data-icon="inline-start" />
             )}
             Add
-          </Button>
+          </DisabledReasonButton>
         </div>
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           Encrypted before it leaves your machine. The value can't be shown
@@ -294,8 +306,9 @@ function VariablesList({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [confirming, setConfirming] = useState<string | null>(null);
+  const online = useOnline();
   const invalid = nameError(name);
-  const canAdd = !!name && !invalid && !set.isPending;
+  const canAdd = !!name && !invalid && !set.isPending && online;
 
   async function add() {
     try {
@@ -341,14 +354,19 @@ function VariablesList({
             placeholder="Value"
             autoComplete="off"
           />
-          <Button size="sm" disabled={!canAdd} onClick={add}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canAdd}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={add}
+          >
             {set.isPending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlusIcon data-icon="inline-start" />
             )}
             Save
-          </Button>
+          </DisabledReasonButton>
         </div>
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           Reusing an existing name updates that variable.

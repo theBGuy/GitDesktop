@@ -21,8 +21,14 @@ import type { RepoRole } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
-import { HeldRoleSelect, InlineConfirm, RemoteListSection } from "./parts";
+import {
+  HeldRoleSelect,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 const ROLES: { value: RepoRole; label: string }[] = [
   { value: "read", label: "Read" },
@@ -60,6 +66,7 @@ export function CollaboratorsSection({
   const remove = useRemoveCollaborator(repoPath);
   const updateInvite = useUpdateInvitation(repoPath);
   const cancelInvite = useCancelInvitation(repoPath);
+  const online = useOnline();
 
   // Every collaborator on a USER-owned repo gets write: GitHub 422s a read invite and
   // silently clamps triage/maintain/admin to write. So a KNOWN personal repo offers no
@@ -91,6 +98,7 @@ export function CollaboratorsSection({
   const canAdd =
     validUsername(username.trim()) &&
     !add.isPending &&
+    online &&
     rolesUnknownReason === undefined;
   // The username is the blocker to name first: it's the one the user can fix here.
   const inviteHeldReason = (() => {
@@ -99,6 +107,8 @@ export function CollaboratorsSection({
         return "Enter a GitHub username";
       case !validUsername(username.trim()):
         return "That isn't a valid GitHub username";
+      case !online:
+        return OFFLINE_WRITE_REASON;
       case add.isPending:
         return SAVING_REASON;
       default:

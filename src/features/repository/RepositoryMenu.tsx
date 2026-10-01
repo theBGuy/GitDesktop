@@ -130,6 +130,11 @@ const RepoSettingsDialog = lazy(() =>
   loadRepoSettingsDialog().then((m) => ({ default: m.RepoSettingsDialog })),
 );
 
+/** Parenthetical reasons on the disabled Repository settings item while its
+ *  admin probe hasn't answered: a disabled menu item can't show a tooltip. */
+const SETTINGS_ACCESS_CHECKING_ITEM_REASON = "checking access";
+const SETTINGS_ACCESS_FAILED_ITEM_REASON = "couldn't check access";
+
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
   const settings = useSettings();
@@ -302,10 +307,17 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const starred = starStatus.data ?? false;
   // Repo settings are admin-only, on both providers (GitHub admin / GitLab
   // Maintainer+ — the probe dispatches per provider); the menu item hides for
-  // everyone else.
+  // a resolved non-admin. An unanswered probe (pending, parked, or failed) is
+  // no verdict, so the item stays visible but disabled with the reason.
   const settingsReady = forgeFeatureReady(gh.data, "repoSettings");
   const admin = useRepoAdmin(repoPath, settingsReady);
   const canOpenRepoSettings = settingsReady && Boolean(admin.data?.admin);
+  const repoSettingsHeldReason =
+    settingsReady && admin.data === undefined
+      ? admin.isError
+        ? SETTINGS_ACCESS_FAILED_ITEM_REASON
+        : SETTINGS_ACCESS_CHECKING_ITEM_REASON
+      : undefined;
   const editor = (settings.data?.externalEditor ?? "").trim();
   const editorName =
     (settings.data?.externalEditorName ?? "").trim() || "editor";
@@ -660,11 +672,18 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <KanbanIcon />
           {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}
         </DropdownMenuItem>
-        {canOpenRepoSettings && (
+        {canOpenRepoSettings ? (
           <DropdownMenuItem onClick={openRepoSettings}>
             <GearSixIcon />
             Repository settings…
           </DropdownMenuItem>
+        ) : (
+          repoSettingsHeldReason !== undefined && (
+            <DropdownMenuItem disabled>
+              <GearSixIcon />
+              Repository settings… ({repoSettingsHeldReason})
+            </DropdownMenuItem>
+          )
         )}
         <DropdownMenuItem onClick={() => setBranchRulesOpen(true)}>
           <ShieldCheckIcon />

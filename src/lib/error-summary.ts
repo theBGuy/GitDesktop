@@ -72,13 +72,12 @@ const TRANSFER_REF_LINE =
  *  end-anchored on that single token. */
 const TRANSFER_DELETED_LINE = /^ - \[deleted\] +\S+\r?$/;
 
-/** Lines that carry no signal for a one-line summary: git `hint:` guidance,
- *  `Rebasing (x/y)` progress counters, the transfer headers and non-`!` per-ref
- *  lines, and blanks. Matched against the trimmed line (dropping a CRLF
- *  joint's `\r`), except the per-ref shapes, which start with their indent. */
+/** Trimmed blanks, ERROR banners, git hints, progress and transfer metadata
+ *  carry no summary signal. Per-ref shapes require the original indent, so they
+ *  test the raw line and must absorb a trailing CRLF `\r` themselves. */
 function isNoiseLine(line: string): boolean {
   const t = line.trim();
-  if (t === "") return true;
+  if (t === "" || t === "ERROR") return true;
   if (t.startsWith("hint:")) return true;
   if (/^Rebasing \(\d+\/\d+\)/.test(t)) return true;
   if (PUSH_TRANSFER_HEADER.test(t)) return true;
@@ -382,6 +381,15 @@ const GH_OUTAGE_PHRASES = [
 ];
 const GH_OUTAGE_STATUS = /\b(?:http|status code:?)\s+50[0234]\b/;
 
+/** GitLab's outage phrases mirror classify_glab_failure's OFFLINE_STATUS
+ *  in forge/session.rs; numeric status matching stays gh-only. */
+const GLAB_OUTAGE_PHRASES = [
+  "bad gateway",
+  "service unavailable",
+  "gateway timeout",
+  "proxy authentication required",
+];
+
 /** The literal phrases the Bitbucket and Jira HTTP clients (forge/http.rs,
  *  forge/jira.rs) put in a transport failure, whose raw reqwest text names none
  *  of the phrases above. A cross-language contract: this suite pins both, and a
@@ -450,8 +458,13 @@ function networkSummary(
     ...(kind === "gh" ? GH_OUTAGE_PHRASES : []),
     ...RUST_TRANSPORT_PHRASES,
   ];
+  // glab pads and wraps outage phrases; other phrase scans keep the raw spacing.
+  const glabOutage =
+    kind === "glab" &&
+    GLAB_OUTAGE_PHRASES.some((p) => hasStandaloneWord(collapseSpaces(text), p));
   const transport =
     phrases.some((p) => hasStandaloneWord(text, p)) ||
+    glabOutage ||
     (kind === "gh" && GH_OUTAGE_STATUS.test(text));
   return transport
     ? `Couldn't reach ${host} — check your network connection.`

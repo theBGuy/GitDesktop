@@ -26,7 +26,12 @@ import type {
   GitLabProtectedBranch,
 } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteListSection } from "./parts";
+import { useOnline } from "@/lib/use-online";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 
 /** GitLab's protectable access levels, for both the "allowed to push" and
  *  "allowed to merge" allow lists. Free tier exposes these three roles; the
@@ -263,6 +268,7 @@ function ProtectBranchForm({
   onDone: () => void;
 }) {
   const protectBranch = useGlProtectBranch(repoPath);
+  const online = useOnline();
   const [name, setName] = useState("");
   const [pushLevel, setPushLevel] = useState("40");
   const [mergeLevel, setMergeLevel] = useState("40");
@@ -271,7 +277,7 @@ function ProtectBranchForm({
   const trimmed = name.trim();
   const duplicate = existing.some((b) => b.name === trimmed);
   const canProtect =
-    trimmed.length > 0 && !duplicate && !protectBranch.isPending;
+    trimmed.length > 0 && !duplicate && !protectBranch.isPending && online;
   const warning = !trimmed
     ? "Enter a branch name."
     : duplicate
@@ -375,10 +381,15 @@ function ProtectBranchForm({
           <Button variant="outline" size="sm" onClick={onDone}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!canProtect} onClick={submit}>
+          <DisabledReasonButton
+            size="sm"
+            disabled={!canProtect}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            onClick={submit}
+          >
             {protectBranch.isPending && <Spinner data-icon="inline-start" />}
             Protect
-          </Button>
+          </DisabledReasonButton>
         </div>
       </div>
     </div>

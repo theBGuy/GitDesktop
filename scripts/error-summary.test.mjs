@@ -673,12 +673,15 @@ const TRANSPORT_PHRASES = [
   "forcibly closed by the remote host",
   "proxyconnect tcp",
 ];
-/** gh's outage answers, read for gh alone. */
-const GH_ONLY_PHRASES = [
+/** GitLab's OFFLINE_STATUS phrases from forge/session.rs. */
+const GLAB_OUTAGE_PHRASES = [
   "Bad Gateway",
   "Service Unavailable",
   "Gateway Timeout",
   "Proxy Authentication Required",
+];
+/** gh also recognizes outage answers carrying only a numeric status. */
+const GH_ONLY_PHRASES = [
   "HTTP 500",
   "HTTP 502",
   "HTTP 503",
@@ -707,6 +710,7 @@ test("every transport phrase classifies for every network kind that reads it", (
     const phrases = [
       ...TRANSPORT_PHRASES,
       ...RUST_TRANSPORT_PHRASES,
+      ...(kind === "gh" || kind === "glab" ? GLAB_OUTAGE_PHRASES : []),
       ...(kind === "gh" ? GH_ONLY_PHRASES : []),
     ];
     for (const phrase of phrases) {
@@ -791,7 +795,20 @@ test("io errors are never rewritten, even with transport wording", () => {
   assert.equal(presentError(appError("io", message)).summary, message);
 });
 
-test("gh-only outage phrases stay gh's: other kinds keep their raw line", () => {
+test("GitLab outage phrases map for glab; Bitbucket and Jira keep their raw line", () => {
+  for (const kind of ["glab", "bitbucket", "jira"]) {
+    for (const word of GLAB_OUTAGE_PHRASES) {
+      const message = `request failed: ${word}`;
+      assert.equal(
+        presentError(appError(kind, message)).summary,
+        kind === "glab" ? reach("GitLab") : message,
+        `${kind}: ${word}`,
+      );
+    }
+  }
+});
+
+test("gh-only numeric outage statuses leave other kinds' raw line", () => {
   for (const kind of ["glab", "bitbucket", "jira"]) {
     for (const word of GH_ONLY_PHRASES) {
       const message = `request failed: ${word}`;
@@ -802,6 +819,63 @@ test("gh-only outage phrases stay gh's: other kinds keep their raw line", () => 
       );
     }
   }
+});
+
+test("glab's padded ERROR banner gives way to Unauthenticated (banner negative control)", () => {
+  const message =
+    "          \n   ERROR  \n          \n  Unauthenticated.        ";
+  const p = presentError(appError("glab", message));
+  assert.equal(p.summary, "Unauthenticated.");
+  assert.equal(p.fullText, message);
+});
+
+test("glab's padded ERROR banner with Bad Gateway maps to GitLab (outage negative control)", () => {
+  const message = "          \n   ERROR  \n          \n  Bad Gateway        ";
+  assert.equal(
+    presentError(appError("glab", message)).summary,
+    reach("GitLab"),
+  );
+});
+
+test("glab's wrapped Members-list Bad Gateway classifies (whitespace-collapse revert detector)", () => {
+  const message = [
+    "   ERROR  ",
+    "          ",
+    '  Get "https://gitlab.com/api/v4/projects/theBGuy%2Fgitdesktop-gitlab-demo/members/all?per_page=100&page=1": Bad        ',
+    "  Gateway.        ",
+  ].join("\n");
+  const p = presentError(appError("glab", message));
+  assert.equal(p.summary, reach("GitLab"));
+  assert.equal(p.fullText, message);
+});
+
+test("glab's short single-line Bad Gateway still classifies", () => {
+  const message = 'Get "https://gitlab.com/api/v4/user": Bad Gateway';
+  assert.equal(
+    presentError(appError("glab", message)).summary,
+    reach("GitLab"),
+  );
+});
+
+test("glab's padded ERROR banner alone keeps the first non-empty fallback", () => {
+  const message = "          \n   ERROR  \n          ";
+  assert.equal(presentError(appError("glab", message)).summary, "ERROR");
+});
+
+test("gh skips a padded ERROR line and keeps the real message", () => {
+  const message =
+    "          \n   ERROR  \n          \n  Example failure.        ";
+  assert.equal(
+    presentError(appError("gh", message)).summary,
+    "Example failure.",
+  );
+});
+
+test("Bitbucket keeps Bad Gateway as its raw summary", () => {
+  assert.equal(
+    presentError(appError("bitbucket", "Bad Gateway")).summary,
+    "Bad Gateway",
+  );
 });
 
 test("bare transport words and phrases inside identifiers never classify", () => {

@@ -10,7 +10,7 @@ import {
 import type { BbEnvironment } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import {
-  PipelinesConfigErrorCard,
+  PipelinesConfigGate,
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
 import { RemoteListSection } from "./parts";
@@ -46,57 +46,57 @@ export function BitbucketEnvironmentsSection({
     }
   }
 
-  if (config.isError && !config.data) {
-    return <PipelinesConfigErrorCard error={config.error} />;
-  }
-
   if (config.data && !enabled) {
     return (
-      <PipelinesDisabledBanner
-        pending={setEnabled.isPending}
-        onEnable={handleEnablePipelines}
-      />
+      <PipelinesConfigGate config={config}>
+        <PipelinesDisabledBanner
+          pending={setEnabled.isPending}
+          onEnable={handleEnablePipelines}
+        />
+      </PipelinesConfigGate>
     );
   }
 
   return (
-    <div className="min-w-0 space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-muted-foreground">
-          Deployment environments for Pipelines. Managed on Bitbucket.
-        </p>
-        {webUrl && (
-          <button
-            type="button"
-            className="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline"
-            onClick={() =>
-              openUrl(
-                `${webUrl}/admin/addon/admin/pipelines/deployment-settings`,
-              )
-            }
-          >
-            Manage on Bitbucket…
-            <ArrowSquareOutIcon className="size-3 shrink-0" />
-          </button>
-        )}
-      </div>
+    <PipelinesConfigGate config={config}>
+      <div className="min-w-0 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-muted-foreground">
+            Deployment environments for Pipelines. Managed on Bitbucket.
+          </p>
+          {webUrl && (
+            <button
+              type="button"
+              className="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline"
+              onClick={() =>
+                openUrl(
+                  `${webUrl}/admin/addon/admin/pipelines/deployment-settings`,
+                )
+              }
+            >
+              Manage on Bitbucket…
+              <ArrowSquareOutIcon className="size-3 shrink-0" />
+            </button>
+          )}
+        </div>
 
-      <RemoteListSection
-        query={environments}
-        rowCount={environments.data?.length ?? 0}
-        noun="environments"
-        loadFailed="Couldn't load environments."
-        extraPaused={config.isPaused}
-        emptyLabel="No deployment environments."
-        skeletonClassName="h-11 w-full"
-        errorTitle="Couldn't load environments"
-        errorHint="If this is a permissions error, viewing deployment environments needs admin on this repository."
-      >
-        {environments.data?.map((env) => (
-          <EnvironmentRow key={env.uuid} environment={env} />
-        ))}
-      </RemoteListSection>
-    </div>
+        <RemoteListSection
+          query={environments}
+          rowCount={environments.data?.length ?? 0}
+          noun="environments"
+          loadFailed="Couldn't load environments."
+          extraPaused={config.isPaused}
+          emptyLabel="No deployment environments."
+          skeletonClassName="h-11 w-full"
+          errorTitle="Couldn't load environments"
+          errorHint="If this is a permissions error, viewing deployment environments needs admin on this repository."
+        >
+          {environments.data?.map((env) => (
+            <EnvironmentRow key={env.uuid} environment={env} />
+          ))}
+        </RemoteListSection>
+      </div>
+    </PipelinesConfigGate>
   );
 }
 

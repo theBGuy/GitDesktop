@@ -397,6 +397,19 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.
   Settled by omission (no `fetching`), so Retry survives its own press.
+- **Settings form retention** — a repo-settings FORM over one read renders
+  through `RemoteFormSection` (repo-settings/parts): gated on absent data,
+  never `isError`, so a failed or parked refresh keeps the form and its draft
+  under a notice above it. A draft that reseeds after a save holds only touched
+  fields and retires each when the server reads back equal — never a clear on
+  save (a failed post-save refetch shows the pre-save values) or a
+  `dataUpdatedAt` key (every focus refetch wipes the draft); a whole-object
+  draft would send another client's newer values back stale.
+- **Offline remote writes** — a repo-settings control that fires a remote
+  write gates on `useOnline()` (`src/lib/use-online.ts`) with the shared
+  `OFFLINE_WRITE_REASON` (repo-settings/parts), disabled with reason, never
+  hidden: a mutation pressed offline parks silently and fires on reconnect.
+  Local-file writes (FUNDING.yml, dependabot.yml) stay enabled.
 - **Held role pickers** — a row's role select held while saving rides
   `HeldRoleSelect` (repo-settings/parts): readOnly + gated open, never Base
   UI's `disabled`, which drops the trigger and its reason from the tab order.

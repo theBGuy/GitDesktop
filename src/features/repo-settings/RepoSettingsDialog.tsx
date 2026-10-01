@@ -12,6 +12,7 @@ import { type ComponentType, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
 import { RelativeTime } from "@/components/relative-time";
@@ -68,6 +69,7 @@ import {
   registerRepoSettingsOpenMarker,
 } from "@/lib/stores/repo-description-generation";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import { BitbucketBranchRestrictionsSection } from "./BitbucketBranchRestrictionsSection";
 import { BitbucketDefaultReviewersSection } from "./BitbucketDefaultReviewersSection";
@@ -86,7 +88,12 @@ import { GitLabProtectedBranchesSection } from "./GitLabProtectedBranchesSection
 import { GitLabVariablesSection } from "./GitLabVariablesSection";
 import { GitLabWebhooksSection } from "./GitLabWebhooksSection";
 import { PagesSection } from "./PagesSection";
-import { DeliveryPayload, InlineConfirm, RemoteListSection } from "./parts";
+import {
+  DeliveryPayload,
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteListSection,
+} from "./parts";
 import { RulesetsSection } from "./RulesetsSection";
 import { SecretsSection } from "./SecretsSection";
 import { SecuritySection } from "./SecuritySection";
@@ -855,6 +862,7 @@ function WebhookForm({
   const create = useCreateWebhook(repoPath);
   const update = useUpdateWebhook(repoPath);
   const pending = create.isPending || update.isPending;
+  const online = useOnline();
 
   const [url, setUrl] = useState(hook?.config.url ?? "");
   const [contentType, setContentType] = useState<"json" | "form">(
@@ -994,30 +1002,22 @@ function WebhookForm({
         <Button variant="outline" onClick={onDone} disabled={pending}>
           Cancel
         </Button>
-        {/* The vendored Button renders a native `disabled` (pointer-events:
-            none), so a `title` on the button itself never shows — the
-            disabled-reason hint rides a wrapping span. */}
-        <span
-          className={cn(
-            "inline-flex",
-            (!urlValid || !eventsValid) && "cursor-not-allowed",
-          )}
-          title={
+        <DisabledReasonButton
+          disabled={pending || !urlValid || !eventsValid || !online}
+          reason={
             !urlValid
               ? "Enter a valid http(s) URL"
               : !eventsValid
                 ? "Select at least one event"
-                : undefined
+                : !online
+                  ? OFFLINE_WRITE_REASON
+                  : undefined
           }
+          onClick={submit}
         >
-          <Button
-            disabled={pending || !urlValid || !eventsValid}
-            onClick={submit}
-          >
-            {pending && <Spinner data-icon="inline-start" />}
-            {hook ? "Save changes" : "Create webhook"}
-          </Button>
-        </span>
+          {pending && <Spinner data-icon="inline-start" />}
+          {hook ? "Save changes" : "Create webhook"}
+        </DisabledReasonButton>
       </div>
     </div>
   );
