@@ -181,6 +181,7 @@ export function SecuritySection({
             repoPath={repoPath}
             status={status}
             dataUpdatedAt={security.dataUpdatedAt}
+            isError={security.isError}
           />
           <DependabotVersionUpdates repoPath={repoPath} open={open} />
           <MoreOnGitHub repoPath={repoPath} open={open} />
@@ -402,11 +403,14 @@ function SecurityForm({
   repoPath,
   status,
   dataUpdatedAt,
+  isError,
 }: {
   repoPath: string;
   status: SecurityStatus;
   /** When `status` last loaded; a failed refetch doesn't advance it. */
   dataUpdatedAt: number;
+  /** The read's last fetch failed; stays set through a refetch until one lands. */
+  isError: boolean;
 }) {
   const apply = useApplySecurity(repoPath);
   const seed = useMemo(() => toDraft(status), [status]);
@@ -416,13 +420,13 @@ function SecurityForm({
   // refetch failed keeps its values on screen, and a refetch never wipes an edit.
   const [edit, setEdit] = useState<Partial<Draft> | null>(null);
   // What a save sent, stamped with the read it was made against. A newer read
-  // retires those keys even when it differs (a toggle GitHub refused); a key
-  // toggled again since keeps the newer value.
+  // with no failure after it retires those keys even when it differs (a toggle
+  // GitHub refused); a failed post-save refetch holds them, as does a re-toggle.
   const [pending, setPending] = useState<{
     at: number;
     sent: Partial<Draft>;
   } | null>(null);
-  if (pending !== null && dataUpdatedAt > pending.at) {
+  if (pending !== null && dataUpdatedAt > pending.at && !isError) {
     setPending(null);
     if (edit !== null) {
       const kept = FEATURES.filter(

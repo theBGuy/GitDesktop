@@ -76,6 +76,7 @@ export function PagesSection({
             repoPath={repoPath}
             pages={data}
             dataUpdatedAt={pages.dataUpdatedAt}
+            isError={pages.isError}
           />
         ) : (
           <PagesDisabled repoPath={repoPath} />
@@ -194,11 +195,14 @@ function PagesEnabled({
   repoPath,
   pages,
   dataUpdatedAt,
+  isError,
 }: {
   repoPath: string;
   pages: PagesInfo;
   /** When `pages` last loaded; a failed refetch doesn't advance it. */
   dataUpdatedAt: number;
+  /** The read's last fetch failed; stays set through a refetch until one lands. */
+  isError: boolean;
 }) {
   const branches = useBranches(repoPath);
   const update = useUpdatePages(repoPath);
@@ -210,14 +214,14 @@ function PagesEnabled({
   const [pathEdit, setPath] = useState<string | null>(null);
   const [cnameEdit, setCname] = useState<string | null>(null);
   // What a save sent, stamped with the read it was made against. A newer read
-  // retires those fields even when it differs (a domain GitHub normalized); one
-  // typed into since keeps the newer text.
+  // with no failure after it retires those fields even when it differs (a domain
+  // GitHub normalized); a failed post-save refetch holds them, as does new typing.
   const [pending, setPending] = useState<{
     at: number;
     sent: { branch?: string; path?: string; cname?: string };
   } | null>(null);
   const serverPath = pages.sourcePath || "/";
-  if (pending !== null && dataUpdatedAt > pending.at) {
+  if (pending !== null && dataUpdatedAt > pending.at && !isError) {
     setPending(null);
     if (branchEdit !== null && branchEdit === pending.sent.branch)
       setBranch(null);
