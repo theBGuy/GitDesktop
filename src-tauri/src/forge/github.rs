@@ -1744,16 +1744,16 @@ mod tests {
     }
 
     /// `gh_status`'s signed-in status for one repo-view result.
-    fn status_after_view(view: AppResult<crate::github::runner::GhOutput>) -> ForgeStatus {
-        let (repo, host, probe_error) = crate::github::pr::repo_view_outcome(view);
-        from_gh_status(GhStatus {
+    fn status_after_view(view: AppResult<crate::github::runner::GhOutput>) -> AppResult<ForgeStatus> {
+        let (repo, host, probe_error) = crate::github::pr::repo_view_outcome(view)?;
+        Ok(from_gh_status(GhStatus {
             installed: true,
             authenticated: true,
             repo,
             host,
             login: Some("me".into()),
             probe_error,
-        })
+        }))
     }
 
     /// The signed-in status with no classification, as every lookup produced it
@@ -1777,7 +1777,7 @@ mod tests {
             "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/graphql)",
             "HTTP 429: Too Many Requests (https://api.github.com/graphql)",
         ] {
-            let f = status_after_view(Ok(view_out(1, "", stderr)));
+            let f = status_after_view(Ok(view_out(1, "", stderr))).unwrap();
             assert!(f.authenticated, "{stderr}");
             assert_eq!(
                 f.probe_error,
@@ -1789,8 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn other_repo_view_failures_stay_unclassified() {
-        // A revoked token must keep today's arms, never a try-again-later notice.
+    fn non_transport_repo_view_failures_stay_unclassified() {
         for view in [
             Ok(view_out(
                 1,
@@ -1802,19 +1801,33 @@ mod tests {
                 "",
                 "HTTP 401: Bad credentials (https://api.github.com/graphql)",
             )),
+            Ok(view_out(1, "", "HTTP 404: Not Found")),
+            Ok(view_out(1, "", "")),
             Ok(view_out(0, "not json", "")),
-            Err(AppError::Timeout(15)),
         ] {
-            let f = status_after_view(view);
+            let f = status_after_view(view).unwrap();
             assert_eq!(f.probe_error, None);
             assert_eq!(serde_json::to_value(&f).unwrap(), unclassified(None, None));
         }
     }
 
     #[test]
+    fn transport_repo_view_failures_reject_status() {
+        for view in [
+            Err(AppError::Timeout(15)),
+            Err(AppError::GhNotFound),
+            Err(AppError::Io(std::io::Error::other("fake spawn failure"))),
+            Ok(view_out(1, "", "dial tcp: lookup example.invalid: timeout")),
+            Ok(view_out(1, "", "HTTP 502: Bad Gateway")),
+        ] {
+            assert!(status_after_view(view).is_err());
+        }
+    }
+
+    #[test]
     fn successful_repo_view_is_unchanged() {
         let body = r#"{"nameWithOwner":"owner/name","url":"https://github.com/owner/name"}"#;
-        let f = status_after_view(Ok(view_out(0, body, "")));
+        let f = status_after_view(Ok(view_out(0, body, ""))).unwrap();
         assert_eq!(f.probe_error, None);
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json, unclassified(Some("owner/name"), Some("github.com")));

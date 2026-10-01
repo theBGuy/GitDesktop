@@ -108,7 +108,7 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
                     GH_TIMEOUT,
                 )
                 .await,
-            ),
+            )?,
             Err(_) => (None, None, None),
         }
     } else {
@@ -150,31 +150,70 @@ fn fallback_auth_outcome(code: i32, report: &str) -> AppResult<(bool, Vec<Parsed
     Ok((code == 0, parse_auth_accounts(report)))
 }
 
-/// `gh_status`'s repo lookup as `(repo, host, probe_error)`. Only rate-limit wording
-/// in stderr classifies a failure: any other one (a revoked token included) stays
-/// unclassified so it keeps today's arms. The lookup runs only when auth read
-/// Healthy, so a just-revoked token misread here heals on the next status refetch.
-pub(crate) fn repo_view_outcome(
-    result: AppResult<crate::github::runner::GhOutput>,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<crate::forge::model::ProbeError>,
-) {
-    let Ok(out) = result else {
-        return (None, None, None);
+enum RepoViewOutcome {
+    Transport(AppError),
+    RateLimited,
+    Unresolved,
+    Resolved(String, Option<String>),
+}
+
+pub(crate) fn repo_lookup_is_not_found(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("could not resolve to a repository")
+        || stderr.match_indices("http 404").any(|(index, matched)| {
+            let before = stderr[..index].chars().next_back();
+            let after = stderr[index + matched.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric())
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+        })
+}
+
+fn classify_repo_view(result: AppResult<crate::github::runner::GhOutput>) -> RepoViewOutcome {
+    let out = match result {
+        Ok(out) => out,
+        Err(error) => return RepoViewOutcome::Transport(error),
     };
     if out.code != 0 {
-        let class = crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr))
-            .then_some(crate::forge::model::ProbeError::RateLimited);
-        return (None, None, class);
+        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
+            return RepoViewOutcome::RateLimited;
+        }
+        if repo_lookup_is_not_found(&out.stderr) {
+            return RepoViewOutcome::Unresolved;
+        }
+        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
+            return RepoViewOutcome::Transport(AppError::Gh(
+                "Couldn't reach GitHub to look up the repository.".to_string(),
+            ));
+        }
+        return RepoViewOutcome::Unresolved;
     }
     match serde_json::from_str::<RepoView>(&out.stdout_lossy()) {
         Ok(view) => {
             let host = host_from_url(&view.url);
-            (Some(view.name_with_owner), host, None)
+            RepoViewOutcome::Resolved(view.name_with_owner, host)
         }
-        Err(_) => (None, None, None),
+        Err(_) => RepoViewOutcome::Unresolved,
+    }
+}
+
+/// Transport failures reject so status observers retain their last-good data.
+/// Rate limits and unresolved repositories remain answered probes.
+pub(crate) fn repo_view_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<(
+    Option<String>,
+    Option<String>,
+    Option<crate::forge::model::ProbeError>,
+)> {
+    match classify_repo_view(result) {
+        RepoViewOutcome::Transport(error) => Err(error),
+        RepoViewOutcome::RateLimited => Ok((
+            None,
+            None,
+            Some(crate::forge::model::ProbeError::RateLimited),
+        )),
+        RepoViewOutcome::Unresolved => Ok((None, None, None)),
+        RepoViewOutcome::Resolved(repo, host) => Ok((Some(repo), host, None)),
     }
 }
 
@@ -6934,6 +6973,91 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+    fn repo_view_fixture(code: i32, stdout: &str, stderr: &str) -> crate::github::runner::GhOutput {
+        crate::github::runner::GhOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    #[test]
+    fn repo_view_classifier_marks_transport_failures() {
+        for stderr in [
+            "dial tcp: lookup example.invalid: timeout",
+            "HTTP 502: Bad Gateway",
+            "HTTP 4040: connection failed",
+            "XHTTP 404: connection failed",
+        ] {
+            assert!(matches!(
+                super::classify_repo_view(Ok(repo_view_fixture(1, "", stderr))),
+                super::RepoViewOutcome::Transport(AppError::Gh(_))
+            ));
+        }
+        assert!(matches!(
+            super::classify_repo_view(Err(AppError::Timeout(15))),
+            super::RepoViewOutcome::Transport(AppError::Timeout(15))
+        ));
+        assert!(matches!(
+            super::classify_repo_view(Err(AppError::GhNotFound)),
+            super::RepoViewOutcome::Transport(AppError::GhNotFound)
+        ));
+        let spawn_error = std::io::Error::other("fake spawn failure");
+        assert!(matches!(
+            super::classify_repo_view(Err(AppError::Io(spawn_error))),
+            super::RepoViewOutcome::Transport(AppError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn repo_view_not_found_slugs_are_unresolved() {
+        for stderr in [
+            "GraphQL: Could not resolve to a Repository with the name 'acme/http-proxy'.",
+            "GraphQL: Could not resolve to a Repository with the name 'acme/nginx-proxy'.",
+            "GraphQL: Could not resolve to a Repository with the name 'acme/dns-lookup'.",
+            "GraphQL: Could not resolve to a Repository with the name 'acme/connection-pool'.",
+            "HTTP 404: Not Found (https://api.github.com/repos/acme/http-proxy)",
+            "gh: Not Found (HTTP 404) (https://api.github.com/repos/acme/dns-lookup)",
+        ] {
+            assert!(
+                matches!(
+                    super::classify_repo_view(Ok(repo_view_fixture(1, "", stderr))),
+                    super::RepoViewOutcome::Unresolved
+                ),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_view_classifier_preserves_answered_variants() {
+        for stderr in [
+            "GraphQL: API rate limit exceeded.",
+            "HTTP 429: rate limit exceeded after timeout",
+        ] {
+            assert!(matches!(
+                super::classify_repo_view(Ok(repo_view_fixture(1, "", stderr))),
+                super::RepoViewOutcome::RateLimited
+            ));
+        }
+        for stderr in ["HTTP 404: Not Found", "HTTP 401: Bad credentials", ""] {
+            assert!(matches!(
+                super::classify_repo_view(Ok(repo_view_fixture(1, "", stderr))),
+                super::RepoViewOutcome::Unresolved
+            ));
+        }
+        assert!(matches!(
+            super::classify_repo_view(Ok(repo_view_fixture(0, "not json", ""))),
+            super::RepoViewOutcome::Unresolved
+        ));
+        let body = r#"{"nameWithOwner":"owner/name","url":"https://github.com/owner/name"}"#;
+        assert!(matches!(
+            super::classify_repo_view(Ok(repo_view_fixture(0, body, ""))),
+            super::RepoViewOutcome::Resolved(repo, host)
+                if repo == "owner/name" && host.as_deref() == Some("github.com")
+        ));
+    }
 
     #[test]
     fn publish_url_failure_leads_with_created_and_pushed_fact() {

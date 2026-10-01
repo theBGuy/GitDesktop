@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import {
   DATE_ONLY,
   formatFieldDate,
@@ -144,6 +145,7 @@ export function BoardBulkFieldsDialog({
   fieldDefs,
   defsTruncated,
   defsPending,
+  defsPendingReason,
   defsError,
   onRetryDefs,
   pending,
@@ -167,6 +169,9 @@ export function BoardBulkFieldsDialog({
   /** The definitions read was capped, so some fields have no row here. */
   defsTruncated: boolean;
   defsPending: boolean;
+  /** What `defsPending` shows: a read parked offline is waiting on the
+   *  connection, not loading. */
+  defsPendingReason: string;
   defsError: Error | null;
   onRetryDefs: () => void;
   /** A bulk write is in flight — from this run or one the user closed over. */
@@ -196,6 +201,10 @@ export function BoardBulkFieldsDialog({
   // across close, and `<Activity>` replays effect setups on show, so a draft left
   // behind would be a payload the user never re-authored.
   useSeedOnOpen(open, () => setDraft({}));
+  // Keyed on this dialog's own error, not the panel's: Retry unmounts on press
+  // (a never-loaded read resets to pending, a cached one goes fetching), and the
+  // scroll region survives either way to take the focus.
+  const defsRescue = useRetryFocusRescue(defsError !== null);
 
   const writable = fieldDefs.filter(isWritable);
   const { updates, clears } = draftPayload(draft);
@@ -274,9 +283,13 @@ export function BoardBulkFieldsDialog({
         </DialogHeader>
         {/* The dialog's ONE scroll region: every row renders at natural height, so
             nothing nests a second scrollbar inside this one. */}
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+        <div
+          ref={defsRescue.hostRef}
+          tabIndex={-1}
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 outline-none"
+        >
           {defsPending && (
-            <p className="py-1 text-muted-foreground">Loading fields…</p>
+            <p className="py-1 text-muted-foreground">{defsPendingReason}</p>
           )}
           {defsError !== null && (
             <div className="py-1">
@@ -284,6 +297,7 @@ export function BoardBulkFieldsDialog({
                 {presentError(defsError).summary}
               </p>
               <Button
+                ref={defsRescue.retryRef}
                 variant="outline"
                 size="xs"
                 className="mt-1.5"

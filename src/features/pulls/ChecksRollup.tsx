@@ -41,6 +41,7 @@ import {
   sectionReadNotice,
 } from "@/features/conversations/remote-section-state";
 import { clipTitle } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
   repoKeys,
@@ -187,50 +188,25 @@ function CheckLogTail({
   const runLogs = useRunFailedLogs(repoPath, runId, jobId === null);
   const logs = jobId !== null ? jobLogs : runLogs;
 
-  // A read parked before it ever loaded would skeleton until reconnect.
-  if (logs.data === undefined && logs.isPaused) {
-    return (
-      <p className="mt-1.5 text-[11px] text-muted-foreground">
-        {offlinePendingMessage("logs")}
-      </p>
-    );
-  }
-  if (logs.isPending) {
-    return (
-      <div className="mt-1.5 space-y-1.5">
-        <Skeleton className="h-3 w-full" />
-        <Skeleton className="h-3 w-11/12" />
-        <Skeleton className="h-3 w-4/5" />
-      </div>
-    );
-  }
-  if (logs.data === undefined) {
-    return (
-      <p className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
-        Couldn't load logs.
-        {check.detailsUrl && (
-          <button
-            type="button"
-            onClick={() => check.detailsUrl && openUrl(check.detailsUrl)}
-            className="inline-flex cursor-pointer items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
-          >
-            <ArrowSquareOutIcon className="size-3" />
-            Open full run
-          </button>
-        )}
-      </p>
-    );
-  }
-  // A cached tail outlives a failed or parked refresh, under a line saying which.
+  // gh's own reason (no access, logs expired) is what tells a permanent failure
+  // from one a Retry can fix.
+  const reason = logs.error ? presentError(logs.error).summary : "";
+  // With nothing loaded the notice stands in for the tail; loaded text stays
+  // drawn through a failed or parked refresh, under a line saying which.
   const notice = sectionReadNotice({
     noun: "logs",
-    loadFailed: "Couldn't load logs.",
+    loadFailed: reason
+      ? `Couldn't load logs: ${reason}`
+      : "Couldn't load logs.",
     // A log is one block, so "rows" is whether it has any text to show.
-    rowCount: logs.data === "" ? 0 : 1,
+    rowCount: logs.data === undefined ? undefined : logs.data === "" ? 0 : 1,
     isError: logs.isError,
     isPaused: logs.isPaused,
     isFetching: logs.isFetching,
   });
+  // The notice stays mounted across every arm: a Retry resets a never-loaded
+  // read to pending, and its wrapper is where focus lands when the skeleton
+  // swaps the button out. The row header carries the one "Open full run".
   return (
     <div className="mt-1.5">
       <DegradedListNotice
@@ -241,7 +217,18 @@ function CheckLogTail({
         onRetry={notice?.retry ? () => void logs.refetch() : undefined}
         className="px-0 pb-1"
       />
-      <LogBlock text={logs.data} maxHeightClass="max-h-72" />
+      {logs.data === undefined ? (
+        logs.isPending &&
+        !logs.isPaused && (
+          <div className="space-y-1.5">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-11/12" />
+            <Skeleton className="h-3 w-4/5" />
+          </div>
+        )
+      ) : (
+        <LogBlock text={logs.data} maxHeightClass="max-h-72" />
+      )}
     </div>
   );
 }

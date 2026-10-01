@@ -22,8 +22,13 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  type ListNoticeCause,
+  listNotice,
   OFFLINE_ROWS_NOTICE,
   offlinePendingMessage,
   refreshFailed,
@@ -199,6 +204,32 @@ export function ActionsPanel({
       r.headBranch.toLowerCase().includes(query),
   );
 
+  // Loaded rows outlive a failed or parked refresh, under a line saying which. A
+  // failed Load more also sets isError, but it keeps its own line on the
+  // Load-more row, so only a failed refresh speaks for the whole list.
+  const notice =
+    ghReady && allRuns.length > 0
+      ? listNotice({
+          noun: `${runNoun} runs`,
+          failed: refreshFailed({
+            isError: runs.isError && !runs.isFetchNextPageError,
+            isPaused: runs.isPaused,
+            isFetching: runs.isFetching,
+          }),
+          offline: runs.isPaused,
+          placeholder: runs.isPlaceholderData,
+          hasRows: true,
+          loadMoreFailed: false,
+        })
+      : null;
+  // Offline mounts no Retry: a retry while offline parks again at once, and
+  // reconnecting resumes the read by itself.
+  const noticeRetry: Record<ListNoticeCause, (() => void) | undefined> = {
+    refresh: () => void runs.refetch(),
+    "load-more": () => void runs.fetchNextPage(),
+    offline: undefined,
+  };
+
   const onListKeyDown = listKeyboardNav({
     items: visible,
     activeIndex: visible.findIndex((r) => r.id === selectedRunId),
@@ -301,6 +332,14 @@ export function ActionsPanel({
         tabIndex={-1}
         className="min-h-0 flex-1 overflow-hidden outline-none"
       >
+        <DegradedListNotice
+          noun={`${runNoun} runs`}
+          degraded={notice !== null}
+          message={notice?.message}
+          retryLabel={notice?.retryLabel}
+          onRetry={notice ? noticeRetry[notice.cause] : undefined}
+          className="pt-2"
+        />
         {forge.isPending ? (
           <ListRowSkeletons rows={2} lines={3} name={ciFeature} />
         ) : !ghReady ? (
@@ -461,8 +500,9 @@ export function ActionsPanel({
         {/* Outside the branches above so a filtered-to-nothing list can still be
             deepened: paging is what brings older matches within reach. Parked,
             the row says so instead: a page asked for offline would only park,
-            and reconnecting resumes the read by itself. */}
-        {runs.hasNextPage && runs.isPaused && (
+            and reconnecting resumes the read by itself. The list notice already
+            says it whenever it shows the park, so the row stays silent then. */}
+        {runs.hasNextPage && runs.isPaused && notice?.cause !== "offline" && (
           <p className="border-b px-3 py-1.5 text-center text-xs text-muted-foreground">
             {OFFLINE_ROWS_NOTICE}
           </p>

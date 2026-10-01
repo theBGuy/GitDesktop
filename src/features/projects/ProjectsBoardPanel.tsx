@@ -5176,14 +5176,16 @@ export function ProjectsBoardPanel({
     [],
   );
 
-  // The forge probe's Retry (the error card below, or ForgeNotReady's) resets
-  // the never-loaded probe to pending, swapping the card for the skeleton: the
-  // panel root takes the focus. Mirrors the body's first four arms, keyed on
-  // either card being mounted.
+  // Every body Retry (the forge probe's error card, ForgeNotReady's, the fatal
+  // board error card) can swap its card for a skeleton or notice: the panel root
+  // takes the focus. Mirrors the body's first seven arms, keyed on any of those
+  // cards being mounted; one hook serves all three since the arms are exclusive.
   const forgeRescue = useRetryFocusRescue(
     gh.data === undefined
       ? gh.error !== null
-      : (provider === null || isGitHub) && !forgeReady(gh.data),
+      : (provider === null || isGitHub) &&
+          (!forgeReady(gh.data) ||
+            (!scopeGap && !boardParked && fatalError !== null)),
   );
   // The root is both the body's focus landing and that rescue's host.
   const forgeHostRef = forgeRescue.hostRef;
@@ -5284,6 +5286,7 @@ export function ProjectsBoardPanel({
               if (fields.error !== null) void fields.refetch();
               if (items.error !== null) void items.refetch();
             }}
+            retryRef={forgeRescue.retryRef}
           />
         );
       case loading || fatalRetrying:
@@ -6555,6 +6558,7 @@ export function ProjectsBoardPanel({
             fieldDefs={fieldDefs}
             defsTruncated={fields.data?.truncated === true}
             defsPending={fieldsPending}
+            defsPendingReason={fieldsUnanswered}
             // Only a settled failure shows the dialog's error and Retry: over
             // cached definitions a refetch or park keeps them drawing.
             defsError={refreshFailed(fields) ? fields.error : null}

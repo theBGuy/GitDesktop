@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
@@ -155,6 +156,7 @@ export function StackSection({
   onDissolve,
   dissolving,
   disabled,
+  reason,
 }: {
   stack: PrStackInfo | null | undefined;
   members: PrStackMember[] | undefined;
@@ -170,12 +172,16 @@ export function StackSection({
   currentNumber: number;
   onSelect: (number: number) => void;
   /** Runs the caller's confirmed dissolve. Absent ⇒ no Dissolve affordance —
-   *  the caller owns the eligibility (native stack, open, writable). */
+   *  the caller owns the eligibility (a native stack on an open PR whose
+   *  provider can edit it); push permission holds it via `disabled` instead. */
   onDissolve?: () => void;
   dissolving?: boolean;
   /** Holds the Dissolve action without claiming a write is running — the caller
-   *  sets it while its own handler would refuse (e.g. a PR switch in flight). */
+   *  sets it while its own handler would refuse (no push access, a PR switch in
+   *  flight). */
   disabled?: boolean;
+  /** Why `disabled` holds Dissolve, as its tooltip and announced reason. */
+  reason?: string;
 }) {
   if (!stack) return null;
   const rows = byPosition(members ?? []);
@@ -204,6 +210,7 @@ export function StackSection({
         onDissolve={onDissolve}
         dissolving={dissolving}
         disabled={disabled}
+        reason={reason}
       />
       {/* Members ride a second fetch that can fail while the stack summary
           succeeds — still say the PR is stacked, rather than hiding membership
@@ -277,11 +284,13 @@ function StackHeader({
   onDissolve,
   dissolving,
   disabled,
+  reason,
 }: {
   label: string;
   onDissolve?: () => void;
   dissolving?: boolean;
   disabled?: boolean;
+  reason?: string;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -289,16 +298,18 @@ function StackHeader({
         {label}
       </p>
       {onDissolve && (
-        <Button
+        <DisabledReasonButton
           variant="ghost"
           size="xs"
-          className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive focus-visible:text-destructive"
+          className="cursor-pointer text-muted-foreground hover:text-destructive focus-visible:text-destructive"
           disabled={dissolving || disabled}
+          // The spinner already says a dissolve is running.
+          reason={dissolving ? undefined : reason}
           onClick={onDissolve}
         >
           {dissolving && <Spinner data-icon="inline-start" />}
           Dissolve
-        </Button>
+        </DisabledReasonButton>
       )}
     </div>
   );

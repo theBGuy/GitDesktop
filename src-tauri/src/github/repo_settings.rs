@@ -12,21 +12,34 @@ use crate::github::runner::{
     run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 
-/// Whether the signed-in user is an admin on this repo — gates the repo-settings /
-/// webhooks UI. Reads the viewer's `permissions.admin`; no access reads as `false`
-/// rather than erroring. A repo without a GitHub origin remote errors.
+/// Reads `permissions.admin` to gate repo settings and webhooks; no access is `false`.
+/// Transport failures, rate limits, and a missing GitHub origin remote reject.
 pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
     // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders auto-resolve
     // to the PARENT on a fork with an `upstream` remote, which would probe the
     // upstream's admin bit instead of the user's own fork.
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let out = run_gh_raw(
+    let result = run_gh_raw(
         Some(&repo_path),
         &["api", &format!("repos/{slug}"), "-q", ".permissions.admin"],
         GH_TIMEOUT,
     )
-    .await?;
+    .await;
+    repo_admin_outcome(result)
+}
+
+fn repo_admin_outcome(result: AppResult<GhOutput>) -> AppResult<bool> {
+    let out = result?;
     if out.code != 0 {
+        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
+            return Err(AppError::Gh(gh_failure_reason(&out)));
+        }
+        if crate::github::pr::repo_lookup_is_not_found(&out.stderr) {
+            return Ok(false);
+        }
+        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
+            return Err(AppError::Gh(gh_failure_reason(&out)));
+        }
         return Ok(false);
     }
     Ok(out.stdout_lossy().trim() == "true")
@@ -870,6 +883,75 @@ pub async fn gh_repo_settings_update(
 #[cfg(test)]
 mod tests {
     use super::{gh_failure_reason, write_access_from_repo_json, GhOutput};
+
+    #[test]
+    fn repo_admin_transport_failures_reject() {
+        for stderr in [
+            "HTTP 502: Bad Gateway",
+            "dial tcp: lookup example.invalid: timeout",
+        ] {
+            let result = super::repo_admin_outcome(Ok(GhOutput {
+                stdout: Vec::new(),
+                stderr: stderr.into(),
+                code: 1,
+            }));
+            assert!(
+                matches!(result, Err(crate::error::AppError::Gh(_))),
+                "{stderr}"
+            );
+        }
+        assert!(matches!(
+            super::repo_admin_outcome(Err(crate::error::AppError::Timeout(30))),
+            Err(crate::error::AppError::Timeout(30))
+        ));
+        assert!(matches!(
+            super::repo_admin_outcome(Err(crate::error::AppError::GhNotFound)),
+            Err(crate::error::AppError::GhNotFound)
+        ));
+    }
+
+    #[test]
+    fn repo_admin_rate_limits_reject() {
+        for stderr in [
+            "HTTP 403: You have exceeded a secondary rate limit.",
+            "HTTP 429: rate limit exceeded after timeout",
+            "HTTP 429: Too Many Requests",
+        ] {
+            let result = super::repo_admin_outcome(Ok(GhOutput {
+                stdout: Vec::new(),
+                stderr: stderr.into(),
+                code: 1,
+            }));
+            assert!(
+                matches!(result, Err(crate::error::AppError::Gh(_))),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_admin_preserves_answered_verdicts() {
+        for (code, stdout, stderr, expected) in [
+            (1, "", "HTTP 403: Forbidden", false),
+            (1, "", "HTTP 404: Not Found", false),
+            (
+                1,
+                "",
+                "HTTP 404: Not Found (https://api.github.com/repos/acme/http-proxy)",
+                false,
+            ),
+            (1, "", "", false),
+            (0, "true\n", "", true),
+            (0, "false\n", "", false),
+        ] {
+            let result = super::repo_admin_outcome(Ok(GhOutput {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.into(),
+                code,
+            }));
+            assert_eq!(result.unwrap(), expected, "{code}: {stdout:?}, {stderr:?}");
+        }
+    }
 
     #[test]
     fn gh_failure_reason_names_the_failure_even_when_gh_is_silent() {

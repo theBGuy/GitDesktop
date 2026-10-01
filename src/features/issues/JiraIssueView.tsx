@@ -49,6 +49,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import {
   detailNoticeMessage,
+  emptyPickerCopy,
   offlinePendingMessage,
   refreshFailed,
   resolveDetailPane,
@@ -339,11 +340,24 @@ export function JiraAssigneePicker({
       />
       <ComboboxContent>
         <ComboboxEmpty>
-          {users.isPending && debounced
-            ? "Searching…"
-            : users.isError
-              ? "Couldn't search users."
-              : "No matching users."}
+          {/* A new search keeps the previous key's results as placeholder, which
+              is no answer for this one: it reads as still loading, or offline
+              when parked. */}
+          {emptyPickerCopy(
+            {
+              data: users.isPlaceholderData ? undefined : users.data,
+              isPending: users.isPending || users.isPlaceholderData,
+              isError: users.isError,
+              isPaused: users.isPaused,
+              isFetching: users.isFetching,
+            },
+            {
+              noun: "users",
+              loading: "Searching…",
+              loadFailed: "Couldn't search users.",
+              empty: "No matching users.",
+            },
+          )}
         </ComboboxEmpty>
         <ComboboxList>
           {(item: ForgeUserRef) =>

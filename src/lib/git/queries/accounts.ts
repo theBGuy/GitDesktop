@@ -75,8 +75,8 @@ export function useAccountsHealth() {
 
 /** Refresh everything a successful reconnect can change: the accounts-health list,
  *  every repo's forge-status (a dead session flips a repo back to ready) and
- *  forge-session-health, the gh-accounts list (which account is active), the gh
- *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
+ *  forge-session-health, admin access, the gh-accounts list (the active account),
+ *  gh token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
  *  as do the six GitHub Projects reads (catalog, memberships, field values, a
@@ -103,6 +103,7 @@ export function useInvalidateAfterReconnect() {
         q.queryKey[0] === "repo" &&
         (q.queryKey[2] === "forge-status" ||
           q.queryKey[2] === "forge-session-health" ||
+          q.queryKey[2] === "admin" ||
           q.queryKey[2] === "secrets" ||
           q.queryKey[2] === "variables" ||
           q.queryKey[2] === "webhooks" ||

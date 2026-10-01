@@ -920,13 +920,20 @@ export function RemotePrView({
   })();
   // Dissolve is offered only for a stack GitDesktop can actually write: a
   // GitHub-native one (a GitLab-inferred chain has no stack to dissolve).
+  // Permission only enables: a viewer without push keeps the control, held
+  // with `writeReason`, like Merge.
   const canDissolveStack =
     dissolveStackNumber !== null && details.data?.state === "OPEN" && canEdit;
 
   async function dissolveStack() {
     const info = details.data?.stack;
     // The confirm names this stack's id and size, both read off the rendered PR.
-    if (!info || dissolveStackNumber === null || details.isPlaceholderData)
+    if (
+      !info ||
+      dissolveStackNumber === null ||
+      details.isPlaceholderData ||
+      writeBlocked
+    )
       return;
     const count = details.data?.stackMembers.length || info.size;
     const ok = await useConfirm.getState().ask({
@@ -960,6 +967,7 @@ export function RemotePrView({
     isSelectedPr &&
       !details.isPlaceholderData &&
       canDissolveStack &&
+      !writeBlocked &&
       !stackDissolve.isPending,
   );
 
@@ -2770,9 +2778,11 @@ export function RemotePrView({
           onSelect={(n) => selectPrWithAlign({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
           dissolving={stackDissolve.isPending}
-          // `dissolveStack` refuses while the rendered stack is the previous PR's,
-          // so hold its control — without the spinner a real write would show.
-          disabled={detailsStale}
+          // `dissolveStack` refuses without push or while the rendered stack is
+          // the previous PR's, so hold its control — without the spinner a real
+          // write would show. Permission outranks the switch, as on Merge.
+          disabled={detailsStale || writeBlocked}
+          reason={writeReason ?? staleReason}
         />
         {stackOffer && (
           <StackOffer

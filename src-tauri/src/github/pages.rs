@@ -5,9 +5,9 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
-use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -34,14 +34,28 @@ pub async fn gh_pages_get(repo_path: String) -> AppResult<Option<PagesInfo>> {
     // to the PARENT on a fork with an `upstream` remote, so build the literal
     // `repos/<slug>` path to keep every Pages call on the user's own fork.
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let out = run_gh_raw(
+    let result = run_gh_raw(
         Some(&repo_path),
         &["api", &format!("repos/{slug}/pages")],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    pages_get_outcome(result)
+}
+
+fn pages_get_outcome(result: AppResult<GhOutput>) -> AppResult<Option<PagesInfo>> {
+    let out = result?;
     if out.code != 0 {
-        return Ok(None); // 404 = Pages not enabled
+        if crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
+            return Err(AppError::Gh(out.stderr.trim().to_string()));
+        }
+        if crate::github::pr::repo_lookup_is_not_found(&out.stderr) {
+            return Ok(None);
+        }
+        if crate::forge::session::gh_error_is_network(Some(&out.stderr)) {
+            return Err(AppError::Gh(out.stderr.trim().to_string()));
+        }
+        return Ok(None);
     }
     let v: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
@@ -168,4 +182,101 @@ pub async fn gh_pages_disable(repo_path: String) -> AppResult<()> {
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pages_get_outcome, AppError, GhOutput};
+    use serde_json::json;
+
+    fn pages_fixture(code: i32, stdout: &str, stderr: &str) -> GhOutput {
+        GhOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    #[test]
+    fn pages_get_transport_failures_reject() {
+        for stderr in [
+            "HTTP 502: Bad Gateway",
+            "dial tcp: lookup example.invalid: timeout",
+        ] {
+            assert!(
+                matches!(
+                    pages_get_outcome(Ok(pages_fixture(1, "", stderr))),
+                    Err(AppError::Gh(_))
+                ),
+                "{stderr}"
+            );
+        }
+        assert!(matches!(
+            pages_get_outcome(Err(AppError::Timeout(120))),
+            Err(AppError::Timeout(120))
+        ));
+        assert!(matches!(
+            pages_get_outcome(Err(AppError::GhNotFound)),
+            Err(AppError::GhNotFound)
+        ));
+    }
+
+    #[test]
+    fn pages_get_rate_limits_reject() {
+        for stderr in [
+            "HTTP 403: You have exceeded a secondary rate limit.",
+            "HTTP 429: Too Many Requests",
+            "HTTP 429: rate limit exceeded after timeout",
+        ] {
+            assert!(
+                matches!(
+                    pages_get_outcome(Ok(pages_fixture(1, "", stderr))),
+                    Err(AppError::Gh(_))
+                ),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_get_not_found_is_absent_even_with_network_worded_slugs() {
+        for stderr in [
+            "HTTP 404: Not Found",
+            "HTTP 404: Not Found (https://api.github.com/repos/acme/http-proxy/pages)",
+        ] {
+            assert!(
+                matches!(pages_get_outcome(Ok(pages_fixture(1, "", stderr))), Ok(None)),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_get_success_parses_settings() {
+        let body = json!({
+            "html_url": "https://pages.example.invalid/",
+            "status": "built",
+            "build_type": "legacy",
+            "source": { "branch": "main", "path": "/docs" },
+            "cname": "pages.example.invalid",
+            "https_enforced": true,
+            "https_certificate": { "state": "approved" }
+        });
+        let info = pages_get_outcome(Ok(pages_fixture(0, &body.to_string(), "")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(info).unwrap(),
+            json!({
+                "htmlUrl": "https://pages.example.invalid/",
+                "status": "built",
+                "buildType": "legacy",
+                "sourceBranch": "main",
+                "sourcePath": "/docs",
+                "cname": "pages.example.invalid",
+                "httpsEnforced": true,
+                "httpsCertificateState": "approved"
+            })
+        );
+    }
 }

@@ -8,7 +8,7 @@ use crate::github::runner::{run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT
 /// Community-health profile + social counts for the Insights tab. Read-only and
 /// tolerant: a repo without a GitHub remote (or with the dependency/community
 /// data unavailable) reads as a zeroed default rather than erroring — the same
-/// posture as `gh_repo_admin`. The caller should still gate on having a GitHub
+/// posture as `gh_repo_admin` for access denials only. Still gate on a GitHub
 /// repo so an all-zero default isn't shown for a non-GitHub project.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
