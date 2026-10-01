@@ -642,8 +642,10 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     classify_gh_text_report(out.code, &report, host_str)
 }
 
-/// Mask dotted hosts after trailing punctuation and one numeric port; recognize scheme URLs.
-/// Never trim host prefixes: `(client.timeout` must remain a Go transport diagnostic.
+/// Whether `word` is a dotted host once trailing non-hostname characters and
+/// one numeric `:port` are trimmed, or a scheme URL. Callers do the masking.
+/// Never trim host prefixes — `(client.timeout` must remain a Go transport
+/// diagnostic (only the URL arm trims leading quotes and `(`).
 fn is_host_or_url_token(word: &str) -> bool {
     let mut bare = word;
     let mut port_stripped = false;
@@ -960,18 +962,18 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     // Rate limits are checked first as the most specific signal. glab's exact wording
     // is unmeasured, so match phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
-    if combined_lower.contains("rate limit")
-        || combined_lower.contains("too many requests")
-        || has_standalone_429(combined_lower)
+    if transport_residue.contains("rate limit")
+        || transport_residue.contains("too many requests")
+        || has_standalone_429(&transport_residue)
     {
         GlabFailure::RateLimited
-    } else if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
+    } else if NOT_CONNECTED.iter().any(|n| transport_residue.contains(n)) {
         GlabFailure::NotConnected
     } else if NETWORKISH.iter().any(|n| {
         // INFERRED from glab 1.105.0/client-go v2.40.1: "context deadline exceeded"
         // can mean exhausted 429 retries with no rate-limit wording or status digits,
         // or a network hang; both read Offline.
-        // Multi-word phrases match as substrings because a hostname cannot contain a space.
+        // Multi-word phrases match as substrings after host/URL tokens are masked.
         if n.contains(' ') {
             transport_residue.contains(n)
         } else {
@@ -3179,6 +3181,25 @@ check your internet connection or https://githubstatus.com";
     }
 
     // ── glab failure classifier ──
+    #[test]
+    fn glab_host_and_url_tokens_do_not_vote_for_auth_or_throttle() {
+        // SYNTHETIC: host labels, ports and URL paths cannot supply a verdict.
+        for (cell, expected) in [
+            ("x gitlab-429.acme.com: 401 unauthorized", GlabFailure::Broken),
+            ("x: not logged in to gitlab-429.acme.com", GlabFailure::NotConnected),
+            ("dial tcp 10.0.0.1:429: refused", GlabFailure::Offline),
+            ("get https://gitlab.com/api/v4/projects/429/...: 401", GlabFailure::Broken),
+            ("x gitlab.firma.no token rejected", GlabFailure::Broken),
+            ("gitlab-429.acme.com: 429 rate limit exceeded", GlabFailure::RateLimited),
+            ("http 429", GlabFailure::RateLimited),
+            ("status (429)", GlabFailure::RateLimited),
+            ("429 Too Many Requests", GlabFailure::RateLimited),
+            ("x: not logged in to gitlab.com", GlabFailure::NotConnected),
+        ] {
+            assert_eq!(classify_glab_failure(&cell.to_lowercase()), expected, "{cell}");
+        }
+    }
+
     #[test]
     fn glab_classifier_buckets() {
         assert_eq!(

@@ -2210,11 +2210,14 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     })
     .collect();
 
-    // CI checks — the head pipeline's jobs (best-effort; empty when the MR has no
-    // pipeline or the jobs fetch fails).
-    let checks = match &mr.head_pipeline {
-        Some(p) => pipeline_checks(repo_path, &enc, p.id).await,
-        None => Vec::new(),
+    // Checks are additive: a failed jobs read leaves the view available with an
+    // explicitly unknown list; an absent pipeline is a known empty list.
+    let (checks, checks_unknown) = match &mr.head_pipeline {
+        Some(p) => match pipeline_checks(repo_path, &enc, p.id).await {
+            Ok(checks) => (checks, false),
+            Err(_) => (Vec::new(), true),
+        },
+        None => (Vec::new(), false),
     };
 
     let colors = project_label_colors(repo_path, &enc).await;
@@ -2342,6 +2345,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // never cascades, so an unknown chain can't hide a multi-MR merge.
         stack_unknown: false,
         members_unknown: false,
+        checks_unknown,
         mergeability: map_gl_mergeability(
             &mr.state,
             mr.has_conflicts,
@@ -6829,21 +6833,24 @@ fn map_job_check_status(status: &str) -> String {
     .to_string()
 }
 
-/// The MR head pipeline's jobs mapped onto the PR-view check rollup. Best-effort: a
-/// missing pipeline or a failed jobs fetch yields an empty list (checks are additive
-/// to the view, never fatal). Each job carries its own `web_url` (link-out) plus the
-/// pipeline id as `run_id` and the job id as `job_id` (both stringified — GitLab ids
-/// exceed the JS safe-int range) so the frontend's inline log peek routes `job_id`
-/// through `forge_ci_job_logs`.
-async fn pipeline_checks(repo_path: &str, enc: &str, pipeline_id: u64) -> Vec<PrCheckOut> {
+/// The MR head pipeline's checks; fetch and parse failures stay errors so the view
+/// can mark the list unknown. The pipeline id lands in `run_id` and the job id in
+/// `job_id` (stringified — GitLab ids exceed the JS safe-int range); a present
+/// `job_id` is what routes the frontend's inline log peek through `forge_ci_job_logs`.
+async fn pipeline_checks(
+    repo_path: &str,
+    enc: &str,
+    pipeline_id: u64,
+) -> AppResult<Vec<PrCheckOut>> {
     let endpoint = format!("projects/{enc}/pipelines/{pipeline_id}/jobs?per_page=100");
-    let jobs: Vec<GlabJob> = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT)
-        .await
-        .ok()
-        .and_then(|o| serde_json::from_str::<Vec<GlabJob>>(&o.stdout_lossy()).ok())
-        .unwrap_or_default();
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    pipeline_checks_from(&out.stdout_lossy(), pipeline_id)
+}
+
+fn pipeline_checks_from(body: &str, pipeline_id: u64) -> AppResult<Vec<PrCheckOut>> {
+    let jobs = pipeline_jobs_from(body)?;
     let run_id = pipeline_id.to_string();
-    jobs.into_iter()
+    Ok(jobs.into_iter()
         .map(|j| PrCheckOut {
             name: j.name,
             status: map_job_check_status(&j.status),
@@ -6853,7 +6860,7 @@ async fn pipeline_checks(repo_path: &str, enc: &str, pipeline_id: u64) -> Vec<Pr
             started_at: Some(j.started_at).filter(|s| !s.is_empty()),
             completed_at: Some(j.finished_at).filter(|s| !s.is_empty()),
         })
-        .collect()
+        .collect())
 }
 
 /// GitLab's pipeline `source` → a short label for the run's "workflow" slot
@@ -12832,6 +12839,21 @@ mod tests {
         let jobs =
             pipeline_jobs_from(r#"[{"id":7,"status":"failed","name":"test"}]"#).unwrap();
         assert_eq!((jobs[0].id, jobs[0].status.as_str()), (7, "failed"));
+    }
+
+    #[test]
+    fn pipeline_checks_body_preserves_failed_and_empty_reads() {
+        for body in ["", "<html>502 Bad Gateway</html>", r#"{"message":"404 Not found"}"#] {
+            assert!(pipeline_checks_from(body, 42).is_err(), "{body}");
+        }
+        assert!(pipeline_checks_from("[]", 42).unwrap().is_empty());
+        let checks =
+            pipeline_checks_from(r#"[{"id":7,"status":"failed","name":"test"}]"#, 42)
+                .unwrap();
+        assert_eq!(checks[0].name, "test");
+        assert_eq!(checks[0].status, "FAILURE");
+        assert_eq!(checks[0].run_id.as_deref(), Some("42"));
+        assert_eq!(checks[0].job_id.as_deref(), Some("7"));
     }
 
     #[test]

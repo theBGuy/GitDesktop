@@ -307,6 +307,11 @@ export interface PrDetails {
   reviews: PrThreadOut[];
   comments: PrThreadOut[];
   checks: PrCheckOut[];
+  /** True when the checks read FAILED, so an empty `checks` is a missing list,
+   *  not a PR without checks (`true` implies `checks` is empty). GitLab and
+   *  Bitbucket only; GitHub reads its checks in the same call as the PR itself,
+   *  so it always reports false. */
+  checksUnknown: boolean;
   labels: RepoLabel[];
   /** Assignees. GitHub and GitLab both fill this (the MR/PR-assignees picker is
    *  wired for both, `implemented.mrAssignees`); Bitbucket leaves it empty. Each

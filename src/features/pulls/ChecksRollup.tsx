@@ -540,11 +540,16 @@ function RunDetailFetcher({
  * list with failures first. Checks with a fetchable run/job (GitHub Actions, GitLab
  * pipeline jobs) peek their log inline; external checks (Bitbucket build statuses,
  * etc.) link out. Auto-expanded when anything failed, or when a required check was
- * cancelled or went stale. With no checks it renders no visible DOM — only its
- * headless completion watchers, which must survive an empty refetch window.
+ * cancelled or went stale. With no checks it shows only a failed-read notice when
+ * `checksUnknown` says the list is missing; a known-empty list renders no visible
+ * DOM, just its headless completion watchers, which must survive an empty refetch
+ * window.
  */
 export function ChecksRollup({
   checks,
+  checksUnknown,
+  detailsPaused,
+  onRetryChecks,
   repoPath,
   provider,
   crossRepository,
@@ -552,6 +557,14 @@ export function ChecksRollup({
   unmetRequiredContexts = [],
 }: {
   checks: PrCheckOut[];
+  /** The checks read failed, so an empty `checks` is a missing list, not a PR
+   *  without checks. */
+  checksUnknown: boolean;
+  /** The details read is parked offline: its refetch resumes on reconnect, so
+   *  the failed-read notice says so instead of offering Retry. */
+  detailsPaused: boolean;
+  /** Refetches the details read the checks ride. */
+  onRetryChecks?: () => void;
   repoPath: string;
   /** The repo's forge provider — gates the running-Actions live-steps fetch to
    *  GitHub (GitLab checks also carry run/job ids but have no steps). */
@@ -1094,6 +1107,19 @@ export function ChecksRollup({
   return (
     <>
       {watchers}
+      {/* Mounted in both arms so a Retry that lands the list hands focus to the
+          notice's wrapper, not `<body>`; healthy, it stays sr-only. */}
+      <DegradedListNotice
+        noun="checks"
+        degraded={checksUnknown}
+        message={
+          detailsPaused
+            ? offlinePendingMessage("the checks")
+            : `Couldn't load this ${provider === "gitlab" ? "merge request" : "pull request"}'s checks.`
+        }
+        onRetry={detailsPaused ? undefined : onRetryChecks}
+        className="px-0 pb-0"
+      />
       {checks.length === 0 ? null : (
         <div className="text-[11px]">
           {blockedRunIds.length > 0 && (

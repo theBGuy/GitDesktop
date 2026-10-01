@@ -4145,6 +4145,13 @@ pub struct PrDetails {
     /// is a missing list, not a one-PR stack. GitHub only: GitLab derives members
     /// from the same rows as membership, and Bitbucket has no stacks.
     pub members_unknown: bool,
+    /// The checks read FAILED, so an empty `checks` is a missing list, not a no-checks
+    /// state. `checks_unknown == true` implies `checks` is empty. GitLab: true on a
+    /// failed jobs read, false for no pipeline or a successful read. Bitbucket: true
+    /// on a failed statuses fetch/parse or an unavailable head sha, false on success.
+    /// GitHub: always false — checks arrive in the same `gh pr view` call as the view
+    /// itself; a failed call fails the whole view, so a rendered view's checks were read.
+    pub checks_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
     pub mergeability: PrMergeability,
@@ -4806,6 +4813,7 @@ pub async fn gh_pr_view(
         stack_members,
         stack_unknown,
         members_unknown,
+        checks_unknown: false,
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
@@ -7161,6 +7169,7 @@ mod tests {
             stack_members,
             stack_unknown,
             members_unknown,
+            checks_unknown: false,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
@@ -7204,6 +7213,8 @@ mod tests {
         assert!(v.get("stack_unknown").is_none());
         assert_eq!(v["membersUnknown"], false);
         assert!(v.get("members_unknown").is_none());
+        assert_eq!(v["checksUnknown"], false);
+        assert!(v.get("checks_unknown").is_none());
 
         // Unstacked: an explicit null plus an empty array, never a missing key.
         let v =
@@ -7228,6 +7239,13 @@ mod tests {
         assert_eq!(v["stackMembers"], serde_json::json!([]));
         assert_eq!(v["stackUnknown"], false);
         assert_eq!(v["membersUnknown"], true);
+
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        details.checks_unknown = true;
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["checks"], serde_json::json!([]));
+        assert_eq!(v["checksUnknown"], true);
+        assert!(v.get("checks_unknown").is_none());
     }
 
     #[test]

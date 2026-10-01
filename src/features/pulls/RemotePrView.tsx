@@ -2805,6 +2805,9 @@ export function RemotePrView({
         <ChecksRollup
           key={settledEntityKey ?? `pending-${entityKey}`}
           checks={pr.checks}
+          checksUnknown={pr.checksUnknown}
+          detailsPaused={details.isPaused}
+          onRetryChecks={() => void details.refetch()}
           repoPath={repoPath}
           provider={providerKey}
           crossRepository={!!pr.crossRepository}

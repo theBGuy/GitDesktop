@@ -286,6 +286,8 @@ mod tests {
         for output in [
             "No token provided in configuration file",
             "gitlab.com: API call failed: 401 Unauthorized",
+            // SYNTHETIC: a 429 host label cannot override a rejected-token verdict.
+            "x gitlab-429.acme.com: 401 Unauthorized",
         ] {
             assert_eq!(
                 glab_auth(Ok((1, output.to_string()))),
