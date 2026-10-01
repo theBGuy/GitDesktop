@@ -652,13 +652,15 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
         .find(|a| a.host == host_str)
         .or_else(|| accounts.first());
     // Account metadata and host/URL-shaped tokens cannot name a transport verdict.
+    // A trailing colon still counts as host-shaped.
     let transport_residue = report
         .lines()
         .filter(|line| !line.contains("Logged in to") && !line.contains("Active account:"))
         .flat_map(str::split_whitespace)
         .map(|word| {
-            let host = word.contains('.')
-                && word.split('.').all(|label| {
+            let bare = word.trim_end_matches(':');
+            let host = bare.contains('.')
+                && bare.split('.').all(|label| {
                     !label.is_empty()
                         && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
                 });
@@ -926,6 +928,7 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
         // INFERRED from glab 1.105.0/client-go v2.40.1: "context deadline exceeded"
         // can mean exhausted 429 retries with no rate-limit wording or status digits,
         // or a network hang; both read Offline.
+        // Multi-word phrases match as substrings because a hostname cannot contain a space.
         if n.contains(' ') {
             combined_lower.contains(n)
         } else {
@@ -939,7 +942,8 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     }
 }
 
-// Hyphens join hostname labels and must not expose an embedded transport word.
+/// Like `has_standalone_word`, but '-' also counts as a word character because
+/// hyphens join hostname labels.
 fn glab_has_transport_word(text: &str, word: &str) -> bool {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '-';
     text.match_indices(word).any(|(i, _)| {
@@ -2436,6 +2440,22 @@ mod tests {
                 classify_gh_text_report(1, &report, "github.com").state,
                 SessionState::Broken,
                 "{address}"
+            );
+        }
+        // cli/cli v2.0.0 failure lines use the "X <host>: ..." shape.
+        /// SYNTHETIC: a colon-suffixed proxy hostname carries no transport verdict.
+        const PROXY_HOST_COLON: &str = "\
+  ✓ Logged in to github.com as alice
+  X proxy.acme.com: authentication failed";
+        /// SYNTHETIC: a colon-suffixed timeout hostname carries no transport verdict.
+        const TIMEOUT_HOST_COLON: &str = "\
+  ✓ Logged in to github.com as alice
+  X timeout.acme.com: authentication failed";
+        for report in [PROXY_HOST_COLON, TIMEOUT_HOST_COLON] {
+            assert_eq!(
+                classify_gh_text_report(1, report, "github.com").state,
+                SessionState::Broken,
+                "{report}"
             );
         }
         /// SYNTHETIC: a successful account's hostname must not vote on transport.
