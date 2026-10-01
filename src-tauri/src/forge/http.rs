@@ -315,6 +315,20 @@ pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> Str
     }
 }
 
+fn bb_body_read_error(e: reqwest::Error) -> AppError {
+    if e.is_timeout() || e.is_connect() {
+        AppError::Bitbucket(transport_failure_message(
+            "could not read Bitbucket response",
+            &e,
+        ))
+    } else {
+        bb_unreadable(
+            "the response",
+            format!("could not read Bitbucket response: {e}"),
+        )
+    }
+}
+
 /// Resolve a relative path against the API base, or pass an absolute URL through.
 /// (Bitbucket's pagination `next` is a full URL; single-endpoint calls pass a
 /// relative path like `workspaces` or `repositories/{ws}`.)
@@ -357,15 +371,7 @@ async fn bb_get_status(
             AppError::Bitbucket(transport_failure_message("Bitbucket request failed", &e))
         })?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            bb_unreadable(
-                "the response",
-                format!("could not read Bitbucket response: {e}"),
-            )
-        })?;
+    let body = resp.text().await.map_err(bb_body_read_error)?;
     Ok((status, body))
 }
 
@@ -450,15 +456,7 @@ pub async fn bb_send(
         .get(reqwest::header::LOCATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            bb_unreadable(
-                "the response",
-                format!("could not read Bitbucket response: {e}"),
-            )
-        })?;
+    let body = resp.text().await.map_err(bb_body_read_error)?;
     Ok((status, location, body))
 }
 
@@ -517,6 +515,45 @@ pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()
         return Err(http_error(status, &body));
     }
     Ok(())
+}
+
+// SYNTHETIC: headers arrive successfully, then the body stalls or ends early.
+#[cfg(test)]
+pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+            .await
+            .unwrap();
+        if timeout {
+            std::future::pending::<()>().await;
+        }
+    });
+    let response = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+    let error = response.text().await.unwrap_err();
+    server.abort();
+    assert_eq!(error.is_timeout(), timeout);
+    assert!(!error.is_connect());
+    error
 }
 
 #[cfg(test)]
@@ -602,6 +639,22 @@ mod tests {
             bb_unreadable("the response", detail.into()).to_string(),
             "Couldn't read the response from Bitbucket.\ncould not parse Bitbucket response: boom"
         );
+    }
+
+    #[tokio::test]
+    async fn bitbucket_body_read_timeout_carries_the_transport_marker() {
+        let error = incomplete_body_error(true).await;
+        let message = bb_body_read_error(error).to_string();
+        assert!(message.ends_with(": request timed out"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn bitbucket_other_body_read_errors_keep_the_unreadable_detail() {
+        let error = incomplete_body_error(false).await;
+        let expected = format!(
+            "Couldn't read the response from Bitbucket.\ncould not read Bitbucket response: {error}"
+        );
+        assert_eq!(bb_body_read_error(error).to_string(), expected);
     }
 
     #[test]
@@ -722,6 +775,9 @@ mod tests {
             message.starts_with("Bitbucket request failed: "),
             "{message}"
         );
+        assert!(message.ends_with(": connection failed"), "{message}");
+        // SYNTHETIC: a refused send supplies is_connect at the body-error seam.
+        let message = bb_body_read_error(error).to_string();
         assert!(message.ends_with(": connection failed"), "{message}");
     }
 

@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useOpAbort, useOpContinue, useOpState } from "@/lib/git/queries";
 import type { RepoOp, RepoOpState } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
@@ -148,10 +149,10 @@ export function ConflictBanner({
     // One calm status line — the per-file resolution actions live in the diff
     // pane's conflict view, so this just carries merge state + Continue/Abort
     // and the batch "Resolve all with AI".
-    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
+    <div className="flex items-center justify-between gap-x-3 border-b px-3 py-1.5 text-xs">
       <span
         className={cn(
-          "flex items-center gap-1.5",
+          "flex min-w-0 items-center gap-1.5",
           editPaused ? "text-info" : "text-warning",
         )}
       >
@@ -160,16 +161,18 @@ export function ConflictBanner({
         ) : (
           <WarningIcon className="size-3.5 shrink-0" />
         )}
-        {editPaused
-          ? "Rebase paused — amend this commit's changes in Changes, then Continue"
-          : opVerb
-            ? `${opVerb} · ${conflictText}`
-            : // No operation to continue or abort (a conflicted stash pop leaves
-              // unmerged paths and nothing else), so the banner has to say where
-              // the resolution happens.
-              `${conflictText} — resolve ${conflictedCount === 1 ? "it" : "them"} in the changes list.`}
+        <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
+          {editPaused
+            ? "Rebase paused — amend this commit's changes in Changes, then Continue"
+            : opVerb
+              ? `${opVerb} · ${conflictText}`
+              : // No operation to continue or abort (a conflicted stash pop leaves
+                // unmerged paths and nothing else), so the banner has to say where
+                // the resolution happens.
+                `${conflictText} — resolve ${conflictedCount === 1 ? "it" : "them"} in the changes list.`}
+        </span>
       </span>
-      <div className="flex items-center gap-1.5">
+      <div className="flex shrink-0 items-center gap-1.5">
         {canResolveWithAi && (
           <Button
             size="xs"

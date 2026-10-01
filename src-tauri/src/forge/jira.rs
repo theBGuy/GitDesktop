@@ -398,6 +398,14 @@ fn http_error_with_resolver(
     }
 }
 
+fn jira_body_read_error(e: reqwest::Error) -> AppError {
+    if e.is_timeout() || e.is_connect() {
+        AppError::Jira(transport_failure_message("could not read Jira response", &e))
+    } else {
+        jira_unreadable("the response", format!("could not read Jira response: {e}"))
+    }
+}
+
 /// The low-level authenticated request: send `method` to the base-resolved `path` with
 /// HTTP Basic auth (and an optional JSON body), returning the raw `(status, body)`
 /// WITHOUT turning a non-2xx into an error — the caller decides (base resolution needs
@@ -424,15 +432,7 @@ async fn raw_request(
         .await
         .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            jira_unreadable(
-                "the response",
-                format!("could not read Jira response: {e}"),
-            )
-        })?;
+    let body = resp.text().await.map_err(jira_body_read_error)?;
     Ok((status, body))
 }
 
@@ -661,15 +661,7 @@ async fn fetch_cloud_id(site: &str) -> AppResult<String> {
         .await
         .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            jira_unreadable(
-                "the response",
-                format!("could not read Jira response: {e}"),
-            )
-        })?;
+    let body = resp.text().await.map_err(jira_body_read_error)?;
     if !(200..300).contains(&status) {
         return Err(AppError::Jira(format!(
             "couldn't resolve the site's cloud id (HTTP {status})"
@@ -1546,15 +1538,7 @@ async fn get_json_agile<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|e| AppError::Jira(transport_failure_message("Jira request failed", &e)))?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            jira_unreadable(
-                "the response",
-                format!("could not read Jira response: {e}"),
-            )
-        })?;
+    let body = resp.text().await.map_err(jira_body_read_error)?;
     if !(200..300).contains(&status) {
         return Err(http_error(status, &body));
     }
@@ -2994,6 +2978,42 @@ mod tests {
             jira_unreadable("the response", detail.into()).to_string(),
             "Couldn't read the response from Jira.\ncould not parse Jira response: boom"
         );
+    }
+
+    #[tokio::test]
+    async fn jira_body_read_timeout_carries_the_transport_marker() {
+        let error = crate::forge::http::incomplete_body_error(true).await;
+        let message = jira_body_read_error(error).to_string();
+        assert!(message.ends_with(": request timed out"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn jira_other_body_read_errors_keep_the_unreadable_detail() {
+        let error = crate::forge::http::incomplete_body_error(false).await;
+        let expected =
+            format!("Couldn't read the response from Jira.\ncould not read Jira response: {error}");
+        assert_eq!(jira_body_read_error(error).to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn jira_body_read_connect_failure_carries_the_transport_marker() {
+        // SYNTHETIC: a refused send supplies is_connect at the body-error seam.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/fixture"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect());
+        let message = jira_body_read_error(error).to_string();
+        assert!(message.ends_with(": connection failed"), "{message}");
     }
 
     #[test]

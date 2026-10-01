@@ -651,12 +651,20 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
         .iter()
         .find(|a| a.host == host_str)
         .or_else(|| accounts.first());
+    // Account metadata and dotted host/URL tokens cannot name a transport verdict.
+    let transport_residue = report
+        .lines()
+        .filter(|line| !line.contains("Logged in to") && !line.contains("Active account:"))
+        .flat_map(str::split_whitespace)
+        .map(|word| if word.contains('.') { "" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ");
     // Transport words outrank the account count: a failed report can carry no
     // "Logged in" line at all, and reading that as NotConnected would sign the user
     // out for an outage.
     let state = if code == 0 {
         SessionState::Healthy
-    } else if gh_error_is_network(Some(report)) {
+    } else if gh_error_is_network(Some(&transport_residue)) {
         SessionState::Offline
     } else if accounts.is_empty() {
         SessionState::NotConnected
@@ -778,8 +786,8 @@ fn gh_account_health(host: &str, acct: &GhJsonAccount) -> SessionHealth {
         "error" => SessionState::Broken,
         // Never Broken: an inconclusive probe.
         "timeout" => SessionState::Offline,
-        // Unknown/empty state → treat as inconclusive, never a false alarm.
-        _ => SessionState::Offline,
+        // Unknown/empty state has no evidence of a connection or an outage.
+        _ => SessionState::NotConnected,
     };
     let mut h = SessionHealth::new("github", host, state);
     h.login = acct.login.clone().filter(|s| !s.is_empty());
@@ -883,13 +891,13 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
         "gateway timeout",
         "proxy authentication required",
     ];
-    // NETWORKISH matches as bare substrings here. Source-derived, not live-reproduced:
-    // glab 1.105.0's client-go (v2.40.1) retries a 429 until its Ratelimit-Reset inside
-    // the context budget, so a long throttle can surface as Go's bare "context deadline
-    // exceeded" with no rate-limit wording or status digits. Offline rather than
-    // RateLimited: a genuine network hang surfaces the same words.
-    // Checked first as the most specific signal. glab's exact wording is unmeasured, so
-    // it matches the phrases a GitLab throttle can carry (a 429 answers "Too Many
+    // Single transport words need boundaries; multi-word phrases cannot be hostnames.
+    // INFERRED from glab 1.105.0/client-go v2.40.1: retries can exhaust the context
+    // deadline with no rate-limit wording or status digits. A network hang produces
+    // the same phrase, so it means Offline.
+
+    // Rate limits are checked first as the most specific signal. glab's exact wording
+    // is unmeasured, so match phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
     if combined_lower.contains("rate limit")
         || combined_lower.contains("too many requests")
@@ -898,10 +906,13 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
         GlabFailure::RateLimited
     } else if NOT_CONNECTED.iter().any(|n| combined_lower.contains(n)) {
         GlabFailure::NotConnected
-    } else if NETWORKISH
-        .iter()
-        .chain(OFFLINE_STATUS.iter())
-        .any(|n| combined_lower.contains(n))
+    } else if NETWORKISH.iter().any(|n| {
+        if n.contains(' ') {
+            combined_lower.contains(n)
+        } else {
+            has_standalone_word(combined_lower, n)
+        }
+    }) || OFFLINE_STATUS.iter().any(|n| combined_lower.contains(n))
     {
         GlabFailure::Offline
     } else {
@@ -2363,6 +2374,40 @@ mod tests {
 
     #[test]
     fn old_gh_text_report_reads_offline_only_on_transport_words() {
+        /// SYNTHETIC: a successful account's hostname must not vote on transport.
+        const NETWORK_HOST_SUCCESS: &str = "\
+  ✓ Logged in to timeout.acme.com as alice
+  X Failed to log in to github.acme.com account bob
+  - The token in keyring is invalid.";
+        let h = classify_gh_text_report(1, NETWORK_HOST_SUCCESS, "timeout.acme.com");
+        assert_eq!(h.state, SessionState::Broken);
+        assert_eq!(h.login.as_deref(), Some("alice"));
+        /// SYNTHETIC: the failed host alone carries the transport word.
+        const NETWORK_HOST_FAILED: &str = "\
+  ✓ Logged in to github.com as alice
+  X Failed to log in to timeout.acme.com account bob
+  - The token in keyring is invalid.";
+        assert_eq!(
+            classify_gh_text_report(1, NETWORK_HOST_FAILED, "github.com").state,
+            SessionState::Broken
+        );
+        /// SYNTHETIC: successful-account metadata is not a transport verdict.
+        const NETWORK_ACCOUNT_METADATA: &str = "\
+  ✓ Logged in to github.com as network
+  - Active account: connection
+  X Failed to log in to github.acme.com account bob
+  - The token in keyring is invalid.";
+        assert_eq!(
+            classify_gh_text_report(1, NETWORK_ACCOUNT_METADATA, "github.com").state,
+            SessionState::Broken
+        );
+        /// SYNTHETIC: the real transport word survives masking the dotted hostname.
+        const NETWORK_HOST_TIMEOUT: &str =
+            "X Timeout trying to log in to timeout.acme.com account bob";
+        assert_eq!(
+            classify_gh_text_report(1, NETWORK_HOST_TIMEOUT, "timeout.acme.com").state,
+            SessionState::Offline
+        );
         // Inferred old-gh wording (from gh's source, not a live old gh).
         let timed_out = "\
   ✓ Logged in to github.com as alice (oauth_token)
@@ -2453,7 +2498,6 @@ check your internet connection or https://githubstatus.com";
                 "error",
                 Some("Get \"https://api.github.com/\": unexpected EOF"),
             ),
-            one_account("", None),
         ] {
             let err = gh_host_auth(&GhJsonProbe::Parsed(map), "github.com")
                 .err()
@@ -2640,6 +2684,17 @@ check your internet connection or https://githubstatus.com";
         for map in readings {
             let status = session_auth_status(classify_gh_host(&map["github.com"]).state);
             assert_ne!(status, AuthStatus::Unknown);
+        }
+        for state in ["", "something_new"] {
+            let map = one_account(state, None);
+            for (health, reprobe) in classify_both(&map) {
+                assert_eq!(session_auth_status(health.state), AuthStatus::NotAuthed);
+                assert!(!reprobe);
+            }
+            let auth = gh_host_auth(&GhJsonProbe::Parsed(map), "github.com")
+                .unwrap()
+                .unwrap();
+            assert!(!auth.authenticated);
         }
     }
 
@@ -3018,6 +3073,13 @@ check your internet connection or https://githubstatus.com";
             r#"Post "https://gitlab.com/oauth/token": oauth2: "invalid_grant" "The provided authorization grant is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client.""#,
             "x gitlab502.example.com: 401 unauthorized",
             "x gitlab503.example.com: api call failed",
+            // SYNTHETIC: embedded transport words in hosts are not outage evidence.
+            "x gitlab.mynetwork.com: 401 unauthorized; token revoked",
+            "x gitlab.mytimeout.com: 401 unauthorized; token revoked",
+            "x gitlab.myconnection.com: 401 unauthorized; token revoked",
+            "x gitlab.mydial.com: 401 unauthorized; token revoked",
+            "x gitlab.mylookup.com: 401 unauthorized; token revoked",
+            "x gitlab.mytls.com: 401 unauthorized; token revoked",
         ] {
             assert_eq!(
                 classify_glab_failure(&credential.to_lowercase()),
