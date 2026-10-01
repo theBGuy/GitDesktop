@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -34,8 +35,13 @@ import {
 } from "@/lib/git/queries";
 import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { InlineConfirm, RemoteFormSection } from "./parts";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  RemoteFormSection,
+} from "./parts";
 import {
   type PendingSent,
   reconcileTouched,
@@ -419,6 +425,7 @@ function SecurityForm({
   isError: boolean;
 }) {
   const apply = useApplySecurity(repoPath);
+  const online = useOnline();
   const seed = useMemo(() => toDraft(status), [status]);
   // Touched toggles only, retired per `reconcileTouched` — never on the save
   // itself, so a save whose refetch failed keeps its values on screen.
@@ -514,10 +521,15 @@ function SecurityForm({
           >
             Discard
           </Button>
-          <Button size="sm" onClick={save} disabled={apply.isPending}>
+          <DisabledReasonButton
+            size="sm"
+            onClick={save}
+            disabled={apply.isPending || !online}
+            reason={online ? undefined : OFFLINE_WRITE_REASON}
+          >
             {apply.isPending && <Spinner data-icon="inline-start" />}
             Save changes
-          </Button>
+          </DisabledReasonButton>
         </div>
       )}
     </div>

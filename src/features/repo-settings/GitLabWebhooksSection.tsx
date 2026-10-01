@@ -74,6 +74,7 @@ export function GitLabWebhooksSection({
   const hooks = useGlHooks(repoPath, open);
   const deleteHook = useGlDeleteHook(repoPath);
   const testHook = useGlTestHook(repoPath);
+  const online = useOnline();
   // null = list; "new" = create form; a hook = edit form.
   const [editing, setEditing] = useState<GitLabHook | "new" | null>(null);
   const [viewingEvents, setViewingEvents] = useState<GitLabHook | null>(null);
@@ -172,20 +173,22 @@ export function GitLabWebhooksSection({
                   prompt="Delete?"
                   actLabel="Delete"
                   pending={deleteHook.isPending}
+                  heldReason={online ? undefined : OFFLINE_WRITE_REASON}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(h.id)}
                 />
               ) : (
                 <>
-                  <Button
+                  <DisabledReasonButton
                     size="sm"
                     variant="ghost"
                     title="Send a test push event"
-                    disabled={testHook.isPending}
+                    disabled={testHook.isPending || !online}
+                    reason={online ? undefined : OFFLINE_WRITE_REASON}
                     onClick={() => handleTest(h.id)}
                   >
                     <ArrowClockwiseIcon />
-                  </Button>
+                  </DisabledReasonButton>
                   <Button
                     size="sm"
                     variant="ghost"
@@ -368,6 +371,7 @@ function HookDeliveries({
 }) {
   const events = useGlHookEvents(repoPath, hook.id);
   const resend = useGlResendHookEvent(repoPath, hook.id);
+  const online = useOnline();
   const [expanded, setExpanded] = useState<string | null>(null);
 
   async function handleResend(eventId: string) {
@@ -410,6 +414,7 @@ function HookDeliveries({
             expanded={expanded === d.id}
             onToggle={() => setExpanded(expanded === d.id ? null : d.id)}
             resending={resend.isPending}
+            resendHeld={online ? undefined : OFFLINE_WRITE_REASON}
             onResend={() => handleResend(d.id)}
           />
         ))}
@@ -423,12 +428,15 @@ function DeliveryRow({
   expanded,
   onToggle,
   resending,
+  resendHeld,
   onResend,
 }: {
   delivery: GitLabHookDelivery;
   expanded: boolean;
   onToggle: () => void;
   resending: boolean;
+  /** Why Re-send is held; unset leaves it enabled. */
+  resendHeld?: string;
   onResend: () => void;
 }) {
   const ok =
@@ -459,15 +467,16 @@ function DeliveryRow({
             ) : null}
           </span>
         </button>
-        <Button
+        <DisabledReasonButton
           size="sm"
           variant="ghost"
           title="Re-send this delivery"
-          disabled={resending}
+          disabled={resending || resendHeld !== undefined}
+          reason={resendHeld}
           onClick={onResend}
         >
           <ArrowClockwiseIcon />
-        </Button>
+        </DisabledReasonButton>
       </div>
       {expanded && (
         <div className="space-y-2 border-t p-2">

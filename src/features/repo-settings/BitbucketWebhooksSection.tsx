@@ -64,6 +64,7 @@ export function BitbucketWebhooksSection({
 }) {
   const hooks = useBbHooks(repoPath, open);
   const deleteHook = useBbDeleteHook(repoPath);
+  const online = useOnline();
   // null = list; "new" = create form; a hook = edit form.
   const [editing, setEditing] = useState<BitbucketHook | "new" | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -137,6 +138,7 @@ export function BitbucketWebhooksSection({
                   prompt="Delete?"
                   actLabel="Delete"
                   pending={deleteHook.isPending}
+                  heldReason={online ? undefined : OFFLINE_WRITE_REASON}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(h.uuid)}
                 />

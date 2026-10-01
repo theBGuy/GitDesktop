@@ -1,10 +1,10 @@
 // Pins the repo-settings draft reconcile (src/features/repo-settings/
-// touched-draft.ts) that Security and Pages run on every render. The contract:
-// a touched field retires once the server reads back equal; a saved field
-// retires on the first healthy read newer than the save even when the server
-// stored something else; a failed post-save refetch holds the saved values; a
-// field edited again during the save survives; nothing returns new objects
-// when nothing changed, so a render-time caller can't loop.
+// touched-draft.ts) that Security, Pages and Funding run on every render. The
+// contract: a touched field retires once the server reads back equal; a saved
+// field retires on the first healthy read newer than the save even when the
+// server stored something else; a failed post-save refetch holds the saved
+// values; a field edited again during the save survives; nothing returns new
+// objects when nothing changed, so a render-time caller can't loop.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so the module

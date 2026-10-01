@@ -38,6 +38,7 @@ export function BitbucketDefaultReviewersSection({
   const reviewers = useBbDefaultReviewers(repoPath, open);
   const add = useBbAddDefaultReviewer(repoPath);
   const remove = useBbRemoveDefaultReviewer(repoPath);
+  const online = useOnline();
 
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -113,6 +114,7 @@ export function BitbucketDefaultReviewersSection({
               onFocus={() => setActiveIndex(i)}
               confirming={confirming === r.id}
               pending={remove.isPending}
+              confirmHeld={online ? undefined : OFFLINE_WRITE_REASON}
               onConfirm={() => setConfirming(r.id)}
               onCancel={() => setConfirming(null)}
               onRemove={() => handleRemove(r)}
@@ -131,6 +133,7 @@ function ReviewerRow({
   onFocus,
   confirming,
   pending,
+  confirmHeld,
   onConfirm,
   onCancel,
   onRemove,
@@ -141,6 +144,8 @@ function ReviewerRow({
   onFocus: () => void;
   confirming: boolean;
   pending: boolean;
+  /** Why the confirm's Remove is held; unset leaves it enabled. */
+  confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;
   onRemove: () => void;
@@ -172,6 +177,7 @@ function ReviewerRow({
           prompt="Remove?"
           actLabel="Remove"
           pending={pending}
+          heldReason={confirmHeld}
           onCancel={onCancel}
           onAct={onRemove}
         />

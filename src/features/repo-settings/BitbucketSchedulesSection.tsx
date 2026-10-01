@@ -222,6 +222,17 @@ function ScheduleRow({
   // refetch swaps in the server's real one; a toggle/delete against a fake uuid
   // would 404, so both controls stay disabled while it's syncing.
   const syncing = schedule.uuid.startsWith("pending:");
+  const online = useOnline();
+  const toggleHeld = (() => {
+    switch (true) {
+      case syncing:
+        return "Syncing with Bitbucket…";
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      default:
+        return undefined;
+    }
+  })();
   return (
     <div className="flex items-center gap-2 rounded-md border p-2 text-xs">
       <div className="min-w-0 flex-1">
@@ -232,28 +243,22 @@ function ScheduleRow({
           {schedule.cronPattern}
         </p>
       </div>
-      {syncing ? (
-        // A natively-disabled control drops its title, so wrap it to explain why.
-        <span title="Syncing with Bitbucket…" className="inline-flex">
-          <Switch
-            checked={schedule.enabled}
-            disabled
-            aria-label="Schedule enabled"
-          />
-        </span>
-      ) : (
+      {/* A natively-disabled control drops its title, so the wrapper explains
+          why; it stays mounted so a focused switch survives the hold. */}
+      <span title={toggleHeld} className="inline-flex">
         <Switch
           checked={schedule.enabled}
-          disabled={toggling}
+          disabled={toggling || toggleHeld !== undefined}
           onCheckedChange={onToggle}
           aria-label="Schedule enabled"
         />
-      )}
+      </span>
       {confirming ? (
         <InlineConfirm
           prompt="Delete?"
           actLabel="Delete"
           pending={pending}
+          heldReason={online ? undefined : OFFLINE_WRITE_REASON}
           onCancel={onCancel}
           onAct={onRemove}
         />

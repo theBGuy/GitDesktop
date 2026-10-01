@@ -18,8 +18,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
-import { isPermanentListError } from "@/features/conversations/remote-section-state";
 import {
   useCheckRunApps,
   useCreateRuleset,
@@ -33,9 +31,10 @@ import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
-  AsyncErrorCard,
+  HeldRoleSelect,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
+  RemoteFormSection,
   RemoteListSection,
 } from "./parts";
 
@@ -62,6 +61,8 @@ const REF_SCOPE_ITEMS: Record<string, string> = {
  *  reason, and rulesets are admin-only on GitHub. */
 const ADMIN_HINT =
   "If this is a permissions error, managing rulesets needs repo-admin access.";
+
+const SAVING_REASON = "Saving your last change…";
 
 /** Rule types we model in the editor. Any others on an edited ruleset are
  *  preserved untouched (so advanced rules aren't dropped). */
@@ -374,6 +375,10 @@ function RulesetList({
   const setEnforcement = useSetRulesetEnforcement(repoPath);
   const del = useDeleteRuleset(repoPath);
   const [confirming, setConfirming] = useState<number | null>(null);
+  const online = useOnline();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
+  const enforcementHeld =
+    offlineReason ?? (setEnforcement.isPending ? SAVING_REASON : undefined);
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -448,30 +453,22 @@ function RulesetList({
                   prompt="Delete?"
                   actLabel="Delete"
                   pending={del.isPending}
+                  heldReason={offlineReason}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(rs.id)}
                 />
               ) : (
                 <>
-                  <Select
-                    items={ENFORCEMENT_ITEMS}
+                  <HeldRoleSelect
                     value={rs.enforcement}
-                    disabled={setEnforcement.isPending}
-                    onValueChange={(v) =>
-                      v && handleEnforcement(rs.id, v as RulesetEnforcement)
+                    heldReason={enforcementHeld}
+                    onRole={(v) =>
+                      handleEnforcement(rs.id, v as RulesetEnforcement)
                     }
-                  >
-                    <SelectTrigger size="sm" className="w-28">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ENFORCEMENTS.map((e) => (
-                        <SelectItem key={e.value} value={e.value}>
-                          {e.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    options={ENFORCEMENTS}
+                    items={ENFORCEMENT_ITEMS}
+                    label={`Enforcement for ${rs.name}`}
+                  />
                   <DisabledReasonButton
                     size="sm"
                     variant="ghost"
@@ -510,49 +507,36 @@ function RulesetEditor({
   onDone: () => void;
 }) {
   const existing = useRuleset(repoPath, id);
-  const failed = id != null && existing.isError && existing.data === undefined;
-  const retryable = failed && !isPermanentListError(existing.error);
-  // A Retry press resets the never-loaded read to pending, swapping the card for
-  // the skeleton; the column below is the focus host that survives it.
-  const { hostRef, retryRef } = useRetryFocusRescue(retryable);
-  // The form only ever mounts on loaded data: a save is a full-replace PUT built
-  // from `original`, so a form seeded blank would wipe the ruleset's bypass
-  // actors, unmodeled rules and conditions. (The create path fetches nothing.)
-  const body = (() => {
-    switch (true) {
-      // `isPending`, not `isLoading`: a fetch react-query paused for being
-      // offline is neither loading nor errored, and the error arm below would
-      // blame permissions for it.
-      case id != null && existing.isPending:
-        return <Skeleton className="h-64 w-full" />;
-      // Gated on absent data, not on `isError`: a failed background refetch keeps
-      // the last good ruleset, and unmounting the form there would silently
-      // discard a half-authored draft.
-      case id != null && !existing.data:
-        return (
-          <AsyncErrorCard
-            title="Couldn't load this ruleset."
-            error={existing.error}
-            hint={ADMIN_HINT}
-            onRetry={retryable ? () => void existing.refetch() : undefined}
-            retryLabel="Retry loading this ruleset"
-            retryRef={retryRef}
-          />
-        );
-      default:
-        return (
-          <RulesetForm
-            repoPath={repoPath}
-            id={id}
-            original={existing.data}
-            onDone={onDone}
-          />
-        );
-    }
-  })();
+  // An edit's form only ever mounts on loaded data: a save is a full-replace PUT
+  // built from `original`, so a form seeded blank would wipe the ruleset's bypass
+  // actors, unmodeled rules and conditions. The create path fetches nothing.
+  const body =
+    id == null ? (
+      <RulesetForm repoPath={repoPath} id={null} onDone={onDone} />
+    ) : (
+      <RemoteFormSection
+        query={existing}
+        noun="this ruleset"
+        skeleton={<Skeleton className="h-64 w-full" />}
+        errorTitle="Couldn't load this ruleset."
+        errorHint={ADMIN_HINT}
+      >
+        {(original) => (
+          // The fields' own column: the section host spaces tighter.
+          <div className="min-w-0 space-y-4">
+            <RulesetForm
+              repoPath={repoPath}
+              id={id}
+              original={original}
+              onDone={onDone}
+            />
+          </div>
+        )}
+      </RemoteFormSection>
+    );
 
   return (
-    <div ref={hostRef} tabIndex={-1} className="min-w-0 space-y-4 outline-none">
+    <div className="min-w-0 space-y-4">
       <button
         type="button"
         onClick={onDone}

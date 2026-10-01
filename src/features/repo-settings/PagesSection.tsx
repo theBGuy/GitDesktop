@@ -216,6 +216,8 @@ function PagesEnabled({
   const branches = useBranches(repoPath);
   const update = useUpdatePages(repoPath);
   const disable = useDisablePages(repoPath);
+  const online = useOnline();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   // An absent field shows the server's value. Touched fields retire per
   // `reconcileTouched` — never on the save itself, so a save whose refetch
   // failed keeps its values on screen.
@@ -273,11 +275,16 @@ function PagesEnabled({
   const certFailed =
     pages.httpsCertificateState === "errored" ||
     pages.httpsCertificateState === "bad_authz";
-  const httpsHint = certReady
-    ? undefined
-    : certFailed
-      ? "HTTPS certificate provisioning failed — check the domain's DNS configuration"
-      : "Waiting for the HTTPS certificate to be issued for this domain";
+  const httpsHeld = (() => {
+    switch (true) {
+      case !certReady && certFailed:
+        return "HTTPS certificate provisioning failed — check the domain's DNS configuration";
+      case !certReady:
+        return "Waiting for the HTTPS certificate to be issued for this domain";
+      default:
+        return offlineReason;
+    }
+  })();
 
   async function handleUpdateSource() {
     const at = dataUpdatedAt;
@@ -379,14 +386,17 @@ function PagesEnabled({
                 ))}
               </SelectContent>
             </Select>
-            <Button
+            <DisabledReasonButton
               size="sm"
               variant="outline"
-              disabled={!sourceChanged || !branch || update.isPending}
+              disabled={
+                !sourceChanged || !branch || update.isPending || !online
+              }
+              reason={offlineReason}
               onClick={handleUpdateSource}
             >
               Update
-            </Button>
+            </DisabledReasonButton>
           </div>
         </LabeledGroup>
       )}
@@ -403,14 +413,15 @@ function PagesEnabled({
             autoComplete="off"
             spellCheck={false}
           />
-          <Button
+          <DisabledReasonButton
             size="sm"
             variant="outline"
-            disabled={cname === pages.cname || update.isPending}
+            disabled={cname === pages.cname || update.isPending || !online}
+            reason={offlineReason}
             onClick={handleSaveDomain}
           >
             Save
-          </Button>
+          </DisabledReasonButton>
         </div>
         <p className="text-[11px] text-muted-foreground">
           Point your DNS at GitHub Pages, then add the domain here.
@@ -428,10 +439,10 @@ function PagesEnabled({
             </span>
           )}
         </span>
-        <span title={certReady ? undefined : httpsHint} className="inline-flex">
+        <span title={httpsHeld} className="inline-flex">
           <Switch
             checked={pages.httpsEnforced}
-            disabled={update.isPending || !certReady}
+            disabled={update.isPending || httpsHeld !== undefined}
             onCheckedChange={handleHttpsEnforced}
           />
         </span>
@@ -444,6 +455,7 @@ function PagesEnabled({
             promptClassName="mr-auto text-xs"
             actLabel="Disable Pages"
             pending={disable.isPending}
+            heldReason={offlineReason}
             onCancel={() => setConfirmingDisable(false)}
             onAct={handleDisable}
           />

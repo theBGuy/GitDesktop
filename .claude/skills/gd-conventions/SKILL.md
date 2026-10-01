@@ -402,18 +402,26 @@ one grep away on the named symbol. Grows via Conventions-sync.
   never `isError`, so a failed or parked refresh keeps the form and its draft
   under a notice above it. A draft that reseeds after a save holds only touched
   fields and retires them through `reconcileTouched` + `stampSent`
-  (repo-settings/touched-draft, pinned by its test) — never a clear on
+  (repo-settings/touched-draft, pinned by its test; a save that canonicalizes
+  client-side, like Funding's, remaps its draft to the canonical form and
+  stamps that) — never a clear on
   save (a failed post-save refetch shows the pre-save values) or a
   `dataUpdatedAt` key (every focus refetch wipes the draft); a whole-object
   draft would send another client's newer values back stale.
 - **Offline remote writes** — a repo-settings control that fires a remote
-  write gates on `useOnline()` (`src/lib/use-online.ts`) with the shared
-  `OFFLINE_WRITE_REASON` (repo-settings/parts), disabled with reason, never
-  hidden: a mutation pressed offline parks silently and fires on reconnect.
-  Local-file writes (FUNDING.yml, dependabot.yml) stay enabled.
-- **Held role pickers** — a row's role select held while saving rides
-  `HeldRoleSelect` (repo-settings/parts): readOnly + gated open, never Base
-  UI's `disabled`, which drops the trigger and its reason from the tab order.
+  write (add, save, delete, role, toggle) gates on `useOnline()`
+  (`src/lib/use-online.ts`) with the shared `OFFLINE_WRITE_REASON`
+  (repo-settings/parts), disabled with reason, never hidden: a mutation
+  pressed offline parks silently and fires on reconnect. Confirms take
+  `InlineConfirm`'s / `DangerDialog`'s `heldReason`, pickers
+  `HeldRoleSelect`'s, switches an always-mounted titled span (a held arm
+  that swaps the tree shape drops focus). Openers that only reveal a
+  form or confirm stay enabled, as do local writes (FUNDING.yml,
+  dependabot.yml, removing the upstream remote).
+- **Held row pickers** — a row's select (role, ruleset enforcement) held while
+  saving or offline rides `HeldRoleSelect` (repo-settings/parts): readOnly +
+  gated open, never Base UI's `disabled`, which drops the trigger and its
+  reason from the tab order.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

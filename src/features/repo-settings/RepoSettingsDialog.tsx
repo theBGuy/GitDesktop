@@ -555,6 +555,8 @@ function WebhookRow({
   const test = useTestWebhook(repoPath);
   const del = useDeleteWebhook(repoPath);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const online = useOnline();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
 
   const lastCode = hook.lastResponse.code;
   const lastTone =
@@ -633,32 +635,35 @@ function WebhookRow({
             promptClassName="mr-auto"
             actLabel="Remove"
             pending={del.isPending}
+            heldReason={offlineReason}
             onCancel={() => setConfirmingDelete(false)}
             onAct={handleDelete}
           />
         ) : (
           <>
-            <Button
+            <DisabledReasonButton
               size="sm"
               variant="ghost"
-              disabled={ping.isPending}
+              disabled={ping.isPending || !online}
+              reason={offlineReason}
               title="Send a ping event"
               onClick={handlePing}
             >
               <BroadcastIcon data-icon="inline-start" />
               Ping
-            </Button>
+            </DisabledReasonButton>
             {canTest && (
-              <Button
+              <DisabledReasonButton
                 size="sm"
                 variant="ghost"
-                disabled={test.isPending}
+                disabled={test.isPending || !online}
+                reason={offlineReason}
                 title="Trigger a test push event"
                 onClick={handleTest}
               >
                 <ArrowClockwiseIcon data-icon="inline-start" />
                 Test
-              </Button>
+              </DisabledReasonButton>
             )}
             <Button
               size="sm"
@@ -766,6 +771,7 @@ function DeliveryRow({
     expanded ? delivery.id : null,
   );
   const redeliver = useRedeliverWebhook(repoPath, hookId);
+  const online = useOnline();
 
   const ok = delivery.statusCode >= 200 && delivery.statusCode < 300;
   const eventLabel = delivery.action
@@ -812,10 +818,11 @@ function DeliveryRow({
       {expanded && (
         <div className="space-y-2 border-t p-2">
           <div className="flex justify-end">
-            <Button
+            <DisabledReasonButton
               size="xs"
               variant="ghost"
-              disabled={redeliver.isPending}
+              disabled={redeliver.isPending || !online}
+              reason={online ? undefined : OFFLINE_WRITE_REASON}
               onClick={handleRedeliver}
             >
               {redeliver.isPending ? (
@@ -824,7 +831,7 @@ function DeliveryRow({
                 <ArrowClockwiseIcon data-icon="inline-start" />
               )}
               Redeliver
-            </Button>
+            </DisabledReasonButton>
           </div>
           {detail.isPending && <Skeleton className="h-16 w-full" />}
           {detail.isError && (

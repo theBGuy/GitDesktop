@@ -280,6 +280,7 @@ function SecretsList({
             }
             confirming={confirming === s.name}
             pending={del.isPending}
+            confirmHeld={online ? undefined : OFFLINE_WRITE_REASON}
             onConfirm={() => setConfirming(s.name)}
             onCancel={() => setConfirming(null)}
             onDelete={() => remove(s.name)}
@@ -389,6 +390,7 @@ function VariablesList({
             metaMono
             confirming={confirming === v.name}
             pending={del.isPending}
+            confirmHeld={online ? undefined : OFFLINE_WRITE_REASON}
             onConfirm={() => setConfirming(v.name)}
             onCancel={() => setConfirming(null)}
             onEdit={() => {
@@ -409,6 +411,7 @@ function Row({
   metaMono,
   confirming,
   pending,
+  confirmHeld,
   onConfirm,
   onCancel,
   onDelete,
@@ -419,6 +422,8 @@ function Row({
   metaMono?: boolean;
   confirming: boolean;
   pending: boolean;
+  /** Why the confirm's Delete is held; unset leaves it enabled. */
+  confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;
   onDelete: () => void;
@@ -444,6 +449,7 @@ function Row({
           prompt="Delete?"
           actLabel="Delete"
           pending={pending}
+          heldReason={confirmHeld}
           onCancel={onCancel}
           onAct={onDelete}
         />

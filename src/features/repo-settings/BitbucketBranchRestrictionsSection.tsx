@@ -76,6 +76,7 @@ export function BitbucketBranchRestrictionsSection({
 }) {
   const restrictions = useBbBranchRestrictions(repoPath, open);
   const remove = useBbDeleteBranchRestriction(repoPath);
+  const online = useOnline();
   // null = list; "new" = create form; a restriction = edit form.
   const [editing, setEditing] = useState<
     BitbucketBranchRestriction | "new" | null
@@ -145,6 +146,7 @@ export function BitbucketBranchRestrictionsSection({
                   prompt="Delete?"
                   actLabel="Delete"
                   pending={remove.isPending}
+                  heldReason={online ? undefined : OFFLINE_WRITE_REASON}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleRemove(r.id)}
                 />

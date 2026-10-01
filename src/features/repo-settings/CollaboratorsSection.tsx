@@ -115,10 +115,15 @@ export function CollaboratorsSection({
         return rolesUnknownReason;
     }
   })();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const collabRoleHeld =
-    rolesUnknownReason ?? (add.isPending ? SAVING_REASON : undefined);
+    rolesUnknownReason ??
+    offlineReason ??
+    (add.isPending ? SAVING_REASON : undefined);
   const inviteRoleHeld =
-    rolesUnknownReason ?? (updateInvite.isPending ? SAVING_REASON : undefined);
+    rolesUnknownReason ??
+    offlineReason ??
+    (updateInvite.isPending ? SAVING_REASON : undefined);
 
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];
@@ -286,6 +291,7 @@ export function CollaboratorsSection({
                 onRole={(r) => setCollaboratorRole(c.login, r)}
                 confirming={confirming === key}
                 pending={remove.isPending}
+                confirmHeld={offlineReason}
                 onConfirm={() => setConfirming(key)}
                 onCancel={() => setConfirming(null)}
                 onRemove={() => removeCollaborator(c.login)}
@@ -335,6 +341,7 @@ export function CollaboratorsSection({
                   onRole={(r) => setInvitationRole(inv.id, r)}
                   confirming={confirming === key}
                   pending={cancelInvite.isPending}
+                  confirmHeld={offlineReason}
                   onConfirm={() => setConfirming(key)}
                   onCancel={() => setConfirming(null)}
                   onRemove={() => cancelInvitation(inv.id)}
@@ -401,6 +408,7 @@ function PersonRow({
   onRole,
   confirming,
   pending,
+  confirmHeld,
   onConfirm,
   onCancel,
   onRemove,
@@ -421,6 +429,8 @@ function PersonRow({
   onRole: (role: RepoRole) => void;
   confirming: boolean;
   pending: boolean;
+  /** Why the confirm's Remove is held; unset leaves it enabled. */
+  confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;
   onRemove: () => void;
@@ -450,6 +460,7 @@ function PersonRow({
           prompt="Remove?"
           actLabel="Remove"
           pending={pending}
+          heldReason={confirmHeld}
           onCancel={onCancel}
           onAct={onRemove}
         />

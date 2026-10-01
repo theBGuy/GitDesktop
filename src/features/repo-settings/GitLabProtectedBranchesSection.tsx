@@ -27,6 +27,7 @@ import type {
 } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
+import { cn } from "@/lib/utils";
 import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -179,6 +180,17 @@ function ProtectedBranchRow({
 }) {
   const switchId = useId();
   const inheritedHint = "Inherited from the group — manage it there.";
+  const online = useOnline();
+  const forcePushHeld = (() => {
+    switch (true) {
+      case branch.inherited:
+        return inheritedHint;
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   return (
     <div className="space-y-2 rounded-md border p-2 text-xs">
@@ -201,6 +213,7 @@ function ProtectedBranchRow({
             prompt="Unprotect?"
             actLabel="Unprotect"
             pending={unprotecting}
+            heldReason={online ? undefined : OFFLINE_WRITE_REASON}
             onCancel={onCancel}
             onAct={onUnprotect}
           />
@@ -229,31 +242,26 @@ function ProtectedBranchRow({
         Push: {levelSummary(branch.pushLevels)} · Merge:{" "}
         {levelSummary(branch.mergeLevels)}
       </p>
-      {branch.inherited ? (
-        <span title={inheritedHint} className="inline-flex items-center gap-2">
-          <Switch
-            id={switchId}
-            checked={branch.allowForcePush}
-            disabled
-            aria-label="Allow force push"
-          />
-          <Label htmlFor={switchId} className="text-xs text-muted-foreground">
-            Allow force push
-          </Label>
-        </span>
-      ) : (
-        <div className="flex items-center gap-2">
-          <Switch
-            id={switchId}
-            checked={branch.allowForcePush}
-            disabled={forceSaving}
-            onCheckedChange={onToggleForcePush}
-          />
-          <Label htmlFor={switchId} className="text-xs">
-            Allow force push
-          </Label>
-        </div>
-      )}
+      {/* The titled wrapper stays mounted so a focused switch survives the hold;
+          only its title and the switch's disabled state vary. */}
+      <span title={forcePushHeld} className="flex w-fit items-center gap-2">
+        <Switch
+          id={switchId}
+          checked={branch.allowForcePush}
+          disabled={forceSaving || forcePushHeld !== undefined}
+          onCheckedChange={onToggleForcePush}
+          aria-label="Allow force push"
+        />
+        <Label
+          htmlFor={switchId}
+          className={cn(
+            "text-xs",
+            forcePushHeld !== undefined && "text-muted-foreground",
+          )}
+        >
+          Allow force push
+        </Label>
+      </span>
     </div>
   );
 }

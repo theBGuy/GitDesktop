@@ -45,8 +45,9 @@ import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { InlineConfirm } from "./parts";
+import { InlineConfirm, OFFLINE_WRITE_REASON } from "./parts";
 import { ScopeRefreshHint } from "./ScopeRefreshHint";
 
 /** The provider-neutral facts the danger actions need, sourced from whichever
@@ -73,6 +74,7 @@ function DangerDialog({
   confirmLabel,
   pending,
   disabled,
+  heldReason,
   onConfirm,
   children,
 }: {
@@ -84,6 +86,9 @@ function DangerDialog({
   confirmLabel: string;
   pending: boolean;
   disabled?: boolean;
+  /** Why the confirm is held whatever is typed, as its hover text and
+   *  accessible description; unset leaves it to the phrase and `disabled`. */
+  heldReason?: string;
   onConfirm: () => void;
   children?: ReactNode;
 }) {
@@ -117,14 +122,17 @@ function DangerDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             variant="destructive"
-            disabled={!matches || disabled || pending}
+            disabled={
+              !matches || disabled || pending || heldReason !== undefined
+            }
+            reason={heldReason}
             onClick={onConfirm}
           >
             {pending && <Spinner data-icon="inline-start" />}
             {confirmLabel}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -298,6 +306,7 @@ function RenameAction({
   provider: ForgeProvider;
 }) {
   const rename = useRenameRepo(repoPath);
+  const online = useOnline();
   const current = info.currentName;
   const [name, setName] = useState(current);
   const isGitLab = provider === "gitlab";
@@ -335,15 +344,16 @@ function RenameAction({
           autoComplete="off"
           spellCheck={false}
         />
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={!valid || !changed || rename.isPending}
+          disabled={!valid || !changed || rename.isPending || !online}
+          reason={online ? undefined : OFFLINE_WRITE_REASON}
           onClick={handleRename}
         >
           {rename.isPending && <Spinner data-icon="inline-start" />}
           Rename
-        </Button>
+        </DisabledReasonButton>
       </div>
     </Row>
   );
@@ -361,6 +371,7 @@ function ArchiveAction({
   isOwner: boolean;
 }) {
   const setArchived = useSetArchived(repoPath);
+  const online = useOnline();
   const [confirming, setConfirming] = useState(false);
   const archived = info.archived;
   // Sentence-cased for toasts, lowercase mid-sentence — GitHub copy unchanged.
@@ -392,6 +403,7 @@ function ArchiveAction({
             actLabel={archived ? "Unarchive" : "Archive"}
             actVariant={archived ? "default" : "destructive"}
             pending={setArchived.isPending}
+            heldReason={online ? undefined : OFFLINE_WRITE_REASON}
             onCancel={() => setConfirming(false)}
             onAct={handleArchive}
           />
@@ -505,6 +517,7 @@ function LeaveForkNetworkAction({
   const settings = useSettings();
   const forge = useForgeStatus(repoPath);
   const removeFork = useGlRemoveForkRelationship(repoPath);
+  const online = useOnline();
   const [rechecking, setRechecking] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const record = settings.data?.recentRepos.find((r) => r.path === repoPath);
@@ -588,6 +601,7 @@ function LeaveForkNetworkAction({
         <InlineConfirm
           actLabel="Remove"
           pending={removeFork.isPending}
+          heldReason={online ? undefined : OFFLINE_WRITE_REASON}
           onCancel={() => setConfirming(false)}
           onAct={handleRemoveFork}
         />
@@ -651,6 +665,7 @@ function VisibilityAction({
   isOwner: boolean;
 }) {
   const setVisibility = useSetVisibility(repoPath);
+  const online = useOnline();
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState(info.visibility || "public");
   const isGitLab = provider === "gitlab";
@@ -694,6 +709,7 @@ function VisibilityAction({
         confirmPhrase={info.fullName}
         confirmLabel="Change visibility"
         disabled={target === info.visibility}
+        heldReason={online ? undefined : OFFLINE_WRITE_REASON}
         pending={setVisibility.isPending}
         onConfirm={handleChangeVisibility}
       >
@@ -736,6 +752,7 @@ function TransferAction({
   isOwner: boolean;
 }) {
   const transfer = useTransferRepo(repoPath);
+  const online = useOnline();
   const [open, setOpen] = useState(false);
   const [newOwner, setNewOwner] = useState("");
   const copy = DANGER_COPY[provider].transfer;
@@ -788,6 +805,7 @@ function TransferAction({
         confirmPhrase={info.fullName}
         confirmLabel="Transfer"
         disabled={!newOwner.trim()}
+        heldReason={online ? undefined : OFFLINE_WRITE_REASON}
         pending={transfer.isPending}
         onConfirm={handleTransfer}
       >
@@ -823,6 +841,7 @@ function DeleteAction({
   onRepoDeleted: () => void;
 }) {
   const del = useDeleteRepo(repoPath);
+  const online = useOnline();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const isGitLab = provider === "gitlab";
@@ -865,6 +884,7 @@ function DeleteAction({
         description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Delete forever"
+        heldReason={online ? undefined : OFFLINE_WRITE_REASON}
         pending={del.isPending}
         onConfirm={handleDelete}
       >

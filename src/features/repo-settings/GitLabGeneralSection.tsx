@@ -1,6 +1,7 @@
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useCallback, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -38,8 +39,9 @@ import {
 } from "@/lib/stores/repo-description-generation";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useOnline } from "@/lib/use-online";
 import { DescriptionField } from "./DescriptionField";
-import { RemoteFormSection } from "./parts";
+import { OFFLINE_WRITE_REASON, RemoteFormSection } from "./parts";
 import { GITLAB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
@@ -168,6 +170,7 @@ function GitLabGeneralForm({
   branches: Branch[];
 }) {
   const update = useUpdateGlRepoSettings(repoPath);
+  const online = useOnline();
   const base = toInput(settings);
   const [form, setForm] = useState<GitLabRepoSettingsInput>(base);
 
@@ -462,13 +465,14 @@ function GitLabGeneralForm({
       </div>
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">
-        <Button
-          disabled={!dirty || update.isPending || busy}
+        <DisabledReasonButton
+          disabled={!dirty || update.isPending || busy || !online}
+          reason={online ? undefined : OFFLINE_WRITE_REASON}
           onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}
           Save changes
-        </Button>
+        </DisabledReasonButton>
       </div>
     </div>
   );

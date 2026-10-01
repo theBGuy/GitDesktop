@@ -189,6 +189,7 @@ export function GitLabVariablesSection({
               key={rowId}
               variable={v}
               saving={setVariable.isPending}
+              writeHeld={online ? undefined : OFFLINE_WRITE_REASON}
               onSave={(newValue) => handleSave(v, newValue)}
               confirming={confirming === rowId}
               pending={deleteVariable.isPending}
@@ -206,6 +207,7 @@ export function GitLabVariablesSection({
 function VariableRow({
   variable,
   saving,
+  writeHeld,
   onSave,
   confirming,
   pending,
@@ -215,6 +217,8 @@ function VariableRow({
 }: {
   variable: GitLabVariable;
   saving: boolean;
+  /** Why Save and the confirmed Delete are held; unset leaves them enabled. */
+  writeHeld?: string;
   onSave: (value: string) => void;
   confirming: boolean;
   pending: boolean;
@@ -248,6 +252,7 @@ function VariableRow({
             prompt="Delete?"
             actLabel="Delete"
             pending={pending}
+            heldReason={writeHeld}
             onCancel={onCancel}
             onAct={onRemove}
           />
@@ -271,14 +276,15 @@ function VariableRow({
           autoComplete="off"
           spellCheck={false}
         />
-        <Button
+        <DisabledReasonButton
           size="sm"
           variant="outline"
-          disabled={!dirty || saving}
+          disabled={!dirty || saving || writeHeld !== undefined}
+          reason={writeHeld}
           onClick={() => onSave(draft)}
         >
           Save
-        </Button>
+        </DisabledReasonButton>
       </div>
     </div>
   );

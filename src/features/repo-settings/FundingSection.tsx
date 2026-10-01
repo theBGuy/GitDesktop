@@ -10,6 +10,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
 import { InlineConfirm, RemoteFormSection } from "./parts";
+import {
+  type PendingSent,
+  reconcileTouched,
+  stampSent,
+  type TouchedEdit,
+} from "./touched-draft";
 
 const GITHUB_KEY = "github";
 const CUSTOM_KEY = "custom";
@@ -88,7 +94,7 @@ function toFields(content: string): Record<string, string> {
   return f;
 }
 
-function generateFunding(fields: Record<string, string>): string {
+function generateFunding(fields: Partial<Record<string, string>>): string {
   const lines: string[] = [];
   const gh = splitList(fields[GITHUB_KEY] ?? "").slice(0, 4);
   if (gh.length === 1) lines.push(`github: ${gh[0]}`);
@@ -129,7 +135,13 @@ export function FundingSection({
     >
       {(content) => (
         // `null` is a loaded answer: there's no FUNDING.yml yet.
-        <FundingForm key={repoPath} repoPath={repoPath} content={content} />
+        <FundingForm
+          key={repoPath}
+          repoPath={repoPath}
+          content={content}
+          dataUpdatedAt={funding.dataUpdatedAt}
+          isError={funding.isError}
+        />
       )}
     </RemoteFormSection>
   );
@@ -138,28 +150,36 @@ export function FundingSection({
 function FundingForm({
   repoPath,
   content,
+  dataUpdatedAt,
+  isError,
 }: {
   repoPath: string;
   content: string | null;
+  /** When `content` last loaded; a failed refetch doesn't advance it. */
+  dataUpdatedAt: number;
+  /** The read's last fetch failed; stays set through a refetch until one lands. */
+  isError: boolean;
 }) {
   const exists = content !== null;
   const set = useSetFunding(repoPath);
   const del = useDeleteFunding(repoPath);
   const seed = useMemo(() => toFields(content ?? ""), [content]);
-  // Only the fields the user touched, so untouched ones ride the latest file. A
-  // touched field retires once the file reads back equal, never on the save
-  // itself: a save whose refetch failed keeps its values on screen.
-  const [edit, setEdit] = useState<Record<string, string> | null>(null);
+  // Touched fields only, retired per `reconcileTouched` — never on the save
+  // itself, so a save whose refetch failed keeps its values on screen.
+  const [edit, setEdit] = useState<TouchedEdit<string, string> | null>(null);
+  const [pending, setPending] = useState<PendingSent<string, string> | null>(
+    null,
+  );
   const [confirmingRemove, setConfirmingRemove] = useState(false);
-  if (edit !== null) {
-    const kept = Object.keys(edit).filter((k) => edit[k] !== seed[k]);
-    if (kept.length !== Object.keys(edit).length)
-      setEdit(
-        kept.length > 0
-          ? Object.fromEntries(kept.map((k) => [k, edit[k]]))
-          : null,
-      );
-  }
+  const reconciled = reconcileTouched({
+    edit,
+    server: seed,
+    pending,
+    dataUpdatedAt,
+    isError,
+  });
+  if (reconciled.edit !== edit) setEdit(reconciled.edit);
+  if (reconciled.pending !== pending) setPending(reconciled.pending);
 
   const dirty = edit !== null;
   const fields = { ...seed, ...edit };
@@ -171,11 +191,12 @@ function FundingForm({
   // so the outcome would never reach the user.
   async function save() {
     const next = generateFunding(fields);
+    const at = dataUpdatedAt;
     try {
       await set.mutateAsync(next);
-      // The file reads back normalized (trimmed, list spacing), so a saved field
-      // takes that form or it would never match the refetch and retire. A field
-      // typed into since the save started keeps the newer text.
+      // The file reads back normalized (trimmed, list spacing): a saved field
+      // takes that form and is stamped in it, or `reconcileTouched` would read it
+      // as typed into since the save. A field typed into mid-save keeps its text.
       const saved = toFields(next);
       setEdit(
         (e) =>
@@ -187,6 +208,10 @@ function FundingForm({
             ]),
           ),
       );
+      const sent: TouchedEdit<string, string> = Object.fromEntries(
+        Object.keys(edit ?? {}).map((k) => [k, saved[k]]),
+      );
+      setPending((p) => stampSent(p, at, sent));
       toast.success("Wrote .github/FUNDING.yml — commit it to publish");
     } catch (e) {
       toastError(e);
@@ -200,6 +225,7 @@ function FundingForm({
       // Removing discards the draft by intent; kept, its typed values would
       // reappear over the emptied form as an unsaved edit.
       setEdit(null);
+      setPending(null);
       toast.success("Removed .github/FUNDING.yml — commit it to publish");
       setConfirmingRemove(false);
     } catch (e) {

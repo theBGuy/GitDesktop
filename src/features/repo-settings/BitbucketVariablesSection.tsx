@@ -267,6 +267,17 @@ function VariableRow({
   // refetch swaps in the server's real one; edit/delete against a fake uuid would
   // 404, so they stay disabled while it's syncing.
   const syncing = variable.uuid.startsWith("pending:");
+  const online = useOnline();
+  const saveHeldReason = (() => {
+    switch (true) {
+      case syncing:
+        return "Syncing with Bitbucket…";
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      default:
+        return undefined;
+    }
+  })();
   // A secured variable's stored value never comes back, so an empty draft on a
   // secured row means "keep it" — only a non-empty draft (or a secure-state
   // change) is a real edit.
@@ -310,6 +321,7 @@ function VariableRow({
             prompt="Delete?"
             actLabel="Delete"
             pending={pending}
+            heldReason={online ? undefined : OFFLINE_WRITE_REASON}
             onCancel={onCancel}
             onAct={onRemove}
           />
@@ -346,26 +358,16 @@ function VariableRow({
           autoComplete="off"
           spellCheck={false}
         />
-        {syncing ? (
-          <DisabledReasonButton
-            size="sm"
-            variant="outline"
-            disabled
-            reason="Syncing with Bitbucket…"
-          >
-            Save
-          </DisabledReasonButton>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!dirty || update.isPending}
-            onClick={save}
-          >
-            {update.isPending && <Spinner data-icon="inline-start" />}
-            Save
-          </Button>
-        )}
+        <DisabledReasonButton
+          size="sm"
+          variant="outline"
+          disabled={saveHeldReason !== undefined || !dirty || update.isPending}
+          reason={saveHeldReason}
+          onClick={save}
+        >
+          {update.isPending && <Spinner data-icon="inline-start" />}
+          Save
+        </DisabledReasonButton>
       </div>
       <Label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
         <Checkbox
