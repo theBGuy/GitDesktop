@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use tauri_plugin_http::reqwest::{self, Client};
 
 use crate::error::{AppError, AppResult};
-use crate::forge::http::{body_read_is_transport, transport_failure_message};
+use crate::forge::http::{is_transport_failure, transport_failure_message};
 use crate::forge::model::ForgeUserRef;
 
 /// Keep the summary on line one and the original detail available on line two.
@@ -399,7 +399,7 @@ fn http_error_with_resolver(
 }
 
 fn jira_body_read_error(e: reqwest::Error) -> AppError {
-    if body_read_is_transport(&e) {
+    if is_transport_failure(&e) {
         AppError::Jira(transport_failure_message("could not read Jira response", &e))
     } else {
         jira_unreadable("the response", format!("could not read Jira response: {e}"))

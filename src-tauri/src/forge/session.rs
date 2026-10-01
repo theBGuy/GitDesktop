@@ -646,6 +646,10 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
 /// A trailing colon still counts as host-shaped.
 fn is_host_or_url_token(word: &str) -> bool {
     let bare = word.trim_end_matches(':');
+    let bare = bare
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
+        .map_or(bare, |(host, _)| host);
     let host = bare.contains('.')
         && bare.split('.').all(|label| {
             !label.is_empty()
@@ -3226,10 +3230,12 @@ check your internet connection or https://githubstatus.com";
     #[test]
     fn glab_transport_label_host_is_broken() {
         // SYNTHETIC: an entire hostname label is not a standalone diagnostic.
-        assert_eq!(
-            classify_glab_failure("x timeout.acme.com: 401 unauthorized"),
-            GlabFailure::Broken
-        );
+        for report in [
+            "x timeout.acme.com: 401 unauthorized",
+            "x timeout.acme.com:8443: 401 unauthorized",
+        ] {
+            assert_eq!(classify_glab_failure(report), GlabFailure::Broken, "{report}");
+        }
     }
 
     #[test]

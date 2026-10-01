@@ -2576,7 +2576,7 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         }
         if text.len() > CI_RUN_LOG_CAP {
             text.push_str(&format!(
-                "({} more failed jobs not shown)\n",
+                "({} more failed steps not shown)\n",
                 failed.len() - attempted
             ));
             break;

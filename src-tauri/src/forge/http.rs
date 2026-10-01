@@ -300,7 +300,7 @@ pub(crate) const TRANSPORT_CONNECT_FAILED: &str = "connection failed";
 
 /// Detect ConnectionReset, ConnectionAborted, or BrokenPipe in the error chain.
 /// UnexpectedEof is excluded: a truncated body is not provably a transport failure.
-pub(crate) fn has_connection_reset(error: &(dyn std::error::Error + 'static)) -> bool {
+fn has_connection_reset(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(error) = current {
         if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
@@ -318,7 +318,7 @@ pub(crate) fn has_connection_reset(error: &(dyn std::error::Error + 'static)) ->
     false
 }
 
-pub(crate) fn body_read_is_transport(e: &reqwest::Error) -> bool {
+pub(crate) fn is_transport_failure(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || has_connection_reset(e)
 }
 
@@ -328,7 +328,7 @@ pub(crate) fn body_read_is_transport(e: &reqwest::Error) -> bool {
 pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> String {
     let cause = if e.is_timeout() {
         Some(TRANSPORT_TIMED_OUT)
-    } else if body_read_is_transport(e) {
+    } else if is_transport_failure(e) {
         // Resets reuse the existing cross-IPC literal matched by error-summary.ts.
         Some(TRANSPORT_CONNECT_FAILED)
     } else {
@@ -341,7 +341,7 @@ pub(crate) fn transport_failure_message(prefix: &str, e: &reqwest::Error) -> Str
 }
 
 fn bb_body_read_error(e: reqwest::Error) -> AppError {
-    if body_read_is_transport(&e) {
+    if is_transport_failure(&e) {
         AppError::Bitbucket(transport_failure_message(
             "could not read Bitbucket response",
             &e,
@@ -740,6 +740,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // The synchronized RST was verified on Windows; other platforms are unprobed.
     #[cfg(windows)]
     async fn bitbucket_body_read_reset_carries_the_connect_marker() {
         let error = incomplete_body_error_mode(false, true).await;

@@ -7229,7 +7229,11 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         match trace {
             Ok(trace) => {
                 succeeded += 1;
-                text.push_str(trace.trim_end());
+                text.push_str(if trace.trim().is_empty() {
+                    "This job produced no log output."
+                } else {
+                    trace.trim_end()
+                });
                 text.push_str("\n\n");
             }
             Err(e) => {
@@ -7267,6 +7271,7 @@ fn failed_logs_outcome(
         }
     }
     if start == notices.len() {
+        // Notices exactly cover [0, start), so no real output was dropped and no marker is needed.
         notices.push_str(&text[start..]);
     } else {
         let remaining = text.len() - start;
