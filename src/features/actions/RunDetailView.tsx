@@ -8,7 +8,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { type UseQueryResult, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -20,6 +20,14 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  refreshFailed,
+  resolveDetailPane,
+  sectionReadNotice,
+} from "@/features/conversations/remote-section-state";
 import { APPROVE_RUN_CONFIRM } from "@/features/pulls/ChecksRollup";
 import {
   forgeFeatureReady,
@@ -50,6 +58,7 @@ import {
   cancelLabel,
   cancelOffered,
   cancelStartedMessage,
+  ciRunNoun,
   isFailureConclusion,
   isPipelineProvider,
   type JobRerunOffer,
@@ -77,6 +86,39 @@ function isLogPending(log: string): boolean {
  *  checks rollup's repair pass; its constant stays private to that module rather
  *  than exporting pull-request state into this view. */
 const RUN_REPAIR_DELAY_MS = 4500;
+
+/** A log pane's line over its read. Loaded log text stays drawn through a
+ *  failed or parked refresh, so this only says which; with nothing loaded it
+ *  stands in for the log. Mounted whenever the pane shows, so its live region
+ *  announces and its wrapper catches a Retry's focus. */
+function LogsNotice({
+  logs,
+}: {
+  logs: Pick<
+    UseQueryResult<string>,
+    "data" | "isError" | "isPaused" | "isFetching" | "refetch"
+  >;
+}) {
+  const notice = sectionReadNotice({
+    noun: "logs",
+    loadFailed: "Couldn't load logs.",
+    // A log is one block, so "rows" is whether it has any text to show.
+    rowCount: logs.data === undefined ? undefined : logs.data === "" ? 0 : 1,
+    isError: logs.isError,
+    isPaused: logs.isPaused,
+    isFetching: logs.isFetching,
+  });
+  return (
+    <DegradedListNotice
+      noun="logs"
+      degraded={notice !== null}
+      message={notice?.message}
+      retryLabel={notice?.retryLabel}
+      onRetry={notice?.retry ? () => void logs.refetch() : undefined}
+      className="px-0 pb-1"
+    />
+  );
+}
 
 function JobRow({
   repoPath,
@@ -321,21 +363,21 @@ function JobRow({
               </button>
               {showLogs && (
                 <div className="mt-1.5">
-                  {logs.isPending ? (
-                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                      <Spinner /> Loading logs…
-                    </div>
-                  ) : logs.isError ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      Couldn't load logs.
-                    </p>
+                  <LogsNotice logs={logs} />
+                  {logs.data === undefined ? (
+                    logs.isPending &&
+                    !logs.isPaused && (
+                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                        <Spinner /> Loading logs…
+                      </div>
+                    )
                   ) : pendingLog ? (
                     <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
                       <Spinner className="size-3" />
                       Logs are being archived — this can take a moment.
                     </p>
                   ) : (
-                    <LogBlock text={logs.data ?? ""} />
+                    <LogBlock text={logs.data} />
                   )}
                 </div>
               )}
@@ -632,7 +674,18 @@ export function RunDetailView({
   const isManualJob = (job: RunJob) =>
     job.status === "completed" && job.conclusion === "action_required";
 
-  if (detail.isPending) {
+  // A loaded run always renders: a failed or parked refresh keeps it on screen
+  // under a notice rather than replacing it, open logs included.
+  const pane = resolveDetailPane({
+    pending: detail.isPending,
+    error: detail.isError,
+    hasData: run !== undefined,
+    paused: detail.isPaused,
+    fetching: detail.isFetching,
+  });
+  const runNoun = ciRunNoun(provider);
+
+  if (pane === "skeleton") {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-7 w-2/3" />
@@ -642,16 +695,46 @@ export function RunDetailView({
     );
   }
 
-  if (detail.isError || !run) {
+  if (pane === "offline") {
     return (
       <div className="p-6 text-center text-sm text-muted-foreground">
-        Couldn't load this run.
+        {offlinePendingMessage(`this ${runNoun}`)}
       </div>
     );
   }
 
+  if (!run) {
+    return (
+      <div className="flex flex-col items-center gap-2 p-6 text-center text-sm text-muted-foreground">
+        Couldn't load this {runNoun}.
+        <Button
+          variant="outline"
+          size="sm"
+          className="cursor-pointer"
+          disabled={detail.isFetching}
+          onClick={() => void detail.refetch()}
+        >
+          {detail.isFetching ? "Retrying…" : "Retry"}
+        </Button>
+      </div>
+    );
+  }
+
+  const detailFailed = refreshFailed(detail);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <DegradedListNotice
+        noun={`this ${runNoun}`}
+        degraded={pane === "content-degraded"}
+        message={detailNoticeMessage({
+          noun: runNoun,
+          isError: detailFailed,
+          stale: false,
+        })}
+        onRetry={detailFailed ? () => void detail.refetch() : undefined}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <div className="border-b p-4">
         <div className="flex items-start gap-2">
           <StatusIcon
@@ -846,17 +929,17 @@ export function RunDetailView({
               </Button>
               {showLogs && (
                 <div className="mt-2">
-                  {logs.isPending ? (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <Spinner /> Loading logs…
-                    </div>
-                  ) : logs.isError ? (
-                    <p className="text-xs text-muted-foreground">
-                      Couldn't load logs.
-                    </p>
+                  <LogsNotice logs={logs} />
+                  {logs.data === undefined ? (
+                    logs.isPending &&
+                    !logs.isPaused && (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Spinner /> Loading logs…
+                      </div>
+                    )
                   ) : (
                     <LogBlock
-                      text={logs.data ?? ""}
+                      text={logs.data}
                       emptyLabel="No failed logs available."
                       maxHeightClass="max-h-96"
                     />

@@ -59,6 +59,11 @@ import {
   projectScopeReadOnly,
   ScopeGapBlock,
 } from "./ProjectsPopover";
+import {
+  OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
+  refreshFailed,
+} from "./remote-section-state";
 
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
@@ -660,10 +665,21 @@ function BoardSection({
           {board.project.title}
         </p>
       )}
-      {defs.isPending && (
-        <p className="py-1 text-xs text-muted-foreground">Loading fields…</p>
+      {/* Parked offline, after a failure or before the first answer: a Retry
+          would only park again, and reconnecting resumes the read. */}
+      {defs.isPaused && (defs.isPending || defs.isError) ? (
+        <p className="py-1 text-xs text-muted-foreground">
+          {defs.data === undefined
+            ? offlinePendingMessage("this board's fields")
+            : OFFLINE_ROWS_NOTICE}
+        </p>
+      ) : (
+        (defs.isPending ||
+          (defs.isError && defs.isFetching && defs.data === undefined)) && (
+          <p className="py-1 text-xs text-muted-foreground">Loading fields…</p>
+        )
       )}
-      {defs.error !== null && (
+      {refreshFailed(defs) && defs.error !== null && (
         <div className="py-1 text-xs">
           <p className="text-muted-foreground">
             {presentError(defs.error).summary}

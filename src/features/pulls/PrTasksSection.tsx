@@ -308,6 +308,7 @@ export function PrTasksSection({
     rowCount: tasks?.length,
     isError: tasksQuery.isError,
     isPaused: tasksQuery.isPaused,
+    isFetching: tasksQuery.isFetching,
   });
   const list = tasks ?? [];
   const total = list.length;

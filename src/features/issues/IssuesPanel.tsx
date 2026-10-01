@@ -619,6 +619,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         // A park can't clear a permanent verdict (disabled issues, a refused
         // filter), so its explanation stays up instead of the offline line.
         remotePaused={parkedUnlessPermanent(issueList)}
+        remoteFetching={issueList.isFetching}
         remotePlaceholder={issueList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}
@@ -689,6 +690,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
                 pending: jiraIssues.isPending,
                 isError: jiraIssues.isError,
                 paused: jiraIssues.isPaused,
+                fetching: jiraIssues.isFetching,
                 errorSlot: (
                   <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
                     <p>

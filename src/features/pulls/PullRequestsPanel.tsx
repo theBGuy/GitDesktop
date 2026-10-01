@@ -1145,6 +1145,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         // A park can't clear a refused filter, so its explanation stays up
         // instead of the offline line.
         remotePaused={parkedUnlessPermanent(prList)}
+        remoteFetching={prList.isFetching}
         remotePlaceholder={prList.isPlaceholderData && !loadMore.growing}
         loadMoreFailed={loadMore.loadMoreFailed}
         onRetryLoadMore={loadMore.retryLoadMore}

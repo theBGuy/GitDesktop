@@ -8,6 +8,10 @@ import { Fragment, useLayoutEffect, useRef, useState } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { starParts } from "@/features/explore/explore-utils";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { forgeRepoUrl } from "@/lib/git/api";
@@ -58,8 +62,13 @@ function CompareCell({
   // fall to <body>. react-query's notify batching can land the result after any
   // frame scheduled from the click, so the follow-up rides the commit instead.
   const pendingFocusRef = useRef(false);
+  // The parked line took the click's focus. It hands focus on only if it still
+  // held it when it unmounted (focus then sits on <body>): the user may have
+  // moved on during an outage of any length.
+  const offlineHeldRef = useRef(false);
   const resultRef = useRef<HTMLSpanElement | null>(null);
   const retryRef = useRef<HTMLButtonElement | null>(null);
+  const offlineRef = useRef<HTMLSpanElement | null>(null);
   const divergence = useForkDivergence(
     repoPath,
     entry.fullName,
@@ -68,18 +77,29 @@ function CompareCell({
     requested,
   );
 
+  const failed = refreshFailed(divergence);
   useLayoutEffect(() => {
+    if (offlineHeldRef.current && !divergence.isPaused) {
+      offlineHeldRef.current = false;
+      const active = document.activeElement;
+      if (active === null || active === document.body)
+        pendingFocusRef.current = true;
+    }
     if (!pendingFocusRef.current) return;
     if (divergence.data) {
       pendingFocusRef.current = false;
       resultRef.current?.focus();
-    } else if (divergence.isError && divergence.errorUpdatedAt) {
+    } else if (failed && divergence.errorUpdatedAt) {
       pendingFocusRef.current = false;
       retryRef.current?.focus();
+    } else if (divergence.isPaused) {
+      pendingFocusRef.current = false;
+      offlineHeldRef.current = true;
+      offlineRef.current?.focus();
     }
     // errorUpdatedAt: a repeated failure changes neither `data` nor `isError`,
     // and a still-armed flag would let a much-later background success steal focus.
-  }, [divergence.data, divergence.isError, divergence.errorUpdatedAt]);
+  }, [divergence.data, failed, divergence.isPaused, divergence.errorUpdatedAt]);
 
   // Resolved counts outrank an in-flight fetch: `refetchOnWindowFocus` re-runs a
   // stale compare on every alt-tab, and dropping back to a skeleton would erase
@@ -97,7 +117,16 @@ function CompareCell({
       </span>
     );
   }
-  if (divergence.isError) {
+  // Parked offline, first ask or retry alike: a Retry would only park again,
+  // and reconnecting resumes the compare by itself.
+  if (divergence.isPaused) {
+    return (
+      <span ref={offlineRef} tabIndex={-1} aria-live="polite">
+        {offlinePendingMessage("this comparison")}
+      </span>
+    );
+  }
+  if (failed) {
     return (
       <span aria-live="polite" className="flex items-center gap-1">
         Couldn't compare
@@ -106,7 +135,6 @@ function CompareCell({
           type="button"
           size="xs"
           variant="ghost"
-          disabled={divergence.isFetching}
           aria-label={`Retry comparing ${entry.fullName} with this repository`}
           onClick={() => {
             pendingFocusRef.current = true;

@@ -179,6 +179,7 @@ export function PrCommitDetail({
     error: diff.isError,
     hasData: diff.data !== undefined,
     paused: diff.isPaused,
+    fetching: diff.isFetching,
   });
   const failed = refreshFailed(diff);
 

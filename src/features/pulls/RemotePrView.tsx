@@ -54,7 +54,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
@@ -1852,6 +1855,7 @@ export function RemotePrView({
   const stackMerge = stackMergeDisclosure({
     stack: pr?.stack,
     members: pr?.stackMembers,
+    membersUnknown: pr?.membersUnknown ?? false,
     stackUnknown: pr?.stackUnknown ?? false,
     prNoun,
     atomic: isNativeStack(pr?.stack),
@@ -1918,10 +1922,10 @@ export function RemotePrView({
   // Details alone aren't enough: threads decide which reviews claim inline
   // blocks and the timeline interleaves rows ABOVE the target, so either landing
   // afterwards would push a scrolled-to card back off screen. Waiting for all
-  // three to settle (an ERROR settles too — the feed renders what it has) keeps
-  // this to one attempt against the finished layout. A DISABLED timeline (no
-  // provider resolved yet) is neither, so the reveal waits and fires once the
-  // probe answers; if it never does, the request simply lapses.
+  // three to settle (an ERROR settles too — the feed keeps what it has under a
+  // refresh notice) keeps this to one attempt against the finished layout. A
+  // DISABLED timeline (no provider resolved yet) is neither, so the reveal waits
+  // and fires once the probe answers; if it never does, the request simply lapses.
   // Retained content counts as settled: a failed refresh keeps rendering it.
   const revealInputsSettled =
     (details.isSuccess || (details.isError && details.data !== undefined)) &&
@@ -1970,10 +1974,21 @@ export function RemotePrView({
     error: details.isError,
     hasData: details.data !== undefined,
     paused: details.isPaused,
+    fetching: details.isFetching,
   });
+  // A pressed Retry resets the never-loaded read to pending, swapping the error
+  // for the skeleton. Every arm's root is the same host div, so React keeps that
+  // node through the swap and on into the loaded pull request, and focus lands
+  // there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    detailPane !== "skeleton" &&
+      detailPane !== "offline" &&
+      (detailPane === "error" || !pr) &&
+      details.isError,
+  );
   if (detailPane === "skeleton") {
     return (
-      <div className="space-y-3 p-4">
+      <div ref={hostRef} tabIndex={-1} className="space-y-3 p-4 outline-none">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-32 w-full" />
@@ -1982,7 +1997,9 @@ export function RemotePrView({
   }
   if (detailPane === "offline") {
     return (
-      <DiffPlaceholder message={offlinePendingMessage(`this ${prNoun}`)} />
+      <div ref={hostRef} tabIndex={-1} className="h-full outline-none">
+        <DiffPlaceholder message={offlinePendingMessage(`this ${prNoun}`)} />
+      </div>
     );
   }
   if (detailPane === "error" || !pr) {
@@ -1997,29 +2014,34 @@ export function RemotePrView({
       ? presentError(details.error).summary
       : null;
     return (
-      <DiffPlaceholder
-        message={details.isError ? loadFailed : `Could not load this ${prNoun}`}
-        action={
-          details.isError ? (
-            <div className="flex flex-col items-center gap-2">
-              {/* The headline can't name the failure class, so the real reason —
-                  offline, deleted, no access — lives here. */}
-              {errorSummary ? (
-                <p className="max-w-md text-center text-xs">{errorSummary}</p>
-              ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                disabled={details.isFetching}
-                onClick={() => details.refetch()}
-              >
-                {details.isFetching ? "Retrying…" : "Retry"}
-              </Button>
-            </div>
-          ) : undefined
-        }
-      />
+      <div ref={hostRef} tabIndex={-1} className="h-full outline-none">
+        <DiffPlaceholder
+          message={
+            details.isError ? loadFailed : `Could not load this ${prNoun}`
+          }
+          action={
+            details.isError ? (
+              <div className="flex flex-col items-center gap-2">
+                {/* The headline can't name the failure class, so the real reason —
+                    offline, deleted, no access — lives here. */}
+                {errorSummary ? (
+                  <p className="max-w-md text-center text-xs">{errorSummary}</p>
+                ) : null}
+                <Button
+                  ref={retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  disabled={details.isFetching}
+                  onClick={() => details.refetch()}
+                >
+                  {details.isFetching ? "Retrying…" : "Retry"}
+                </Button>
+              </div>
+            ) : undefined
+          }
+        />
+      </div>
     );
   }
 
@@ -2595,7 +2617,11 @@ export function RemotePrView({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
       <DegradedListNotice
         noun={`this ${prNoun}`}
         degraded={detailPane === "content-degraded"}
@@ -2740,6 +2766,9 @@ export function RemotePrView({
         <StackSection
           stack={pr.stack}
           members={pr.stackMembers}
+          membersUnknown={pr.membersUnknown}
+          detailsPaused={details.isPaused}
+          onRetryMembers={() => void details.refetch()}
           currentNumber={number}
           onSelect={(n) => selectPrWithAlign({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
@@ -3000,7 +3029,7 @@ export function RemotePrView({
               )}
               <PrActivityFeed
                 pr={pr}
-                timeline={timeline.data}
+                timeline={timeline}
                 reactions={reactions.data}
                 claims={threadClaims}
                 providerKey={providerKey}
@@ -3074,6 +3103,7 @@ export function RemotePrView({
                 }
                 isError={reviewThreads.isError}
                 isPaused={reviewThreads.isPaused}
+                isFetching={reviewThreads.isFetching}
                 onRetry={() => void reviewThreads.refetch()}
                 onQuote={detailsStale ? undefined : quoteReply}
                 onReply={

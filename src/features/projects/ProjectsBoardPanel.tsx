@@ -62,7 +62,12 @@ import {
   projectScopeReadOnly,
   ScopeGapBlock,
 } from "@/features/conversations/ProjectsPopover";
-import { groupNoticesByMessage } from "@/features/conversations/remote-section-state";
+import {
+  groupNoticesByMessage,
+  OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -881,6 +886,39 @@ function BoardSkeleton() {
       </div>
     </>
   );
+}
+
+/** A failed read's line in the board's notices strip. No `retry` marks a read
+ *  parked offline: a retry would only park again, and reconnecting resumes it. */
+type LiveNotice = {
+  key: string;
+  what: string;
+  message: string;
+  retry?: () => void;
+};
+
+/** `q`'s line in the strip, or null while it is healthy or refetching an earlier
+ *  failure, which says nothing until that refetch settles. */
+function liveNoticeFor(
+  key: string,
+  what: string,
+  q: {
+    error: Error | null;
+    isError: boolean;
+    isPaused: boolean;
+    isFetching: boolean;
+    refetch: () => unknown;
+  },
+): LiveNotice | null {
+  if (q.error === null) return null;
+  if (q.isPaused) return { key, what, message: OFFLINE_ROWS_NOTICE };
+  if (!refreshFailed(q)) return null;
+  return {
+    key,
+    what,
+    message: presentError(q.error).summary,
+    retry: () => void q.refetch(),
+  };
 }
 
 /** The panel's error card: the failure's own summary plus the one control that
@@ -4754,9 +4792,22 @@ export function ProjectsBoardPanel({
   // error card is for having nothing to show, not for having stale-but-real
   // cards.
   const hasPages = (items.data?.pages.length ?? 0) > 0;
-  const fatalError = hasPages
-    ? null
-    : (projects.error ?? fields.error ?? items.error);
+  const boardReads = [projects, fields, items];
+  const erroredReads = hasPages
+    ? []
+    : boardReads.filter((read) => read.error !== null);
+  // With no cards to keep, a read parked offline after a failure or before its
+  // first answer outranks the error card: its Retry would only park again.
+  const boardParked =
+    !hasPages &&
+    boardReads.some(
+      (read) =>
+        read.isPaused && (read.error !== null || read.data === undefined),
+    );
+  const fatalError =
+    erroredReads.find((read) => refreshFailed(read))?.error ?? null;
+  // A failure being refetched has nothing to show yet, so it loads.
+  const fatalRetrying = erroredReads.length > 0 && fatalError === null;
   // ONE name for "the items read hasn't settled", shared by the skeleton gate
   // and the count beside it. Two expressions of the same condition would drift,
   // and this is the pair that must not: a count is an ASSERTION about the board,
@@ -4840,7 +4891,10 @@ export function ProjectsBoardPanel({
       // staleTime window. Only the full refetch behind the strip's Retry can
       // clear it, which is why this points there. A failed CONTINUATION is
       // excluded: those pages were never invalidated, so retrying the page is
-      // exactly the right move.
+      // exactly the right move. Parked, the strip offers no Retry to point at:
+      // the refresh resumes on reconnect.
+      case items.isError && !items.isFetchNextPageError && items.isPaused:
+        return OFFLINE_ROWS_NOTICE;
       case (items.isError && !items.isFetchNextPageError) ||
         rereadStall === "failed":
         return `The ${surface}'s last refresh failed. Retry the refresh before loading more.`;
@@ -4853,50 +4907,33 @@ export function ProjectsBoardPanel({
   // vanishing behind a board that silently renders ungrouped or stale. Exactly
   // one visible recovery path per failed read, which is why the items arm
   // excludes a CONTINUATION failure — that one is recovered at Load more.
-  const liveNotices: {
-    key: string;
-    what: string;
-    message: string;
-    retry: () => void;
-  }[] = [];
+  const liveNotices: LiveNotice[] = [];
   if (hasPages) {
-    if (projects.error !== null)
-      liveNotices.push({
-        key: "projects",
-        what: "the project list",
-        message: presentError(projects.error).summary,
-        retry: () => void projects.refetch(),
-      });
-    if (fields.error !== null)
-      liveNotices.push({
-        key: "fields",
-        what: "this board's fields",
-        message: presentError(fields.error).summary,
-        retry: () => void fields.refetch(),
-      });
-    // Beside the fields read, which is the other board-level one and the read the
-    // switcher's own hold points at. The popover names the failure where the rows
-    // would be; the recovery control is here, like every other failed read's.
-    if (views.error !== null)
-      liveNotices.push({
-        key: "views",
-        what: "this board's saved views",
-        message: presentError(views.error).summary,
-        retry: () => void views.refetch(),
-      });
-    // Also while a write's failed re-read still holds the table's cells, whose
-    // reason points here: a later optimistic patch can clear the read's error while
-    // the lens still shows the values from before that write.
-    if ((items.error !== null && !items.isFetchNextPageError) || rereadFailed)
-      liveNotices.push({
-        key: "items",
-        what: "this board's items",
-        message:
-          items.error === null
-            ? REREAD_FAILED_NOTE
-            : presentError(items.error).summary,
-        retry: () => void items.refetch(),
-      });
+    const itemsNotice = items.isFetchNextPageError
+      ? null
+      : liveNoticeFor("items", "this board's items", items);
+    for (const notice of [
+      liveNoticeFor("projects", "the project list", projects),
+      liveNoticeFor("fields", "this board's fields", fields),
+      // Beside the fields read, which is the other board-level one and the read
+      // the switcher's own hold points at. The popover names the failure where
+      // the rows would be; the recovery control is here, like every other one's.
+      liveNoticeFor("views", "this board's saved views", views),
+      // Also while a write's failed re-read still holds the table's cells, whose
+      // reason points here: a later optimistic patch can clear the read's error
+      // while the lens still shows the values from before that write. A refetch
+      // in flight is that re-read's own retry, so it says nothing until it lands.
+      itemsNotice ??
+        (rereadFailed && !items.isFetching
+          ? {
+              key: "items",
+              what: "this board's items",
+              message: REREAD_FAILED_NOTE,
+              retry: () => void items.refetch(),
+            }
+          : null),
+    ])
+      if (notice !== null) liveNotices.push(notice);
   }
 
   // Where the menu's card sits RIGHT NOW, re-derived with the columns rather than
@@ -5172,6 +5209,12 @@ export function ProjectsBoardPanel({
             </ScopeGapBlock>
           </div>
         );
+      case boardParked:
+        return (
+          <BoardNotice>
+            <p data-body-landing="">{offlinePendingMessage("this board")}</p>
+          </BoardNotice>
+        );
       case fatalError !== null:
         return (
           <ErrorCard
@@ -5183,7 +5226,7 @@ export function ProjectsBoardPanel({
             }}
           />
         );
-      case loading:
+      case loading || fatalRetrying:
         return <BoardSkeleton />;
       // A capped or half-answered catalog can be empty while boards exist, so
       // the definitive "there are none" is held back for a complete read and the
@@ -6186,22 +6229,33 @@ export function ProjectsBoardPanel({
                 key={group.map((notice) => notice.key).join("+")}
                 className="flex flex-wrap items-center gap-1.5"
               >
-                <span className="text-destructive">{group[0].message}</span>
+                <span
+                  className={
+                    group[0].retry === undefined
+                      ? "text-muted-foreground"
+                      : "text-destructive"
+                  }
+                >
+                  {group[0].message}
+                </span>
                 {group.length > 1 && (
                   <span className="text-muted-foreground">
                     ({group.map((notice) => notice.what).join(", ")})
                   </span>
                 )}
-                <button
-                  type="button"
-                  aria-label={`Retry loading ${group.map((notice) => notice.what).join(", ")}`}
-                  onClick={() => {
-                    for (const notice of group) notice.retry();
-                  }}
-                  className="cursor-pointer text-muted-foreground underline hover:text-foreground"
-                >
-                  Retry
-                </button>
+                {/* Offline lines share one message and carry no Retry. */}
+                {group[0].retry !== undefined && (
+                  <button
+                    type="button"
+                    aria-label={`Retry loading ${group.map((notice) => notice.what).join(", ")}`}
+                    onClick={() => {
+                      for (const notice of group) notice.retry?.();
+                    }}
+                    className="cursor-pointer text-muted-foreground underline hover:text-foreground"
+                  >
+                    Retry
+                  </button>
+                )}
               </p>
             ))}
             {cappedNotes.length > 0 && (

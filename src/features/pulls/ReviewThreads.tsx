@@ -1088,6 +1088,7 @@ export function ReviewThreadsBlock({
   threads,
   isError,
   isPaused = false,
+  isFetching = false,
   onRetry,
   heading = "Review comments",
   onQuote,
@@ -1109,6 +1110,9 @@ export function ReviewThreadsBlock({
   /** The threads read is parked waiting for a connection (react-query's
    *  `isPaused`); it outranks `isError`, and its notice offers no Retry. */
   isPaused?: boolean;
+  /** The threads read has a fetch in flight: a failure being refetched hasn't
+   *  settled, so it raises no notice until it lands. */
+  isFetching?: boolean;
   /** Re-runs the threads read from a failed-refresh notice. Absent = no Retry. */
   onRetry?: () => void;
   /** Section heading — "Review comments" by default; callers pass e.g. "Other line
@@ -1137,6 +1141,7 @@ export function ReviewThreadsBlock({
     threadCount: threads?.length,
     isError,
     isPaused,
+    isFetching,
   });
   // Nothing visible while loading (undefined) or when there are no threads.
   const idle = !drawn && notice === null;

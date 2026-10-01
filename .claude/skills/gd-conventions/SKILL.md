@@ -386,6 +386,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **networkMode / offline parking** — react-query calls on possibly-offline
   surfaces set the documented `networkMode`; the default PARKS offline and the
   query never resolves.
+- **Retry focus rescue** — a Retry control whose press can unmount it (an
+  error arm swapping to a skeleton or notice) rides `useRetryFocusRescue`
+  (ConversationListPanel) with a stable `tabIndex={-1}` host element; focus
+  must never fall to `<body>` on the shown→hidden edge.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

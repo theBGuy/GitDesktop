@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeStatus } from "@/lib/git/queries";
 import {
@@ -275,8 +276,19 @@ export function RunWorkflowDialog({
     }
   }
 
+  // A list parked before it ever loaded would say "Loading…" until reconnect,
+  // and an empty claim would be false: it says it waits for the connection.
+  const workflowsParked = workflows.isPaused && workflows.data === undefined;
+  // A failure being refetched has nothing to judge yet, so it still loads.
+  const workflowsLoading =
+    !workflowsParked &&
+    (workflows.isPending ||
+      (workflows.isFetching && workflows.data === undefined));
   const noneDispatchable =
-    !isPipelines && !workflows.isPending && dispatchable.length === 0;
+    !isPipelines &&
+    !workflowsLoading &&
+    !workflowsParked &&
+    dispatchable.length === 0;
   const selectedNoTrigger =
     !isPipelines && workflow !== "" && hasNoManualTrigger(probed, workflow);
 
@@ -316,10 +328,16 @@ export function RunWorkflowDialog({
                 }}
                 disabled={dispatchable.length === 0}
               >
-                <SelectTrigger id={`${idBase}-workflow`} className="w-full">
+                <SelectTrigger
+                  id={`${idBase}-workflow`}
+                  aria-describedby={
+                    workflowsParked ? `${idBase}-workflow-offline` : undefined
+                  }
+                  className="w-full"
+                >
                   <SelectValue
                     placeholder={
-                      workflows.isPending ? "Loading…" : "Select a workflow"
+                      workflowsLoading ? "Loading…" : "Select a workflow"
                     }
                     onMouseEnter={clipTitleFromText}
                   />
@@ -345,6 +363,14 @@ export function RunWorkflowDialog({
                   })}
                 </SelectContent>
               </Select>
+              {workflowsParked && (
+                <p
+                  id={`${idBase}-workflow-offline`}
+                  className="text-xs text-muted-foreground"
+                >
+                  {offlinePendingMessage("workflows")}
+                </p>
+              )}
               {noneDispatchable && (
                 <p className="text-xs text-muted-foreground">
                   No active workflows found. A workflow needs a{" "}

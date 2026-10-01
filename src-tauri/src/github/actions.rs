@@ -583,8 +583,36 @@ pub async fn gh_run_cancel(repo_path: String, run_id: u64) -> AppResult<()> {
     Ok(())
 }
 
+/// gh's refusal while the run (or job) hasn't completed. It arrives on stderr with
+/// a non-zero exit, yet is a pending state, not a failure: the frontend matches it
+/// to show "being archived" and poll.
+const GH_LOG_IN_PROGRESS: &str = "is still in progress; logs will be available";
+
+/// The verdict on a `gh run view --log`/`--log-failed` read. Per gh 2.94.0's
+/// `pkg/cmd/run/view/view.go`, log text goes only to stdout and exits 0 whatever
+/// the run's conclusion (non-zero is reserved for `--exit-status`, never passed
+/// here); everything on stderr is an error with a non-zero exit. So exit 0 is the
+/// answer, possibly empty (no failed steps); the in-progress refusal passes
+/// through as its pending sentinel; any other failure is an error, so a cached
+/// log is kept rather than overwritten with gh's message. Pure — unit-tested.
+fn log_output_verdict(code: i32, stdout: String, stderr: &str) -> AppResult<String> {
+    if code == 0 {
+        return Ok(stdout);
+    }
+    let msg = stderr.trim();
+    if msg.contains(GH_LOG_IN_PROGRESS) {
+        return Ok(msg.to_string());
+    }
+    Err(AppError::Gh(if msg.is_empty() {
+        format!("gh exited with code {code}")
+    } else {
+        msg.to_string()
+    }))
+}
+
 /// Logs of only the failed steps (`gh run view --log-failed`), tail-capped.
-/// Read raw because gh exits non-zero on a failed run.
+/// Read raw so [`log_output_verdict`] can tell gh's in-progress refusal from a
+/// real failure.
 pub async fn gh_run_failed_logs(repo_path: String, run_id: u64) -> AppResult<String> {
     let id = run_id.to_string();
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
@@ -594,12 +622,7 @@ pub async fn gh_run_failed_logs(repo_path: String, run_id: u64) -> AppResult<Str
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let mut text = out.stdout_lossy();
-    if text.trim().is_empty() {
-        // No failed-step logs (e.g. cancelled, or still running) — surface gh's
-        // own message instead of an empty pane.
-        text = out.stderr.trim().to_string();
-    }
+    let mut text = log_output_verdict(out.code, out.stdout_lossy(), &out.stderr)?;
     if text.len() > RUN_LOG_CAP {
         let mut start = text.len() - RUN_LOG_CAP;
         while !text.is_char_boundary(start) {
@@ -613,31 +636,33 @@ pub async fn gh_run_failed_logs(repo_path: String, run_id: u64) -> AppResult<Str
 /// Logs for one job, for AI debugging. Prefers the failed-step logs (highest
 /// signal); falls back to the full job log when gh returns nothing for
 /// `--log-failed`. Tighter cap than the run-level logs since this is fed to a
-/// model. Read raw because gh exits non-zero on a failed run.
+/// model. Read raw so [`log_output_verdict`] can tell gh's in-progress refusal
+/// from a real failure.
 const JOB_LOG_CAP: usize = 60_000;
 
 pub async fn gh_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
     let id = job_id.to_string();
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let mut out = run_gh_raw(
+    let failed = run_gh_raw(
         Some(&repo_path),
         &["run", "view", "-R", &slug, "--job", &id, "--log-failed"],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let mut text = out.stdout_lossy();
-    if text.trim().is_empty() {
-        out = run_gh_raw(
+    let failed_text = failed.stdout_lossy();
+    // Fall back to the full log only on a SUCCESSFUL empty answer: a refusal or
+    // failure would only repeat on the second read.
+    let mut text = if failed.code == 0 && failed_text.trim().is_empty() {
+        let full = run_gh_raw(
             Some(&repo_path),
             &["run", "view", "-R", &slug, "--job", &id, "--log"],
             GH_NETWORK_TIMEOUT,
         )
         .await?;
-        text = out.stdout_lossy();
-    }
-    if text.trim().is_empty() {
-        text = out.stderr.trim().to_string();
-    }
+        log_output_verdict(full.code, full.stdout_lossy(), &full.stderr)?
+    } else {
+        log_output_verdict(failed.code, failed_text, &failed.stderr)?
+    };
     if text.len() > JOB_LOG_CAP {
         let mut start = text.len() - JOB_LOG_CAP;
         while !text.is_char_boundary(start) {
@@ -1832,5 +1857,34 @@ mod tests {
 
         let unrelated = "HTTP 404: Not Found (https://api.github.com/repos/o/r/actions/workflows/1/dispatches)";
         assert_eq!(humanize_dispatch_error(unrelated, "master"), unrelated);
+    }
+
+    /// A failed log read must be an error, or it overwrites a cached log with
+    /// gh's message; the in-progress refusal must stay Ok, since the frontend
+    /// keys its "being archived" poll on that text.
+    #[test]
+    fn log_output_verdict_errs_on_failure_but_passes_the_in_progress_sentinel() {
+        let bad_gateway = "failed to get job: Get \"https://api.github.com/repos/o/r/actions/jobs/1\": Bad Gateway\n";
+        assert!(matches!(
+            log_output_verdict(1, String::new(), bad_gateway),
+            Err(AppError::Gh(msg)) if msg.contains("Bad Gateway")
+        ));
+        assert!(matches!(
+            log_output_verdict(1, String::new(), ""),
+            Err(AppError::Gh(msg)) if msg == "gh exited with code 1"
+        ));
+
+        let pending = "run 42 is still in progress; logs will be available when it is complete\n";
+        assert_eq!(
+            log_output_verdict(1, String::new(), pending).unwrap(),
+            pending.trim()
+        );
+
+        // Exit 0 is the answer, empty included (no failed steps).
+        assert_eq!(log_output_verdict(0, String::new(), "").unwrap(), "");
+        assert_eq!(
+            log_output_verdict(0, "build\tStep\tok\n".to_string(), "").unwrap(),
+            "build\tStep\tok\n"
+        );
     }
 }

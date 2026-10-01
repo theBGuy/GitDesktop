@@ -1,4 +1,5 @@
 import { ArrowClockwiseIcon, PlayIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +22,11 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -139,6 +145,7 @@ export function ActionsPanel({
 
   const branchFilter = branchOnly && currentBranch ? currentBranch : undefined;
   const runs = useWorkflowRunPages(repoPath, ghReady, active, branchFilter);
+  const queryClient = useQueryClient();
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectRun = useUiStore((s) => s.selectRun);
 
@@ -249,7 +256,14 @@ export function ActionsPanel({
             disabled={!ghReady || runs.isFetching}
             reason={ghReady ? undefined : "Connect this repo to load runs"}
             title="Refresh runs"
-            onClick={() => runs.refetch()}
+            // The whole Actions subtree, as the run-detail repair pass does: the
+            // open run's detail is its own read, and a refresh that skipped it
+            // would leave a failed detail failed beside a recovered list.
+            onClick={() =>
+              void queryClient.invalidateQueries({
+                queryKey: ["repo", repoPath, "actions"],
+              })
+            }
           >
             <ArrowClockwiseIcon
               className={cn(runs.isFetching && "animate-spin")}
@@ -275,9 +289,18 @@ export function ActionsPanel({
           <ListRowSkeletons rows={2} lines={3} name={ciFeature} />
         ) : !ghReady ? (
           <ForgeNotReady repoPath={repoPath} feature={ciFeature} />
-        ) : runs.isPending ? (
+        ) : runs.isPaused &&
+          (runs.isPending || (runs.isError && allRuns.length === 0)) ? (
+          // Parked with nothing to show: a skeleton would spin until reconnect,
+          // and a Refresh would only park again. A loaded-empty list keeps its
+          // empty state below, being a loaded answer.
+          <p className="px-3 py-4 text-xs text-muted-foreground">
+            {offlinePendingMessage(`${runNoun} runs`)}
+          </p>
+        ) : runs.isPending ||
+          (runs.isError && allRuns.length === 0 && runs.isFetching) ? (
           <ListRowSkeletons rows={3} lines={3} name={ciFeature} />
-        ) : runs.isError && allRuns.length === 0 ? (
+        ) : refreshFailed(runs) && allRuns.length === 0 ? (
           // Only when there is nothing to show: a failed Load more also flips isError
           // while every already-loaded page survives in the cache, and that failure
           // belongs on the Load-more row rather than replacing the whole list.
@@ -416,8 +439,15 @@ export function ActionsPanel({
           </ContextMenu>
         )}
         {/* Outside the branches above so a filtered-to-nothing list can still be
-            deepened: paging is what brings older matches within reach. */}
-        {runs.hasNextPage && (
+            deepened: paging is what brings older matches within reach. Parked,
+            the row says so instead: a page asked for offline would only park,
+            and reconnecting resumes the read by itself. */}
+        {runs.hasNextPage && runs.isPaused && (
+          <p className="border-b px-3 py-1.5 text-center text-xs text-muted-foreground">
+            {OFFLINE_ROWS_NOTICE}
+          </p>
+        )}
+        {runs.hasNextPage && !runs.isPaused && (
           <Button
             variant="ghost"
             size="xs"

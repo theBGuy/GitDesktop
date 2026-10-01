@@ -103,6 +103,40 @@ function SectionHeader(props: {
   );
 }
 
+/** Keeps focus off `<body>` when a Retry leaves the DOM under the user's focus:
+ *  a refresh lands, a pressed retry parks offline, or a pane swaps to its
+ *  loading skeleton. `retryShown` must be true exactly while the Retry carrying
+ *  `retryRef` is mounted; `hostRef` goes on an element with `tabIndex={-1}`
+ *  that survives the swap. Only the shown→hidden edge rescues, and only when
+ *  THIS Retry held focus as it left (read in the ref cleanup, which React runs
+ *  just before removing the node), so a sibling losing its Retry in the same
+ *  commit can't claim focus it never had; preventScroll keeps the viewer's
+ *  scroll position. */
+export function useRetryFocusRescue(retryShown: boolean) {
+  const host = useRef<HTMLElement | null>(null);
+  const retryWasShown = useRef(retryShown);
+  const retryHeldFocus = useRef(false);
+  const hostRef = useCallback((node: HTMLElement | null) => {
+    host.current = node;
+  }, []);
+  const retryRef = useCallback(
+    (node: HTMLElement | null) => () => {
+      retryHeldFocus.current = document.activeElement === node;
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    const was = retryWasShown.current;
+    retryWasShown.current = retryShown;
+    if (!was || retryShown) return;
+    const owned = retryHeldFocus.current;
+    retryHeldFocus.current = false;
+    if (owned && document.activeElement === document.body)
+      host.current?.focus({ preventScroll: true });
+  }, [retryShown]);
+  return { hostRef, retryRef };
+}
+
 /** The in-flow line a list section or detail pane shows while it draws cached
  *  content its last read couldn't replace: a failed refresh, a read parked
  *  offline, a failed Load more. The words carry the state, never color alone.
@@ -135,34 +169,12 @@ export function DegradedListNotice(props: {
     extraAction,
     className,
   } = props;
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const retryShown = degraded && onRetry !== undefined;
-  const retryWasShown = useRef(retryShown);
-  // Whether THIS notice's Retry held focus as it left the DOM, so a sibling
-  // notice losing its Retry in the same commit can't claim focus it never had.
-  // Read in the ref cleanup, which React runs just before removing the node,
-  // while focus still sits on it.
-  const retryHeldFocus = useRef(false);
-  const retryRef = useCallback(
-    (node: HTMLButtonElement | null) => () => {
-      retryHeldFocus.current = document.activeElement === node;
-    },
-    [],
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    degraded && onRetry !== undefined,
   );
-  // Only Retry going away can drop focus, so only that edge rescues, and only
-  // from `<body>`; preventScroll keeps the viewer's scroll position.
-  useLayoutEffect(() => {
-    const was = retryWasShown.current;
-    retryWasShown.current = retryShown;
-    if (!was || retryShown) return;
-    const owned = retryHeldFocus.current;
-    retryHeldFocus.current = false;
-    if (owned && document.activeElement === document.body)
-      wrapRef.current?.focus({ preventScroll: true });
-  }, [retryShown]);
   return (
     <div
-      ref={wrapRef}
+      ref={hostRef}
       tabIndex={-1}
       className={
         degraded
@@ -290,6 +302,10 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
    *  `isPaused`): cached rows stay under an offline notice, and with none the
    *  section says it's offline instead of showing skeletons. */
   remotePaused?: boolean;
+  /** The remote list's read has a fetch in flight. Over an earlier failure it
+   *  hasn't settled, so its rows draw without the failure notice until it lands
+   *  (a reconnect resumes an errored read with `isError` still set). */
+  remoteFetching?: boolean;
   /** The drawn remote rows are placeholder rows loaded for ANOTHER view (a
    *  state tab or filter switch still loading), not this list's own. */
   remotePlaceholder?: boolean;
@@ -351,6 +367,8 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     isError: boolean;
     /** The Jira read is parked waiting for a connection. */
     paused?: boolean;
+    /** The Jira read has a fetch in flight, as `remoteFetching`. */
+    fetching?: boolean;
     /** Rendered in place of the list on error when no rows are cached (e.g. a
      *  Reconnect prompt); cached rows keep rendering under a degraded notice. */
     errorSlot?: ReactNode;
@@ -428,6 +446,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     remoteErrorSlot,
     remoteRetry,
     remotePaused,
+    remoteFetching,
     remotePlaceholder,
     loadMoreFailed,
     onRetryLoadMore,
@@ -520,6 +539,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     error: remoteError ?? false,
     rowCount: visibleRemote.length,
     paused: remotePaused,
+    fetching: remoteFetching,
   });
   const remoteNotice = listNotice({
     noun: remoteNoun,
@@ -600,6 +620,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       error: jira.isError,
       rowCount: jira.items.length,
       paused: jira.paused,
+      fetching: jira.fetching,
     });
   const jiraNotice = listNotice({
     noun: "Jira issues",

@@ -1,5 +1,8 @@
+import type { UseQueryResult } from "@tanstack/react-query";
 import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 import { RelativeTime } from "@/components/relative-time";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import { sectionReadNotice } from "@/features/conversations/remote-section-state";
 import {
   AuthorAvatar,
   hasVisibleBody,
@@ -236,7 +239,12 @@ export function PrActivityFeed({
   mentions,
 }: {
   pr: PrDetails;
-  timeline: ForgeTimelineEvent[] | undefined;
+  /** The timeline read itself, not just its data: loaded events stay drawn
+   *  through a failed or parked refresh, under a notice that says which. */
+  timeline: Pick<
+    UseQueryResult<ForgeTimelineEvent[]>,
+    "data" | "isError" | "isPaused" | "isFetching" | "refetch"
+  >;
   reactions: IssueReactions | undefined;
   claims: PrThreadClaims;
   providerKey: ForgeProvider;
@@ -516,7 +524,7 @@ export function PrActivityFeed({
 
   // Timeline events — provider-neutral (GitHub, GitLab, Bitbucket);
   // empty otherwise.
-  for (const [i, ev] of (timeline ?? []).entries()) {
+  for (const [i, ev] of (timeline.data ?? []).entries()) {
     entries.push({
       date: ev.date,
       sortKey: 3,
@@ -535,6 +543,30 @@ export function PrActivityFeed({
     ),
   );
 
-  if (rendered.length === 0) return null;
-  return <div className="space-y-4">{rendered}</div>;
+  // Named for the read that failed: the feed's reviews, comments and commits
+  // ride the details payload and still render beside this notice.
+  const notice = sectionReadNotice({
+    noun: "timeline events",
+    loadFailed: "Couldn't load timeline events.",
+    rowCount: timeline.data?.length,
+    isError: timeline.isError,
+    isPaused: timeline.isPaused,
+    isFetching: timeline.isFetching,
+  });
+
+  // The notice mounts even over an empty feed: its live region only announces
+  // text arriving after it is in the DOM, and its wrapper catches a Retry's focus.
+  return (
+    <>
+      <DegradedListNotice
+        noun="timeline events"
+        degraded={notice !== null}
+        message={notice?.message}
+        retryLabel={notice?.retryLabel}
+        onRetry={notice?.retry ? () => void timeline.refetch() : undefined}
+        className="px-0 pb-0"
+      />
+      {rendered.length > 0 && <div className="space-y-4">{rendered}</div>}
+    </>
+  );
 }

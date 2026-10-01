@@ -1730,6 +1730,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         stack: None,
         stack_members: Vec::new(),
         stack_unknown: false,
+        members_unknown: false,
         // Bitbucket Cloud's PR payload carries no mergeability field, and its only
         // pre-check needs a write scope — so "unknown", never a guess.
         mergeability: PrMergeability::unavailable(),

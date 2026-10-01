@@ -5,7 +5,8 @@
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
-// offline says so instead of spinning a skeleton forever.
+// offline says so instead of spinning a skeleton forever. A failure being
+// refetched (a reconnect's resumed read) says nothing until it settles.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -38,7 +39,9 @@ const BOOLS = [false, true];
 const ROW_COUNTS = [0, 1, 7];
 
 /** The ladder in the order the section checks it, written out rung by rung. A
- *  park outranks a failed refresh at every altitude, as in the detail pane. */
+ *  park outranks a failed refresh at every altitude, as in the detail pane, and
+ *  a failure being refetched hasn't settled: its rows draw quietly, and with
+ *  none it loads. */
 function expected({
   ghPending,
   ghReady,
@@ -46,6 +49,7 @@ function expected({
   error,
   rowCount,
   paused,
+  fetching,
 }) {
   if (ghPending) return "gh-skeleton";
   if (!ghReady) return "not-ready";
@@ -53,6 +57,8 @@ function expected({
   if (listPending) return "list-skeleton";
   if (paused && rowCount > 0) return "rows-offline";
   if (paused && error) return "offline";
+  if (error && fetching && rowCount === 0) return "list-skeleton";
+  if (error && fetching) return "rows";
   if (error && rowCount === 0) return "error";
   if (error) return "rows-degraded";
   if (rowCount === 0) return "empty";
@@ -66,27 +72,29 @@ test("every ladder input resolves to its rung (full truth table)", () => {
       for (const listPending of BOOLS)
         for (const error of BOOLS)
           for (const paused of BOOLS)
-            for (const rowCount of ROW_COUNTS) {
-              const input = {
-                ghPending,
-                ghReady,
-                listPending,
-                error,
-                rowCount,
-                paused,
-              };
-              assert.equal(
-                resolveRemoteSection(input),
-                expected(input),
-                JSON.stringify(input),
-              );
-              cases++;
-            }
-  // 2^5 flag combinations x 3 row counts: a truncated loop fails here.
-  assert.equal(cases, 96);
+            for (const fetching of BOOLS)
+              for (const rowCount of ROW_COUNTS) {
+                const input = {
+                  ghPending,
+                  ghReady,
+                  listPending,
+                  error,
+                  rowCount,
+                  paused,
+                  fetching,
+                };
+                assert.equal(
+                  resolveRemoteSection(input),
+                  expected(input),
+                  JSON.stringify(input),
+                );
+                cases++;
+              }
+  // 2^6 flag combinations x 3 row counts: a truncated loop fails here.
+  assert.equal(cases, 192);
 });
 
-test("an omitted paused flag reads as online, matching every older caller", () => {
+test("omitted paused and fetching flags read as online and settled, matching every older caller", () => {
   for (const listPending of BOOLS)
     for (const error of BOOLS)
       for (const rowCount of ROW_COUNTS) {
@@ -99,10 +107,33 @@ test("an omitted paused flag reads as online, matching every older caller", () =
         };
         assert.equal(
           resolveRemoteSection(input),
-          resolveRemoteSection({ ...input, paused: false }),
+          resolveRemoteSection({ ...input, paused: false, fetching: false }),
           JSON.stringify(input),
         );
       }
+});
+
+test("a list failure being refetched draws quietly, and settles back to its degraded rungs", () => {
+  const ready = { ghPending: false, ghReady: true, listPending: false };
+  const failing = { ...ready, error: true, paused: false };
+  // In flight: cached rows draw without a notice, and nothing drawn loads.
+  assert.equal(
+    resolveRemoteSection({ ...failing, fetching: true, rowCount: 4 }),
+    "rows",
+  );
+  assert.equal(
+    resolveRemoteSection({ ...failing, fetching: true, rowCount: 0 }),
+    "list-skeleton",
+  );
+  // Negative control: the same failure settled keeps its degraded rungs.
+  assert.equal(
+    resolveRemoteSection({ ...failing, fetching: false, rowCount: 4 }),
+    "rows-degraded",
+  );
+  assert.equal(
+    resolveRemoteSection({ ...failing, fetching: false, rowCount: 0 }),
+    "error",
+  );
 });
 
 test("a first load parked offline says offline, never an endless skeleton", () => {
@@ -198,6 +229,7 @@ test("a failed read parked offline lands the list on the detail pane's rung", ()
       error: true,
       hasData: rowCount > 0,
       paused: true,
+      fetching: false,
     });
     assert.equal(PANE_FOR_LIST[list], pane, JSON.stringify({ rowCount, list }));
   }
@@ -241,8 +273,8 @@ test("a park never hides a permanent verdict with nothing drawn", () => {
 });
 
 /** The review-comments notice, rung by rung. */
-function expectedReviewNotice({ threadCount, isError, isPaused }) {
-  const failed = isError && !isPaused;
+function expectedReviewNotice({ threadCount, isError, isPaused, isFetching }) {
+  const failed = isError && !isPaused && !isFetching;
   const drawn = threadCount !== undefined && threadCount > 0;
   if (failed && drawn) return ["refresh-drawn", true];
   if (failed && threadCount !== undefined) return ["refresh-empty", true];
@@ -264,19 +296,20 @@ test("every review-comments input resolves to its line (full truth table)", () =
   let cases = 0;
   for (const threadCount of [undefined, 0, 1])
     for (const isError of BOOLS)
-      for (const isPaused of BOOLS) {
-        const input = { threadCount, isError, isPaused };
-        const notice = reviewCommentsNotice(input);
-        assert.deepEqual(
-          notice === null
-            ? null
-            : [REVIEW_LINES[notice.message] ?? notice.message, notice.retry],
-          expectedReviewNotice(input),
-          JSON.stringify(input),
-        );
-        cases++;
-      }
-  assert.equal(cases, 12);
+      for (const isPaused of BOOLS)
+        for (const isFetching of BOOLS) {
+          const input = { threadCount, isError, isPaused, isFetching };
+          const notice = reviewCommentsNotice(input);
+          assert.deepEqual(
+            notice === null
+              ? null
+              : [REVIEW_LINES[notice.message] ?? notice.message, notice.retry],
+            expectedReviewNotice(input),
+            JSON.stringify(input),
+          );
+          cases++;
+        }
+  assert.equal(cases, 24);
 });
 
 test("review comments: a park outranks the failure, and a loaded empty answer stays quiet", () => {
@@ -309,12 +342,15 @@ test("review comments: a park outranks the failure, and a loaded empty answer st
   );
 });
 
-/** The detail pane's ladder, rung by rung. */
-function expectedPane({ pending, error, hasData, paused }) {
-  if (hasData && (error || paused)) return "content-degraded";
+/** The detail pane's ladder, rung by rung. A failure being refetched hasn't
+ *  settled: its content draws without a notice, and with none it loads. */
+function expectedPane({ pending, error, hasData, paused, fetching }) {
+  const failed = error && !fetching;
+  if (hasData && (failed || paused)) return "content-degraded";
   if (hasData) return "content";
   if (paused) return "offline";
   if (pending) return "skeleton";
+  if (error && fetching) return "skeleton";
   return "error";
 }
 
@@ -323,20 +359,26 @@ test("every detail pane input resolves to its state (full truth table)", () => {
   for (const pending of BOOLS)
     for (const error of BOOLS)
       for (const hasData of BOOLS)
-        for (const paused of BOOLS) {
-          const input = { pending, error, hasData, paused };
-          assert.equal(
-            resolveDetailPane(input),
-            expectedPane(input),
-            JSON.stringify(input),
-          );
-          cases++;
-        }
-  assert.equal(cases, 16);
+        for (const paused of BOOLS)
+          for (const fetching of BOOLS) {
+            const input = { pending, error, hasData, paused, fetching };
+            assert.equal(
+              resolveDetailPane(input),
+              expectedPane(input),
+              JSON.stringify(input),
+            );
+            cases++;
+          }
+  assert.equal(cases, 32);
 });
 
 test("a detail refresh that fails over cached data keeps the content", () => {
-  const cached = { pending: false, hasData: true, paused: false };
+  const cached = {
+    pending: false,
+    hasData: true,
+    paused: false,
+    fetching: false,
+  };
   assert.equal(
     resolveDetailPane({ ...cached, error: true }),
     "content-degraded",
@@ -353,6 +395,7 @@ test("a detail refresh that fails over cached data keeps the content", () => {
       error: false,
       hasData: false,
       paused: false,
+      fetching: true,
     }),
     "skeleton",
   );
@@ -362,26 +405,138 @@ test("a detail refresh that fails over cached data keeps the content", () => {
       error: false,
       hasData: false,
       paused: true,
+      fetching: false,
     }),
     "offline",
   );
 });
 
-test("a failure counts only while not parked offline (full truth table)", () => {
+test("a failure counts only while settled online (full truth table)", () => {
   // Offline outranks a failure it follows: the notice speaks of the connection
-  // and offers no Retry, even though react-query still reports the error.
-  for (const [isError, isPaused, expected] of [
-    [true, true, false],
-    [true, false, true],
-    [false, true, false],
-    [false, false, false],
+  // and offers no Retry, even though react-query still reports the error. A
+  // refetch in flight hasn't settled either way, so it says nothing yet.
+  for (const [isError, isPaused, isFetching, expected] of [
+    [true, true, true, false],
+    [true, true, false, false],
+    [true, false, true, false],
+    [true, false, false, true],
+    [false, true, true, false],
+    [false, true, false, false],
+    [false, false, true, false],
+    [false, false, false, false],
   ]) {
     assert.equal(
-      refreshFailed({ isError, isPaused }),
+      refreshFailed({ isError, isPaused, isFetching }),
       expected,
-      `isError=${isError} isPaused=${isPaused}`,
+      `isError=${isError} isPaused=${isPaused} isFetching=${isFetching}`,
     );
   }
+  // An omitted flag reads as settled, matching the callers that can't see it.
+  assert.equal(refreshFailed({ isError: true, isPaused: false }), true);
+});
+
+test("a reconnect's resumed refetch shows no error until it settles (negative control)", () => {
+  // The resumed read: the park has lifted, the error is still reported, and the
+  // refetch is in flight. Nothing may claim a failure, and Retry stays away.
+  const resumed = { isError: true, isPaused: false, isFetching: true };
+  assert.equal(refreshFailed(resumed), false);
+  assert.equal(
+    sectionReadNotice({
+      noun: "tasks",
+      loadFailed: "Couldn't load tasks.",
+      rowCount: 3,
+      ...resumed,
+    }),
+    null,
+  );
+  assert.equal(
+    sectionReadNotice({
+      noun: "tasks",
+      loadFailed: "Couldn't load tasks.",
+      rowCount: undefined,
+      ...resumed,
+    }),
+    null,
+  );
+  assert.equal(reviewCommentsNotice({ threadCount: 2, ...resumed }), null);
+  assert.equal(
+    ungroupedReason({
+      requested: true,
+      grouped: false,
+      truncated: false,
+      ...resumed,
+    }),
+    null,
+  );
+  // The same read once it settles on the failure: the error and its Retry.
+  const settled = { ...resumed, isFetching: false };
+  assert.equal(refreshFailed(settled), true);
+  assert.deepEqual(reviewCommentsNotice({ threadCount: 2, ...settled }), {
+    message: "Couldn't refresh review comments — showing the last loaded ones.",
+    retry: true,
+  });
+});
+
+/** What a single read's detail surface shows, read through the helpers the way a
+ *  view composes them: the pane ladder, then the notice over retained content. */
+function detailOutcome(q) {
+  const pane = resolveDetailPane({
+    pending: !q.isError && !q.hasData,
+    error: q.isError,
+    hasData: q.hasData,
+    paused: q.isPaused,
+    fetching: q.isFetching,
+  });
+  if (pane !== "content-degraded") return pane;
+  const failed = refreshFailed(q);
+  const message = detailNoticeMessage({
+    noun: "issue",
+    isError: failed,
+    stale: false,
+  });
+  return message.startsWith("You're offline") && !failed
+    ? "content-offline"
+    : failed
+      ? "content-failed-retry"
+      : `unexpected: ${message}`;
+}
+
+test("every read cell lands on its named outcome (isError x isPaused x isFetching x data)", () => {
+  // A park outranks everything; a settled failure offers Retry; a failure being
+  // refetched draws its content quietly, or loads with nothing to draw.
+  const EXPECTED = {
+    // [isError, isPaused, isFetching, hasData]
+    "false,false,false,false": "skeleton",
+    "false,false,false,true": "content",
+    "false,false,true,false": "skeleton",
+    "false,false,true,true": "content",
+    "false,true,false,false": "offline",
+    "false,true,false,true": "content-offline",
+    "false,true,true,false": "offline",
+    "false,true,true,true": "content-offline",
+    "true,false,false,false": "error",
+    "true,false,false,true": "content-failed-retry",
+    "true,false,true,false": "skeleton",
+    "true,false,true,true": "content",
+    "true,true,false,false": "offline",
+    "true,true,false,true": "content-offline",
+    "true,true,true,false": "offline",
+    "true,true,true,true": "content-offline",
+  };
+  let cases = 0;
+  for (const isError of BOOLS)
+    for (const isPaused of BOOLS)
+      for (const isFetching of BOOLS)
+        for (const hasData of BOOLS) {
+          const cell = [isError, isPaused, isFetching, hasData].join(",");
+          assert.equal(
+            detailOutcome({ isError, isPaused, isFetching, hasData }),
+            EXPECTED[cell],
+            cell,
+          );
+          cases++;
+        }
+  assert.equal(cases, 16);
 });
 
 const LIST = { noun: "pull requests", hasRows: true };
@@ -893,8 +1048,8 @@ test("the offline and detail notice strings are the ones every surface shows", (
 });
 
 /** A single-read section's notice, rung by rung. */
-function expectedSectionNotice({ rowCount, isError, isPaused }) {
-  const failed = isError && !isPaused;
+function expectedSectionNotice({ rowCount, isError, isPaused, isFetching }) {
+  const failed = isError && !isPaused && !isFetching;
   if (rowCount === undefined) {
     if (isPaused) return ["offline-pending", false];
     return failed ? ["load", true] : null;
@@ -915,25 +1070,26 @@ test("every single-read section input resolves to its line (full truth table)", 
   let cases = 0;
   for (const rowCount of [undefined, 0, 1, 4])
     for (const isError of BOOLS)
-      for (const isPaused of BOOLS) {
-        const input = { rowCount, isError, isPaused };
-        const notice = sectionReadNotice({
-          noun: "tasks",
-          loadFailed: "Couldn't load tasks.",
-          ...input,
-        });
-        assert.deepEqual(
-          notice === null
-            ? null
-            : [SECTION_LINES[notice.message] ?? notice.message, notice.retry],
-          expectedSectionNotice(input),
-          JSON.stringify(input),
-        );
-        if (notice !== null)
-          assert.equal(notice.retryLabel, "Retry loading tasks");
-        cases++;
-      }
-  assert.equal(cases, 16);
+      for (const isPaused of BOOLS)
+        for (const isFetching of BOOLS) {
+          const input = { rowCount, isError, isPaused, isFetching };
+          const notice = sectionReadNotice({
+            noun: "tasks",
+            loadFailed: "Couldn't load tasks.",
+            ...input,
+          });
+          assert.deepEqual(
+            notice === null
+              ? null
+              : [SECTION_LINES[notice.message] ?? notice.message, notice.retry],
+            expectedSectionNotice(input),
+            JSON.stringify(input),
+          );
+          if (notice !== null)
+            assert.equal(notice.retryLabel, "Retry loading tasks");
+          cases++;
+        }
+  assert.equal(cases, 32);
 });
 
 test("a single-read section keeps its rows through a failure and a park", () => {
@@ -989,12 +1145,13 @@ function expectedUngrouped({
   grouped,
   isError,
   isPaused,
+  isFetching,
   truncated,
 }) {
   if (!requested || grouped) return null;
   if (truncated) return "truncated";
   if (isPaused) return "offline";
-  if (isError) return "error";
+  if (isError && !isFetching) return "error";
   return null;
 }
 
@@ -1004,16 +1161,24 @@ test("every grouping input resolves to its note (full truth table)", () => {
     for (const grouped of BOOLS)
       for (const isError of BOOLS)
         for (const isPaused of BOOLS)
-          for (const truncated of BOOLS) {
-            const input = { requested, grouped, isError, isPaused, truncated };
-            assert.equal(
-              ungroupedReason(input),
-              expectedUngrouped(input),
-              JSON.stringify(input),
-            );
-            cases++;
-          }
-  assert.equal(cases, 32);
+          for (const isFetching of BOOLS)
+            for (const truncated of BOOLS) {
+              const input = {
+                requested,
+                grouped,
+                isError,
+                isPaused,
+                isFetching,
+                truncated,
+              };
+              assert.equal(
+                ungroupedReason(input),
+                expectedUngrouped(input),
+                JSON.stringify(input),
+              );
+              cases++;
+            }
+  assert.equal(cases, 64);
 });
 
 test("grouped and flat lists × error, paused, and fresh review state", () => {

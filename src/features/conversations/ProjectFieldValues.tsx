@@ -16,6 +16,7 @@ import type {
 } from "@/lib/git/types";
 import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { parseableDate } from "@/lib/time";
+import { useRetryFocusRescue } from "./ConversationListPanel";
 import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
 import { offlinePendingMessage } from "./remote-section-state";
@@ -415,6 +416,18 @@ export function ProjectFieldValues({
     values.isPaused &&
     (values.data === undefined || values.error !== null);
   const offlineMessage = offlinePendingMessage(FIELD_LABEL.toLowerCase());
+  // Still gated: a disabled query keeps whatever error it last cached, so an item
+  // whose boards — or whose scope — have since gone stays silent.
+  const failedShown =
+    lines.length === 0 &&
+    !loading &&
+    !parked &&
+    canRead &&
+    values.error !== null &&
+    boardsKnown;
+  // A pressed Retry resets the never-loaded read to pending, swapping it for the
+  // skeleton: focus lands on the block that survives instead of `<body>`.
+  const { hostRef, retryRef } = useRetryFocusRescue(failedShown);
 
   const content = (() => {
     switch (true) {
@@ -441,13 +454,12 @@ export function ProjectFieldValues({
             {offlineMessage}
           </span>
         );
-      // Still gated: a disabled query keeps whatever error it last cached, so an
-      // item whose boards — or whose scope — have since gone stays silent.
-      case canRead && values.error !== null && boardsKnown:
+      case failedShown && values.error !== null:
         return (
           <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
             {presentError(values.error).summary}
             <button
+              ref={retryRef}
               type="button"
               aria-label={`Retry loading ${FIELD_LABEL.toLowerCase()}`}
               className="cursor-pointer underline hover:text-foreground"
@@ -524,7 +536,7 @@ export function ProjectFieldValues({
   // be left standing over it.
   if (!cells)
     return (
-      <div className="space-y-1.5">
+      <div ref={hostRef} tabIndex={-1} className="space-y-1.5 outline-none">
         {heading ?? (
           <p className="text-xs font-medium text-muted-foreground">
             {FIELD_LABEL}
@@ -542,8 +554,16 @@ export function ProjectFieldValues({
         empty={content === null && truncatedNote === null}
         busy={lines.length === 0 && loading}
       >
-        {content}
-        {truncatedNote}
+        {/* The cell offers no host of its own, so this span is the one that
+            survives the error→skeleton swap; it lays out as the cell does. */}
+        <span
+          ref={hostRef}
+          tabIndex={-1}
+          className="flex w-full min-w-0 flex-wrap items-center gap-1.5 outline-none"
+        >
+          {content}
+          {truncatedNote}
+        </span>
       </MetaValueCell>
     </>
   );

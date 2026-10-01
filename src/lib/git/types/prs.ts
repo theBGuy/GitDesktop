@@ -341,6 +341,10 @@ export interface PrDetails {
    *  merge path that can cascade. GitHub-only this wave (only GitHub cascades);
    *  the GitLab and Bitbucket arms always report false. */
   stackUnknown: boolean;
+  /** True when `stack` is known but the member lookup FAILED, so an empty
+   *  `stackMembers` is a missing list, not a one-PR stack. GitHub only; the
+   *  GitLab and Bitbucket arms always report false. */
+  membersUnknown: boolean;
   /** How this PR merges into its base. Optional: rows cached by a session that
    *  predates the field deserialize without it — treat absent as unknown. */
   mergeability?: PrMergeability;

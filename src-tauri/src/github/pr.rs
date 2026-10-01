@@ -2268,24 +2268,40 @@ struct PrStackProbe {
     members: Vec<PrStackMember>,
     /// The probe itself failed — membership is genuinely unknown, not absent.
     unknown: bool,
+    /// Membership is known but the member fetch failed, so the empty `members`
+    /// is a missing list, not a short stack.
+    members_unknown: bool,
 }
 
 impl PrStackProbe {
     /// Probed successfully; this PR is in no stack.
     fn unstacked() -> Self {
-        Self { stack: None, members: Vec::new(), unknown: false }
+        Self { stack: None, members: Vec::new(), unknown: false, members_unknown: false }
     }
     /// The probe failed (spawn, non-zero exit, unparseable body, or timeout).
     fn unknown() -> Self {
-        Self { stack: None, members: Vec::new(), unknown: true }
+        Self { stack: None, members: Vec::new(), unknown: true, members_unknown: false }
+    }
+    /// Membership is settled; `members` is hop 2's outcome, where a timeout or a
+    /// failed fetch leaves the member list unknown rather than empty. Pure —
+    /// unit-tested.
+    fn stacked(
+        stack: PrStackInfo,
+        members: Result<Option<Vec<PrStackMember>>, tokio::time::error::Elapsed>,
+    ) -> Self {
+        let (members, members_unknown) = match members {
+            Ok(Some(members)) => (members, false),
+            Ok(None) | Err(_) => (Vec::new(), true),
+        };
+        Self { stack: Some(stack), members, unknown: false, members_unknown }
     }
 }
 
 /// This PR's stack membership plus the stack's members bottom→top, for the detail
 /// view. Distinguishes "probe failed" from "not stacked" (see [`PrStackProbe`]).
-/// The MEMBER fetch is best-effort within a KNOWN membership: failing it — timeout
-/// included — returns the membership the PR payload reported with an empty member
-/// list, which is incomplete, not unknown.
+/// The MEMBER fetch is best-effort within a KNOWN membership: failing it, timeout
+/// included, keeps the membership the PR payload reported and flags the member
+/// list `members_unknown` rather than passing an empty list off as the stack.
 ///
 /// Each hop carries its OWN [`STACKS_TIMEOUT`] rather than one bound around both:
 /// a single outer bound would discard a membership hop 1 had already established
@@ -2314,30 +2330,34 @@ async fn gh_pr_stack(repo_path: &str, slug: &str, number: u64) -> PrStackProbe {
         return PrStackProbe::unstacked();
     };
 
-    // Membership is settled from here — hop 2 can only add or omit the member list.
-    let members = tokio::time::timeout(STACKS_TIMEOUT, gh_stack_members(repo_path, slug, id))
-        .await
-        .unwrap_or_default();
-    PrStackProbe {
-        stack: Some(PrStackInfo { id: id.to_string(), position, size }),
-        members,
-        unknown: false,
-    }
+    // Membership is settled from here — hop 2 can only add the member list or
+    // mark it unknown.
+    let members =
+        tokio::time::timeout(STACKS_TIMEOUT, gh_stack_members(repo_path, slug, id)).await;
+    PrStackProbe::stacked(PrStackInfo { id: id.to_string(), position, size }, members)
 }
 
-/// One stack's members bottom→top. Empty on any failure — the caller treats that
-/// as "no member list", never an error.
-async fn gh_stack_members(repo_path: &str, slug: &str, stack_number: u64) -> Vec<PrStackMember> {
+/// One stack's members bottom→top, or `None` when the fetch failed (spawn,
+/// non-zero exit, unparseable body) — distinct from a genuinely short list.
+async fn gh_stack_members(
+    repo_path: &str,
+    slug: &str,
+    stack_number: u64,
+) -> Option<Vec<PrStackMember>> {
     let endpoint = format!("repos/{slug}/stacks/{stack_number}");
-    let Ok(out) = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await else {
-        return Vec::new();
-    };
+    let out = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await.ok()?;
+    stack_members_from_output(&out)
+}
+
+/// Read a stacks-endpoint response into members, `None` on a non-zero exit or an
+/// unparseable body. Pure — unit-tested.
+fn stack_members_from_output(out: &crate::github::runner::GhOutput) -> Option<Vec<PrStackMember>> {
     if out.code != 0 {
-        return Vec::new();
+        return None;
     }
     serde_json::from_str::<GhStackEntry>(&out.stdout_lossy())
+        .ok()
         .map(|entry| stack_members_from(&entry.pull_requests))
-        .unwrap_or_default()
 }
 
 /// What a stack create/add confirmed: the stack's number and its members
@@ -4117,6 +4137,10 @@ pub struct PrDetails {
     /// failing open has no such consequence (each MR merges on its own, nothing
     /// cascades), and Bitbucket has no stacks, so both report `false`.
     pub stack_unknown: bool,
+    /// `stack` is known but the member fetch failed, so an empty `stack_members`
+    /// is a missing list, not a one-PR stack. GitHub only: GitLab derives members
+    /// from the same rows as membership, and Bitbucket has no stacks.
+    pub members_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
     pub mergeability: PrMergeability,
@@ -4520,6 +4544,7 @@ pub async fn gh_pr_view(
         stack,
         members: stack_members,
         unknown: stack_unknown,
+        members_unknown,
     } = probe;
     let out = out?;
     let raw: RawPr = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
@@ -4776,6 +4801,7 @@ pub async fn gh_pr_view(
         stack,
         stack_members,
         stack_unknown,
+        members_unknown,
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
@@ -6874,6 +6900,7 @@ mod tests {
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
+        stack_members_from_output, PrStackProbe,
         map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
         PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
         GhPrRestComment,
@@ -7092,12 +7119,13 @@ mod tests {
         }
     }
 
-    /// A `PrDetails` with everything empty but the two stack fields — the wire
-    /// shape is what these tests pin, not the payload.
+    /// A `PrDetails` with everything empty but the stack fields — the wire shape
+    /// is what these tests pin, not the payload.
     fn details_with_stack(
         stack: Option<PrStackInfo>,
         stack_members: Vec<PrStackMember>,
         stack_unknown: bool,
+        members_unknown: bool,
     ) -> PrDetails {
         PrDetails {
             id: String::new(),
@@ -7128,6 +7156,7 @@ mod tests {
             stack,
             stack_members,
             stack_unknown,
+            members_unknown,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
@@ -7153,6 +7182,7 @@ mod tests {
                 base_ref_name: "main".to_string(),
             }],
             false,
+            false,
         );
         let v = serde_json::to_value(&details).unwrap();
         assert_eq!(v["stack"]["id"], "133465");
@@ -7168,19 +7198,32 @@ mod tests {
 
         assert_eq!(v["stackUnknown"], false);
         assert!(v.get("stack_unknown").is_none());
+        assert_eq!(v["membersUnknown"], false);
+        assert!(v.get("members_unknown").is_none());
 
         // Unstacked: an explicit null plus an empty array, never a missing key.
-        let v = serde_json::to_value(details_with_stack(None, Vec::new(), false)).unwrap();
+        let v =
+            serde_json::to_value(details_with_stack(None, Vec::new(), false, false)).unwrap();
         assert!(v["stack"].is_null());
         assert_eq!(v["stackMembers"], serde_json::json!([]));
         assert_eq!(v["stackUnknown"], false);
+        assert_eq!(v["membersUnknown"], false);
 
         // Probe failed: `stack` is null exactly as for an unstacked PR, so
         // `stackUnknown` is the ONLY signal separating the two — it must always be
         // present, never skipped.
-        let v = serde_json::to_value(details_with_stack(None, Vec::new(), true)).unwrap();
+        let v = serde_json::to_value(details_with_stack(None, Vec::new(), true, false)).unwrap();
         assert!(v["stack"].is_null());
         assert_eq!(v["stackUnknown"], true);
+
+        // Member fetch failed: an empty `stackMembers` beside a known `stack` reads
+        // exactly like a one-PR stack, so `membersUnknown` must always be present.
+        let stack = PrStackInfo { id: "133465".to_string(), position: 1, size: 2 };
+        let v = serde_json::to_value(details_with_stack(Some(stack), Vec::new(), false, true))
+            .unwrap();
+        assert_eq!(v["stackMembers"], serde_json::json!([]));
+        assert_eq!(v["stackUnknown"], false);
+        assert_eq!(v["membersUnknown"], true);
     }
 
     #[test]
@@ -7193,6 +7236,9 @@ mod tests {
         .unwrap();
         assert!(row.stack.is_none());
         assert!(serde_json::to_value(&row).unwrap()["stack"].is_null());
+        // A list row carries no member list, so it has no `membersUnknown` either —
+        // that flag belongs to the detail payload alone.
+        assert!(serde_json::to_value(&row).unwrap().get("membersUnknown").is_none());
 
         let joined: PrInfo = serde_json::from_str(
             r#"{"number":7,"url":"u","title":"t","baseRefName":"main","headRefName":"f",
@@ -7544,6 +7590,59 @@ mod tests {
         assert_eq!(joined[0].stack.as_ref().unwrap().id, "22");
         assert!(joined[1].stack.is_none());
         assert!(joined.iter().all(|p| !p.stack_unknown));
+    }
+
+    /// The detail probe's hop-2 tri-state. A FAILED member fetch must flag the
+    /// list unknown: an empty list beside a known membership otherwise reads as a
+    /// one-PR stack, hiding that the lookup failed.
+    #[tokio::test]
+    async fn stack_probe_marks_members_unknown_only_when_the_member_fetch_failed() {
+        use crate::github::runner::GhOutput;
+        let info = || PrStackInfo { id: "22".to_string(), position: 1, size: 2 };
+        let output = |code: i32, body: &str| GhOutput {
+            stdout: body.as_bytes().to_vec(),
+            stderr: String::new(),
+            code,
+        };
+
+        // (a) The member fetch timed out.
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::ZERO,
+            std::future::pending::<Option<Vec<PrStackMember>>>(),
+        )
+        .await;
+        let timed_out = PrStackProbe::stacked(info(), elapsed);
+        assert!(timed_out.members_unknown);
+        assert!(!timed_out.unknown);
+        assert!(timed_out.members.is_empty());
+        assert_eq!(timed_out.stack.as_ref().map(|s| s.size), Some(2));
+
+        // (b) Non-zero exit and (c) an unparseable body: membership stays known,
+        // only the member list is unknown.
+        for out in [output(1, r#"{"pull_requests":[]}"#), output(0, "not json")] {
+            let probe = PrStackProbe::stacked(info(), Ok(stack_members_from_output(&out)));
+            assert!(probe.members_unknown);
+            assert!(!probe.unknown);
+            assert!(probe.stack.is_some());
+        }
+
+        // (d) A genuine one-member answer is KNOWN, however short.
+        let one = output(
+            0,
+            r#"{"number":22,"open":true,"pull_requests":[
+                {"number":21,"title":"only","state":"OPEN","head":{"ref":"a"},"base":{"ref":"main"}}
+            ]}"#,
+        );
+        let probe = PrStackProbe::stacked(info(), Ok(stack_members_from_output(&one)));
+        assert!(!probe.members_unknown);
+        assert_eq!(probe.members.len(), 1);
+
+        // (e) Whole-probe failure is `unknown`, never `members_unknown`; unstacked
+        // is neither.
+        let failed = PrStackProbe::unknown();
+        assert!(failed.unknown && !failed.members_unknown);
+        let unstacked = PrStackProbe::unstacked();
+        assert!(!unstacked.unknown && !unstacked.members_unknown);
     }
 
     /// `stackUnknown` rides the wire as a camelCase bool the frontend can read, and
@@ -8288,7 +8387,7 @@ mod tests {
     /// `undefined` in TS, which is exactly how a conflicting PR looked clean.
     #[test]
     fn mergeability_fields_serialize_camel_case() {
-        let mut details = details_with_stack(None, Vec::new(), false);
+        let mut details = details_with_stack(None, Vec::new(), false, false);
         details.mergeability = PrMergeability {
             state: "conflicting".to_string(),
             detail: Some("DIRTY".to_string()),
@@ -8301,7 +8400,7 @@ mod tests {
         assert!(v.get("cross_repository").is_none());
 
         // Absent detail is an explicit null, never a missing key.
-        let details = details_with_stack(None, Vec::new(), false);
+        let details = details_with_stack(None, Vec::new(), false, false);
         let v = serde_json::to_value(&details).unwrap();
         assert_eq!(v["mergeability"]["state"], "unavailable");
         assert!(v["mergeability"]["detail"].is_null());

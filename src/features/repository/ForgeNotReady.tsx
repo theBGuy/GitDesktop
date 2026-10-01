@@ -7,7 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useRef } from "react";
+import { type Ref, useEffect, useRef } from "react";
 import { PathText } from "@/components/path-text";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -56,9 +56,15 @@ const ATLASSIAN_TOKEN_URL =
 export function ForgeNotReady({
   repoPath,
   feature,
+  retryRef,
 }: {
   repoPath: string;
   feature: string;
+  /** Rides the unreachable-host arm's Retry, for a caller's
+   *  `useRetryFocusRescue`. The rescue can't live in here: a Retry resets the
+   *  never-loaded probe to pending, and every caller unmounts this card for its
+   *  skeleton then, so only a caller-owned host survives the swap. */
+  retryRef?: Ref<HTMLButtonElement>;
 }) {
   const forge = useForgeStatus(repoPath);
   const settings = useSettings();
@@ -335,6 +341,7 @@ export function ForgeNotReady({
           available right now. Check your network connection.
         </p>
         <Button
+          ref={retryRef}
           variant="outline"
           size="sm"
           className="cursor-pointer"

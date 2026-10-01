@@ -15,7 +15,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, type Ref, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { PathText } from "@/components/path-text";
@@ -30,7 +30,10 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import {
   type DetailPaneState,
@@ -604,16 +607,18 @@ function UnavailableCard({
 function LoadFailed({
   category,
   onRetry,
+  retryRef,
 }: {
   category: string;
   onRetry: () => void;
+  retryRef: Ref<HTMLButtonElement>;
 }) {
   return (
     <div className="flex flex-col items-start gap-2 border-b px-3 py-3">
       <p className="text-xs text-muted-foreground">
         Couldn't load {category}. Retry to try again.
       </p>
-      <Button variant="outline" size="sm" onClick={onRetry}>
+      <Button ref={retryRef} variant="outline" size="sm" onClick={onRetry}>
         <ArrowClockwiseIcon data-icon="inline-start" />
         Retry
       </Button>
@@ -635,6 +640,7 @@ type FindingsRead = {
   isPending: boolean;
   isError: boolean;
   isPaused: boolean;
+  isFetching: boolean;
   data: unknown;
 };
 
@@ -653,6 +659,7 @@ function findingsPane(read: FindingsRead): DetailPaneState {
     error: read.isError,
     hasData: read.data !== undefined,
     paused: read.isPaused,
+    fetching: read.isFetching,
   });
 }
 
@@ -672,17 +679,33 @@ function FindingsLoadGate({
   onRetry: () => void;
   children: ReactNode;
 }) {
-  switch (pane) {
-    case "error":
-      return <LoadFailed category={category} onRetry={onRetry} />;
-    case "offline":
-      return <LoadOffline category={category} />;
-    case "skeleton":
-      return <RowSkeletons name={skeletonName} />;
-    case "content":
-    case "content-degraded":
-      return children;
-  }
+  // A pressed Retry resets the never-loaded read to pending, swapping the card
+  // for skeletons: the gate's own box survives every arm and takes the focus.
+  const { hostRef, retryRef } = useRetryFocusRescue(pane === "error");
+  const body = (() => {
+    switch (pane) {
+      case "error":
+        return (
+          <LoadFailed
+            category={category}
+            onRetry={onRetry}
+            retryRef={retryRef}
+          />
+        );
+      case "offline":
+        return <LoadOffline category={category} />;
+      case "skeleton":
+        return <RowSkeletons name={skeletonName} />;
+      case "content":
+      case "content-degraded":
+        return children;
+    }
+  })();
+  return (
+    <div ref={hostRef} tabIndex={-1} className="outline-none">
+      {body}
+    </div>
+  );
 }
 
 /** The always-mounted notice over a findings section's retained rows: a failed
@@ -1883,6 +1906,10 @@ export function FindingsPanel({
   // which set of queries runs, so the other providers' fire not at all.
   const provider = forge.data?.provider;
   const ready = forgeReady(forge.data);
+  // ForgeNotReady's Retry resets the never-loaded probe to pending, which swaps
+  // the card for skeletons below. Keyed on the card being mounted, a superset of
+  // its Retry being mounted: the edge still rescues only a Retry that held focus.
+  const forgeRescue = useRetryFocusRescue(!forge.isPending && !ready);
   const supported = forgeSupports(forge.data, "securityFindings");
   const enabled = ready && supported;
   // Mirrors RepositoryMenu's gate on the "Repository settings…" item: the deep
@@ -2208,11 +2235,20 @@ export function FindingsPanel({
 
       {/* overflow-hidden: the vendored ScrollArea Root is `relative`-only, so
           without containment a long list leaks a window scrollbar. */}
-      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <ScrollArea
+        // The host every arm below swaps inside, so a Retry's focus lands here.
+        ref={forgeRescue.hostRef}
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-hidden outline-none"
+      >
         {forge.isPending ? (
           <RowSkeletons name="security findings" />
         ) : !ready ? (
-          <ForgeNotReady repoPath={repoPath} feature="security findings" />
+          <ForgeNotReady
+            repoPath={repoPath}
+            feature="security findings"
+            retryRef={forgeRescue.retryRef}
+          />
         ) : !supported ? (
           <p className="px-3 py-6 text-center text-xs text-muted-foreground">
             Security findings aren't available on this repository's host.

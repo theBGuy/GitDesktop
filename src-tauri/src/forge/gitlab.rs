@@ -2341,6 +2341,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // Inference failing open has no disclosure consequence here: a GitLab merge
         // never cascades, so an unknown chain can't hide a multi-MR merge.
         stack_unknown: false,
+        members_unknown: false,
         mergeability: map_gl_mergeability(
             &mr.state,
             mr.has_conflicts,
@@ -7157,6 +7158,17 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
     })
 }
 
+/// A pipeline's jobs-list body, strictly: an unreadable body is an error, so no
+/// caller can mistake it for a pipeline with no jobs. Pure — unit-tested.
+fn pipeline_jobs_from(body: &str) -> AppResult<Vec<GlabJob>> {
+    serde_json::from_str(body).map_err(|e| {
+        gl_unreadable(
+            "the pipeline's jobs",
+            format!("could not parse GitLab pipeline jobs: {e}"),
+        )
+    })
+}
+
 /// One job's log (`/jobs/<id>/trace`), cleaned of ANSI + section markers, tail-capped.
 pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
@@ -7179,7 +7191,9 @@ pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
 /// `gh run view --log-failed` (which GitLab has no single endpoint for).
 pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let jobs: Vec<GlabJob> = run_glab(
+    // A failed jobs read is an error, never "no failed jobs": the empty arm below
+    // is a claim about the pipeline, and the frontend keeps cached logs on Err.
+    let out = run_glab(
         Some(repo_path),
         &[
             "api",
@@ -7187,10 +7201,8 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
         ],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str::<Vec<GlabJob>>(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
+    .await?;
+    let jobs = pipeline_jobs_from(&out.stdout_lossy())?;
     let failed: Vec<&GlabJob> = jobs.iter().filter(|j| j.status == "failed").collect();
     if failed.is_empty() {
         return Ok("No failed jobs in this pipeline.".to_string());
@@ -12752,6 +12764,21 @@ mod tests {
         assert_eq!(job.conclusion, "skipped");
         assert_eq!(job.started_at, "");
         assert!(job.steps.is_empty());
+    }
+
+    /// The failed-logs pane's "No failed jobs" line is a claim about the pipeline,
+    /// so an unreadable jobs body must surface as an error, never an empty list.
+    #[test]
+    fn pipeline_jobs_body_fails_loudly_rather_than_reading_as_no_jobs() {
+        assert!(pipeline_jobs_from("").is_err());
+        assert!(pipeline_jobs_from("<html>502 Bad Gateway</html>").is_err());
+        assert!(pipeline_jobs_from(r#"{"message":"404 Not found"}"#).is_err());
+
+        // A real answer, however short, still reads.
+        assert!(pipeline_jobs_from("[]").unwrap().is_empty());
+        let jobs =
+            pipeline_jobs_from(r#"[{"id":7,"status":"failed","name":"test"}]"#).unwrap();
+        assert_eq!((jobs[0].id, jobs[0].status.as_str()), (7, "failed"));
     }
 
     #[test]

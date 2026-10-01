@@ -32,6 +32,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  OFFLINE_ROWS_NOTICE,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -198,12 +203,18 @@ const hasAnswered = (leg: MyWorkLeg) =>
  *  the sources probe left disabled stays pending forever. */
 const settled = (leg: MyWorkLeg) => hasAnswered(leg) || leg.query.isError;
 
+/** A leg has settled on what it shows NOW: a failure parked offline or being
+ *  refetched hasn't, so it can't let an empty inbox claim to be complete. */
+const settledNow = (leg: MyWorkLeg) =>
+  hasAnswered(leg) || refreshFailed(leg.query);
+
 /**
  * What the error screen speaks for. The sources probe answers only when it left
  * nothing behind to ask: its data survives a failed refetch, so legs that are
  * still configured have their own answers and those are the truth — the probe's
  * failure drops to a notice rather than replacing a forge's real reply. Legs
- * speak only once every one of them has failed.
+ * speak only once every one of them has failed and settled: a leg parked
+ * offline is waiting, not failing, and its Retry would only park again.
  */
 function failedLegs(sourcesError: unknown, legs: MyWorkLeg[]): LegError[] {
   if (legs.length === 0) {
@@ -211,7 +222,7 @@ function failedLegs(sourcesError: unknown, legs: MyWorkLeg[]): LegError[] {
       ? []
       : [{ provider: null, error: sourcesError }];
   }
-  if (!legs.every((l) => l.query.isError)) return [];
+  if (!legs.every((l) => refreshFailed(l.query))) return [];
   return legs.map((l) => ({ provider: l.provider, error: l.query.error }));
 }
 
@@ -638,6 +649,13 @@ export function MyWorkScreen() {
   // And only when there is nothing for it to replace: rows an earlier fetch or
   // another leg supplied outlive the failure, which drops to a notice line.
   const fatal = errors.length > 0 && items.length === 0;
+  // Nothing drawn, and every leg is either parked offline or settled with it: the
+  // inbox waits for the connection, never an endless skeleton or an empty claim.
+  const offline =
+    !fatal &&
+    items.length === 0 &&
+    enabledLegs.some((l) => l.query.isPaused) &&
+    enabledLegs.every((l) => l.query.isPaused || settledNow(l));
   const refreshing =
     sources.isFetching || enabledLegs.some((l) => l.query.isFetching);
   // Refetches the sources probe too: a sign-in that landed while the inbox was
@@ -982,6 +1000,7 @@ export function MyWorkScreen() {
 
       <MyWorkBody
         loading={loading}
+        offline={offline}
         errors={fatal ? errors : NO_ERRORS}
         // "Items may be missing", never "the page is full": a leg hit its
         // server-side cap, the merged union overshot, or a provider lost part of
@@ -990,7 +1009,7 @@ export function MyWorkScreen() {
         capped={page.truncated}
         noSources={sources.isSuccess && enabledLegs.length === 0}
         answered={answeredLegs.map((l) => l.provider)}
-        allSettled={allSettled}
+        allSettled={enabledLegs.every(settledNow)}
         items={items}
         visible={visible}
         activeIndex={activeIndex}
@@ -1005,6 +1024,7 @@ export function MyWorkScreen() {
           Given nothing to say while the error screen owns the message. */}
       <MyWorkNotices
         legs={fatal ? NO_LEGS : enabledLegs}
+        bodyOffline={offline}
         sourcesFailed={!fatal && sources.isError}
       />
     </div>
@@ -1014,11 +1034,12 @@ export function MyWorkScreen() {
 /** Opens an item, optionally overriding the worktree preference. */
 type OpenItem = (item: MyWorkItem, opts?: { preferWorktree?: boolean }) => void;
 
-/** The body's state machine: loading → error → no sources → empty →
+/** The body's state machine: offline → loading → error → no sources → empty →
  *  filtered-empty → list. Split from the shell so the virtualizer below only
  *  ever mounts with rows. */
 function MyWorkBody({
   loading,
+  offline,
   errors,
   capped,
   noSources,
@@ -1034,6 +1055,9 @@ function MyWorkBody({
   onOpen,
 }: {
   loading: boolean;
+  /** Nothing drawn while a leg waits offline: a parked first fetch never ends
+   *  the paint window, so this outranks `loading`. */
+  offline: boolean;
   errors: LegError[];
   capped: boolean;
   noSources: boolean;
@@ -1049,6 +1073,9 @@ function MyWorkBody({
   onSelect: (url: string) => void;
   onOpen: OpenItem;
 }) {
+  if (offline) {
+    return <QuietLine>{offlinePendingMessage("your work")}</QuietLine>;
+  }
   if (loading) {
     return <ListRowSkeletons rows={8} lines={1} name="your work" />;
   }
@@ -1279,19 +1306,31 @@ function MyWorkList({
  *  nothing to say it renders an empty, zero-height container. */
 function MyWorkNotices({
   legs,
+  bodyOffline,
   sourcesFailed,
 }: {
   legs: MyWorkLeg[];
+  /** The body already says the inbox waits offline; parked legs add nothing. */
+  bodyOffline: boolean;
   sourcesFailed: boolean;
 }) {
   const lines = legs.flatMap((leg) => {
-    if (leg.query.isError) return [FAILURE_NOTICE[leg.provider]];
-    return settled(leg) ? [] : [FETCH_NOTICE[leg.provider]];
+    // A parked leg is waiting, not failing: no failure line. Its drawn rows are
+    // its last loaded ones only when they aren't another key's placeholder.
+    if (leg.query.isPaused) {
+      if (bodyOffline) return [];
+      return leg.query.data === undefined || leg.query.isPlaceholderData
+        ? [offlinePendingMessage(`${providerLabel(leg.provider)} work`)]
+        : [OFFLINE_ROWS_NOTICE];
+    }
+    if (refreshFailed(leg.query)) return [FAILURE_NOTICE[leg.provider]];
+    return settledNow(leg) ? [] : [FETCH_NOTICE[leg.provider]];
   });
   if (sourcesFailed) lines.push(SOURCES_NOTICE);
   return (
     <div aria-live="polite" className="px-3 text-[11px] text-muted-foreground">
-      {lines.map((line) => (
+      {/* Deduped: several parked legs share the one offline line. */}
+      {[...new Set(lines)].map((line) => (
         <p key={line} className="py-1">
           {line}
         </p>

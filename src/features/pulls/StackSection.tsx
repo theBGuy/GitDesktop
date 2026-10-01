@@ -8,6 +8,8 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { clipTitle } from "@/lib/clip-title";
 import {
   offerIdentity,
@@ -77,6 +79,7 @@ function numberList(members: PrStackMember[]): string {
 export function stackMergeDisclosure({
   stack,
   members,
+  membersUnknown,
   stackUnknown,
   prNoun,
   atomic,
@@ -84,6 +87,8 @@ export function stackMergeDisclosure({
 }: {
   stack: PrStackInfo | null | undefined;
   members: PrStackMember[] | undefined;
+  /** `stack` is known but its member lookup failed, so `members` is missing. */
+  membersUnknown: boolean;
   /** The stack probe failed, so a null `stack` means unknown, not unstacked. */
   stackUnknown: boolean;
   prNoun: string;
@@ -101,10 +106,11 @@ export function stackMergeDisclosure({
   if (stack) {
     if (!atomic) return null;
     const position = `This ${prNoun} is position ${stack.position} of ${stack.size} in a stack.`;
-    // Known stack, missing member list: the members hop failed, not "nothing is
-    // below" — name the scope without a count. (The arm below covers having no
-    // stack info at all, which is a weaker claim still.)
-    if ((members ?? []).length === 0) {
+    // Known stack whose member lookup failed: what sits below is unknown, so
+    // name the scope without a count. A KNOWN list, however short, counts below.
+    // (The arm after this block covers having no stack info at all, a weaker
+    // claim still.)
+    if (membersUnknown) {
       if (stack.position <= 1) return null;
       return {
         notice: `${position} Merging it also merges every still-open ${prNoun} below it — ${tail}`,
@@ -132,14 +138,18 @@ export function stackMergeDisclosure({
 
 /**
  * The detail view's Stack section: the members of the open PR's stack, listed
- * bottom-first (merge order) with the one being read marked. Renders nothing at
- * all for an UNSTACKED PR — no header, no placeholder; a stacked PR whose member
- * list is missing still gets the header and a muted note. The data rides the
- * caller's PR-details query, so this has no loading state of its own.
+ * bottom-first (merge order) with the one being read marked. Renders nothing
+ * for an UNSTACKED PR; a known stack of fewer than two members gets the header
+ * alone, and one whose member lookup failed gets the header and a notice. The
+ * data rides the caller's PR-details query, so this has no loading state of its
+ * own.
  */
 export function StackSection({
   stack,
   members,
+  membersUnknown,
+  detailsPaused,
+  onRetryMembers,
   currentNumber,
   onSelect,
   onDissolve,
@@ -148,6 +158,13 @@ export function StackSection({
 }: {
   stack: PrStackInfo | null | undefined;
   members: PrStackMember[] | undefined;
+  /** The member lookup failed, so an empty `members` is missing, not short. */
+  membersUnknown: boolean;
+  /** The details read is parked offline: its refetch resumes on reconnect, so
+   *  the failed-lookup notice says so instead of offering Retry. */
+  detailsPaused: boolean;
+  /** Refetches the details read the member list rides. */
+  onRetryMembers: () => void;
   /** The PR the detail view is showing — its row is highlighted and carries
    *  `aria-current`. It stays focusable so arrow-key nav can start from it. */
   currentNumber: number;
@@ -162,28 +179,9 @@ export function StackSection({
 }) {
   if (!stack) return null;
   const rows = byPosition(members ?? []);
-
-  // Members ride a second fetch that can fail while the stack summary succeeds
-  // (the backend emits the summary with an empty member list then) — still say
-  // the PR is stacked, rather than hiding membership over a missing list.
-  if (rows.length === 0) {
-    return (
-      <div>
-        {/* Denominator source differs per arm and must stay that way: with no
-            rows to count, the summary's own `size` is all there is; the max
-            keeps a `position` past it from reading "3 of 2". */}
-        <StackHeader
-          label={`Stack · ${stack.position} of ${Math.max(stack.size, stack.position)}`}
-          onDissolve={onDissolve}
-          dissolving={dissolving}
-          disabled={disabled}
-        />
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          Couldn't load the stack's members.
-        </p>
-      </div>
-    );
-  }
+  // A KNOWN list this short has nothing to list, but the header stays: it
+  // carries Dissolve, which a stack whose other members closed still needs.
+  const listShown = !membersUnknown && rows.length >= 2;
 
   // `listKeyboardNav` calls no hooks, so it's safe to build after the early return.
   const onKeyDown = listKeyboardNav({
@@ -193,60 +191,80 @@ export function StackSection({
     rowKey: (member) => String(member.number),
   });
 
+  // Denominator source differs per arm and must stay that way: the rows are the
+  // members we actually have, so they set it; with no list (the member lookup
+  // failed) the summary's own `size` is all there is. The max keeps a server
+  // `position` past either from reading "3 of 2".
+  const denominator = membersUnknown ? stack.size : rows.length;
+
   return (
     <div>
-      {/* The rows are the members we actually have, so they — not the summary's
-          `size`, fetched on a separate hop — set the denominator; the max keeps
-          a server `position` past the last row from reading "3 of 2". */}
       <StackHeader
-        label={`Stack · ${stack.position} of ${Math.max(rows.length, stack.position)}`}
+        label={`Stack · ${stack.position} of ${Math.max(denominator, stack.position)}`}
         onDissolve={onDissolve}
         dissolving={dissolving}
         disabled={disabled}
       />
-      {/* Capped like the checks rollup so a deep stack can't push the tab row
-          out of the header; arrow-nav scrolls the active row into view. */}
-      <div
-        className="mt-1.5 max-h-48 overflow-y-auto border"
-        onKeyDown={onKeyDown}
-      >
-        {rows.map((member) => {
-          const { Icon, tone, word } = memberPresentation(member.state);
-          const isCurrent = member.number === currentNumber;
-          return (
-            <button
-              key={member.number}
-              type="button"
-              data-row={String(member.number)}
-              aria-current={isCurrent ? "true" : undefined}
-              onClick={() => onSelect(member.number)}
-              className={cn(
-                "flex w-full items-center gap-2 border-b px-3 py-1.5 text-left text-xs last:border-b-0",
-                isCurrent
-                  ? "bg-accent text-accent-foreground"
-                  : "cursor-pointer hover:bg-muted/60",
-              )}
-            >
-              <span className="w-4 shrink-0 text-right text-muted-foreground tabular-nums">
-                {member.position}
-              </span>
-              <span className="shrink-0 font-mono text-muted-foreground">
-                #{member.number}
-              </span>
-              <span
-                className="min-w-0 flex-1 truncate"
-                onMouseEnter={clipTitle(member.title)}
+      {/* Members ride a second fetch that can fail while the stack summary
+          succeeds — still say the PR is stacked, rather than hiding membership
+          over a missing list. Mounted in both arms so a Retry that lands the
+          list hands focus to the notice's wrapper, not `<body>`. */}
+      <DegradedListNotice
+        noun="stack members"
+        degraded={membersUnknown}
+        message={
+          detailsPaused
+            ? offlinePendingMessage("the stack's members")
+            : "Couldn't load the stack's members."
+        }
+        onRetry={detailsPaused ? undefined : onRetryMembers}
+        className="mt-1.5 px-0 pb-0"
+      />
+      {listShown && (
+        // Capped like the checks rollup so a deep stack can't push the tab row
+        // out of the header; arrow-nav scrolls the active row into view.
+        <div
+          className="mt-1.5 max-h-48 overflow-y-auto border"
+          onKeyDown={onKeyDown}
+        >
+          {rows.map((member) => {
+            const { Icon, tone, word } = memberPresentation(member.state);
+            const isCurrent = member.number === currentNumber;
+            return (
+              <button
+                key={member.number}
+                type="button"
+                data-row={String(member.number)}
+                aria-current={isCurrent ? "true" : undefined}
+                onClick={() => onSelect(member.number)}
+                className={cn(
+                  "flex w-full items-center gap-2 border-b px-3 py-1.5 text-left text-xs last:border-b-0",
+                  isCurrent
+                    ? "bg-accent text-accent-foreground"
+                    : "cursor-pointer hover:bg-muted/60",
+                )}
               >
-                {member.title}
-              </span>
-              <span className={cn("flex shrink-0 items-center gap-1", tone)}>
-                <Icon className="size-3 shrink-0" weight="fill" aria-hidden />
-                {word}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+                <span className="w-4 shrink-0 text-right text-muted-foreground tabular-nums">
+                  {member.position}
+                </span>
+                <span className="shrink-0 font-mono text-muted-foreground">
+                  #{member.number}
+                </span>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  onMouseEnter={clipTitle(member.title)}
+                >
+                  {member.title}
+                </span>
+                <span className={cn("flex shrink-0 items-center gap-1", tone)}>
+                  <Icon className="size-3 shrink-0" weight="fill" aria-hidden />
+                  {word}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

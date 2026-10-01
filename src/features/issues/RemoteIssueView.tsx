@@ -27,7 +27,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
@@ -314,10 +317,20 @@ export function RemoteIssueView({
     error: details.isError,
     hasData: issue !== undefined,
     paused: details.isPaused,
+    fetching: details.isFetching,
   });
+  // A pressed Retry resets the never-loaded read to pending, swapping the error
+  // for the skeleton. Every arm's root is the same host div, so React keeps that
+  // node through the swap and on into the loaded issue, and focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    detailPane !== "skeleton" &&
+      detailPane !== "offline" &&
+      (detailPane === "error" || !issue) &&
+      details.isError,
+  );
   if (detailPane === "skeleton") {
     return (
-      <div className="space-y-3 p-4">
+      <div ref={hostRef} tabIndex={-1} className="space-y-3 p-4 outline-none">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-32 w-full" />
@@ -325,7 +338,11 @@ export function RemoteIssueView({
     );
   }
   if (detailPane === "offline") {
-    return <DiffPlaceholder message={offlinePendingMessage("this issue")} />;
+    return (
+      <div ref={hostRef} tabIndex={-1} className="h-full outline-none">
+        <DiffPlaceholder message={offlinePendingMessage("this issue")} />
+      </div>
+    );
   }
   if (detailPane === "error" || !issue) {
     // The failure class isn't knowable here, so the headline claims only which
@@ -338,27 +355,30 @@ export function RemoteIssueView({
       ? presentError(details.error).summary
       : null;
     return (
-      <DiffPlaceholder
-        message={details.isError ? loadFailed : "Could not load this issue"}
-        action={
-          details.isError ? (
-            <div className="flex flex-col items-center gap-2">
-              {errorSummary ? (
-                <p className="max-w-md text-center text-xs">{errorSummary}</p>
-              ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                disabled={details.isFetching}
-                onClick={() => details.refetch()}
-              >
-                {details.isFetching ? "Retrying…" : "Retry"}
-              </Button>
-            </div>
-          ) : undefined
-        }
-      />
+      <div ref={hostRef} tabIndex={-1} className="h-full outline-none">
+        <DiffPlaceholder
+          message={details.isError ? loadFailed : "Could not load this issue"}
+          action={
+            details.isError ? (
+              <div className="flex flex-col items-center gap-2">
+                {errorSummary ? (
+                  <p className="max-w-md text-center text-xs">{errorSummary}</p>
+                ) : null}
+                <Button
+                  ref={retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  disabled={details.isFetching}
+                  onClick={() => details.refetch()}
+                >
+                  {details.isFetching ? "Retrying…" : "Retry"}
+                </Button>
+              </div>
+            ) : undefined
+          }
+        />
+      </div>
     );
   }
 
@@ -869,7 +889,11 @@ export function RemoteIssueView({
   );
 
   return (
-    <div className="@container/issue-detail flex h-full flex-col">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className="@container/issue-detail flex h-full flex-col outline-none"
+    >
       <DegradedListNotice
         noun="this issue"
         degraded={detailPane === "content-degraded"}

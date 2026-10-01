@@ -17,12 +17,16 @@ export function offlinePendingMessage(subject: string): string {
 
 /** Whether a read's notice speaks of a failed refresh and offers Retry.
  *  Offline outranks a failure it follows: a retry would park at once, and
- *  reconnecting resumes the read by itself. */
+ *  reconnecting resumes the read by itself. A refetch in flight is unsettled
+ *  too (a reconnect resumes the errored read with `isError` still set), so it
+ *  says nothing until it lands. Omitting `isFetching` reads as settled, which
+ *  is only safe where the caller's degraded gate can't see the fetch either. */
 export function refreshFailed(q: {
   isError: boolean;
   isPaused: boolean;
+  isFetching?: boolean;
 }): boolean {
-  return q.isError && !q.isPaused;
+  return q.isError && !q.isPaused && !q.isFetching;
 }
 
 /** The notice over a detail pane's retained content. `noun` is bare ("pull
@@ -62,7 +66,12 @@ export type RemoteSectionState =
  *  data loss. `paused` is react-query's offline park (`isPaused`): an
  *  online-mode read waits there with no timeout, so it needs its own words,
  *  and it outranks an earlier failure the way {@link resolveDetailPane} does,
- *  since a Retry would only park again. */
+ *  since a Retry would only park again. `fetching` is a refetch in flight: over
+ *  an earlier failure it is not settled yet, so its rows draw quietly; omitted,
+ *  it reads as settled. Its empty arm loads rather than erroring: react-query
+ *  resets a never-loaded errored read to pending on refetch, so error, fetching
+ *  and no rows together come only from derived inputs (rows filtered out, or an
+ *  `error` merged from several reads). */
 export function resolveRemoteSection(input: {
   ghPending: boolean;
   ghReady: boolean;
@@ -70,6 +79,7 @@ export function resolveRemoteSection(input: {
   error: boolean;
   rowCount: number;
   paused?: boolean;
+  fetching?: boolean;
 }): RemoteSectionState {
   const { ghPending, ghReady, listPending, error, rowCount } = input;
   const paused = input.paused ?? false;
@@ -81,6 +91,7 @@ export function resolveRemoteSection(input: {
   // refetch over a loaded list without one keeps the empty copy below: zero
   // drawn rows is still a loaded answer.
   if (paused && error) return "offline";
+  if (error && input.fetching) return rowCount > 0 ? "rows" : "list-skeleton";
   if (error) return rowCount > 0 ? "rows-degraded" : "error";
   return rowCount === 0 ? "empty" : "rows";
 }
@@ -124,6 +135,7 @@ export function reviewCommentsNotice(input: {
   threadCount: number | undefined;
   isError: boolean;
   isPaused: boolean;
+  isFetching?: boolean;
 }): { message: string; retry: boolean } | null {
   const { threadCount, isPaused } = input;
   const failed = refreshFailed(input);
@@ -216,6 +228,7 @@ export function sectionReadNotice(input: {
   rowCount: number | undefined;
   isError: boolean;
   isPaused: boolean;
+  isFetching?: boolean;
 }): { message: string; retryLabel: string; retry: boolean } | null {
   const { noun, rowCount, isPaused } = input;
   const failed = refreshFailed(input);
@@ -250,18 +263,20 @@ export type UngroupedReason = "offline" | "error" | "truncated";
  *  when it is grouped or there is nothing to explain yet (a map still fetching).
  *  `truncated` is a loaded map too short to bucket every row, a verdict a park
  *  can't change; a park outranks a failure it follows, since a retry would only
- *  park again, and it covers a first load that would otherwise wait unexplained. */
+ *  park again, and it covers a first load that would otherwise wait unexplained.
+ *  A failure being refetched is still fetching, so it stays silent too. */
 export function ungroupedReason(input: {
   requested: boolean;
   grouped: boolean;
   isError: boolean;
   isPaused: boolean;
+  isFetching?: boolean;
   truncated: boolean;
 }): UngroupedReason | null {
   if (!input.requested || input.grouped) return null;
   if (input.truncated) return "truncated";
   if (input.isPaused) return "offline";
-  if (input.isError) return "error";
+  if (refreshFailed(input)) return "error";
   return null;
 }
 
@@ -276,17 +291,25 @@ export type DetailPaneState =
 /** The detail pane's ladder: loaded content always renders, with a notice when
  *  its refresh failed or is parked offline, since react-query keeps the last
  *  good data beside both. Placeholder data counts as data. With nothing loaded,
- *  a parked read says it's offline rather than spinning a skeleton forever. */
+ *  a parked read says it's offline rather than spinning a skeleton forever.
+ *  `fetching` is required, not defaulted: a failure being refetched (a
+ *  reconnect's resumed read) hasn't settled, and a pane degraded on the raw
+ *  error would pair with {@link refreshFailed}'s silence as an offline claim.
+ *  Its no-data skeleton arm serves derived inputs only (a `hasData` backed by
+ *  another cache, say): react-query resets a never-loaded errored read to
+ *  pending on refetch. */
 export function resolveDetailPane(input: {
   pending: boolean;
   error: boolean;
   hasData: boolean;
   paused: boolean;
+  fetching: boolean;
 }): DetailPaneState {
-  const { pending, error, hasData, paused } = input;
-  if (hasData) return error || paused ? "content-degraded" : "content";
+  const { pending, hasData, paused } = input;
+  const failed = input.error && !input.fetching;
+  if (hasData) return failed || paused ? "content-degraded" : "content";
   if (paused) return "offline";
-  if (pending) return "skeleton";
+  if (pending || (input.error && !failed)) return "skeleton";
   return "error";
 }
 

@@ -309,6 +309,11 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           rowCount: visible.length,
           // The meta probe's error feeds `error`, so its park must count too.
           paused: meta.isPaused || list.isPaused,
+          // Unsettled only while EVERY errored read is refetching: one still
+          // settled on its failure keeps the notice.
+          fetching:
+            (!meta.isError || meta.isFetching) &&
+            (!list.isError || list.isFetching),
         })
       : null;
   const listContent = ((): ReactNode => {

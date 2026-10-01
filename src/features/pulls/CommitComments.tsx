@@ -307,6 +307,7 @@ export function CommitComments({
     rowCount: comments.data?.length,
     isError: comments.isError,
     isPaused: comments.isPaused,
+    isFetching: comments.isFetching,
   });
   const whole = list.filter((c) => c.path == null);
   const anchored = list.filter((c) => c.path != null);
