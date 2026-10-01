@@ -32,6 +32,7 @@ import {
   sectionReadNotice,
 } from "@/features/conversations/remote-section-state";
 import { APPROVE_RUN_CONFIRM } from "@/features/pulls/ChecksRollup";
+import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
   useApproveWorkflowRun,
@@ -99,12 +100,17 @@ function LogsNotice({
 }: {
   logs: Pick<
     UseQueryResult<string>,
-    "data" | "isError" | "isPaused" | "isFetching" | "refetch"
+    "data" | "error" | "isError" | "isPaused" | "isFetching" | "refetch"
   >;
 }) {
+  // gh's own reason (no access, logs expired) is what tells a permanent failure
+  // from one a Retry can fix.
+  const reason = logs.error ? presentError(logs.error).summary : "";
   const notice = sectionReadNotice({
     noun: "logs",
-    loadFailed: "Couldn't load logs.",
+    loadFailed: reason
+      ? `Couldn't load logs: ${reason}`
+      : "Couldn't load logs.",
     // A log is one block, so "rows" is whether it has any text to show.
     rowCount: logs.data === undefined ? undefined : logs.data === "" ? 0 : 1,
     isError: logs.isError,

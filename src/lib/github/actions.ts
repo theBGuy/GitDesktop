@@ -311,8 +311,15 @@ export function useRunDetail(
     queryKey: ["repo", repo, "actions", "run", String(runId ?? 0)] as const,
     queryFn: () => forgeCiRunView(repo, runId ?? 0),
     enabled: runId !== null && active,
+    // An errored read stops polling: each poll would flip `isFetching` and
+    // remount the failure notice and its Retry. Retry, invalidation, reconnect,
+    // and focus refetches still resume it, and a success re-arms the poll.
     refetchInterval: (query) =>
-      query.state.data && isRunActive(query.state.data.status) ? 5000 : false,
+      query.state.status !== "error" &&
+      query.state.data &&
+      isRunActive(query.state.data.status)
+        ? 5000
+        : false,
   });
 }
 

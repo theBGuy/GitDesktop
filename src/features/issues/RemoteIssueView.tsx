@@ -323,10 +323,7 @@ export function RemoteIssueView({
   // for the skeleton. Every arm's root is the same host div, so React keeps that
   // node through the swap and on into the loaded issue, and focus lands there.
   const { hostRef, retryRef } = useRetryFocusRescue(
-    detailPane !== "skeleton" &&
-      detailPane !== "offline" &&
-      (detailPane === "error" || !issue) &&
-      details.isError,
+    detailPane === "error" && details.isError,
   );
   if (detailPane === "skeleton") {
     return (

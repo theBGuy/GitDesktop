@@ -20,7 +20,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import {
+  DEGRADED_ACTION_CLASS,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeStatus } from "@/lib/git/queries";
 import {
@@ -284,11 +289,17 @@ export function RunWorkflowDialog({
     !workflowsParked &&
     (workflows.isPending ||
       (workflows.isFetching && workflows.data === undefined));
+  // A settled failure with nothing loaded: the list is unknown, never empty.
+  const workflowsFailed =
+    !isPipelines && workflows.data === undefined && refreshFailed(workflows);
+  // The empty claim needs a loaded list behind it.
   const noneDispatchable =
-    !isPipelines &&
-    !workflowsLoading &&
-    !workflowsParked &&
-    dispatchable.length === 0;
+    !isPipelines && workflows.data !== undefined && dispatchable.length === 0;
+  // The Retry below resets the never-loaded list to pending, which unmounts it:
+  // the field's own box survives and takes the focus.
+  const workflowsRescue = useRetryFocusRescue(workflowsFailed);
+  // The one status line (offline or failed) the picker points at for AT.
+  const workflowHintId = `${idBase}-workflow-hint`;
   const selectedNoTrigger =
     !isPipelines && workflow !== "" && hasNoManualTrigger(probed, workflow);
 
@@ -314,7 +325,11 @@ export function RunWorkflowDialog({
 
         <div className="space-y-4">
           {!isPipelines && (
-            <div className="space-y-2">
+            <div
+              ref={workflowsRescue.hostRef}
+              tabIndex={-1}
+              className="space-y-2 outline-none"
+            >
               <Label htmlFor={`${idBase}-workflow`}>Workflow</Label>
               <Select
                 items={workflowItems}
@@ -331,7 +346,9 @@ export function RunWorkflowDialog({
                 <SelectTrigger
                   id={`${idBase}-workflow`}
                   aria-describedby={
-                    workflowsParked ? `${idBase}-workflow-offline` : undefined
+                    workflowsParked || workflowsFailed
+                      ? workflowHintId
+                      : undefined
                   }
                   className="w-full"
                 >
@@ -365,10 +382,27 @@ export function RunWorkflowDialog({
               </Select>
               {workflowsParked && (
                 <p
-                  id={`${idBase}-workflow-offline`}
+                  id={workflowHintId}
                   className="text-xs text-muted-foreground"
                 >
                   {offlinePendingMessage("workflows")}
+                </p>
+              )}
+              {workflowsFailed && (
+                <p
+                  id={workflowHintId}
+                  className="text-xs text-muted-foreground"
+                >
+                  Couldn't load workflows.{" "}
+                  <button
+                    ref={workflowsRescue.retryRef}
+                    type="button"
+                    aria-label="Retry loading workflows"
+                    onClick={() => void workflows.refetch()}
+                    className={DEGRADED_ACTION_CLASS}
+                  >
+                    Retry
+                  </button>
                 </p>
               )}
               {noneDispatchable && (

@@ -203,10 +203,18 @@ const hasAnswered = (leg: MyWorkLeg) =>
  *  the sources probe left disabled stays pending forever. */
 const settled = (leg: MyWorkLeg) => hasAnswered(leg) || leg.query.isError;
 
-/** A leg has settled on what it shows NOW: a failure parked offline or being
- *  refetched hasn't, so it can't let an empty inbox claim to be complete. */
+/** The leg holds a page of its OWN, not the previous key's placeholder. */
+const hasOwnData = (leg: MyWorkLeg) =>
+  leg.query.data !== undefined && !leg.query.isPlaceholderData;
+
+/** A leg has settled on what it shows NOW: a failure being refetched, or one
+ *  parked offline with nothing of its own loaded, hasn't, so it can't let an
+ *  empty inbox claim to be complete. A park over its own loaded page has: that
+ *  page is still this leg's answer. */
 const settledNow = (leg: MyWorkLeg) =>
-  hasAnswered(leg) || refreshFailed(leg.query);
+  hasAnswered(leg) ||
+  refreshFailed(leg.query) ||
+  (leg.query.isPaused && hasOwnData(leg));
 
 /**
  * What the error screen speaks for. The sources probe answers only when it left
@@ -649,12 +657,15 @@ export function MyWorkScreen() {
   // And only when there is nothing for it to replace: rows an earlier fetch or
   // another leg supplied outlive the failure, which drops to a notice line.
   const fatal = errors.length > 0 && items.length === 0;
-  // Nothing drawn, and every leg is either parked offline or settled with it: the
-  // inbox waits for the connection, never an endless skeleton or an empty claim.
+  // Nothing drawn, a leg parked before it ever answered, and every other leg
+  // parked or settled: the inbox waits for the connection, never an endless
+  // skeleton or an empty claim. A leg that answered empty doesn't count: zero
+  // rows is a loaded answer, so the empty copy stays and the notice line beneath
+  // says it's parked.
   const offline =
     !fatal &&
     items.length === 0 &&
-    enabledLegs.some((l) => l.query.isPaused) &&
+    enabledLegs.some((l) => l.query.isPaused && !hasOwnData(l)) &&
     enabledLegs.every((l) => l.query.isPaused || settledNow(l));
   const refreshing =
     sources.isFetching || enabledLegs.some((l) => l.query.isFetching);

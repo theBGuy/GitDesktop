@@ -1981,10 +1981,7 @@ export function RemotePrView({
   // node through the swap and on into the loaded pull request, and focus lands
   // there.
   const { hostRef, retryRef } = useRetryFocusRescue(
-    detailPane !== "skeleton" &&
-      detailPane !== "offline" &&
-      (detailPane === "error" || !pr) &&
-      details.isError,
+    detailPane === "error" && details.isError,
   );
   if (detailPane === "skeleton") {
     return (

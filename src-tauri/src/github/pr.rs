@@ -2349,8 +2349,10 @@ async fn gh_stack_members(
     stack_members_from_output(&out)
 }
 
-/// Read a stacks-endpoint response into members, `None` on a non-zero exit or an
-/// unparseable body. Pure — unit-tested.
+/// Read a stacks-endpoint response into members, `None` on a non-zero exit, an
+/// unparseable body, or an empty member list. Hop 1 already proved this PR is a
+/// member, so its own stack listing no usable member is a shape failure, never a
+/// known-empty stack. Pure — unit-tested.
 fn stack_members_from_output(out: &crate::github::runner::GhOutput) -> Option<Vec<PrStackMember>> {
     if out.code != 0 {
         return None;
@@ -2358,6 +2360,7 @@ fn stack_members_from_output(out: &crate::github::runner::GhOutput) -> Option<Ve
     serde_json::from_str::<GhStackEntry>(&out.stdout_lossy())
         .ok()
         .map(|entry| stack_members_from(&entry.pull_requests))
+        .filter(|members| !members.is_empty())
 }
 
 /// What a stack create/add confirmed: the stack's number and its members
@@ -7617,9 +7620,16 @@ mod tests {
         assert!(timed_out.members.is_empty());
         assert_eq!(timed_out.stack.as_ref().map(|s| s.size), Some(2));
 
-        // (b) Non-zero exit and (c) an unparseable body: membership stays known,
-        // only the member list is unknown.
-        for out in [output(1, r#"{"pull_requests":[]}"#), output(0, "not json")] {
+        // (b) Non-zero exit, (c) an unparseable body, and a parseable body with no
+        // usable member (the stack hop 1 placed this PR in can't be empty):
+        // membership stays known, only the member list is unknown.
+        for out in [
+            output(1, r#"{"pull_requests":[]}"#),
+            output(0, "not json"),
+            output(0, "{}"),
+            output(0, r#"{"pull_requests":[]}"#),
+            output(0, r#"{"pull_requests":[{"title":"no number"}]}"#),
+        ] {
             let probe = PrStackProbe::stacked(info(), Ok(stack_members_from_output(&out)));
             assert!(probe.members_unknown);
             assert!(!probe.unknown);

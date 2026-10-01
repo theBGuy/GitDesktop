@@ -418,15 +418,20 @@ export function ProjectFieldValues({
   const offlineMessage = offlinePendingMessage(FIELD_LABEL.toLowerCase());
   // Still gated: a disabled query keeps whatever error it last cached, so an item
   // whose boards — or whose scope — have since gone stays silent.
-  const failedShown =
+  const errored =
     lines.length === 0 &&
-    !loading &&
     !parked &&
     canRead &&
     values.error !== null &&
     boardsKnown;
-  // A pressed Retry resets the never-loaded read to pending, swapping it for the
-  // skeleton: focus lands on the block that survives instead of `<body>`.
+  // A failure being refetched over loaded-but-lineless values hasn't settled, so
+  // it loads like a first read rather than keeping the error and its Retry up.
+  const retrying = errored && values.isFetching;
+  const skeleton = loading || retrying;
+  const failedShown = errored && !skeleton;
+  // A pressed Retry swaps the error for the skeleton (a never-loaded read resets
+  // to pending; a loaded one starts fetching): focus lands on the host that
+  // survives instead of `<body>`.
   const { hostRef, retryRef } = useRetryFocusRescue(failedShown);
 
   const content = (() => {
@@ -446,7 +451,7 @@ export function ProjectFieldValues({
             ))}
           </div>
         );
-      case loading:
+      case skeleton:
         return <Skeleton className="h-4 w-40" aria-hidden />;
       case parked:
         return (
@@ -549,22 +554,19 @@ export function ProjectFieldValues({
   return (
     <>
       {heading ?? <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>}
-      <MetaValueCell
-        label={FIELD_LABEL}
-        empty={content === null && truncatedNote === null}
-        busy={lines.length === 0 && loading}
-      >
-        {/* The cell offers no host of its own, so this span is the one that
-            survives the error→skeleton swap; it lays out as the cell does. */}
-        <span
-          ref={hostRef}
-          tabIndex={-1}
-          className="flex w-full min-w-0 flex-wrap items-center gap-1.5 outline-none"
+      {/* The cell takes no ref and swaps its children for the empty placeholder,
+          so the host every state shares wraps the whole cell: a block grid item,
+          which lays out as the cell alone did. */}
+      <div ref={hostRef} tabIndex={-1} className="min-w-0 outline-none">
+        <MetaValueCell
+          label={FIELD_LABEL}
+          empty={content === null && truncatedNote === null}
+          busy={lines.length === 0 && skeleton}
         >
           {content}
           {truncatedNote}
-        </span>
-      </MetaValueCell>
+        </MetaValueCell>
+      </div>
     </>
   );
 }
