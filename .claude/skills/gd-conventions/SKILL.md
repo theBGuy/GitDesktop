@@ -391,8 +391,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (ConversationListPanel) with a stable `tabIndex={-1}` host element; focus
   must never fall to `<body>` on the shown→hidden edge.
 - **Empty-picker copy** — a picker's line while it draws no options rides
-  `emptyPickerCopy` (remote-section-state); a parked read says offline, and
-  only a successful read may claim there are none.
+  `emptyPickerCopy` (remote-section-state); a read parked with nothing loaded,
+  or over a failure, says offline; only a successful read may claim none.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

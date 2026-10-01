@@ -263,7 +263,7 @@ export function ActionsPanel({
               !ghReady
                 ? "Connect this repo to load runs"
                 : runs.isFetching
-                  ? `Refreshing ${runNoun} runs…`
+                  ? `Loading ${runNoun} runs…`
                   : undefined
             }
             title="Refresh runs"

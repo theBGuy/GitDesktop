@@ -496,13 +496,15 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           (`relative` only), so without containment the list's natural height
           leaks into the document once it exceeds the viewport (a window
           scrollbar over a black void). The Viewport still scrolls internally. */}
-      <ScrollArea
-        // The host every arm below swaps inside, so a Retry's focus lands here.
-        ref={rescue.hostRef}
-        tabIndex={-1}
-        className="min-h-0 flex-1 overflow-hidden outline-none"
-      >
-        <div onKeyDown={onListKeyDown}>
+      <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+        <div
+          // The host every arm below swaps inside, so a Retry's focus lands
+          // here, where the arrow keys still reach the list's nav.
+          ref={rescue.hostRef}
+          tabIndex={-1}
+          className="outline-none"
+          onKeyDown={onListKeyDown}
+        >
           <DegradedListNotice
             noun="discussions"
             degraded={notice !== null}
