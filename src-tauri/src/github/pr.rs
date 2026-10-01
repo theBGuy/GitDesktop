@@ -143,10 +143,13 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
 /// report worded like a transport failure rejects under the same contract as the
 /// per-host probe: the sign-in is unknown, never signed-out.
 fn fallback_auth_outcome(code: i32, report: &str) -> AppResult<(bool, Vec<ParsedAccount>)> {
-    if code != 0 && crate::forge::session::gh_error_is_network(Some(report)) {
-        return Err(AppError::Gh(
-            "Couldn't reach GitHub to check the sign-in.".to_string(),
-        ));
+    if code != 0 {
+        let transport_residue = crate::forge::session::gh_text_transport_residue(report);
+        if crate::forge::session::gh_error_is_network(Some(&transport_residue)) {
+            return Err(AppError::Gh(
+                "Couldn't reach GitHub to check the sign-in.".to_string(),
+            ));
+        }
     }
     Ok((code == 0, parse_auth_accounts(report)))
 }
@@ -4176,6 +4179,10 @@ pub struct PrDetails {
     /// GitHub: always false — checks arrive in the same `gh pr view` call as the view
     /// itself; a failed call fails the whole view, so a rendered view's checks were read.
     pub checks_unknown: bool,
+    /// The comments read FAILED: `comments` holds no server comments (a frontend
+    /// optimistic append may transiently appear). GitLab: a failed notes read; Bitbucket:
+    /// any failed comments page. GitHub: always false, read in the view's own call.
+    pub comments_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
     pub mergeability: PrMergeability,
@@ -4192,6 +4199,16 @@ pub struct PrDetails {
 pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrCheckOut>, bool) {
     match read {
         Ok(checks) => (checks, false),
+        Err(_) => (Vec::new(), true),
+    }
+}
+
+/// Unknown comments are always empty; successful reads, including empty ones, are known.
+pub(crate) fn comments_or_unknown<E>(
+    read: Result<Vec<PrThreadOut>, E>,
+) -> (Vec<PrThreadOut>, bool) {
+    match read {
+        Ok(comments) => (comments, false),
         Err(_) => (Vec::new(), true),
     }
 }
@@ -4846,6 +4863,7 @@ pub async fn gh_pr_view(
         stack_unknown,
         members_unknown,
         checks_unknown: false,
+        comments_unknown: false,
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
@@ -7312,6 +7330,7 @@ mod tests {
             stack_unknown,
             members_unknown,
             checks_unknown: false,
+            comments_unknown: false,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
@@ -7357,6 +7376,8 @@ mod tests {
         assert!(v.get("members_unknown").is_none());
         assert_eq!(v["checksUnknown"], false);
         assert!(v.get("checks_unknown").is_none());
+        assert_eq!(v["commentsUnknown"], false);
+        assert!(v.get("comments_unknown").is_none());
 
         // Unstacked: an explicit null plus an empty array, never a missing key.
         let v =
@@ -7388,6 +7409,13 @@ mod tests {
         assert_eq!(v["checks"], serde_json::json!([]));
         assert_eq!(v["checksUnknown"], true);
         assert!(v.get("checks_unknown").is_none());
+
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        details.comments_unknown = true;
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["comments"], serde_json::json!([]));
+        assert_eq!(v["commentsUnknown"], true);
+        assert!(v.get("comments_unknown").is_none());
     }
 
     #[test]
@@ -9044,6 +9072,22 @@ github.acme.com
         // A healthy report never rejects, whatever words it carries.
         let healthy = "  ✓ Logged in to git.network.example as alice (oauth_token)";
         assert!(fallback_auth_outcome(0, healthy).unwrap().0);
+    }
+
+    #[test]
+    fn auth_fallback_masks_hostnames_and_login_slots_before_network_checks() {
+        for report in [
+            "X Failed to log in to timeout.acme.corp account alice (keyring)\nThe token is invalid.",
+            "X Failed to log in to github.com account proxy (keyring)\nThe token is invalid.",
+            "X Failed to log in to timeout using token (GH_TOKEN)\nThe token is invalid.",
+            "Logged in to github.com as timeout\nActive account: proxy\nThe token is invalid.",
+            "The token is invalid for https://proxy.acme.com/502",
+        ] {
+            assert!(!fallback_auth_outcome(1, report).unwrap().0, "{report}");
+        }
+        let report = "X Failed to log in to timeout.acme.corp account proxy (keyring)\nconnection refused";
+        let err = fallback_auth_outcome(1, report).err().expect("rejects");
+        assert_eq!(err.to_string(), "Couldn't reach GitHub to check the sign-in.");
     }
 
     #[test]

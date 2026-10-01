@@ -174,8 +174,9 @@ impl GitDesktopMcp {
                        is true, the stack status could NOT be checked — that is not a guarantee \
                        the PR is unstacked, so verify on GitHub before merging it. `checksUnknown` \
                        means the checks could not be read and an empty `checks` is a missing list. \
-                       For just the conversation — including file:line review \
-                       threads — see list_pull_request_comments. Returns JSON."
+                       `commentsUnknown` means the comments could not be read and an empty \
+                       `comments` is a missing list. For just the conversation — including \
+                       file:line review threads — see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(
         &self,
@@ -208,9 +209,11 @@ impl GitDesktopMcp {
                        -anchored threads, each with its full reply chain) — every entry carries the \
                        author, date, and the original markdown body. Each thread's `diffHunk` \
                        code-context excerpt (GitHub only) is capped to its last few lines; set \
-                       `include_diff_hunk` false to drop hunks entirely (default true). Read-only; \
-                       returns JSON. (For the PR's metadata + changed files use get_pull_request; \
-                       for its diff, pull_request_diff.)"
+                       `include_diff_hunk` false to drop hunks entirely (default true). \
+                       `commentsUnknown` means the comments could not be read and an empty \
+                       `comments` is a missing list. Read-only; returns JSON. (For the PR's \
+                       metadata + changed files use get_pull_request; for its diff, \
+                       pull_request_diff.)"
     )]
     async fn list_pull_request_comments(
         &self,
@@ -234,43 +237,13 @@ impl GitDesktopMcp {
                 String::new()
             };
         }
-        // KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
-        // mirrors this composed shape — the diffHunk cap AND the empty-field
-        // pruning below — for the HTTP review tool loop.
-        let mut payload = serde_json::json!({
-            "number": args.number,
-            "comments": pr.comments,
-            "reviews": pr.reviews,
-            "review_threads": review_threads,
-        });
-        // Prune always-default empty fields from every comment/thread object so
-        // agent consumers (the AI review eats the same JSON) don't pay tokens for
-        // e.g. `authorAvatarUrl:""` or `isMinimized:false`. Mutates the OWNED
-        // Value; the shared IPC struct's serialized shape is untouched.
-        if let Some(arr) = payload.get_mut("comments").and_then(|v| v.as_array_mut()) {
-            for c in arr {
-                strip_empty_comment_defaults(c);
-            }
-        }
-        if let Some(arr) = payload.get_mut("reviews").and_then(|v| v.as_array_mut()) {
-            for c in arr {
-                strip_empty_comment_defaults(c);
-            }
-        }
-        if let Some(arr) = payload
-            .get_mut("review_threads")
-            .and_then(|v| v.as_array_mut())
-        {
-            for thread in arr {
-                strip_empty_comment_defaults(thread);
-                if let Some(nested) = thread.get_mut("comments").and_then(|v| v.as_array_mut()) {
-                    for c in nested {
-                        strip_empty_comment_defaults(c);
-                    }
-                }
-            }
-        }
-        json_result_untrusted(&payload)
+        json_result_untrusted(&comments_payload(
+            args.number,
+            pr.comments,
+            pr.comments_unknown,
+            pr.reviews,
+            review_threads,
+        ))
     }
 
     #[tool(
@@ -514,6 +487,56 @@ impl GitDesktopMcp {
     }
 }
 
+/// The list_pull_request_comments payload. `commentsUnknown` rides beside `comments`
+/// so a failed comments read never reaches an agent as an empty conversation.
+///
+/// KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
+/// mirrors this composed shape, the empty-field pruning below, and the tool's
+/// diffHunk cap for the HTTP review tool loop.
+fn comments_payload(
+    number: u64,
+    comments: Vec<crate::github::pr::PrThreadOut>,
+    comments_unknown: bool,
+    reviews: Vec<crate::github::pr::PrThreadOut>,
+    review_threads: Vec<crate::github::pr::ReviewThreadOut>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "number": number,
+        "comments": comments,
+        "commentsUnknown": comments_unknown,
+        "reviews": reviews,
+        "review_threads": review_threads,
+    });
+    // Prune always-default empty fields from every comment/thread object so
+    // agent consumers (the AI review eats the same JSON) don't pay tokens for
+    // e.g. `authorAvatarUrl:""` or `isMinimized:false`. Mutates the OWNED
+    // Value; the shared IPC struct's serialized shape is untouched.
+    if let Some(arr) = payload.get_mut("comments").and_then(|v| v.as_array_mut()) {
+        for c in arr {
+            strip_empty_comment_defaults(c);
+        }
+    }
+    if let Some(arr) = payload.get_mut("reviews").and_then(|v| v.as_array_mut()) {
+        for c in arr {
+            strip_empty_comment_defaults(c);
+        }
+    }
+    if let Some(arr) = payload
+        .get_mut("review_threads")
+        .and_then(|v| v.as_array_mut())
+    {
+        for thread in arr {
+            strip_empty_comment_defaults(thread);
+            if let Some(nested) = thread.get_mut("comments").and_then(|v| v.as_array_mut()) {
+                for c in nested {
+                    strip_empty_comment_defaults(c);
+                }
+            }
+        }
+    }
+    payload
+}
+
 /// Drop the always-default empty fields from one comment/thread JSON object,
 /// in place. Removes a key ONLY when it holds its empty default; every other
 /// key (including load-bearing `false`s like `isResolved`/`viewerDidAuthor`,
@@ -671,5 +694,20 @@ mod tests {
         assert!(!nc.contains_key("isMinimized"));
         assert_eq!(nc.get("viewerDidAuthor"), Some(&serde_json::Value::Bool(false)));
         assert_eq!(nc.get("id"), Some(&serde_json::json!("C1")));
+    }
+
+    /// An empty `comments` is ambiguous on its own, so `commentsUnknown` is always
+    /// present, survives the prune, and carries the camelCase name get_pull_request uses.
+    #[test]
+    fn comments_payload_carries_comments_unknown() {
+        let v = comments_payload(7, Vec::new(), true, Vec::new(), Vec::new());
+        assert_eq!(v["number"], 7);
+        assert_eq!(v["comments"], serde_json::json!([]));
+        assert_eq!(v["commentsUnknown"], true);
+        assert!(v.get("comments_unknown").is_none());
+
+        let v = comments_payload(7, Vec::new(), false, Vec::new(), Vec::new());
+        assert_eq!(v["comments"], serde_json::json!([]));
+        assert_eq!(v["commentsUnknown"], false);
     }
 }

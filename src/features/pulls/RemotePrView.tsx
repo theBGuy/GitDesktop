@@ -295,9 +295,12 @@ const PROVIDER_MERGE_STRATEGIES: Record<
 };
 
 /** Tab labels for this view's sections, function-valued because three of the four
- *  carry a live count. */
+ *  carry a live count. An unread comments list has no count to show, not zero. */
 const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
-  conversation: (pr) => `Conversation (${pr.comments.length})`,
+  conversation: (pr) =>
+    pr.commentsUnknown
+      ? "Conversation"
+      : `Conversation (${pr.comments.length})`,
   commits: (pr) => `Commits (${pr.commits.length})`,
   files: (pr) => `Files (${pr.files.length})`,
   review: () => "Review",
@@ -3037,6 +3040,22 @@ export function RemotePrView({
                   editable={pr.state === "OPEN" && !detailsStale}
                 />
               )}
+              {/* The comments ride a sub-fetch that can fail while the view loads;
+                  mounted in both arms so a Retry that lands the list hands focus to
+                  the notice's wrapper, not `<body>`. */}
+              <DegradedListNotice
+                noun="comments"
+                degraded={pr.commentsUnknown}
+                message={
+                  details.isPaused
+                    ? offlinePendingMessage("the comments")
+                    : `Couldn't load this ${prNoun}'s comments.`
+                }
+                onRetry={
+                  details.isPaused ? undefined : () => void details.refetch()
+                }
+                className="px-0 pb-0"
+              />
               <PrActivityFeed
                 pr={pr}
                 timeline={timeline}
@@ -3149,10 +3168,11 @@ export function RemotePrView({
               {/* What the FEED holds, not what the payload does: the viewer's own
                   pending review and its draft line comments are carried by the notice
                   strip, so counting either here would silence this line over an empty
-                  feed. Threads and timeline must have LOADED: an unread one counts
-                  zero, and "no activity" is a claim about what was read. */}
+                  feed. Comments, threads and timeline must have LOADED: an unread one
+                  counts zero, and "no activity" is a claim about what was read. */}
               {threadClaims.renderedReviews.length === 0 &&
                 pr.comments.length === 0 &&
+                !pr.commentsUnknown &&
                 pr.commits.length === 0 &&
                 timeline.data !== undefined &&
                 timeline.data.length === 0 &&

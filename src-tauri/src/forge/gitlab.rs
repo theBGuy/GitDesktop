@@ -28,7 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
-use crate::forge::session::{classify_glab_failure, GlabFailure};
+use crate::forge::session::{classify_glab_failure_for_host, GlabFailure};
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
     FORK_POLL_DELAY, README_CANDIDATES,
@@ -37,10 +37,10 @@ use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
-    checks_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem,
-    PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo,
-    PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember, PrThreadOut,
-    RepoLabel, ReviewSubmitOut, ReviewThreadOut, STACKS_TIMEOUT,
+    checks_or_unknown, comments_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
+    ExternalReviewItem, PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
+    PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember,
+    PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -137,7 +137,7 @@ pub(crate) async fn host_status(repo_path: &str, host: &str) -> ForgeStatus {
 }
 
 /// Whether a `glab auth status` probe signs `host` in. A probe that never reached
-/// `host` (a timeout, or a failure `classify_glab_failure` reads as Offline) is an
+/// `host` (a timeout, or a failure `classify_glab_failure_for_host` reads as Offline) is an
 /// error, never a signed-out verdict: react-query keeps the last good status on a
 /// rejection, where `false` would unmount every GitLab panel for an outage. Other
 /// failures, rate limits included, read false (the session-health arms own those).
@@ -151,7 +151,7 @@ fn gitlab_auth_outcome(probe: AppResult<GlabOutput>, host: &str) -> AppResult<bo
         Ok(out) if out.code == 0 => Ok(true),
         Ok(out) => {
             let combined = format!("{}\n{}", out.stdout_lossy(), out.stderr).to_lowercase();
-            match classify_glab_failure(&combined) {
+            match classify_glab_failure_for_host(&combined, host) {
                 GlabFailure::Offline => Err(unreachable()),
                 GlabFailure::NotConnected | GlabFailure::RateLimited | GlabFailure::Broken => {
                     Ok(false)
@@ -2179,43 +2179,20 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the view.
     let viewer = current_user_login(repo_path).await;
 
-    // Comments — drop GitLab's system notes and diff-anchored (positioned) notes
-    // (the latter surface as `review_threads`).
-    let comments: Vec<PrThreadOut> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str::<Vec<GlabNote>>(&o.stdout_lossy()).ok())
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|n| !n.system && n.position.is_none())
-    .map(|n| {
-        let (author, author_avatar_url) = n
-            .author
-            .map(|a| (a.username, a.avatar_url))
-            .unwrap_or_default();
-        PrThreadOut {
-            viewer_did_author: note_authored_by_viewer(&author, viewer.as_deref()),
-            author,
-            author_avatar_url,
-            state: String::new(),
-            body: n.body,
-            date: n.created_at,
-            id: n.id.to_string(),
-            url: String::new(),
-            is_minimized: false,
-            minimized_reason: String::new(),
-            // GitLab doesn't model review objects — no owning review id.
-            review_id: String::new(),
-        }
-    })
-    .collect();
+    // Comments are additive like checks: a failed notes read leaves the view
+    // available with an explicitly unknown list rather than an empty conversation.
+    let (comments, comments_unknown) = comments_or_unknown(
+        run_glab(
+            Some(repo_path),
+            &[
+                "api",
+                &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100"),
+            ],
+            GLAB_NETWORK_TIMEOUT,
+        )
+        .await
+        .and_then(|o| mr_comments_from(&o.stdout_lossy(), viewer.as_deref())),
+    );
 
     // Checks are additive: a failed jobs read leaves the view available with an
     // explicitly unknown list; an absent pipeline is a known empty list.
@@ -2353,6 +2330,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         stack_unknown: false,
         members_unknown: false,
         checks_unknown,
+        comments_unknown,
         mergeability: map_gl_mergeability(
             &mr.state,
             mr.has_conflicts,
@@ -2369,6 +2347,42 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // not denied.
         maintainer_can_modify: None,
     })
+}
+
+/// An MR's notes body as its conversation comments, strictly: an unreadable body is
+/// an error, never an empty conversation. System notes and diff-anchored
+/// (positioned) notes are dropped — the latter surface as `review_threads`. Pure.
+fn mr_comments_from(body: &str, viewer: Option<&str>) -> AppResult<Vec<PrThreadOut>> {
+    let notes: Vec<GlabNote> = serde_json::from_str(body).map_err(|e| {
+        gl_unreadable(
+            "the merge request's comments",
+            format!("could not parse GitLab merge request notes: {e}"),
+        )
+    })?;
+    Ok(notes
+        .into_iter()
+        .filter(|n| !n.system && n.position.is_none())
+        .map(|n| {
+            let (author, author_avatar_url) = n
+                .author
+                .map(|a| (a.username, a.avatar_url))
+                .unwrap_or_default();
+            PrThreadOut {
+                viewer_did_author: note_authored_by_viewer(&author, viewer),
+                author,
+                author_avatar_url,
+                state: String::new(),
+                body: n.body,
+                date: n.created_at,
+                id: n.id.to_string(),
+                url: String::new(),
+                is_minimized: false,
+                minimized_reason: String::new(),
+                // GitLab doesn't model review objects — no owning review id.
+                review_id: String::new(),
+            }
+        })
+        .collect())
 }
 
 /// One `resource_label_events` entry: `{action:"add"|"remove", label{name,color},
@@ -6852,19 +6866,17 @@ async fn pipeline_checks(
 ) -> AppResult<Vec<PrCheckOut>> {
     let cross_project = cross_project_id.map(|id| id.to_string());
     let project = cross_project.as_deref().unwrap_or(enc);
-    let endpoint = format!("projects/{project}/pipelines/{pipeline_id}/jobs?per_page=100");
-    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    pipeline_checks_from(&out.stdout_lossy(), pipeline_id, cross_project_id.is_some())
+    let jobs = pipeline_jobs(repo_path, project, pipeline_id).await?;
+    Ok(pipeline_checks_from(jobs, pipeline_id, cross_project_id.is_some()))
 }
 
 fn pipeline_checks_from(
-    body: &str,
+    jobs: Vec<GlabJob>,
     pipeline_id: u64,
     cross_project: bool,
-) -> AppResult<Vec<PrCheckOut>> {
-    let jobs = pipeline_jobs_from(body)?;
+) -> Vec<PrCheckOut> {
     let run_id = (!cross_project).then(|| pipeline_id.to_string());
-    Ok(jobs.into_iter()
+    jobs.into_iter()
         .map(|j| PrCheckOut {
             name: j.name,
             status: map_job_check_status(&j.status),
@@ -6874,7 +6886,7 @@ fn pipeline_checks_from(
             started_at: Some(j.started_at).filter(|s| !s.is_empty()),
             completed_at: Some(j.finished_at).filter(|s| !s.is_empty()),
         })
-        .collect())
+        .collect()
 }
 
 /// GitLab's pipeline `source` → a short label for the run's "workflow" slot
@@ -7135,16 +7147,7 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
 
     // Jobs — GitLab returns newest-first; reverse to execution order (stage order),
     // matching how view_pr reorders commits oldest-first.
-    let out = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let mut jobs = pipeline_jobs_from(&out.stdout_lossy())?;
+    let mut jobs = pipeline_jobs(repo_path, &enc, run_id).await?;
     jobs.reverse();
 
     // Prefer the commit subject (free, from the jobs) for the header; else the
@@ -7188,6 +7191,48 @@ fn pipeline_jobs_from(body: &str) -> AppResult<Vec<GlabJob>> {
     })
 }
 
+/// GitLab caps a list page at 100.
+const JOBS_PER_PAGE: usize = 100;
+/// A fan-out pipeline's jobs can run past one page; three pages covers realistic
+/// pipelines without an unbounded walk on a pathological one.
+const MAX_JOB_PAGES: u32 = 3;
+
+/// Every job of a pipeline in `project` (encoded path or numeric id), up to
+/// [`MAX_JOB_PAGES`], in GitLab's newest-first order.
+async fn pipeline_jobs(
+    repo_path: &str,
+    project: &str,
+    pipeline_id: u64,
+) -> AppResult<Vec<GlabJob>> {
+    pipeline_jobs_paged(|page| async move {
+        let endpoint = format!(
+            "projects/{project}/pipelines/{pipeline_id}/jobs?per_page={JOBS_PER_PAGE}&page={page}"
+        );
+        let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+        Ok(out.stdout_lossy())
+    })
+    .await
+}
+
+/// The page walk behind [`pipeline_jobs`], strictly: any page that fails to fetch or
+/// parse fails the whole read, so a truncated list never passes as complete.
+async fn pipeline_jobs_paged<F, Fut>(mut fetch_page: F) -> AppResult<Vec<GlabJob>>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let mut jobs = Vec::new();
+    for page in 1..=MAX_JOB_PAGES {
+        let batch = pipeline_jobs_from(&fetch_page(page).await?)?;
+        let done = batch.len() < JOBS_PER_PAGE;
+        jobs.extend(batch);
+        if done {
+            break;
+        }
+    }
+    Ok(jobs)
+}
+
 /// One job's log (`/jobs/<id>/trace`), cleaned of ANSI + section markers, tail-capped.
 pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
@@ -7212,16 +7257,7 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
     let enc = encode_project(&project_path(repo_path).await?);
     // A failed jobs read is an error, never "no failed jobs": the empty arm below
     // is a claim about the pipeline, and the frontend keeps cached logs on Err.
-    let out = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/pipelines/{run_id}/jobs?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let jobs = pipeline_jobs_from(&out.stdout_lossy())?;
+    let jobs = pipeline_jobs(repo_path, &enc, run_id).await?;
     let failed: Vec<&GlabJob> = jobs.iter().filter(|j| j.status == "failed").collect();
     if failed.is_empty() {
         return Ok("No failed jobs in this pipeline.".to_string());
@@ -12884,14 +12920,23 @@ mod tests {
         assert_eq!((jobs[0].id, jobs[0].status.as_str()), (7, "failed"));
     }
 
+    /// One jobs page through the same strict parse `pipeline_checks` applies.
+    fn checks_from_body(
+        body: &str,
+        pipeline_id: u64,
+        cross_project: bool,
+    ) -> AppResult<Vec<PrCheckOut>> {
+        pipeline_jobs_from(body).map(|jobs| pipeline_checks_from(jobs, pipeline_id, cross_project))
+    }
+
     #[test]
     fn pipeline_checks_body_preserves_failed_and_empty_reads() {
         for body in ["", "<html>502 Bad Gateway</html>", r#"{"message":"404 Not found"}"#] {
-            assert!(pipeline_checks_from(body, 42, false).is_err(), "{body}");
+            assert!(checks_from_body(body, 42, false).is_err(), "{body}");
         }
-        assert!(pipeline_checks_from("[]", 42, false).unwrap().is_empty());
+        assert!(checks_from_body("[]", 42, false).unwrap().is_empty());
         let checks =
-            pipeline_checks_from(r#"[{"id":7,"status":"failed","name":"test"}]"#, 42, false)
+            checks_from_body(r#"[{"id":7,"status":"failed","name":"test"}]"#, 42, false)
                 .unwrap();
         assert_eq!(checks[0].name, "test");
         assert_eq!(checks[0].status, "FAILURE");
@@ -12899,9 +12944,119 @@ mod tests {
         assert_eq!(checks[0].job_id.as_deref(), Some("7"));
     }
 
+    /// A jobs page of `n` jobs with ids counting up from `first_id`.
+    fn jobs_page(first_id: u64, n: usize) -> String {
+        let jobs: Vec<serde_json::Value> = (0..n as u64)
+            .map(|i| {
+                serde_json::json!({
+                    "id": first_id + i,
+                    "status": "success",
+                    "name": format!("job-{}", first_id + i),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(jobs).to_string()
+    }
+
+    /// Drives the page walk with canned pages (`None` = that page's fetch fails),
+    /// returning the outcome and the pages requested, in order.
+    async fn walk_jobs(pages: Vec<Option<String>>) -> (AppResult<Vec<GlabJob>>, Vec<u32>) {
+        let mut requested = Vec::new();
+        let result = pipeline_jobs_paged(|page| {
+            requested.push(page);
+            let body = pages.get(page as usize - 1).cloned().flatten();
+            async move { body.ok_or_else(|| AppError::Glab("HTTP 502".into())) }
+        })
+        .await;
+        (result, requested)
+    }
+
+    #[tokio::test]
+    async fn pipeline_jobs_follow_a_full_page_and_fold_the_next() {
+        let (jobs, requested) =
+            walk_jobs(vec![Some(jobs_page(1, 100)), Some(jobs_page(101, 7))]).await;
+        let jobs = jobs.unwrap();
+        assert_eq!(requested, [1, 2]);
+        assert_eq!(jobs.len(), 107);
+        // Server order survives the fold, so view_run's reverse stays oldest-first.
+        assert_eq!((jobs[0].id, jobs[106].id), (1, 107));
+    }
+
+    #[tokio::test]
+    async fn pipeline_jobs_stop_on_a_short_or_empty_first_page() {
+        let (jobs, requested) = walk_jobs(vec![Some(jobs_page(1, 7))]).await;
+        assert_eq!(jobs.unwrap().len(), 7);
+        assert_eq!(requested, [1]);
+
+        let (jobs, requested) = walk_jobs(vec![Some("[]".into())]).await;
+        assert!(jobs.unwrap().is_empty());
+        assert_eq!(requested, [1]);
+    }
+
+    #[tokio::test]
+    async fn pipeline_jobs_fail_whole_when_a_later_page_fails() {
+        let (jobs, requested) = walk_jobs(vec![Some(jobs_page(1, 100)), None]).await;
+        assert!(jobs.is_err());
+        assert_eq!(requested, [1, 2]);
+
+        // An unreadable later page is the same failure, never a 100-job pipeline.
+        let (jobs, _) =
+            walk_jobs(vec![Some(jobs_page(1, 100)), Some("<html>502</html>".into())]).await;
+        assert!(jobs.is_err());
+
+        // Through the checks fold, a failed later page reads as unknown checks.
+        let (jobs, _) = walk_jobs(vec![Some(jobs_page(1, 100)), None]).await;
+        let (checks, unknown) =
+            checks_or_unknown(jobs.map(|jobs| pipeline_checks_from(jobs, 42, false)));
+        assert!(checks.is_empty());
+        assert!(unknown);
+    }
+
+    #[tokio::test]
+    async fn pipeline_jobs_stop_at_the_page_ceiling() {
+        let full = (0..5).map(|p| Some(jobs_page(p * 100 + 1, 100))).collect();
+        let (jobs, requested) = walk_jobs(full).await;
+        assert_eq!(requested, [1, 2, 3]);
+        assert_eq!(jobs.unwrap().len(), 300);
+    }
+
+    #[test]
+    fn mr_comments_body_preserves_failed_and_empty_reads() {
+        for body in ["", "<html>502 Bad Gateway</html>", r#"{"message":"404 Not found"}"#] {
+            let (comments, unknown) = comments_or_unknown(mr_comments_from(body, None));
+            assert!(comments.is_empty(), "{body}");
+            assert!(unknown, "{body}");
+        }
+        // A failed fetch folds the same way as an unreadable body.
+        let (comments, unknown) =
+            comments_or_unknown(Err::<Vec<PrThreadOut>, _>(AppError::Glab("HTTP 502".into())));
+        assert!(comments.is_empty());
+        assert!(unknown);
+
+        // A read that succeeds empty, or holds only filtered notes, is a known empty list.
+        let (comments, unknown) = comments_or_unknown(mr_comments_from("[]", None));
+        assert!(comments.is_empty());
+        assert!(!unknown);
+        let (comments, unknown) = comments_or_unknown(mr_comments_from(
+            r#"[{"id":1,"body":"assigned to @a","system":true}]"#,
+            None,
+        ));
+        assert!(comments.is_empty());
+        assert!(!unknown);
+
+        let (comments, unknown) = comments_or_unknown(mr_comments_from(
+            r#"[{"id":5,"body":"looks good","author":{"username":"alice"}}]"#,
+            Some("alice"),
+        ));
+        assert!(!unknown);
+        assert_eq!(comments[0].id, "5");
+        assert_eq!(comments[0].body, "looks good");
+        assert!(comments[0].viewer_did_author);
+    }
+
     #[test]
     fn pipeline_checks_from_cross_project_preserves_link_without_action_ids() {
-        let checks = pipeline_checks_from(
+        let checks = checks_from_body(
             r#"[{"id":7,"status":"failed","name":"test",
                  "web_url":"https://gitlab.com/fork/repo/-/jobs/7"}]"#,
             42,

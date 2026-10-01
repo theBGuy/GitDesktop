@@ -7,9 +7,8 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
-use crate::github::gh_unreadable;
-use crate::github::repo_settings::gh_failure_reason;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]

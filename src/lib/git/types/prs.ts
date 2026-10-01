@@ -312,6 +312,10 @@ export interface PrDetails {
    *  Bitbucket only; GitHub reads its checks in the same call as the PR itself,
    *  so it always reports false. */
   checksUnknown: boolean;
+  /** True when the forge's comments read FAILED: `comments` holds no server
+   *  comments, though a local optimistic append may transiently appear. GitLab
+   *  and Bitbucket only; GitHub reads them with the PR itself, so always false. */
+  commentsUnknown: boolean;
   labels: RepoLabel[];
   /** Assignees. GitHub and GitLab both fill this (the MR/PR-assignees picker is
    *  wired for both, `implemented.mrAssignees`); Bitbucket leaves it empty. Each

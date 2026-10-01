@@ -350,7 +350,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "review summaries, and file:line-anchored review threads with their " +
         "reply chains. Each thread's diffHunk code-context excerpt (GitHub only) " +
         "is capped to its last few lines; set include_diff_hunk false to drop " +
-        "hunks entirely (default true).",
+        "hunks entirely (default true). commentsUnknown means the comments " +
+        "could not be read and an empty comments is a missing list.",
       inputSchema: z.object({
         include_diff_hunk: z
           .boolean()
@@ -384,6 +385,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           const composed = {
             number: prNumber,
             comments: pr.comments.map(stripEmptyCommentDefaults),
+            commentsUnknown: pr.commentsUnknown,
             reviews: pr.reviews.map(stripEmptyCommentDefaults),
             review_threads: cappedThreads.map((t) => {
               const pruned = stripEmptyCommentDefaults(t);

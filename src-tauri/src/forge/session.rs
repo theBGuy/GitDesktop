@@ -315,6 +315,7 @@ pub(crate) fn gh_error_is_network(error: Option<&str>) -> bool {
     })
 }
 
+/// Only repository-resolution wording or a bounded HTTP 404 counts as not found.
 pub(crate) fn gh_error_is_not_found(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
     stderr.contains("could not resolve to a repository")
@@ -326,6 +327,8 @@ pub(crate) fn gh_error_is_not_found(stderr: &str) -> bool {
         })
 }
 
+/// Failure buckets for nonzero gh exits; `Answered` is the fallback without
+/// evidence of rate limiting, a missing resource, or a transport failure.
 pub(crate) enum GhFailure {
     RateLimited,
     NotFound,
@@ -333,6 +336,8 @@ pub(crate) enum GhFailure {
     Answered,
 }
 
+/// Rate-limit and not-found evidence outrank transport words.
+/// `Answered` covers any un-worded nonzero exit, including 401/403 and empty stderr.
 pub(crate) fn classify_gh_failure(stderr: &str) -> GhFailure {
     // Check not-found before network: gh's 404 text embeds network-worded slugs.
     if gh_error_is_rate_limit(Some(stderr)) {
@@ -678,6 +683,28 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
 /// Never trim host prefixes — `(client.timeout` must remain a Go transport
 /// diagnostic (only the URL arm trims leading quotes and `(`).
 fn is_host_or_url_token(word: &str) -> bool {
+    let bare = trim_host_token_suffix(word);
+    let host = bare.contains('.')
+        && bare.split('.').all(|label| {
+            !label.is_empty()
+                && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        });
+    // Go errors wrap URLs in quotes; status text can wrap them in parentheses.
+    let url = word
+        .trim_start_matches(['"', '\'', '('])
+        .split_once("://")
+        .is_some_and(|(scheme, _)| {
+            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        });
+    host || url
+}
+
+/// Trim only trailing punctuation and one numeric port; leading delimiters
+/// preserve diagnostic tokens such as `(Client.Timeout`.
+fn trim_host_token_suffix(word: &str) -> &str {
     let mut bare = word;
     let mut port_stripped = false;
     loop {
@@ -697,35 +724,21 @@ fn is_host_or_url_token(word: &str) -> bool {
             break;
         }
     }
-    let host = bare.contains('.')
-        && bare.split('.').all(|label| {
-            !label.is_empty()
-                && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
-        });
-    // Go errors wrap URLs in quotes; status text can wrap them in parentheses.
-    let url = word
-        .trim_start_matches(['"', '\'', '('])
-        .split_once("://")
-        .is_some_and(|(scheme, _)| {
-            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                && scheme
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
-        });
-    host || url
+    bare
 }
 
-/// The pure step behind [`github_health_text_fallback`]: one plain `gh auth status`
-/// result (exit code + combined report) classified for `host_str`.
-fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHealth {
-    let accounts = crate::github::pr::parse_auth_accounts(report);
-    // Prefer the account matching this host, else any.
-    let acct = accounts
-        .iter()
-        .find(|a| a.host == host_str)
-        .or_else(|| accounts.first());
-    // Account metadata and host/URL-shaped tokens cannot name a transport verdict.
-    let transport_residue = report
+/// Host and URL tokens cannot supply diagnostic words or status codes.
+pub(crate) fn mask_host_tokens(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| if is_host_or_url_token(word) { "" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Account metadata and positional login slots in gh text reports cannot
+/// supply transport evidence; host and URL tokens are masked afterward.
+pub(crate) fn gh_text_transport_residue(report: &str) -> String {
+    let residue = report
         .lines()
         .filter(|line| !line.contains("Logged in to") && !line.contains("Active account:"))
         .flat_map(|line| {
@@ -744,15 +757,21 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
             }
             words
         })
-        .map(|word| {
-            if is_host_or_url_token(word) {
-                ""
-            } else {
-                word
-            }
-        })
         .collect::<Vec<_>>()
         .join(" ");
+    mask_host_tokens(&residue)
+}
+
+/// The pure step behind [`github_health_text_fallback`]: one plain `gh auth status`
+/// result (exit code + combined report) classified for `host_str`.
+fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHealth {
+    let accounts = crate::github::pr::parse_auth_accounts(report);
+    // Prefer the account matching this host, else any.
+    let acct = accounts
+        .iter()
+        .find(|a| a.host == host_str)
+        .or_else(|| accounts.first());
+    let transport_residue = gh_text_transport_residue(report);
     // Transport words outrank the account count: a failed report can carry no
     // "Logged in" line at all, and reading that as NotConnected would sign the user
     // out for an outage.
@@ -874,7 +893,9 @@ fn gh_account_health(host: &str, acct: &GhJsonAccount) -> SessionHealth {
         "error" if gh_error_is_rate_limit(acct.error.as_deref()) => SessionState::RateLimited,
         // A request that never reached GitHub says nothing about the credential, and an
         // outage fails the anti-flap re-probe identically.
-        "error" if gh_error_is_network(acct.error.as_deref()) => SessionState::Offline,
+        "error" if gh_error_is_network(acct.error.as_deref().map(mask_host_tokens).as_deref()) => {
+            SessionState::Offline
+        }
         // Possibly transient: the per-repo and accounts paths confirm it with a
         // re-probe; the poller takes it as-is and re-reads next tick.
         "error" => SessionState::Broken,
@@ -975,11 +996,7 @@ pub(crate) enum GlabFailure {
 /// Unknown text degrades to `Broken` (never a panic) so an unrecognized glab message
 /// still surfaces as an actionable "reconnect" rather than being swallowed.
 pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
-    let transport_residue = combined_lower
-        .split_whitespace()
-        .map(|word| if is_host_or_url_token(word) { "" } else { word })
-        .collect::<Vec<_>>()
-        .join(" ");
+    let transport_residue = mask_host_tokens(combined_lower);
     const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
     // Proxy/server outage status text (measured via a 502 proxy: `Post "…/oauth/token":
     // Bad Gateway`) is Offline as for gh, in session health and the sign-in probe, never
@@ -1016,6 +1033,31 @@ pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     } else {
         GlabFailure::Broken
     }
+}
+
+/// A known host, including undotted labels and numeric ports, cannot vote on
+/// failure kind. Input text is lowercased as for `classify_glab_failure`.
+pub(crate) fn classify_glab_failure_for_host(combined_lower: &str, host: &str) -> GlabFailure {
+    let host = host.to_ascii_lowercase();
+    let bare_host = host
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
+        .map_or(host.as_str(), |(bare, _)| bare);
+    let residue = combined_lower
+        .split_whitespace()
+        .map(|word| {
+            let trimmed = trim_host_token_suffix(word);
+            if trimmed.eq_ignore_ascii_case(&host) || trimmed.eq_ignore_ascii_case(bare_host) {
+                // Keep the token slot so masking cannot join diagnostic phrases.
+                // Punctuation supplies no classifier words or digits.
+                "?"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    classify_glab_failure(&residue)
 }
 
 /// Like `has_standalone_word`, but '-' also counts as a word character because
@@ -1085,7 +1127,7 @@ async fn gitlab_health(host: &str) -> SessionHealth {
         return h;
     }
     let raw = format!("{}\n{}", out.stdout_lossy(), out.stderr);
-    match classify_glab_failure(&raw.to_lowercase()) {
+    match classify_glab_failure_for_host(&raw.to_lowercase(), host) {
         GlabFailure::NotConnected => SessionHealth::new("gitlab", host, SessionState::NotConnected),
         GlabFailure::Offline => SessionHealth::new("gitlab", host, SessionState::Offline),
         GlabFailure::RateLimited => glab_rate_limited(host, &raw),
@@ -1102,7 +1144,7 @@ async fn gitlab_health(host: &str) -> SessionHealth {
                 }
                 Ok(o2) => {
                     let raw2 = format!("{}\n{}", o2.stdout_lossy(), o2.stderr);
-                    match classify_glab_failure(&raw2.to_lowercase()) {
+                    match classify_glab_failure_for_host(&raw2.to_lowercase(), host) {
                         GlabFailure::NotConnected => {
                             SessionHealth::new("gitlab", host, SessionState::NotConnected)
                         }
@@ -2435,6 +2477,36 @@ mod tests {
     }
 
     #[test]
+    fn gh_json_host_and_url_tokens_cannot_supply_network_evidence() {
+        for error in [
+            "The token is invalid for https://proxy.acme.com/user",
+            "The token is invalid for timeout.acme.corp",
+            "The token is invalid for https://acme.com/502",
+        ] {
+            for (health, reprobe) in classify_both(&one_account("error", Some(error))) {
+                assert_eq!(health.state, SessionState::Broken, "{error}");
+                assert!(reprobe, "{error}");
+                assert_eq!(health.detail.as_deref(), Some(error));
+            }
+        }
+    }
+
+    #[test]
+    fn gh_json_transport_evidence_survives_auth_digits_in_urls() {
+        for error in [
+            "Get https://proxy.acme.com/user: connection refused",
+            "Get https://acme.com/401: context deadline exceeded",
+            "Get https://acme.com/403: unexpected EOF",
+        ] {
+            for (health, reprobe) in classify_both(&one_account("error", Some(error))) {
+                assert_eq!(health.state, SessionState::Offline, "{error}");
+                assert!(!reprobe, "{error}");
+                assert_eq!(health.detail.as_deref(), Some(error));
+            }
+        }
+    }
+
+    #[test]
     fn gh_json_auth_refusal_stays_broken_despite_network_words() {
         // gh 2.94.0's live wording for a rejected token, measured with a bogus GH_TOKEN.
         let live_401 = "non-200 OK status code: 401 Unauthorized body: \"{\\r\\n  \\\"message\\\": \\\"Bad credentials\\\",\\r\\n  \\\"documentation_url\\\": \\\"https://docs.github.com/rest\\\",\\r\\n  \\\"status\\\": \\\"401\\\"\\r\\n}\"";
@@ -3301,6 +3373,71 @@ check your internet connection or https://githubstatus.com";
             "x timeout.acme.com:8443: 401 unauthorized",
         ] {
             assert_eq!(classify_glab_failure(report), GlabFailure::Broken, "{report}");
+        }
+    }
+
+    #[test]
+    fn glab_known_undotted_host_cannot_supply_rate_limit_digits() {
+        for (text, host) in [
+            ("x gitlab-429: 401 unauthorized", "gitlab-429"),
+            ("x gitlab-429: 401 unauthorized", "GITLAB-429"),
+            ("x gitlab-429:8443),. 401 unauthorized", "gitlab-429"),
+            ("x gitlab-429. 401 unauthorized", "gitlab-429"),
+            ("x localhost:429 401 unauthorized", "localhost"),
+            ("x gitlab-429:8443: 401 unauthorized", "gitlab-429:8443"),
+            ("x gitlab-429 401 unauthorized", "gitlab-429:8443"),
+            ("x gitlab-429:8443),. 401 unauthorized", "GITLAB-429:8443"),
+        ] {
+            assert_eq!(
+                classify_glab_failure_for_host(text, host),
+                GlabFailure::Broken,
+                "{text} / {host}"
+            );
+            assert_eq!(classify_glab_failure(text), GlabFailure::RateLimited, "{text}");
+        }
+        assert_eq!(
+            classify_glab_failure_for_host("x gitlab-429: too many requests", "gitlab-429"),
+            GlabFailure::RateLimited
+        );
+        assert_eq!(
+            classify_glab_failure_for_host(
+                "x gitlab-429:8443: too many requests",
+                "gitlab-429:8443",
+            ),
+            GlabFailure::RateLimited
+        );
+        assert_eq!(
+            classify_glab_failure_for_host("x gitlab-429: 429", "gitlab-429"),
+            GlabFailure::RateLimited
+        );
+        assert_eq!(
+            classify_glab_failure_for_host("x gitlab-429: 401 unauthorized", "gitlab"),
+            GlabFailure::RateLimited
+        );
+    }
+
+    #[test]
+    fn glab_known_host_mask_keeps_phrase_words_separated() {
+        let text = "not gitlab-429 logged in";
+        assert_eq!(
+            classify_glab_failure_for_host(text, "gitlab-429"),
+            GlabFailure::Broken
+        );
+        assert_eq!(classify_glab_failure(text), GlabFailure::RateLimited);
+    }
+
+    #[test]
+    fn glab_known_host_mask_preserves_leading_delimiters_and_transport_evidence() {
+        for (text, host) in [
+            ("(client.timeout", "client.timeout"),
+            ("(timeout", "timeout"),
+            ("x gitlab-429: connection refused", "gitlab-429"),
+        ] {
+            assert_eq!(
+                classify_glab_failure_for_host(text, host),
+                GlabFailure::Offline,
+                "{text}"
+            );
         }
     }
 

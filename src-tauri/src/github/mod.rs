@@ -27,6 +27,7 @@ pub mod security_findings;
 pub mod teams;
 
 use crate::error::{AppError, AppResult};
+use crate::github::runner::GhOutput;
 
 /// The `owner/repo` slug of the checked-out repo's **origin** remote, to pass
 /// explicitly as `gh -R <slug>`.
@@ -125,9 +126,39 @@ pub(crate) fn gh_unreadable(what: &str, detail: String) -> AppError {
     AppError::Gh(format!("Couldn't read {what} from GitHub.\n{detail}"))
 }
 
+/// A one-line reason for a failed `gh` call — its first non-empty stderr line,
+/// or the exit status when gh said nothing. It reaches the UI, so keep it short.
+pub(crate) fn gh_failure_reason(out: &GhOutput) -> String {
+    out.stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("gh exited with status {}", out.code))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fork_owner_of, gh_unreadable, lens_remote, valid_github_slug};
+    use super::{
+        fork_owner_of, gh_failure_reason, gh_unreadable, lens_remote, valid_github_slug, GhOutput,
+    };
+
+    #[test]
+    fn gh_failure_reason_names_the_failure_even_when_gh_is_silent() {
+        let noisy = GhOutput {
+            stdout: Vec::new(),
+            stderr: "\n  \ngh: Not Found (HTTP 404)\nsecond line\n".into(),
+            code: 1,
+        };
+        assert_eq!(gh_failure_reason(&noisy), "gh: Not Found (HTTP 404)");
+        // Empty stderr still names the failure rather than reading as silence.
+        let silent = GhOutput {
+            stdout: Vec::new(),
+            stderr: String::new(),
+            code: 4,
+        };
+        assert_eq!(gh_failure_reason(&silent), "gh exited with status 4");
+    }
 
     #[test]
     fn lens_remote_accepts_none_origin_upstream() {

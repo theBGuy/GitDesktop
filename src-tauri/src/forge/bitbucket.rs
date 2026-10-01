@@ -45,9 +45,9 @@ use crate::forge::{
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
-    checks_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn,
-    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel,
-    PrMergeability, PrPollInfo, PrRef, PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
+    checks_or_unknown, comments_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
+    PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo,
+    PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
 };
 
 /// Whether this process has SUCCESSFULLY seeded git's credential store this session
@@ -442,10 +442,22 @@ async fn bb_paginate<T: serde::de::DeserializeOwned>(
     first_url: String,
     what: &str,
 ) -> AppResult<Vec<T>> {
+    bb_walk_pages(first_url, |url| async move {
+        http::bb_get_json::<BbPage<T>>(creds, &url, what, BbOpKind::Read).await
+    })
+    .await
+}
+
+/// The `next`-following walk behind [`bb_paginate`], over an injected page fetch.
+async fn bb_walk_pages<T, F, Fut>(first_url: String, mut fetch_page: F) -> AppResult<Vec<T>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<BbPage<T>>>,
+{
     let mut url = first_url;
     let mut out: Vec<T> = Vec::new();
     for _ in 0..BB_MAX_PAGES {
-        let page: BbPage<T> = http::bb_get_json(creds, &url, what, BbOpKind::Read).await?;
+        let page = fetch_page(url).await?;
         out.extend(page.values);
         match next_page_url(page.next) {
             Some(next) => url = next,
@@ -1629,19 +1641,14 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // double-render them. A reply carries `parent` but not `inline`, so an
     // `inline.is_none()` filter alone misses it — resolve each comment's chain root
     // instead, across ALL pages (a page-2 reply's inline root can sit on page 1). A reply
-    // to a plain comment has a non-inline root and stays in the flat list. Best-effort
-    // (empty on failure); `base` already carries the `/pullrequests/{number}` suffix.
-    let comments: Vec<PrThreadOut> = fetch_all_pr_comments(&creds, &format!("{base}/comments"))
-        .await
-        .map(|values| {
-            let inline_ids = inline_thread_comment_ids(&values);
-            values
-                .into_iter()
-                .filter(|c| !c.deleted && !c.pending && !inline_ids.contains(&c.id))
-                .map(|c| from_bb_comment(c, &viewer_uuid))
-                .collect()
-        })
-        .unwrap_or_default();
+    // to a plain comment has a non-inline root and stays in the flat list. A failed walk
+    // leaves the view available with an explicitly unknown list; `base` already carries
+    // the `/pullrequests/{number}` suffix.
+    let (comments, comments_unknown) = comments_or_unknown(
+        fetch_all_pr_comments(&creds, &format!("{base}/comments"))
+            .await
+            .map(|values| conversation_comments(values, &viewer_uuid)),
+    );
 
     // The core PR's head scopes checks independently of the best-effort commits
     // fetch; `pullrequests/{id}/statuses` includes superseded commits. Missing head
@@ -1738,6 +1745,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         stack_unknown: false,
         members_unknown: false,
         checks_unknown,
+        comments_unknown,
         // Bitbucket Cloud's PR payload carries no mergeability field, and its only
         // pre-check needs a write scope — so "unknown", never a guess.
         mergeability: PrMergeability::unavailable(),
@@ -1925,6 +1933,17 @@ fn bb_timeline_date(e: &ForgeTimelineEventOut) -> &str {
 /// Bitbucket's mixed local offsets — the raw strings don't sort chronologically.
 fn bb_timeline_instant(e: &ForgeTimelineEventOut) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(bb_timeline_date(e)).ok()
+}
+
+/// A PR's whole comment set as its flat conversation list: deleted, pending, and every
+/// inline-thread comment (root or reply) dropped, in server order. Pure.
+fn conversation_comments(values: Vec<BbComment>, viewer_uuid: &str) -> Vec<PrThreadOut> {
+    let inline_ids = inline_thread_comment_ids(&values);
+    values
+        .into_iter()
+        .filter(|c| !c.deleted && !c.pending && !inline_ids.contains(&c.id))
+        .map(|c| from_bb_comment(c, viewer_uuid))
+        .collect()
 }
 
 /// Map one non-deleted/non-pending comment onto a neutral thread. The body is the raw
@@ -6800,12 +6819,7 @@ mod tests {
         assert!(inline_ids.contains(&5));
         assert!(!inline_ids.contains(&1));
         assert!(!inline_ids.contains(&6));
-        let threads: Vec<PrThreadOut> = page
-            .values
-            .into_iter()
-            .filter(|c| !c.deleted && !c.pending && !inline_ids.contains(&c.id))
-            .map(|c| from_bb_comment(c, ""))
-            .collect();
+        let threads = conversation_comments(page.values, "");
         // Survivors: the general comment and its (non-inline) reply. The inline
         // root + its reply, plus deleted/pending, are excluded.
         assert_eq!(threads.len(), 2);
@@ -6813,6 +6827,67 @@ mod tests {
         assert_eq!(threads[0].author, "Bob");
         assert_eq!(threads[1].body, "reply to general");
         assert_eq!(threads[1].author, "Cid");
+    }
+
+    /// One comments page holding `ids`, linking to `next` when given.
+    fn comments_page(ids: &[u64], next: Option<&str>) -> BbPage<BbComment> {
+        let values: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "content": {"raw": format!("c{id}")}}))
+            .collect();
+        serde_json::from_value(serde_json::json!({"values": values, "next": next})).unwrap()
+    }
+
+    /// Drives the comments walk with canned pages (`None` = that page fails) and
+    /// folds it exactly as `view_pr` does.
+    async fn fold_comment_pages(
+        pages: Vec<Option<BbPage<BbComment>>>,
+    ) -> (Vec<PrThreadOut>, bool, usize) {
+        let mut pages = pages.into_iter();
+        let mut requested = 0;
+        let read = bb_walk_pages(format!("{BB_API_BASE}c?pagelen=100"), |_url| {
+            requested += 1;
+            let page = pages.next().flatten();
+            async move { page.ok_or_else(|| AppError::Bitbucket("HTTP 502".into())) }
+        })
+        .await;
+        let (comments, unknown) =
+            comments_or_unknown(read.map(|values| conversation_comments(values, "")));
+        (comments, unknown, requested)
+    }
+
+    #[tokio::test]
+    async fn comments_fold_preserves_failed_and_empty_reads() {
+        // A later page failing aborts the walk: page one's comments are NOT shown as
+        // the whole conversation, the list is unknown.
+        let next = format!("{BB_API_BASE}c?pagelen=100&page=2");
+        let (comments, unknown, requested) =
+            fold_comment_pages(vec![Some(comments_page(&[1, 2], Some(&next))), None]).await;
+        assert_eq!(requested, 2);
+        assert!(comments.is_empty());
+        assert!(unknown);
+
+        // A failed first page is the same unknown list.
+        let (comments, unknown, _) = fold_comment_pages(vec![None]).await;
+        assert!(comments.is_empty());
+        assert!(unknown);
+
+        // A read that succeeds empty is a known empty conversation.
+        let (comments, unknown, requested) =
+            fold_comment_pages(vec![Some(comments_page(&[], None))]).await;
+        assert_eq!(requested, 1);
+        assert!(comments.is_empty());
+        assert!(!unknown);
+
+        // Every page landing folds them all, in server order.
+        let (comments, unknown, _) = fold_comment_pages(vec![
+            Some(comments_page(&[1, 2], Some(&next))),
+            Some(comments_page(&[3], None)),
+        ])
+        .await;
+        assert!(!unknown);
+        let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2", "3"]);
     }
 
     #[test]

@@ -8,10 +8,10 @@ use serde_json::json;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
-use crate::github::gh_unreadable;
 use crate::github::runner::{
     run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 /// Reads `permissions.admin` to gate repo settings and webhooks; no access is `false`.
 /// Transport failures, rate limits, and a missing GitHub origin remote reject.
@@ -101,17 +101,6 @@ fn write_access_from_repo_json(repo_json: &str) -> Result<WriteAccessBits, Strin
         perms.triage.or(perms.push),
         role_from_permissions(&perms),
     ))
-}
-
-/// A one-line reason for a failed `gh` call — its first non-empty stderr line,
-/// or the exit status when gh said nothing. It reaches the UI, so keep it short.
-pub(crate) fn gh_failure_reason(out: &GhOutput) -> String {
-    out.stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("gh exited with status {}", out.code))
 }
 
 /// Whether the signed-in viewer can push to this repo — the viewer-permission
@@ -879,7 +868,7 @@ pub async fn gh_repo_settings_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{gh_failure_reason, write_access_from_repo_json, GhOutput};
+    use super::{write_access_from_repo_json, GhOutput};
 
     #[test]
     fn repo_admin_transport_failures_reject() {
@@ -948,23 +937,6 @@ mod tests {
             }));
             assert_eq!(result.unwrap(), expected, "{code}: {stdout:?}, {stderr:?}");
         }
-    }
-
-    #[test]
-    fn gh_failure_reason_names_the_failure_even_when_gh_is_silent() {
-        let noisy = GhOutput {
-            stdout: Vec::new(),
-            stderr: "\n  \ngh: Not Found (HTTP 404)\nsecond line\n".into(),
-            code: 1,
-        };
-        assert_eq!(gh_failure_reason(&noisy), "gh: Not Found (HTTP 404)");
-        // Empty stderr still names the failure rather than reading as silence.
-        let silent = GhOutput {
-            stdout: Vec::new(),
-            stderr: String::new(),
-            code: 4,
-        };
-        assert_eq!(gh_failure_reason(&silent), "gh exited with status 4");
     }
 
     #[test]
