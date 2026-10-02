@@ -307,7 +307,7 @@ export interface PrDetails {
   reviews: PrThreadOut[];
   comments: PrThreadOut[];
   checks: PrCheckOut[];
-  /** True when the checks read failed or is knowably incomplete — never present
+  /** True when the checks read failed or may be incomplete — never present
    *  `checks` as complete. A partial list may be retained; an empty one is a
    *  missing list, not a PR without checks. GitLab and Bitbucket only; GitHub
    *  reads its checks in the same call as the PR itself, so always false. */
@@ -317,7 +317,7 @@ export interface PrDetails {
    *  same list. Implies `checksUnknown`; a failed read is unknown but never
    *  truncated. GitHub: always false. */
   checksTruncated: boolean;
-  /** True when the comments read failed or is knowably incomplete — never
+  /** True when the comments read failed or may be incomplete — never
    *  present `comments` as complete. A partial list may be retained, and a local
    *  optimistic append may transiently appear. GitLab and Bitbucket: a failed or
    *  capped read. GitHub: a failed REST top-up past 100 comments, which keeps
@@ -329,7 +329,7 @@ export interface PrDetails {
    *  `commentsUnknown`; a failed read is unknown but never truncated.
    *  GitHub: always false. */
   commentsTruncated: boolean;
-  /** True when the commits read failed or is knowably incomplete — never present
+  /** True when the commits read failed or may be incomplete — never present
    *  `commits` as complete. A partial list may be retained. GitLab and
    *  Bitbucket: a failed or capped read. GitHub: a failed REST top-up past 100
    *  commits (the GraphQL rows are kept) or the 250-commit REST ceiling. */
@@ -339,7 +339,7 @@ export interface PrDetails {
    *  same list. Implies `commitsUnknown`; a failed read is unknown but never
    *  truncated. GitHub: set at the 250-commit REST ceiling. */
   commitsTruncated: boolean;
-  /** True when the reviewer-verdict read failed or is knowably incomplete — never
+  /** True when the reviewer-verdict read failed or may be incomplete — never
    *  present reviewer verdicts (`completedReviewers`, or on GitHub the chips
    *  derived from `reviews`) as complete, nor an assigned reviewer without a
    *  verdict as pending. `reviewers` itself stays complete. GitLab: a failed

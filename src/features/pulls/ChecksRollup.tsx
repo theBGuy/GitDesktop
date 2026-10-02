@@ -548,7 +548,7 @@ export function ChecksRollup({
   unmetRequiredContexts = [],
 }: {
   checks: PrCheckOut[];
-  /** The checks read failed or is knowably incomplete — never present `checks`
+  /** The checks read failed or may be incomplete — never present `checks`
    *  as complete. Empty and not truncated, it is a missing list, not a PR
    *  without checks. */
   checksUnknown: boolean;
