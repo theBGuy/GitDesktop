@@ -278,6 +278,20 @@ const NETWORKISH: [&str; 7] = [
     "deadline exceeded",
 ];
 
+const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
+
+// Proxy/server outage status text (measured via a 502 proxy: `Post "…/oauth/token":
+// Bad Gateway`) is Offline as for gh, in session health and the sign-in probe, never
+// Broken. Multi-word only: this is a bare-substring match, and hostnames carry digits.
+const OFFLINE_STATUS: [&str; 4] = [
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "proxy authentication required",
+];
+
+const GLAB_RATE_LIMIT_PHRASES: [&str; 2] = ["rate limit", "too many requests"];
+
 /// gh-only additions, measured from `gh auth status --json` (gh 2.94.0) behind a
 /// failing proxy, whose CONNECT refusals carry only the status TEXT: a dropped stream
 /// reads `unexpected EOF`, and a refusing proxy `Bad Gateway`, `Service Unavailable`,
@@ -997,21 +1011,12 @@ pub(crate) enum GlabFailure {
 /// still surfaces as an actionable "reconnect" rather than being swallowed.
 pub(crate) fn classify_glab_failure(combined_lower: &str) -> GlabFailure {
     let transport_residue = mask_host_tokens(combined_lower);
-    const NOT_CONNECTED: [&str; 4] = ["not logged in", "no token", "no accounts", "no hosts"];
-    // Proxy/server outage status text (measured via a 502 proxy: `Post "…/oauth/token":
-    // Bad Gateway`) is Offline as for gh, in session health and the sign-in probe, never
-    // Broken. Multi-word only: this is a bare-substring match, and hostnames carry digits.
-    const OFFLINE_STATUS: [&str; 4] = [
-        "bad gateway",
-        "service unavailable",
-        "gateway timeout",
-        "proxy authentication required",
-    ];
     // Rate limits are checked first as the most specific signal. glab's exact wording
     // is unmeasured, so match phrases a GitLab throttle can carry (a 429 answers "Too Many
     // Requests" / "Retry later", with no "rate limit" in it).
-    if transport_residue.contains("rate limit")
-        || transport_residue.contains("too many requests")
+    if GLAB_RATE_LIMIT_PHRASES
+        .iter()
+        .any(|phrase| transport_residue.contains(phrase))
         || has_standalone_429(&transport_residue)
     {
         GlabFailure::RateLimited
@@ -1043,13 +1048,16 @@ pub(crate) fn classify_glab_failure_for_host(combined_lower: &str, host: &str) -
         .rsplit_once(':')
         .filter(|(_, port)| !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()))
         .map_or(host.as_str(), |(bare, _)| bare);
-    // A diagnostic-word host may falsely vote Offline on a bare mention.
-    // Keep that safe rejection (and the last good status) rather than turn
-    // a real outage into a signed-out verdict.
+    // Hosts named after any classifier word keep their bare mentions: masking
+    // one word of a phrase could turn an outage into a signed-out verdict.
     let diagnostic_host = bare_host == "429"
         || NETWORKISH
             .iter()
-            .any(|word| !word.contains(' ') && *word == bare_host);
+            .chain(OFFLINE_STATUS.iter())
+            .chain(NOT_CONNECTED.iter())
+            .chain(GLAB_RATE_LIMIT_PHRASES.iter())
+            .flat_map(|phrase| phrase.split_whitespace())
+            .any(|word| word == bare_host);
     let residue = combined_lower
         .split_whitespace()
         .map(|word| {
@@ -3480,6 +3488,24 @@ check your internet connection or https://githubstatus.com";
                 classify_glab_failure_for_host("429", host),
                 GlabFailure::RateLimited
             );
+        }
+    }
+
+    #[test]
+    fn glab_bare_diagnostic_hosts_preserve_multi_word_phrases() {
+        for (host, text, expected) in [
+            (
+                "gateway",
+                r#"post "https://gateway/oauth/token": bad gateway"#,
+                GlabFailure::Offline,
+            ),
+            ("deadline", "context deadline exceeded", GlabFailure::Offline),
+            ("proxy", "407 proxy authentication required", GlabFailure::Offline),
+            ("requests", "too many requests", GlabFailure::RateLimited),
+            ("token", "no token", GlabFailure::NotConnected),
+        ] {
+            assert_eq!(classify_glab_failure_for_host(text, host), expected, "{text}");
+            assert_eq!(classify_glab_failure(text), expected, "{text}");
         }
     }
 
