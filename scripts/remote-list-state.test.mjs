@@ -1308,7 +1308,7 @@ test("every unknown-sub-list input resolves to its arm (truth table)", () => {
   const retry = () => {};
   const RETAINED = "Only some of this merge request's commits loaded.";
   const OFFLINE = offlinePendingMessage("the commits");
-  const FAILED = "Couldn't load this merge request's commits.";
+  const FAILED = "Couldn't fully load this merge request's commits.";
   for (const truncated of BOOLS) {
     for (const paused of BOOLS) {
       const notice = unknownListNotice({

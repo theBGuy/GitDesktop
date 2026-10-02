@@ -4204,7 +4204,8 @@ pub struct PrDetails {
     /// present reviewer verdicts as complete or assume assigned reviewers are pending.
     /// The assigned `reviewers` list stays complete; only verdicts are unknown.
     /// GitLab: failed verdict read; false with no assigned reviewers.
-    /// GitHub: failed reviews top-up. Bitbucket: false, verdicts come from the core read.
+    /// GitHub: a failed reviews top-up leaves `reviews` holding only the 100 GraphQL rows.
+    /// Bitbucket: false, verdicts come from the core read.
     pub reviewers_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
@@ -4744,6 +4745,7 @@ pub async fn gh_pr_view(
             viewer_did_author: false,
             is_minimized: false,
             minimized_reason: String::new(),
+            // Reviews carry their own id in `id` (see `PrThreadOut::review_id`).
             review_id: String::new(),
         })
         .collect();

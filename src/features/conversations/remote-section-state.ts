@@ -191,8 +191,9 @@ export function reviewCommentsNotice(input: {
  *  keyed on the wire's `truncated` flag, never the shown row count (filtering can
  *  empty a capped page; an optimistic append can fill a failed one). A truncated
  *  read re-reads the same cap on refetch or reconnect, so it outranks offline and
- *  offers no Retry. A failed read says so beside any rows, which the server read
- *  didn't supply; parked offline it resumes by itself, so it offers no Retry. */
+ *  offers no Retry. A failed read says so beside any rows it shows (an
+ *  optimistic append, or the GraphQL rows GitHub keeps after a failed top-up);
+ *  parked offline it resumes by itself, so it offers no Retry. */
 export function unknownListNotice(opts: {
   prNoun: string;
   list: string;
@@ -204,7 +205,7 @@ export function unknownListNotice(opts: {
   if (truncated)
     return { message: `Only some of this ${prNoun}'s ${list} loaded.` };
   if (paused) return { message: offlinePendingMessage(`the ${list}`) };
-  return { message: `Couldn't load this ${prNoun}'s ${list}.`, onRetry };
+  return { message: `Couldn't fully load this ${prNoun}'s ${list}.`, onRetry };
 }
 
 export type ListNoticeCause = "refresh" | "load-more" | "offline";

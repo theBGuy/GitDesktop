@@ -2752,7 +2752,7 @@ export function RemotePrView({
           message={
             details.isPaused
               ? offlinePendingMessage("review status")
-              : "Couldn't load review status — reviewers show without their verdicts."
+              : "Couldn't fully load review status — reviewers may show without their latest verdicts."
           }
           onRetry={details.isPaused ? undefined : () => void details.refetch()}
           className="px-0 pb-0"

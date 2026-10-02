@@ -318,8 +318,9 @@ export interface PrDetails {
   checksTruncated: boolean;
   /** True when the comments read failed or is knowably incomplete — never
    *  present `comments` as complete. A partial list may be retained, and a local
-   *  optimistic append may transiently appear. GitLab and Bitbucket only; GitHub
-   *  reads them with the PR itself, so always false. */
+   *  optimistic append may transiently appear. GitLab and Bitbucket: a failed or
+   *  capped read. GitHub: a failed REST top-up past 100 comments, which keeps
+   *  the GraphQL rows. */
   commentsUnknown: boolean;
   /** True when the comments read succeeded but was cut at a cap, so `comments`
    *  is a partial list (possibly empty once filtered) a refetch can't complete.
@@ -327,17 +328,22 @@ export interface PrDetails {
    *  GitHub: always false. */
   commentsTruncated: boolean;
   /** True when the commits read failed or is knowably incomplete — never present
-   *  `commits` as complete. A partial list may be retained. GitHub reads them with
-   *  the PR itself, so always false. */
+   *  `commits` as complete. A partial list may be retained. GitLab and
+   *  Bitbucket: a failed or capped read. GitHub: a failed REST top-up past 100
+   *  commits (the GraphQL rows are kept) or the 250-commit REST ceiling. */
   commitsUnknown: boolean;
   /** True when the commits read succeeded but was cut at a cap, so `commits` is
    *  a partial list a refetch can't complete. Implies `commitsUnknown`; a failed
-   *  read is unknown but never truncated. GitHub: always false. */
+   *  read is unknown but never truncated. GitHub: set at the 250-commit REST
+   *  ceiling. */
   commitsTruncated: boolean;
   /** True when the reviewer-verdict read failed or is knowably incomplete — never
-   *  present `completedReviewers` as complete, nor an assigned reviewer without a
-   *  verdict as pending. `reviewers` itself stays complete. GitHub derives
-   *  verdicts from `reviews`, so always false. */
+   *  present reviewer verdicts (`completedReviewers`, or on GitHub the chips
+   *  derived from `reviews`) as complete, nor an assigned reviewer without a
+   *  verdict as pending. `reviewers` itself stays complete. GitLab: a failed
+   *  verdict read; false with no assigned reviewers. GitHub: a failed reviews
+   *  top-up, leaving `reviews` with only the 100 GraphQL rows. Bitbucket: always
+   *  false. */
   reviewersUnknown: boolean;
   labels: RepoLabel[];
   /** Assignees. GitHub and GitLab both fill this (the MR/PR-assignees picker is

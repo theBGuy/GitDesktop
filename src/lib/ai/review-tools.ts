@@ -358,7 +358,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "hunks entirely (default true). commentsUnknown means the comments " +
         "could not be fully read, so comments may be partial or empty, and " +
         "commentsTruncated means the read hit a cap (retrying returns the same " +
-        "partial list).",
+        "partial list). reviewersUnknown means reviewer verdicts could not be " +
+        "fully read; on GitHub, reviews may then be partial.",
       inputSchema: z.object({
         include_diff_hunk: z
           .boolean()
@@ -395,6 +396,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             commentsUnknown: pr.commentsUnknown,
             commentsTruncated: pr.commentsTruncated,
             reviews: pr.reviews.map(stripEmptyCommentDefaults),
+            reviewersUnknown: pr.reviewersUnknown,
             review_threads: cappedThreads.map((t) => {
               const pruned = stripEmptyCommentDefaults(t);
               if (Array.isArray(t.comments)) {
