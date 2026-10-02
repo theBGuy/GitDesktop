@@ -140,7 +140,8 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
           value={mode}
           onValueChange={(v) => v && setMode(v as "branch" | "workflow")}
         >
-          <SelectTrigger id="pages-mode" className="w-56">
+          {/* Where focus lands when disabling Pages swaps this form in. */}
+          <SelectTrigger data-confirm-fallback id="pages-mode" className="w-56">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -437,8 +438,13 @@ function PagesEnabled({
       >
         <span>
           Enforce HTTPS
+          {/* Visual only: the switch's description carries the full reason,
+              and as label text this would join the switch's name. */}
           {!certReady && (
-            <span className="ml-1 text-[11px] text-muted-foreground">
+            <span
+              aria-hidden="true"
+              className="ml-1 text-[11px] text-muted-foreground"
+            >
               {certFailed
                 ? "(certificate provisioning failed)"
                 : "(available once the certificate is ready)"}

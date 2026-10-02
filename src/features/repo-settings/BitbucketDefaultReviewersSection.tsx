@@ -70,7 +70,7 @@ export function BitbucketDefaultReviewersSection({
   }
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div data-confirm-section className="min-w-0 space-y-4">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
           Reviewers automatically added to every new pull request.
@@ -159,6 +159,7 @@ function ReviewerRow({
       role="option"
       aria-selected={active}
       data-reviewer={reviewer.id}
+      data-confirm-row
       tabIndex={-1}
       onFocus={onFocus}
       className={cn(
@@ -273,6 +274,7 @@ function AddReviewerPopover({
           />
         }
         aria-label="Add default reviewer"
+        data-confirm-fallback
       >
         {pending ? (
           <Spinner data-icon="inline-start" />

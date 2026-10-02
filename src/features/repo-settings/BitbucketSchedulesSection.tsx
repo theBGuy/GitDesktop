@@ -156,12 +156,16 @@ export function BitbucketSchedulesSection({
 
   return (
     <PipelinesConfigGate config={config}>
-      <div className="min-w-0 space-y-3">
+      <div data-confirm-section className="min-w-0 space-y-3">
         <div className="flex items-center justify-between">
           <p className="text-xs text-muted-foreground">
             Run a pipeline on a branch automatically, on a cron schedule.
           </p>
-          <Button size="sm" onClick={() => setCreating(true)}>
+          <Button
+            data-confirm-fallback
+            size="sm"
+            onClick={() => setCreating(true)}
+          >
             <PlusIcon data-icon="inline-start" />
             Add schedule
           </Button>
@@ -236,7 +240,10 @@ function ScheduleRow({
     }
   })();
   return (
-    <div className="flex items-center gap-2 rounded-md border p-2 text-xs">
+    <div
+      data-confirm-row
+      className="flex items-center gap-2 rounded-md border p-2 text-xs"
+    >
       <div className="min-w-0 flex-1">
         <p className="truncate font-mono font-medium" title={schedule.refName}>
           {schedule.refName}

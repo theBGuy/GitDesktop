@@ -427,7 +427,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   focus across the swap via `useConfirmSwapFocus` (repo-settings/parts): the
   same ref on the trigger and on `InlineConfirm`'s `swapFocusRef`, keyed per
   row in lists; without it the dialog's focus fallback sends focus to the
-  popup when the focused node unmounts.
+  popup when the focused node unmounts. A confirm that removes its own row or
+  container lands on a successor: mark the row `data-confirm-row`, the section
+  root `data-confirm-section`, and its first input or add control
+  `data-confirm-fallback`. The act button holds by reason while pending, so it
+  keeps focus through the write.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

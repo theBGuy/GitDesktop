@@ -109,12 +109,16 @@ export function BitbucketBranchRestrictionsSection({
   }
 
   return (
-    <div className="min-w-0 space-y-3">
+    <div data-confirm-section className="min-w-0 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           Rules that limit who can push, merge, or delete matching branches.
         </p>
-        <Button size="sm" onClick={() => setEditing("new")}>
+        <Button
+          data-confirm-fallback
+          size="sm"
+          onClick={() => setEditing("new")}
+        >
           <PlusIcon data-icon="inline-start" />
           Add restriction
         </Button>
@@ -131,7 +135,11 @@ export function BitbucketBranchRestrictionsSection({
         errorHint="If this is a permissions error, managing branch restrictions needs admin on this repository."
       >
         {restrictions.data?.map((r) => (
-          <div key={r.id} className="rounded-md border p-2 text-xs">
+          <div
+            key={r.id}
+            data-confirm-row
+            className="rounded-md border p-2 text-xs"
+          >
             <div className="flex items-center gap-2">
               <p className="min-w-0 flex-1">
                 <span className="font-medium">{kindLabel(r.kind)}</span>

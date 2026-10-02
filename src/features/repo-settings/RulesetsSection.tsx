@@ -406,13 +406,18 @@ function RulesetList({
   }
 
   return (
-    <div className="min-w-0 space-y-3">
+    <div data-confirm-section className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
           Layered branch protection — the modern replacement for classic
           protection.
         </p>
-        <Button size="sm" variant="outline" onClick={onNew}>
+        <Button
+          data-confirm-fallback
+          size="sm"
+          variant="outline"
+          onClick={onNew}
+        >
           <PlusIcon data-icon="inline-start" />
           New ruleset
         </Button>
@@ -436,6 +441,7 @@ function RulesetList({
           return (
             <div
               key={rs.id}
+              data-confirm-row
               className="flex items-center gap-2 rounded-md border p-2.5 text-xs"
             >
               <div className="min-w-0 flex-1">

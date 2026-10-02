@@ -343,6 +343,7 @@ function RenameAction({
     >
       <div className="flex shrink-0 items-center gap-2">
         <Input
+          data-confirm-fallback
           value={name}
           onChange={(e) => setName(e.target.value)}
           className="h-8 w-44 font-mono"
@@ -984,8 +985,13 @@ export function DangerZone({
   const isOwner =
     isGitHub || (isBitbucket ? admin.data?.admin : admin.data?.owner) || false;
 
+  // The confirm-swap section: a row that removes itself (the upstream remote,
+  // the fork relationship) hands focus to the rename field at its top.
   return (
-    <div className="space-y-3 rounded-md border border-destructive/40 p-3">
+    <div
+      data-confirm-section
+      className="space-y-3 rounded-md border border-destructive/40 p-3"
+    >
       <h3 className="text-xs font-semibold text-destructive">Danger zone</h3>
       <RenameAction repoPath={repoPath} info={info} provider={provider} />
       {/* Local detach — any provider, whenever an `upstream` remote exists. */}

@@ -248,8 +248,10 @@ function DependabotVersionUpdates({
   if (config.isPending) return null;
   const exists = config.data != null;
 
+  // Its own confirm-swap section: removing the file swaps the confirm for
+  // "Set up…", which is where focus lands.
   return (
-    <div className="border-t pt-3">
+    <div data-confirm-section className="border-t pt-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs font-medium">Dependabot version updates</p>
@@ -283,6 +285,7 @@ function DependabotVersionUpdates({
           )
         ) : (
           <Button
+            data-confirm-fallback
             variant="outline"
             size="sm"
             className="shrink-0"

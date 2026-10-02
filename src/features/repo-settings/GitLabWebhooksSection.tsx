@@ -125,12 +125,16 @@ export function GitLabWebhooksSection({
   }
 
   return (
-    <div className="min-w-0 space-y-3">
+    <div data-confirm-section className="min-w-0 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           Webhooks GitLab fires for this project's events.
         </p>
-        <Button size="sm" onClick={() => setEditing("new")}>
+        <Button
+          data-confirm-fallback
+          size="sm"
+          onClick={() => setEditing("new")}
+        >
           <PlusIcon data-icon="inline-start" />
           Add webhook
         </Button>
@@ -147,7 +151,11 @@ export function GitLabWebhooksSection({
         errorHint="If this is a permissions error, managing webhooks needs the Maintainer role."
       >
         {hooks.data?.map((h) => (
-          <div key={h.id} className="rounded-md border p-2 text-xs">
+          <div
+            key={h.id}
+            data-confirm-row
+            className="rounded-md border p-2 text-xs"
+          >
             <div className="flex items-center gap-2">
               <div className="min-w-0 flex-1">
                 <p className="truncate font-mono font-medium" title={h.url}>

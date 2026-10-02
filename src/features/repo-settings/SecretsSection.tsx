@@ -219,11 +219,12 @@ function SecretsList({
   }
 
   return (
-    <div className="space-y-3">
+    <div data-confirm-section className="space-y-3">
       <div className="rounded-md border p-3">
         <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-2">
           <div className="space-y-1">
             <Input
+              data-confirm-fallback
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="SECRET_NAME"
@@ -334,11 +335,12 @@ function VariablesList({
   }
 
   return (
-    <div className="space-y-3">
+    <div data-confirm-section className="space-y-3">
       <div className="rounded-md border p-3">
         <div className="grid grid-cols-[1fr_1fr_auto] items-start gap-2">
           <div className="space-y-1">
             <Input
+              data-confirm-fallback
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="VARIABLE_NAME"
@@ -432,7 +434,10 @@ function Row({
 }) {
   const swapFocus = useConfirmSwapFocus();
   return (
-    <div className="flex items-center gap-2 rounded-md border p-2.5 text-xs">
+    <div
+      data-confirm-row
+      className="flex items-center gap-2 rounded-md border p-2.5 text-xs"
+    >
       <div className="min-w-0 flex-1">
         <p className="truncate font-mono font-medium">{name}</p>
         {meta && (

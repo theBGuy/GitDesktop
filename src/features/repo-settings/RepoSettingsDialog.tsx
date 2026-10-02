@@ -504,14 +504,19 @@ function WebhooksSection({
   return (
     // min-w-0: DialogContent is display:grid, so this grid item must be allowed
     // to shrink below its content (the long webhook URL) for truncate to work.
-    <div className="min-w-0 space-y-3">
+    <div data-confirm-section className="min-w-0 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           {hooks.data?.length
             ? `${hooks.data.length} webhook${hooks.data.length === 1 ? "" : "s"}`
             : "Send a POST to a URL when events happen in this repo."}
         </p>
-        <Button size="sm" variant="outline" onClick={() => setEditing("new")}>
+        <Button
+          data-confirm-fallback
+          size="sm"
+          variant="outline"
+          onClick={() => setEditing("new")}
+        >
           <PlusIcon data-icon="inline-start" />
           Add webhook
         </Button>
@@ -600,7 +605,7 @@ function WebhookRow({
   }
 
   return (
-    <div className="rounded-md border p-3 text-xs">
+    <div data-confirm-row className="rounded-md border p-3 text-xs">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">

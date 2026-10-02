@@ -142,10 +142,11 @@ export function GitLabMembersSection({
   }
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div data-confirm-section className="min-w-0 space-y-4">
       <div className="rounded-md border p-3">
         <div className="grid grid-cols-[1fr_auto_auto] gap-2">
           <Input
+            data-confirm-fallback
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="GitLab username"
@@ -291,6 +292,7 @@ function MemberRow({
       role="option"
       aria-selected={active}
       data-member={member.id}
+      data-confirm-row
       tabIndex={-1}
       onFocus={onFocus}
       className={cn(

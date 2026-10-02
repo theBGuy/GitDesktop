@@ -245,7 +245,9 @@ function FundingForm({
 
       <div className="space-y-1.5">
         <Label htmlFor="funding-github">GitHub Sponsors</Label>
+        {/* Where focus lands once removing the file takes its confirm away. */}
         <Input
+          data-confirm-fallback
           id="funding-github"
           value={fields[GITHUB_KEY] ?? ""}
           onChange={(e) => setField(GITHUB_KEY, e.target.value)}

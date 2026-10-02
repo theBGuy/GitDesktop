@@ -118,13 +118,17 @@ export function GitLabProtectedBranchesSection({
   }
 
   return (
-    <div className="min-w-0 space-y-3">
+    <div data-confirm-section className="min-w-0 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           Branches and wildcards protected from force pushes and unauthorized
           changes.
         </p>
-        <Button size="sm" onClick={() => setEditing(true)}>
+        <Button
+          data-confirm-fallback
+          size="sm"
+          onClick={() => setEditing(true)}
+        >
           <PlusIcon data-icon="inline-start" />
           Protect branch
         </Button>
@@ -197,7 +201,7 @@ function ProtectedBranchRow({
   })();
 
   return (
-    <div className="space-y-2 rounded-md border p-2 text-xs">
+    <div data-confirm-row className="space-y-2 rounded-md border p-2 text-xs">
       <div className="flex items-center gap-2">
         <p
           className="min-w-0 flex-1 truncate font-mono font-medium"

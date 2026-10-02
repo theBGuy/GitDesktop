@@ -109,6 +109,9 @@ export const OFFLINE_WRITE_REASON =
 /** The hold reason while a row's last change is still saving. */
 export const SAVING_REASON = "Saving your last change…";
 
+/** The hold reason on a confirm's act button while its change is in flight. */
+export const ACT_PENDING_REASON = "Applying this change…";
+
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
 function formNoticeMessage(noun: string, failed: boolean): string {
   return failed
@@ -175,8 +178,16 @@ export function RemoteFormSection<T>({
       skeleton
     );
   })();
+  // Also the confirm-swap section (useConfirmSwapFocus): every control of a
+  // form over one read lives inside this host.
   return (
-    <div ref={hostRef} tabIndex={-1} className="min-w-0 space-y-3 outline-none">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      data-confirm-section
+      data-confirm-host
+      className="min-w-0 space-y-3 outline-none"
+    >
       <DegradedListNotice
         noun={noun}
         degraded={noticeMessage !== undefined}
@@ -341,7 +352,12 @@ export function RemoteListSection({
     !isPermanentListError(query.error);
   const { hostRef, retryRef } = useRetryFocusRescue(coldRetry);
   return (
-    <div ref={hostRef} tabIndex={-1} className="space-y-2 outline-none">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      data-confirm-host
+      className="space-y-2 outline-none"
+    >
       <DegradedListNotice
         noun={noun}
         degraded={noticeMessage !== undefined}
@@ -582,10 +598,69 @@ function onBody(): boolean {
   return active === null || active === document.body;
 }
 
+/** Marks every node a swap ref holds, so a successor search finds a row's
+ *  confirm controls from the DOM alone, whichever hook instance owns the row. */
+const SWAP_NODE_ATTR = "data-confirm-swap";
+
+/** Where focus goes when a leaving node took its row or container with it,
+ *  captured at ref cleanup while the DOM still holds that node. */
+interface Successors {
+  row: Element | null;
+  /** The rows before `row` in its section, nearest first. */
+  before: Element[];
+  section: Element | null;
+  host: Element | null;
+}
+
+function successorsOf(node: HTMLElement): Successors {
+  const row = node.closest("[data-confirm-row]");
+  const section =
+    node.closest("[data-confirm-section]") ?? row?.parentElement ?? null;
+  const rows =
+    row === null || section === null
+      ? []
+      : Array.from(section.querySelectorAll("[data-confirm-row]"));
+  const at = row === null ? -1 : rows.indexOf(row);
+  return {
+    row,
+    before: at > 0 ? rows.slice(0, at).reverse() : [],
+    section,
+    host: node.closest("[data-confirm-host]"),
+  };
+}
+
+/** Focuses `el` if it can take focus now: connected, rendered, not disabled. */
+function focusLanded(el: Element | null | undefined): boolean {
+  if (!(el instanceof HTMLElement) || !el.isConnected) return false;
+  el.focus();
+  return document.activeElement === el;
+}
+
+function focusRow(row: Element): boolean {
+  return Array.from(row.querySelectorAll(`[${SWAP_NODE_ATTR}]`)).some(
+    focusLanded,
+  );
+}
+
+function focusSuccessor({ row, before, section, host }: Successors) {
+  if (row !== null && section !== null) {
+    const rows = Array.from(section.querySelectorAll("[data-confirm-row]"));
+    // The nearest surviving earlier row marks the removed row's place, so a row
+    // re-keyed into that place counts as the next one.
+    const anchor = before.find((r) => r.isConnected);
+    const at = anchor === undefined ? 0 : rows.indexOf(anchor) + 1;
+    if (rows.slice(at).some(focusRow)) return;
+    if (rows.slice(0, at).reverse().some(focusRow)) return;
+  }
+  const fallbacks = section?.querySelectorAll("[data-confirm-fallback]");
+  if (fallbacks && Array.from(fallbacks).some(focusLanded)) return;
+  focusLanded(host);
+}
+
 function createConfirmSwapFocus() {
   let armed: string | number | null = null;
-  // A node whose focus went nowhere: the act button disabled while pending
-  // drops focus to <body> with no landing, and still owns it until it leaves.
+  // A node whose focus went nowhere (natively disabled under focus) dropped it
+  // to <body> with no landing, and still owns it until it leaves.
   let stranded: HTMLElement | null = null;
   const refs = new Map<string | number, SwapFocusRef>();
   return (key: string | number = ""): SwapFocusRef => {
@@ -593,6 +668,7 @@ function createConfirmSwapFocus() {
     if (ref === undefined) {
       ref = (node) => {
         if (node === null) return;
+        node.setAttribute(SWAP_NODE_ATTR, "");
         if (armed === key) {
           armed = null;
           if (onBody()) node.focus({ preventScroll: true });
@@ -606,19 +682,26 @@ function createConfirmSwapFocus() {
         };
         node.addEventListener("focusout", onFocusOut);
         node.addEventListener("focusin", onFocusIn);
-        // Ref cleanup runs before React removes the node, while focus is still
-        // readable; the microtask disarms a leave nothing in this commit claimed.
+        // Ref cleanup runs before React removes the node, while focus and the
+        // node's neighbors are still readable. A swap claims within its own
+        // commit, so a leave still unclaimed at the microtask took its row or
+        // container along. A microtask, not an rAF: it runs ahead of Base UI's
+        // focusout fallback to the popup, which an rAF loses to.
         return () => {
           node.removeEventListener("focusout", onFocusOut);
           node.removeEventListener("focusin", onFocusIn);
+          node.removeAttribute(SWAP_NODE_ATTR);
           const owned =
             node.contains(document.activeElement) ||
             (stranded === node && onBody());
           if (stranded === node) stranded = null;
           if (!owned) return;
           armed = key;
+          const successors = successorsOf(node);
           queueMicrotask(() => {
-            if (armed === key) armed = null;
+            if (armed !== key) return;
+            armed = null;
+            if (onBody()) focusSuccessor(successors);
           });
         };
       };
@@ -636,6 +719,12 @@ function createConfirmSwapFocus() {
  * focus still sits on `<body>`, inside the swap's own commit — ahead of Base
  * UI's dialog fallback — so a pointer user who clicked elsewhere is never
  * pulled back.
+ *
+ * A leave nothing claims (its row or container left too) lands on a successor,
+ * found from DOM markers: the next `data-confirm-row`'s swap control, else the
+ * previous one's (rows without one are skipped), else the first focusable
+ * `data-confirm-fallback` in the `data-confirm-section`, else the list or
+ * form host. Mark the row root, the section root, and its fallback controls.
  */
 export function useConfirmSwapFocus() {
   const [swapFocus] = useState(createConfirmSwapFocus);
@@ -697,13 +786,14 @@ export function InlineConfirm({
         {cancelLabel}
       </Button>
       {/* One node whether or not a reason holds it, so a focused act button
-          survives the reason coming and going. */}
+          survives the reason coming and going. Pending holds by reason too,
+          so the press keeps focus through the write instead of dropping it. */}
       <DisabledReasonButton
         ref={swapFocusRef}
         size="sm"
         variant={actVariant}
         disabled={pending || heldReason !== undefined}
-        reason={heldReason}
+        reason={heldReason ?? (pending ? ACT_PENDING_REASON : undefined)}
         onClick={onAct}
       >
         {pending && <Spinner data-icon="inline-start" />}

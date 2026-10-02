@@ -120,10 +120,11 @@ export function GitLabVariablesSection({
   }
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div data-confirm-section className="min-w-0 space-y-4">
       <div className="space-y-2 rounded-md border p-3">
         <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
           <Input
+            data-confirm-fallback
             value={key}
             onChange={(e) => setKey(e.target.value)}
             placeholder="VARIABLE_KEY"
@@ -232,7 +233,7 @@ function VariableRow({
   const swapFocus = useConfirmSwapFocus();
 
   return (
-    <div className="space-y-1.5 rounded-md border p-2 text-xs">
+    <div data-confirm-row className="space-y-1.5 rounded-md border p-2 text-xs">
       <div className="flex items-center gap-2">
         <p
           className="min-w-0 flex-1 truncate font-mono font-medium"
