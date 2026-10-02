@@ -4172,17 +4172,27 @@ pub struct PrDetails {
     /// is a missing list, not a one-PR stack. GitHub only: GitLab derives members
     /// from the same rows as membership, and Bitbucket has no stacks.
     pub members_unknown: bool,
-    /// The checks read FAILED, so an empty `checks` is a missing list, not a no-checks
-    /// state. `checks_unknown == true` implies `checks` is empty. GitLab: true on a
-    /// failed jobs read, false for no pipeline or a successful read. Bitbucket: true
-    /// on a failed statuses fetch/parse or an unavailable head sha, false on success.
-    /// GitHub: always false — checks arrive in the same `gh pr view` call as the view
-    /// itself; a failed call fails the whole view, so a rendered view's checks were read.
+    /// True when the read failed or is knowably incomplete; consumers must not
+    /// present the checks as complete. Partial checks may be retained.
+    /// GitLab: failed or capped jobs read; false for no pipeline or a complete read.
+    /// Bitbucket: failed statuses fetch/parse or an unavailable head sha.
+    /// GitHub: always false, read in the same call as the view.
     pub checks_unknown: bool,
-    /// The comments read FAILED: `comments` holds no server comments (a frontend
-    /// optimistic append may transiently appear). GitLab: a failed notes read; Bitbucket:
-    /// any failed comments page. GitHub: always false, read in the view's own call.
+    /// True when the read failed or is knowably incomplete; consumers must not
+    /// present the comments as complete. Partial comments may be retained.
+    /// GitLab: failed or capped notes read. Bitbucket: failed or truncated pages.
+    /// GitHub: always false, read in the same call as the view.
     pub comments_unknown: bool,
+    /// True when the read failed or is knowably incomplete; consumers must not
+    /// present the commits as complete. Partial commits may be retained.
+    /// GitLab/Bitbucket: failed or capped read. GitHub: always false, core read.
+    pub commits_unknown: bool,
+    /// True when the read failed or is knowably incomplete; consumers must not
+    /// present reviewer verdicts as complete or assume assigned reviewers are pending.
+    /// The assigned `reviewers` list stays complete; only verdicts are unknown.
+    /// GitLab: failed verdict read; false with no assigned reviewers.
+    /// GitHub/Bitbucket: always false, verdicts come from core/complete reads.
+    pub reviewers_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
     pub mergeability: PrMergeability,
@@ -4195,7 +4205,7 @@ pub struct PrDetails {
     pub maintainer_can_modify: Option<bool>,
 }
 
-/// Unknown checks are always empty; successful reads, including empty ones, are known.
+/// Failed checks reads are empty and unknown; successful complete reads are known.
 pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrCheckOut>, bool) {
     match read {
         Ok(checks) => (checks, false),
@@ -4203,14 +4213,16 @@ pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrC
     }
 }
 
-/// Unknown comments are always empty; successful reads, including empty ones, are known.
+/// Failed reads are empty and unknown; capped reads retain their partial list.
+pub(crate) fn read_or_unknown<T, E>(read: Result<(Vec<T>, bool), E>) -> (Vec<T>, bool) {
+    read.unwrap_or_else(|_| (Vec::new(), true))
+}
+
+/// Comments preserve the cap signal independently of the retained list's length.
 pub(crate) fn comments_or_unknown<E>(
-    read: Result<Vec<PrThreadOut>, E>,
+    read: Result<(Vec<PrThreadOut>, bool), E>,
 ) -> (Vec<PrThreadOut>, bool) {
-    match read {
-        Ok(comments) => (comments, false),
-        Err(_) => (Vec::new(), true),
-    }
+    read_or_unknown(read)
 }
 
 /// A merge/pull request's approval summary — who has approved and whether the
@@ -4864,6 +4876,9 @@ pub async fn gh_pr_view(
         members_unknown,
         checks_unknown: false,
         comments_unknown: false,
+        // Commits and reviewer verdicts come from core/complete reads on GitHub.
+        commits_unknown: false,
+        reviewers_unknown: false,
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
@@ -7331,6 +7346,8 @@ mod tests {
             members_unknown,
             checks_unknown: false,
             comments_unknown: false,
+            commits_unknown: false,
+            reviewers_unknown: false,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
@@ -7416,6 +7433,21 @@ mod tests {
         assert_eq!(v["comments"], serde_json::json!([]));
         assert_eq!(v["commentsUnknown"], true);
         assert!(v.get("comments_unknown").is_none());
+    }
+
+    #[test]
+    fn detail_unknown_fields_serialize_camel_case() {
+        // SYNTHETIC: both verdicts exercise the shared IPC wire contract.
+        for unknown in [false, true] {
+            let mut details = details_with_stack(None, Vec::new(), false, false);
+            details.commits_unknown = unknown;
+            details.reviewers_unknown = unknown;
+            let v = serde_json::to_value(&details).unwrap();
+            assert_eq!(v["commitsUnknown"], unknown);
+            assert_eq!(v["reviewersUnknown"], unknown);
+            assert!(v.get("commits_unknown").is_none());
+            assert!(v.get("reviewers_unknown").is_none());
+        }
     }
 
     #[test]

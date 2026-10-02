@@ -306,7 +306,10 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
     tools.get_pull_request = tool({
       description:
         "This pull request's metadata and changed-file summary (title, body, " +
-        "state, branches, commits, files, labels, reviewers) from the forge.",
+        "state, branches, commits, files, labels, reviewers) from the forge. " +
+        "commitsUnknown means the commits could not be fully read, so commits " +
+        "may be partial or empty; reviewersUnknown means reviewer verdicts could " +
+        "not be read, so no reviewer can be assumed pending or approved.",
       inputSchema: z.object({}),
       execute: async (_input, { abortSignal }) => {
         try {
@@ -327,6 +330,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
               hash: c.oid,
               subject: c.headline,
             })),
+            commitsUnknown: pr.commitsUnknown,
             files: pr.files.map((f) => ({
               path: f.path,
               additions: f.additions,
@@ -334,6 +338,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             })),
             labels: pr.labels.map((l) => l.name),
             reviewers: pr.reviewers.map((r) => r.label),
+            reviewersUnknown: pr.reviewersUnknown,
           };
           return (
             UNTRUSTED_PREFIX + capHead(JSON.stringify(trimmed, null, 2), 60_000)
@@ -351,7 +356,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "reply chains. Each thread's diffHunk code-context excerpt (GitHub only) " +
         "is capped to its last few lines; set include_diff_hunk false to drop " +
         "hunks entirely (default true). commentsUnknown means the comments " +
-        "could not be read and an empty comments is a missing list.",
+        "could not be fully read, so comments may be partial or empty.",
       inputSchema: z.object({
         include_diff_hunk: z
           .boolean()

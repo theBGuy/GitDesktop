@@ -15,7 +15,8 @@ use crate::forge::glab::{
     account_authorities, account_hostname, is_addressable_host, run_glab_raw,
 };
 use crate::forge::session::{
-    classify_glab_failure, gh_cli_auth_status, worst_host_auth, GlabFailure,
+    classify_glab_failure, classify_glab_failure_for_host, gh_cli_auth_status, worst_host_auth,
+    GlabFailure,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,14 +88,22 @@ enum AuthProbe {
 /// failure text decides between a rejected credential and an outage; a probe that
 /// timed out is an outage too. The classifier's precedence assumes ONE host's
 /// output; the one multi-host report it reads is the bare probe's, whose limit
-/// [`glab_cli_auth`] documents.
-fn glab_auth(result: AppResult<(i32, String)>) -> AuthStatus {
+/// [`glab_cli_auth`] documents. `host` is the probe's `--hostname` pin: its
+/// mentions are masked so a host label can't supply classifier words or digits.
+fn glab_auth(result: AppResult<(i32, String)>, host: Option<&str>) -> AuthStatus {
     match result {
         Ok((0, _)) => AuthStatus::Authed,
-        Ok((_, output)) => match classify_glab_failure(&output.to_lowercase()) {
-            GlabFailure::Offline | GlabFailure::RateLimited => AuthStatus::Unreachable,
-            GlabFailure::NotConnected | GlabFailure::Broken => AuthStatus::NotAuthed,
-        },
+        Ok((_, output)) => {
+            let lower = output.to_lowercase();
+            let failure = match host {
+                Some(host) => classify_glab_failure_for_host(&lower, host),
+                None => classify_glab_failure(&lower),
+            };
+            match failure {
+                GlabFailure::Offline | GlabFailure::RateLimited => AuthStatus::Unreachable,
+                GlabFailure::NotConnected | GlabFailure::Broken => AuthStatus::NotAuthed,
+            }
+        }
         Err(AppError::Timeout(_)) => AuthStatus::Unreachable,
         Err(_) => AuthStatus::Unknown,
     }
@@ -132,15 +141,20 @@ async fn glab_cli_auth(binary: &Path) -> AuthStatus {
     let probes = pinned.iter().map(|host| async move {
         let args = ["auth", "status", "--hostname", host.as_str()];
         let out = run_glab_raw(None, &args, DETECT_TIMEOUT).await;
-        glab_auth(out.map(|o| (o.code, format!("{}\n{}", o.stdout_lossy(), o.stderr))))
+        glab_auth(
+            out.map(|o| (o.code, format!("{}\n{}", o.stdout_lossy(), o.stderr))),
+            Some(host.as_str()),
+        )
     });
     // run_capture_parts already applies sanitize_child_env; only token stripping is
     // exempt here. Bare `glab auth status` follows glab's own precedence to the
-    // token's target, so this probe cannot address a foreign host.
+    // token's target, so this probe cannot address a foreign host. It classifies
+    // unhosted: its report spans every host, so no one host's mentions are masked.
     let bare_probe = async {
         if bare {
             Some(glab_auth(
                 run_capture(binary, &["auth", "status"], DETECT_TIMEOUT).await,
+                None,
             ))
         } else {
             None
@@ -270,13 +284,13 @@ mod tests {
             "429 Too Many Requests",
         ] {
             assert_eq!(
-                glab_auth(Ok((1, output.to_string()))),
+                glab_auth(Ok((1, output.to_string())), None),
                 AuthStatus::Unreachable,
                 "{output}"
             );
         }
         assert_eq!(
-            glab_auth(Err(AppError::Timeout(20))),
+            glab_auth(Err(AppError::Timeout(20)), None),
             AuthStatus::Unreachable
         );
     }
@@ -290,13 +304,52 @@ mod tests {
             "x gitlab-429.acme.com: 401 Unauthorized",
         ] {
             assert_eq!(
-                glab_auth(Ok((1, output.to_string()))),
+                glab_auth(Ok((1, output.to_string())), None),
                 AuthStatus::NotAuthed,
                 "{output}"
             );
         }
-        assert_eq!(glab_auth(Ok((0, String::new()))), AuthStatus::Authed);
-        assert_eq!(glab_auth(Err(AppError::GlabNotFound)), AuthStatus::Unknown);
+        assert_eq!(glab_auth(Ok((0, String::new())), None), AuthStatus::Authed);
+        assert_eq!(
+            glab_auth(Err(AppError::GlabNotFound), None),
+            AuthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn glab_pinned_probe_masks_its_own_host_so_the_label_cannot_fake_an_outage() {
+        // SYNTHETIC: invented host labels that spell classifier digits or words.
+        for (host, output, pinned, unhosted) in [
+            (
+                "gitlab-429",
+                "x gitlab-429: 401 Unauthorized",
+                AuthStatus::NotAuthed,
+                AuthStatus::Unreachable,
+            ),
+            (
+                "gitlab-429:8443",
+                "x gitlab-429:8443: 401 Unauthorized",
+                AuthStatus::NotAuthed,
+                AuthStatus::Unreachable,
+            ),
+            (
+                "timeout",
+                "x timeout: 401 Unauthorized",
+                AuthStatus::NotAuthed,
+                AuthStatus::Unreachable,
+            ),
+            // The host's own mention is masked; real throttle wording still reads.
+            (
+                "gitlab-429",
+                "x gitlab-429: 429 Too Many Requests",
+                AuthStatus::Unreachable,
+                AuthStatus::Unreachable,
+            ),
+        ] {
+            let read = |pin| glab_auth(Ok((1, output.to_string())), pin);
+            assert_eq!(read(Some(host)), pinned, "{output} / {host}");
+            assert_eq!(read(None), unhosted, "{output}");
+        }
     }
 
     #[test]
@@ -308,8 +361,8 @@ mod tests {
         let plan = |config: Option<&str>, env: Option<&str>, target: &str| {
             glab_probe_plan(account_authorities_from(config, env, Some("t")), target)
         };
-        let signed_in = glab_auth(Ok((0, String::new())));
-        let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())));
+        let signed_in = glab_auth(Ok((0, String::new())), None);
+        let revoked = glab_auth(Ok((1, "401 Unauthorized".to_string())), None);
 
         // A ported saved key is never probed as its bare host: the bare probe covers
         // it whatever the default target is.
@@ -352,7 +405,7 @@ mod tests {
 
     #[test]
     fn glab_rejected_host_outranks_an_unreachable_one() {
-        let host = |output: &str| glab_auth(Ok((1, output.to_string())));
+        let host = |output: &str| glab_auth(Ok((1, output.to_string())), None);
         let revoked = host("gitlab.com: API call failed: 401 Unauthorized");
         // One host rejects its token while another can't be reached: signed out.
         let offline = host("Get \"https://vpn.example/api/v4/user\": dial tcp: i/o timeout");

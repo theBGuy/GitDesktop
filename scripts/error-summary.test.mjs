@@ -983,6 +983,37 @@ test("status-like numbers in URLs and Jira keys don't suppress the rewrite", () 
   }
 });
 
+test("status-like digits in a dotted host or its port don't suppress the rewrite", () => {
+  // SYNTHETIC: invented hostnames whose labels and ports spell status codes.
+  for (const [kind, message] of [
+    ["glab", "lookup gitlab-429.acme.com: no such host"],
+    ["glab", "dial tcp: lookup gitlab-401.acme.com:8443: no such host"],
+    ["gh", "dial tcp ghe.acme.com:403: connect: connection refused"],
+    ["bitbucket", "request to bb-403.acme.com: connection failed"],
+  ]) {
+    const p = presentError(appError(kind, message));
+    assert.equal(p.summary, reach(HOST_BY_KIND[kind]), message);
+    assert.equal(p.long, true, "the raw text stays reachable via Details");
+  }
+});
+
+test("a real status beside a masked host still suppresses the rewrite", () => {
+  for (const message of [
+    "401 unauthorized",
+    "gitlab.acme.com: 401 unauthorized; no such host on retry",
+    "gitlab.acme.com:8443: 429 too many requests; connection refused",
+  ]) {
+    const p = presentError(appError("glab", message));
+    assert.equal(p.summary, message, message);
+  }
+});
+
+test("an undotted host label still supplies status digits (accepted residual)", () => {
+  // SYNTHETIC: Rust masks this only for a probe pinned to that host.
+  const message = "lookup gitlab-429: no such host";
+  assert.equal(presentError(appError("glab", message)).summary, message);
+});
+
 test("empty messages fall through to a non-blank summary", () => {
   assert.equal(
     presentError({ kind: "git", message: "", code: 1, stderr: "" }).summary,

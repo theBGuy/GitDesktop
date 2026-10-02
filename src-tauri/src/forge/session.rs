@@ -2402,6 +2402,18 @@ mod tests {
     }
 
     #[test]
+    fn gh_json_unrecognized_state_is_not_connected_never_broken() {
+        // SYNTHETIC: a state gh doesn't emit; its error text proves nothing either way.
+        let map = one_account("degraded", Some(GH_401));
+        for (health, reprobe) in classify_both(&map) {
+            assert_eq!(health.state, SessionState::NotConnected);
+            assert_eq!(health.detail, None);
+            assert_eq!(health.login.as_deref(), Some("theBGuy"));
+            assert!(!reprobe);
+        }
+    }
+
+    #[test]
     fn gh_accounts_reprobe_fires_when_any_account_is_broken() {
         // One rate-limited host beside one broken host: the Broken one still earns
         // the shared re-probe.

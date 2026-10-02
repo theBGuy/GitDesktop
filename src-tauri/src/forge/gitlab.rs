@@ -37,7 +37,7 @@ use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
-    checks_or_unknown, comments_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
+    comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
     ExternalReviewItem, PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
     PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember,
     PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut, STACKS_TIMEOUT,
@@ -2152,27 +2152,18 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // Commits — GitLab returns newest-first; the frontend treats the last as head,
     // so reverse to oldest-first (matching gh's GraphQL order).
-    let mut commits: Vec<PrCommitOut> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}/commits?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str::<Vec<GlabCommit>>(&o.stdout_lossy()).ok())
-    .unwrap_or_default()
-    .into_iter()
-    .map(|c| PrCommitOut {
-        message_body: message_body_from_full(&c.message),
-        oid: c.id,
-        headline: c.title,
-        date: c.created_at,
-        author: c.author_name,
-    })
-    .collect();
+    let (mut commits, commits_unknown) = read_or_unknown(
+        run_glab(
+            Some(repo_path),
+            &[
+                "api",
+                &format!("projects/{enc}/merge_requests/{number}/commits?per_page=100"),
+            ],
+            GLAB_NETWORK_TIMEOUT,
+        )
+        .await
+        .and_then(|o| mr_commits_from(&o.stdout_lossy())),
+    );
     commits.reverse();
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
@@ -2199,7 +2190,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     let (checks, checks_unknown) = match &mr.head_pipeline {
         Some(p) => {
             let cross_project_id = p.cross_project_id(mr.target_project_id);
-            checks_or_unknown(pipeline_checks(repo_path, &enc, p.id, cross_project_id).await)
+            read_or_unknown(pipeline_checks(repo_path, &enc, p.id, cross_project_id).await)
         }
         None => (Vec::new(), false),
     };
@@ -2228,24 +2219,13 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .map(|a| (a.username, a.avatar_url))
         .unwrap_or_default();
 
-    // Reviewer verdicts. GitLab MRs carry no reviewable review objects, so a completed
-    // reviewer is an assigned reviewer whose per-reviewer state is `approved` or
-    // `requested_changes` (from `…/reviewers`). Best-effort — a failed fetch just leaves
-    // `completed_reviewers` empty. NOTE: `reviewers` below stays the FULL assigned set:
-    // an approver remains assigned, and that list drives a full-replacement PUT, so
-    // dropping acted reviewers would un-assign them on the next edit. The frontend
-    // de-dups the display instead.
-    let reviewer_states: std::collections::HashMap<String, String> =
-        mr_reviewers(repo_path, &enc, number)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|r| {
-                r.user
-                    .map(|u| (u.username, r.state.to_ascii_lowercase()))
-                    .filter(|(name, _)| !name.is_empty())
-            })
-            .collect();
+    // Assigned reviewers stay complete for full-replacement PUTs; verdict failures
+    // must not imply that every assigned reviewer is pending.
+    let (reviewer_states, reviewers_unknown) = if mr.reviewers.is_empty() {
+        (std::collections::HashMap::new(), false)
+    } else {
+        reviewer_states_or_unknown(mr_reviewers(repo_path, &enc, number).await)
+    };
 
     // The acted subset (approved / requested-changes) with each verdict — borrows
     // `mr.reviewers` so the full list below can still consume it.
@@ -2331,6 +2311,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         members_unknown: false,
         checks_unknown,
         comments_unknown,
+        commits_unknown,
+        reviewers_unknown,
         mergeability: map_gl_mergeability(
             &mr.state,
             mr.has_conflicts,
@@ -2349,17 +2331,56 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     })
 }
 
-/// An MR's notes body as its conversation comments, strictly: an unreadable body is
-/// an error, never an empty conversation. System notes and diff-anchored
-/// (positioned) notes are dropped — the latter surface as `review_threads`. Pure.
-fn mr_comments_from(body: &str, viewer: Option<&str>) -> AppResult<Vec<PrThreadOut>> {
+/// A full single page heuristically signals incomplete commits; exact-cap totals
+/// are also unknown because this endpoint read does not fetch a second page.
+fn mr_commits_from(body: &str) -> AppResult<(Vec<PrCommitOut>, bool)> {
+    let commits: Vec<GlabCommit> = serde_json::from_str(body).map_err(|e| {
+        gl_unreadable(
+            "the merge request's commits",
+            format!("could not parse GitLab merge request commits: {e}"),
+        )
+    })?;
+    let more_pages = commits.len() == 100;
+    let commits = commits
+        .into_iter()
+        .map(|c| PrCommitOut {
+            message_body: message_body_from_full(&c.message),
+            oid: c.id,
+            headline: c.title,
+            date: c.created_at,
+            author: c.author_name,
+        })
+        .collect();
+    Ok((commits, more_pages))
+}
+
+fn reviewer_states_or_unknown(
+    read: AppResult<Vec<GlabReviewer>>,
+) -> (std::collections::HashMap<String, String>, bool) {
+    let (reviewers, unknown) = read_or_unknown(read.map(|rows| (rows, false)));
+    let states = reviewers
+        .into_iter()
+        .filter_map(|r| {
+            r.user
+                .map(|u| (u.username, r.state.to_ascii_lowercase()))
+                .filter(|(name, _)| !name.is_empty())
+        })
+        .collect();
+    (states, unknown)
+}
+
+/// System and positioned notes are filtered after measuring the raw page.
+/// A full 100-note page heuristically signals truncation, even if exactly 100 exist.
+/// Unreadable bodies fail the read; capped reads retain conversation comments.
+fn mr_comments_from(body: &str, viewer: Option<&str>) -> AppResult<(Vec<PrThreadOut>, bool)> {
     let notes: Vec<GlabNote> = serde_json::from_str(body).map_err(|e| {
         gl_unreadable(
             "the merge request's comments",
             format!("could not parse GitLab merge request notes: {e}"),
         )
     })?;
-    Ok(notes
+    let more_pages = notes.len() == 100;
+    let comments = notes
         .into_iter()
         .filter(|n| !n.system && n.position.is_none())
         .map(|n| {
@@ -2382,7 +2403,8 @@ fn mr_comments_from(body: &str, viewer: Option<&str>) -> AppResult<Vec<PrThreadO
                 review_id: String::new(),
             }
         })
-        .collect())
+        .collect();
+    Ok((comments, more_pages))
 }
 
 /// One `resource_label_events` entry: `{action:"add"|"remove", label{name,color},
@@ -6854,20 +6876,22 @@ fn map_job_check_status(status: &str) -> String {
     .to_string()
 }
 
-/// Read checks from the pipeline's owning project. Read failures, including denied
-/// cross-project access, leave the view's checks unknown. Cross-project checks link
-/// out without run/job ids because log, detail and retry routes use the target project.
-/// Same-project ids are stringified to preserve JS precision.
+/// Failed or capped job reads leave checks unknown; consumers must not present
+/// the list as complete. Cross-project checks omit action ids because those routes
+/// use the target project; same-project ids are strings to preserve JS precision.
 async fn pipeline_checks(
     repo_path: &str,
     enc: &str,
     pipeline_id: u64,
     cross_project_id: Option<u64>,
-) -> AppResult<Vec<PrCheckOut>> {
+) -> AppResult<(Vec<PrCheckOut>, bool)> {
     let cross_project = cross_project_id.map(|id| id.to_string());
     let project = cross_project.as_deref().unwrap_or(enc);
-    let jobs = pipeline_jobs(repo_path, project, pipeline_id).await?;
-    Ok(pipeline_checks_from(jobs, pipeline_id, cross_project_id.is_some()))
+    let (jobs, more_pages) = pipeline_jobs(repo_path, project, pipeline_id).await?;
+    Ok((
+        pipeline_checks_from(jobs, pipeline_id, cross_project_id.is_some()),
+        more_pages,
+    ))
 }
 
 fn pipeline_checks_from(
@@ -7147,7 +7171,7 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
 
     // Jobs — GitLab returns newest-first; reverse to execution order (stage order),
     // matching how view_pr reorders commits oldest-first.
-    let mut jobs = pipeline_jobs(repo_path, &enc, run_id).await?;
+    let (mut jobs, _more_pages) = pipeline_jobs(repo_path, &enc, run_id).await?;
     jobs.reverse();
 
     // Prefer the commit subject (free, from the jobs) for the header; else the
@@ -7203,7 +7227,7 @@ async fn pipeline_jobs(
     repo_path: &str,
     project: &str,
     pipeline_id: u64,
-) -> AppResult<Vec<GlabJob>> {
+) -> AppResult<(Vec<GlabJob>, bool)> {
     pipeline_jobs_paged(|page| async move {
         let endpoint = format!(
             "projects/{project}/pipelines/{pipeline_id}/jobs?per_page={JOBS_PER_PAGE}&page={page}"
@@ -7214,25 +7238,26 @@ async fn pipeline_jobs(
     .await
 }
 
-/// The page walk behind [`pipeline_jobs`], strictly: any page that fails to fetch or
-/// parse fails the whole read, so a partially fetched list never passes as complete.
-/// A pipeline with more than [`MAX_JOB_PAGES`] full pages returns only its newest
-/// jobs, with no truncation signal.
-async fn pipeline_jobs_paged<F, Fut>(mut fetch_page: F) -> AppResult<Vec<GlabJob>>
+/// Fetch or parse failures fail the whole read. A full final page at
+/// [`MAX_JOB_PAGES`] sets `more_pages`: a heuristic with a false positive when the
+/// total is exactly `JOBS_PER_PAGE * MAX_JOB_PAGES`. Newest jobs are retained.
+async fn pipeline_jobs_paged<F, Fut>(mut fetch_page: F) -> AppResult<(Vec<GlabJob>, bool)>
 where
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
 {
     let mut jobs = Vec::new();
+    let mut more_pages = false;
     for page in 1..=MAX_JOB_PAGES {
         let batch = pipeline_jobs_from(&fetch_page(page).await?)?;
         let done = batch.len() < JOBS_PER_PAGE;
+        more_pages = page == MAX_JOB_PAGES && batch.len() == JOBS_PER_PAGE;
         jobs.extend(batch);
         if done {
             break;
         }
     }
-    Ok(jobs)
+    Ok((jobs, more_pages))
 }
 
 /// One job's log (`/jobs/<id>/trace`), cleaned of ANSI + section markers, tail-capped.
@@ -7253,16 +7278,28 @@ pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
     Ok(tail_cap(text, CI_JOB_LOG_CAP))
 }
 
+fn no_failed_jobs_message(more_pages: bool) -> String {
+    if more_pages {
+        format!(
+            "No failed jobs in the newest {} jobs checked; \
+             this pipeline has more jobs that weren't read.",
+            JOBS_PER_PAGE * MAX_JOB_PAGES as usize
+        )
+    } else {
+        "No failed jobs in this pipeline.".to_string()
+    }
+}
+
 /// The failed jobs' logs for a pipeline, concatenated — GitLab's analogue of
 /// `gh run view --log-failed` (which GitLab has no single endpoint for).
 pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> {
     let enc = encode_project(&project_path(repo_path).await?);
     // A failed jobs read is an error, never "no failed jobs": the empty arm below
     // is a claim about the pipeline, and the frontend keeps cached logs on Err.
-    let jobs = pipeline_jobs(repo_path, &enc, run_id).await?;
+    let (jobs, more_pages) = pipeline_jobs(repo_path, &enc, run_id).await?;
     let failed: Vec<&GlabJob> = jobs.iter().filter(|j| j.status == "failed").collect();
     if failed.is_empty() {
-        return Ok("No failed jobs in this pipeline.".to_string());
+        return Ok(no_failed_jobs_message(more_pages));
     }
     let mut text = String::new();
     let mut succeeded = 0;
@@ -12962,7 +12999,7 @@ mod tests {
 
     /// Drives the page walk with canned pages (`None` = that page's fetch fails),
     /// returning the outcome and the pages requested, in order.
-    async fn walk_jobs(pages: Vec<Option<String>>) -> (AppResult<Vec<GlabJob>>, Vec<u32>) {
+    async fn walk_jobs(pages: Vec<Option<String>>) -> (AppResult<(Vec<GlabJob>, bool)>, Vec<u32>) {
         let mut requested = Vec::new();
         let result = pipeline_jobs_paged(|page| {
             requested.push(page);
@@ -12977,7 +13014,8 @@ mod tests {
     async fn pipeline_jobs_follow_a_full_page_and_fold_the_next() {
         let (jobs, requested) =
             walk_jobs(vec![Some(jobs_page(1, 100)), Some(jobs_page(101, 7))]).await;
-        let jobs = jobs.unwrap();
+        let (jobs, more_pages) = jobs.unwrap();
+        assert!(!more_pages);
         assert_eq!(requested, [1, 2]);
         assert_eq!(jobs.len(), 107);
         // Server order survives the fold, so view_run's reverse stays oldest-first.
@@ -12987,11 +13025,11 @@ mod tests {
     #[tokio::test]
     async fn pipeline_jobs_stop_on_a_short_or_empty_first_page() {
         let (jobs, requested) = walk_jobs(vec![Some(jobs_page(1, 7))]).await;
-        assert_eq!(jobs.unwrap().len(), 7);
+        assert_eq!(jobs.unwrap().0.len(), 7);
         assert_eq!(requested, [1]);
 
         let (jobs, requested) = walk_jobs(vec![Some("[]".into())]).await;
-        assert!(jobs.unwrap().is_empty());
+        assert!(jobs.unwrap().0.is_empty());
         assert_eq!(requested, [1]);
     }
 
@@ -13008,18 +13046,118 @@ mod tests {
 
         // Through the checks fold, a failed later page reads as unknown checks.
         let (jobs, _) = walk_jobs(vec![Some(jobs_page(1, 100)), None]).await;
-        let (checks, unknown) =
-            checks_or_unknown(jobs.map(|jobs| pipeline_checks_from(jobs, 42, false)));
+        let (checks, unknown) = read_or_unknown(
+            jobs.map(|(jobs, more_pages)| (pipeline_checks_from(jobs, 42, false), more_pages)),
+        );
         assert!(checks.is_empty());
         assert!(unknown);
     }
 
     #[tokio::test]
     async fn pipeline_jobs_stop_at_the_page_ceiling() {
-        let full = (0..5).map(|p| Some(jobs_page(p * 100 + 1, 100))).collect();
+        // SYNTHETIC: exactly 300 jobs still signal more pages at the heuristic cap.
+        let full = (0..3).map(|p| Some(jobs_page(p * 100 + 1, 100))).collect();
         let (jobs, requested) = walk_jobs(full).await;
         assert_eq!(requested, [1, 2, 3]);
-        assert_eq!(jobs.unwrap().len(), 300);
+        let (checks, unknown) = read_or_unknown(
+            jobs.map(|(jobs, more_pages)| (pipeline_checks_from(jobs, 42, false), more_pages)),
+        );
+        assert_eq!(checks.len(), 300);
+        assert!(unknown);
+    }
+
+    #[tokio::test]
+    async fn pipeline_jobs_below_the_page_ceiling_are_known() {
+        // SYNTHETIC: 299 jobs leave the final page one short of the cap.
+        let (jobs, requested) = walk_jobs(vec![
+            Some(jobs_page(1, 100)),
+            Some(jobs_page(101, 100)),
+            Some(jobs_page(201, 99)),
+        ])
+        .await;
+        let (jobs, more_pages) = jobs.unwrap();
+        assert_eq!(requested, [1, 2, 3]);
+        assert_eq!(jobs.len(), 299);
+        assert!(!more_pages);
+    }
+
+    #[test]
+    fn failed_logs_limit_the_no_failures_claim_to_the_jobs_read() {
+        // SYNTHETIC: the empty-failure branch receives either pagination verdict.
+        assert_eq!(
+            no_failed_jobs_message(true),
+            "No failed jobs in the newest 300 jobs checked; \
+             this pipeline has more jobs that weren't read."
+        );
+        assert_eq!(
+            no_failed_jobs_message(false),
+            "No failed jobs in this pipeline."
+        );
+    }
+
+    #[test]
+    fn mr_comments_measure_the_raw_cap_before_filtering() {
+        // SYNTHETIC: system and positioned notes count toward the raw 100-note cap.
+        for count in [99, 100] {
+            let notes: Vec<_> = (0..count)
+                .map(|id| match id {
+                    0 => serde_json::json!({"id": id, "system": true}),
+                    1 => serde_json::json!({"id": id, "position": {"new_line": 1}}),
+                    _ => serde_json::json!({"id": id, "body": format!("note-{id}")}),
+                })
+                .collect();
+            let (comments, unknown) = comments_or_unknown(mr_comments_from(
+                &serde_json::to_string(&notes).unwrap(),
+                None,
+            ));
+            assert_eq!(unknown, count == 100);
+            assert_eq!(comments.len(), count - 2);
+            assert_eq!(comments[0].body, "note-2");
+        }
+    }
+
+    #[test]
+    fn mr_commits_retain_capped_reads_and_mark_failures_unknown() {
+        // SYNTHETIC: empty, below-cap and exact-cap single-page commit bodies.
+        for count in [0, 99, 100] {
+            let commits: Vec<_> = (0..count)
+                .map(|id| serde_json::json!({"id": format!("sha-{id}"), "title": "commit"}))
+                .collect();
+            let (commits, unknown) =
+                read_or_unknown(mr_commits_from(&serde_json::to_string(&commits).unwrap()));
+            assert_eq!(unknown, count == 100);
+            assert_eq!(commits.len(), count);
+            if count > 0 {
+                assert_eq!(commits[0].oid, "sha-0");
+            }
+        }
+        let (commits, unknown) = read_or_unknown(mr_commits_from("<html>502</html>"));
+        assert!(commits.is_empty());
+        assert!(unknown);
+        let (commits, unknown) = read_or_unknown(Err::<(Vec<PrCommitOut>, bool), _>(
+            AppError::Glab("HTTP 502".into()),
+        ));
+        assert!(commits.is_empty());
+        assert!(unknown);
+    }
+
+    #[test]
+    fn mr_reviewer_verdict_failures_are_unknown() {
+        // SYNTHETIC: a failed read, a known empty list and an approved reviewer.
+        let (states, unknown) =
+            reviewer_states_or_unknown(Err(AppError::Glab("HTTP 502".into())));
+        assert!(states.is_empty());
+        assert!(unknown);
+        let (states, unknown) = reviewer_states_or_unknown(Ok(Vec::new()));
+        assert!(states.is_empty());
+        assert!(!unknown);
+        let reviewers = serde_json::from_value(serde_json::json!([
+            {"user": {"id": 1, "username": "alice"}, "state": "approved"}
+        ]))
+        .unwrap();
+        let (states, unknown) = reviewer_states_or_unknown(Ok(reviewers));
+        assert_eq!(states.get("alice").map(String::as_str), Some("approved"));
+        assert!(!unknown);
     }
 
     #[test]
@@ -13030,8 +13168,9 @@ mod tests {
             assert!(unknown, "{body}");
         }
         // A failed fetch folds the same way as an unreadable body.
-        let (comments, unknown) =
-            comments_or_unknown(Err::<Vec<PrThreadOut>, _>(AppError::Glab("HTTP 502".into())));
+        let (comments, unknown) = comments_or_unknown(Err::<(Vec<PrThreadOut>, bool), _>(
+            AppError::Glab("HTTP 502".into()),
+        ));
         assert!(comments.is_empty());
         assert!(unknown);
 

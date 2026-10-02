@@ -173,10 +173,13 @@ impl GitDesktopMcp {
                        MRs and each MR merges on its own. When `stack` is null AND `stackUnknown` \
                        is true, the stack status could NOT be checked — that is not a guarantee \
                        the PR is unstacked, so verify on GitHub before merging it. `checksUnknown` \
-                       means the checks could not be read and an empty `checks` is a missing list. \
-                       `commentsUnknown` means the comments could not be read and an empty \
-                       `comments` is a missing list. For just the conversation — including \
-                       file:line review threads — see list_pull_request_comments. Returns JSON."
+                       means the checks read failed or is knowably incomplete; partial checks \
+                       may remain. `commentsUnknown` and `commitsUnknown` mean those reads failed \
+                       or are knowably incomplete; retained lists must not be treated as complete. \
+                       `reviewersUnknown` applies only to reviewer verdicts; the assigned \
+                       reviewers list stays complete. For just the conversation, including \
+                       file:line review \
+                       threads, see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(
         &self,
@@ -210,8 +213,9 @@ impl GitDesktopMcp {
                        author, date, and the original markdown body. Each thread's `diffHunk` \
                        code-context excerpt (GitHub only) is capped to its last few lines; set \
                        `include_diff_hunk` false to drop hunks entirely (default true). \
-                       `commentsUnknown` means the comments could not be read and an empty \
-                       `comments` is a missing list. Read-only; returns JSON. (For the PR's \
+                       `commentsUnknown` means the comments read failed or is knowably incomplete; \
+                       retained comments must not be treated as complete. Read-only; returns JSON. \
+                       (For the PR's \
                        metadata + changed files use get_pull_request; for its diff, \
                        pull_request_diff.)"
     )]
@@ -488,7 +492,7 @@ impl GitDesktopMcp {
 }
 
 /// The list_pull_request_comments payload. `commentsUnknown` rides beside `comments`
-/// so a failed comments read never reaches an agent as an empty conversation.
+/// so failed or knowably incomplete reads cannot be presented as complete.
 ///
 /// KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)
 /// mirrors this composed shape, the empty-field pruning below, and the tool's
@@ -700,6 +704,7 @@ mod tests {
     /// present, survives the prune, and carries the camelCase name get_pull_request uses.
     #[test]
     fn comments_payload_carries_comments_unknown() {
+        // SYNTHETIC: both flag values survive pruning with the camelCase name.
         let v = comments_payload(7, Vec::new(), true, Vec::new(), Vec::new());
         assert_eq!(v["number"], 7);
         assert_eq!(v["comments"], serde_json::json!([]));

@@ -197,7 +197,7 @@ import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
-import { ChecksRollup } from "./ChecksRollup";
+import { ChecksRollup, unknownListNotice } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PendingReviewStrip } from "./PendingReviewStrip";
@@ -295,13 +295,15 @@ const PROVIDER_MERGE_STRATEGIES: Record<
 };
 
 /** Tab labels for this view's sections, function-valued because three of the four
- *  carry a live count. An unread comments list has no count to show, not zero. */
+ *  carry a live count. An unread or partial list has no count to show, not its
+ *  length. */
 const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
   conversation: (pr) =>
     pr.commentsUnknown
       ? "Conversation"
       : `Conversation (${pr.comments.length})`,
-  commits: (pr) => `Commits (${pr.commits.length})`,
+  commits: (pr) =>
+    pr.commitsUnknown ? "Commits" : `Commits (${pr.commits.length})`,
   files: (pr) => `Files (${pr.files.length})`,
   review: () => "Review",
 };
@@ -2738,6 +2740,20 @@ export function RemotePrView({
             {metaCells}
           </div>
         ) : null}
+        {/* Verdicts ride their own sub-read; without them an assigned reviewer's
+            plain chip would read as still pending. Verdicts only exist for
+            assigned reviewers, so an empty list has nothing to qualify. */}
+        <DegradedListNotice
+          noun="review status"
+          degraded={pr.reviewersUnknown && pr.reviewers.length > 0}
+          message={
+            details.isPaused
+              ? offlinePendingMessage("review status")
+              : "Couldn't load review status — reviewers show without their verdicts."
+          }
+          onRetry={details.isPaused ? undefined : () => void details.refetch()}
+          className="px-0 pb-0"
+        />
         {/* GitLab-only time-tracking summary; a popover with estimate/add-spent
             while the MR is open, static once closed. */}
         {canTrackTime && (
@@ -3046,14 +3062,13 @@ export function RemotePrView({
               <DegradedListNotice
                 noun="comments"
                 degraded={pr.commentsUnknown}
-                message={
-                  details.isPaused
-                    ? offlinePendingMessage("the comments")
-                    : `Couldn't load this ${prNoun}'s comments.`
-                }
-                onRetry={
-                  details.isPaused ? undefined : () => void details.refetch()
-                }
+                {...unknownListNotice({
+                  prNoun,
+                  list: "comments",
+                  retained: pr.comments.length > 0,
+                  paused: details.isPaused,
+                  onRetry: () => void details.refetch(),
+                })}
                 className="px-0 pb-0"
               />
               <PrActivityFeed
@@ -3174,6 +3189,7 @@ export function RemotePrView({
                 pr.comments.length === 0 &&
                 !pr.commentsUnknown &&
                 pr.commits.length === 0 &&
+                !pr.commitsUnknown &&
                 timeline.data !== undefined &&
                 timeline.data.length === 0 &&
                 threadClaims.visibleThreads !== undefined &&
@@ -3374,18 +3390,34 @@ export function RemotePrView({
               />
             );
           }
+          // The commits ride a sub-fetch that can fail or come back capped; the
+          // notice stays mounted so a Retry that lands hands focus to its wrapper.
           return (
-            <CommitsList
-              commits={pr.commits.map((c) => ({
-                id: c.oid,
-                subject: c.headline,
-                shortSha: c.oid.slice(0, 7),
-                author: c.author,
-                date: c.date,
-              }))}
-              onSelect={setSelectedCommitOid}
-              selectedId={selectedCommitOid}
-            />
+            <>
+              <DegradedListNotice
+                noun="commits"
+                degraded={pr.commitsUnknown}
+                {...unknownListNotice({
+                  prNoun,
+                  list: "commits",
+                  retained: pr.commits.length > 0,
+                  paused: details.isPaused,
+                  onRetry: () => void details.refetch(),
+                })}
+                className="shrink-0 border-b px-4 py-1.5"
+              />
+              <CommitsList
+                commits={pr.commits.map((c) => ({
+                  id: c.oid,
+                  subject: c.headline,
+                  shortSha: c.oid.slice(0, 7),
+                  author: c.author,
+                  date: c.date,
+                }))}
+                onSelect={setSelectedCommitOid}
+                selectedId={selectedCommitOid}
+              />
+            </>
           );
         })()}
 

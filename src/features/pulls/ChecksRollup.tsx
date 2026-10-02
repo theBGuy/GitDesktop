@@ -522,6 +522,24 @@ function RunDetailFetcher({
   return null;
 }
 
+/** The notice props for a PR sub-list whose read failed or is knowably partial.
+ *  Rows present with the flag set means a capped read: a refetch re-reads the
+ *  same cap and reconnecting won't lift it, so that arm outranks offline and
+ *  offers no Retry. An empty list is a failed read, retried or resumed. */
+export function unknownListNotice(opts: {
+  prNoun: string;
+  list: string;
+  retained: boolean;
+  paused: boolean;
+  onRetry?: () => void;
+}): { message: string; onRetry?: () => void } {
+  const { prNoun, list, retained, paused, onRetry } = opts;
+  if (retained)
+    return { message: `Only some of this ${prNoun}'s ${list} loaded.` };
+  if (paused) return { message: offlinePendingMessage(`the ${list}`) };
+  return { message: `Couldn't load this ${prNoun}'s ${list}.`, onRetry };
+}
+
 /**
  * The PR's CI checks as a disclosure rollup: a summary line
  * (`✓ N passed · ✕ M failed · ● K pending` — each count with its own icon + word, so
@@ -530,9 +548,9 @@ function RunDetailFetcher({
  * pipeline jobs) peek their log inline; external checks (Bitbucket build statuses,
  * etc.) link out. Auto-expanded when anything failed, or when a required check was
  * cancelled or went stale. With no checks it shows only a failed-read notice when
- * `checksUnknown` says the list is missing; a known-empty list renders no visible
- * DOM, just its headless completion watchers, which must survive an empty refetch
- * window.
+ * `checksUnknown` says the list is missing, and over a capped list it says only
+ * some loaded. A known-empty list renders no visible DOM, just its headless
+ * completion watchers, which must survive an empty refetch window.
  */
 export function ChecksRollup({
   checks,
@@ -546,8 +564,9 @@ export function ChecksRollup({
   unmetRequiredContexts = [],
 }: {
   checks: PrCheckOut[];
-  /** The checks read failed, so an empty `checks` is a missing list, not a PR
-   *  without checks. */
+  /** The checks read failed or is knowably incomplete — never present `checks`
+   *  as complete. Empty, it is a missing list, not a PR without checks; with
+   *  rows, a capped read whose rows are partial. */
   checksUnknown: boolean;
   /** The details read is parked offline: its refetch resumes on reconnect, so
    *  the failed-read notice says so instead of offering Retry. */
@@ -1094,6 +1113,13 @@ export function ChecksRollup({
   ].filter((s) => s.count > 0);
 
   const prNoun = provider === "gitlab" ? "merge request" : "pull request";
+  const notice = unknownListNotice({
+    prNoun,
+    list: "checks",
+    retained: checks.length > 0,
+    paused: detailsPaused,
+    onRetry: onRetryChecks,
+  });
   return (
     <>
       {watchers}
@@ -1102,12 +1128,8 @@ export function ChecksRollup({
       <DegradedListNotice
         noun="checks"
         degraded={checksUnknown}
-        message={
-          detailsPaused
-            ? offlinePendingMessage("the checks")
-            : `Couldn't load this ${prNoun}'s checks.`
-        }
-        onRetry={detailsPaused ? undefined : onRetryChecks}
+        message={notice.message}
+        onRetry={notice.onRetry}
         className="px-0 pb-0"
       />
       {checks.length === 0 ? null : (

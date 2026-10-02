@@ -413,6 +413,13 @@ const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
  *  `ABC-401`) would otherwise read as an answered status. */
 const IDENTIFIER_TOKENS = /https?:\/\/[^\s"')]+|\b[A-Z][A-Z0-9_]+-\d+\b/g;
 
+/** Bare dotted hosts with one optional numeric port (`gitlab-429.acme.com:8443`),
+ *  the dotted arm of Rust's `is_host_or_url_token` (forge/session.rs). Rust's
+ *  undotted-host rules need the probed host or gh's report grammar, which no
+ *  message here carries, so an undotted label like `gitlab-429` still reads. */
+const HOST_TOKENS =
+  /(?<![A-Za-z0-9-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?![A-Za-z0-9-])/g;
+
 function isAsciiAlphanumeric(c: string | undefined): boolean {
   return c !== undefined && /[a-z0-9]/i.test(c);
 }
@@ -443,8 +450,12 @@ function networkSummary(
   if (host === undefined || message.trimStart().startsWith("Couldn't reach"))
     return null;
   // Both scans read the masked text: every transport phrase has a space, which
-  // a masked URL or key can't hold, so masking hides no transport signal.
-  const text = message.replace(IDENTIFIER_TOKENS, " ").toLowerCase();
+  // a masked URL, key or host can't hold, so masking hides no transport signal.
+  // URLs mask first, so a URL's path digits never outlive its host.
+  const text = message
+    .replace(IDENTIFIER_TOKENS, " ")
+    .replace(HOST_TOKENS, " ")
+    .toLowerCase();
   if (
     hasStandaloneWord(text, "401") ||
     hasStandaloneWord(text, "403") ||
