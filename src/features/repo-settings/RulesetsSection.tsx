@@ -36,6 +36,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
   RemoteListSection,
+  SAVING_REASON,
 } from "./parts";
 
 const ENFORCEMENTS: { value: RulesetEnforcement; label: string }[] = [
@@ -61,8 +62,6 @@ const REF_SCOPE_ITEMS: Record<string, string> = {
  *  reason, and rulesets are admin-only on GitHub. */
 const ADMIN_HINT =
   "If this is a permissions error, managing rulesets needs repo-admin access.";
-
-const SAVING_REASON = "Saving your last change…";
 
 /** Rule types we model in the editor. Any others on an edited ruleset are
  *  preserved untouched (so advanced rules aren't dropped). */

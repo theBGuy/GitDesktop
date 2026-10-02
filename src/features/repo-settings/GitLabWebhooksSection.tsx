@@ -435,7 +435,7 @@ function DeliveryRow({
   expanded: boolean;
   onToggle: () => void;
   resending: boolean;
-  /** Why Re-send is held; unset leaves it enabled. */
+  /** Why Re-send is held. */
   resendHeld?: string;
   onResend: () => void;
 }) {

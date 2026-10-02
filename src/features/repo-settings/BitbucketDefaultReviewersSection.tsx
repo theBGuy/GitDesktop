@@ -23,6 +23,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
 } from "./parts";
 
 /** Bitbucket default reviewers: the accounts auto-added to every new pull
@@ -144,7 +145,7 @@ function ReviewerRow({
   onFocus: () => void;
   confirming: boolean;
   pending: boolean;
-  /** Why the confirm's Remove is held; unset leaves it enabled. */
+  /** Why the confirm's Remove is held. */
   confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;
@@ -214,7 +215,7 @@ function AddReviewerPopover({
   const heldReason = !online
     ? OFFLINE_WRITE_REASON
     : pending
-      ? "Saving your last change…"
+      ? SAVING_REASON
       : undefined;
   // A pick made offline would park silently, so a picker open when the
   // connection drops closes with its trigger held. Reset, not derived into

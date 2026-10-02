@@ -422,7 +422,7 @@ function Row({
   metaMono?: boolean;
   confirming: boolean;
   pending: boolean;
-  /** Why the confirm's Delete is held; unset leaves it enabled. */
+  /** Why the confirm's Delete is held. */
   confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;

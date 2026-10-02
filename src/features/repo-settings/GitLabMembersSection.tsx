@@ -31,6 +31,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
 } from "./parts";
 
 /** The roles the app offers (the classic five — Planner is newer and not
@@ -53,8 +54,6 @@ function roleLabel(level: number): string {
   if (level === 15) return "Planner";
   return ROLES.find((r) => r.value === level)?.label ?? `Level ${level}`;
 }
-
-const SAVING_REASON = "Saving your last change…";
 
 function validUsername(u: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(u);
@@ -277,7 +276,7 @@ function MemberRow({
   onRole: (level: number) => void;
   confirming: boolean;
   pending: boolean;
-  /** Why the confirm's Remove is held; unset leaves it enabled. */
+  /** Why the confirm's Remove is held. */
   confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;

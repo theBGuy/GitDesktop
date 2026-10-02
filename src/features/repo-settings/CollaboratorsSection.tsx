@@ -28,6 +28,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
 } from "./parts";
 
 const ROLES: { value: RepoRole; label: string }[] = [
@@ -46,7 +47,6 @@ const ROLE_ITEMS: Record<string, string> = Object.fromEntries(
 
 const ROLES_UNREAD_REASON =
   "Couldn't check which roles this repository supports";
-const SAVING_REASON = "Saving your last change…";
 
 function validUsername(u: string): boolean {
   return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(u);
@@ -429,7 +429,7 @@ function PersonRow({
   onRole: (role: RepoRole) => void;
   confirming: boolean;
   pending: boolean;
-  /** Why the confirm's Remove is held; unset leaves it enabled. */
+  /** Why the confirm's Remove is held. */
   confirmHeld?: string;
   onConfirm: () => void;
   onCancel: () => void;

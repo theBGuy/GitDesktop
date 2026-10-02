@@ -217,7 +217,7 @@ function VariableRow({
 }: {
   variable: GitLabVariable;
   saving: boolean;
-  /** Why Save and the confirmed Delete are held; unset leaves them enabled. */
+  /** Why Save and the confirmed Delete are held. */
   writeHeld?: string;
   onSave: (value: string) => void;
   confirming: boolean;

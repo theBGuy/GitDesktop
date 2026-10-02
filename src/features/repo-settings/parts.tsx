@@ -98,6 +98,9 @@ export function AsyncErrorCard({
 export const OFFLINE_WRITE_REASON =
   "You're offline — this will be available once you're back online.";
 
+/** The hold reason while a row's last change is still saving. */
+export const SAVING_REASON = "Saving your last change…";
+
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
 function formNoticeMessage(noun: string, failed: boolean): string {
   return failed
@@ -380,7 +383,7 @@ export function HeldRoleSelect({
   /** Why the picker is held, as its hover text and accessible description. */
   heldReason?: string;
   onRole: (value: string) => void;
-  /** The roles offered, in order. */
+  /** The options offered, in order. */
   options: readonly { value: string; label: string }[];
   items?: Record<string, string>;
   valueLabel?: ReactNode;

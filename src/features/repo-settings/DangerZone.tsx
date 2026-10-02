@@ -598,13 +598,17 @@ function LeaveForkNetworkAction({
     ),
     gitlab: () =>
       confirming ? (
-        <InlineConfirm
-          actLabel="Remove"
-          pending={removeFork.isPending}
-          heldReason={online ? undefined : OFFLINE_WRITE_REASON}
-          onCancel={() => setConfirming(false)}
-          onAct={handleRemoveFork}
-        />
+        // The stacked fork column doesn't stretch the act button's wrapper
+        // span — the confirm needs its own row, like Archive's.
+        <div className="flex items-center gap-2">
+          <InlineConfirm
+            actLabel="Remove"
+            pending={removeFork.isPending}
+            heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+            onCancel={() => setConfirming(false)}
+            onAct={handleRemoveFork}
+          />
+        </div>
       ) : (
         <DangerButton
           variant="destructive"
