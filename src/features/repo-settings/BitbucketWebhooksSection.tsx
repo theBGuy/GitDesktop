@@ -27,6 +27,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 /** Bitbucket's webhook events, curated to the ones people wire, in display
@@ -68,6 +69,7 @@ export function BitbucketWebhooksSection({
   // null = list; "new" = create form; a hook = edit form.
   const [editing, setEditing] = useState<BitbucketHook | "new" | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const swapFocus = useConfirmSwapFocus();
 
   // Awaited, not per-call callbacks: this subtree unmounts when the dialog
   // closes or the rail crossfades to another section, and react-query drops
@@ -139,6 +141,7 @@ export function BitbucketWebhooksSection({
                   actLabel="Delete"
                   pending={deleteHook.isPending}
                   heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+                  swapFocusRef={swapFocus(h.uuid)}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(h.uuid)}
                 />
@@ -153,6 +156,7 @@ export function BitbucketWebhooksSection({
                     <PencilSimpleIcon />
                   </Button>
                   <Button
+                    ref={swapFocus(h.uuid)}
                     size="sm"
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"

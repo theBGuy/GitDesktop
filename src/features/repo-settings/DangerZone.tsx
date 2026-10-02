@@ -47,7 +47,11 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { InlineConfirm, OFFLINE_WRITE_REASON } from "./parts";
+import {
+  InlineConfirm,
+  OFFLINE_WRITE_REASON,
+  useConfirmSwapFocus,
+} from "./parts";
 import { ScopeRefreshHint } from "./ScopeRefreshHint";
 
 /** The provider-neutral facts the danger actions need, sourced from whichever
@@ -374,6 +378,7 @@ function ArchiveAction({
   const setArchived = useSetArchived(repoPath);
   const online = useOnline();
   const [confirming, setConfirming] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
   const archived = info.archived;
   // Sentence-cased for toasts, lowercase mid-sentence — GitHub copy unchanged.
   const noun = isGitLab ? "project" : "repository";
@@ -405,12 +410,14 @@ function ArchiveAction({
             actVariant={archived ? "default" : "destructive"}
             pending={setArchived.isPending}
             heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+            swapFocusRef={swapFocus()}
             onCancel={() => setConfirming(false)}
             onAct={handleArchive}
           />
         </div>
       ) : (
         <DangerButton
+          ref={swapFocus()}
           variant="outline"
           disabled={!isOwner}
           hint={isOwner ? undefined : OWNER_HINT}
@@ -436,6 +443,7 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
   const remotes = useRemotes(repoPath);
   const removeRemote = useRemoveRemote(repoPath);
   const [confirming, setConfirming] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
 
   async function handleRemoveUpstream() {
     try {
@@ -475,12 +483,14 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
             <InlineConfirm
               actLabel="Remove"
               pending={removeRemote.isPending}
+              swapFocusRef={swapFocus()}
               onCancel={() => setConfirming(false)}
               onAct={handleRemoveUpstream}
             />
           </div>
         ) : (
           <DangerButton
+            ref={swapFocus()}
             variant="outline"
             className="shrink-0"
             onClick={() => setConfirming(true)}
@@ -521,6 +531,7 @@ function LeaveForkNetworkAction({
   const online = useOnline();
   const [rechecking, setRechecking] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
   const record = settings.data?.recentRepos.find((r) => r.path === repoPath);
 
   if (record?.isFork !== true) return null;
@@ -606,12 +617,14 @@ function LeaveForkNetworkAction({
             actLabel="Remove"
             pending={removeFork.isPending}
             heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+            swapFocusRef={swapFocus()}
             onCancel={() => setConfirming(false)}
             onAct={handleRemoveFork}
           />
         </div>
       ) : (
         <DangerButton
+          ref={swapFocus()}
           variant="destructive"
           disabled={!isOwner}
           hint={isOwner ? undefined : OWNER_HINT}

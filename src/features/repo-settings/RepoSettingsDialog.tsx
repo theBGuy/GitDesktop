@@ -93,6 +93,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 import { RulesetsSection } from "./RulesetsSection";
 import { SecretsSection } from "./SecretsSection";
@@ -555,6 +556,7 @@ function WebhookRow({
   const test = useTestWebhook(repoPath);
   const del = useDeleteWebhook(repoPath);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
 
@@ -636,6 +638,7 @@ function WebhookRow({
             actLabel="Remove"
             pending={del.isPending}
             heldReason={offlineReason}
+            swapFocusRef={swapFocus()}
             onCancel={() => setConfirmingDelete(false)}
             onAct={handleDelete}
           />
@@ -679,6 +682,7 @@ function WebhookRow({
               Edit
             </Button>
             <Button
+              ref={swapFocus()}
               size="sm"
               variant="ghost"
               className="text-destructive hover:text-destructive"

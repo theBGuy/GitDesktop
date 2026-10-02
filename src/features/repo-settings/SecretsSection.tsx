@@ -34,6 +34,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 const APPS: { value: SecretApp; label: string }[] = [
@@ -429,6 +430,7 @@ function Row({
   onDelete: () => void;
   onEdit?: () => void;
 }) {
+  const swapFocus = useConfirmSwapFocus();
   return (
     <div className="flex items-center gap-2 rounded-md border p-2.5 text-xs">
       <div className="min-w-0 flex-1">
@@ -450,6 +452,7 @@ function Row({
           actLabel="Delete"
           pending={pending}
           heldReason={confirmHeld}
+          swapFocusRef={swapFocus()}
           onCancel={onCancel}
           onAct={onDelete}
         />
@@ -461,6 +464,7 @@ function Row({
             </Button>
           )}
           <Button
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-destructive hover:text-destructive"

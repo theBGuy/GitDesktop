@@ -28,6 +28,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 function validKey(k: string): boolean {
@@ -268,6 +269,7 @@ function VariableRow({
   // 404, so they stay disabled while it's syncing.
   const syncing = variable.uuid.startsWith("pending:");
   const online = useOnline();
+  const swapFocus = useConfirmSwapFocus();
   const saveHeldReason = (() => {
     switch (true) {
       case syncing:
@@ -322,11 +324,13 @@ function VariableRow({
             actLabel="Delete"
             pending={pending}
             heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+            swapFocusRef={swapFocus()}
             onCancel={onCancel}
             onAct={onRemove}
           />
         ) : syncing ? (
           <DisabledReasonButton
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-muted-foreground"
@@ -338,6 +342,7 @@ function VariableRow({
           </DisabledReasonButton>
         ) : (
           <Button
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"

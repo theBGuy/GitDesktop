@@ -21,6 +21,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 function validKey(k: string): boolean {
@@ -228,6 +229,7 @@ function VariableRow({
 }) {
   const [draft, setDraft] = useState(variable.value);
   const dirty = draft !== variable.value;
+  const swapFocus = useConfirmSwapFocus();
 
   return (
     <div className="space-y-1.5 rounded-md border p-2 text-xs">
@@ -253,11 +255,13 @@ function VariableRow({
             actLabel="Delete"
             pending={pending}
             heldReason={writeHeld}
+            swapFocusRef={swapFocus()}
             onCancel={onCancel}
             onAct={onRemove}
           />
         ) : (
           <Button
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"

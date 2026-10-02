@@ -1,4 +1,11 @@
-import { Fragment, type ReactNode, type Ref, useMemo, useState } from "react";
+import {
+  type ComponentProps,
+  Fragment,
+  type ReactNode,
+  type Ref,
+  useMemo,
+  useState,
+} from "react";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -11,6 +18,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -442,6 +450,71 @@ export function HeldRoleSelect({
   );
 }
 
+/** Why a {@link HeldSwitch} is held. The site reason (offline, inherited, a
+ *  dependency, a pending certificate) outranks `saving`, as the row pickers'
+ *  `offlineReason ?? SAVING_REASON` does: a save parked offline lands only on
+ *  reconnect, which is what that reason says. */
+export function heldSwitchReason(
+  heldReason: string | undefined,
+  saving: boolean,
+): string | undefined {
+  return heldReason ?? (saving ? SAVING_REASON : undefined);
+}
+
+/**
+ * A switch held with a reason ({@link heldSwitchReason}). Held by `readOnly`,
+ * never Base UI's `disabled`, which sets tabIndex -1: the switch stays one
+ * mounted, focusable node across every hold edge, Space and Enter flip
+ * nothing, and the reason reaches hover, keyboard, and AT alike.
+ */
+export function HeldSwitch({
+  heldReason,
+  saving = false,
+  inLabel = false,
+  className,
+  ...props
+}: Omit<ComponentProps<typeof Switch>, "disabled" | "readOnly"> & {
+  heldReason?: string;
+  /** The switch's own change is still saving. */
+  saving?: boolean;
+  /** Named by a wrapping `<label>`, which then carries the hover title itself:
+   *  Chromium reads a titled descendant's title into the label's text, and so
+   *  into the switch's name. */
+  inLabel?: boolean;
+}) {
+  const reason = heldSwitchReason(heldReason, saving);
+  const held = reason !== undefined;
+  const hold = useDisabledReason({
+    disabled: held,
+    reason,
+    describedBy: props["aria-describedby"],
+  });
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0",
+        hold.blockedReason !== null && "cursor-not-allowed",
+      )}
+      title={inLabel ? undefined : hold.wrapperTitle}
+    >
+      {/* `hidden`, as in HeldRoleSelect: a wrapping <label> names the switch
+          from its content, which skips hidden text but would read sr-only. */}
+      {hold.blockedReason !== null && (
+        <span id={hold.reasonId} hidden>
+          {hold.blockedReason}
+        </span>
+      )}
+      <Switch
+        {...props}
+        readOnly={held}
+        aria-disabled={held || undefined}
+        aria-describedby={hold.describedBy}
+        className={cn(ARIA_DISABLED_CLASS, className)}
+      />
+    </span>
+  );
+}
+
 /**
  * The scope note inside an async list's error card, in `ScopeRefreshHint`'s
  * grammar. The reconnect button only appears for a classic OAuth/PAT sign-in
@@ -502,6 +575,75 @@ function ScopeErrorHint({ scope }: { scope: string }) {
   );
 }
 
+type SwapFocusRef = (node: HTMLElement | null) => (() => void) | undefined;
+
+function onBody(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body;
+}
+
+function createConfirmSwapFocus() {
+  let armed: string | number | null = null;
+  // A node whose focus went nowhere: the act button disabled while pending
+  // drops focus to <body> with no landing, and still owns it until it leaves.
+  let stranded: HTMLElement | null = null;
+  const refs = new Map<string | number, SwapFocusRef>();
+  return (key: string | number = ""): SwapFocusRef => {
+    let ref = refs.get(key);
+    if (ref === undefined) {
+      ref = (node) => {
+        if (node === null) return;
+        if (armed === key) {
+          armed = null;
+          if (onBody()) node.focus({ preventScroll: true });
+        }
+        const onFocusOut = (e: FocusEvent) => {
+          if (e.relatedTarget === null) stranded = node;
+        };
+        // A window blur also leaves with no target, but focus comes back here.
+        const onFocusIn = () => {
+          if (stranded === node) stranded = null;
+        };
+        node.addEventListener("focusout", onFocusOut);
+        node.addEventListener("focusin", onFocusIn);
+        // Ref cleanup runs before React removes the node, while focus is still
+        // readable; the microtask disarms a leave nothing in this commit claimed.
+        return () => {
+          node.removeEventListener("focusout", onFocusOut);
+          node.removeEventListener("focusin", onFocusIn);
+          const owned =
+            node.contains(document.activeElement) ||
+            (stranded === node && onBody());
+          if (stranded === node) stranded = null;
+          if (!owned) return;
+          armed = key;
+          queueMicrotask(() => {
+            if (armed === key) armed = null;
+          });
+        };
+      };
+      refs.set(key, ref);
+    }
+    return ref;
+  };
+}
+
+/**
+ * Keeps focus across a `confirming ? <InlineConfirm/> : <trigger/>` swap: the
+ * trigger leaving with focus hands it to the confirm's Cancel, and the confirm
+ * leaving with focus hands it back to the returning trigger. Pass the same
+ * `swapFocus(key)` to both sides (`ref` on the trigger, `swapFocusRef` on
+ * InlineConfirm); one hook can serve a whole list keyed per row. It moves focus
+ * only when the leaving side held it (or lost it to `<body>` and nothing took
+ * it since) and focus sits on `<body>`, within the swap's own commit, before
+ * Base UI's dialog fallback (a microtask) parks it on the popup; a pointer user
+ * who clicked elsewhere is never pulled back.
+ */
+export function useConfirmSwapFocus() {
+  const [swapFocus] = useState(createConfirmSwapFocus);
+  return swapFocus;
+}
+
 /**
  * The confirm half of an inline confirm-delete affordance: a `Cancel` button and
  * a (usually destructive) action button with a pending spinner, optionally
@@ -519,6 +661,7 @@ export function InlineConfirm({
   actVariant = "destructive",
   pending = false,
   heldReason,
+  swapFocusRef,
   onCancel,
   onAct,
 }: {
@@ -533,6 +676,8 @@ export function InlineConfirm({
   /** Why the act button is held, as its hover text and accessible description.
    *  Unset leaves it held only while `pending`. */
   heldReason?: string;
+  /** The `useConfirmSwapFocus` ref this confirm swaps with its trigger under. */
+  swapFocusRef?: Ref<HTMLButtonElement>;
   onCancel: () => void;
   onAct: () => void;
 }) {
@@ -543,12 +688,20 @@ export function InlineConfirm({
           {prompt}
         </span>
       )}
-      <Button size="sm" variant={cancelVariant} onClick={onCancel}>
+      {/* Both buttons report a leave; Cancel attaches first in tree order, so
+          it is the one that claims an incoming hand-off. */}
+      <Button
+        ref={swapFocusRef}
+        size="sm"
+        variant={cancelVariant}
+        onClick={onCancel}
+      >
         {cancelLabel}
       </Button>
       {/* One node whether or not a reason holds it, so a focused act button
           survives the reason coming and going. */}
       <DisabledReasonButton
+        ref={swapFocusRef}
         size="sm"
         variant={actVariant}
         disabled={pending || heldReason !== undefined}

@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteFormSection } from "./parts";
+import { InlineConfirm, RemoteFormSection, useConfirmSwapFocus } from "./parts";
 import {
   type PendingSent,
   reconcileTouched,
@@ -171,6 +171,7 @@ function FundingForm({
     null,
   );
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
   const reconciled = reconcileTouched({
     edit,
     server: seed,
@@ -292,11 +293,13 @@ function FundingForm({
               cancelVariant="outline"
               actLabel="Remove"
               pending={del.isPending}
+              swapFocusRef={swapFocus()}
               onCancel={() => setConfirmingRemove(false)}
               onAct={remove}
             />
           ) : (
             <Button
+              ref={swapFocus()}
               variant="ghost"
               size="sm"
               className="mr-auto text-muted-foreground"

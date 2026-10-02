@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBranches,
@@ -31,9 +30,12 @@ import type { PagesInfo } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  HeldSwitch,
+  heldSwitchReason,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
+  useConfirmSwapFocus,
 } from "./parts";
 import {
   type PendingSent,
@@ -218,6 +220,7 @@ function PagesEnabled({
   const disable = useDisablePages(repoPath);
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
+  const swapFocus = useConfirmSwapFocus();
   // An absent field shows the server's value. Touched fields retire per
   // `reconcileTouched` — never on the save itself, so a save whose refetch
   // failed keeps its values on screen.
@@ -428,7 +431,10 @@ function PagesEnabled({
         </p>
       </div>
 
-      <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
+      <label
+        className="flex cursor-pointer items-center justify-between gap-3 text-xs"
+        title={heldSwitchReason(httpsHeld, update.isPending)}
+      >
         <span>
           Enforce HTTPS
           {!certReady && (
@@ -439,13 +445,13 @@ function PagesEnabled({
             </span>
           )}
         </span>
-        <span title={httpsHeld} className="inline-flex">
-          <Switch
-            checked={pages.httpsEnforced}
-            disabled={update.isPending || httpsHeld !== undefined}
-            onCheckedChange={handleHttpsEnforced}
-          />
-        </span>
+        <HeldSwitch
+          checked={pages.httpsEnforced}
+          heldReason={httpsHeld}
+          saving={update.isPending}
+          inLabel
+          onCheckedChange={handleHttpsEnforced}
+        />
       </label>
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">
@@ -456,11 +462,13 @@ function PagesEnabled({
             actLabel="Disable Pages"
             pending={disable.isPending}
             heldReason={offlineReason}
+            swapFocusRef={swapFocus()}
             onCancel={() => setConfirmingDisable(false)}
             onAct={handleDisable}
           />
         ) : (
           <Button
+            ref={swapFocus()}
             variant="ghost"
             size="sm"
             className="text-destructive hover:text-destructive"

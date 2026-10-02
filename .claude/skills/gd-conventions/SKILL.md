@@ -414,14 +414,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (repo-settings/parts), disabled with reason, never hidden: a mutation
   pressed offline parks silently and fires on reconnect. Confirms take
   `InlineConfirm`'s / `DangerDialog`'s `heldReason`, pickers
-  `HeldRoleSelect`'s, switches an always-mounted titled span (a held arm
-  that swaps the tree shape drops focus). Openers that only reveal a
-  form or confirm stay enabled, as do local writes (FUNDING.yml,
-  dependabot.yml, removing the upstream remote).
+  `HeldRoleSelect`'s, switches `HeldSwitch`'s (readOnly, never `disabled`:
+  one node that keeps its tab stop and gives keyboard and AT its reason;
+  inside a wrapping `<label>` pass `inLabel` and title the label). Openers
+  that only reveal a form or confirm stay enabled, as do local writes
+  (FUNDING.yml, dependabot.yml, removing the upstream remote).
 - **Held row pickers** — a row's select (role, ruleset enforcement) held while
   saving or offline rides `HeldRoleSelect` (repo-settings/parts): readOnly +
   gated open, never Base UI's `disabled`, which drops the trigger and its
   reason from the tab order.
+- **Confirm-swap focus** — a control that swaps with an inline confirm hands
+  focus across the swap via `useConfirmSwapFocus` (repo-settings/parts): the
+  same ref on the trigger and on `InlineConfirm`'s `swapFocusRef`, keyed per
+  row in lists; without it the dialog's focus fallback sends focus to the
+  popup when the focused node unmounts.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

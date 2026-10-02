@@ -15,7 +15,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBbCreateSchedule,
@@ -34,9 +33,11 @@ import {
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
 import {
+  HeldSwitch,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 const bbSchedulesKey = (repo: string) => ["repo", repo, "bb-schedules"];
@@ -223,6 +224,7 @@ function ScheduleRow({
   // would 404, so both controls stay disabled while it's syncing.
   const syncing = schedule.uuid.startsWith("pending:");
   const online = useOnline();
+  const swapFocus = useConfirmSwapFocus();
   const toggleHeld = (() => {
     switch (true) {
       case syncing:
@@ -243,27 +245,26 @@ function ScheduleRow({
           {schedule.cronPattern}
         </p>
       </div>
-      {/* A natively-disabled control drops its title, so the wrapper explains
-          why; it stays mounted so a focused switch survives the hold. */}
-      <span title={toggleHeld} className="inline-flex">
-        <Switch
-          checked={schedule.enabled}
-          disabled={toggling || toggleHeld !== undefined}
-          onCheckedChange={onToggle}
-          aria-label="Schedule enabled"
-        />
-      </span>
+      <HeldSwitch
+        checked={schedule.enabled}
+        heldReason={toggleHeld}
+        saving={toggling}
+        onCheckedChange={onToggle}
+        aria-label={`Schedule enabled for ${schedule.refName}`}
+      />
       {confirming ? (
         <InlineConfirm
           prompt="Delete?"
           actLabel="Delete"
           pending={pending}
           heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+          swapFocusRef={swapFocus()}
           onCancel={onCancel}
           onAct={onRemove}
         />
       ) : syncing ? (
         <DisabledReasonButton
+          ref={swapFocus()}
           size="sm"
           variant="ghost"
           className="text-muted-foreground"
@@ -274,6 +275,7 @@ function ScheduleRow({
         </DisabledReasonButton>
       ) : (
         <Button
+          ref={swapFocus()}
           size="sm"
           variant="ghost"
           className="text-muted-foreground hover:text-destructive"

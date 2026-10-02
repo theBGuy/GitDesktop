@@ -37,6 +37,7 @@ import {
   RemoteFormSection,
   RemoteListSection,
   SAVING_REASON,
+  useConfirmSwapFocus,
 } from "./parts";
 
 const ENFORCEMENTS: { value: RulesetEnforcement; label: string }[] = [
@@ -374,6 +375,7 @@ function RulesetList({
   const setEnforcement = useSetRulesetEnforcement(repoPath);
   const del = useDeleteRuleset(repoPath);
   const [confirming, setConfirming] = useState<number | null>(null);
+  const swapFocus = useConfirmSwapFocus();
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const enforcementHeld =
@@ -453,6 +455,7 @@ function RulesetList({
                   actLabel="Delete"
                   pending={del.isPending}
                   heldReason={offlineReason}
+                  swapFocusRef={swapFocus(rs.id)}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(rs.id)}
                 />
@@ -478,6 +481,7 @@ function RulesetList({
                     Edit
                   </DisabledReasonButton>
                   <Button
+                    ref={swapFocus(rs.id)}
                     size="sm"
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"

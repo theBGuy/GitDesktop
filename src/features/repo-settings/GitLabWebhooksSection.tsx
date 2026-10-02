@@ -36,6 +36,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 /** GitLab's per-hook event flags, in display order (no "send everything" —
@@ -79,6 +80,7 @@ export function GitLabWebhooksSection({
   const [editing, setEditing] = useState<GitLabHook | "new" | null>(null);
   const [viewingEvents, setViewingEvents] = useState<GitLabHook | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const swapFocus = useConfirmSwapFocus();
 
   // Awaited, not per-call callbacks: this subtree unmounts when the dialog
   // closes or the rail crossfades to another section, and react-query drops
@@ -174,6 +176,7 @@ export function GitLabWebhooksSection({
                   actLabel="Delete"
                   pending={deleteHook.isPending}
                   heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+                  swapFocusRef={swapFocus(h.id)}
                   onCancel={() => setConfirming(null)}
                   onAct={() => handleDelete(h.id)}
                 />
@@ -206,6 +209,7 @@ export function GitLabWebhooksSection({
                     <PencilSimpleIcon />
                   </Button>
                   <Button
+                    ref={swapFocus(h.id)}
                     size="sm"
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"

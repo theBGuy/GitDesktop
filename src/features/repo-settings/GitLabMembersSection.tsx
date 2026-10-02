@@ -32,6 +32,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   SAVING_REASON,
+  useConfirmSwapFocus,
 } from "./parts";
 
 /** The roles the app offers (the classic five — Planner is newer and not
@@ -159,7 +160,7 @@ export function GitLabMembersSection({
             onValueChange={(v) => v && setLevel(Number(v))}
             itemToStringLabel={(v) => roleLabel(Number(v))}
           >
-            <SelectTrigger size="sm" className="w-28">
+            <SelectTrigger size="sm" className="w-28" aria-label="Role">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -284,6 +285,7 @@ function MemberRow({
 }) {
   // A confirm opened before settings named the owner yields to the hold.
   const showConfirm = confirming && removeHeld === undefined;
+  const swapFocus = useConfirmSwapFocus();
   return (
     <div
       role="option"
@@ -319,6 +321,7 @@ function MemberRow({
           actLabel="Remove"
           pending={pending}
           heldReason={confirmHeld}
+          swapFocusRef={swapFocus()}
           onCancel={onCancel}
           onAct={onRemove}
         />
@@ -332,9 +335,11 @@ function MemberRow({
             onRole={(v) => onRole(Number(v))}
             options={ROLE_OPTIONS}
             valueLabel={roleLabel(member.accessLevel)}
+            label={`Role for ${member.username}`}
           />
           {removeHeld !== undefined ? (
             <DisabledReasonButton
+              ref={swapFocus()}
               size="sm"
               variant="ghost"
               className="text-muted-foreground"
@@ -346,6 +351,7 @@ function MemberRow({
             </DisabledReasonButton>
           ) : (
             <Button
+              ref={swapFocus()}
               size="sm"
               variant="ghost"
               className="text-muted-foreground hover:text-destructive"

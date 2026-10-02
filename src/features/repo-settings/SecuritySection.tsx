@@ -24,7 +24,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import {
   useApplySecurity,
   useDeleteDependabot,
@@ -38,9 +37,12 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
+  HeldSwitch,
+  heldSwitchReason,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
+  useConfirmSwapFocus,
 } from "./parts";
 import {
   type PendingSent,
@@ -218,6 +220,7 @@ function DependabotVersionUpdates({
   const del = useDeleteDependabot(repoPath);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -262,12 +265,14 @@ function DependabotVersionUpdates({
               <InlineConfirm
                 actLabel="Remove"
                 pending={del.isPending}
+                swapFocusRef={swapFocus()}
                 onCancel={() => setConfirmingRemove(false)}
                 onAct={handleRemove}
               />
             </div>
           ) : (
             <Button
+              ref={swapFocus()}
               variant="outline"
               size="sm"
               className="shrink-0"
@@ -482,21 +487,28 @@ function SecurityForm({
     <div className="min-w-0 space-y-2">
       {FEATURES.map((f) => {
         if (f.privateOnly && !status.isPrivate) return null;
-        const blocked = f.dependsOn ? !draft[f.dependsOn] : false;
+        const parent = FEATURES.find((p) => p.key === f.dependsOn);
+        const blocked = parent !== undefined && !draft[parent.key];
+        const blockedReason = blocked
+          ? `Available once ${parent.label} is on.`
+          : undefined;
         return (
           <label
             key={f.key}
             className={`flex items-start justify-between gap-3 rounded-md border p-3 ${
               blocked ? "opacity-60" : "cursor-pointer"
             }`}
+            title={heldSwitchReason(blockedReason, apply.isPending)}
           >
             <div className="min-w-0">
               <p className="text-xs font-medium">{f.label}</p>
               <p className="text-[11px] text-muted-foreground">{f.desc}</p>
             </div>
-            <Switch
+            <HeldSwitch
               checked={draft[f.key]}
-              disabled={blocked || apply.isPending}
+              heldReason={blockedReason}
+              saving={apply.isPending}
+              inLabel
               onCheckedChange={(next) => set(f.key, next)}
             />
           </label>

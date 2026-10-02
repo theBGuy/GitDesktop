@@ -24,6 +24,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   SAVING_REASON,
+  useConfirmSwapFocus,
 } from "./parts";
 
 /** Bitbucket default reviewers: the accounts auto-added to every new pull
@@ -152,6 +153,7 @@ function ReviewerRow({
   onRemove: () => void;
 }) {
   const hint = userRefHint(reviewer, all);
+  const swapFocus = useConfirmSwapFocus();
   return (
     <div
       role="option"
@@ -179,11 +181,13 @@ function ReviewerRow({
           actLabel="Remove"
           pending={pending}
           heldReason={confirmHeld}
+          swapFocusRef={swapFocus()}
           onCancel={onCancel}
           onAct={onRemove}
         />
       ) : (
         <Button
+          ref={swapFocus()}
           size="sm"
           variant="ghost"
           className="text-muted-foreground hover:text-destructive"

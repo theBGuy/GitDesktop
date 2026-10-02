@@ -29,6 +29,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   SAVING_REASON,
+  useConfirmSwapFocus,
 } from "./parts";
 
 const ROLES: { value: RepoRole; label: string }[] = [
@@ -367,12 +368,15 @@ function RoleSlot({
   personal,
   value,
   heldReason,
+  label,
   onRole,
 }: {
   personal: boolean;
   value: string;
   /** Why the picker is held, as its hover text and accessible description. */
   heldReason?: string;
+  /** The picker's accessible name; HeldRoleSelect's own default when unset. */
+  label?: string;
   onRole: (role: RepoRole) => void;
 }) {
   if (personal)
@@ -389,6 +393,7 @@ function RoleSlot({
       onRole={(v) => onRole(v as RepoRole)}
       options={ROLES}
       items={ROLE_ITEMS}
+      label={label}
     />
   );
 }
@@ -435,6 +440,7 @@ function PersonRow({
   onCancel: () => void;
   onRemove: () => void;
 }) {
+  const swapFocus = useConfirmSwapFocus();
   return (
     <div
       role="option"
@@ -461,6 +467,7 @@ function PersonRow({
           actLabel="Remove"
           pending={pending}
           heldReason={confirmHeld}
+          swapFocusRef={swapFocus()}
           onCancel={onCancel}
           onAct={onRemove}
         />
@@ -470,10 +477,12 @@ function PersonRow({
             personal={personal}
             value={roleValue}
             heldReason={roleHeld}
+            label={`Role for ${login}`}
             onRole={onRole}
           />
           {removeHeld !== undefined ? (
             <DisabledReasonButton
+              ref={swapFocus()}
               size="sm"
               variant="ghost"
               className="text-muted-foreground"
@@ -485,6 +494,7 @@ function PersonRow({
             </DisabledReasonButton>
           ) : (
             <Button
+              ref={swapFocus()}
               size="sm"
               variant="ghost"
               className="text-muted-foreground hover:text-destructive"

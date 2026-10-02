@@ -29,9 +29,12 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import {
+  HeldSwitch,
+  heldSwitchReason,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  useConfirmSwapFocus,
 } from "./parts";
 
 /** GitLab's protectable access levels, for both the "allowed to push" and
@@ -181,6 +184,7 @@ function ProtectedBranchRow({
   const switchId = useId();
   const inheritedHint = "Inherited from the group — manage it there.";
   const online = useOnline();
+  const swapFocus = useConfirmSwapFocus();
   const forcePushHeld = (() => {
     switch (true) {
       case branch.inherited:
@@ -214,11 +218,13 @@ function ProtectedBranchRow({
             actLabel="Unprotect"
             pending={unprotecting}
             heldReason={online ? undefined : OFFLINE_WRITE_REASON}
+            swapFocusRef={swapFocus()}
             onCancel={onCancel}
             onAct={onUnprotect}
           />
         ) : branch.inherited ? (
           <DisabledReasonButton
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-muted-foreground"
@@ -229,6 +235,7 @@ function ProtectedBranchRow({
           </DisabledReasonButton>
         ) : (
           <Button
+            ref={swapFocus()}
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
@@ -242,15 +249,19 @@ function ProtectedBranchRow({
         Push: {levelSummary(branch.pushLevels)} · Merge:{" "}
         {levelSummary(branch.mergeLevels)}
       </p>
-      {/* The titled wrapper stays mounted so a focused switch survives the hold;
-          only its title and the switch's disabled state vary. */}
-      <span title={forcePushHeld} className="flex w-fit items-center gap-2">
-        <Switch
+      {/* The title carries the hold reason over the Label too. The Label names
+          the switch (Base UI's label fallback outranks aria-label), so the row
+          identity rides in its sr-only suffix. */}
+      <span
+        title={heldSwitchReason(forcePushHeld, forceSaving)}
+        className="flex w-fit items-center gap-2"
+      >
+        <HeldSwitch
           id={switchId}
           checked={branch.allowForcePush}
-          disabled={forceSaving || forcePushHeld !== undefined}
+          heldReason={forcePushHeld}
+          saving={forceSaving}
           onCheckedChange={onToggleForcePush}
-          aria-label="Allow force push"
         />
         <Label
           htmlFor={switchId}
@@ -260,6 +271,7 @@ function ProtectedBranchRow({
           )}
         >
           Allow force push
+          <span className="sr-only"> for {branch.name}</span>
         </Label>
       </span>
     </div>
