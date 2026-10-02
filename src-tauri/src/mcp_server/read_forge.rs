@@ -176,10 +176,11 @@ impl GitDesktopMcp {
                        means the checks read failed or is knowably incomplete; partial checks \
                        may remain. `commentsUnknown` and `commitsUnknown` mean those reads failed \
                        or are knowably incomplete; retained lists must not be treated as complete. \
+                       `commentsTruncated`, `commitsTruncated` and `checksTruncated` mean \
+                       a capped read returns the same partial list on retry. \
                        `reviewersUnknown` applies only to reviewer verdicts; the assigned \
                        reviewers list stays complete. For just the conversation, including \
-                       file:line review \
-                       threads, see list_pull_request_comments. Returns JSON."
+                       file:line review threads, see list_pull_request_comments. Returns JSON."
     )]
     async fn get_pull_request(
         &self,

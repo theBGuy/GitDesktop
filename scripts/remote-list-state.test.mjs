@@ -1,7 +1,7 @@
 // Pins the remote list section's render ladder, the detail pane's ladder, the
 // list notice, the "Load more" guard, the permanent-error predicate and the
-// park it withholds, the review-comments notice, the empty-picker line, and
-// the board's failure-notice grouping.
+// park it withholds, the review-comments notice, the PR sub-list notice, the
+// empty-picker line, and the board's failure-notice grouping.
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
@@ -34,6 +34,7 @@ import {
   sectionReadNotice,
   stepLoadMoreGuard,
   ungroupedReason,
+  unknownListNotice,
 } from "../src/features/conversations/remote-section-state.ts";
 
 const BOOLS = [false, true];
@@ -1301,4 +1302,51 @@ test("only a successful read may claim the picker is empty (negative control)", 
     ),
     PICKER_COPY.loadFailed,
   );
+});
+
+test("every unknown-sub-list input resolves to its arm (truth table)", () => {
+  const retry = () => {};
+  const RETAINED = "Only some of this merge request's commits loaded.";
+  const OFFLINE = offlinePendingMessage("the commits");
+  const FAILED = "Couldn't load this merge request's commits.";
+  for (const truncated of BOOLS) {
+    for (const paused of BOOLS) {
+      const notice = unknownListNotice({
+        prNoun: "merge request",
+        list: "commits",
+        truncated,
+        paused,
+        onRetry: retry,
+      });
+      const label = `truncated=${truncated} paused=${paused}`;
+      // A cap re-reads the same cap on refetch or reconnect: it outranks
+      // offline and never offers Retry.
+      if (truncated) {
+        assert.deepEqual(notice, { message: RETAINED }, label);
+      } else if (paused) {
+        // A parked read resumes by itself, so a Retry would park again.
+        assert.deepEqual(notice, { message: OFFLINE }, label);
+      } else {
+        assert.equal(notice.message, FAILED, label);
+        assert.equal(notice.onRetry, retry, label);
+      }
+    }
+  }
+});
+
+test("only a failed, unparked sub-list read offers Retry (negative control)", () => {
+  const offered = [];
+  for (const truncated of BOOLS) {
+    for (const paused of BOOLS) {
+      const notice = unknownListNotice({
+        prNoun: "pull request",
+        list: "checks",
+        truncated,
+        paused,
+        onRetry: () => {},
+      });
+      if (notice.onRetry !== undefined) offered.push({ truncated, paused });
+    }
+  }
+  assert.deepEqual(offered, [{ truncated: false, paused: false }]);
 });

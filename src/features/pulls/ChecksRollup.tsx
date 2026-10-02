@@ -37,8 +37,8 @@ import {
 } from "@/features/actions/status";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import {
-  offlinePendingMessage,
   sectionReadNotice,
+  unknownListNotice,
 } from "@/features/conversations/remote-section-state";
 import { clipTitle } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
@@ -520,26 +520,6 @@ function RunDetailFetcher({
     if (jobs) setJobs((prev) => ({ ...prev, [runId]: jobs }));
   }, [jobs, runId, setJobs]);
   return null;
-}
-
-/** The notice props for a PR sub-list whose read failed or is knowably partial,
- *  keyed on the wire's `truncated` flag, never the shown row count (filtering can
- *  empty a capped page; an optimistic append can fill a failed one). A truncated
- *  read re-reads the same cap on refetch or reconnect, so it outranks offline and
- *  offers no Retry. A failed read says so beside any rows, which the server read
- *  didn't supply; parked offline it resumes by itself, so it offers no Retry. */
-export function unknownListNotice(opts: {
-  prNoun: string;
-  list: string;
-  truncated: boolean;
-  paused: boolean;
-  onRetry?: () => void;
-}): { message: string; onRetry?: () => void } {
-  const { prNoun, list, truncated, paused, onRetry } = opts;
-  if (truncated)
-    return { message: `Only some of this ${prNoun}'s ${list} loaded.` };
-  if (paused) return { message: offlinePendingMessage(`the ${list}`) };
-  return { message: `Couldn't load this ${prNoun}'s ${list}.`, onRetry };
 }
 
 /**

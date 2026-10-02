@@ -74,6 +74,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
   resolveDetailPane,
+  unknownListNotice,
 } from "@/features/conversations/remote-section-state";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
@@ -197,7 +198,7 @@ import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
-import { ChecksRollup, unknownListNotice } from "./ChecksRollup";
+import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PendingReviewStrip } from "./PendingReviewStrip";
@@ -2741,11 +2742,13 @@ export function RemotePrView({
           </div>
         ) : null}
         {/* Verdicts ride their own sub-read; without them an assigned reviewer's
-            plain chip would read as still pending. Verdicts only exist for
-            assigned reviewers, so an empty list has nothing to qualify. */}
+            plain chip would read as still pending. Gated on the flag alone:
+            GitLab skips the verdicts read when nobody is assigned (so it stays
+            false), while on GitHub acted reviewers leave the assigned list, so
+            an empty list with unknown verdicts still hides finished reviews. */}
         <DegradedListNotice
           noun="review status"
-          degraded={pr.reviewersUnknown && pr.reviewers.length > 0}
+          degraded={pr.reviewersUnknown}
           message={
             details.isPaused
               ? offlinePendingMessage("review status")

@@ -309,9 +309,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "state, branches, commits, files, labels, reviewers) from the forge. " +
         "commitsUnknown means the commits could not be fully read, so commits " +
         "may be partial or empty, and commitsTruncated means the read hit a cap " +
-        "(retrying returns the same partial list); reviewersUnknown means " +
-        "reviewer verdicts could not be read, so no reviewer can be assumed " +
-        "pending or approved.",
+        "(retrying returns the same partial list).",
       inputSchema: z.object({}),
       execute: async (_input, { abortSignal }) => {
         try {
@@ -341,7 +339,6 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             })),
             labels: pr.labels.map((l) => l.name),
             reviewers: pr.reviewers.map((r) => r.label),
-            reviewersUnknown: pr.reviewersUnknown,
           };
           return (
             UNTRUSTED_PREFIX + capHead(JSON.stringify(trimmed, null, 2), 60_000)

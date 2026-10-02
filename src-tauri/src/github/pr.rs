@@ -4175,7 +4175,7 @@ pub struct PrDetails {
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present the checks as complete. Partial checks may be retained.
     /// GitLab: failed or capped jobs read; false for no pipeline or a complete read.
-    /// Bitbucket: failed statuses fetch/parse or an unavailable head sha.
+    /// Bitbucket: failed statuses fetch/parse, remaining next page or unavailable head sha.
     /// GitHub: always false, read in the same call as the view.
     pub checks_unknown: bool,
     /// True when the read succeeded but the list is knowably cut at a pagination cap.
@@ -4185,7 +4185,7 @@ pub struct PrDetails {
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present the comments as complete. Partial comments may be retained.
     /// GitLab: failed or capped notes read. Bitbucket: failed or truncated pages.
-    /// GitHub: always false, read in the same call as the view.
+    /// GitHub: a failed REST top-up retains the GraphQL rows with an unknown list.
     pub comments_unknown: bool,
     /// True when the read succeeded but the list is knowably cut at a pagination cap.
     /// `comments_truncated` implies `comments_unknown`. Failed reads are unknown
@@ -4193,7 +4193,8 @@ pub struct PrDetails {
     pub comments_truncated: bool,
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present the commits as complete. Partial commits may be retained.
-    /// GitLab/Bitbucket: failed or capped read. GitHub: always false, core read.
+    /// GitLab/Bitbucket: failed or capped read. GitHub: failed REST top-up or a list
+    /// reaching the REST commit ceiling; failed top-ups retain the GraphQL rows.
     pub commits_unknown: bool,
     /// True when the read succeeded but the list is knowably cut at a pagination cap.
     /// `commits_truncated` implies `commits_unknown`. Failed reads are unknown
@@ -4201,9 +4202,9 @@ pub struct PrDetails {
     pub commits_truncated: bool,
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present reviewer verdicts as complete or assume assigned reviewers are pending.
-    /// The assigned `reviewers` list stays complete; the verdicts read is all-or-nothing.
+    /// The assigned `reviewers` list stays complete; only verdicts are unknown.
     /// GitLab: failed verdict read; false with no assigned reviewers.
-    /// GitHub/Bitbucket: always false, verdicts come from core/complete reads.
+    /// GitHub: failed reviews top-up. Bitbucket: false, verdicts come from the core read.
     pub reviewers_unknown: bool,
     /// Whether the PR can merge right now, per the SERVER — never inferred locally.
     /// Bitbucket reports `"unavailable"` (its PR shape has no such field).
@@ -4217,11 +4218,24 @@ pub struct PrDetails {
     pub maintainer_can_modify: Option<bool>,
 }
 
-/// Failed checks reads are empty and unknown; successful complete reads are known.
-pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrCheckOut>, bool) {
-    match read {
-        Ok(checks) => (checks, false),
-        Err(_) => (Vec::new(), true),
+/// GitHub's pull-request commits endpoint returns at most 250 commits.
+/// Source: <https://docs.github.com/en/rest/pulls/pulls#list-commits-on-a-pull-request>.
+const GH_REST_PR_COMMITS_CEILING: usize = 250;
+
+/// A missing top-up means the GraphQL list was below 100 rows. Failed top-ups
+/// retain those rows as unknown; successful REST reads may reach an endpoint cap.
+fn gh_top_up_or_unknown<T, E>(
+    graphql_rows: Vec<T>,
+    top_up: Option<Result<Vec<T>, E>>,
+    rest_ceiling: Option<usize>,
+) -> (Vec<T>, bool, bool) {
+    match top_up {
+        None => (graphql_rows, false, false),
+        Some(Ok(rows)) => {
+            let capped = rest_ceiling.is_some_and(|ceiling| rows.len() >= ceiling);
+            (rows, capped, capped)
+        }
+        Some(Err(_)) => (graphql_rows, true, false),
     }
 }
 
@@ -4678,135 +4692,89 @@ pub async fn gh_pr_view(
             .collect()
     };
 
-    // Same GraphQL-100-connection cap on commits/reviews/comments: complete each
-    // from its paginated REST endpoint when we hit 100, best-effort (a REST
-    // failure keeps the 100 GraphQL entries rather than failing the view).
-    let commits: Vec<PrCommitOut> = if raw.commits.len() >= 100 {
-        match gh_pr_commits_paginated(&repo_path, number, lens.as_deref()).await {
-            Ok(complete) => complete,
-            Err(_) => raw
-                .commits
-                .into_iter()
-                .map(|c| {
-                    let author = c
-                        .authors
-                        .into_iter()
-                        .next()
-                        .map(|a| if a.name.is_empty() { a.login } else { a.name })
-                        .unwrap_or_default();
-                    PrCommitOut {
-                        oid: c.oid,
-                        headline: c.message_headline,
-                        message_body: c.message_body,
-                        date: real_time_or_empty(c.authored_date),
-                        author,
-                    }
-                })
-                .collect(),
-        }
+    // At 100 GraphQL rows, top up commits/reviews/comments from paginated REST.
+    // A failed top-up retains the GraphQL rows and flags that list unknown.
+    // The commits endpoint has its own ceiling even after successful pagination.
+    let commits_top_up = if raw.commits.len() >= 100 {
+        Some(gh_pr_commits_paginated(&repo_path, number, lens.as_deref()).await)
     } else {
-        raw.commits
-            .into_iter()
-            .map(|c| {
-                let author = c
-                    .authors
-                    .into_iter()
-                    .next()
-                    .map(|a| if a.name.is_empty() { a.login } else { a.name })
-                    .unwrap_or_default();
-                PrCommitOut {
-                    oid: c.oid,
-                    headline: c.message_headline,
-                    message_body: c.message_body,
-                    date: real_time_or_empty(c.authored_date),
-                    author,
-                }
-            })
-            .collect()
+        None
     };
+    let graphql_commits: Vec<PrCommitOut> = raw
+        .commits
+        .into_iter()
+        .map(|c| {
+            let author = c
+                .authors
+                .into_iter()
+                .next()
+                .map(|a| if a.name.is_empty() { a.login } else { a.name })
+                .unwrap_or_default();
+            PrCommitOut {
+                oid: c.oid,
+                headline: c.message_headline,
+                message_body: c.message_body,
+                date: real_time_or_empty(c.authored_date),
+                author,
+            }
+        })
+        .collect();
+    let (commits, commits_unknown, commits_truncated) = gh_top_up_or_unknown(
+        graphql_commits,
+        commits_top_up,
+        Some(GH_REST_PR_COMMITS_CEILING),
+    );
 
-    let reviews: Vec<PrThreadOut> = if raw.reviews.len() >= 100 {
-        match gh_pr_reviews_paginated(&repo_path, number, lens.as_deref()).await {
-            Ok(complete) => complete,
-            Err(_) => raw
-                .reviews
-                .into_iter()
-                .map(|r| PrThreadOut {
-                    author: login(r.author),
-                    author_avatar_url: String::new(),
-                    state: r.state,
-                    body: r.body,
-                    date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
-                    id: r.id,
-                    url: String::new(),
-                    viewer_did_author: false,
-                    is_minimized: false,
-                    minimized_reason: String::new(),
-                    // Reviews carry their own id in `id` (see `PrThreadOut::review_id`).
-                    review_id: String::new(),
-                })
-                .collect(),
-        }
+    let reviews_top_up = if raw.reviews.len() >= 100 {
+        Some(gh_pr_reviews_paginated(&repo_path, number, lens.as_deref()).await)
     } else {
-        raw.reviews
-            .into_iter()
-            .map(|r| PrThreadOut {
-                author: login(r.author),
-                author_avatar_url: String::new(),
-                state: r.state,
-                body: r.body,
-                date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
-                id: r.id,
-                url: String::new(),
-                viewer_did_author: false,
-                is_minimized: false,
-                minimized_reason: String::new(),
-                review_id: String::new(),
-            })
-            .collect()
+        None
     };
+    let graphql_reviews: Vec<PrThreadOut> = raw
+        .reviews
+        .into_iter()
+        .map(|r| PrThreadOut {
+            author: login(r.author),
+            author_avatar_url: String::new(),
+            state: r.state,
+            body: r.body,
+            date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
+            id: r.id,
+            url: String::new(),
+            viewer_did_author: false,
+            is_minimized: false,
+            minimized_reason: String::new(),
+            review_id: String::new(),
+        })
+        .collect();
+    let (reviews, reviewers_unknown, _reviews_truncated) =
+        gh_top_up_or_unknown(graphql_reviews, reviews_top_up, None);
 
-    let comments: Vec<PrThreadOut> = if raw.comments.len() >= 100 {
-        match gh_pr_comments_paginated(&repo_path, number, lens.as_deref()).await {
-            Ok(complete) => complete,
-            Err(_) => raw
-                .comments
-                .into_iter()
-                .map(|c| PrThreadOut {
-                    author: login(c.author),
-                    author_avatar_url: String::new(),
-                    state: String::new(),
-                    body: c.body,
-                    date: real_time_or_empty(c.created_at),
-                    id: c.id,
-                    url: c.url,
-                    viewer_did_author: c.viewer_did_author,
-                    is_minimized: c.is_minimized,
-                    minimized_reason: c.minimized_reason,
-                    // Conversation comments belong to no review.
-                    review_id: String::new(),
-                })
-                .collect(),
-        }
+    let comments_top_up = if raw.comments.len() >= 100 {
+        Some(gh_pr_comments_paginated(&repo_path, number, lens.as_deref()).await)
     } else {
-        raw.comments
-            .into_iter()
-            .map(|c| PrThreadOut {
-                author: login(c.author),
-                author_avatar_url: String::new(),
-                state: String::new(),
-                body: c.body,
-                date: real_time_or_empty(c.created_at),
-                id: c.id,
-                url: c.url,
-                viewer_did_author: c.viewer_did_author,
-                is_minimized: c.is_minimized,
-                minimized_reason: c.minimized_reason,
-                // Conversation comments belong to no review.
-                review_id: String::new(),
-            })
-            .collect()
+        None
     };
+    let graphql_comments: Vec<PrThreadOut> = raw
+        .comments
+        .into_iter()
+        .map(|c| PrThreadOut {
+            author: login(c.author),
+            author_avatar_url: String::new(),
+            state: String::new(),
+            body: c.body,
+            date: real_time_or_empty(c.created_at),
+            id: c.id,
+            url: c.url,
+            viewer_did_author: c.viewer_did_author,
+            is_minimized: c.is_minimized,
+            minimized_reason: c.minimized_reason,
+            // Conversation comments belong to no review.
+            review_id: String::new(),
+        })
+        .collect();
+    let (comments, comments_unknown, comments_truncated) =
+        gh_top_up_or_unknown(graphql_comments, comments_top_up, None);
 
     // Repo-level merge-method settings — one extra `gh api graphql` call the
     // `gh pr view --json` surface can't supply. Best-effort: on failure all three
@@ -4815,8 +4783,8 @@ pub async fn gh_pr_view(
         .await
         .unwrap_or_default();
 
-    // The view's own head oid, never the commit list: that list stops at 250 (REST) or
-    // 100 (GraphQL) commits, so on a large PR its last entry is not the head.
+    // The list can stop at GH_REST_PR_COMMITS_CEILING or the GraphQL fallback;
+    // use the view's head oid because the list's last entry may not be the head.
     let check_runs = events_for_head(check_runs, Some(raw.head_ref_oid.as_str()));
 
     // Free: `mergeable`/`mergeStateStatus` ride the same `gh pr view` call. The
@@ -4891,13 +4859,11 @@ pub async fn gh_pr_view(
         stack_unknown,
         members_unknown,
         checks_unknown: false,
-        comments_unknown: false,
-        // Commits and reviewer verdicts come from core/complete reads on GitHub.
-        commits_unknown: false,
-        reviewers_unknown: false,
-        // GitHub's core/complete reads do not use these pagination caps.
-        comments_truncated: false,
-        commits_truncated: false,
+        comments_unknown,
+        commits_unknown,
+        reviewers_unknown,
+        comments_truncated,
+        commits_truncated,
         checks_truncated: false,
         mergeability,
         cross_repository: raw.is_cross_repository,
@@ -5960,9 +5926,8 @@ fn rest_comment_to_out(c: GhPrRestComment, viewer_login: Option<&str>) -> PrThre
     }
 }
 
-/// Completes the PR's commit list via the paginated commits REST API, past the
-/// 100-item GraphQL cap `gh pr view --json commits` hits. Returns rows in the
-/// PR-view shape.
+/// Reads past the GraphQL 100-item cap in PR-view shape. REST pagination still
+/// stops at [`GH_REST_PR_COMMITS_CEILING`]; the view fold reports that ceiling.
 async fn gh_pr_commits_paginated(
     repo_path: &str,
     number: u64,
@@ -6985,7 +6950,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_stack_join, checks_or_unknown, classify_gh_merge_refusal, classify_merge_async,
+        apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
         external_items_from_thread_nodes, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
@@ -7002,7 +6967,7 @@ mod tests {
         PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
-        GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrCheckOut, PrDetails, PrInfo, PrMergeOutcome,
+        GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
         ForgeTimelineEventOut,
         batch_check_present, build_divergence_compare_path, oid_outside_origin_graph,
@@ -7302,28 +7267,63 @@ mod tests {
     }
 
     #[test]
-    fn checks_or_unknown_preserves_successful_reads() {
-        let check = PrCheckOut {
-            name: "build".to_string(),
-            status: "SUCCESS".to_string(),
-            ..Default::default()
-        };
-        let (checks, unknown) = checks_or_unknown::<()>(Ok(vec![check]));
-        assert!(!unknown);
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].name, "build");
-        assert_eq!(checks[0].status, "SUCCESS");
-
-        let (checks, unknown) = checks_or_unknown::<()>(Ok(Vec::new()));
-        assert!(checks.is_empty());
-        assert!(!unknown);
+    fn short_graphql_lists_are_complete_without_a_top_up() {
+        // SYNTHETIC: empty and one-under-cap lists need no REST read.
+        for count in [0, 99] {
+            for ceiling in [None, Some(super::GH_REST_PR_COMMITS_CEILING)] {
+                let expected: Vec<_> = (0..count).collect();
+                let (rows, unknown, truncated) =
+                    super::gh_top_up_or_unknown::<_, ()>(expected.clone(), None, ceiling);
+                assert_eq!(rows, expected);
+                assert_eq!((unknown, truncated), (false, false));
+            }
+        }
     }
 
     #[test]
-    fn checks_or_unknown_marks_failed_reads() {
-        let (checks, unknown) = checks_or_unknown(Err("checks unavailable"));
-        assert!(checks.is_empty());
-        assert!(unknown);
+    fn commit_top_ups_report_the_rest_ceiling() {
+        // SYNTHETIC: below, exactly at and beyond the documented REST ceiling.
+        let ceiling = super::GH_REST_PR_COMMITS_CEILING;
+        for count in [ceiling - 1, ceiling, ceiling + 1] {
+            let complete: Vec<_> = (0..count).collect();
+            let (rows, unknown, truncated) = super::gh_top_up_or_unknown::<_, ()>(
+                vec![usize::MAX; 100],
+                Some(Ok(complete.clone())),
+                Some(ceiling),
+            );
+            assert_eq!(rows, complete);
+            assert_eq!((unknown, truncated), (count >= ceiling, count >= ceiling));
+        }
+    }
+
+    #[test]
+    fn successful_comment_and_review_top_ups_are_complete() {
+        // SYNTHETIC: these REST lists have no commits-style endpoint ceiling.
+        for count in [101, 250, 251] {
+            let complete: Vec<_> = (0..count).collect();
+            let (rows, unknown, truncated) = super::gh_top_up_or_unknown::<_, ()>(
+                vec![usize::MAX; 100],
+                Some(Ok(complete.clone())),
+                None,
+            );
+            assert_eq!(rows, complete);
+            assert_eq!((unknown, truncated), (false, false));
+        }
+    }
+
+    #[test]
+    fn failed_top_ups_retain_graphql_rows_and_mark_the_list_unknown() {
+        // SYNTHETIC: commits, comments and reviewer verdicts retain 100 fallback rows.
+        for ceiling in [None, Some(super::GH_REST_PR_COMMITS_CEILING)] {
+            let fallback: Vec<_> = (0..100).collect();
+            let (rows, unknown, truncated) = super::gh_top_up_or_unknown(
+                fallback.clone(),
+                Some(Err("REST read failed")),
+                ceiling,
+            );
+            assert_eq!(rows, fallback);
+            assert_eq!((unknown, truncated), (true, false));
+        }
     }
 
     /// A `PrDetails` with everything empty but the stack fields — the wire shape
@@ -7487,7 +7487,7 @@ mod tests {
 
     #[test]
     fn truncated_reads_are_always_unknown_independent_of_row_count() {
-        // SYNTHETIC: empty/full capped reads and a local append after a failed read.
+        // SYNTHETIC: empty/full capped reads, complete reads and a failed read.
         for read in [
             Ok((Vec::new(), false)),
             Ok((vec![1], false)),
@@ -7503,10 +7503,6 @@ mod tests {
             assert_eq!((unknown, truncated), expected);
             assert!(!truncated || unknown);
         }
-        let (mut rows, unknown, truncated) = super::read_or_unknown::<u8, _>(Err(()));
-        rows.push(1);
-        assert_eq!(rows.len(), 1);
-        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[test]

@@ -45,7 +45,7 @@ use crate::forge::{
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
-    checks_or_unknown, comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut,
+    comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut,
     DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
     PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut,
     ReviewSubmitOut, ReviewThreadOut,
@@ -1464,6 +1464,28 @@ fn map_bb_check_state(state: &str) -> String {
     }
 }
 
+/// A non-empty next URL means this successful statuses read is incomplete.
+fn checks_from_status_page(
+    page: BbPage<BbCommitStatus>,
+) -> (Vec<crate::github::pr::PrCheckOut>, bool) {
+    let more = page.next.as_deref().is_some_and(|n| !n.is_empty());
+    let checks = page
+        .values
+        .into_iter()
+        .map(|s| crate::github::pr::PrCheckOut {
+            name: s.name.filter(|n| !n.is_empty()).unwrap_or(s.key),
+            status: map_bb_check_state(&s.state),
+            details_url: s.url.filter(|u| !u.is_empty()),
+            // External statuses have no Actions-style run/job id (link-out only).
+            run_id: None,
+            job_id: None,
+            started_at: s.created_on.filter(|t| !t.is_empty()),
+            completed_at: s.updated_on.filter(|t| !t.is_empty()),
+        })
+        .collect();
+    (checks, more)
+}
+
 /// Reduce a commit's build-status states (Bitbucket `state`: SUCCESSFUL/FAILED/
 /// INPROGRESS/STOPPED, plus any unknown) to one neutral list-row CI signal.
 /// Precedence: any FAILED → failing; else any INPROGRESS or unrecognized state →
@@ -1662,8 +1684,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     // fetch; `pullrequests/{id}/statuses` includes superseded commits. Missing head
     // or failed statuses leave checks unknown without failing the view.
     let head_sha = view_head_sha(&pr);
-    let (checks, checks_unknown) = if head_sha.is_empty() {
-        (Vec::new(), true)
+    let (checks, checks_unknown, checks_truncated) = if head_sha.is_empty() {
+        (Vec::new(), true, false)
     } else {
         let checks = http::bb_get_json::<BbPage<BbCommitStatus>>(
             &creds,
@@ -1677,22 +1699,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             BbOpKind::Read,
         )
         .await
-        .map(|page| {
-            page.values
-                .into_iter()
-                .map(|s| crate::github::pr::PrCheckOut {
-                    name: s.name.filter(|n| !n.is_empty()).unwrap_or(s.key),
-                    status: map_bb_check_state(&s.state),
-                    details_url: s.url.filter(|u| !u.is_empty()),
-                    // External statuses have no Actions-style run/job id (link-out only).
-                    run_id: None,
-                    job_id: None,
-                    started_at: s.created_on.filter(|t| !t.is_empty()),
-                    completed_at: s.updated_on.filter(|t| !t.is_empty()),
-                })
-                .collect()
-        });
-        checks_or_unknown(checks)
+        .map(checks_from_status_page);
+        read_or_unknown(checks)
     };
 
     // Completed reviewers = participants who acted, derived from participant state
@@ -1756,8 +1764,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         comments_unknown,
         comments_truncated,
         commits_truncated,
-        // The statuses read exposes no truncation signal.
-        checks_truncated: false,
+        checks_truncated,
         commits_unknown,
         // Reviewer verdicts arrive in the core PR read on Bitbucket.
         reviewers_unknown: false,
@@ -6940,6 +6947,36 @@ mod tests {
             assert_eq!(comments.len(), 1);
             assert_eq!(comments[0].id, "1");
         }
+    }
+
+    #[test]
+    fn status_pages_keep_remaining_next_as_a_truncation_signal() {
+        // SYNTHETIC: the same status with a remaining, absent or empty next URL.
+        for next in [Some("https://api.bitbucket.org/2.0/statuses?page=2"), None, Some("")] {
+            let page: BbPage<BbCommitStatus> = serde_json::from_value(serde_json::json!({
+                "values": [{"key": "ci", "name": "build", "state": "SUCCESSFUL"}],
+                "next": next,
+            }))
+            .unwrap();
+            let more = next.is_some_and(|n| !n.is_empty());
+            let (checks, unknown, truncated) =
+                read_or_unknown::<_, ()>(Ok(checks_from_status_page(page)));
+            assert_eq!((unknown, truncated), (more, more));
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].name, "build");
+            assert_eq!(checks[0].status, "SUCCESS");
+            assert!(checks[0].run_id.is_none());
+            assert!(checks[0].job_id.is_none());
+        }
+    }
+
+    #[test]
+    fn failed_status_reads_are_unknown_without_claiming_truncation() {
+        // SYNTHETIC: a failed statuses fetch has no successful capped page.
+        let read: AppResult<BbPage<BbCommitStatus>> = Err(AppError::Bitbucket("HTTP 502".into()));
+        let (checks, unknown, truncated) = read_or_unknown(read.map(checks_from_status_page));
+        assert!(checks.is_empty());
+        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[tokio::test]
