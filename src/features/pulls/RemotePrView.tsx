@@ -296,8 +296,8 @@ const PROVIDER_MERGE_STRATEGIES: Record<
 };
 
 /** Tab labels for this view's sections, function-valued because three of the four
- *  carry a live count. An unread or partial list has no count to show, not its
- *  length. */
+ *  carry a live count. An unread or possibly partial list has no count to show,
+ *  not its length. */
 const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
   conversation: (pr) =>
     pr.commentsUnknown

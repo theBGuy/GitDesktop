@@ -531,8 +531,9 @@ function RunDetailFetcher({
  * etc.) link out. Auto-expanded when anything failed, or when a required check was
  * cancelled or went stale. With no checks it shows only a failed-read notice when
  * `checksUnknown` says the list is missing, and over a `checksTruncated` list it
- * says only some loaded. A known-empty list renders no visible DOM, just its
- * headless completion watchers, which must survive an empty refetch window.
+ * says the checks may be incomplete. A known-empty list renders no visible DOM,
+ * just its headless completion watchers, which must survive an empty refetch
+ * window.
  */
 export function ChecksRollup({
   checks,
@@ -551,8 +552,9 @@ export function ChecksRollup({
    *  as complete. Empty and not truncated, it is a missing list, not a PR
    *  without checks. */
   checksUnknown: boolean;
-  /** The read succeeded but was cut at a cap (implies `checksUnknown`): the rows
-   *  are partial and a refetch can't complete them. */
+  /** The read succeeded but hit a pagination cap (implies `checksUnknown`): the
+   *  rows may be partial (an exact-cap list can be complete), and a refetch
+   *  returns the same list. */
   checksTruncated: boolean;
   /** The details read is parked offline: its refetch resumes on reconnect, so
    *  the failed-read notice says so instead of offering Retry. */

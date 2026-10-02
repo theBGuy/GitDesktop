@@ -173,11 +173,11 @@ impl GitDesktopMcp {
                        MRs and each MR merges on its own. When `stack` is null AND `stackUnknown` \
                        is true, the stack status could NOT be checked — that is not a guarantee \
                        the PR is unstacked, so verify on GitHub before merging it. `checksUnknown` \
-                       means the checks read failed or is knowably incomplete; partial checks \
+                       means the checks read failed or may be incomplete; partial checks \
                        may remain. `commentsUnknown` and `commitsUnknown` mean those reads failed \
-                       or are knowably incomplete; retained lists must not be treated as complete. \
+                       or may be incomplete; retained lists must not be treated as complete. \
                        `commentsTruncated`, `commitsTruncated` and `checksTruncated` mean \
-                       a capped read returns the same partial list on retry. \
+                       the list may be partial and retrying returns the same list. \
                        `reviewersUnknown` means reviewer verdicts could not be fully read \
                        (on GitHub, the `reviews` summaries may then be partial); the assigned \
                        reviewers list stays complete. For just the conversation, including \
@@ -215,9 +215,9 @@ impl GitDesktopMcp {
                        author, date, and the original markdown body. Each thread's `diffHunk` \
                        code-context excerpt (GitHub only) is capped to its last few lines; set \
                        `include_diff_hunk` false to drop hunks entirely (default true). \
-                       `commentsUnknown` means the comments read failed or is knowably incomplete; \
+                       `commentsUnknown` means the comments read failed or may be incomplete; \
                        retained comments must not be treated as complete. `commentsTruncated` \
-                       means a capped read returns the same partial list on retry. \
+                       means the list may be partial and retrying returns the same list. \
                        `reviewersUnknown` means reviewer verdicts could not be fully read; \
                        on GitHub, `reviews` may then be partial. \
                        Read-only; returns JSON. (For the PR's \
@@ -499,7 +499,7 @@ impl GitDesktopMcp {
 }
 
 /// The list_pull_request_comments payload. `commentsUnknown` rides beside `comments`
-/// so failed or knowably incomplete reads cannot be presented as complete.
+/// so failed or potentially incomplete reads cannot be presented as complete.
 /// `reviewersUnknown` also flags incomplete reviewer verdicts and GitHub `reviews`.
 ///
 /// KEEP IN SYNC: src/lib/ai/review-tools.ts (`list_pull_request_comments`)

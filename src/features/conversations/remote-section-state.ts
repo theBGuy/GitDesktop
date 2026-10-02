@@ -187,7 +187,7 @@ export function reviewCommentsNotice(input: {
   }
 }
 
-/** The notice props for a PR sub-list whose read failed or is knowably partial,
+/** The notice props for a PR sub-list whose read failed or may be partial,
  *  keyed on the wire's `truncated` flag, never the shown row count (filtering can
  *  empty a capped page; an optimistic append can fill a failed one). A truncated
  *  read re-reads the same cap on refetch or reconnect, so it outranks offline and

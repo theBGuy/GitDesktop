@@ -4172,35 +4172,38 @@ pub struct PrDetails {
     /// is a missing list, not a one-PR stack. GitHub only: GitLab derives members
     /// from the same rows as membership, and Bitbucket has no stacks.
     pub members_unknown: bool,
-    /// True when the read failed or is knowably incomplete; consumers must not
+    /// True when the read failed or may be incomplete; consumers must not
     /// present the checks as complete. Partial checks may be retained.
-    /// GitLab: failed or capped jobs read; false for no pipeline or a complete read.
+    /// GitLab: failed or capped jobs read; false for no pipeline or a below-cap read.
     /// Bitbucket: failed statuses fetch/parse, remaining next page or unavailable head sha.
     /// GitHub: always false, read in the same call as the view.
     pub checks_unknown: bool,
-    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// True when the read succeeded but hit a pagination cap, so the list may be partial.
+    /// An exact-cap list can be complete; a refetch returns the same list.
     /// `checks_truncated` implies `checks_unknown`. Failed reads are unknown
     /// with `checks_truncated == false`; consumers must not infer this from row count.
     pub checks_truncated: bool,
-    /// True when the read failed or is knowably incomplete; consumers must not
+    /// True when the read failed or may be incomplete; consumers must not
     /// present the comments as complete. Partial comments may be retained.
     /// GitLab: failed or capped notes read. Bitbucket: failed or truncated pages.
     /// GitHub: a failed REST top-up retains the GraphQL rows with an unknown list.
     pub comments_unknown: bool,
-    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// True when the read succeeded but hit a pagination cap, so the list may be partial.
+    /// An exact-cap list can be complete; a refetch returns the same list.
     /// `comments_truncated` implies `comments_unknown`. Failed reads are unknown
     /// with `comments_truncated == false`; consumers must not infer this from row count.
     pub comments_truncated: bool,
-    /// True when the read failed or is knowably incomplete; consumers must not
+    /// True when the read failed or may be incomplete; consumers must not
     /// present the commits as complete. Partial commits may be retained.
     /// GitLab/Bitbucket: failed or capped read. GitHub: failed REST top-up or a list
     /// reaching the REST commit ceiling; failed top-ups retain the GraphQL rows.
     pub commits_unknown: bool,
-    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// True when the read succeeded but hit a pagination cap, so the list may be partial.
+    /// An exact-cap list can be complete; a refetch returns the same list.
     /// `commits_truncated` implies `commits_unknown`. Failed reads are unknown
     /// with `commits_truncated == false`; consumers must not infer this from row count.
     pub commits_truncated: bool,
-    /// True when the read failed or is knowably incomplete; consumers must not
+    /// True when the read failed or may be incomplete; consumers must not
     /// present reviewer verdicts as complete or assume assigned reviewers are pending.
     /// The assigned `reviewers` list stays complete; only verdicts are unknown.
     /// GitLab: failed verdict read; false with no assigned reviewers.

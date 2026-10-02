@@ -7289,7 +7289,7 @@ fn no_failed_jobs_message(more_pages: bool) -> String {
     if more_pages {
         format!(
             "No failed jobs in the newest {} jobs checked; \
-             this pipeline has more jobs that weren't read.",
+             the pipeline may have more.",
             pipeline_jobs_read_limit()
         )
     } else {
@@ -7301,8 +7301,7 @@ fn no_failed_jobs_message(more_pages: bool) -> String {
 fn append_jobs_read_limit(mut text: String, more_pages: bool) -> String {
     if more_pages {
         text.push_str(&format!(
-            "\nOnly the newest {} jobs were checked; \
-             this pipeline has more jobs that weren't read.",
+            "\nThis pipeline may have more jobs than the newest {} checked.",
             pipeline_jobs_read_limit()
         ));
     }
@@ -13107,7 +13106,7 @@ mod tests {
         assert_eq!(
             no_failed_jobs_message(true),
             "No failed jobs in the newest 300 jobs checked; \
-             this pipeline has more jobs that weren't read."
+             the pipeline may have more."
         );
         assert_eq!(
             no_failed_jobs_message(false),
@@ -13121,8 +13120,7 @@ mod tests {
         assert_eq!(append_jobs_read_limit("trace".into(), false), "trace");
         assert_eq!(
             append_jobs_read_limit("trace".into(), true),
-            "trace\nOnly the newest 300 jobs were checked; \
-             this pipeline has more jobs that weren't read."
+            "trace\nThis pipeline may have more jobs than the newest 300 checked."
         );
     }
 
@@ -13136,8 +13134,7 @@ mod tests {
         let output = append_jobs_read_limit(capped.clone(), true);
         assert!(output.starts_with(&capped));
         assert!(output.ends_with(
-            "\nOnly the newest 300 jobs were checked; \
-             this pipeline has more jobs that weren't read."
+            "\nThis pipeline may have more jobs than the newest 300 checked."
         ));
     }
 
