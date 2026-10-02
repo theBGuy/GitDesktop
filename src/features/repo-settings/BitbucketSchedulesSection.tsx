@@ -250,7 +250,7 @@ function ScheduleRow({
         heldReason={toggleHeld}
         saving={toggling}
         onCheckedChange={onToggle}
-        aria-label={`Schedule enabled for ${schedule.refName}`}
+        aria-label={`Schedule enabled for ${schedule.refName} (${schedule.cronPattern})`}
       />
       {confirming ? (
         <InlineConfirm

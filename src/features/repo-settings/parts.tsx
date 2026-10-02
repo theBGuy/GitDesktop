@@ -629,15 +629,13 @@ function createConfirmSwapFocus() {
 }
 
 /**
- * Keeps focus across a `confirming ? <InlineConfirm/> : <trigger/>` swap: the
- * trigger leaving with focus hands it to the confirm's Cancel, and the confirm
- * leaving with focus hands it back to the returning trigger. Pass the same
- * `swapFocus(key)` to both sides (`ref` on the trigger, `swapFocusRef` on
- * InlineConfirm); one hook can serve a whole list keyed per row. It moves focus
- * only when the leaving side held it (or lost it to `<body>` and nothing took
- * it since) and focus sits on `<body>`, within the swap's own commit, before
- * Base UI's dialog fallback (a microtask) parks it on the popup; a pointer user
- * who clicked elsewhere is never pulled back.
+ * Keeps focus across a `confirming ? <InlineConfirm/> : <trigger/>` swap: pass
+ * the same `swapFocus(key)` as the trigger's `ref` and InlineConfirm's
+ * `swapFocusRef`, keyed per row when one hook serves a list. Moves focus only
+ * when the leaving side held it (or had dropped it to `<body>`, unclaimed) and
+ * focus still sits on `<body>`, inside the swap's own commit — ahead of Base
+ * UI's dialog fallback — so a pointer user who clicked elsewhere is never
+ * pulled back.
  */
 export function useConfirmSwapFocus() {
   const [swapFocus] = useState(createConfirmSwapFocus);
