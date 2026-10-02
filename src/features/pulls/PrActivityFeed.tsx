@@ -312,8 +312,9 @@ export function PrActivityFeed({
   } = claims;
   // Feed-constant, so it's read once here rather than per event row.
   const ghHost = useActiveForgeGhHost();
-  // Newest commit date drives approval staleness. gh returns
-  // oldest-first, but be defensive: max over all commit dates.
+  // Newest commit date drives approval staleness, max over all dates rather than
+  // trusting list order. Only a complete list can say which commit is newest:
+  // GitHub's capped list keeps the OLDEST commits, so staleness waits on it.
   const newestCommitMs = pr.commits.reduce((max, c) => {
     const t = new Date(c.date).getTime();
     return Number.isNaN(t) ? max : Math.max(max, t);
@@ -330,7 +331,8 @@ export function PrActivityFeed({
   const entries: TimelineEntry[] = [];
 
   // A stale APPROVED/CHANGES_REQUESTED review (dated before the newest
-  // commit) gets a warning marker after its card.
+  // commit) gets a warning marker after its card; a partial commits list
+  // gets none, its newest commit and the count since both unknowable.
   for (const r of renderedReviews) {
     // GitLab/Bitbucket reviews carry an EMPTY id, so equality alone would let a
     // blank request claim every one of them at once; a reveal request is always
@@ -401,6 +403,7 @@ export function PrActivityFeed({
     const isVerdict = r.state === "APPROVED" || r.state === "CHANGES_REQUESTED";
     const reviewMs = new Date(r.date).getTime();
     const stale =
+      !pr.commitsUnknown &&
       isVerdict &&
       newestCommitMs > 0 &&
       !Number.isNaN(reviewMs) &&

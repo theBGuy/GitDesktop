@@ -49,6 +49,10 @@ export interface ReviewContext {
   title: string;
   body: string;
   commitSubjects: string[];
+  /** The forge's commits read failed or hit a cap, so `commitSubjects` may be
+   *  partial; the prompt discloses it. Absent for local PRs, whose lists are
+   *  never partial. */
+  commitsUnknown?: boolean;
   /** Repo working directory — the CLI agent runs here. */
   repoPath: string;
   /** The origin|upstream lens the PR was opened under — scopes every per-PR store
@@ -717,6 +721,7 @@ export async function startReview(
         title: context.title,
         body: context.body,
         commitSubjects: context.commitSubjects,
+        commitsUnknown: context.commitsUnknown,
         diffText: diff.text,
         diffTruncated: diff.truncated,
         files: diff.files.map((f) => ({

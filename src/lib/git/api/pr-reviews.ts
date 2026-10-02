@@ -4,7 +4,7 @@ import type {
   ExternalReviewItem,
   RemoteLens,
   ReviewSubmitOut,
-  ReviewThreadOut,
+  ReviewThreadsOut,
 } from "../types";
 
 /** Third-party AI-reviewer findings on a PR/MR (Copilot/CodeRabbit/…), behind the
@@ -28,7 +28,7 @@ export const forgePrReviewThreads = (
   number: number,
   lens: RemoteLens,
 ) =>
-  invoke<ReviewThreadOut[]>("forge_pr_review_threads", {
+  invoke<ReviewThreadsOut>("forge_pr_review_threads", {
     repoPath,
     number,
     lens,

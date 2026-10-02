@@ -73,6 +73,10 @@ export interface PrPromptInput {
   excludedFiles?: number;
   /** Subjects of the commits this PR would introduce (base..head). */
   commitSubjects: string[];
+  /** The forge's commits read failed or hit a cap, so `commitSubjects` may be
+   *  partial. Absent/false ⇒ no disclosure line (prompt unchanged) — local
+   *  commit lists are never partial. */
+  commitsUnknown?: boolean;
   baseBranch: string;
   headBranch: string;
   repoInstructions: string | null;
@@ -145,6 +149,10 @@ export interface ReviewPromptInput {
   title: string;
   body: string;
   commitSubjects: string[];
+  /** The forge's commits read failed or hit a cap, so `commitSubjects` may be
+   *  partial. Absent/false ⇒ no disclosure line (prompt unchanged) — local
+   *  commit lists are never partial. */
+  commitsUnknown?: boolean;
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];

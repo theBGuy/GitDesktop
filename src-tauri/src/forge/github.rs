@@ -255,7 +255,7 @@ pub async fn review_threads(
     repo_path: &str,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
+) -> AppResult<crate::github::pr::ReviewThreadsOut> {
     crate::github::pr::gh_pr_review_threads(repo_path.to_string(), number, lens).await
 }
 

@@ -393,6 +393,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Empty-picker copy** — a picker's line while it draws no options rides
   `emptyPickerCopy` (remote-section-state); a read parked with nothing loaded,
   or over a failure, says offline; only a successful read may claim none.
+- **Degraded-list copy** — a list that may be partial rides `unknownListNotice`
+  (remote-section-state), keyed on the read's WIRE flags, never row count:
+  truncated says "may be incomplete" with no Retry; a failure offers Retry; a
+  park never does. Several sub-lists of ONE read share one line and one Retry
+  through `unknownListsNotice`, never stacked per-list notices.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

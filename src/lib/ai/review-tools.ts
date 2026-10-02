@@ -306,10 +306,13 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
     tools.get_pull_request = tool({
       description:
         "This pull request's metadata and changed-file summary (title, body, " +
-        "state, branches, commits, files, labels, reviewers) from the forge. " +
+        "state, branches, head commit, commits, files, labels, reviewers) from " +
+        "the forge. headSha is the forge-reported head commit (null when the " +
+        "forge supplied none); the commits list can end short of it. " +
         "commitsUnknown means the commits could not be fully read, so commits " +
         "may be partial or empty, and commitsTruncated means the read hit a cap " +
-        "(the list may be partial and retrying returns the same list).",
+        "(the list may be partial and retrying returns the same list). " +
+        "filesUnknown and filesTruncated mean the same for files.",
       inputSchema: z.object({}),
       execute: async (_input, { abortSignal }) => {
         try {
@@ -324,6 +327,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
             isDraft: pr.isDraft,
             baseRefName: pr.baseRefName,
             headRefName: pr.headRefName,
+            headSha: pr.headSha,
             additions: pr.additions,
             deletions: pr.deletions,
             commits: pr.commits.map((c) => ({
@@ -337,6 +341,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
               additions: f.additions,
               deletions: f.deletions,
             })),
+            filesUnknown: pr.filesUnknown,
+            filesTruncated: pr.filesTruncated,
             labels: pr.labels.map((l) => l.name),
             reviewers: pr.reviewers.map((r) => r.label),
           };
@@ -360,7 +366,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "commentsTruncated means the read hit a cap (the list may be partial " +
         "and retrying returns the same list). reviewersUnknown means reviewer " +
         "verdicts could not be fully read; on GitHub, reviews may then be " +
-        "partial.",
+        "partial. threadsTruncated means the review-threads read hit a cap " +
+        "(review_threads may be partial and retrying returns the same list).",
       inputSchema: z.object({
         include_diff_hunk: z
           .boolean()
@@ -375,10 +382,11 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           if (abortSignal?.aborted) return "Error: cancelled";
           // Origin-pinned: these tools read the fork's own PR (upstream-lens AI review is
           // a follow-up).
-          const [pr, reviewThreads] = await Promise.all([
-            forgePrView(ctx.repoPath, prNumber, "origin"),
-            forgePrReviewThreads(ctx.repoPath, prNumber, "origin"),
-          ]);
+          const [pr, { threads: reviewThreads, threadsTruncated }] =
+            await Promise.all([
+              forgePrView(ctx.repoPath, prNumber, "origin"),
+              forgePrReviewThreads(ctx.repoPath, prNumber, "origin"),
+            ]);
           // Bound (or drop) each thread's diffHunk so a comment on a new file
           // can't drag the whole file into the payload (GitHub-only; other
           // providers already set it "").
@@ -405,6 +413,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
               }
               return pruned;
             }),
+            threadsTruncated,
           };
           return (
             UNTRUSTED_PREFIX +

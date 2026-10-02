@@ -183,6 +183,9 @@ export function useGeneratePrDescription(repoPath: string) {
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
       /** Omit and the pick runs whenever the draft needs it. */
       labelPick?: LabelPickGate,
+      /** The forge's commits read failed or hit a cap, so `commitSubjects` may
+       *  be partial; the prompt discloses it. Omit for local commit lists. */
+      commitsUnknown?: boolean,
     ): Promise<PrDraft | null> => {
       const parse = (buffer: string) =>
         extractPrDraft(
@@ -218,6 +221,7 @@ export function useGeneratePrDescription(repoPath: string) {
             files: diff.files,
             excludedFiles: diff.excludedFiles,
             commitSubjects,
+            commitsUnknown,
             baseBranch: base,
             headBranch: head,
             repoInstructions,
@@ -344,6 +348,9 @@ export function useGeneratePrDescription(repoPath: string) {
       issueCandidates?: IssueCandidate[],
       /** Mention-only Jira candidates (Bitbucket + linked project). */
       jiraCandidates?: JiraCandidate[],
+      /** The forge's commits read failed or hit a cap, so `commitSubjects` may
+       *  be partial; the prompt discloses it. */
+      commitsUnknown?: boolean,
     ) =>
       runFromDiff(
         getDiff,
@@ -357,6 +364,8 @@ export function useGeneratePrDescription(repoPath: string) {
         issueCandidates,
         jiraCandidates,
         "change-request",
+        undefined,
+        commitsUnknown,
       ),
     [runFromDiff],
   );

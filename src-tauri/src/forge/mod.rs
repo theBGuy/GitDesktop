@@ -1664,7 +1664,7 @@ pub async fn forge_pr_review_threads(
     repo_path: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<crate::github::pr::ReviewThreadOut>> {
+) -> AppResult<crate::github::pr::ReviewThreadsOut> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::review_threads(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::review_threads(&repo_path, number).await,

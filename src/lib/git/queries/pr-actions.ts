@@ -12,7 +12,7 @@ import type {
   PrDetails,
   PrThreadOut,
   RemoteLens,
-  ReviewThreadOut,
+  ReviewThreadsOut,
 } from "../types";
 import { invalidateRepoAfterWrite, repoKeys } from "./core";
 import {
@@ -162,14 +162,22 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
       ]);
       const prev = queryClient.getQueryData<PrDetails>(key);
       const prevThreads =
-        queryClient.getQueryData<ReviewThreadOut[]>(threadsKey);
+        queryClient.getQueryData<ReviewThreadsOut>(threadsKey);
       queryClient.setQueryData<PrDetails>(key, (d) =>
         d
           ? { ...d, reviews: d.reviews.filter((r) => r.id !== args.reviewId) }
           : d,
       );
-      queryClient.setQueryData<ReviewThreadOut[]>(threadsKey, (list) =>
-        list ? dropDraftsByReviewIds(list, new Set([args.reviewId])) : list,
+      queryClient.setQueryData<ReviewThreadsOut>(threadsKey, (out) =>
+        out
+          ? {
+              ...out,
+              threads: dropDraftsByReviewIds(
+                out.threads,
+                new Set([args.reviewId]),
+              ),
+            }
+          : out,
       );
       return { key, threadsKey, prevReviews: prev?.reviews, prevThreads };
     },
@@ -626,20 +634,23 @@ function useOptimisticReviewCommentMutation<
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
 ) {
-  return useOptimisticCacheMutation<TArgs, TData, ReviewThreadOut[]>(
+  return useOptimisticCacheMutation<TArgs, TData, ReviewThreadsOut>(
     mutationFn,
     (args) => prReviewThreadsKey(repo, args.number, lens),
-    (threads, args) =>
-      threads?.flatMap((t) => {
-        if (!t.comments.some((c) => c.id === args.commentId)) return [t];
-        const comments = t.comments.flatMap((c) => {
-          if (c.id !== args.commentId) return [c];
-          const patched = patchComment(c, args);
-          return patched ? [patched] : [];
-        });
-        // A delete that empties the thread drops the whole card (server does too).
-        return comments.length === 0 ? [] : [{ ...t, comments }];
-      }),
+    (out, args) =>
+      out && {
+        ...out,
+        threads: out.threads.flatMap((t) => {
+          if (!t.comments.some((c) => c.id === args.commentId)) return [t];
+          const comments = t.comments.flatMap((c) => {
+            if (c.id !== args.commentId) return [c];
+            const patched = patchComment(c, args);
+            return patched ? [patched] : [];
+          });
+          // A delete that empties the thread drops the whole card (server does too).
+          return comments.length === 0 ? [] : [{ ...t, comments }];
+        }),
+      },
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
   );
 }

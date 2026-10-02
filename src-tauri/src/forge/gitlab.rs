@@ -40,7 +40,7 @@ use crate::github::pr::{
     comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
     ExternalReviewItem, PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
     PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember,
-    PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut, STACKS_TIMEOUT,
+    PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut, ReviewThreadsOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -1781,6 +1781,8 @@ struct GlabChange {
 #[derive(Deserialize)]
 struct GlabMrChanges {
     iid: u64,
+    #[serde(default, deserialize_with = "null_to_default")]
+    sha: String,
     web_url: String,
     title: String,
     #[serde(default)]
@@ -2150,8 +2152,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         })
         .collect();
 
-    // Commits — GitLab returns newest-first; the frontend treats the last as head,
-    // so reverse to oldest-first (matching gh's GraphQL order).
+    // GitLab returns newest-first; reverse to the neutral model's oldest-first order.
     let (mut commits, commits_unknown, commits_truncated) = read_or_unknown(
         run_glab(
             Some(repo_path),
@@ -2165,6 +2166,11 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .and_then(|o| mr_commits_from(&o.stdout_lossy())),
     );
     commits.reverse();
+    let head_sha = if mr.sha.is_empty() {
+        commits.last().map(|c| c.oid.clone()).filter(|oid| !oid.is_empty())
+    } else {
+        Some(mr.sha)
+    };
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the view.
@@ -2264,11 +2270,15 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         is_draft: mr.draft,
         base_ref_name: mr.target_branch,
         head_ref_name: mr.source_branch,
+        head_sha,
         additions,
         deletions,
         url: mr.web_url,
         commits,
         files,
+        // Both files flags stay false pending the deferred /changes overflow live probe.
+        files_unknown: false,
+        files_truncated: false,
         reviews: Vec::new(),
         comments,
         checks,
@@ -5447,39 +5457,54 @@ fn external_items_from_discussions(discussions: &[GlabDiscussion]) -> Vec<Extern
         .collect()
 }
 
-/// Fetch an MR's discussions (per_page=100, capped at 5 pages — the recent
-/// findings/threads are all we need, and this can't spawn unbounded network
-/// calls). Per-page tolerant: a page that won't parse stops the walk and returns
-/// what we have so far, rather than sinking the whole read. Shared by
-/// `external_reviews` (AI-context) and `review_threads` (the review-thread view).
+const DISCUSSIONS_PER_PAGE: usize = 100;
+const MAX_DISCUSSION_PAGES: u32 = 5;
+
+/// Fetch an MR's discussions up to five pages. Fetch or parse failures fail the
+/// whole read; a full final page signals potentially incomplete discussions.
 async fn fetch_mr_discussions(
     repo_path: &str,
     enc: &str,
     number: u64,
-) -> AppResult<Vec<GlabDiscussion>> {
-    let mut all: Vec<GlabDiscussion> = Vec::new();
-    for page in 1..=5u32 {
-        let endpoint =
-            format!("projects/{enc}/merge_requests/{number}/discussions?per_page=100&page={page}");
+) -> AppResult<(Vec<GlabDiscussion>, bool)> {
+    mr_discussions_paged(|page| async move {
+        let endpoint = format!(
+            "projects/{enc}/merge_requests/{number}/discussions?per_page={DISCUSSIONS_PER_PAGE}&page={page}"
+        );
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-        let batch: Vec<GlabDiscussion> = match serde_json::from_str(&out.stdout_lossy()) {
-            Ok(b) => b,
-            Err(_) => break,
-        };
-        let done = batch.len() < 100;
+        Ok(out.stdout_lossy())
+    })
+    .await
+}
+
+async fn mr_discussions_paged<F, Fut>(mut fetch_page: F) -> AppResult<(Vec<GlabDiscussion>, bool)>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let mut all: Vec<GlabDiscussion> = Vec::new();
+    let mut truncated = false;
+    for page in 1..=MAX_DISCUSSION_PAGES {
+        let batch: Vec<GlabDiscussion> = serde_json::from_str(&fetch_page(page).await?)
+            .map_err(|e| {
+                gl_unreadable("the MR discussions", format!("could not parse discussions: {e}"))
+            })?;
+        let done = batch.len() < DISCUSSIONS_PER_PAGE;
+        truncated = page == MAX_DISCUSSION_PAGES && !done;
         all.extend(batch);
         if done {
             break;
         }
     }
-    Ok(all)
+    Ok((all, truncated))
 }
 
 /// Third-party AI-reviewer findings on a merge request, mapped onto the same neutral
 /// shape GitHub uses — every non-system note of the MR's discussions.
 pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
+    // external_reviews truncation consumption is deferred; its wire shape stays a Vec.
+    let (discussions, _) = fetch_mr_discussions(repo_path, &enc, number).await?;
     Ok(external_items_from_discussions(&discussions))
 }
 
@@ -5491,9 +5516,9 @@ pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<Ext
 /// `position.line_range` (0 when single-line). GitLab's flat discussions API exposes
 /// no per-thread "outdated" bit nor a diff excerpt, so `is_outdated` is always false
 /// and `diff_hunk` always empty.
-pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<ReviewThreadOut>> {
+pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<ReviewThreadsOut> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let discussions = fetch_mr_discussions(repo_path, &enc, number).await?;
+    let (discussions, threads_truncated) = fetch_mr_discussions(repo_path, &enc, number).await?;
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the read.
@@ -5571,7 +5596,10 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<Vec<Revie
             comments,
         });
     }
-    Ok(threads)
+    Ok(ReviewThreadsOut {
+        threads,
+        threads_truncated,
+    })
 }
 
 /// Reply in an existing MR discussion (`POST …/discussions/{id}/notes`, `-f body`).
@@ -13027,6 +13055,66 @@ mod tests {
         })
         .await;
         (result, requested)
+    }
+
+    async fn walk_discussions(
+        pages: Vec<Option<String>>,
+    ) -> (AppResult<(Vec<GlabDiscussion>, bool)>, Vec<u32>) {
+        let mut requested = Vec::new();
+        let result = mr_discussions_paged(|page| {
+            requested.push(page);
+            let body = pages.get(page as usize - 1).cloned().flatten();
+            async move { body.ok_or_else(|| AppError::Glab("HTTP 502".into())) }
+        })
+        .await;
+        (result, requested)
+    }
+
+    fn discussions_page(count: usize) -> String {
+        let rows: Vec<_> = (0..count)
+            .map(|id| serde_json::json!({"id": id.to_string(), "notes": []}))
+            .collect();
+        serde_json::to_string(&rows).unwrap()
+    }
+
+    #[tokio::test]
+    async fn discussions_parse_or_transport_failure_fails_the_whole_read() {
+        for failure in [Some("<html>502</html>".into()), None] {
+            let (result, requested) = walk_discussions(vec![failure.clone()]).await;
+            assert!(result.is_err());
+            assert_eq!(requested, [1]);
+            let (result, requested) = walk_discussions(vec![
+                Some(discussions_page(DISCUSSIONS_PER_PAGE)),
+                failure,
+            ])
+            .await;
+            assert!(result.is_err());
+            assert_eq!(requested, [1, 2]);
+        }
+    }
+
+    #[tokio::test]
+    async fn discussions_full_cap_is_truncated_but_underfull_final_page_is_complete() {
+        for final_count in [0, DISCUSSIONS_PER_PAGE - 1, DISCUSSIONS_PER_PAGE] {
+            let mut pages = vec![
+                Some(discussions_page(DISCUSSIONS_PER_PAGE));
+                MAX_DISCUSSION_PAGES as usize - 1
+            ];
+            pages.push(Some(discussions_page(final_count)));
+            let (result, requested) = walk_discussions(pages).await;
+            let (discussions, truncated) = result.unwrap();
+            assert_eq!(requested, (1..=MAX_DISCUSSION_PAGES).collect::<Vec<_>>());
+            assert_eq!(
+                discussions.len(),
+                (MAX_DISCUSSION_PAGES as usize - 1) * DISCUSSIONS_PER_PAGE + final_count
+            );
+            assert_eq!(truncated, final_count == DISCUSSIONS_PER_PAGE);
+        }
+        let (result, requested) = walk_discussions(vec![Some("[]".into())]).await;
+        let (discussions, truncated) = result.unwrap();
+        assert!(discussions.is_empty());
+        assert!(!truncated);
+        assert_eq!(requested, [1]);
     }
 
     #[tokio::test]

@@ -36,7 +36,7 @@ import {
 } from "@/lib/git/api";
 import { sectionFilePath } from "@/lib/git/diff-split";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import type { DiffStatEntry } from "@/lib/git/types";
+import { type DiffStatEntry, prHeadSha } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
 import { listLocalPrs, reloadLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import {
@@ -108,6 +108,9 @@ export type AutomationEvent =
       title: string;
       body: string;
       commitSubjects: string[];
+      /** The forge's commits read failed or hit a cap, so `commitSubjects` may be
+       *  partial; the review prompt discloses it. Absent = complete. */
+      commitsUnknown?: boolean;
       /** The author's "Notes for reviewers", carried straight from the Create-PR
        *  dialogs so the review that fires on open sees them without a comment
        *  round-trip. Absent on catch-up / synthesized events (those recover the
@@ -125,9 +128,16 @@ export type AutomationEvent =
       /** The PR head's CURRENT tip SHA (the new commits). The runner re-reviews
        *  only when this is past the last-reviewed head for the rule's mode. */
       headSha?: string;
+      /** The full oid of `headSha` when the poll abbreviated it (Bitbucket), for
+       *  the review worktree's fetch alone, which needs a full oid. Claim, release,
+       *  coverage, dismissal and the record keep keying on the poll-form `headSha`
+       *  so every path and app version collides on the same head. */
+      fetchHeadSha?: string;
       title: string;
       body: string;
       commitSubjects: string[];
+      /** As on `pr-open`: `commitSubjects` may be partial. Absent = complete. */
+      commitsUnknown?: boolean;
       target:
         | { type: "remote"; number: number }
         | { type: "local"; id: string };
@@ -1139,7 +1149,9 @@ interface ResolvedRunTarget {
   title: string;
   body: string;
   commitSubjects: string[];
+  commitsUnknown: boolean;
   headSha: string;
+  fetchHeadSha?: string;
 }
 
 /**
@@ -1211,9 +1223,10 @@ export function runAutomationNow(
             toast.info(CLOSED_PR_COPY);
             return null;
           }
-          // The poll's `headSha` is the value pr-sync detection keys on; `gh_pr_view`'s
-          // commit list truncates at 100, so its last entry may not be the head. The
-          // preview pass skips it — its head only has to prove resolvable.
+          // The poll's `headSha` is the value pr-sync detection keys on, so it wins;
+          // the view's forge-reported head comes next and the commits tail last, as
+          // GitHub's capped oldest-first list can end short of the head. The preview
+          // pass skips the poll — its head only has to prove resolvable.
           const polledHead = pollHead
             ? await forgePrPoll(repoPath)
                 .then(
@@ -1221,13 +1234,20 @@ export function runAutomationNow(
                 )
                 .catch(() => undefined)
             : undefined;
+          const viewHead = prHeadSha(pr) ?? "";
+          const headSha = polledHead || viewHead;
           resolved = {
             base: pr.baseRefName,
             head: pr.headRefName,
             title: pr.title,
             body: pr.body,
             commitSubjects: pr.commits.map((c) => c.headline),
-            headSha: polledHead || (pr.commits.at(-1)?.oid ?? ""),
+            commitsUnknown: pr.commitsUnknown,
+            headSha,
+            fetchHeadSha:
+              viewHead.length > headSha.length && viewHead.startsWith(headSha)
+                ? viewHead
+                : undefined,
           };
         } else {
           // `listLocalPrs` reads the memoized store instance, so without this the
@@ -1255,6 +1275,7 @@ export function runAutomationNow(
             body: pr.body,
             // Local PRs carry no commit list; the branch diff is the source of truth.
             commitSubjects: [],
+            commitsUnknown: false,
             headSha: tips[pr.head] ?? "",
           };
         }
@@ -1302,9 +1323,11 @@ export function runAutomationNow(
           base: current.base,
           head: current.head,
           headSha: current.headSha,
+          fetchHeadSha: current.fetchHeadSha,
           title: current.title,
           body: current.body,
           commitSubjects: current.commitSubjects,
+          commitsUnknown: current.commitsUnknown,
           target:
             target.kind === "remote"
               ? { type: "remote", number: target.number }
@@ -1582,6 +1605,8 @@ async function generateReviewText(
       title: event.title,
       body: event.kind === "commit" ? "" : event.body,
       commitSubjects: event.kind === "commit" ? [] : event.commitSubjects,
+      commitsUnknown:
+        event.kind === "commit" ? undefined : event.commitsUnknown,
       diffText: filtered.text,
       diffTruncated: diff.truncated,
       files: filtered.files.map((f) => ({
@@ -1616,7 +1641,12 @@ async function generateReviewText(
       repoPath: event.repoPath,
       // Read the reviewed commit / PR-head's files in a worktree, not whatever
       // branch happens to be checked out.
-      headSha: event.kind === "commit" ? event.hash : event.headSha,
+      headSha:
+        event.kind === "commit"
+          ? event.hash
+          : event.kind === "pr-sync"
+            ? (event.fetchHeadSha ?? event.headSha)
+            : event.headSha,
       // The user's Review-timeout override (null = the backend's tier defaults).
       timeoutSecs: reviewTimeoutSecs(appSettings.reviewTimeout),
       timeoutConfigurable: true,

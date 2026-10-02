@@ -35,6 +35,7 @@ import {
   stepLoadMoreGuard,
   ungroupedReason,
   unknownListNotice,
+  unknownListsNotice,
 } from "../src/features/conversations/remote-section-state.ts";
 
 const BOOLS = [false, true];
@@ -274,8 +275,16 @@ test("a park never hides a permanent verdict with nothing drawn", () => {
   assert.equal(atCallSite(disabled, false), "error");
 });
 
-/** The review-comments notice, rung by rung. */
-function expectedReviewNotice({ threadCount, isError, isPaused, isFetching }) {
+/** The review-comments notice, rung by rung. A capped read outranks every
+ *  other arm: a retry or reconnect re-reads the same cap. */
+function expectedReviewNotice({
+  threadCount,
+  truncated,
+  isError,
+  isPaused,
+  isFetching,
+}) {
+  if (truncated) return ["truncated", false];
   const failed = isError && !isPaused && !isFetching;
   const drawn = threadCount !== undefined && threadCount > 0;
   if (failed && drawn) return ["refresh-drawn", true];
@@ -286,6 +295,7 @@ function expectedReviewNotice({ threadCount, isError, isPaused, isFetching }) {
   return null;
 }
 const REVIEW_LINES = {
+  "Review comments may be incomplete.": "truncated",
   "Couldn't refresh review comments — showing the last loaded ones.":
     "refresh-drawn",
   "Couldn't refresh review comments.": "refresh-empty",
@@ -297,27 +307,42 @@ const REVIEW_LINES = {
 test("every review-comments input resolves to its line (full truth table)", () => {
   let cases = 0;
   for (const threadCount of [undefined, 0, 1])
-    for (const isError of BOOLS)
-      for (const isPaused of BOOLS)
-        for (const isFetching of BOOLS) {
-          const input = { threadCount, isError, isPaused, isFetching };
-          const notice = reviewCommentsNotice(input);
-          assert.deepEqual(
-            notice === null
-              ? null
-              : [REVIEW_LINES[notice.message] ?? notice.message, notice.retry],
-            expectedReviewNotice(input),
-            JSON.stringify(input),
-          );
-          cases++;
-        }
-  assert.equal(cases, 24);
+    for (const truncated of BOOLS)
+      for (const isError of BOOLS)
+        for (const isPaused of BOOLS)
+          for (const isFetching of BOOLS) {
+            const input = {
+              threadCount,
+              truncated,
+              isError,
+              isPaused,
+              isFetching,
+            };
+            const notice = reviewCommentsNotice(input);
+            assert.deepEqual(
+              notice === null
+                ? null
+                : [
+                    REVIEW_LINES[notice.message] ?? notice.message,
+                    notice.retry,
+                  ],
+              expectedReviewNotice(input),
+              JSON.stringify(input),
+            );
+            cases++;
+          }
+  assert.equal(cases, 48);
 });
 
 test("review comments: a park outranks the failure, and a loaded empty answer stays quiet", () => {
   // Parked over a failure with threads drawn: the offline line, no Retry.
   assert.deepEqual(
-    reviewCommentsNotice({ threadCount: 3, isError: true, isPaused: true }),
+    reviewCommentsNotice({
+      threadCount: 3,
+      truncated: false,
+      isError: true,
+      isPaused: true,
+    }),
     {
       message: "You're offline — showing the last loaded review comments.",
       retry: false,
@@ -325,13 +350,19 @@ test("review comments: a park outranks the failure, and a loaded empty answer st
   );
   // Parked over a loaded empty answer: nothing to say.
   assert.equal(
-    reviewCommentsNotice({ threadCount: 0, isError: false, isPaused: true }),
+    reviewCommentsNotice({
+      threadCount: 0,
+      truncated: false,
+      isError: false,
+      isPaused: true,
+    }),
     null,
   );
   // A first load that fails online: the load line, with Retry.
   assert.deepEqual(
     reviewCommentsNotice({
       threadCount: undefined,
+      truncated: false,
       isError: true,
       isPaused: false,
     }),
@@ -339,7 +370,59 @@ test("review comments: a park outranks the failure, and a loaded empty answer st
   );
   // Negative control: healthy threads raise no notice at all.
   assert.equal(
-    reviewCommentsNotice({ threadCount: 3, isError: false, isPaused: false }),
+    reviewCommentsNotice({
+      threadCount: 3,
+      truncated: false,
+      isError: false,
+      isPaused: false,
+    }),
+    null,
+  );
+});
+
+test("review comments: a capped read says so over drawn threads, never with Retry", () => {
+  const capped = {
+    message: "Review comments may be incomplete.",
+    retry: false,
+  };
+  // Threads drawn under a cap: the line shows though nothing failed.
+  assert.deepEqual(
+    reviewCommentsNotice({
+      threadCount: 3,
+      truncated: true,
+      isError: false,
+      isPaused: false,
+    }),
+    capped,
+  );
+  // A failed refresh over the capped rows: a Retry would read the same cap.
+  assert.deepEqual(
+    reviewCommentsNotice({
+      threadCount: 3,
+      truncated: true,
+      isError: true,
+      isPaused: false,
+    }),
+    capped,
+  );
+  // Every residual thread claimed by a review above: still capped.
+  assert.deepEqual(
+    reviewCommentsNotice({
+      threadCount: 0,
+      truncated: true,
+      isError: false,
+      isPaused: true,
+    }),
+    capped,
+  );
+  // Negative control: the same drawn rows with the flag off stay quiet.
+  assert.equal(
+    reviewCommentsNotice({
+      threadCount: 3,
+      truncated: false,
+      isError: false,
+      isPaused: false,
+    }),
     null,
   );
 });
@@ -460,7 +543,10 @@ test("a reconnect's resumed refetch shows no error until it settles (negative co
     }),
     null,
   );
-  assert.equal(reviewCommentsNotice({ threadCount: 2, ...resumed }), null);
+  assert.equal(
+    reviewCommentsNotice({ threadCount: 2, truncated: false, ...resumed }),
+    null,
+  );
   assert.equal(
     ungroupedReason({
       requested: true,
@@ -473,10 +559,14 @@ test("a reconnect's resumed refetch shows no error until it settles (negative co
   // The same read once it settles on the failure: the error and its Retry.
   const settled = { ...resumed, isFetching: false };
   assert.equal(refreshFailed(settled), true);
-  assert.deepEqual(reviewCommentsNotice({ threadCount: 2, ...settled }), {
-    message: "Couldn't refresh review comments — showing the last loaded ones.",
-    retry: true,
-  });
+  assert.deepEqual(
+    reviewCommentsNotice({ threadCount: 2, truncated: false, ...settled }),
+    {
+      message:
+        "Couldn't refresh review comments — showing the last loaded ones.",
+      retry: true,
+    },
+  );
 });
 
 /** What a single read's detail surface shows, read through the helpers the way a
@@ -1349,4 +1439,99 @@ test("only a failed, unparked sub-list read offers Retry (negative control)", ()
     }
   }
   assert.deepEqual(offered, [{ truncated: false, paused: false }]);
+});
+
+test("sub-lists of one read share a notice: arms join, Retry rides a failed arm", () => {
+  const retry = () => {};
+  const STATES = [
+    { unknown: false, truncated: false },
+    { unknown: true, truncated: false },
+    { unknown: true, truncated: true },
+  ];
+  for (const comments of STATES)
+    for (const commits of STATES)
+      for (const paused of BOOLS) {
+        const lists = [
+          { list: "comments", ...comments },
+          { list: "commits", ...commits },
+        ];
+        const notice = unknownListsNotice({
+          prNoun: "pull request",
+          lists,
+          paused,
+          onRetry: retry,
+        });
+        const label = JSON.stringify({ comments, commits, paused });
+        const shown = lists.filter((l) => l.unknown);
+        if (shown.length === 0) {
+          assert.equal(notice, null, label);
+          continue;
+        }
+        // Each list says exactly what its own notice would, in arm order.
+        const arm = (l) => (l.truncated ? 0 : paused ? 1 : 2);
+        const byArm = [0, 1, 2]
+          .map((a) => shown.filter((l) => arm(l) === a).map((l) => l.list))
+          .filter((names) => names.length > 0);
+        const expected = byArm
+          .map(
+            (names) =>
+              unknownListNotice({
+                prNoun: "pull request",
+                list: names.join(" and "),
+                truncated: shown.find((l) => l.list === names[0]).truncated,
+                paused,
+              }).message,
+          )
+          .join(" ");
+        assert.equal(notice.message, expected, label);
+        const failedNames = shown
+          .filter((l) => arm(l) === 2)
+          .map((l) => l.list);
+        const anyFailed = failedNames.length > 0;
+        assert.equal(notice.onRetry, anyFailed ? retry : undefined, label);
+        // The Retry names exactly the lists a retry would re-read.
+        assert.equal(
+          notice.retryLabel,
+          anyFailed ? `Retry loading ${failedNames.join(" and ")}` : undefined,
+          label,
+        );
+      }
+});
+
+test("sub-lists of one read: worded examples (negative control included)", () => {
+  const retry = () => {};
+  const both = (comments, commits, paused = false) =>
+    unknownListsNotice({
+      prNoun: "merge request",
+      lists: [
+        { list: "comments", ...comments },
+        { list: "commits", ...commits },
+      ],
+      paused,
+      onRetry: retry,
+    });
+  const failed = { unknown: true, truncated: false };
+  const capped = { unknown: true, truncated: true };
+  const whole = { unknown: false, truncated: false };
+  assert.deepEqual(both(failed, failed), {
+    message: "Couldn't fully load this merge request's comments and commits.",
+    onRetry: retry,
+    retryLabel: "Retry loading comments and commits",
+  });
+  assert.deepEqual(both(capped, failed), {
+    message:
+      "This merge request's comments may be incomplete. Couldn't fully load this merge request's commits.",
+    onRetry: retry,
+    // Only the failed list is retried, so only it is named.
+    retryLabel: "Retry loading commits",
+  });
+  // A cap alone re-reads the same cap, so no Retry.
+  assert.deepEqual(both(whole, capped), {
+    message: "This merge request's commits may be incomplete.",
+  });
+  assert.deepEqual(both(whole, failed, true), {
+    message: offlinePendingMessage("the commits"),
+  });
+  // Negative control: complete lists raise nothing.
+  assert.equal(both(whole, whole), null);
 });

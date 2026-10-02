@@ -1086,6 +1086,7 @@ export function ReviewThreadList({
  */
 export function ReviewThreadsBlock({
   threads,
+  truncated,
   isError,
   isPaused = false,
   isFetching = false,
@@ -1106,6 +1107,9 @@ export function ReviewThreadsBlock({
 }: {
   /** `undefined` while the read hasn't loaded; `[]` is a loaded answer. */
   threads: ReviewThreadOut[] | undefined;
+  /** The threads read's `threadsTruncated` wire flag: the read hit a cap, so the
+   *  threads may be partial. Required so no caller can silently drop it. */
+  truncated: boolean;
   isError: boolean;
   /** The threads read is parked waiting for a connection (react-query's
    *  `isPaused`); it outranks `isError`, and its notice offers no Retry. */
@@ -1139,6 +1143,7 @@ export function ReviewThreadsBlock({
   const drawn = threads !== undefined && threads.length > 0;
   const notice = reviewCommentsNotice({
     threadCount: threads?.length,
+    truncated,
     isError,
     isPaused,
     isFetching,

@@ -149,11 +149,15 @@ export function parkedUnlessPermanent(q: {
 }
 
 /** The one line the review-comments block shows, or null. `threadCount` is
- *  the threads it draws, `undefined` until the read has loaded. A failure
- *  offers Retry; a park never does, and it outranks the failure it follows.
- *  A loaded empty answer stays quiet offline, like a list's empty rung. */
+ *  the threads it draws, `undefined` until the read has loaded. `truncated` is
+ *  the loaded read's wire flag, never the drawn count: it re-reads the same cap
+ *  on refetch or reconnect, so it outranks every other arm and offers no Retry,
+ *  as {@link unknownListNotice} does. A failure offers Retry; a park never does,
+ *  and it outranks the failure it follows. A loaded empty answer stays quiet
+ *  offline, like a list's empty rung. */
 export function reviewCommentsNotice(input: {
   threadCount: number | undefined;
+  truncated: boolean;
   isError: boolean;
   isPaused: boolean;
   isFetching?: boolean;
@@ -162,6 +166,8 @@ export function reviewCommentsNotice(input: {
   const failed = refreshFailed(input);
   const drawn = threadCount !== undefined && threadCount > 0;
   switch (true) {
+    case input.truncated:
+      return { message: "Review comments may be incomplete.", retry: false };
     case failed && drawn:
       return {
         message:
@@ -208,6 +214,46 @@ export function unknownListNotice(opts: {
     return { message: `This ${prNoun}'s ${list} may be incomplete.` };
   if (paused) return { message: offlinePendingMessage(`the ${list}`) };
   return { message: `Couldn't fully load this ${prNoun}'s ${list}.`, onRetry };
+}
+
+/** {@link unknownListNotice} over several sub-lists of ONE read (a PR's comments
+ *  and commits both ride its details payload), so they share one line and one
+ *  Retry instead of stacking. Lists in the same arm join into one sentence; the
+ *  arms keep that function's precedence order, and Retry rides only a shown
+ *  failed arm. Null when every list is complete. */
+export function unknownListsNotice(opts: {
+  prNoun: string;
+  lists: readonly { list: string; unknown: boolean; truncated: boolean }[];
+  paused: boolean;
+  onRetry?: () => void;
+}): { message: string; onRetry?: () => void; retryLabel?: string } | null {
+  const { prNoun, paused, onRetry } = opts;
+  const truncated: string[] = [];
+  const offline: string[] = [];
+  const failed: string[] = [];
+  for (const l of opts.lists) {
+    if (!l.unknown) continue;
+    if (l.truncated) truncated.push(l.list);
+    else if (paused) offline.push(l.list);
+    else failed.push(l.list);
+  }
+  const sentence = (
+    names: string[],
+    arm: { truncated: boolean; paused: boolean },
+  ) => unknownListNotice({ prNoun, list: names.join(" and "), ...arm }).message;
+  const sentences: string[] = [];
+  if (truncated.length > 0)
+    sentences.push(sentence(truncated, { truncated: true, paused }));
+  if (offline.length > 0)
+    sentences.push(sentence(offline, { truncated: false, paused: true }));
+  if (failed.length > 0)
+    sentences.push(sentence(failed, { truncated: false, paused: false }));
+  if (sentences.length === 0) return null;
+  const message = sentences.join(" ");
+  // The Retry's name lists only the failed arm: the rest wouldn't change on retry.
+  return failed.length > 0
+    ? { message, onRetry, retryLabel: `Retry loading ${failed.join(" and ")}` }
+    : { message };
 }
 
 export type ListNoticeCause = "refresh" | "load-more" | "offline";

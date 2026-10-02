@@ -75,6 +75,7 @@ import {
   refreshFailed,
   resolveDetailPane,
   unknownListNotice,
+  unknownListsNotice,
 } from "@/features/conversations/remote-section-state";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
@@ -177,6 +178,7 @@ import {
   type ForgeUserRef,
   type PrDetails,
   type PrThreadOut,
+  prHeadSha,
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
@@ -305,7 +307,7 @@ const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
       : `Conversation (${pr.comments.length})`,
   commits: (pr) =>
     pr.commitsUnknown ? "Commits" : `Commits (${pr.commits.length})`,
-  files: (pr) => `Files (${pr.files.length})`,
+  files: (pr) => (pr.filesUnknown ? "Files" : `Files (${pr.files.length})`),
   review: () => "Review",
 };
 
@@ -1674,7 +1676,7 @@ export function RemotePrView({
   async function confirmMerge() {
     // GitLab stale-view guard: the head sha the user is looking at (the same oid
     // the AI-review path uses). GitLab 409s if the head moved; GitHub ignores it.
-    const sha = pr?.commits.at(-1)?.oid;
+    const sha = pr ? prHeadSha(pr) : undefined;
     // The checkbox is hidden/disabled for a default or rule-protected head, but
     // force the flag false here too so a stale `true` can't reach the forge.
     const deleteHead = deleteBranch && !headIsDefault && !headDeletionBlocked;
@@ -1753,7 +1755,7 @@ export function RemotePrView({
   // reviewer notes, so none ride the event.
   async function fireReadyReview() {
     if (!pr) return;
-    const headSha = pr.commits.at(-1)?.oid;
+    const headSha = prHeadSha(pr);
     if (!(await prOpenEligible(repoPath, String(number), headSha ?? "")))
       return;
     triggerAutomations({
@@ -1761,7 +1763,8 @@ export function RemotePrView({
       repoPath,
       base: pr.baseRefName,
       head: pr.headRefName,
-      // gh GraphQL returns commits oldest-first, so the head is the last.
+      // The forge-reported head: GitHub's capped oldest-first commits list can
+      // end short of it, and a wrong head here re-fires pr-sync's paid review.
       headSha,
       title: pr.title,
       // No body/commit subjects on this path — the PR diff is the source of
@@ -1773,7 +1776,7 @@ export function RemotePrView({
   }
   // One derivation of which review owns which line-comment threads, shared by the
   // feed and the residual block below it.
-  const threadClaims = usePrThreadClaims(pr, reviewThreads.data);
+  const threadClaims = usePrThreadClaims(pr, reviewThreads.data?.threads);
   // Guards for the merge dialog's "delete head branch on the remote" checkbox:
   // every forge refuses to delete the DEFAULT branch (so the option is hidden),
   // and a local branch RULE can block deleting the head (so it's disabled with a
@@ -1832,11 +1835,10 @@ export function RemotePrView({
       ? selectedPath
       : (pr?.files[0]?.path ?? null);
 
-  // GitLab's merge sends a stale-view `sha` guard sourced from the MR's head commit
-  // (`pr.commits.at(-1)`). If the best-effort commits read failed, that's absent and
-  // we can't guard — so for GitLab we disable Merge rather than merge unguarded on an
-  // irreversible op; reloading refetches the head. (GitHub has no guard, so it's exempt.)
-  const mergeGuardMissing = provider === "gitlab" && pr?.commits.length === 0;
+  // GitLab's merge sends a stale-view `sha` guard sourced from the forge-reported head.
+  // Without one we can't guard, so GitLab disables Merge rather than merge unguarded on
+  // an irreversible op; reloading refetches the head. GitHub has no guard, so it's exempt.
+  const mergeGuardMissing = provider === "gitlab" && pr != null && !pr.headSha;
 
   // GitHub-only: when every one of the three merge methods is disabled by the repo's
   // settings or by a GitDesktop branch rule, a menu of all-disabled items is useless
@@ -2151,6 +2153,8 @@ export function RemotePrView({
       // Grounded Jira mention candidates (Bitbucket + linked project); empty
       // unless the Jira cluster is active.
       canJiraMention ? buildJiraCandidates() : undefined,
+      // A partial commits list rides into the prompt as a disclosure line.
+      prForGen.commitsUnknown,
     );
   }
 
@@ -2458,6 +2462,28 @@ export function RemotePrView({
     }
   })();
 
+  // The Conversation feed's details-payload lists, keyed on the wire flags.
+  const feedListsNotice = unknownListsNotice({
+    prNoun,
+    lists: [
+      {
+        list: "comments",
+        unknown: pr.commentsUnknown,
+        truncated: pr.commentsTruncated,
+      },
+      {
+        list: "commits",
+        unknown: pr.commitsUnknown,
+        truncated: pr.commitsTruncated,
+      },
+    ],
+    paused: details.isPaused,
+    onRetry: () => void details.refetch(),
+  });
+  // A files read with nothing to draw: the Files tab shows its notice alone, and
+  // the header drops its totals (see the DiffStat there).
+  const filesMissing = pr.filesUnknown && pr.files.length === 0;
+
   // The header's meta fields, row-major, as label/value pairs for the grid
   // below: an editable field emits its trigger as the label cell and its chips
   // as the value cell (`cells`), a read-only one a static label plus chips.
@@ -2726,11 +2752,17 @@ export function RemotePrView({
           <span className="font-mono">{pr.headRefName}</span>
           <span>→</span>
           <span className="font-mono">{pr.baseRefName}</span>
-          <DiffStat
-            added={pr.additions}
-            deleted={pr.deletions}
-            className="flex items-center gap-2"
-          />
+          {/* Bitbucket sums its totals from the files rows, so a failed files read
+              yields a false zero; GitHub's totals are PR-level and survive a partial
+              list. The flag is the gate: the empty-list term only keeps real totals
+              showing, it infers no completeness. The Files notice explains the gap. */}
+          {!filesMissing && (
+            <DiffStat
+              added={pr.additions}
+              deleted={pr.deletions}
+              className="flex items-center gap-2"
+            />
+          )}
         </div>
         {/* One label/value grid for every meta field, two pairs wide until the
             PANEL (not the viewport) is too narrow for them — the PR view's width
@@ -2929,14 +2961,16 @@ export function RemotePrView({
             title: pr.title,
             body: pr.body,
             commitSubjects: pr.commits.map((c) => c.headline),
+            commitsUnknown: pr.commitsUnknown,
             repoPath,
             // Scopes the run's per-PR stores (prior reviews, own-comments digest) to
             // the lens this view resolved — a fork's two lenses are different PRs.
             lens,
             // Provider-aware review copy (MR/merge-request noun, markdown flavor).
             provider: provider ?? undefined,
-            // gh GraphQL returns commits oldest-first, so the head is the last.
-            headSha: pr.commits.at(-1)?.oid,
+            // The forge-reported head: tools read the tree here and the saved
+            // review records it, and GitHub's capped commits list can end short.
+            headSha: prHeadSha(pr),
             // Reuse the diff already cached by usePrDiff (mounted above) instead of
             // re-fetching it — PR diffs are among the slowest loads in the app.
             loadDiff: () =>
@@ -3060,19 +3094,14 @@ export function RemotePrView({
                   editable={pr.state === "OPEN" && !detailsStale}
                 />
               )}
-              {/* The comments ride a sub-fetch that can fail while the view loads;
-                  mounted in both arms so a Retry that lands the list hands focus to
-                  the notice's wrapper, not `<body>`. */}
+              {/* The comments and commits ride sub-fetches of the details read that
+                  can fail or come back capped; one line names both so the feed's
+                  notices don't stack. Mounted in both arms so a Retry that lands
+                  the lists hands focus to the notice's wrapper, not `<body>`. */}
               <DegradedListNotice
-                noun="comments"
-                degraded={pr.commentsUnknown}
-                {...unknownListNotice({
-                  prNoun,
-                  list: "comments",
-                  truncated: pr.commentsTruncated,
-                  paused: details.isPaused,
-                  onRetry: () => void details.refetch(),
-                })}
+                noun="comments and commits"
+                degraded={feedListsNotice !== null}
+                {...(feedListsNotice ?? {})}
                 className="px-0 pb-0"
               />
               <PrActivityFeed
@@ -3144,6 +3173,7 @@ export function RemotePrView({
                     ? undefined
                     : threadClaims.residualThreads
                 }
+                truncated={reviewThreads.data?.threadsTruncated ?? false}
                 heading={
                   threadClaims.claimedThreadIds.size > 0
                     ? "Other line comments"
@@ -3434,50 +3464,72 @@ export function RemotePrView({
             number={number}
             onSubmit={() => setSubmitOpen(true)}
           />
-          <PrFilesPane
-            files={pr.files}
-            effectivePath={effectivePath}
-            onSelectPath={setSelectedPath}
-            fileDiff={fileDiff}
-            isPending={prDiff.isPending}
-            isError={prDiff.isError}
-            isPaused={prDiff.isPaused}
-            isFetching={prDiff.isFetching}
-            onRetry={() => void prDiff.refetch()}
-            dataIsPlaceholder={prDiff.isPlaceholderData}
-            // The same threads + handlers/gates the Conversation block uses — one
-            // filtered list off the top-level read, not a second fetch, so an
-            // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than
-            // anchoring here as ordinary Reply/Resolve threads. The app's own drafts
-            // arrive separately below, badged. Quoting from a diff card feeds the
-            // view-level composer (persists to Conversation).
-            threads={threadClaims.visibleThreads}
-            drafts={drafts.data}
-            repoPath={repoPath}
-            lens={lens}
-            number={number}
-            lineWidget={reviewLineWidget}
-            onQuote={detailsStale ? undefined : quoteReply}
-            onReply={
-              canThreadReply
-                ? (threadId, body) =>
-                    threadReply.mutateAsync({ threadId, body })
-                : undefined
+          {/* The files ride a sub-fetch of the details read that can fail or come
+              back capped. With none loaded the notice takes the pane's place, so
+              an empty rail never reads as a PR without changes; it stays mounted
+              across both arms, so a Retry that lands hands focus to its wrapper. */}
+          <DegradedListNotice
+            noun="files"
+            degraded={pr.filesUnknown}
+            {...unknownListNotice({
+              prNoun,
+              list: "files",
+              truncated: pr.filesTruncated,
+              paused: details.isPaused,
+              onRetry: () => void details.refetch(),
+            })}
+            className={
+              filesMissing
+                ? "flex-1 justify-center px-4"
+                : "shrink-0 border-b px-4 py-1.5"
             }
-            onResolve={
-              canThreadResolve
-                ? (threadId, resolved) =>
-                    threadResolve.mutateAsync({ threadId, resolved })
-                : undefined
-            }
-            provider={providerKey}
-            apply={suggestionApply}
-            fileDiffLookup={fileDiffLookup}
-            mentions={mentions}
-            // gh GraphQL returns commits oldest-first, so the head is the last —
-            // pin the file-row Blame at the PR's tip.
-            blameRev={pr.commits.at(-1)?.oid}
           />
+          {!filesMissing && (
+            <PrFilesPane
+              files={pr.files}
+              effectivePath={effectivePath}
+              onSelectPath={setSelectedPath}
+              fileDiff={fileDiff}
+              isPending={prDiff.isPending}
+              isError={prDiff.isError}
+              isPaused={prDiff.isPaused}
+              isFetching={prDiff.isFetching}
+              onRetry={() => void prDiff.refetch()}
+              dataIsPlaceholder={prDiff.isPlaceholderData}
+              // The same threads + handlers/gates the Conversation block uses — one
+              // filtered list off the top-level read, not a second fetch, so an
+              // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than
+              // anchoring here as ordinary Reply/Resolve threads. The app's own drafts
+              // arrive separately below, badged. Quoting from a diff card feeds the
+              // view-level composer (persists to Conversation).
+              threads={threadClaims.visibleThreads}
+              drafts={drafts.data}
+              repoPath={repoPath}
+              lens={lens}
+              number={number}
+              lineWidget={reviewLineWidget}
+              onQuote={detailsStale ? undefined : quoteReply}
+              onReply={
+                canThreadReply
+                  ? (threadId, body) =>
+                      threadReply.mutateAsync({ threadId, body })
+                  : undefined
+              }
+              onResolve={
+                canThreadResolve
+                  ? (threadId, resolved) =>
+                      threadResolve.mutateAsync({ threadId, resolved })
+                  : undefined
+              }
+              provider={providerKey}
+              apply={suggestionApply}
+              fileDiffLookup={fileDiffLookup}
+              mentions={mentions}
+              // Pin the file-row Blame at the forge-reported tip: GitHub's capped
+              // commits list can end short of it.
+              blameRev={prHeadSha(pr)}
+            />
+          )}
         </div>
       )}
 

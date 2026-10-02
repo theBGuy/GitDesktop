@@ -166,7 +166,11 @@ impl GitDesktopMcp {
     #[tool(
         description = "Get a pull request's full details (title, body, state, reviews, comments, \
                        files) by number from the repository's forge (GitHub, GitLab, or Bitbucket, \
-                       per its remote). A stacked PR also carries `stack` ({id, position, size}) \
+                       per its remote). `headSha` is the full head commit SHA, or null when unknown. \
+                       `filesUnknown` means files could not be fully read; `filesTruncated` means \
+                       the read hit a cap (the list may be partial and retrying returns the same list). \
+                       A failed read is unknown but never truncated. Retained files must not be \
+                       treated as complete. A stacked PR also carries `stack` ({id, position, size}) \
                        and `stackMembers`, the whole stack bottom→top with each layer's state. On \
                        GitHub merged layers stay listed, because merging one layer also merges \
                        every unmerged layer below it; a GitLab chain is inferred from the open \
@@ -219,7 +223,9 @@ impl GitDesktopMcp {
                        retained comments must not be treated as complete. `commentsTruncated` \
                        means the list may be partial and retrying returns the same list. \
                        `reviewersUnknown` means reviewer verdicts could not be fully read; \
-                       on GitHub, `reviews` may then be partial. \
+                       on GitHub, `reviews` may then be partial. threadsTruncated means the \
+                       review-threads read hit a cap (review_threads may be partial and retrying \
+                       returns the same list). \
                        Read-only; returns JSON. (For the PR's \
                        metadata + changed files use get_pull_request; for its diff, \
                        pull_request_diff.)"
@@ -237,9 +243,9 @@ impl GitDesktopMcp {
                 .map_err(app_err)?;
         // Bound each thread's diffHunk so a comment on a new file can't drag the
         // whole file into the payload (GitHub-only; GitLab/Bitbucket set it ""),
-        // or drop it entirely when the caller opts out. Mutating this OWNED Vec
-        // never touches the shared IPC struct's serialized shape.
-        for t in &mut review_threads {
+        // or drop it entirely when the caller opts out. Mutating the wrapper's
+        // owned threads Vec never touches the shared IPC struct's serialized shape.
+        for t in &mut review_threads.threads {
             t.diff_hunk = if args.include_diff_hunk {
                 cap_hunk_lines(std::mem::take(&mut t.diff_hunk), HUNK_MAX_LINES)
             } else {
@@ -512,7 +518,7 @@ fn comments_payload(
     comments_truncated: bool,
     reviews: Vec<crate::github::pr::PrThreadOut>,
     reviewers_unknown: bool,
-    review_threads: Vec<crate::github::pr::ReviewThreadOut>,
+    review_threads: crate::github::pr::ReviewThreadsOut,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({
         "number": number,
@@ -521,7 +527,8 @@ fn comments_payload(
         "commentsTruncated": comments_truncated,
         "reviews": reviews,
         "reviewersUnknown": reviewers_unknown,
-        "review_threads": review_threads,
+        "review_threads": review_threads.threads,
+        "threadsTruncated": review_threads.threads_truncated,
     });
     // Prune always-default empty fields from every comment/thread object so
     // agent consumers (the AI review eats the same JSON) don't pay tokens for
@@ -726,13 +733,19 @@ mod tests {
                     truncated,
                     Vec::new(),
                     reviewers_unknown,
-                    Vec::new(),
+                    crate::github::pr::ReviewThreadsOut {
+                        threads: Vec::new(),
+                        threads_truncated: truncated,
+                    },
                 );
                 assert_eq!(v["number"], 7);
                 assert_eq!(v["comments"], serde_json::json!([]));
                 assert_eq!(v["commentsUnknown"], unknown);
                 assert_eq!(v["commentsTruncated"], truncated);
                 assert_eq!(v["reviewersUnknown"], reviewers_unknown);
+                assert_eq!(v["review_threads"], serde_json::json!([]));
+                assert_eq!(v["threadsTruncated"], truncated);
+                assert!(v.get("threads_truncated").is_none());
                 assert!(v.get("comments_unknown").is_none());
                 assert!(v.get("comments_truncated").is_none());
                 assert!(v.get("reviewers_unknown").is_none());

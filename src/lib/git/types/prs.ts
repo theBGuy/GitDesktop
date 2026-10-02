@@ -1,5 +1,9 @@
 import type { ForgeUserRef, RepoLabel } from "./forge";
-import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
+import type {
+  CompletedReviewerWithState,
+  PrThreadOut,
+  ReviewThreadOut,
+} from "./pr-reviews";
 
 export interface PrPollInfo {
   number: number;
@@ -339,6 +343,19 @@ export interface PrDetails {
    *  same list. Implies `commitsUnknown`; a failed read is unknown but never
    *  truncated. GitHub: set at the 250-commit REST ceiling. */
   commitsTruncated: boolean;
+  /** The PR's head commit as the forge reports it, independent of `commits`:
+   *  GitHub lists commits oldest-first under a cap, so the list's tail is not the
+   *  head there. Null when the forge supplied none. */
+  headSha: string | null;
+  /** True when the files read failed or may be incomplete — never present
+   *  `files` as complete. A partial list may be retained; an empty one is a
+   *  missing list, not a PR without changed files. */
+  filesUnknown: boolean;
+  /** True when the files read succeeded but hit a pagination cap, so `files`
+   *  may be partial (an exact-cap list can be complete); a refetch returns the
+   *  same list. Implies `filesUnknown`; a failed read is unknown but never
+   *  truncated. */
+  filesTruncated: boolean;
   /** True when the reviewer-verdict read failed or may be incomplete — never
    *  present reviewer verdicts (`completedReviewers`, or on GitHub the chips
    *  derived from `reviews`) as complete, nor an assigned reviewer without a
@@ -396,6 +413,24 @@ export interface PrDetails {
    *  by maintainers"). GitHub only; absent/null = unknown, which must not be read
    *  as a denial. */
   maintainerCanModify?: boolean | null;
+}
+
+/** The PR's head commit: the forge-reported `headSha`, falling back to the
+ *  commits tail only when the forge supplied none. On GitHub that tail is the
+ *  head only while the oldest-first list is complete. */
+export function prHeadSha(
+  pr: Pick<PrDetails, "headSha" | "commits">,
+): string | undefined {
+  return pr.headSha || pr.commits.at(-1)?.oid;
+}
+
+/** A PR's file:line-anchored review threads, as one read returns them. */
+export interface ReviewThreadsOut {
+  threads: ReviewThreadOut[];
+  /** True when the threads read hit a pagination cap, so `threads` may be
+   *  partial (an exact-cap list can be complete); a refetch returns the same
+   *  list. A failed read rejects instead. */
+  threadsTruncated: boolean;
 }
 
 /** How far a pull request's head has drifted from its base — the update-branch

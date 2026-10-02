@@ -250,6 +250,25 @@ function renderJiraLine(
   return s ? `- ${key}${suffix} — ${s}` : `- ${key}${suffix}`;
 }
 
+/** A commit-subjects section, or null with nothing to say. `unknown` (the forge's
+ *  read failed or hit a cap) appends one disclosure line; without it the section is
+ *  byte-identical to the MCP twin's, whose local commit lists are never partial. */
+function commitListSection(
+  heading: string,
+  subjects: string[],
+  unknown: boolean | undefined,
+): string | null {
+  if (subjects.length === 0 && !unknown) return null;
+  const lines = subjects.map((s) => `- ${s}`);
+  if (unknown)
+    lines.push(
+      subjects.length > 0
+        ? "[commit list may be incomplete — the diff is authoritative]"
+        : "[commit list unavailable — the diff is authoritative]",
+    );
+  return `${heading}\n${lines.join("\n")}`;
+}
+
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildPrPrompt(input: PrPromptInput): {
   system: string;
@@ -308,11 +327,12 @@ export function buildPrPrompt(input: PrPromptInput): {
   const promptParts = [
     `This ${prNoun} merges \`${input.headBranch}\` into \`${input.baseBranch}\`.`,
   ];
-  if (input.commitSubjects.length > 0) {
-    promptParts.push(
-      `## Commits in this ${abbrev}\n${input.commitSubjects.map((s) => `- ${s}`).join("\n")}`,
-    );
-  }
+  const commitsSection = commitListSection(
+    `## Commits in this ${abbrev}`,
+    input.commitSubjects,
+    input.commitsUnknown,
+  );
+  if (commitsSection) promptParts.push(commitsSection);
   let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
@@ -772,11 +792,12 @@ export function buildReviewPrompt(
       `## Author's notes for reviewers\n${capBody(input.reviewNotes.trim(), 8000)}`,
     );
   }
-  if (input.commitSubjects.length > 0) {
-    promptParts.push(
-      `## Commits\n${input.commitSubjects.map((s) => `- ${s}`).join("\n")}`,
-    );
-  }
+  const commitsSection = commitListSection(
+    "## Commits",
+    input.commitSubjects,
+    input.commitsUnknown,
+  );
+  if (commitsSection) promptParts.push(commitsSection);
   // Stronger wording than the generator's twin: an invented finding about a
   // file the reviewer can't see reads as a real one.
   let filesSection = `## Files changed\n${fileSummary || "(none)"}`;

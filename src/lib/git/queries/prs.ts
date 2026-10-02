@@ -20,6 +20,7 @@ import type {
   RemoteLens,
   RemoteListFilter,
   ReviewThreadOut,
+  ReviewThreadsOut,
 } from "../types";
 import { remoteListFilterKey } from "../types";
 import {
@@ -529,7 +530,8 @@ export function usePrDiff(
 
 // File:line-anchored review threads (Copilot/CodeRabbit/human line comments); the
 // data serves both the Conversation grouping and the Files diff anchors, so it
-// lives at the PR top level.
+// lives at the PR top level. The entry is the whole ReviewThreadsOut: optimistic
+// writers patch `.threads` and carry `threadsTruncated` through untouched.
 export const prReviewThreadsKey = (
   repo: string,
   number: number,
@@ -815,7 +817,7 @@ export function useCreateReviewThread(repo: string, lens: RemoteLens) {
     }) => {
       const key = prReviewThreadsKey(repo, args.number, lens);
       await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<ReviewThreadOut[]>(key);
+      const prev = queryClient.getQueryData<ReviewThreadsOut>(key);
       const login = queryClient.getQueryData<ForgeStatus>([
         "repo",
         repo,
@@ -850,8 +852,8 @@ export function useCreateReviewThread(repo: string, lens: RemoteLens) {
           },
         ],
       };
-      queryClient.setQueryData<ReviewThreadOut[]>(key, (threads) =>
-        threads ? [...threads, synthetic] : threads,
+      queryClient.setQueryData<ReviewThreadsOut>(key, (out) =>
+        out ? { ...out, threads: [...out.threads, synthetic] } : out,
       );
       return { prev, key };
     },

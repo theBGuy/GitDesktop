@@ -88,6 +88,7 @@ import {
   parseNpmVersions,
   verdict,
 } from "./check-tauri-plugin-parity.mjs";
+import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 
 // -------------------------------------------------- check-changelog-fragment
 
@@ -4427,5 +4428,77 @@ test("the PR label-policy sentences are identical in prompt.ts and generate.rs",
     for (const [rel, text] of Object.entries(sources)) {
       assert.ok(text.includes(sentence), `${rel} lacks: ${sentence}`);
     }
+  }
+});
+
+// The PR prompt's commits section: `assemble_pr_recipe` builds it from local
+// commits, which are never partial, so the app's disclosure line must stay out of
+// a complete list for the two to agree. The Rust format is pinned as source text
+// (whitespace-collapsed, before its test module); the TS side is rendered for real.
+const RUST_PR_COMMITS_SECTION =
+  'if !p.commit_subjects.is_empty() { prompt_parts.push(format!( "## Commits in this {abbrev}\\n{}", p.commit_subjects .iter() .map(|s| format!("- {s}")) .collect::<Vec<_>>() .join("\\n") )); }';
+const COMMITS_PARTIAL_LINE =
+  "[commit list may be incomplete — the diff is authoritative]";
+const COMMITS_UNAVAILABLE_LINE =
+  "[commit list unavailable — the diff is authoritative]";
+
+test("the PR prompt's commits section matches generate.rs for a complete list", async () => {
+  const rust = promptSource("src-tauri/src/mcp_server/generate.rs");
+  const testsAt = rust.indexOf("\n#[cfg(test)]\nmod tests");
+  assert.ok(testsAt > 0, "generate.rs test module marker not found");
+  assert.ok(
+    rust
+      .slice(0, testsAt)
+      .replace(/\s+/g, " ")
+      .includes(RUST_PR_COMMITS_SECTION),
+    "generate.rs commits section drifted from its pinned format",
+  );
+  const hooks = installSrcHooks();
+  try {
+    const { buildPrPrompt } = await import("@/lib/ai/prompt");
+    const base = {
+      diffText: "diff --git a/x b/x\n+1\n",
+      diffTruncated: false,
+      files: [{ path: "x", added: 1, deleted: 0, isBinary: false }],
+      commitSubjects: ["feat: thing", "fix: other"],
+      baseBranch: "main",
+      headBranch: "feat",
+      repoInstructions: null,
+      globalInstructions: "",
+      availableLabels: [],
+    };
+    // What the pinned Rust format renders for this list under GitHub's "PR".
+    const rustRendered = `## Commits in this PR\n${base.commitSubjects
+      .map((s) => `- ${s}`)
+      .join("\n")}`;
+    const complete = buildPrPrompt(base).prompt;
+    assert.ok(complete.includes(`${rustRendered}\n\n## Files changed`));
+    assert.equal(
+      buildPrPrompt({ ...base, commitsUnknown: false }).prompt,
+      complete,
+    );
+    assert.ok(!complete.includes(COMMITS_PARTIAL_LINE));
+    assert.ok(!complete.includes(COMMITS_UNAVAILABLE_LINE));
+    // Partial and failed reads disclose; an empty complete list has no section.
+    assert.ok(
+      buildPrPrompt({ ...base, commitsUnknown: true }).prompt.includes(
+        `${rustRendered}\n${COMMITS_PARTIAL_LINE}\n\n## Files changed`,
+      ),
+    );
+    const failed = buildPrPrompt({
+      ...base,
+      commitSubjects: [],
+      commitsUnknown: true,
+    }).prompt;
+    assert.ok(
+      failed.includes(`## Commits in this PR\n${COMMITS_UNAVAILABLE_LINE}`),
+    );
+    assert.ok(
+      !buildPrPrompt({ ...base, commitSubjects: [] }).prompt.includes(
+        "## Commits",
+      ),
+    );
+  } finally {
+    hooks.deregister();
   }
 });
