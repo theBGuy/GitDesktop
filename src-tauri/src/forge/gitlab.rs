@@ -7281,16 +7281,32 @@ pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
     Ok(tail_cap(text, CI_JOB_LOG_CAP))
 }
 
+fn pipeline_jobs_read_limit() -> usize {
+    JOBS_PER_PAGE * MAX_JOB_PAGES as usize
+}
+
 fn no_failed_jobs_message(more_pages: bool) -> String {
     if more_pages {
         format!(
             "No failed jobs in the newest {} jobs checked; \
              this pipeline has more jobs that weren't read.",
-            JOBS_PER_PAGE * MAX_JOB_PAGES as usize
+            pipeline_jobs_read_limit()
         )
     } else {
         "No failed jobs in this pipeline.".to_string()
     }
+}
+
+/// Append after tail-capping so the pagination limit remains visible.
+fn append_jobs_read_limit(mut text: String, more_pages: bool) -> String {
+    if more_pages {
+        text.push_str(&format!(
+            "\nOnly the newest {} jobs were checked; \
+             this pipeline has more jobs that weren't read.",
+            pipeline_jobs_read_limit()
+        ));
+    }
+    text
 }
 
 /// The failed jobs' logs for a pipeline, concatenated — GitLab's analogue of
@@ -7342,13 +7358,14 @@ pub async fn run_failed_logs(repo_path: &str, run_id: u64) -> AppResult<String> 
             }
         }
     }
-    failed_logs_outcome(
+    let text = failed_logs_outcome(
         text,
         succeeded,
         last_failure,
         &failed_sections,
         CI_RUN_LOG_CAP,
-    )
+    )?;
+    Ok(append_jobs_read_limit(text, more_pages))
 }
 
 fn failed_logs_outcome(
@@ -13096,6 +13113,32 @@ mod tests {
             no_failed_jobs_message(false),
             "No failed jobs in this pipeline."
         );
+    }
+
+    #[test]
+    fn failed_logs_append_a_jobs_limit_note_only_for_capped_reads() {
+        // SYNTHETIC: the same fetched trace with either pagination verdict.
+        assert_eq!(append_jobs_read_limit("trace".into(), false), "trace");
+        assert_eq!(
+            append_jobs_read_limit("trace".into(), true),
+            "trace\nOnly the newest 300 jobs were checked; \
+             this pipeline has more jobs that weren't read."
+        );
+    }
+
+    #[test]
+    fn failed_logs_keep_the_jobs_limit_note_after_tail_truncation() {
+        // SYNTHETIC: a long trace loses its beginning before the note is appended.
+        let raw = format!("earlier trace\n{}", "tail".repeat(20));
+        let capped = failed_logs_outcome(raw, 1, None, &[], 8).unwrap();
+        assert!(!capped.contains("earlier trace"));
+        assert!(capped.ends_with("tailtail"));
+        let output = append_jobs_read_limit(capped.clone(), true);
+        assert!(output.starts_with(&capped));
+        assert!(output.ends_with(
+            "\nOnly the newest 300 jobs were checked; \
+             this pipeline has more jobs that weren't read."
+        ));
     }
 
     #[test]

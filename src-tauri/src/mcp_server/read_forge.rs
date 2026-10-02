@@ -712,8 +712,8 @@ mod tests {
         assert_eq!(nc.get("id"), Some(&serde_json::json!("C1")));
     }
 
-    /// An empty `comments` is ambiguous on its own, so `commentsUnknown` is always
-    /// present, survives the prune, and carries the camelCase name get_pull_request uses.
+    /// `commentsUnknown`, `commentsTruncated`, and `reviewersUnknown` are always present,
+    /// survive pruning, and use the same camelCase names as get_pull_request.
     #[test]
     fn comments_payload_carries_comment_and_reviewer_read_flags() {
         // SYNTHETIC: comment and reviewer reads can succeed or fail independently.

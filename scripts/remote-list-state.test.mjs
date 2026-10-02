@@ -1306,7 +1306,7 @@ test("only a successful read may claim the picker is empty (negative control)", 
 
 test("every unknown-sub-list input resolves to its arm (truth table)", () => {
   const retry = () => {};
-  const RETAINED = "Only some of this merge request's commits loaded.";
+  const RETAINED = "This merge request's commits may be incomplete.";
   const OFFLINE = offlinePendingMessage("the commits");
   const FAILED = "Couldn't fully load this merge request's commits.";
   for (const truncated of BOOLS) {
