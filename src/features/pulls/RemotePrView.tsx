@@ -2480,9 +2480,13 @@ export function RemotePrView({
     paused: details.isPaused,
     onRetry: () => void details.refetch(),
   });
-  // A files read with nothing to draw: the Files tab shows its notice alone, and
-  // the header drops its totals (see the DiffStat there).
+  // A files read with nothing to draw: the Files tab shows its notice alone.
   const filesMissing = pr.filesUnknown && pr.files.length === 0;
+  // Whether the header's +/- totals are unreadable. GitHub's totals are PR-level
+  // and survive a partial files list; Bitbucket's are summed from the rows, so
+  // they hide whenever its files are unknown.
+  const totalsUnknown =
+    pr.filesUnknown && (pr.files.length === 0 || provider === "bitbucket");
 
   // The header's meta fields, row-major, as label/value pairs for the grid
   // below: an editable field emits its trigger as the label cell and its chips
@@ -2752,11 +2756,10 @@ export function RemotePrView({
           <span className="font-mono">{pr.headRefName}</span>
           <span>→</span>
           <span className="font-mono">{pr.baseRefName}</span>
-          {/* Bitbucket sums its totals from the files rows, so a failed files read
-              yields a false zero; GitHub's totals are PR-level and survive a partial
-              list. The flag is the gate: the empty-list term only keeps real totals
-              showing, it infers no completeness. The Files notice explains the gap. */}
-          {!filesMissing && (
+          {/* GitHub's totals are PR-level and survive a partial files list;
+              Bitbucket's are summed from the rows, so they hide whenever its files
+              are unknown. The Files notice explains the gap. */}
+          {!totalsUnknown && (
             <DiffStat
               added={pr.additions}
               deleted={pr.deletions}

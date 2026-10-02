@@ -149,12 +149,14 @@ export function parkedUnlessPermanent(q: {
 }
 
 /** The one line the review-comments block shows, or null. `threadCount` is
- *  the threads it draws, `undefined` until the read has loaded. `truncated` is
- *  the loaded read's wire flag, never the drawn count: it re-reads the same cap
- *  on refetch or reconnect, so it outranks every other arm and offers no Retry,
- *  as {@link unknownListNotice} does. A failure offers Retry; a park never does,
- *  and it outranks the failure it follows. A loaded empty answer stays quiet
- *  offline, like a list's empty rung. */
+ *  the threads it draws, `undefined` until the read has loaded. A failure offers
+ *  Retry and outranks `truncated`: unlike {@link unknownListNotice}, where the wire
+ *  makes the two exclusive, `isError` here is the threads query's own refresh
+ *  state over a retained capped payload, and its Retry can bring in newer
+ *  threads. `truncated` is the loaded read's wire flag, never the drawn count;
+ *  it re-reads the same cap on refetch or reconnect, so it outranks a park and
+ *  offers no Retry. A park never offers Retry and outranks the failure it
+ *  follows. A loaded empty answer stays quiet offline, like a list's empty rung. */
 export function reviewCommentsNotice(input: {
   threadCount: number | undefined;
   truncated: boolean;
@@ -166,8 +168,6 @@ export function reviewCommentsNotice(input: {
   const failed = refreshFailed(input);
   const drawn = threadCount !== undefined && threadCount > 0;
   switch (true) {
-    case input.truncated:
-      return { message: "Review comments may be incomplete.", retry: false };
     case failed && drawn:
       return {
         message:
@@ -178,6 +178,8 @@ export function reviewCommentsNotice(input: {
       return { message: "Couldn't refresh review comments.", retry: true };
     case failed:
       return { message: "Couldn't load review comments.", retry: true };
+    case input.truncated:
+      return { message: "Review comments may be incomplete.", retry: false };
     case isPaused && drawn:
       return {
         message: "You're offline — showing the last loaded review comments.",

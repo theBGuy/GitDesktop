@@ -275,8 +275,9 @@ test("a park never hides a permanent verdict with nothing drawn", () => {
   assert.equal(atCallSite(disabled, false), "error");
 });
 
-/** The review-comments notice, rung by rung. A capped read outranks every
- *  other arm: a retry or reconnect re-reads the same cap. */
+/** The review-comments notice, rung by rung. A failed refresh outranks a cap
+ *  (its Retry can bring in newer threads); a cap outranks a park, since a
+ *  reconnect re-reads the same cap. */
 function expectedReviewNotice({
   threadCount,
   truncated,
@@ -284,12 +285,12 @@ function expectedReviewNotice({
   isPaused,
   isFetching,
 }) {
-  if (truncated) return ["truncated", false];
   const failed = isError && !isPaused && !isFetching;
   const drawn = threadCount !== undefined && threadCount > 0;
   if (failed && drawn) return ["refresh-drawn", true];
   if (failed && threadCount !== undefined) return ["refresh-empty", true];
   if (failed) return ["load", true];
+  if (truncated) return ["truncated", false];
   if (isPaused && drawn) return ["offline-drawn", false];
   if (isPaused && threadCount === undefined) return ["offline-pending", false];
   return null;
@@ -380,7 +381,7 @@ test("review comments: a park outranks the failure, and a loaded empty answer st
   );
 });
 
-test("review comments: a capped read says so over drawn threads, never with Retry", () => {
+test("review comments: a capped read says so without Retry, unless a refresh failed over it", () => {
   const capped = {
     message: "Review comments may be incomplete.",
     retry: false,
@@ -395,7 +396,8 @@ test("review comments: a capped read says so over drawn threads, never with Retr
     }),
     capped,
   );
-  // A failed refresh over the capped rows: a Retry would read the same cap.
+  // A failed refresh over the capped rows: the failure wins, since its Retry
+  // can bring in newer threads even though the cap comes back.
   assert.deepEqual(
     reviewCommentsNotice({
       threadCount: 3,
@@ -403,7 +405,11 @@ test("review comments: a capped read says so over drawn threads, never with Retr
       isError: true,
       isPaused: false,
     }),
-    capped,
+    {
+      message:
+        "Couldn't refresh review comments — showing the last loaded ones.",
+      retry: true,
+    },
   );
   // Every residual thread claimed by a review above: still capped.
   assert.deepEqual(

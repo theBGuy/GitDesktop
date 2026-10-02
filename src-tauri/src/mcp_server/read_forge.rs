@@ -223,8 +223,8 @@ impl GitDesktopMcp {
                        retained comments must not be treated as complete. `commentsTruncated` \
                        means the list may be partial and retrying returns the same list. \
                        `reviewersUnknown` means reviewer verdicts could not be fully read; \
-                       on GitHub, `reviews` may then be partial. threadsTruncated means the \
-                       review-threads read hit a cap (review_threads may be partial and retrying \
+                       on GitHub, `reviews` may then be partial. `threadsTruncated` means the \
+                       review-threads read hit a cap (`review_threads` may be partial and retrying \
                        returns the same list). \
                        Read-only; returns JSON. (For the PR's \
                        metadata + changed files use get_pull_request; for its diff, \

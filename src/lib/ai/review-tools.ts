@@ -307,8 +307,10 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
       description:
         "This pull request's metadata and changed-file summary (title, body, " +
         "state, branches, head commit, commits, files, labels, reviewers) from " +
-        "the forge. headSha is the forge-reported head commit (null when the " +
-        "forge supplied none); the commits list can end short of it. " +
+        "the forge. headSha is the head commit: GitHub's `headRefOid`, " +
+        "GitLab's MR `sha` (newest commit as fallback), Bitbucket's newest " +
+        "commit (its PR source hash is abbreviated); null when none could be " +
+        "read. The commits list can end short of it. " +
         "commitsUnknown means the commits could not be fully read, so commits " +
         "may be partial or empty, and commitsTruncated means the read hit a cap " +
         "(the list may be partial and retrying returns the same list). " +

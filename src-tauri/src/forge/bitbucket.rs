@@ -461,8 +461,22 @@ async fn bb_paginate_with_truncation<T: serde::de::DeserializeOwned>(
 /// GitLab's full-page heuristic. Followed URLs stay within the authenticated origin.
 async fn bb_walk_pages<T, F, Fut>(
     first_url: String,
-    mut fetch_page: F,
+    fetch_page: F,
 ) -> AppResult<(Vec<T>, bool)>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<BbPage<T>>>,
+{
+    let (rows, outcome) = bb_walk_pages_retaining(first_url, fetch_page).await;
+    outcome.map(|truncated| (rows, truncated))
+}
+
+/// Keep parsed pages alongside the outcome so callers choose whether to retain
+/// them on failure. The successful outcome reports unread next pages.
+async fn bb_walk_pages_retaining<T, F, Fut>(
+    first_url: String,
+    mut fetch_page: F,
+) -> (Vec<T>, AppResult<bool>)
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<BbPage<T>>>,
@@ -470,15 +484,18 @@ where
     let mut url = first_url;
     let mut out: Vec<T> = Vec::new();
     for _ in 0..BB_MAX_PAGES {
-        let page = fetch_page(url).await?;
+        let page = match fetch_page(url).await {
+            Ok(page) => page,
+            Err(error) => return (out, Err(error)),
+        };
         out.extend(page.values);
         let has_next = page.next.as_deref().is_some_and(|next| !next.is_empty());
         match next_page_url(page.next) {
             Some(next) => url = next,
-            None => return Ok((out, has_next)),
+            None => return (out, Ok(has_next)),
         }
     }
-    Ok((out, true))
+    (out, Ok(true))
 }
 
 // ── Repository listing (clone browser) ─────────────────────────────────────────
@@ -1598,26 +1615,16 @@ fn full_head_oid(commits: &[PrCommitOut]) -> Option<String> {
 }
 
 /// Retain parsed pages on failure, with unknown but not truncated files.
-async fn diffstat_paged<F, Fut>(first_url: String, mut fetch_page: F) -> (Vec<BbDiffstat>, bool, bool)
+async fn diffstat_paged<F, Fut>(first_url: String, fetch_page: F) -> (Vec<BbDiffstat>, bool, bool)
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<BbPage<BbDiffstat>>>,
 {
-    let mut url = first_url;
-    let mut rows = Vec::new();
-    for _ in 0..BB_MAX_PAGES {
-        let page = match fetch_page(url).await {
-            Ok(page) => page,
-            Err(_) => return (rows, true, false),
-        };
-        rows.extend(page.values);
-        let has_next = page.next.as_deref().is_some_and(|next| !next.is_empty());
-        match next_page_url(page.next) {
-            Some(next) => url = next,
-            None => return (rows, has_next, has_next),
-        }
+    let (rows, outcome) = bb_walk_pages_retaining(first_url, fetch_page).await;
+    match outcome {
+        Ok(truncated) => (rows, truncated, truncated),
+        Err(_) => (rows, true, false),
     }
-    (rows, true, true)
 }
 
 /// Full read view of one pull request — the single PR GET (hard error) plus best-effort

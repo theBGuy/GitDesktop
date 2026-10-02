@@ -4132,7 +4132,9 @@ pub struct PrDetails {
     pub is_draft: bool,
     pub base_ref_name: String,
     pub head_ref_name: String,
-    /// The full head commit oid, independent of a potentially incomplete commit list.
+    /// GitHub's `headRefOid`, GitLab's MR `sha` (newest commit as fallback),
+    /// Bitbucket's newest commit (its PR source hash is abbreviated);
+    /// null when none could be read.
     pub head_sha: Option<String>,
     pub additions: u32,
     pub deletions: u32,
@@ -6469,6 +6471,33 @@ pub async fn gh_pr_review_threads(
         r#"query($cursor: String){{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100, after:$cursor){{ pageInfo{{ endCursor hasNextPage }} nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ pageInfo{{ hasNextPage endCursor }} nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{{ id }} }} }} }} }} }} }} }}"#
     );
 
+    gh_review_threads_paged(&repo_path, |cursor| {
+        let repo_path = &repo_path;
+        let query = &query;
+        async move {
+            // Omit the first cursor: an absent GraphQL variable is null.
+            let mut args: Vec<String> =
+                vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
+            if let Some(c) = cursor {
+                args.push("-f".into());
+                args.push(format!("cursor={c}"));
+            }
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let out = run_gh(Some(repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+            Ok(out.stdout_lossy())
+        }
+    })
+    .await
+}
+
+async fn gh_review_threads_paged<F, Fut>(
+    repo_path: &str,
+    mut fetch_page: F,
+) -> AppResult<ReviewThreadsOut>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
     let str_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
     };
@@ -6499,17 +6528,7 @@ pub async fn gh_pr_review_threads(
     let mut threads_truncated = false;
     // Bounded at 5 pages (500 threads) — a larger PR truncates rather than looping.
     for _ in 0..5 {
-        // The `cursor` variable is omitted on the first request (a missing GraphQL
-        // variable is null → the first page); later pages pass the prior endCursor.
-        let mut args: Vec<String> =
-            vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
-        if let Some(c) = &cursor {
-            args.push("-f".into());
-            args.push(format!("cursor={c}"));
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        let value: serde_json::Value = serde_json::from_str(&fetch_page(cursor).await?).map_err(|e| {
             gh_unreadable(
                 "the review threads",
                 format!("could not parse the PR review threads: {e}"),
@@ -6539,7 +6558,7 @@ pub async fn gh_pr_review_threads(
                     let thread_id = str_at(t, "/id");
                     if !thread_id.is_empty() {
                         if let Ok(extra) =
-                            gh_thread_comment_replies_topup(&repo_path, &thread_id, &inner_cursor, &map_comment)
+                            gh_thread_comment_replies_topup(repo_path, &thread_id, &inner_cursor, &map_comment)
                                 .await
                         {
                             comments.extend(extra);
@@ -7545,6 +7564,62 @@ mod tests {
                 serde_json::json!({ "threads": [], "threadsTruncated": truncated })
             );
         }
+    }
+
+    async fn walk_review_threads(
+        pages: Vec<(bool, &str)>,
+    ) -> (super::ReviewThreadsOut, Vec<Option<String>>) {
+        let mut pages = pages.into_iter();
+        let mut requested = Vec::new();
+        let result = super::gh_review_threads_paged("", |cursor| {
+            requested.push(cursor);
+            let (has_next, end_cursor) = pages.next().expect("unexpected page request");
+            let body = serde_json::json!({
+                "data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                    "nodes": [{"id": end_cursor, "comments": {"nodes": [{"body": "comment"}]}}],
+                }}}}
+            })
+            .to_string();
+            async move { Ok(body) }
+        })
+        .await
+        .unwrap();
+        (result, requested)
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_remaining_pages_at_the_five_page_cap() {
+        let (result, requested) = walk_review_threads(vec![
+            (true, "1"),
+            (true, "2"),
+            (true, "3"),
+            (true, "4"),
+            (true, "5"),
+        ])
+        .await;
+        assert!(result.threads_truncated);
+        assert_eq!(result.threads.len(), 5);
+        assert_eq!(
+            requested,
+            vec![None, Some("1".into()), Some("2".into()), Some("3".into()), Some("4".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_threads_are_complete_when_an_early_page_has_no_next() {
+        let (result, requested) = walk_review_threads(vec![(true, "next"), (false, "done")]).await;
+        assert!(!result.threads_truncated);
+        assert_eq!(result.threads.len(), 2);
+        assert_eq!(requested, vec![None, Some("next".into())]);
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_unread_pages_when_the_cursor_is_empty() {
+        let (result, requested) = walk_review_threads(vec![(true, "")]).await;
+        assert!(result.threads_truncated);
+        assert_eq!(result.threads.len(), 1);
+        assert_eq!(requested, vec![None]);
     }
 
     #[test]

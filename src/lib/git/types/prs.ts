@@ -1,9 +1,5 @@
 import type { ForgeUserRef, RepoLabel } from "./forge";
-import type {
-  CompletedReviewerWithState,
-  PrThreadOut,
-  ReviewThreadOut,
-} from "./pr-reviews";
+import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
 
 export interface PrPollInfo {
   number: number;
@@ -343,9 +339,10 @@ export interface PrDetails {
    *  same list. Implies `commitsUnknown`; a failed read is unknown but never
    *  truncated. GitHub: set at the 250-commit REST ceiling. */
   commitsTruncated: boolean;
-  /** The PR's head commit as the forge reports it, independent of `commits`:
-   *  GitHub lists commits oldest-first under a cap, so the list's tail is not the
-   *  head there. Null when the forge supplied none. */
+  /** The PR's head commit. GitHub's `headRefOid`, GitLab's MR `sha` (newest
+   *  commit as fallback), Bitbucket's newest commit (its PR source hash is
+   *  abbreviated); null when none could be read. GitHub lists commits
+   *  oldest-first under a cap, so the list's tail is not the head there. */
   headSha: string | null;
   /** True when the files read failed or may be incomplete — never present
    *  `files` as complete. A partial list may be retained; an empty one is a
@@ -422,15 +419,6 @@ export function prHeadSha(
   pr: Pick<PrDetails, "headSha" | "commits">,
 ): string | undefined {
   return pr.headSha || pr.commits.at(-1)?.oid;
-}
-
-/** A PR's file:line-anchored review threads, as one read returns them. */
-export interface ReviewThreadsOut {
-  threads: ReviewThreadOut[];
-  /** True when the threads read hit a pagination cap, so `threads` may be
-   *  partial (an exact-cap list can be complete); a refetch returns the same
-   *  list. A failed read rejects instead. */
-  threadsTruncated: boolean;
 }
 
 /** How far a pull request's head has drifted from its base — the update-branch

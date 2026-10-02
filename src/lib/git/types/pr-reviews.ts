@@ -90,6 +90,15 @@ export interface ReviewThreadOut {
   comments: PrThreadOut[];
 }
 
+/** A PR's file:line-anchored review threads, as one read returns them. */
+export interface ReviewThreadsOut {
+  threads: ReviewThreadOut[];
+  /** True when the threads read hit a pagination cap, so `threads` may be
+   *  partial (an exact-cap list can be complete); a refetch returns the same
+   *  list. A failed read rejects instead. */
+  threadsTruncated: boolean;
+}
+
 /** A reviewer who has submitted a verdict, as supplied by the backend (GitLab
  *  approvals, Bitbucket participant states). The `state` is uppercased —
  *  APPROVED / CHANGES_REQUESTED / COMMENTED. */
