@@ -5460,13 +5460,14 @@ fn external_items_from_discussions(discussions: &[GlabDiscussion]) -> Vec<Extern
 const DISCUSSIONS_PER_PAGE: usize = 100;
 const MAX_DISCUSSION_PAGES: u32 = 5;
 
-/// Fetch an MR's discussions up to five pages. Fetch or parse failures fail the
-/// whole read; a full final page signals potentially incomplete discussions.
+/// Fetch an MR's discussions up to five pages, reporting fetch or parse failures
+/// alongside the pages read so far; each caller chooses whether to keep them.
+/// A full final page signals potentially incomplete discussions.
 async fn fetch_mr_discussions(
     repo_path: &str,
     enc: &str,
     number: u64,
-) -> AppResult<(Vec<GlabDiscussion>, bool)> {
+) -> (Vec<GlabDiscussion>, AppResult<bool>) {
     mr_discussions_paged(|page| async move {
         let endpoint = format!(
             "projects/{enc}/merge_requests/{number}/discussions?per_page={DISCUSSIONS_PER_PAGE}&page={page}"
@@ -5477,7 +5478,7 @@ async fn fetch_mr_discussions(
     .await
 }
 
-async fn mr_discussions_paged<F, Fut>(mut fetch_page: F) -> AppResult<(Vec<GlabDiscussion>, bool)>
+async fn mr_discussions_paged<F, Fut>(mut fetch_page: F) -> (Vec<GlabDiscussion>, AppResult<bool>)
 where
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
@@ -5485,10 +5486,14 @@ where
     let mut all: Vec<GlabDiscussion> = Vec::new();
     let mut truncated = false;
     for page in 1..=MAX_DISCUSSION_PAGES {
-        let batch: Vec<GlabDiscussion> = serde_json::from_str(&fetch_page(page).await?)
-            .map_err(|e| {
+        let batch: Vec<GlabDiscussion> = match fetch_page(page).await.and_then(|body| {
+            serde_json::from_str(&body).map_err(|e| {
                 gl_unreadable("the MR discussions", format!("could not parse discussions: {e}"))
-            })?;
+            })
+        }) {
+            Ok(batch) => batch,
+            Err(error) => return (all, Err(error)),
+        };
         let done = batch.len() < DISCUSSIONS_PER_PAGE;
         truncated = page == MAX_DISCUSSION_PAGES && !done;
         all.extend(batch);
@@ -5496,15 +5501,19 @@ where
             break;
         }
     }
-    Ok((all, truncated))
+    (all, Ok(truncated))
 }
 
 /// Third-party AI-reviewer findings on a merge request, mapped onto the same neutral
 /// shape GitHub uses — every non-system note of the MR's discussions.
 pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
     let enc = encode_project(&project_path(repo_path).await?);
-    // external_reviews truncation consumption is deferred; its wire shape stays a Vec.
-    let (discussions, _) = fetch_mr_discussions(repo_path, &enc, number).await?;
+    // Callers choose tolerance: external reviews keep parsed pages on later failure.
+    // Truncation-flag consumption remains deferred; the wire shape stays a Vec.
+    let (discussions, outcome) = fetch_mr_discussions(repo_path, &enc, number).await;
+    if discussions.is_empty() {
+        outcome?;
+    }
     Ok(external_items_from_discussions(&discussions))
 }
 
@@ -5518,7 +5527,8 @@ pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<Ext
 /// and `diff_hunk` always empty.
 pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<ReviewThreadsOut> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let (discussions, threads_truncated) = fetch_mr_discussions(repo_path, &enc, number).await?;
+    let (discussions, outcome) = fetch_mr_discussions(repo_path, &enc, number).await;
+    let threads_truncated = outcome?;
 
     // Resolve the signed-in user once, tolerantly — a failure just hides every
     // comment's edit/delete (drives `viewer_did_author`), it must not fail the read.
@@ -13059,7 +13069,7 @@ mod tests {
 
     async fn walk_discussions(
         pages: Vec<Option<String>>,
-    ) -> (AppResult<(Vec<GlabDiscussion>, bool)>, Vec<u32>) {
+    ) -> ((Vec<GlabDiscussion>, AppResult<bool>), Vec<u32>) {
         let mut requested = Vec::new();
         let result = mr_discussions_paged(|page| {
             requested.push(page);
@@ -13078,17 +13088,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discussions_parse_or_transport_failure_fails_the_whole_read() {
+    async fn discussions_parse_or_transport_failure_retains_pages_with_an_error_outcome() {
         for failure in [Some("<html>502</html>".into()), None] {
-            let (result, requested) = walk_discussions(vec![failure.clone()]).await;
-            assert!(result.is_err());
+            let ((discussions, outcome), requested) = walk_discussions(vec![failure.clone()]).await;
+            assert!(outcome.is_err());
+            assert!(discussions.is_empty());
             assert_eq!(requested, [1]);
-            let (result, requested) = walk_discussions(vec![
+            let ((discussions, outcome), requested) = walk_discussions(vec![
                 Some(discussions_page(DISCUSSIONS_PER_PAGE)),
                 failure,
             ])
             .await;
-            assert!(result.is_err());
+            assert!(outcome.is_err());
+            assert_eq!(discussions.len(), DISCUSSIONS_PER_PAGE);
+            assert_eq!(discussions[0].id, "0");
+            assert_eq!(discussions[DISCUSSIONS_PER_PAGE - 1].id, "99");
             assert_eq!(requested, [1, 2]);
         }
     }
@@ -13102,7 +13116,8 @@ mod tests {
             ];
             pages.push(Some(discussions_page(final_count)));
             let (result, requested) = walk_discussions(pages).await;
-            let (discussions, truncated) = result.unwrap();
+            let (discussions, outcome) = result;
+            let truncated = outcome.unwrap();
             assert_eq!(requested, (1..=MAX_DISCUSSION_PAGES).collect::<Vec<_>>());
             assert_eq!(
                 discussions.len(),
@@ -13111,7 +13126,8 @@ mod tests {
             assert_eq!(truncated, final_count == DISCUSSIONS_PER_PAGE);
         }
         let (result, requested) = walk_discussions(vec![Some("[]".into())]).await;
-        let (discussions, truncated) = result.unwrap();
+        let (discussions, outcome) = result;
+        let truncated = outcome.unwrap();
         assert!(discussions.is_empty());
         assert!(!truncated);
         assert_eq!(requested, [1]);
