@@ -312,15 +312,28 @@ export interface PrDetails {
    *  missing list, not a PR without checks. GitLab and Bitbucket only; GitHub
    *  reads its checks in the same call as the PR itself, so always false. */
   checksUnknown: boolean;
+  /** True when the checks read succeeded but was cut at a cap, so `checks` is a
+   *  partial list a refetch can't complete. Implies `checksUnknown`; a failed
+   *  read is unknown but never truncated. GitHub: always false. */
+  checksTruncated: boolean;
   /** True when the comments read failed or is knowably incomplete — never
    *  present `comments` as complete. A partial list may be retained, and a local
    *  optimistic append may transiently appear. GitLab and Bitbucket only; GitHub
    *  reads them with the PR itself, so always false. */
   commentsUnknown: boolean;
+  /** True when the comments read succeeded but was cut at a cap, so `comments`
+   *  is a partial list (possibly empty once filtered) a refetch can't complete.
+   *  Implies `commentsUnknown`; a failed read is unknown but never truncated.
+   *  GitHub: always false. */
+  commentsTruncated: boolean;
   /** True when the commits read failed or is knowably incomplete — never present
    *  `commits` as complete. A partial list may be retained. GitHub reads them with
    *  the PR itself, so always false. */
   commitsUnknown: boolean;
+  /** True when the commits read succeeded but was cut at a cap, so `commits` is
+   *  a partial list a refetch can't complete. Implies `commitsUnknown`; a failed
+   *  read is unknown but never truncated. GitHub: always false. */
+  commitsTruncated: boolean;
   /** True when the reviewer-verdict read failed or is knowably incomplete — never
    *  present `completedReviewers` as complete, nor an assigned reviewer without a
    *  verdict as pending. `reviewers` itself stays complete. GitHub derives

@@ -2152,7 +2152,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // Commits — GitLab returns newest-first; the frontend treats the last as head,
     // so reverse to oldest-first (matching gh's GraphQL order).
-    let (mut commits, commits_unknown) = read_or_unknown(
+    let (mut commits, commits_unknown, commits_truncated) = read_or_unknown(
         run_glab(
             Some(repo_path),
             &[
@@ -2172,7 +2172,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // Comments are additive like checks: a failed notes read leaves the view
     // available with an explicitly unknown list rather than an empty conversation.
-    let (comments, comments_unknown) = comments_or_unknown(
+    let (comments, comments_unknown, comments_truncated) = comments_or_unknown(
         run_glab(
             Some(repo_path),
             &[
@@ -2187,12 +2187,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // Checks are additive: a failed jobs read leaves the view available with an
     // explicitly unknown list; an absent pipeline is a known empty list.
-    let (checks, checks_unknown) = match &mr.head_pipeline {
+    let (checks, checks_unknown, checks_truncated) = match &mr.head_pipeline {
         Some(p) => {
             let cross_project_id = p.cross_project_id(mr.target_project_id);
             read_or_unknown(pipeline_checks(repo_path, &enc, p.id, cross_project_id).await)
         }
-        None => (Vec::new(), false),
+        None => (Vec::new(), false, false),
     };
 
     let colors = project_label_colors(repo_path, &enc).await;
@@ -2311,6 +2311,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         members_unknown: false,
         checks_unknown,
         comments_unknown,
+        comments_truncated,
+        commits_truncated,
+        checks_truncated,
         commits_unknown,
         reviewers_unknown,
         mergeability: map_gl_mergeability(
@@ -2357,7 +2360,7 @@ fn mr_commits_from(body: &str) -> AppResult<(Vec<PrCommitOut>, bool)> {
 fn reviewer_states_or_unknown(
     read: AppResult<Vec<GlabReviewer>>,
 ) -> (std::collections::HashMap<String, String>, bool) {
-    let (reviewers, unknown) = read_or_unknown(read.map(|rows| (rows, false)));
+    let (reviewers, unknown, _) = read_or_unknown(read.map(|rows| (rows, false)));
     let states = reviewers
         .into_iter()
         .filter_map(|r| {
@@ -13046,11 +13049,11 @@ mod tests {
 
         // Through the checks fold, a failed later page reads as unknown checks.
         let (jobs, _) = walk_jobs(vec![Some(jobs_page(1, 100)), None]).await;
-        let (checks, unknown) = read_or_unknown(
+        let (checks, unknown, truncated) = read_or_unknown(
             jobs.map(|(jobs, more_pages)| (pipeline_checks_from(jobs, 42, false), more_pages)),
         );
         assert!(checks.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[tokio::test]
@@ -13059,11 +13062,11 @@ mod tests {
         let full = (0..3).map(|p| Some(jobs_page(p * 100 + 1, 100))).collect();
         let (jobs, requested) = walk_jobs(full).await;
         assert_eq!(requested, [1, 2, 3]);
-        let (checks, unknown) = read_or_unknown(
+        let (checks, unknown, truncated) = read_or_unknown(
             jobs.map(|(jobs, more_pages)| (pipeline_checks_from(jobs, 42, false), more_pages)),
         );
         assert_eq!(checks.len(), 300);
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, true));
     }
 
     #[tokio::test]
@@ -13106,14 +13109,34 @@ mod tests {
                     _ => serde_json::json!({"id": id, "body": format!("note-{id}")}),
                 })
                 .collect();
-            let (comments, unknown) = comments_or_unknown(mr_comments_from(
+            let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from(
                 &serde_json::to_string(&notes).unwrap(),
                 None,
             ));
-            assert_eq!(unknown, count == 100);
+            assert_eq!((unknown, truncated), (count == 100, count == 100));
             assert_eq!(comments.len(), count - 2);
             assert_eq!(comments[0].body, "note-2");
         }
+    }
+
+    #[test]
+    fn fully_filtered_comments_still_report_a_successful_capped_read() {
+        // SYNTHETIC: all 100 raw notes are either system or positioned notes.
+        let notes: Vec<_> = (0..100)
+            .map(|id| {
+                if id < 50 {
+                    serde_json::json!({"id": id, "system": true})
+                } else {
+                    serde_json::json!({"id": id, "position": {"new_line": 1}})
+                }
+            })
+            .collect();
+        let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from(
+            &serde_json::to_string(&notes).unwrap(),
+            None,
+        ));
+        assert!(comments.is_empty());
+        assert_eq!((unknown, truncated), (true, true));
     }
 
     #[test]
@@ -13123,22 +13146,22 @@ mod tests {
             let commits: Vec<_> = (0..count)
                 .map(|id| serde_json::json!({"id": format!("sha-{id}"), "title": "commit"}))
                 .collect();
-            let (commits, unknown) =
+            let (commits, unknown, truncated) =
                 read_or_unknown(mr_commits_from(&serde_json::to_string(&commits).unwrap()));
-            assert_eq!(unknown, count == 100);
+            assert_eq!((unknown, truncated), (count == 100, count == 100));
             assert_eq!(commits.len(), count);
             if count > 0 {
                 assert_eq!(commits[0].oid, "sha-0");
             }
         }
-        let (commits, unknown) = read_or_unknown(mr_commits_from("<html>502</html>"));
+        let (commits, unknown, truncated) = read_or_unknown(mr_commits_from("<html>502</html>"));
         assert!(commits.is_empty());
-        assert!(unknown);
-        let (commits, unknown) = read_or_unknown(Err::<(Vec<PrCommitOut>, bool), _>(
+        assert_eq!((unknown, truncated), (true, false));
+        let (commits, unknown, truncated) = read_or_unknown(Err::<(Vec<PrCommitOut>, bool), _>(
             AppError::Glab("HTTP 502".into()),
         ));
         assert!(commits.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[test]
@@ -13163,33 +13186,33 @@ mod tests {
     #[test]
     fn mr_comments_body_preserves_failed_and_empty_reads() {
         for body in ["", "<html>502 Bad Gateway</html>", r#"{"message":"404 Not found"}"#] {
-            let (comments, unknown) = comments_or_unknown(mr_comments_from(body, None));
+            let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from(body, None));
             assert!(comments.is_empty(), "{body}");
-            assert!(unknown, "{body}");
+            assert_eq!((unknown, truncated), (true, false), "{body}");
         }
         // A failed fetch folds the same way as an unreadable body.
-        let (comments, unknown) = comments_or_unknown(Err::<(Vec<PrThreadOut>, bool), _>(
+        let (comments, unknown, truncated) = comments_or_unknown(Err::<(Vec<PrThreadOut>, bool), _>(
             AppError::Glab("HTTP 502".into()),
         ));
         assert!(comments.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
 
         // A read that succeeds empty, or holds only filtered notes, is a known empty list.
-        let (comments, unknown) = comments_or_unknown(mr_comments_from("[]", None));
+        let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from("[]", None));
         assert!(comments.is_empty());
-        assert!(!unknown);
-        let (comments, unknown) = comments_or_unknown(mr_comments_from(
+        assert_eq!((unknown, truncated), (false, false));
+        let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from(
             r#"[{"id":1,"body":"assigned to @a","system":true}]"#,
             None,
         ));
         assert!(comments.is_empty());
-        assert!(!unknown);
+        assert_eq!((unknown, truncated), (false, false));
 
-        let (comments, unknown) = comments_or_unknown(mr_comments_from(
+        let (comments, unknown, truncated) = comments_or_unknown(mr_comments_from(
             r#"[{"id":5,"body":"looks good","author":{"username":"alice"}}]"#,
             Some("alice"),
         ));
-        assert!(!unknown);
+        assert_eq!((unknown, truncated), (false, false));
         assert_eq!(comments[0].id, "5");
         assert_eq!(comments[0].body, "looks good");
         assert!(comments[0].viewer_did_author);

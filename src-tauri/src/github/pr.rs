@@ -4178,18 +4178,30 @@ pub struct PrDetails {
     /// Bitbucket: failed statuses fetch/parse or an unavailable head sha.
     /// GitHub: always false, read in the same call as the view.
     pub checks_unknown: bool,
+    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// `checks_truncated` implies `checks_unknown`. Failed reads are unknown
+    /// with `checks_truncated == false`; consumers must not infer this from row count.
+    pub checks_truncated: bool,
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present the comments as complete. Partial comments may be retained.
     /// GitLab: failed or capped notes read. Bitbucket: failed or truncated pages.
     /// GitHub: always false, read in the same call as the view.
     pub comments_unknown: bool,
+    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// `comments_truncated` implies `comments_unknown`. Failed reads are unknown
+    /// with `comments_truncated == false`; consumers must not infer this from row count.
+    pub comments_truncated: bool,
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present the commits as complete. Partial commits may be retained.
     /// GitLab/Bitbucket: failed or capped read. GitHub: always false, core read.
     pub commits_unknown: bool,
+    /// True when the read succeeded but the list is knowably cut at a pagination cap.
+    /// `commits_truncated` implies `commits_unknown`. Failed reads are unknown
+    /// with `commits_truncated == false`; consumers must not infer this from row count.
+    pub commits_truncated: bool,
     /// True when the read failed or is knowably incomplete; consumers must not
     /// present reviewer verdicts as complete or assume assigned reviewers are pending.
-    /// The assigned `reviewers` list stays complete; only verdicts are unknown.
+    /// The assigned `reviewers` list stays complete; the verdicts read is all-or-nothing.
     /// GitLab: failed verdict read; false with no assigned reviewers.
     /// GitHub/Bitbucket: always false, verdicts come from core/complete reads.
     pub reviewers_unknown: bool,
@@ -4213,15 +4225,19 @@ pub(crate) fn checks_or_unknown<E>(read: Result<Vec<PrCheckOut>, E>) -> (Vec<PrC
     }
 }
 
-/// Failed reads are empty and unknown; capped reads retain their partial list.
-pub(crate) fn read_or_unknown<T, E>(read: Result<(Vec<T>, bool), E>) -> (Vec<T>, bool) {
-    read.unwrap_or_else(|_| (Vec::new(), true))
+/// Returns rows, unknown, truncated: failed reads are unknown but not truncated.
+/// Successful capped reads retain their rows and always set both flags.
+pub(crate) fn read_or_unknown<T, E>(read: Result<(Vec<T>, bool), E>) -> (Vec<T>, bool, bool) {
+    match read {
+        Ok((rows, truncated)) => (rows, truncated, truncated),
+        Err(_) => (Vec::new(), true, false),
+    }
 }
 
 /// Comments preserve the cap signal independently of the retained list's length.
 pub(crate) fn comments_or_unknown<E>(
     read: Result<(Vec<PrThreadOut>, bool), E>,
-) -> (Vec<PrThreadOut>, bool) {
+) -> (Vec<PrThreadOut>, bool, bool) {
     read_or_unknown(read)
 }
 
@@ -4879,6 +4895,10 @@ pub async fn gh_pr_view(
         // Commits and reviewer verdicts come from core/complete reads on GitHub.
         commits_unknown: false,
         reviewers_unknown: false,
+        // GitHub's core/complete reads do not use these pagination caps.
+        comments_truncated: false,
+        commits_truncated: false,
+        checks_truncated: false,
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
@@ -7348,6 +7368,9 @@ mod tests {
             comments_unknown: false,
             commits_unknown: false,
             reviewers_unknown: false,
+            comments_truncated: false,
+            commits_truncated: false,
+            checks_truncated: false,
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
@@ -7394,6 +7417,9 @@ mod tests {
         assert_eq!(v["checksUnknown"], false);
         assert!(v.get("checks_unknown").is_none());
         assert_eq!(v["commentsUnknown"], false);
+        assert_eq!(v["commentsTruncated"], false);
+        assert_eq!(v["commitsTruncated"], false);
+        assert_eq!(v["checksTruncated"], false);
         assert!(v.get("comments_unknown").is_none());
 
         // Unstacked: an explicit null plus an empty array, never a missing key.
@@ -7436,18 +7462,51 @@ mod tests {
     }
 
     #[test]
-    fn detail_unknown_fields_serialize_camel_case() {
-        // SYNTHETIC: both verdicts exercise the shared IPC wire contract.
-        for unknown in [false, true] {
+    fn detail_unknown_and_truncated_fields_serialize_camel_case() {
+        // SYNTHETIC: complete, failed and capped reads exercise the IPC wire contract.
+        for (unknown, truncated) in [(false, false), (true, false), (true, true)] {
             let mut details = details_with_stack(None, Vec::new(), false, false);
+            details.comments_unknown = unknown;
+            details.checks_unknown = unknown;
             details.commits_unknown = unknown;
             details.reviewers_unknown = unknown;
+            details.comments_truncated = truncated;
+            details.commits_truncated = truncated;
+            details.checks_truncated = truncated;
             let v = serde_json::to_value(&details).unwrap();
-            assert_eq!(v["commitsUnknown"], unknown);
+            for field in ["comments", "commits", "checks"] {
+                assert_eq!(v[format!("{field}Unknown")], unknown);
+                assert_eq!(v[format!("{field}Truncated")], truncated);
+                assert!(v.get(format!("{field}_unknown")).is_none());
+                assert!(v.get(format!("{field}_truncated")).is_none());
+            }
             assert_eq!(v["reviewersUnknown"], unknown);
-            assert!(v.get("commits_unknown").is_none());
             assert!(v.get("reviewers_unknown").is_none());
         }
+    }
+
+    #[test]
+    fn truncated_reads_are_always_unknown_independent_of_row_count() {
+        // SYNTHETIC: empty/full capped reads and a local append after a failed read.
+        for read in [
+            Ok((Vec::new(), false)),
+            Ok((vec![1], false)),
+            Ok((Vec::new(), true)),
+            Ok((vec![1], true)),
+            Err(()),
+        ] {
+            let expected = match &read {
+                Ok((_, truncated)) => (*truncated, *truncated),
+                Err(_) => (true, false),
+            };
+            let (_, unknown, truncated) = super::read_or_unknown(read);
+            assert_eq!((unknown, truncated), expected);
+            assert!(!truncated || unknown);
+        }
+        let (mut rows, unknown, truncated) = super::read_or_unknown::<u8, _>(Err(()));
+        rows.push(1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[test]

@@ -1585,7 +1585,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // Commits — Bitbucket returns newest-first; the neutral model wants oldest-first
     // (the frontend treats the last as head), matching gitlab's reversal.
-    let (mut commits, commits_unknown) = read_or_unknown(
+    let (mut commits, commits_unknown, commits_truncated) = read_or_unknown(
         bb_paginate_with_truncation::<BbCommit>(
             &creds,
             format!("{base}/commits?pagelen=100"),
@@ -1652,7 +1652,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
 
     // A failed walk leaves the view available with an explicitly unknown list;
     // `base` already carries the `/pullrequests/{number}` suffix.
-    let (comments, comments_unknown) = comments_or_unknown(
+    let (comments, comments_unknown, comments_truncated) = comments_or_unknown(
         fetch_all_pr_comments(&creds, &format!("{base}/comments"))
             .await
             .map(|(values, more_pages)| (conversation_comments(values, &viewer_uuid), more_pages)),
@@ -1754,6 +1754,10 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         members_unknown: false,
         checks_unknown,
         comments_unknown,
+        comments_truncated,
+        commits_truncated,
+        // The statuses read exposes no truncation signal.
+        checks_truncated: false,
         commits_unknown,
         // Reviewer verdicts arrive in the core PR read on Bitbucket.
         reviewers_unknown: false,
@@ -6857,7 +6861,7 @@ mod tests {
     /// folds it exactly as `view_pr` does.
     async fn fold_comment_pages(
         pages: Vec<Option<BbPage<BbComment>>>,
-    ) -> (Vec<PrThreadOut>, bool, usize) {
+    ) -> (Vec<PrThreadOut>, bool, bool, usize) {
         let mut pages = pages.into_iter();
         let mut requested = 0;
         let read = bb_walk_pages(format!("{BB_API_BASE}c?pagelen=100"), |_url| {
@@ -6866,10 +6870,10 @@ mod tests {
             async move { page.ok_or_else(|| AppError::Bitbucket("HTTP 502".into())) }
         })
         .await;
-        let (comments, unknown) = comments_or_unknown(
+        let (comments, unknown, truncated) = comments_or_unknown(
             read.map(|(values, more_pages)| (conversation_comments(values, ""), more_pages)),
         );
-        (comments, unknown, requested)
+        (comments, unknown, truncated, requested)
     }
 
     #[tokio::test]
@@ -6877,31 +6881,31 @@ mod tests {
         // A later page failing aborts the walk: page one's comments are NOT shown as
         // the whole conversation, the list is unknown.
         let next = format!("{BB_API_BASE}c?pagelen=100&page=2");
-        let (comments, unknown, requested) =
+        let (comments, unknown, truncated, requested) =
             fold_comment_pages(vec![Some(comments_page(&[1, 2], Some(&next))), None]).await;
         assert_eq!(requested, 2);
         assert!(comments.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
 
         // A failed first page is the same unknown list.
-        let (comments, unknown, _) = fold_comment_pages(vec![None]).await;
+        let (comments, unknown, truncated, _) = fold_comment_pages(vec![None]).await;
         assert!(comments.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
 
         // A read that succeeds empty is a known empty conversation.
-        let (comments, unknown, requested) =
+        let (comments, unknown, truncated, requested) =
             fold_comment_pages(vec![Some(comments_page(&[], None))]).await;
         assert_eq!(requested, 1);
         assert!(comments.is_empty());
-        assert!(!unknown);
+        assert_eq!((unknown, truncated), (false, false));
 
         // Every page landing folds them all, in server order.
-        let (comments, unknown, _) = fold_comment_pages(vec![
+        let (comments, unknown, truncated, _) = fold_comment_pages(vec![
             Some(comments_page(&[1, 2], Some(&next))),
             Some(comments_page(&[3], None)),
         ])
         .await;
-        assert!(!unknown);
+        assert_eq!((unknown, truncated), (false, false));
         let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["1", "2", "3"]);
     }
@@ -6917,9 +6921,9 @@ mod tests {
                     Some(comments_page(&[page as u64 + 1], next))
                 })
                 .collect();
-            let (comments, unknown, requested) = fold_comment_pages(pages).await;
+            let (comments, unknown, truncated, requested) = fold_comment_pages(pages).await;
             assert_eq!(requested, BB_MAX_PAGES);
-            assert_eq!(unknown, more_pages);
+            assert_eq!((unknown, truncated), (more_pages, more_pages));
             assert_eq!(comments.len(), BB_MAX_PAGES);
             assert_eq!(comments[0].id, "1");
         }
@@ -6928,11 +6932,11 @@ mod tests {
     #[tokio::test]
     async fn comments_keep_the_truncation_signal_when_next_is_off_origin() {
         // SYNTHETIC: off-origin pages stay unread; an empty next is exhausted.
-        for (next, truncated) in [("https://other.example/comments?page=2", true), ("", false)] {
-            let (comments, unknown, requested) =
+        for (next, expected) in [("https://other.example/comments?page=2", true), ("", false)] {
+            let (comments, unknown, truncated, requested) =
                 fold_comment_pages(vec![Some(comments_page(&[1], Some(next)))]).await;
             assert_eq!(requested, 1);
-            assert_eq!(unknown, truncated);
+            assert_eq!((unknown, truncated), (expected, expected));
             assert_eq!(comments.len(), 1);
             assert_eq!(comments[0].id, "1");
         }
@@ -6955,8 +6959,8 @@ mod tests {
                 async move { Ok(page) }
             })
             .await;
-            let (commits, unknown) = read_or_unknown(read);
-            assert_eq!(unknown, more_pages);
+            let (commits, unknown, truncated) = read_or_unknown(read);
+            assert_eq!((unknown, truncated), (more_pages, more_pages));
             assert_eq!(commits.len(), BB_MAX_PAGES);
             assert_eq!(commits[0].hash, "sha-1");
         }
@@ -6964,9 +6968,9 @@ mod tests {
             Err(AppError::Bitbucket("HTTP 502".into()))
         })
         .await;
-        let (commits, unknown) = read_or_unknown(read);
+        let (commits, unknown, truncated) = read_or_unknown(read);
         assert!(commits.is_empty());
-        assert!(unknown);
+        assert_eq!((unknown, truncated), (true, false));
     }
 
     #[test]

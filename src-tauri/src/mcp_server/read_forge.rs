@@ -214,8 +214,9 @@ impl GitDesktopMcp {
                        code-context excerpt (GitHub only) is capped to its last few lines; set \
                        `include_diff_hunk` false to drop hunks entirely (default true). \
                        `commentsUnknown` means the comments read failed or is knowably incomplete; \
-                       retained comments must not be treated as complete. Read-only; returns JSON. \
-                       (For the PR's \
+                       retained comments must not be treated as complete. `commentsTruncated` \
+                       means a capped read returns the same partial list on retry. \
+                       Read-only; returns JSON. (For the PR's \
                        metadata + changed files use get_pull_request; for its diff, \
                        pull_request_diff.)"
     )]
@@ -245,6 +246,7 @@ impl GitDesktopMcp {
             args.number,
             pr.comments,
             pr.comments_unknown,
+            pr.comments_truncated,
             pr.reviews,
             review_threads,
         ))
@@ -501,6 +503,7 @@ fn comments_payload(
     number: u64,
     comments: Vec<crate::github::pr::PrThreadOut>,
     comments_unknown: bool,
+    comments_truncated: bool,
     reviews: Vec<crate::github::pr::PrThreadOut>,
     review_threads: Vec<crate::github::pr::ReviewThreadOut>,
 ) -> serde_json::Value {
@@ -508,6 +511,7 @@ fn comments_payload(
         "number": number,
         "comments": comments,
         "commentsUnknown": comments_unknown,
+        "commentsTruncated": comments_truncated,
         "reviews": reviews,
         "review_threads": review_threads,
     });
@@ -703,16 +707,16 @@ mod tests {
     /// An empty `comments` is ambiguous on its own, so `commentsUnknown` is always
     /// present, survives the prune, and carries the camelCase name get_pull_request uses.
     #[test]
-    fn comments_payload_carries_comments_unknown() {
-        // SYNTHETIC: both flag values survive pruning with the camelCase name.
-        let v = comments_payload(7, Vec::new(), true, Vec::new(), Vec::new());
-        assert_eq!(v["number"], 7);
-        assert_eq!(v["comments"], serde_json::json!([]));
-        assert_eq!(v["commentsUnknown"], true);
-        assert!(v.get("comments_unknown").is_none());
-
-        let v = comments_payload(7, Vec::new(), false, Vec::new(), Vec::new());
-        assert_eq!(v["comments"], serde_json::json!([]));
-        assert_eq!(v["commentsUnknown"], false);
+    fn comments_payload_carries_comments_unknown_and_truncated() {
+        // SYNTHETIC: complete, failed and capped empty lists retain both wire flags.
+        for (unknown, truncated) in [(false, false), (true, false), (true, true)] {
+            let v = comments_payload(7, Vec::new(), unknown, truncated, Vec::new(), Vec::new());
+            assert_eq!(v["number"], 7);
+            assert_eq!(v["comments"], serde_json::json!([]));
+            assert_eq!(v["commentsUnknown"], unknown);
+            assert_eq!(v["commentsTruncated"], truncated);
+            assert!(v.get("comments_unknown").is_none());
+            assert!(v.get("comments_truncated").is_none());
+        }
     }
 }

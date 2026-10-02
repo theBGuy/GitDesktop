@@ -2835,6 +2835,7 @@ export function RemotePrView({
           key={settledEntityKey ?? `pending-${entityKey}`}
           checks={pr.checks}
           checksUnknown={pr.checksUnknown}
+          checksTruncated={pr.checksTruncated}
           detailsPaused={details.isPaused}
           onRetryChecks={() => void details.refetch()}
           repoPath={repoPath}
@@ -3065,7 +3066,7 @@ export function RemotePrView({
                 {...unknownListNotice({
                   prNoun,
                   list: "comments",
-                  retained: pr.comments.length > 0,
+                  truncated: pr.commentsTruncated,
                   paused: details.isPaused,
                   onRetry: () => void details.refetch(),
                 })}
@@ -3400,7 +3401,7 @@ export function RemotePrView({
                 {...unknownListNotice({
                   prNoun,
                   list: "commits",
-                  retained: pr.commits.length > 0,
+                  truncated: pr.commitsTruncated,
                   paused: details.isPaused,
                   onRetry: () => void details.refetch(),
                 })}

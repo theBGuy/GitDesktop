@@ -522,19 +522,21 @@ function RunDetailFetcher({
   return null;
 }
 
-/** The notice props for a PR sub-list whose read failed or is knowably partial.
- *  Rows present with the flag set means a capped read: a refetch re-reads the
- *  same cap and reconnecting won't lift it, so that arm outranks offline and
- *  offers no Retry. An empty list is a failed read, retried or resumed. */
+/** The notice props for a PR sub-list whose read failed or is knowably partial,
+ *  keyed on the wire's `truncated` flag, never the shown row count (filtering can
+ *  empty a capped page; an optimistic append can fill a failed one). A truncated
+ *  read re-reads the same cap on refetch or reconnect, so it outranks offline and
+ *  offers no Retry. A failed read says so beside any rows, which the server read
+ *  didn't supply; parked offline it resumes by itself, so it offers no Retry. */
 export function unknownListNotice(opts: {
   prNoun: string;
   list: string;
-  retained: boolean;
+  truncated: boolean;
   paused: boolean;
   onRetry?: () => void;
 }): { message: string; onRetry?: () => void } {
-  const { prNoun, list, retained, paused, onRetry } = opts;
-  if (retained)
+  const { prNoun, list, truncated, paused, onRetry } = opts;
+  if (truncated)
     return { message: `Only some of this ${prNoun}'s ${list} loaded.` };
   if (paused) return { message: offlinePendingMessage(`the ${list}`) };
   return { message: `Couldn't load this ${prNoun}'s ${list}.`, onRetry };
@@ -548,13 +550,14 @@ export function unknownListNotice(opts: {
  * pipeline jobs) peek their log inline; external checks (Bitbucket build statuses,
  * etc.) link out. Auto-expanded when anything failed, or when a required check was
  * cancelled or went stale. With no checks it shows only a failed-read notice when
- * `checksUnknown` says the list is missing, and over a capped list it says only
- * some loaded. A known-empty list renders no visible DOM, just its headless
- * completion watchers, which must survive an empty refetch window.
+ * `checksUnknown` says the list is missing, and over a `checksTruncated` list it
+ * says only some loaded. A known-empty list renders no visible DOM, just its
+ * headless completion watchers, which must survive an empty refetch window.
  */
 export function ChecksRollup({
   checks,
   checksUnknown,
+  checksTruncated,
   detailsPaused,
   onRetryChecks,
   repoPath,
@@ -565,9 +568,12 @@ export function ChecksRollup({
 }: {
   checks: PrCheckOut[];
   /** The checks read failed or is knowably incomplete — never present `checks`
-   *  as complete. Empty, it is a missing list, not a PR without checks; with
-   *  rows, a capped read whose rows are partial. */
+   *  as complete. Empty and not truncated, it is a missing list, not a PR
+   *  without checks. */
   checksUnknown: boolean;
+  /** The read succeeded but was cut at a cap (implies `checksUnknown`): the rows
+   *  are partial and a refetch can't complete them. */
+  checksTruncated: boolean;
   /** The details read is parked offline: its refetch resumes on reconnect, so
    *  the failed-read notice says so instead of offering Retry. */
   detailsPaused: boolean;
@@ -1116,7 +1122,7 @@ export function ChecksRollup({
   const notice = unknownListNotice({
     prNoun,
     list: "checks",
-    retained: checks.length > 0,
+    truncated: checksTruncated,
     paused: detailsPaused,
     onRetry: onRetryChecks,
   });
