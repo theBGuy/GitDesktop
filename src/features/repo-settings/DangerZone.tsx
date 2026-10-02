@@ -87,7 +87,8 @@ function DangerDialog({
   pending: boolean;
   disabled?: boolean;
   /** Why the confirm is held whatever is typed, as its hover text and
-   *  accessible description; unset leaves it to the phrase and `disabled`. */
+   *  accessible description; unset leaves it to the phrase, `disabled`, and
+   *  `pending`. */
   heldReason?: string;
   onConfirm: () => void;
   children?: ReactNode;
@@ -598,8 +599,8 @@ function LeaveForkNetworkAction({
     ),
     gitlab: () =>
       confirming ? (
-        // The stacked fork column doesn't stretch the act button's wrapper
-        // span — the confirm needs its own row, like Archive's.
+        // The stacked column stretches the act button's wrapper span, but not
+        // the button inside it — the confirm takes its own row, like Archive's.
         <div className="flex items-center gap-2">
           <InlineConfirm
             actLabel="Remove"
