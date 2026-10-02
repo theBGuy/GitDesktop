@@ -7215,7 +7215,9 @@ async fn pipeline_jobs(
 }
 
 /// The page walk behind [`pipeline_jobs`], strictly: any page that fails to fetch or
-/// parse fails the whole read, so a truncated list never passes as complete.
+/// parse fails the whole read, so a partially fetched list never passes as complete.
+/// A pipeline with more than [`MAX_JOB_PAGES`] full pages returns only its newest
+/// jobs, with no truncation signal.
 async fn pipeline_jobs_paged<F, Fut>(mut fetch_page: F) -> AppResult<Vec<GlabJob>>
 where
     F: FnMut(u32) -> Fut,

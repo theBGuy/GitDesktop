@@ -1635,15 +1635,8 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         .and_then(|u| u.uuid)
         .unwrap_or_default();
 
-    // Comments — drop deleted + pending, AND every comment belonging to an inline
-    // (diff-anchored) thread, root OR reply: those surface as `review_threads` with real
-    // file/line context, and leaving replies here would both strip that context and
-    // double-render them. A reply carries `parent` but not `inline`, so an
-    // `inline.is_none()` filter alone misses it — resolve each comment's chain root
-    // instead, across ALL pages (a page-2 reply's inline root can sit on page 1). A reply
-    // to a plain comment has a non-inline root and stays in the flat list. A failed walk
-    // leaves the view available with an explicitly unknown list; `base` already carries
-    // the `/pullrequests/{number}` suffix.
+    // A failed walk leaves the view available with an explicitly unknown list;
+    // `base` already carries the `/pullrequests/{number}` suffix.
     let (comments, comments_unknown) = comments_or_unknown(
         fetch_all_pr_comments(&creds, &format!("{base}/comments"))
             .await
@@ -1936,7 +1929,11 @@ fn bb_timeline_instant(e: &ForgeTimelineEventOut) -> Option<DateTime<FixedOffset
 }
 
 /// A PR's whole comment set as its flat conversation list: deleted, pending, and every
-/// inline-thread comment (root or reply) dropped, in server order. Pure.
+/// inline-thread comment (root or reply) dropped, in server order — inline threads
+/// surface as `review_threads` with file/line context, so leaving replies here would
+/// strip that context and double-render them. A reply carries `parent` but not
+/// `inline`, so each comment is traced to its chain root; the input must be the WHOLE
+/// comment set, because a page-2 reply's root can sit on page 1. Pure.
 fn conversation_comments(values: Vec<BbComment>, viewer_uuid: &str) -> Vec<PrThreadOut> {
     let inline_ids = inline_thread_comment_ids(&values);
     values

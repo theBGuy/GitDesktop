@@ -1,2 +1,3 @@
-- GitLab and Bitbucket pull request views say when the conversation couldn't
-  be loaded and offer a retry.
+- GitLab merge requests and Bitbucket pull requests say when their
+  conversation couldn't be loaded and offer Retry (or say it will load once
+  you're back online).
