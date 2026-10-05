@@ -124,6 +124,51 @@ export function sectionFilePath(section: string): string | undefined {
   );
 }
 
+/** One file's change counts, read off its own `diff --git` section. */
+export interface DiffSectionStat {
+  path: string;
+  added: number;
+  deleted: number;
+  isBinary: boolean;
+}
+
+/**
+ * Per-file `+added -deleted` counts read off a unified diff that arrived without
+ * a file list. Paths come from `sectionFilePath`, the decoder `splitUnifiedDiff`
+ * keys with, so the AI-ignore filter matches these entries by the same rule.
+ * Only lines inside a hunk count: a `+++`/`---` header is never a change, and a
+ * hunk line spelled that way always is one.
+ */
+export function diffSectionStats(diff: string): DiffSectionStat[] {
+  if (typeof diff !== "string") return [];
+  const stats: DiffSectionStat[] = [];
+  for (const part of diff.split(/^(?=diff --git )/m)) {
+    if (!part.trim()) continue;
+    try {
+      const path = sectionFilePath(part);
+      if (!path) continue;
+      let added = 0;
+      let deleted = 0;
+      let inHunk = false;
+      for (const line of part.split("\n")) {
+        if (line.startsWith("@@")) inHunk = true;
+        else if (!inHunk) continue;
+        else if (line.startsWith("+")) added++;
+        else if (line.startsWith("-")) deleted++;
+      }
+      stats.push({
+        path,
+        added,
+        deleted,
+        isBinary: part.includes("\nBinary files "),
+      });
+    } catch {
+      // One malformed section must never cost the rest of the list.
+    }
+  }
+  return stats;
+}
+
 /**
  * Splits a combined unified diff (e.g. `gh pr diff`) into per-file sections
  * keyed by the new-file path, so each can be fed to the file diff viewer.

@@ -1,3 +1,4 @@
+import { diffSectionStats } from "@/lib/git/diff-split";
 import type { ContextPack } from "./agent";
 import { branchPrefixSection } from "./branch-prefixes";
 import { distillReadme } from "./readme";
@@ -250,6 +251,36 @@ function renderJiraLine(
   return s ? `- ${key}${suffix} — ${s}` : `- ${key}${suffix}`;
 }
 
+const FILES_DERIVED_LINE = "[file list derived from the diff]";
+
+/** The files a "Files changed" section lists. An empty list beside a non-empty
+ *  diff (typically a failed forge file-list read) is read off the diff and
+ *  `derived` set; the disclosure names no cause, which the list can't know. Git's
+ *  numstat names every section its patch carries, so the MCP twin never derives. */
+export function promptFileList(
+  files: PrPromptInput["files"],
+  diffText: string,
+): { files: PrPromptInput["files"]; derived: boolean } {
+  if (files.length > 0 || !diffText.trim()) return { files, derived: false };
+  const derived = diffSectionStats(diffText);
+  return { files: derived, derived: derived.length > 0 };
+}
+
+/** The "Files changed" heading and list, plus the derived-list disclosure. */
+function filesChangedSection(
+  files: PrPromptInput["files"],
+  diffText: string,
+): string {
+  const listed = promptFileList(files, diffText);
+  const summary = listed.files
+    .map((f) =>
+      f.isBinary ? `${f.path} (binary)` : `${f.path} +${f.added} -${f.deleted}`,
+    )
+    .join("\n");
+  const section = `## Files changed\n${summary || "(none)"}`;
+  return listed.derived ? `${section}\n${FILES_DERIVED_LINE}` : section;
+}
+
 /** A commit-subjects section, or null with nothing to say. `unknown` (the forge's
  *  read failed or hit a cap) appends one disclosure line; without it the section is
  *  byte-identical to the MCP twin's, whose local commit lists are never partial. */
@@ -316,12 +347,6 @@ export function buildPrPrompt(input: PrPromptInput): {
     );
   }
 
-  const fileSummary = input.files
-    .map((f) =>
-      f.isBinary ? `${f.path} (binary)` : `${f.path} +${f.added} -${f.deleted}`,
-    )
-    .join("\n");
-
   const budgeted = budgetDiff(stripBinarySections(input.diffText));
 
   const promptParts = [
@@ -333,7 +358,7 @@ export function buildPrPrompt(input: PrPromptInput): {
     input.commitsUnknown,
   );
   if (commitsSection) promptParts.push(commitsSection);
-  let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
+  let filesSection = filesChangedSection(input.files, input.diffText);
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
   }
@@ -762,12 +787,6 @@ export function buildReviewPrompt(
   input: ReviewPromptInput,
   mode: ReviewMode,
 ): { system: string; prompt: string; coverage: { diffTruncated: boolean } } {
-  const fileSummary = input.files
-    .map((f) =>
-      f.isBinary ? `${f.path} (binary)` : `${f.path} +${f.added} -${f.deleted}`,
-    )
-    .join("\n");
-
   const budgeted = budgetDiff(
     stripBinarySections(input.diffText),
     input.budgetProfile?.diffCharBudget,
@@ -800,7 +819,7 @@ export function buildReviewPrompt(
   if (commitsSection) promptParts.push(commitsSection);
   // Stronger wording than the generator's twin: an invented finding about a
   // file the reviewer can't see reads as a real one.
-  let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
+  let filesSection = filesChangedSection(input.files, input.diffText);
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;
   }

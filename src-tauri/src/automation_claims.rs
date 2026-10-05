@@ -71,9 +71,22 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// The composite claim key for a run: `<repo_key>:<target>:<head_sha>:<action>`.
 /// `repo_key` is the worktree-stable identity (an absolute path), so a main checkout
 /// and a linked worktree of the same repo produce the same key and collide on the
-/// claim — which is exactly the dedup we want.
+/// claim — which is exactly the dedup we want. The head is canonicalized by
+/// [`canonical_head`], so every spelling of one head takes the same claim.
 fn composite_key(repo_key: &str, target: &str, head_sha: &str, action: &str) -> String {
-    format!("{repo_key}:{target}:{head_sha}:{action}")
+    let head = canonical_head(head_sha);
+    format!("{repo_key}:{target}:{head}:{action}")
+}
+
+/// A hex head lowercased and cut to its 12-char prefix; anything else only lowercased.
+/// 12 is Bitbucket's poll form, the shortest in the wild, and prefixes of one oid agree.
+fn canonical_head(head_sha: &str) -> String {
+    let lower = head_sha.to_ascii_lowercase();
+    if lower.len() > 12 && lower.bytes().all(|b| b.is_ascii_hexdigit()) {
+        lower[..12].to_string()
+    } else {
+        lower
+    }
 }
 
 /// Turn a composite key into a legal, collision-free filename. The key holds an
@@ -329,6 +342,63 @@ mod tests {
         assert!(
             claim_in_dir(&dir, &other_head).unwrap(),
             "a different head sha is an independent claim"
+        );
+    }
+
+    #[test]
+    fn full_and_short_forms_of_one_head_take_one_claim() {
+        let (_tmp, dir) = tmp_dir();
+        let full = "0f1e2d3c4b5a69788796a5b4c3d2e1f001122334";
+        let ready_flip = composite_key(r"C:\repo\one", "42", full, "review");
+        let polled = composite_key(r"C:\repo\one", "42", &full[..12], "review");
+        assert_eq!(ready_flip, polled);
+
+        assert!(claim_in_dir(&dir, &ready_flip).unwrap());
+        assert!(
+            !claim_in_dir(&dir, &polled).unwrap(),
+            "the short form must lose to the full form's live claim"
+        );
+        release_in_dir(&dir, &polled);
+        assert!(
+            claim_in_dir(&dir, &ready_flip).unwrap(),
+            "a release under the short form must free the full form's claim"
+        );
+    }
+
+    #[test]
+    fn head_case_does_not_split_a_claim() {
+        let upper = composite_key(r"C:\repo\one", "42", "0F1E2D3C4B5A6978", "review");
+        let lower = composite_key(r"C:\repo\one", "42", "0f1e2d3c4b5a", "review");
+        assert_eq!(upper, lower);
+        // A non-hex head is never cut, only lowercased.
+        assert_eq!(
+            composite_key(r"C:\repo\one", "42", "Not-A-Sha-At-All", "review"),
+            composite_key(r"C:\repo\one", "42", "not-a-sha-at-all", "review"),
+        );
+        assert_ne!(
+            composite_key(r"C:\repo\one", "42", "not-a-sha-at-all", "review"),
+            composite_key(r"C:\repo\one", "42", "not-a-sha-at-", "review"),
+        );
+    }
+
+    #[test]
+    fn distinct_heads_stay_distinct_claims() {
+        let a = composite_key(
+            r"C:\repo\one",
+            "42",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f001122334",
+            "review",
+        );
+        let b = composite_key(
+            r"C:\repo\one",
+            "42",
+            "0f1e2d3c4b5b69788796a5b4c3d2e1f001122334",
+            "review",
+        );
+        assert_ne!(a, b, "heads differing inside the prefix must not collide");
+        assert_ne!(
+            composite_key(r"C:\repo\one", "42", "abc123", "review"),
+            composite_key(r"C:\repo\one", "42", "abc124", "review"),
         );
     }
 

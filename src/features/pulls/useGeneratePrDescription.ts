@@ -10,6 +10,7 @@ import {
   buildPrPrompt,
   extractPrDraft,
   needsStructuredLabelPick,
+  promptFileList,
 } from "@/lib/ai/prompt";
 import { isCliProvider } from "@/lib/ai/providers";
 import type { AiSettings, PromptProvider } from "@/lib/ai/types";
@@ -203,7 +204,13 @@ export function useGeneratePrDescription(repoPath: string) {
             getDiff(settings),
             readRepoInstructions(repoPath),
           ]);
-          if (diff.files.length === 0) {
+          // A change request's forge file list can be missing beside a real diff;
+          // the prompt then lists files off the diff, so only an empty diff refuses.
+          const listed =
+            emptyScope === "change-request"
+              ? promptFileList(diff.files, diff.text).files
+              : diff.files;
+          if (listed.length === 0) {
             const scope =
               emptyScope === "change-request"
                 ? `in this ${provider === "gitlab" ? "merge request" : "pull request"}`
