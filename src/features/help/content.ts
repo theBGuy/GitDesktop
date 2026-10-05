@@ -1019,7 +1019,7 @@ markers, giving you the chance to clean them up first. The command palette offer
 these as **Mark conflict resolved**. Staging a conflicted file any other way (its row's
 **+** button, the right-click menu, **Stage all**, or the palette) asks the same question
 while markers remain, and always asks for a file it can't check: a binary or very large
-file, or one that can't be read right now.
+file, or one it can't read.
 
 {{ai}}## Resolve conflicts with AI
 

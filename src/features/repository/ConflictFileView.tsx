@@ -80,8 +80,9 @@ const DELETION_COPY = {
 } as const;
 
 /** The error pane's copy per failed-read kind: the backend refuses a binary or
- *  oversized file as invalidArgument, and only an `io` failure is plausibly a
- *  transient lock or permission change. Other kinds take the fallback. */
+ *  oversized file as invalidArgument; `io` covers a lock, a permission change,
+ *  or a directory at the path (a conflicted submodule), none promised to pass.
+ *  Other kinds take the fallback. */
 const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
   invalidArgument: (
     <>
@@ -91,7 +92,7 @@ const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
       <span className="font-medium">incoming</span>, or open it in your editor.
     </>
   ),
-  io: "Couldn't read this file right now (it may be locked, or its permissions may have changed). Resolve the conflict once it's readable again, or open it in your editor.",
+  io: "Couldn't read this file. It may be locked, its permissions may have changed, or a folder (such as a conflicted submodule) may sit at this path. Open it in your editor to resolve the conflict, or try again if it becomes readable.",
 };
 const READ_ERROR_FALLBACK =
   "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
