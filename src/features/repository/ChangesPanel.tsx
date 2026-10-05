@@ -861,8 +861,12 @@ export function ChangesPanel({
       return true;
     }
     // The ref, not the disables, is the guarantee: the menu items never read
-    // `mutating`. Refused before the try, so the first check's flags survive.
-    if (checkingRef.current) return false;
+    // `mutating`, so they skip the disables and get the toast instead. Refused
+    // before the try, so the first check's flags survive.
+    if (checkingRef.current) {
+      toast.info("Still checking files for conflict markers");
+      return false;
+    }
     const firedOn = repoPath;
     // `checking` drops in the same tick the stage starts, with no await between
     // it and `stage.isPending` taking over the disables.
