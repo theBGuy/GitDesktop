@@ -3978,6 +3978,7 @@ pub async fn forge_repo_set_visibility(repo_path: String, visibility: String) ->
 
 /// Transfer the repository to another owner/namespace, behind the abstraction.
 /// GitHub takes a user/org (with an optional rename); GitLab a namespace path.
+/// The state handle lets GitLab rewrite origin after the transfer.
 #[tauri::command]
 pub async fn forge_repo_transfer(
     state: tauri::State<'_, crate::state::AppState>,
