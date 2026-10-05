@@ -270,6 +270,10 @@ export interface PrCheckOut {
   /** CheckRun `completedAt`. A StatusContext reports no completion at all, so start
    *  time is the only key both rollup arms can be ordered by. */
   completedAt?: string;
+  /** The GitHub Actions workflow a CheckRun belongs to. Absent for a StatusContext,
+   *  a third-party check run, and every GitLab or Bitbucket row; consumers keying
+   *  a check's identity on it fall back to the name alone there. */
+  workflow?: string;
 }
 
 /** How a pull request merges into its base, as the FORGE reports it. "checking" =

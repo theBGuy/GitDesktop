@@ -271,6 +271,41 @@ test("a newer cancelled run beside an older success is still offered", () => {
   assert.deepEqual(offer({ checks: other }), [["2", T2, "cancelled"]]);
 });
 
+test("supersession needs the same workflow when the row names one", () => {
+  // The kernel keys a run by (name, workflow, event): an identically named job
+  // in another workflow is a different check and retires nothing.
+  const relic = (workflow) =>
+    cancelled({ name: "build", runId: "1", completedAt: T2, workflow });
+  const later = (workflow) =>
+    check({
+      name: "build",
+      runId: "2",
+      status: "SUCCESS",
+      startedAt: T3,
+      completedAt: T4,
+      workflow,
+    });
+  assert.deepEqual(
+    offer({ checks: [relic("ci"), later("release")] }),
+    [["1", T2, "cancelled"]],
+    "another workflow's job does not suppress",
+  );
+  assert.deepEqual(
+    offer({ checks: [relic("ci"), later(undefined)] }),
+    [["1", T2, "cancelled"]],
+    "a row with no workflow cannot vouch for one that has it",
+  );
+  assert.deepEqual(
+    offer({ checks: [relic("ci"), later("ci")] }),
+    [],
+    "the same workflow's later attempt still does",
+  );
+  // A row with no workflow (every GitLab and Bitbucket row) keeps the name-only
+  // comparison.
+  assert.deepEqual(offer({ checks: [relic(undefined), later("ci")] }), []);
+  assert.deepEqual(offer({ checks: [relic(undefined), later(undefined)] }), []);
+});
+
 test("a cancelled check with no completion time contributes no run", () => {
   const checks = [cancelled({ runId: "7", completedAt: undefined })];
   assert.deepEqual(offer({ checks }), []);

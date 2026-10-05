@@ -6963,6 +6963,7 @@ fn pipeline_checks_from(
             job_id: (!cross_project).then(|| j.id.to_string()),
             started_at: Some(j.started_at).filter(|s| !s.is_empty()),
             completed_at: Some(j.finished_at).filter(|s| !s.is_empty()),
+            workflow: None,
         })
         .collect()
 }

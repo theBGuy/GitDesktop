@@ -57,9 +57,11 @@ export function failedRunSignatures(
   return completionSignatures(checks, (c) => bucketOf(c) === "failed");
 }
 
-/** Whether a same-named row started at or after `row` finished: a later attempt
- *  replaced it. The collapse kernel keeps a run cancelled before it started (it
- *  has no start to order by), so this evidence is what retires one. */
+/** Whether a same-named row of the same workflow started at or after `row`
+ *  finished: a later attempt replaced it. The collapse kernel keeps a run
+ *  cancelled before it started (it has no start to order by), so this evidence is
+ *  what retires one. A row with no workflow (GitLab, Bitbucket) matches on name
+ *  alone; one with a workflow is never retired by another workflow's job. */
 function superseded(row: PrCheckOut, checks: readonly PrCheckOut[]): boolean {
   const finished = Date.parse(row.completedAt ?? "");
   if (Number.isNaN(finished)) return false;
@@ -67,6 +69,7 @@ function superseded(row: PrCheckOut, checks: readonly PrCheckOut[]): boolean {
     (other) =>
       other !== row &&
       other.name === row.name &&
+      (row.workflow === undefined || other.workflow === row.workflow) &&
       Date.parse(other.startedAt ?? "") >= finished,
   );
 }

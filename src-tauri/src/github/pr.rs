@@ -3713,12 +3713,13 @@ struct RawCheck {
     started_at: Option<String>,
     #[serde(default)]
     completed_at: Option<String>,
-    /// `CheckRun` or `StatusContext`. Deserialize-only, like `workflow_name`: both
-    /// feed the superseded-run collapse and never reach `PrCheckOut`.
+    /// `CheckRun` or `StatusContext`. Deserialize-only: it feeds the superseded-run
+    /// collapse and never reaches `PrCheckOut`.
     #[serde(default, rename = "__typename", deserialize_with = "null_to_default")]
     typename: String,
     /// The Actions workflow a CheckRun belongs to; "" for a third-party check run,
     /// and absent on a gh too old to export it (which leaves the row uncollapsed).
+    /// Keys the collapse, and reaches `PrCheckOut::workflow` when non-empty.
     #[serde(default, rename = "workflowName", deserialize_with = "null_to_default")]
     workflow_name: String,
 }
@@ -4096,6 +4097,10 @@ pub struct PrCheckOut {
     /// start time the only key both rollup arms can be ordered by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// The Actions workflow a CheckRun belongs to; `None` for a StatusContext, a
+    /// third-party check run, and every GitLab or Bitbucket row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
 }
 
 /// One draft inline comment in a batched review submission, provider-neutral.
@@ -4675,6 +4680,7 @@ fn map_gh_check(c: RawCheck) -> PrCheckOut {
         job_id,
         started_at: c.started_at.filter(|s| real_check_time(s)),
         completed_at: c.completed_at.filter(|s| real_check_time(s)),
+        workflow: Some(c.workflow_name).filter(|w| !w.is_empty()),
     }
 }
 
@@ -9696,6 +9702,24 @@ github.acme.com
         const T2: &str = "2026-09-26T10:00:02Z";
         const T3: &str = "2026-09-26T10:00:03Z";
         const T4: &str = "2026-09-26T10:00:04Z";
+
+        #[test]
+        fn a_check_run_carries_its_workflow_to_the_frontend() {
+            let run = map_gh_check(run_row("build", "ci", Some(T1), "CANCELLED", 1));
+            assert_eq!(run.workflow.as_deref(), Some("ci"));
+            let wire = serde_json::to_value(&run).unwrap();
+            assert_eq!(wire["workflow"], "ci");
+            // A third-party check run and a StatusContext carry none, and the
+            // key is absent on the wire rather than an empty string.
+            let third_party = map_gh_check(run_row("Cloudflare Pages", "", Some(T1), "SUCCESS", 2));
+            assert_eq!(third_party.workflow, None);
+            let status = map_gh_check(context_row("ci/prow", T1, "SUCCESS"));
+            assert_eq!(status.workflow, None);
+            assert!(serde_json::to_value(&status)
+                .unwrap()
+                .get("workflow")
+                .is_none());
+        }
         const T5: &str = "2026-09-26T10:00:05Z";
 
         /// Five runs of one key, listed out of time order: 1 failure, 2 cancelled,
