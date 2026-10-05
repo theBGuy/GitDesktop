@@ -27,6 +27,7 @@ import {
   ACT_PENDING_REASON,
   AsyncErrorCard,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   useConfirmSwapFocus,
@@ -304,8 +305,10 @@ function VariableRow({
         return OFFLINE_WRITE_REASON;
       // Each row owns its update mutation (GitLab's rows share one, so theirs
       // says SAVING_REASON): a pending hold here is always this row's write.
-      case update.isPending && dirty:
+      case update.isPending:
         return ACT_PENDING_REASON;
+      case !dirty:
+        return NO_CHANGES_REASON;
       default:
         return undefined;
     }
@@ -392,7 +395,7 @@ function VariableRow({
         <DisabledReasonButton
           size="sm"
           variant="outline"
-          disabled={saveHeldReason !== undefined || !dirty || update.isPending}
+          disabled={saveHeldReason !== undefined}
           reason={saveHeldReason}
           onClick={save}
         >

@@ -34,6 +34,7 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
   SAVING_REASON,
@@ -197,7 +198,9 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
         size="sm"
         disabled={!canEnable || !online}
         reason={
-          offlineReason ?? (enable.isPending ? ACT_PENDING_REASON : undefined)
+          offlineReason ??
+          (enable.isPending ? ACT_PENDING_REASON : undefined) ??
+          (mode === "branch" && !branch ? "Pick a branch" : undefined)
         }
         onClick={handleEnable}
       >
@@ -301,6 +304,22 @@ function PagesEnabled({
     update.variables?.[field] !== undefined
       ? ACT_PENDING_REASON
       : SAVING_REASON;
+  // Every hold carries a reason, so Update keeps focus through a save, including
+  // the moment the saved source reads back unchanged.
+  const sourceHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case update.isPending:
+        return updateHeld("branch");
+      case !branch:
+        return "Pick a branch";
+      case !sourceChanged:
+        return NO_CHANGES_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   async function handleUpdateSource() {
     const at = dataUpdatedAt;
@@ -405,15 +424,8 @@ function PagesEnabled({
             <DisabledReasonButton
               size="sm"
               variant="outline"
-              disabled={
-                !sourceChanged || !branch || update.isPending || !online
-              }
-              reason={
-                offlineReason ??
-                (update.isPending && sourceChanged && branch
-                  ? updateHeld("branch")
-                  : undefined)
-              }
+              disabled={sourceHeldReason !== undefined}
+              reason={sourceHeldReason}
               onClick={handleUpdateSource}
             >
               Update
@@ -440,9 +452,8 @@ function PagesEnabled({
             disabled={cname === pages.cname || update.isPending || !online}
             reason={
               offlineReason ??
-              (update.isPending && cname !== pages.cname
-                ? updateHeld("cname")
-                : undefined)
+              (update.isPending ? updateHeld("cname") : undefined) ??
+              (cname === pages.cname ? NO_CHANGES_REASON : undefined)
             }
             onClick={handleSaveDomain}
           >

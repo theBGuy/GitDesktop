@@ -6,6 +6,7 @@ import type {
   SecretApp,
   SecurityFeature,
 } from "../types";
+import { invalidateRepoAfterWrite } from "./core";
 import { repoSettingsKey } from "./internal";
 
 // Secrets & variables. `env: null` = repository scope; a string = that
@@ -273,13 +274,6 @@ export function useSetVisibility(repo: string) {
   });
 }
 
-export function useTransferRepo(repo: string) {
-  return useMutation({
-    mutationFn: (a: { newOwner: string; newName: string | null }) =>
-      api.forgeRepoTransfer(repo, a.newOwner, a.newName),
-  });
-}
-
 export function useDeleteRepo(repo: string) {
   return useMutation({ mutationFn: () => api.forgeRepoDelete(repo) });
 }
@@ -293,9 +287,24 @@ export function useSetArchived(repo: string) {
   });
 }
 
+// Rename and transfer both change the repo's name or owner, so they invalidate
+// the whole repo subtree, not just the settings key: every read that names the
+// repo goes stale, and Bitbucket's rename rewrites the origin URL as well.
+// Awaited, so each write stays pending until that refetch settles.
+export function useTransferRepo(repo: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (a: { newOwner: string; newName: string | null }) =>
+      api.forgeRepoTransfer(repo, a.newOwner, a.newName),
+    onSettled: () => invalidateRepoAfterWrite(queryClient, repo),
+  });
+}
+
 export function useRenameRepo(repo: string) {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (newName: string) => api.forgeRepoRename(repo, newName),
+    onSettled: () => invalidateRepoAfterWrite(queryClient, repo),
   });
 }
 

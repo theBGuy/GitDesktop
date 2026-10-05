@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
+  NO_CHANGES_REASON,
   RemoteFormSection,
   useConfirmSwapFocus,
 } from "./parts";
@@ -192,6 +193,20 @@ function FundingForm({
   const fields = { ...seed, ...edit };
   const setField = (key: string, value: string) =>
     setEdit((e) => ({ ...e, [key]: value }));
+  // Every hold carries a reason, so Save keeps focus as a save settles the form
+  // clean; no offline rung, since FUNDING.yml is a local write.
+  const saveHeldReason = (() => {
+    switch (true) {
+      case set.isPending:
+        return ACT_PENDING_REASON;
+      case dirty:
+        return undefined;
+      case exists:
+        return NO_CHANGES_REASON;
+      default:
+        return "Add at least one sponsor link";
+    }
+  })();
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -316,11 +331,9 @@ function FundingForm({
               Remove sponsor button
             </Button>
           ))}
-        {/* A form save under either label, so `!dirty` stays a native disable;
-            no offline rung, since FUNDING.yml is a local working-tree write. */}
         <DisabledReasonButton
-          disabled={!dirty || set.isPending}
-          reason={dirty && set.isPending ? ACT_PENDING_REASON : undefined}
+          disabled={saveHeldReason !== undefined}
+          reason={saveHeldReason}
           onClick={save}
         >
           {set.isPending ? (

@@ -43,6 +43,8 @@ import { useOnline } from "@/lib/use-online";
 import { DescriptionField } from "./DescriptionField";
 import {
   ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";
@@ -238,6 +240,22 @@ function GitLabGeneralForm({
   );
 
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
+  // Every hold carries a reason, so Save keeps focus through a save, including
+  // the moment the saved settings read back and the form settles clean.
+  const saveHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case update.isPending:
+        return ACT_PENDING_REASON;
+      case busy:
+        return AI_DRAFT_PENDING_REASON;
+      case !dirty:
+        return NO_CHANGES_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   // Awaited, not per-call callbacks: this subtree unmounts when the dialog
   // closes or the rail crossfades to another section, and react-query drops
@@ -470,13 +488,8 @@ function GitLabGeneralForm({
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">
         <DisabledReasonButton
-          disabled={!dirty || update.isPending || busy || !online}
-          reason={
-            (online ? undefined : OFFLINE_WRITE_REASON) ??
-            (update.isPending && dirty && !busy
-              ? ACT_PENDING_REASON
-              : undefined)
-          }
+          disabled={saveHeldReason !== undefined}
+          reason={saveHeldReason}
           onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}

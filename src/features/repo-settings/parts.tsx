@@ -113,6 +113,13 @@ export const SAVING_REASON = "Saving your last change…";
  *  create/save/enable submit) while that write is in flight. */
 export const ACT_PENDING_REASON = "Applying this change…";
 
+/** The hold reason on a save or update whose form matches what's saved. */
+export const NO_CHANGES_REASON = "No changes to save";
+
+/** The hold reason on a save while an AI description draft is still streaming
+ *  into the form it would send. */
+export const AI_DRAFT_PENDING_REASON = "Wait for the AI draft to finish";
+
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
 function formNoticeMessage(noun: string, failed: boolean): string {
   return failed

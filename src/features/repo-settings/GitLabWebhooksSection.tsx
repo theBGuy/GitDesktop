@@ -278,8 +278,6 @@ function HookForm({
   const online = useOnline();
   const urlValid =
     url.trim().startsWith("https://") || url.trim().startsWith("http://");
-  const canSave = urlValid && events.length > 0 && !pending && online;
-  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning = !url.trim()
     ? null
     : !urlValid
@@ -287,6 +285,20 @@ function HookForm({
       : events.length === 0
         ? "Select at least one event."
         : null;
+  const saveHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case pending:
+        return ACT_PENDING_REASON;
+      case !url.trim():
+        return "Enter a valid http(s) URL";
+      case warning !== null:
+        return warning;
+      default:
+        return undefined;
+    }
+  })();
 
   function toggleEvent(id: string, on: boolean) {
     setEvents((prev) => (on ? [...prev, id] : prev.filter((e) => e !== id)));
@@ -378,8 +390,8 @@ function HookForm({
           </Button>
           <DisabledReasonButton
             size="sm"
-            disabled={!canSave}
-            reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
+            disabled={saveHeldReason !== undefined}
+            reason={saveHeldReason}
             onClick={save}
           >
             {pending && <Spinner data-icon="inline-start" />}
