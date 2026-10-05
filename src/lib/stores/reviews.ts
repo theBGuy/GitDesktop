@@ -53,6 +53,10 @@ export interface ReviewContext {
    *  partial; the prompt discloses it. Absent for local PRs, whose lists are
    *  never partial. */
   commitsUnknown?: boolean;
+  /** The forge's files read failed or hit a cap, so `loadDiff`'s files may be
+   *  partial; the prompt discloses it. Absent for local PRs, whose lists are
+   *  never partial. */
+  filesUnknown?: boolean;
   /** Repo working directory — the CLI agent runs here. */
   repoPath: string;
   /** The origin|upstream lens the PR was opened under — scopes every per-PR store
@@ -730,6 +734,7 @@ export async function startReview(
           deleted: f.deleted,
           isBinary: f.isBinary,
         })),
+        filesUnknown: context.filesUnknown,
         excludedFiles: filtered.excludedFiles,
         provider: context.provider,
         budgetProfile,

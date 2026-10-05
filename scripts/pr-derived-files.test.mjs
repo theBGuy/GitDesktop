@@ -203,3 +203,50 @@ test("a listed PR file section matches generate.rs and never discloses", () => {
     "## Files changed\nx.rs +3 -1\ny.png (binary)",
   );
 });
+
+// The forge's files read failed or capped: a partial list says so, an empty one
+// says unavailable, and the flag changes nothing when unset or when derived.
+const PARTIAL_LINE =
+  "[file list may be incomplete — the diff is authoritative]";
+const UNAVAILABLE_LINE = "[file list unavailable — the diff is authoritative]";
+
+/** The Files changed section from both builders, which must agree. */
+function bothFilesSections(diffText, files, filesUnknown) {
+  const pr = buildPrPrompt({ ...PR_BASE, diffText, files, filesUnknown });
+  const review = buildReviewPrompt(
+    { ...REVIEW_BASE, diffText, files, filesUnknown },
+    "general",
+  );
+  const fromPr = filesSection(pr.prompt);
+  assert.equal(filesSection(review.prompt), fromPr);
+  return fromPr;
+}
+
+test("filesUnknown absent or false renders byte-identically", () => {
+  const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
+  for (const unknown of [undefined, false]) {
+    assert.equal(bothFilesSections(DIFF, [], unknown), EXPECTED_SECTION);
+    assert.equal(
+      bothFilesSections(DIFF, files, unknown),
+      "## Files changed\nx.rs +3 -1",
+    );
+    assert.equal(
+      bothFilesSections("", [], unknown),
+      "## Files changed\n(none)",
+    );
+  }
+});
+
+test("filesUnknown discloses a partial or unavailable list in both builders", () => {
+  const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
+  assert.equal(
+    bothFilesSections(DIFF, files, true),
+    `## Files changed\nx.rs +3 -1\n${PARTIAL_LINE}`,
+  );
+  assert.equal(
+    bothFilesSections("", [], true),
+    `## Files changed\n(none)\n${UNAVAILABLE_LINE}`,
+  );
+  // A derived list is whole from the diff, so it keeps its own single line.
+  assert.equal(bothFilesSections(DIFF, [], true), EXPECTED_SECTION);
+});

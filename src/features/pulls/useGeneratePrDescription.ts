@@ -189,6 +189,9 @@ export function useGeneratePrDescription(repoPath: string) {
       /** The forge's commits read failed or hit a cap, so `commitSubjects` may
        *  be partial; the prompt discloses it. Omit for local commit lists. */
       commitsUnknown?: boolean,
+      /** The forge's files read failed or hit a cap, so the supplied files may
+       *  be partial; the prompt discloses it. Omit for local file lists. */
+      filesUnknown?: boolean,
     ): Promise<PrDraft | null> => {
       const parse = (buffer: string) =>
         extractPrDraft(
@@ -229,6 +232,7 @@ export function useGeneratePrDescription(repoPath: string) {
             diffText: diff.text,
             diffTruncated: diff.truncated,
             files: diff.files,
+            filesUnknown,
             excludedFiles: diff.excludedFiles,
             commitSubjects,
             commitsUnknown,
@@ -361,6 +365,9 @@ export function useGeneratePrDescription(repoPath: string) {
       /** The forge's commits read failed or hit a cap, so `commitSubjects` may
        *  be partial; the prompt discloses it. */
       commitsUnknown?: boolean,
+      /** The forge's files read failed or hit a cap, so the supplied files may
+       *  be partial; the prompt discloses it. */
+      filesUnknown?: boolean,
     ) =>
       runFromDiff(
         getDiff,
@@ -376,6 +383,7 @@ export function useGeneratePrDescription(repoPath: string) {
         "change-request",
         undefined,
         commitsUnknown,
+        filesUnknown,
       ),
     [runFromDiff],
   );

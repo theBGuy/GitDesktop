@@ -67,6 +67,10 @@ export interface PrPromptInput {
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
+  /** The forge's files read failed or hit a cap, so `files` may be partial.
+   *  Absent/false ⇒ no disclosure line (prompt unchanged) — local file lists are
+   *  never partial. */
+  filesUnknown?: boolean;
   /** Changed files hidden from this context by the user's ignore patterns.
    *  Absent/0 ⇒ no disclosure line (prompt unchanged) — the remote-PR path
    *  supplies its own diff and applies no excludes. */
@@ -156,6 +160,10 @@ export interface ReviewPromptInput {
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
+  /** The forge's files read failed or hit a cap, so `files` may be partial.
+   *  Absent/false ⇒ no disclosure line (prompt unchanged) — local file lists are
+   *  never partial. */
+  filesUnknown?: boolean;
   /** Changed files hidden from this review's diff by the user's AI-ignore
    *  patterns; absent/0 ⇒ no disclosure line. Always 0 alongside `agentic` —
    *  only a non-agentic run filters its diff. */
@@ -187,6 +195,9 @@ export interface ReviewPromptInput {
   externalReviewers?: string[];
   /** Whether any external finding may be stale (made against an older commit). */
   externalStale?: boolean;
+  /** The forge's external-review read hit a cap or kept a partial read, so the
+   *  findings may be incomplete. Absent/false ⇒ no disclosure line (prompt unchanged). */
+  externalIncomplete?: boolean;
   /** One formatted block per comment attributed to GitDesktop on this PR — agent
    *  follow-ups (refutations / "fixed in `<sha>`" replies) and thread replies,
    *  oldest first — so the model resolves what it already covered instead of

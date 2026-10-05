@@ -266,10 +266,13 @@ export function promptFileList(
   return { files: fromDiff, derived: fromDiff.length > 0 };
 }
 
-/** The "Files changed" heading and list, plus the derived-list disclosure. */
+/** The "Files changed" heading and list, plus one disclosure line: derived, or
+ *  `unknown` (the forge's read failed or hit a cap). Without either the section
+ *  is byte-identical to the MCP twin's, whose numstat lists are never partial. */
 function filesChangedSection(
   files: PrPromptInput["files"],
   diffText: string,
+  unknown?: boolean,
 ): string {
   const listed = promptFileList(files, diffText);
   const summary = listed.files
@@ -278,7 +281,11 @@ function filesChangedSection(
     )
     .join("\n");
   const section = `## Files changed\n${summary || "(none)"}`;
-  return listed.derived ? `${section}\n${FILES_DERIVED_LINE}` : section;
+  if (listed.derived) return `${section}\n${FILES_DERIVED_LINE}`;
+  if (!unknown) return section;
+  return listed.files.length > 0
+    ? `${section}\n[file list may be incomplete — the diff is authoritative]`
+    : `${section}\n[file list unavailable — the diff is authoritative]`;
 }
 
 /** A commit-subjects section, or null with nothing to say. `unknown` (the forge's
@@ -358,7 +365,11 @@ export function buildPrPrompt(input: PrPromptInput): {
     input.commitsUnknown,
   );
   if (commitsSection) promptParts.push(commitsSection);
-  let filesSection = filesChangedSection(input.files, input.diffText);
+  let filesSection = filesChangedSection(
+    input.files,
+    input.diffText,
+    input.filesUnknown,
+  );
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
   }
@@ -819,7 +830,11 @@ export function buildReviewPrompt(
   if (commitsSection) promptParts.push(commitsSection);
   // Stronger wording than the generator's twin: an invented finding about a
   // file the reviewer can't see reads as a real one.
-  let filesSection = filesChangedSection(input.files, input.diffText);
+  let filesSection = filesChangedSection(
+    input.files,
+    input.diffText,
+    input.filesUnknown,
+  );
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;
   }
@@ -905,6 +920,9 @@ export function buildReviewPrompt(
       if (input.externalStale) {
         extSection +=
           "\n[some findings were made against an earlier commit and may already be addressed]";
+      }
+      if (input.externalIncomplete) {
+        extSection += "\n[external review list may be incomplete]";
       }
       promptParts.push(extSection);
       renderedExternal = true;

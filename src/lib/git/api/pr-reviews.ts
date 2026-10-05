@@ -1,7 +1,7 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   DraftCommentIn,
-  ExternalReviewItem,
+  ExternalReviewsOut,
   RemoteLens,
   ReviewSubmitOut,
   ReviewThreadsOut,
@@ -15,7 +15,7 @@ export const forgePrExternalReviews = (
   number: number,
   lens: RemoteLens,
 ) =>
-  invoke<ExternalReviewItem[]>("forge_pr_external_reviews", {
+  invoke<ExternalReviewsOut>("forge_pr_external_reviews", {
     repoPath,
     number,
     lens,
