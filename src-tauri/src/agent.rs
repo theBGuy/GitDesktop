@@ -1078,6 +1078,18 @@ async fn codex_chatgpt_auth(binary: &Path) -> bool {
     codex_status_is_chatgpt(run_capture(binary, args, MODELS_TIMEOUT).await)
 }
 
+/// Names the CLI on a catalog listing's timeout, whose `AppError::Timeout` copy
+/// would blame a git operation; every other error passes through unchanged.
+fn catalog_listing_error(kind: AgentKind, e: AppError) -> AppError {
+    match e {
+        AppError::Timeout(secs) => AppError::Command(format!(
+            "{} model catalog timed out after {secs}s",
+            kind.label()
+        )),
+        other => other,
+    }
+}
+
 /// Lists the model ids the CLI itself reports, for the model pickers. Kinds with
 /// no catalog surface answer with an empty list rather than an error, so a caller
 /// can ask about any agent unconditionally.
@@ -1092,7 +1104,9 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
             kind.label()
         ))
     })?;
-    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT).await?;
+    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT)
+        .await
+        .map_err(|e| catalog_listing_error(kind, e))?;
     if code != 0 {
         let reason = stderr
             .lines()
@@ -3857,6 +3871,18 @@ opencode/x-preview-f-free
         assert!(!codex_status_is_chatgpt(status(1, SIGNED_OUT)));
         assert!(!codex_status_is_chatgpt(status(1, CHATGPT)));
         assert!(!codex_status_is_chatgpt(Err(AppError::Timeout(20))));
+    }
+
+    #[test]
+    fn catalog_listing_timeout_names_the_cli_and_other_errors_pass_through() {
+        let timed_out = catalog_listing_error(AgentKind::Copilot, AppError::Timeout(20));
+        assert!(matches!(timed_out, AppError::Command(_)));
+        assert_eq!(
+            timed_out.to_string(),
+            "GitHub Copilot model catalog timed out after 20s"
+        );
+        let other = catalog_listing_error(AgentKind::Codex, AppError::Command("boom".into()));
+        assert!(matches!(other, AppError::Command(ref m) if m == "boom"));
     }
 
     #[test]
