@@ -8351,13 +8351,7 @@ fn rewritten_origin_url(old_url: &str, new_project_path: &str) -> Option<String>
     {
         return None;
     }
-    let path = if let Some((scheme, rest)) = old_url.split_once("://") {
-        if !["https", "http", "ssh"]
-            .iter()
-            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-        {
-            return None;
-        }
+    let path = if let Some((_, rest)) = old_url.split_once("://") {
         let (authority, path) = rest.split_once('/')?;
         if authority.is_empty() {
             return None;
@@ -8427,6 +8421,10 @@ async fn project_origin_before_move(repo_path: &str) -> AppResult<(String, Strin
     Ok((old_url, old_path))
 }
 
+fn origin_matches_snapshot(captured_url: &str, current_url: &str) -> bool {
+    captured_url.trim() == current_url.trim()
+}
+
 async fn rewrite_origin_after(
     state: &AppState,
     repo_path: &str,
@@ -8438,6 +8436,33 @@ async fn rewrite_origin_after(
     let Some(new_url) = origin_url_after(old_url, old_path, new_path) else {
         return Ok(());
     };
+    // Bypass the URL cache: origin may have changed while the remote PUT was pending.
+    // A newer local destination must not be overwritten by the pre-PUT snapshot.
+    let current = crate::git::runner::run_git(
+        Some(repo_path),
+        &["remote", "get-url", "origin"],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| {
+        let display_url = displayed_origin_url(&new_url);
+        let e = e
+            .to_string()
+            .replace(old_url, &displayed_origin_url(old_url))
+            .replace(&new_url, &display_url);
+        AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' remote couldn't be checked — \
+             set it to {display_url} manually. ({e})"
+        ))
+    })?;
+    if !origin_matches_snapshot(old_url, &current.stdout_lossy()) {
+        let display_url = displayed_origin_url(&new_url);
+        let action = if verb == "Renamed" { "rename" } else { "transfer" };
+        return Err(AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' remote was changed while the \
+             {action} was in flight — set it to {display_url} manually."
+        )));
+    }
     if let Err(e) = crate::git::runner::run_git_mutating(
         state,
         repo_path,
@@ -10504,6 +10529,21 @@ mod tests {
                 "g/renamed",
                 "https://host/g/renamed.git",
             ),
+            (
+                "git+ssh://git@GitLab.Example.com:2222/group/proj.git",
+                "group/renamed",
+                "git+ssh://git@GitLab.Example.com:2222/group/renamed.git",
+            ),
+            (
+                "git://GitLab.Example.com:9418/group/proj.git",
+                "group/renamed",
+                "git://GitLab.Example.com:9418/group/renamed.git",
+            ),
+            (
+                "ssh+custom://host/g/p.git",
+                "g/renamed",
+                "ssh+custom://host/g/renamed.git",
+            ),
         ] {
             assert_eq!(
                 rewritten_origin_url(old_url, new_path).as_deref(),
@@ -10533,8 +10573,6 @@ mod tests {
             "https://gitlab.com/group/proj?query",
             "https://gitlab.com/group/proj#fragment",
             "file:///group/proj",
-            "git://host/group/proj.git",
-            "git+ssh://git@host/group/proj.git",
         ] {
             assert_eq!(
                 rewritten_origin_url(old_url, "group/new"),
@@ -10574,13 +10612,35 @@ mod tests {
             ("https://host/g/p.git", "g/other", "g/new", None),
             ("https://host/g/p.git", "g/p", "g/p", None),
             (" https://host/g/p.git ", "g/p", "g/p", None),
-            ("git://host/g/p.git", "g/p", "g/new", None),
+            (
+                "git://host/g/p.git",
+                "g/p",
+                "g/new",
+                Some("git://host/g/new.git"),
+            ),
         ] {
             assert_eq!(
                 origin_url_after(old_url, old_path, new_path).as_deref(),
                 expected,
                 "{old_url}"
             );
+        }
+    }
+
+    #[test]
+    fn origin_snapshot_comparison_trims_only_surrounding_whitespace() {
+        let captured = "https://user@host/g/p.git";
+        for (current, expected) in [
+            (captured, true),
+            (" https://user@host/g/p.git\r\n", true),
+            ("https://user@host/other/p.git", false),
+            ("https://user@other/g/p.git", false),
+            ("https://other@host/g/p.git", false),
+            ("ssh://user@host/g/p.git", false),
+            ("", false),
+        ] {
+            assert_eq!(origin_matches_snapshot(captured, current), expected);
+            assert_eq!(origin_matches_snapshot(current, captured), expected);
         }
     }
 
