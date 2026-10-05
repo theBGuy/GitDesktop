@@ -1060,13 +1060,22 @@ fn parse_copilot_models(stdout: &str) -> Vec<String> {
     out
 }
 
-/// Whether codex is signed in with ChatGPT (vs an API key), which widens its
-/// catalog. Any failure answers false: the API-key filter is valid in both modes.
-async fn codex_chatgpt_auth(binary: &Path) -> bool {
-    match run_capture(binary, &["login", "status"], MODELS_TIMEOUT).await {
+/// The verdict of `codex login status` (stdout+stderr): a ChatGPT login widens
+/// codex's catalog. Any failure answers false: the API-key filter is valid in both
+/// modes.
+fn codex_status_is_chatgpt(result: AppResult<(i32, String)>) -> bool {
+    match result {
         Ok((0, text)) => text.to_ascii_lowercase().contains("chatgpt"),
         _ => false,
     }
+}
+
+/// Whether codex is signed in with ChatGPT (vs an API key).
+async fn codex_chatgpt_auth(binary: &Path) -> bool {
+    let Some(args) = AgentKind::Codex.auth_status_args() else {
+        return false;
+    };
+    codex_status_is_chatgpt(run_capture(binary, args, MODELS_TIMEOUT).await)
 }
 
 /// Lists the model ids the CLI itself reports, for the model pickers. Kinds with
@@ -3832,6 +3841,22 @@ opencode/x-preview-f-free
         assert_eq!(ids.len(), MODELS_LIMIT);
         assert_eq!(ids.first().map(String::as_str), Some("auto"));
         assert_eq!(ids.last().map(String::as_str), Some(last.as_str()));
+    }
+
+    /// `codex login status` wording (codex-cli 0.153.3: the ChatGPT line measured
+    /// live, the rest read from the binary's strings; the API-key line ends in a
+    /// masked key).
+    #[test]
+    fn codex_status_is_chatgpt_only_for_a_successful_chatgpt_login() {
+        const CHATGPT: &str = "Logged in using ChatGPT";
+        const API_KEY: &str = "Logged in using an API key - ****WXYZ";
+        const SIGNED_OUT: &str = "Not logged in";
+        let status = |code: i32, text: &str| Ok((code, format!("{text}\n")));
+        assert!(codex_status_is_chatgpt(status(0, CHATGPT)));
+        assert!(!codex_status_is_chatgpt(status(0, API_KEY)));
+        assert!(!codex_status_is_chatgpt(status(1, SIGNED_OUT)));
+        assert!(!codex_status_is_chatgpt(status(1, CHATGPT)));
+        assert!(!codex_status_is_chatgpt(Err(AppError::Timeout(20))));
     }
 
     #[test]
