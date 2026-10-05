@@ -1,5 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,7 @@ import {
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { type AppError, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { markerStagePrompt } from "./conflict-confirms";
 
@@ -45,8 +46,8 @@ const ACCEPT_ALL_COPY = {
 } as const;
 
 /** What taking a whole side actually does, given which side (if either) has no
- *  version at this path. */
-type AcceptAllArm = "content" | "takesDeletion" | "keepsFile";
+ *  version at this path; `unclassified` when no sides read has landed. */
+type AcceptAllArm = "content" | "takesDeletion" | "keepsFile" | "unclassified";
 
 /** One body per outcome: a modify/delete conflict doesn't "replace" anything —
  *  the backend runs `git rm` for a removing side and re-checks the file out
@@ -61,6 +62,8 @@ const ACCEPT_ALL_BODY: Record<
     `The ${side} side removed ${name}, so this deletes the file from your working tree and index. The ${other} side's changes to it are discarded.`,
   keepsFile: (name, side, other) =>
     `Keeps ${name} whole as the ${side} side left it, replacing what's in your working tree now. The ${other} side removed the file, and that removal is discarded.`,
+  unclassified: (name, side, other) =>
+    `Takes the ${side} side for ${name}: its version, or its removal if that side deleted the file. The ${other} side's changes and any conflict regions you already resolved by hand are discarded.`,
 };
 
 /** The notice per removing side. "Removed" rather than "deleted": a side that
@@ -77,6 +80,24 @@ const DELETION_COPY = {
     keepsFile: "Accept all current",
   },
 } as const;
+
+/** The error pane's copy per failed-read kind: the backend refuses a binary or
+ *  oversized file as invalidArgument; `io` covers a lock, a permission change,
+ *  or a directory at the path (a conflicted submodule), none promised to pass.
+ *  Other kinds take the fallback. */
+const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
+  invalidArgument: (
+    <>
+      This looks like a binary or oversized conflict, so it can't be merged as
+      text. Take a side with{" "}
+      <span className="font-medium">Accept all current</span> /{" "}
+      <span className="font-medium">incoming</span>, or open it in your editor.
+    </>
+  ),
+  io: "Couldn't read this file. It may be locked, its permissions may have changed, or a folder (such as a conflicted submodule) may sit at this path. Open it in your editor to resolve the conflict, or try again if it becomes readable.",
+};
+const READ_ERROR_FALLBACK =
+  "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
 
 /** The two working-file states with no text to show, each worded for what
  *  staging it actually records (content vs. a removal). */
@@ -269,8 +290,8 @@ export function ConflictFileView({
     checkoutSide.isPending ||
     markResolve.isPending ||
     file.isFetching;
-  // A binary / too-large conflict can't be text-merged (the backend refuses to
-  // read it); offer only whole-file resolution + the editor.
+  // A conflict the backend wouldn't read (binary, too large, or unreadable)
+  // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
   const canAi = aiEnabled && reviewConfigured && textResolvable;
 
@@ -301,13 +322,16 @@ export function ConflictFileView({
   async function acceptAll(side: "ours" | "theirs") {
     // Nothing records which regions were resolved by hand, so every arm warns
     // unconditionally: taking a side re-checks the file out from the index and
-    // any manual work in it goes with the other side. An unreadable file
-    // (binary, oversized) has no sides to classify and takes the content arm.
+    // any manual work in it goes with the other side. Classifies from the last
+    // successful read; when none has landed (the first read failed) a deleting
+    // side can't be ruled out, so the unclassified arm names both outcomes.
     const copy = ACCEPT_ALL_COPY[side];
     const name = baseName(path);
     const deleted = file.data ? deletedSide(file.data) : null;
     const arm: AcceptAllArm = (() => {
       switch (true) {
+        case !file.data:
+          return "unclassified";
         case deleted === null:
           return "content";
         case deleted === side:
@@ -334,8 +358,9 @@ export function ConflictFileView({
   }
 
   // Which fallback state is on screen, and so whether Mark resolved is offered.
-  // Gated on !isError as well as data: a refetch that errors (the file turned
-  // binary/oversized) keeps the last data while the pane shows the error copy.
+  // Gated on !isError as well as data: a refetch that errors (the file became
+  // unreadable, binary or oversized) keeps the last data while the pane shows
+  // the error copy.
   const arm =
     file.data && !file.isError && segments === null
       ? fallbackArm(file.data)
@@ -440,11 +465,8 @@ export function ConflictFileView({
           </p>
         ) : file.isError ? (
           <p className="p-4 text-xs text-muted-foreground">
-            This looks like a binary or oversized conflict, so it can't be
-            merged as text. Take a side with{" "}
-            <span className="font-medium">Accept all current</span> /{" "}
-            <span className="font-medium">incoming</span>, or open it in your
-            editor.
+            {(isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
+              READ_ERROR_FALLBACK}
           </p>
         ) : segments === null ? (
           <ConflictFallback

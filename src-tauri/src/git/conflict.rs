@@ -43,7 +43,8 @@ pub struct ConflictSides {
     /// model. The UI refuses to resolve it and says why.
     pub ai_ignored: bool,
     /// Whether the working file is on disk. `working` collapses to "" for an
-    /// empty file and a deleted one alike; this is what separates them.
+    /// empty file and a deleted one alike; this is what separates them. A file
+    /// that exists but can't be read fails the whole command instead.
     pub working_exists: bool,
 }
 
@@ -125,16 +126,16 @@ pub async fn git_conflict_sides(
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
-    // A both-deleted conflict has no working file → "". NotFound is the only
-    // signal that the file is gone; any other read error keeps the swallow-to-
-    // empty behavior but still reports the file as present, so the UI never
-    // offers to stage a removal on the strength of a permissions error.
-    let working_read = tokio::fs::read(Path::new(&repo_path).join(&path)).await;
-    let working_exists = match &working_read {
-        Ok(_) => true,
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-    };
-    let working_bytes = working_read.unwrap_or_default();
+    // NotFound means the file is gone (a side or the user deleted it): it reads
+    // as "" with `working_exists` false. Every other read failure refuses the
+    // whole read, so no caller can mistake an unreadable file for a marker-free
+    // one.
+    let (working_bytes, working_exists) =
+        match tokio::fs::read(Path::new(&repo_path).join(&path)).await {
+            Ok(bytes) => (bytes, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+            Err(e) => return Err(AppError::Io(e)),
+        };
     if working_bytes.len() > RESOLVE_MAX_BYTES {
         return Err(AppError::InvalidArgument(
             "file is too large for AI conflict resolution".into(),
@@ -689,10 +690,10 @@ mod tests {
 
     /// `working_exists` is what separates an emptied working file from a deleted
     /// one, since `working` is "" for both — the discriminator pair the frontend
-    /// rides on, so present, emptied and gone each get a leg (a non-NotFound read
-    /// error is its own class, reported as present at the read site). The wire key
-    /// is asserted too: the frontend reads `workingExists`, and a rename here
-    /// would go silent.
+    /// rides on, so present, emptied and gone each get a leg (an unreadable file
+    /// fails the command instead; see `unreadable_working_file_fails_the_read`).
+    /// The wire key is asserted too: the frontend reads `workingExists`, and a
+    /// rename here would go silent.
     #[tokio::test]
     async fn working_exists_tracks_the_file_on_disk() {
         let (_dir, repo) = conflicted_repo("working-exists", "file.txt", &[]).await;
@@ -732,6 +733,27 @@ mod tests {
             json.contains("\"workingExists\":false"),
             "wire key missing: {json}"
         );
+    }
+
+    /// A working file that exists but can't be read must fail the command: an
+    /// `Ok` with empty content reads as marker-free, and every staging gate would
+    /// pass it unconfirmed. A directory in the file's place is the portable
+    /// unreadable fixture: Windows refuses to open it with PermissionDenied (os
+    /// error 5, measured), Unix fails the read with IsADirectory.
+    #[tokio::test]
+    async fn unreadable_working_file_fails_the_read() {
+        let (_dir, repo) = conflicted_repo("unreadable", "file.txt", &[]).await;
+        let file = Path::new(&repo).join("file.txt");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let err = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("an unreadable working file must not read as Ok");
+        match err {
+            AppError::Io(e) => assert_ne!(e.kind(), std::io::ErrorKind::NotFound, "{e}"),
+            other => panic!("expected AppError::Io, got {other:?}"),
+        }
     }
 
     /// Mark resolved is a plain `git add` on the unmerged path, and the UI offers
