@@ -50,7 +50,6 @@ import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
-  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   useConfirmSwapFocus,
 } from "./parts";
@@ -371,7 +370,7 @@ function RenameAction({
       case !valid:
         return copy.invalid;
       case !changed:
-        return NO_CHANGES_REASON;
+        return "Enter a new name";
       default:
         return undefined;
     }
