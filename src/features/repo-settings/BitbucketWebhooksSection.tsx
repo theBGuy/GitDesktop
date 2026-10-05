@@ -322,7 +322,11 @@ function HookForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canSave}
-            reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
+            reason={
+              offlineReason ??
+              (pending ? ACT_PENDING_REASON : undefined) ??
+              warning
+            }
             onClick={save}
           >
             {pending && <Spinner data-icon="inline-start" />}

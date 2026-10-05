@@ -298,6 +298,24 @@ function GeneralForm({
   const mergeValid =
     form.allowSquashMerge || form.allowMergeCommit || form.allowRebaseMerge;
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
+  // Every hold carries a reason, so Save keeps focus through a save, including
+  // the moment the saved settings read back and the form settles clean.
+  const saveHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case update.isPending:
+        return ACT_PENDING_REASON;
+      case busy:
+        return "Wait for the AI draft to finish";
+      case !mergeValid:
+        return "Enable at least one merge method.";
+      case !dirty:
+        return "No changes to save";
+      default:
+        return undefined;
+    }
+  })();
 
   // Keep the current default selectable even if that branch isn't local; drop
   // agent-session branches (`gd/session/*`) — they're app-internal.
@@ -591,15 +609,8 @@ function GeneralForm({
           </span>
         )}
         <DisabledReasonButton
-          disabled={
-            !dirty || !mergeValid || update.isPending || busy || !online
-          }
-          reason={
-            (online ? undefined : OFFLINE_WRITE_REASON) ??
-            (update.isPending && dirty && mergeValid && !busy
-              ? ACT_PENDING_REASON
-              : undefined)
-          }
+          disabled={saveHeldReason !== undefined}
+          reason={saveHeldReason}
           onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}

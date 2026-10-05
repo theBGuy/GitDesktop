@@ -6,6 +6,7 @@ import type {
   SecretApp,
   SecurityFeature,
 } from "../types";
+import { invalidateRepoAfterWrite } from "./core";
 import { repoSettingsKey } from "./internal";
 
 // Secrets & variables. `env: null` = repository scope; a string = that
@@ -293,9 +294,14 @@ export function useSetArchived(repo: string) {
   });
 }
 
+// The whole repo subtree, not just the settings key: every read that names the
+// repo goes stale, and Bitbucket's rename rewrites the origin URL as well.
+// Awaited, so the rename stays pending until the new name reads back.
 export function useRenameRepo(repo: string) {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (newName: string) => api.forgeRepoRename(repo, newName),
+    onSettled: () => invalidateRepoAfterWrite(queryClient, repo),
   });
 }
 

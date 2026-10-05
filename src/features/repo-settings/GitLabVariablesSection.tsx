@@ -314,7 +314,11 @@ function VariableRow({
           size="sm"
           variant="outline"
           disabled={!dirty || saving || writeHeld !== undefined}
-          reason={writeHeld ?? (dirty && saving ? SAVING_REASON : undefined)}
+          reason={
+            writeHeld ??
+            (saving ? SAVING_REASON : undefined) ??
+            (dirty ? undefined : "No changes to save")
+          }
           onClick={() => onSave(draft)}
         >
           Save

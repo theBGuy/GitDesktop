@@ -78,7 +78,7 @@ function DangerDialog({
   confirmPhrase,
   confirmLabel,
   pending,
-  disabled,
+  disabledReason,
   heldReason,
   onConfirm,
   children,
@@ -90,10 +90,12 @@ function DangerDialog({
   confirmPhrase: string;
   confirmLabel: string;
   pending: boolean;
-  disabled?: boolean;
+  /** Why the caller's own fields hold the confirm (no target picked, say); a
+   *  hold is only ever given as a reason, so the confirm never drops focus. */
+  disabledReason?: string;
   /** Why the confirm is held whatever is typed, as its hover text and
-   *  accessible description; unset leaves it to the phrase, `disabled`, and
-   *  `pending`. */
+   *  accessible description; unset leaves it to the phrase, `disabledReason`,
+   *  and `pending`. */
   heldReason?: string;
   onConfirm: () => void;
   children?: ReactNode;
@@ -102,6 +104,11 @@ function DangerDialog({
   useSeedOnOpen(open, () => setTyped(""));
 
   const matches = typed.trim() === confirmPhrase;
+  const confirmHeldReason =
+    heldReason ??
+    (pending ? ACT_PENDING_REASON : undefined) ??
+    disabledReason ??
+    (matches ? undefined : `Type ${confirmPhrase} to confirm`);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -130,13 +137,8 @@ function DangerDialog({
           </Button>
           <DisabledReasonButton
             variant="destructive"
-            disabled={
-              !matches || disabled || pending || heldReason !== undefined
-            }
-            reason={
-              heldReason ??
-              (pending && matches && !disabled ? ACT_PENDING_REASON : undefined)
-            }
+            disabled={confirmHeldReason !== undefined}
+            reason={confirmHeldReason}
             onClick={onConfirm}
           >
             {pending && <Spinner data-icon="inline-start" />}
@@ -178,7 +180,12 @@ const OWNER_HINT = "Needs the Owner role on GitLab";
 const DANGER_COPY: Record<
   ForgeProvider,
   {
-    rename: { desc: string; toast: (name: string) => string };
+    rename: {
+      desc: string;
+      toast: (name: string) => string;
+      /** Why Rename is held on a name the provider would reject. */
+      invalid: string;
+    };
     forkDesc: string;
     visibility: {
       dialogDesc: string;
@@ -192,6 +199,8 @@ const DANGER_COPY: Record<
       toast: string;
       ownerLabel: string;
       ownerPlaceholder: string;
+      /** Why Transfer is held with no destination typed. */
+      ownerMissing: string;
     };
     delete: { dialogDesc: string; toast: string };
   }
@@ -200,6 +209,7 @@ const DANGER_COPY: Record<
     rename: {
       desc: "Old links and clones keep working.",
       toast: (name) => `Renamed to ${name} — links redirect`,
+      invalid: "Use only letters, digits, '.', '-', and '_'",
     },
     forkDesc:
       "Permanently detaches this repository from its fork network on GitHub — this cannot be undone. GitHub requires the fork be public, under 1 GB, and have no child forks. Your code and history are kept; issues, PRs, stars, and watchers are lost.",
@@ -218,6 +228,7 @@ const DANGER_COPY: Record<
       toast: "Transfer requested",
       ownerLabel: "New owner (user or organization)",
       ownerPlaceholder: "username-or-org",
+      ownerMissing: "Enter the new owner",
     },
     delete: {
       dialogDesc:
@@ -229,6 +240,8 @@ const DANGER_COPY: Record<
     rename: {
       desc: "Renames the name and path; old paths redirect.",
       toast: (name) => `Renamed to ${name} — links redirect`,
+      invalid:
+        "Start with a letter or digit, then use only letters, digits, '.', '-', and '_'",
     },
     forkDesc:
       "Removes the fork relationship on GitLab. Open merge requests to the parent are closed — they stay closed even if the relationship is later re-established via the GitLab API. Your code and history are kept. Requires the Owner role.",
@@ -247,6 +260,7 @@ const DANGER_COPY: Record<
       toast: "Project transferred",
       ownerLabel: "New namespace (group path or username)",
       ownerPlaceholder: "group/subgroup or username",
+      ownerMissing: "Enter the new namespace",
     },
     delete: {
       dialogDesc:
@@ -258,6 +272,7 @@ const DANGER_COPY: Record<
     rename: {
       desc: "Renaming changes the repository URL; GitDesktop will update your local 'origin' remote automatically.",
       toast: (name) => `Renamed to ${name} — origin remote updated`,
+      invalid: "Use only letters, digits, '.', '-', and '_'",
     },
     forkDesc:
       "Bitbucket has no API for this — detach on bitbucket.org under Repository settings → Repository details → Manage repository → Detach fork. A one-time action that cannot be undone. Existing pull requests to the parent stay viewable; new ones can't be created.",
@@ -276,6 +291,7 @@ const DANGER_COPY: Record<
       toast: "Transfer requested",
       ownerLabel: "New owner (user or organization)",
       ownerPlaceholder: "username-or-org",
+      ownerMissing: "Enter the new owner",
     },
     delete: {
       dialogDesc:
@@ -318,6 +334,19 @@ function RenameAction({
   const online = useOnline();
   const current = info.currentName;
   const [name, setName] = useState(current);
+  // A refreshed name replaces the field unless it holds an edit of its own: it
+  // still shows the name it was seeded from, or the one a rename sent (which
+  // Bitbucket may read back as a normalized slug). Never a remount, which
+  // would drop focus from the field or the button.
+  const [seededName, setSeededName] = useState(current);
+  const [sentName, setSentName] = useState<string | null>(null);
+  if (current !== seededName) {
+    setSeededName(current);
+    setSentName(null);
+    if (name.trim() === seededName || name.trim() === sentName) {
+      setName(current);
+    }
+  }
   const isGitLab = provider === "gitlab";
   const copy = DANGER_COPY[provider].rename;
   // GitLab paths must start alphanumeric; GitHub/Bitbucket allow a leading
@@ -327,15 +356,37 @@ function RenameAction({
     ? /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim())
     : /^[A-Za-z0-9._-]+$/.test(name.trim());
   const changed = name.trim() !== current;
+  // Every hold carries a reason, so Rename keeps focus through the write and the
+  // refetch that brings the new name back.
+  const renameHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case rename.isPending:
+        return ACT_PENDING_REASON;
+      case !name.trim():
+        return "Enter a new name";
+      case !valid:
+        return copy.invalid;
+      case !changed:
+        return "No changes to save";
+      default:
+        return undefined;
+    }
+  })();
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
-  // so the outcome would never reach the user.
+  // so the outcome would never reach the user. The sent name is recorded before
+  // the await: the refetch can land the new name before the call resolves.
   async function handleRename() {
+    const next = name.trim();
+    setSentName(next);
     try {
-      await rename.mutateAsync(name.trim());
-      toast.success(copy.toast(name.trim()));
+      await rename.mutateAsync(next);
+      toast.success(copy.toast(next));
     } catch (e) {
+      setSentName(null);
       toastError(e);
     }
   }
@@ -357,13 +408,8 @@ function RenameAction({
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={!valid || !changed || rename.isPending || !online}
-          reason={
-            (online ? undefined : OFFLINE_WRITE_REASON) ??
-            (rename.isPending && valid && changed
-              ? ACT_PENDING_REASON
-              : undefined)
-          }
+          disabled={renameHeldReason !== undefined}
+          reason={renameHeldReason}
           onClick={handleRename}
         >
           {rename.isPending && <Spinner data-icon="inline-start" />}
@@ -740,7 +786,9 @@ function VisibilityAction({
         description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Change visibility"
-        disabled={target === info.visibility}
+        disabledReason={
+          target === info.visibility ? "Pick a different visibility" : undefined
+        }
         heldReason={online ? undefined : OFFLINE_WRITE_REASON}
         pending={setVisibility.isPending}
         onConfirm={handleChangeVisibility}
@@ -836,7 +884,7 @@ function TransferAction({
         description={copy.dialogDesc}
         confirmPhrase={info.fullName}
         confirmLabel="Transfer"
-        disabled={!newOwner.trim()}
+        disabledReason={newOwner.trim() ? undefined : copy.ownerMissing}
         heldReason={online ? undefined : OFFLINE_WRITE_REASON}
         pending={transfer.isPending}
         onConfirm={handleTransfer}

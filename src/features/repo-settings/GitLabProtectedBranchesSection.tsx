@@ -414,7 +414,8 @@ function ProtectBranchForm({
             disabled={!canProtect}
             reason={
               offlineReason ??
-              (protectBranch.isPending ? ACT_PENDING_REASON : undefined)
+              (protectBranch.isPending ? ACT_PENDING_REASON : undefined) ??
+              warning
             }
             onClick={submit}
           >

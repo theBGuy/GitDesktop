@@ -402,7 +402,8 @@ function ScheduleForm({
             disabled={!canSave}
             reason={
               offlineReason ??
-              (create.isPending ? ACT_PENDING_REASON : undefined)
+              (create.isPending ? ACT_PENDING_REASON : undefined) ??
+              warning
             }
             onClick={submit}
           >

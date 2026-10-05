@@ -793,7 +793,11 @@ function RulesetForm({
         <DisabledReasonButton
           onClick={save}
           disabled={pending || !d.name.trim() || !online}
-          reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
+          reason={
+            offlineReason ??
+            (pending ? ACT_PENDING_REASON : undefined) ??
+            (d.name.trim() ? undefined : "Enter a ruleset name")
+          }
         >
           {pending && <Spinner data-icon="inline-start" />}
           {id != null ? "Save ruleset" : "Create ruleset"}

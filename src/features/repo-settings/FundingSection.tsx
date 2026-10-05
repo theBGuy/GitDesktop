@@ -316,11 +316,18 @@ function FundingForm({
               Remove sponsor button
             </Button>
           ))}
-        {/* A form save under either label, so `!dirty` stays a native disable;
-            no offline rung, since FUNDING.yml is a local working-tree write. */}
+        {/* Every hold carries a reason, so Save keeps focus as a save settles the
+            form clean; no offline rung, since FUNDING.yml is a local write. */}
         <DisabledReasonButton
           disabled={!dirty || set.isPending}
-          reason={dirty && set.isPending ? ACT_PENDING_REASON : undefined}
+          reason={
+            (set.isPending ? ACT_PENDING_REASON : undefined) ??
+            (dirty
+              ? undefined
+              : exists
+                ? "No changes to save"
+                : "Add at least one sponsor link")
+          }
           onClick={save}
         >
           {set.isPending ? (

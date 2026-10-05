@@ -1,6 +1,6 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
@@ -223,6 +223,23 @@ function DependabotVersionUpdates({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const swapFocus = useConfirmSwapFocus();
+  const swapRemove = swapFocus();
+  // A create swaps "Set up…" for Remove while the dialog is still open, so the
+  // close resolves its focus return to whichever trigger is mounted by then.
+  const removeRef = useRef<HTMLButtonElement | null>(null);
+  const setUpRef = useRef<HTMLButtonElement | null>(null);
+  // Stable, so React never detaches and reattaches the swap ref between renders.
+  const removeTriggerRef = useCallback(
+    (node: HTMLButtonElement | null) => {
+      removeRef.current = node;
+      const cleanup = swapRemove(node);
+      return () => {
+        removeRef.current = null;
+        cleanup?.();
+      };
+    },
+    [swapRemove],
+  );
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -276,7 +293,7 @@ function DependabotVersionUpdates({
             </div>
           ) : (
             <Button
-              ref={swapFocus()}
+              ref={removeTriggerRef}
               variant="outline"
               size="sm"
               className="shrink-0"
@@ -288,6 +305,7 @@ function DependabotVersionUpdates({
           )
         ) : (
           <Button
+            ref={setUpRef}
             data-confirm-fallback
             variant="outline"
             size="sm"
@@ -303,6 +321,7 @@ function DependabotVersionUpdates({
         onOpenChange={setDialogOpen}
         pending={set.isPending}
         onCreate={handleCreate}
+        finalFocus={() => removeRef.current ?? setUpRef.current}
       />
     </div>
   );
@@ -313,11 +332,14 @@ function DependabotDialog({
   onOpenChange,
   pending,
   onCreate,
+  finalFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   pending: boolean;
   onCreate: (content: string) => void;
+  /** Where focus returns on close, resolved then; `null` keeps Base UI's own. */
+  finalFocus: () => HTMLElement | null;
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [interval, setInterval] = useState("weekly");
@@ -338,7 +360,7 @@ function DependabotDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent finalFocus={finalFocus}>
         <DialogHeader>
           <DialogTitle>Set up version updates</DialogTitle>
           <DialogDescription>
