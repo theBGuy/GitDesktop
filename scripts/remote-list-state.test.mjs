@@ -276,8 +276,9 @@ test("a park never hides a permanent verdict with nothing drawn", () => {
 });
 
 /** The review-comments notice, rung by rung. A failed refresh outranks a cap
- *  (its Retry can bring in newer threads); a cap outranks a park, since a
- *  reconnect re-reads the same cap. */
+ *  (its Retry can bring in newer threads); a cap outranks a park with no Retry,
+ *  since the flag can't tell a cap, which re-reads the same list, from a failed
+ *  reply top-up a refetch might fill in. */
 function expectedReviewNotice({
   threadCount,
   truncated,

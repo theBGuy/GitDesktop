@@ -4555,9 +4555,9 @@ test("the review prompt discloses an incomplete external review list", async () 
 });
 
 // A partial read whose findings all filtered away still discloses, as a header-only
-// section that never pulls in the clause vetting findings it doesn't carry; the own
-// and notes flags follow the same rule, and every flag unset keeps the prompt
-// byte-identical.
+// section that never pulls in the clause vetting findings it doesn't carry. The own
+// flag follows the same rule; the notes flag only rides beside lifted notes and never
+// renders a section of its own. Every flag unset keeps the prompt byte-identical.
 const EXTERNAL_HEADER_ONLY =
   "## Other AI reviewers\n[external review list may be incomplete — findings may exist that were not read]";
 const EXTERNAL_CLAUSE_HEAD = "You are ALSO given findings that OTHER";
