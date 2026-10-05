@@ -1646,11 +1646,14 @@ pub async fn forge_pr_external_reviews(
     repo_path: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<crate::github::pr::ExternalReviewItem>> {
+) -> AppResult<crate::github::pr::ExternalReviewsOut> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::external_reviews(&repo_path, number).await,
         // By design: no bot-review ecosystem posts on Bitbucket PRs — a permanent empty.
-        Some((Provider::Bitbucket, _)) => Ok(Vec::new()),
+        Some((Provider::Bitbucket, _)) => Ok(crate::github::pr::ExternalReviewsOut {
+            items: Vec::new(),
+            items_truncated: false,
+        }),
         _ => github::external_reviews(&repo_path, number, lens).await,
     }
 }

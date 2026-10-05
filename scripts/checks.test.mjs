@@ -4502,3 +4502,54 @@ test("the PR prompt's commits section matches generate.rs for a complete list", 
     hooks.deregister();
   }
 });
+
+// The review prompt's external section: a capped or partial forge read appends one
+// cause-neutral line, distinct from the budget's own truncation line; unset, the
+// prompt is byte-identical.
+const EXTERNAL_INCOMPLETE_LINE = "[external review list may be incomplete]";
+
+test("the review prompt discloses an incomplete external review list", async () => {
+  const hooks = installSrcHooks();
+  try {
+    const { buildReviewPrompt } = await import("@/lib/ai/prompt");
+    const base = {
+      title: "t",
+      body: "",
+      commitSubjects: [],
+      diffText: "diff --git a/x b/x\n+1\n",
+      diffTruncated: false,
+      files: [{ path: "x", added: 1, deleted: 0, isBinary: false }],
+      externalFindings: "### CodeRabbit\n- `x:1` — possible bug",
+      externalReviewers: ["CodeRabbit"],
+    };
+    const complete = buildReviewPrompt(base, "general").prompt;
+    assert.equal(
+      buildReviewPrompt({ ...base, externalIncomplete: false }, "general")
+        .prompt,
+      complete,
+    );
+    assert.ok(!complete.includes(EXTERNAL_INCOMPLETE_LINE));
+    const findingsEnd = `${base.externalFindings}\n\n`;
+    assert.ok(complete.includes(findingsEnd));
+    assert.equal(
+      buildReviewPrompt({ ...base, externalIncomplete: true }, "general")
+        .prompt,
+      complete.replace(
+        findingsEnd,
+        () => `${base.externalFindings}\n${EXTERNAL_INCOMPLETE_LINE}\n\n`,
+      ),
+    );
+    // Rides beside the stale line rather than replacing it.
+    const both = buildReviewPrompt(
+      { ...base, externalStale: true, externalIncomplete: true },
+      "general",
+    ).prompt;
+    assert.ok(
+      both.includes(
+        "\n[some findings were made against an earlier commit and may already be addressed]\n[external review list may be incomplete]\n\n",
+      ),
+    );
+  } finally {
+    hooks.deregister();
+  }
+});

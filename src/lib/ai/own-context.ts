@@ -295,7 +295,8 @@ export async function resolveOwnCommentsContext(
   try {
     // Origin-pinned: AI review context reads the fork's OWN PR; an upstream-lens
     // review is a separate follow-up.
-    items = await forgePrExternalReviews(repoPath, prNumber, "origin");
+    // `itemsTruncated` is deliberately unread here (deferred): a partial read reads as whole.
+    items = (await forgePrExternalReviews(repoPath, prNumber, "origin")).items;
   } catch {
     return {};
   }

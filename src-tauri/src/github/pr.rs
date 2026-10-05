@@ -6207,6 +6207,35 @@ pub struct ExternalReviewItem {
     pub created_at: String,
 }
 
+/// A bounded external-review read; consumers must not infer completeness from row
+/// count. `items_truncated` means the list MAY be incomplete (an exact-cap list can be whole).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalReviewsOut {
+    pub items: Vec<ExternalReviewItem>,
+    pub items_truncated: bool,
+}
+
+/// Whether any connection the external-reviews harvest reads reported a further page:
+/// the PR's reviews, review threads, and conversation comments, or any thread's inner
+/// comments. Absent `pageInfo` reads as false. The inner arm deliberately over-discloses
+/// for the external prompt section (which drops replies): the flag describes the items
+/// payload, replies included, for the wire's own honesty and its future consumers.
+fn external_reviews_truncated(pr: Option<&serde_json::Value>) -> bool {
+    let Some(pr) = pr else {
+        return false;
+    };
+    let more =
+        |v: &serde_json::Value, p: &str| v.pointer(p).and_then(|x| x.as_bool()).unwrap_or(false);
+    more(pr, "/reviews/pageInfo/hasNextPage")
+        || more(pr, "/reviewThreads/pageInfo/hasNextPage")
+        || more(pr, "/comments/pageInfo/hasNextPage")
+        || pr
+            .pointer("/reviewThreads/nodes")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ts| ts.iter().any(|t| more(t, "/comments/pageInfo/hasNextPage")))
+}
+
 /// Map the `reviewThreads/nodes` array onto `ExternalReviewItem`s — the pure core of
 /// `gh_pr_external_reviews`'s inline/reply harvest. Per thread: the first NON-EMPTY
 /// comment is the opener (`inline`); every non-empty comment after it is a `reply`
@@ -6290,14 +6319,14 @@ pub async fn gh_pr_external_reviews(
     repo_path: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<ExternalReviewItem>> {
+) -> AppResult<ExternalReviewsOut> {
     let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     validate_graphql_embed(&owner, "repository owner")?;
     validate_graphql_embed(&name, "repository name")?;
 
     // `number` is a u64 (digits only), so it's safe to embed directly.
     let query = format!(
-        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviews(first:50){{ nodes{{ author{{ login __typename }} body state submittedAt commit{{ oid }} }} }} reviewThreads(first:100){{ nodes{{ isResolved isOutdated path line originalLine comments(first:20){{ nodes{{ author{{ login __typename }} body createdAt commit{{ oid }} originalCommit{{ oid }} }} }} }} }} comments(first:100){{ nodes{{ author{{ login __typename }} body createdAt }} }} }} }} }}"#
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviews(first:50){{ pageInfo{{ hasNextPage }} nodes{{ author{{ login __typename }} body state submittedAt commit{{ oid }} }} }} reviewThreads(first:100){{ pageInfo{{ hasNextPage }} nodes{{ isResolved isOutdated path line originalLine comments(first:20){{ pageInfo{{ hasNextPage }} nodes{{ author{{ login __typename }} body createdAt commit{{ oid }} originalCommit{{ oid }} }} }} }} }} comments(first:100){{ pageInfo{{ hasNextPage }} nodes{{ author{{ login __typename }} body createdAt }} }} }} }} }}"#
     );
     let out = run_gh(
         Some(&repo_path),
@@ -6385,7 +6414,10 @@ pub async fn gh_pr_external_reviews(
         }
     }
 
-    Ok(items)
+    Ok(ExternalReviewsOut {
+        items,
+        items_truncated: external_reviews_truncated(pr),
+    })
 }
 
 /// Fetches the remaining replies of a review thread whose inner `comments(first:50)`
@@ -7009,7 +7041,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 mod tests {
     use super::{
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
-        external_items_from_thread_nodes, fallback_auth_outcome,
+        external_items_from_thread_nodes, external_reviews_truncated, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
@@ -10993,6 +11025,43 @@ github.acme.com
             ] },
         })];
         assert!(external_items_from_thread_nodes(&nodes).is_empty());
+    }
+
+    #[test]
+    fn external_reviews_truncated_reads_each_connections_has_next_page() {
+        let page = |more: bool| serde_json::json!({ "hasNextPage": more });
+        let pr = |reviews: bool, threads: bool| {
+            serde_json::json!({
+                "reviews": { "pageInfo": page(reviews), "nodes": [] },
+                "reviewThreads": { "pageInfo": page(threads), "nodes": [] },
+                "comments": { "pageInfo": page(false), "nodes": [] },
+            })
+        };
+        assert!(external_reviews_truncated(Some(&pr(true, false))));
+        assert!(external_reviews_truncated(Some(&pr(false, true))));
+        assert!(!external_reviews_truncated(Some(&pr(false, false))));
+
+        let conversation = serde_json::json!({ "comments": { "pageInfo": page(true) } });
+        assert!(external_reviews_truncated(Some(&conversation)));
+        let inner = serde_json::json!({ "reviewThreads": {
+            "pageInfo": page(false),
+            "nodes": [
+                { "comments": { "pageInfo": page(false), "nodes": [] } },
+                { "comments": { "pageInfo": page(true), "nodes": [] } },
+            ],
+        } });
+        assert!(external_reviews_truncated(Some(&inner)));
+    }
+
+    #[test]
+    fn external_reviews_truncated_defaults_false_without_page_info() {
+        let legacy = serde_json::json!({
+            "reviews": { "nodes": [] },
+            "reviewThreads": { "nodes": [{ "comments": { "nodes": [] } }] },
+            "comments": { "nodes": [] },
+        });
+        assert!(!external_reviews_truncated(Some(&legacy)));
+        assert!(!external_reviews_truncated(None));
     }
 
     /// Fixtures rather than a live gh: the false arm needs an org whose member

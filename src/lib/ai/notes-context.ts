@@ -38,7 +38,7 @@ export async function resolveReviewerNotesContext(
 ): Promise<{ reviewNotes?: string }> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) return {};
 
-  let items: Awaited<ReturnType<typeof forgePrExternalReviews>>;
+  let items: Awaited<ReturnType<typeof forgePrExternalReviews>>["items"];
   let prAuthor: string;
   try {
     // Origin-pinned, matching `own-context.ts`: notes belong to the fork's own PR.
@@ -47,7 +47,8 @@ export async function resolveReviewerNotesContext(
       forgePrExternalReviews(repoPath, prNumber, "origin"),
       forgePrView(repoPath, prNumber, "origin"),
     ]);
-    items = reviews;
+    // `itemsTruncated` is deliberately unread here (deferred): notes past a cap are missed.
+    items = reviews.items;
     prAuthor = pr.author;
   } catch {
     return {};

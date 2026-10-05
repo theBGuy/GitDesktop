@@ -206,7 +206,7 @@ export function useExternalReviews(repo: string, kind: PrKind, ref: string) {
     queryKey: ["external-reviews", repo, ref, provider ?? "pending"],
     queryFn: async () => {
       // Only runs when enabled, so provider is guaranteed a resolved non-Bitbucket value.
-      const items = await fetchExternalFindings(
+      const { items } = await fetchExternalFindings(
         repo,
         Number(ref),
         provider ?? undefined,

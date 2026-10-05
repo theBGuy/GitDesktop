@@ -38,9 +38,10 @@ use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
-    ExternalReviewItem, PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
-    PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrStackInfo, PrStackMember,
-    PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut, ReviewThreadsOut, STACKS_TIMEOUT,
+    ExternalReviewItem, ExternalReviewsOut, PrAuthor, PrCheckOut, PrCiStatus, PrCommitOut,
+    PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef,
+    PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut,
+    ReviewThreadsOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -5506,15 +5507,27 @@ where
 
 /// Third-party AI-reviewer findings on a merge request, mapped onto the same neutral
 /// shape GitHub uses — every non-system note of the MR's discussions.
-pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<Vec<ExternalReviewItem>> {
+pub async fn external_reviews(repo_path: &str, number: u64) -> AppResult<ExternalReviewsOut> {
     let enc = encode_project(&project_path(repo_path).await?);
-    // Callers choose tolerance: external reviews keep parsed pages on later failure.
-    // Truncation-flag consumption remains deferred; the wire shape stays a Vec.
     let (discussions, outcome) = fetch_mr_discussions(repo_path, &enc, number).await;
-    if discussions.is_empty() {
-        outcome?;
-    }
-    Ok(external_items_from_discussions(&discussions))
+    external_reviews_out(&discussions, outcome)
+}
+
+/// Callers choose tolerance: external reviews keep parsed pages on later failure,
+/// flagged as possibly incomplete; a failure with nothing read stays a hard error.
+fn external_reviews_out(
+    discussions: &[GlabDiscussion],
+    outcome: AppResult<bool>,
+) -> AppResult<ExternalReviewsOut> {
+    let items_truncated = match outcome {
+        Ok(capped) => capped,
+        Err(error) if discussions.is_empty() => return Err(error),
+        Err(_) => true,
+    };
+    Ok(ExternalReviewsOut {
+        items: external_items_from_discussions(discussions),
+        items_truncated,
+    })
 }
 
 /// File:line-anchored review threads on an MR — positioned diff-note discussions
@@ -13131,6 +13144,27 @@ mod tests {
         assert!(discussions.is_empty());
         assert!(!truncated);
         assert_eq!(requested, [1]);
+    }
+
+    #[tokio::test]
+    async fn external_reviews_flag_cap_hits_and_partial_reads_but_not_clean_reads() {
+        let full = || Some(discussions_page(DISCUSSIONS_PER_PAGE));
+        let flagged = |(discussions, outcome): (Vec<GlabDiscussion>, AppResult<bool>)| {
+            external_reviews_out(&discussions, outcome).map(|out| out.items_truncated)
+        };
+
+        let capped = vec![full(); MAX_DISCUSSION_PAGES as usize];
+        assert!(flagged(walk_discussions(capped).await.0).unwrap());
+
+        let (partial, requested) = walk_discussions(vec![full(), full(), None]).await;
+        assert_eq!(requested, [1, 2, 3]);
+        assert_eq!(partial.0.len(), 2 * DISCUSSIONS_PER_PAGE);
+        assert!(flagged(partial).unwrap());
+
+        let underfull = vec![full(), Some(discussions_page(DISCUSSIONS_PER_PAGE - 1))];
+        assert!(!flagged(walk_discussions(underfull).await.0).unwrap());
+
+        assert!(flagged(walk_discussions(vec![None]).await.0).is_err());
     }
 
     #[tokio::test]

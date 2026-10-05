@@ -247,7 +247,7 @@ pub async fn external_reviews(
     repo_path: &str,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<crate::github::pr::ExternalReviewItem>> {
+) -> AppResult<crate::github::pr::ExternalReviewsOut> {
     crate::github::pr::gh_pr_external_reviews(repo_path.to_string(), number, lens).await
 }
 

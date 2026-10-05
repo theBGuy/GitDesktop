@@ -132,3 +132,12 @@ export interface ExternalReviewItem {
   isOutdated: boolean;
   createdAt: string;
 }
+
+/** A PR's external review items, as one read returns them. */
+export interface ExternalReviewsOut {
+  items: ExternalReviewItem[];
+  /** True when the read hit a pagination cap or kept pages read before a failure,
+   *  so `items` may be partial (an exact-cap list can be complete). A failure with
+   *  nothing read rejects instead. */
+  itemsTruncated: boolean;
+}

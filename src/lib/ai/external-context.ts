@@ -16,6 +16,14 @@ export interface ExternalContext {
   /** Whether any included finding was made against an earlier commit (so the
    *  model — and the user — knows it may already be addressed). */
   externalStale?: boolean;
+  /** The forge read hit a cap or kept a partial read, so findings may be missing. */
+  externalIncomplete?: boolean;
+}
+
+/** The kept findings of one external-review read, and whether that read may be partial. */
+export interface ExternalFindings {
+  items: ExternalReviewItem[];
+  incomplete: boolean;
 }
 
 /** Known reviewer-bot logins → friendly display names. This allowlist is the only bot
@@ -78,10 +86,12 @@ function isReviewerFinding(
 
 /**
  * Fetches a PR's review activity and keeps only the third-party AI-reviewer findings.
- * Best-effort: any failure (no gh, network) yields an empty list — external context never
- * blocks a review. Runs behind the forge abstraction (`forge_pr_external_reviews`);
- * Bitbucket has no third-party AI-reviewer ecosystem and its Rust arm is an empty
- * no-network `[]`, so short-circuiting here also skips the IPC round trip.
+ * Best-effort: any failure (no gh, network) yields an empty list with no incomplete
+ * flag — external context never blocks a review. Runs behind the forge abstraction
+ * (`forge_pr_external_reviews`); Bitbucket has no third-party AI-reviewer ecosystem and
+ * its Rust arm is a no-network `{items: [], itemsTruncated: false}`, so short-circuiting
+ * here also skips the IPC round trip. `incomplete` carries the read's own truncation
+ * flag, not the filter's.
  *
  * Used by the panel's external-reviews query as well as `resolveExternalContext`.
  */
@@ -89,14 +99,17 @@ export async function fetchExternalFindings(
   repoPath: string,
   prNumber: number,
   provider: string = "github",
-): Promise<ExternalReviewItem[]> {
-  if (provider === "bitbucket") return [];
+): Promise<ExternalFindings> {
+  if (provider === "bitbucket") return { items: [], incomplete: false };
   try {
     // Origin-pinned: AI review context reads the fork's own PR, not the upstream lens.
-    const items = await forgePrExternalReviews(repoPath, prNumber, "origin");
-    return items.filter((item) => isReviewerFinding(item, provider));
+    const read = await forgePrExternalReviews(repoPath, prNumber, "origin");
+    return {
+      items: read.items.filter((item) => isReviewerFinding(item, provider)),
+      incomplete: read.itemsTruncated,
+    };
   } catch {
-    return [];
+    return { items: [], incomplete: false };
   }
 }
 
@@ -273,7 +286,11 @@ export async function resolveExternalContext(
   const prNumber = Number(ref);
   if (!Number.isInteger(prNumber) || prNumber <= 0) return {};
 
-  const items = await fetchExternalFindings(repoPath, prNumber, provider);
+  const { items, incomplete } = await fetchExternalFindings(
+    repoPath,
+    prNumber,
+    provider,
+  );
   if (items.length === 0) return {};
 
   const externalFindings = formatExternalFindings(
@@ -296,5 +313,6 @@ export async function resolveExternalContext(
     externalFindings,
     externalReviewers: externalReviewerNames(items),
     externalStale,
+    externalIncomplete: incomplete,
   };
 }

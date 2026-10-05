@@ -2153,8 +2153,9 @@ export function RemotePrView({
       // Grounded Jira mention candidates (Bitbucket + linked project); empty
       // unless the Jira cluster is active.
       canJiraMention ? buildJiraCandidates() : undefined,
-      // A partial commits list rides into the prompt as a disclosure line.
+      // Partial commits and files lists ride into the prompt as disclosure lines.
       prForGen.commitsUnknown,
+      prForGen.filesUnknown,
     );
   }
 
@@ -2965,6 +2966,7 @@ export function RemotePrView({
             body: pr.body,
             commitSubjects: pr.commits.map((c) => c.headline),
             commitsUnknown: pr.commitsUnknown,
+            filesUnknown: pr.filesUnknown,
             repoPath,
             // Scopes the run's per-PR stores (prior reviews, own-comments digest) to
             // the lens this view resolved — a fork's two lenses are different PRs.
