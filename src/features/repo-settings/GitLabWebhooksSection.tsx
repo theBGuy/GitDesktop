@@ -211,7 +211,7 @@ export function GitLabWebhooksSection({
                     size="sm"
                     variant="ghost"
                     title="Send a test push event"
-                    disabled={testHook.isPending || !online}
+                    disabled={testHeld(h.id) !== undefined}
                     reason={testHeld(h.id)}
                     onClick={() => handleTest(h.id)}
                   >
@@ -459,7 +459,6 @@ function HookDeliveries({
             delivery={d}
             expanded={expanded === d.id}
             onToggle={() => setExpanded(expanded === d.id ? null : d.id)}
-            resending={resend.isPending}
             resendHeld={resendHeld(d.id)}
             onResend={() => handleResend(d.id)}
           />
@@ -473,14 +472,12 @@ function DeliveryRow({
   delivery,
   expanded,
   onToggle,
-  resending,
   resendHeld,
   onResend,
 }: {
   delivery: GitLabHookDelivery;
   expanded: boolean;
   onToggle: () => void;
-  resending: boolean;
   /** Why Re-send is held. */
   resendHeld?: string;
   onResend: () => void;
@@ -517,7 +514,7 @@ function DeliveryRow({
           size="sm"
           variant="ghost"
           title="Re-send this delivery"
-          disabled={resending || resendHeld !== undefined}
+          disabled={resendHeld !== undefined}
           reason={resendHeld}
           onClick={onResend}
         >
