@@ -6420,73 +6420,73 @@ pub async fn gh_pr_external_reviews(
     })
 }
 
+/// One page of a review thread's remaining replies. Same comment field set the main
+/// `reviewThreads` query selects, so a topped-up reply maps identically to a first-page one.
+const THREAD_REPLIES_TOPUP_QUERY: &str = "query($id: ID!, $cursor: String){ node(id: $id){ ... on PullRequestReviewThread { comments(first: 100, after: $cursor){ pageInfo{ hasNextPage endCursor } nodes{ id author{ login } body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{ id } } } } } }";
+
 /// Fetches the remaining replies of a review thread whose inner `comments(first:50)`
-/// connection reported `hasNextPage`. Node id and cursor are server-opaque, so both
-/// travel as GraphQL VARIABLES, never `format!`-embedded. Bounded at 5 extra pages
-/// (500 replies) — past that the tail truncates rather than looping. `map` is the
-/// main query's per-comment mapper, so shapes agree. Best-effort: callers keep the
+/// connection reported `hasNextPage`, one `fetch_page(thread_id, cursor)` call per page.
+/// Bounded at 5 extra pages (500 replies) — past that the tail truncates rather than
+/// looping. Returns the rows plus whether replies remain unread (the bound hit, a page
+/// reported more without a cursor, or a page carried no comments connection). `map` is
+/// the main query's per-comment mapper, so shapes agree. Best-effort: callers keep the
 /// first 50 on any error.
-async fn gh_thread_comment_replies_topup(
-    repo_path: &str,
+async fn gh_thread_comment_replies_topup<G, Fut>(
     thread_id: &str,
     after: &str,
+    fetch_page: &mut G,
     map: impl Fn(&serde_json::Value) -> PrThreadOut,
-) -> AppResult<Vec<PrThreadOut>> {
-    // Same comment field set the main `reviewThreads` query selects, so a topped-up
-    // reply maps identically to a first-page one.
-    const QUERY: &str = "query($id: ID!, $cursor: String){ node(id: $id){ ... on PullRequestReviewThread { comments(first: 100, after: $cursor){ pageInfo{ hasNextPage endCursor } nodes{ id author{ login } body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{ id } } } } } }";
+) -> AppResult<(Vec<PrThreadOut>, bool)>
+where
+    G: FnMut(String, String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
     let mut extra: Vec<PrThreadOut> = Vec::new();
     let mut cursor = after.to_string();
+    let mut more = false;
     for _ in 0..5 {
-        let out = run_gh(
-            Some(repo_path),
-            &[
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={QUERY}"),
-                "-f",
-                &format!("id={thread_id}"),
-                "-f",
-                &format!("cursor={cursor}"),
-            ],
-            GH_NETWORK_TIMEOUT,
-        )
-        .await?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        let page = fetch_page(thread_id.to_string(), cursor.clone()).await?;
+        let value: serde_json::Value = serde_json::from_str(&page).map_err(|e| {
             gh_unreadable(
                 "the review replies",
                 format!("could not parse the review-thread replies: {e}"),
             )
         })?;
-        let comments = value.pointer("/data/node/comments");
-        if let Some(nodes) = comments
-            .and_then(|c| c.pointer("/nodes"))
-            .and_then(|v| v.as_array())
-        {
+        // A page with no readable comments connection (e.g. `node: null`) can't say the
+        // replies ended, so it fails safe: they count as remaining.
+        let Some(comments) = value
+            .pointer("/data/node/comments")
+            .filter(|c| c.is_object())
+        else {
+            more = true;
+            break;
+        };
+        if let Some(nodes) = comments.pointer("/nodes").and_then(|v| v.as_array()) {
             extra.extend(nodes.iter().map(&map));
         }
         let has_next = comments
-            .and_then(|c| c.pointer("/pageInfo/hasNextPage"))
+            .pointer("/pageInfo/hasNextPage")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let end_cursor = comments
-            .and_then(|c| c.pointer("/pageInfo/endCursor"))
+            .pointer("/pageInfo/endCursor")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        more = has_next;
         if !has_next || end_cursor.is_empty() {
             break;
         }
         cursor = end_cursor.to_string();
     }
-    Ok(extra)
+    Ok((extra, more))
 }
 
 /// File:line-anchored review threads on a PR — GitHub's `reviewThreads` mapped onto
 /// the neutral `ReviewThreadOut`, each with its full reply chain (oldest first).
 /// Empty-comment threads are skipped; line falls back to `originalLine`, then 0.
 /// Follows the cursor up to 5 pages (500 threads). A thread with >50 replies is
-/// topped up via [`gh_thread_comment_replies_topup`].
+/// topped up via [`gh_thread_comment_replies_topup`]; replies it cannot read in full
+/// report through `threads_truncated` as well.
 pub async fn gh_pr_review_threads(
     repo_path: String,
     number: u64,
@@ -6503,32 +6503,66 @@ pub async fn gh_pr_review_threads(
         r#"query($cursor: String){{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ reviewThreads(first:100, after:$cursor){{ pageInfo{{ endCursor hasNextPage }} nodes{{ id isResolved isOutdated diffSide line originalLine startLine originalStartLine path comments(first:50){{ pageInfo{{ hasNextPage endCursor }} nodes{{ id author{{ login }} body createdAt url viewerDidAuthor isMinimized minimizedReason diffHunk pullRequestReview{{ id }} }} }} }} }} }} }} }}"#
     );
 
-    gh_review_threads_paged(&repo_path, |cursor| {
-        let repo_path = &repo_path;
-        let query = &query;
-        async move {
-            // Omit the first cursor: an absent GraphQL variable is null.
-            let mut args: Vec<String> =
-                vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
-            if let Some(c) = cursor {
-                args.push("-f".into());
-                args.push(format!("cursor={c}"));
+    gh_review_threads_paged(
+        |cursor| {
+            let repo_path = &repo_path;
+            let query = &query;
+            async move {
+                // Omit the first cursor: an absent GraphQL variable is null.
+                let mut args: Vec<String> = vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "-f".into(),
+                    format!("query={query}"),
+                ];
+                if let Some(c) = cursor {
+                    args.push("-f".into());
+                    args.push(format!("cursor={c}"));
+                }
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let out = run_gh(Some(repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+                Ok(out.stdout_lossy())
             }
-            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let out = run_gh(Some(repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-            Ok(out.stdout_lossy())
-        }
-    })
+        },
+        |thread_id, cursor| {
+            let repo_path = &repo_path;
+            async move {
+                // Node id and cursor are server-opaque, so both travel as GraphQL
+                // VARIABLES, never `format!`-embedded into the query.
+                let out = run_gh(
+                    Some(repo_path),
+                    &[
+                        "api",
+                        "graphql",
+                        "-f",
+                        &format!("query={THREAD_REPLIES_TOPUP_QUERY}"),
+                        "-f",
+                        &format!("id={thread_id}"),
+                        "-f",
+                        &format!("cursor={cursor}"),
+                    ],
+                    GH_NETWORK_TIMEOUT,
+                )
+                .await?;
+                Ok(out.stdout_lossy())
+            }
+        },
+    )
     .await
 }
 
-async fn gh_review_threads_paged<F, Fut>(
-    repo_path: &str,
+/// The paging core of [`gh_pr_review_threads`]: `fetch_page(cursor)` returns one
+/// `reviewThreads` page, `fetch_replies_page(thread_id, cursor)` one top-up page of a
+/// thread's replies — both injectable so the walk is testable without `gh`.
+async fn gh_review_threads_paged<F, Fut, G, GFut>(
     mut fetch_page: F,
+    mut fetch_replies_page: G,
 ) -> AppResult<ReviewThreadsOut>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
+    G: FnMut(String, String) -> GFut,
+    GFut: std::future::Future<Output = AppResult<String>>,
 {
     let str_at = |v: &serde_json::Value, p: &str| {
         v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string()
@@ -6558,6 +6592,9 @@ where
     let mut threads: Vec<ReviewThreadOut> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut threads_truncated = false;
+    // Kept apart from `threads_truncated`, which every page reassigns: a partial reply
+    // chain on an early page must survive the later pages. Folded in at the return.
+    let mut replies_truncated = false;
     // Bounded at 5 pages (500 threads) — a larger PR truncates rather than looping.
     for _ in 0..5 {
         let value: serde_json::Value = serde_json::from_str(&fetch_page(cursor).await?).map_err(|e| {
@@ -6583,17 +6620,27 @@ where
                     continue;
                 }
                 // >50 replies: top up from the thread's node id (see
-                // `gh_thread_comment_replies_topup`). Best-effort — keep the first 50 on error.
-                let inner_has_next = bool_at(t, "/comments/pageInfo/hasNextPage");
-                let inner_cursor = str_at(t, "/comments/pageInfo/endCursor");
-                if inner_has_next && !inner_cursor.is_empty() {
+                // `gh_thread_comment_replies_topup`). Best-effort — keep the first 50 on
+                // error — but every way the rest goes unread is reported, never silent.
+                if bool_at(t, "/comments/pageInfo/hasNextPage") {
+                    let inner_cursor = str_at(t, "/comments/pageInfo/endCursor");
                     let thread_id = str_at(t, "/id");
-                    if !thread_id.is_empty() {
-                        if let Ok(extra) =
-                            gh_thread_comment_replies_topup(repo_path, &thread_id, &inner_cursor, &map_comment)
-                                .await
+                    if inner_cursor.is_empty() || thread_id.is_empty() {
+                        replies_truncated = true;
+                    } else {
+                        match gh_thread_comment_replies_topup(
+                            &thread_id,
+                            &inner_cursor,
+                            &mut fetch_replies_page,
+                            &map_comment,
+                        )
+                        .await
                         {
-                            comments.extend(extra);
+                            Ok((extra, more)) => {
+                                comments.extend(extra);
+                                replies_truncated |= more;
+                            }
+                            Err(_) => replies_truncated = true,
                         }
                     }
                 }
@@ -6655,7 +6702,7 @@ where
     }
     Ok(ReviewThreadsOut {
         threads,
-        threads_truncated,
+        threads_truncated: threads_truncated || replies_truncated,
     })
 }
 
@@ -7603,21 +7650,126 @@ mod tests {
     ) -> (super::ReviewThreadsOut, Vec<Option<String>>) {
         let mut pages = pages.into_iter();
         let mut requested = Vec::new();
-        let result = super::gh_review_threads_paged("", |cursor| {
-            requested.push(cursor);
-            let (has_next, end_cursor) = pages.next().expect("unexpected page request");
-            let body = serde_json::json!({
-                "data": {"repository": {"pullRequest": {"reviewThreads": {
-                    "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
-                    "nodes": [{"id": end_cursor, "comments": {"nodes": [{"body": "comment"}]}}],
-                }}}}
-            })
-            .to_string();
-            async move { Ok(body) }
-        })
+        let result = super::gh_review_threads_paged(
+            |cursor| {
+                requested.push(cursor);
+                let (has_next, end_cursor) = pages.next().expect("unexpected page request");
+                let body = serde_json::json!({
+                    "data": {"repository": {"pullRequest": {"reviewThreads": {
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                        "nodes": [{"id": end_cursor, "comments": {"nodes": [{"body": "comment"}]}}],
+                    }}}}
+                })
+                .to_string();
+                async move { Ok(body) }
+            },
+            |_, _| -> std::future::Ready<super::AppResult<String>> {
+                panic!("unexpected reply top-up")
+            },
+        )
         .await
         .unwrap();
         (result, requested)
+    }
+
+    /// One complete threads page holding a single thread whose first reply page
+    /// reports more (`inner_cursor`), with `replies(call)` standing in for each top-up
+    /// page. Returns the read and every `(thread id, cursor)` the top-up requested.
+    async fn walk_thread_with_more_replies(
+        thread_id: &str,
+        inner_cursor: &str,
+        mut replies: impl FnMut(usize) -> super::AppResult<String>,
+    ) -> (super::ReviewThreadsOut, Vec<(String, String)>) {
+        let page = serde_json::json!({
+            "data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": false, "endCursor": "t"},
+                "nodes": [{"id": thread_id, "comments": {
+                    "pageInfo": {"hasNextPage": true, "endCursor": inner_cursor},
+                    "nodes": [{"body": "opener"}],
+                }}],
+            }}}}
+        })
+        .to_string();
+        let mut requested = Vec::new();
+        let result = super::gh_review_threads_paged(
+            |_| std::future::ready(Ok(page.clone())),
+            |id, cursor| {
+                requested.push((id, cursor));
+                std::future::ready(replies(requested.len()))
+            },
+        )
+        .await
+        .unwrap();
+        (result, requested)
+    }
+
+    fn reply_page(has_next: bool, end_cursor: &str) -> super::AppResult<String> {
+        Ok(serde_json::json!({"data": {"node": {"comments": {
+            "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+            "nodes": [{"body": "reply"}],
+        }}}})
+        .to_string())
+    }
+
+    #[tokio::test]
+    async fn review_threads_stay_complete_when_the_reply_top_up_finishes() {
+        let (result, requested) =
+            walk_thread_with_more_replies("T1", "c0", |_| reply_page(false, "")).await;
+        assert!(!result.threads_truncated);
+        assert_eq!(result.threads[0].comments.len(), 2);
+        assert_eq!(requested, vec![("T1".into(), "c0".into())]);
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_replies_a_failed_top_up_left_unread() {
+        let (result, requested) = walk_thread_with_more_replies("T1", "c0", |_| {
+            Err(super::AppError::Gh("network".into()))
+        })
+        .await;
+        assert!(result.threads_truncated);
+        assert_eq!(result.threads[0].comments.len(), 1);
+        assert_eq!(requested.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_replies_a_top_up_page_could_not_read() {
+        for page in [
+            serde_json::json!({"data": {"node": null}}),
+            serde_json::json!({"data": {"node": {"comments": null}}}),
+            serde_json::json!({"data": {"node": {}}}),
+        ] {
+            let page = page.to_string();
+            let (result, requested) =
+                walk_thread_with_more_replies("T1", "c0", |_| Ok(page.clone())).await;
+            assert!(result.threads_truncated, "{page}");
+            assert_eq!(result.threads[0].comments.len(), 1);
+            assert_eq!(requested.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_replies_without_a_cursor_or_thread_id() {
+        for (thread_id, inner_cursor) in [("T1", ""), ("", "c0")] {
+            let (result, requested) =
+                walk_thread_with_more_replies(thread_id, inner_cursor, |_| {
+                    panic!("unexpected reply top-up")
+                })
+                .await;
+            assert!(result.threads_truncated);
+            assert_eq!(result.threads[0].comments.len(), 1);
+            assert!(requested.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn review_threads_report_replies_past_the_top_up_page_cap() {
+        let (result, requested) =
+            walk_thread_with_more_replies("T1", "c0", |call| reply_page(true, &format!("c{call}")))
+                .await;
+        assert!(result.threads_truncated);
+        assert_eq!(result.threads[0].comments.len(), 6);
+        let cursors: Vec<&str> = requested.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(cursors, vec!["c0", "c1", "c2", "c3", "c4"]);
     }
 
     #[tokio::test]

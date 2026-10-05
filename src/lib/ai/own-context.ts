@@ -29,6 +29,10 @@ export interface OwnCommentsContext {
    *  rather than the raw per-comment blocks — flips the prompt's own-section
    *  preamble so the model frames it as a compressed summary. */
   ownDistilled?: boolean;
+  /** The forge read hit a cap or kept a partial read, so our own comments may be
+   *  missing — set with or without `ownItems`. Never part of the distilled text,
+   *  so the distill fingerprint and cache don't see it. */
+  ownIncomplete?: boolean;
 }
 
 /** Per-comment body FLOOR under the fair-share allocator: every comment is
@@ -265,7 +269,8 @@ function formatOwnComments(
  * re-review doesn't cold-raise something already addressed. Our own posted AI review
  * bodies are excluded (redundant with the prior-review section). Best-effort and
  * remote-only, mirroring `resolveExternalContext`: a non-remote kind, non-numeric ref,
- * Bitbucket (no review-activity harvest), or any fetch failure yields `{}`.
+ * Bitbucket (no review-activity harvest), or any fetch failure yields `{}`; a partial
+ * read with no own comments yields `{ ownIncomplete: true }`.
  *
  * Detection keys off the shared `https://gitdesktop.app` footer anchor in the comment
  * BODY, not the author — the frontend review posts under the user's own account while
@@ -292,16 +297,24 @@ export async function resolveOwnCommentsContext(
   if (!Number.isInteger(prNumber) || prNumber <= 0) return {};
 
   let items: ExternalReviewItem[];
+  let truncated: boolean;
   try {
     // Origin-pinned: AI review context reads the fork's OWN PR; an upstream-lens
     // review is a separate follow-up.
-    // `itemsTruncated` is deliberately unread here (deferred): a partial read reads as whole.
-    items = (await forgePrExternalReviews(repoPath, prNumber, "origin")).items;
+    const read = await forgePrExternalReviews(repoPath, prNumber, "origin");
+    items = read.items;
+    truncated = read.itemsTruncated;
   } catch {
+    // A failed read is not a partial one: it discloses nothing, like
+    // `fetchExternalFindings`.
     return {};
   }
+  // Rides beside the distilled text on every return below, never inside it.
+  const incomplete: OwnCommentsContext = truncated
+    ? { ownIncomplete: true }
+    : {};
   const own = items.filter((it) => it.body.includes(GD_COMMENT_ANCHOR));
-  if (own.length === 0) return {};
+  if (own.length === 0) return incomplete;
 
   // The per-comment caps, the distill trigger, and the ledger cap all key off the SAME
   // budget as the rest of the prompt (the user's Review-context knob, threaded in as
@@ -315,7 +328,7 @@ export async function resolveOwnCommentsContext(
     uncappedLen,
     survivors,
   } = formatOwnComments(own, budget);
-  if (ownItems.length === 0) return {};
+  if (ownItems.length === 0) return incomplete;
 
   // Over-budget own comments accumulate across rounds until even recency-first
   // selection drops recorded decisions, so distill ALL of them into a compact
@@ -410,6 +423,7 @@ export async function resolveOwnCommentsContext(
         return {
           ownItems: [capLedger(cached.ledger, budget)],
           ownDistilled: true,
+          ...incomplete,
         };
       }
       // No usable ledger, but we may already have tried these exact comments and
@@ -420,7 +434,7 @@ export async function resolveOwnCommentsContext(
         cached?.failed?.fingerprint === fingerprint &&
         Date.now() - cached.failed.at < DISTILL_RETRY_AFTER_MS
       ) {
-        return { ownItems };
+        return { ownItems, ...incomplete };
       }
 
       const ledger = await distillOwnComments({
@@ -444,7 +458,7 @@ export async function resolveOwnCommentsContext(
           model: attemptedModel,
           createdAt: Date.now(),
         }).catch(() => undefined);
-        return { ownItems: [capped], ownDistilled: true };
+        return { ownItems: [capped], ownDistilled: true, ...incomplete };
       }
       // Model produced nothing usable. Costs the same full ceiling as a throw, so
       // it is remembered the same way rather than retried every re-review.
@@ -458,7 +472,7 @@ export async function resolveOwnCommentsContext(
     }
   }
 
-  return { ownItems };
+  return { ownItems, ...incomplete };
 }
 
 /** Safety net: hard-cap the distilled ledger at the resolved own-comments budget (the

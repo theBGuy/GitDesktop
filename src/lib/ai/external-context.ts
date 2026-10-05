@@ -16,7 +16,8 @@ export interface ExternalContext {
   /** Whether any included finding was made against an earlier commit (so the
    *  model — and the user — knows it may already be addressed). */
   externalStale?: boolean;
-  /** The forge read hit a cap or kept a partial read, so findings may be missing. */
+  /** The forge read hit a cap or kept a partial read, so findings may be missing.
+   *  Also set alone, with no findings, when nothing in a partial read survived. */
   externalIncomplete?: boolean;
 }
 
@@ -266,7 +267,8 @@ function formatExternalFindings(
 /**
  * Loads third-party AI-reviewer findings for a remote PR and formats them as soft context.
  * Remote-only (local PRs have no remote reviewers) and best-effort — `ignore`, a non-remote
- * kind, a non-numeric ref, or any fetch failure yields `{}`. Mirrors `resolvePriorContext`:
+ * kind, a non-numeric ref, or any fetch failure yields `{}`; a partial read with no
+ * surviving findings yields `{ externalIncomplete: true }`. Mirrors `resolvePriorContext`:
  * takes primitives, never throws, never the source of truth.
  *
  * `opts.budgetChars` is the section budget the per-finding caps are fair-shared across —
@@ -291,13 +293,16 @@ export async function resolveExternalContext(
     prNumber,
     provider,
   );
-  if (items.length === 0) return {};
+  // A partial read with no surviving findings still discloses: there, an empty
+  // section is not evidence that no reviewer flagged anything.
+  if (items.length === 0) return incomplete ? { externalIncomplete: true } : {};
 
   const externalFindings = formatExternalFindings(
     items,
     opts?.budgetChars ?? EXTERNAL_FINDINGS_CHAR_BUDGET,
   );
-  if (!externalFindings.trim()) return {};
+  if (!externalFindings.trim())
+    return incomplete ? { externalIncomplete: true } : {};
 
   // Stale = an included finding was made against a commit other than the current
   // head, or GitHub already flagged its anchored line as outdated.

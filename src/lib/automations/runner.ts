@@ -8,7 +8,10 @@ import {
   resolveExternalContext,
 } from "@/lib/ai/external-context";
 import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
-import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
+import {
+  type ReviewerNotesContext,
+  resolveReviewerNotesContext,
+} from "@/lib/ai/notes-context";
 import {
   type OwnCommentsContext,
   resolveOwnCommentsContext,
@@ -1534,7 +1537,7 @@ async function generateReviewText(
   const [external, own, resolvedNotes]: [
     ExternalContext,
     OwnCommentsContext,
-    { reviewNotes?: string },
+    ReviewerNotesContext,
   ] = isRemotePr
     ? await Promise.all([
         resolveExternalContext(
@@ -1570,7 +1573,9 @@ async function generateReviewText(
   const [docs, repoInstructions] = await repoContext;
   if (signal.aborted) return null;
 
-  const notes = eventNotes ?? resolvedNotes;
+  // Event-carried notes never take `reviewNotesIncomplete`: that caveat describes the
+  // resolved read, not the event payload, so it must not ride along when the event wins.
+  const notes: ReviewerNotesContext = eventNotes ?? resolvedNotes;
 
   const { system, prompt } = buildReviewPrompt(
     {

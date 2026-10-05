@@ -226,8 +226,9 @@ impl GitDesktopMcp {
                        means the list may be partial and retrying returns the same list. \
                        `reviewersUnknown` means reviewer verdicts could not be fully read; \
                        on GitHub, `reviews` may then be partial. `threadsTruncated` means the \
-                       review-threads read hit a cap (`review_threads` may be partial and retrying \
-                       returns the same list). \
+                       review-threads read hit a cap or a thread's replies could not all be read \
+                       (`review_threads` may be partial; retrying may fill in replies but not \
+                       threads past the cap). \
                        Read-only; returns JSON. (For the PR's \
                        metadata + changed files use get_pull_request; for its diff, \
                        pull_request_diff.)"
