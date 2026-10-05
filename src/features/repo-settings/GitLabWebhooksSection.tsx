@@ -37,6 +37,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -95,6 +96,21 @@ export function GitLabWebhooksSection({
       toastError(e);
     }
   }
+
+  // One `testHook` mutation serves every row, so the hook id it sent names the
+  // row whose own write is in flight.
+  const testHeld = (hookId: string) => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case testHook.isPending && testHook.variables?.hookId === hookId:
+        return ACT_PENDING_REASON;
+      case testHook.isPending:
+        return SAVING_REASON;
+      default:
+        return undefined;
+    }
+  };
 
   async function handleTest(hookId: string) {
     try {
@@ -196,7 +212,7 @@ export function GitLabWebhooksSection({
                     variant="ghost"
                     title="Send a test push event"
                     disabled={testHook.isPending || !online}
-                    reason={online ? undefined : OFFLINE_WRITE_REASON}
+                    reason={testHeld(h.id)}
                     onClick={() => handleTest(h.id)}
                   >
                     <ArrowClockwiseIcon />
@@ -389,6 +405,21 @@ function HookDeliveries({
   const online = useOnline();
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  // One `resend` mutation serves every row, so the event id it sent names the
+  // row whose own write is in flight.
+  const resendHeld = (eventId: string) => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case resend.isPending && resend.variables === eventId:
+        return ACT_PENDING_REASON;
+      case resend.isPending:
+        return SAVING_REASON;
+      default:
+        return undefined;
+    }
+  };
+
   async function handleResend(eventId: string) {
     try {
       await resend.mutateAsync(eventId);
@@ -429,7 +460,7 @@ function HookDeliveries({
             expanded={expanded === d.id}
             onToggle={() => setExpanded(expanded === d.id ? null : d.id)}
             resending={resend.isPending}
-            resendHeld={online ? undefined : OFFLINE_WRITE_REASON}
+            resendHeld={resendHeld(d.id)}
             onResend={() => handleResend(d.id)}
           />
         ))}

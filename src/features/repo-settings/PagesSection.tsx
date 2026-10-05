@@ -36,6 +36,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
+  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 import {
@@ -294,6 +295,13 @@ function PagesEnabled({
     }
   })();
 
+  // Update, Save and the HTTPS switch share one `update` mutation, so the field
+  // a pending write sent identifies the control that owns it.
+  const updateHeld = (field: "branch" | "cname") =>
+    update.variables?.[field] !== undefined
+      ? ACT_PENDING_REASON
+      : SAVING_REASON;
+
   async function handleUpdateSource() {
     const at = dataUpdatedAt;
     try {
@@ -400,7 +408,12 @@ function PagesEnabled({
               disabled={
                 !sourceChanged || !branch || update.isPending || !online
               }
-              reason={offlineReason}
+              reason={
+                offlineReason ??
+                (update.isPending && sourceChanged && branch
+                  ? updateHeld("branch")
+                  : undefined)
+              }
               onClick={handleUpdateSource}
             >
               Update
@@ -425,7 +438,12 @@ function PagesEnabled({
             size="sm"
             variant="outline"
             disabled={cname === pages.cname || update.isPending || !online}
-            reason={offlineReason}
+            reason={
+              offlineReason ??
+              (update.isPending && cname !== pages.cname
+                ? updateHeld("cname")
+                : undefined)
+            }
             onClick={handleSaveDomain}
           >
             Save

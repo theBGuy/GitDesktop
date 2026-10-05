@@ -782,9 +782,14 @@ function RulesetForm({
       </LabeledGroup>
 
       <div className="flex items-center justify-end gap-2 pt-1">
-        <Button variant="outline" onClick={onDone} disabled={pending}>
+        <DisabledReasonButton
+          variant="outline"
+          onClick={onDone}
+          disabled={pending}
+          reason={pending ? SAVING_REASON : undefined}
+        >
           Cancel
-        </Button>
+        </DisabledReasonButton>
         <DisabledReasonButton
           onClick={save}
           disabled={pending || !d.name.trim() || !online}

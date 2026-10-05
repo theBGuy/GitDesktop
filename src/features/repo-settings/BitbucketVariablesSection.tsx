@@ -290,22 +290,26 @@ function VariableRow({
   const syncing = variable.uuid.startsWith("pending:");
   const online = useOnline();
   const swapFocus = useConfirmSwapFocus();
-  const saveHeldReason = (() => {
-    switch (true) {
-      case syncing:
-        return "Syncing with Bitbucket…";
-      case !online:
-        return OFFLINE_WRITE_REASON;
-      default:
-        return undefined;
-    }
-  })();
   // A secured variable's stored value never comes back, so an empty draft on a
   // secured row means "keep it" — only a non-empty draft (or a secure-state
   // change) is a real edit.
   const dirty = variable.secured
     ? draft.length > 0 || secure !== variable.secured
     : draft !== (variable.value ?? "") || secure !== variable.secured;
+  const saveHeldReason = (() => {
+    switch (true) {
+      case syncing:
+        return "Syncing with Bitbucket…";
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      // Each row owns its update mutation (GitLab's rows share one, so theirs
+      // says SAVING_REASON): a pending hold here is always this row's write.
+      case update.isPending && dirty:
+        return ACT_PENDING_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   async function save() {
     try {
@@ -322,7 +326,9 @@ function VariableRow({
       });
       onReconcile();
       toast.success(`Updated ${variable.key}`);
-      setDraft("");
+      // Only a secured value is never echoed back; a plain row keeps the saved
+      // text so `dirty` settles false.
+      if (secure) setDraft("");
     } catch (e) {
       toastError(e);
     }

@@ -43,7 +43,11 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { DescriptionField } from "./DescriptionField";
-import { OFFLINE_WRITE_REASON, RemoteFormSection } from "./parts";
+import {
+  ACT_PENDING_REASON,
+  OFFLINE_WRITE_REASON,
+  RemoteFormSection,
+} from "./parts";
 import { GITHUB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
@@ -590,7 +594,12 @@ function GeneralForm({
           disabled={
             !dirty || !mergeValid || update.isPending || busy || !online
           }
-          reason={online ? undefined : OFFLINE_WRITE_REASON}
+          reason={
+            (online ? undefined : OFFLINE_WRITE_REASON) ??
+            (update.isPending && dirty && mergeValid && !busy
+              ? ACT_PENDING_REASON
+              : undefined)
+          }
           onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}
