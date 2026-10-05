@@ -72,7 +72,10 @@ ancestry, the re-merge trap below is not yours either.)
 
 `-m` answers Git's question by number. `git revert -m 1` says: treat
 parent 1 as the line to keep, and undo what the merge brought in
-from the other side. On `main`, that is almost always the answer.
+from the other side — precisely, everything that distinguishes the
+merge's tree from that parent, hand-made conflict resolutions
+included. `git diff e1c284b^1 e1c284b` previews exactly what the
+revert will take out. On `main`, `-m 1` is almost always the answer.
 
 `-m 2` is the other answer, and on `main` it backfires: it keeps the
 branch's side and undoes what came in from parent 1, stripping out
@@ -82,7 +85,7 @@ notification code in place, the exact opposite of the goal. (Already
 ran it? That bad revert is an ordinary commit — revert it and the
 tree is back where you started.)
 
-## What -m 1 undoes
+## What `-m 1` undoes
 
 Revert refuses to start if the index is dirty or the files it will
 touch carry unstaged edits, so commit or stash anything in flight
@@ -194,8 +197,9 @@ $ git revert --no-edit 1141f0a
  create mode 100644 notify.js
 ```
 
-Git titles it for you: a revert of a revert is a `Reapply`. The tree
-is whole again:
+Git titles it for you: since 2.43, a revert of a revert is a
+`Reapply` (older releases stack `Revert "Revert …"` instead). The
+tree is whole again:
 
 ```sh
 $ cat app.js
