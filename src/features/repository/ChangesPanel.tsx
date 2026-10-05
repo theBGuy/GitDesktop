@@ -34,6 +34,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
+import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import { markNeedsConfirm } from "@/lib/git/conflict-parse";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -61,7 +63,7 @@ import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { flattenPathTree } from "@/lib/path-tree";
+import { flattenPathTree, pathBasename } from "@/lib/path-tree";
 import { CHANGES_VIEW_MODES } from "@/lib/settings/api";
 import {
   useAiEnabled,
@@ -69,6 +71,7 @@ import {
   useSaveSettings,
   useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
@@ -94,6 +97,93 @@ function unstagePaths(entry: FileEntry): string[] {
  *  and aborts the whole pathspec batch — every stage path filters these out. */
 function canStage(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) === null;
+}
+
+function isConflicted(entry: FileEntry): boolean {
+  return entry.unstaged === "conflicted" || entry.staged === "conflicted";
+}
+
+/** A conflicted file a stage would carry markers into; `unchecked` = its sides
+ *  read failed, for any cause (oversize, binary, a git error). */
+interface MarkerFlag {
+  name: string;
+  unchecked: boolean;
+}
+
+/** Up to three base names, else a count. */
+function flaggedNames(flags: MarkerFlag[]): string {
+  return flags.length <= 3
+    ? flags.map((f) => f.name).join(", ")
+    : `${flags.length} files`;
+}
+
+/** The stage-over-markers prompt; one file reads exactly as Mark resolved's. A
+ *  `bulk` action never titles itself after one file, since it stages more. */
+function markerStagePrompt(flags: MarkerFlag[], bulk: boolean) {
+  const marked = flags.filter((f) => !f.unchecked);
+  const unchecked = flags.filter((f) => f.unchecked);
+  const markers =
+    unchecked.length > 0 ? "possible conflict markers" : "conflict markers";
+  const which = unchecked.length > 0 ? "any" : "the";
+  const one = flags.length === 1;
+  const clauses: string[] = [];
+  if (marked.length > 0)
+    clauses.push(
+      `${flaggedNames(marked)} still ${marked.length === 1 ? "has" : "have"} conflict markers.`,
+    );
+  if (unchecked.length > 0)
+    clauses.push(
+      `${flaggedNames(unchecked)} couldn't be checked for conflict markers.`,
+    );
+  clauses.push(
+    one
+      ? `Staging it marks the conflict resolved with ${which} markers in the file, and they'll be committed unless you remove them first.`
+      : `Staging them marks those conflicts resolved with ${which} markers in the files, and they'll be committed unless you remove them first.`,
+  );
+  return {
+    title:
+      one && !bulk
+        ? `Stage ${flags[0].name} with ${markers}?`
+        : `Stage files with ${markers}?`,
+    body: clauses.join(" "),
+  };
+}
+
+/** Sides reads in flight at once: each spawns several git processes, and a
+ *  Stage all can cover hundreds of conflicts. */
+const SIDES_READ_CHUNK = 4;
+
+/** Whether a stage of `conflicted` may go ahead: true when no file still holds
+ *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
+ *  cached read can predate the markers; a failed read asks rather than staging
+ *  silently or refusing. Never rejects. */
+async function confirmMarkerStage(
+  repoPath: string,
+  conflicted: FileEntry[],
+  bulk: boolean,
+): Promise<boolean> {
+  // Index-aligned with `conflicted`: chunks run in order and append in order.
+  const reads: PromiseSettledResult<ConflictSides>[] = [];
+  for (let i = 0; i < conflicted.length; i += SIDES_READ_CHUNK) {
+    const chunk = conflicted.slice(i, i + SIDES_READ_CHUNK);
+    reads.push(
+      ...(await Promise.allSettled(
+        chunk.map((e) => conflictSides(repoPath, e.path, [])),
+      )),
+    );
+  }
+  const flags = conflicted.flatMap((e, i): MarkerFlag[] => {
+    const read = reads[i];
+    const name = pathBasename(e.path);
+    if (read.status === "rejected") return [{ name, unchecked: true }];
+    return markNeedsConfirm(read.value) ? [{ name, unchecked: false }] : [];
+  });
+  if (flags.length === 0) return true;
+  return useConfirm.getState().ask({
+    ...markerStagePrompt(flags, bulk),
+    confirmLabel: "Stage anyway",
+    confirmVariant: "destructive",
+  });
 }
 
 /** The discard-copy predicate: recycle-bin refusal keys on the reserved NAME,
@@ -292,9 +382,7 @@ export function ChangesPanel({
   const pendingFocusSource = useRef<string | null>(null);
 
   const entries = status.data?.entries ?? [];
-  const conflictedPaths = entries
-    .filter((e) => e.unstaged === "conflicted" || e.staged === "conflicted")
-    .map((e) => e.path);
+  const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
 
@@ -803,6 +891,27 @@ export function ChangesPanel({
     setActiveFolderKey(row.type === "folder" ? key : null);
   }
 
+  /** Every stage route's one `git add` (no await unless a target is conflicted);
+   *  a file still holding markers asks first, and a decline stages NOTHING. Only
+   *  the captured targets and repo are used past the prompt, and a repo switch
+   *  meanwhile drops the stage, since the mutation would retarget. Resolves
+   *  whether it staged. */
+  async function stageGuarded(targets: FileEntry[]): Promise<boolean> {
+    const pathspecs = targets.map((e) => literalPathspec(e.path));
+    const conflicted = targets.filter(isConflicted);
+    if (conflicted.length > 0) {
+      const firedOn = repoPath;
+      const ok = await confirmMarkerStage(
+        firedOn,
+        conflicted,
+        targets.length > 1,
+      );
+      if (!ok || useUiStore.getState().repoPath !== firedOn) return false;
+    }
+    await stage.mutateAsync(pathspecs);
+    return true;
+  }
+
   // Toggle one file's staged state — the row's +/- button and the single menu.
   function handleToggle(entry: FileEntry, staged: boolean) {
     if (staged) {
@@ -812,7 +921,7 @@ export function ChangesPanel({
     // Fire-time guard: the affordances are already disabled, but a later call
     // site must not reach a `git add` that dies reading the device.
     if (!canStage(entry)) return;
-    void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
+    void stageGuarded([entry]).catch(onError);
   }
 
   /** The key of the first folder row whose path satisfies `match` in `section`'s
@@ -1021,9 +1130,7 @@ export function ChangesPanel({
   }
 
   function stageAll() {
-    void stage
-      .mutateAsync(stageableUnstaged.map((e) => literalPathspec(e.path)))
-      .catch(onError);
+    void stageGuarded(stageableUnstaged).catch(onError);
   }
 
   function unstageAll() {
@@ -1038,10 +1145,7 @@ export function ChangesPanel({
   async function stageSelected() {
     if (stageableSelected.length === 0) return;
     try {
-      await stage.mutateAsync(
-        stageableSelected.map((e) => literalPathspec(e.path)),
-      );
-      setSelectedKeys(new Set());
+      if (await stageGuarded(stageableSelected)) setSelectedKeys(new Set());
     } catch (e) {
       onError(e);
     }
