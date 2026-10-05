@@ -1,5 +1,4 @@
-- Save, Update, Rename, and the other buttons in repository settings now say
-  why they're waiting, whether there are no changes yet, a field still needs
-  a value, or the typed confirmation doesn't match, and they keep keyboard
-  focus when a save finishes. Closing the Dependabot setup dialog returns
-  focus to its row.
+- Buttons in repository settings that can't act yet now say why: there are
+  no changes to save, a field needs a value or has one that won't be
+  accepted, or the typed confirmation doesn't match. Closing the Dependabot
+  setup dialog returns focus to its row.

@@ -274,13 +274,6 @@ export function useSetVisibility(repo: string) {
   });
 }
 
-export function useTransferRepo(repo: string) {
-  return useMutation({
-    mutationFn: (a: { newOwner: string; newName: string | null }) =>
-      api.forgeRepoTransfer(repo, a.newOwner, a.newName),
-  });
-}
-
 export function useDeleteRepo(repo: string) {
   return useMutation({ mutationFn: () => api.forgeRepoDelete(repo) });
 }
@@ -294,9 +287,19 @@ export function useSetArchived(repo: string) {
   });
 }
 
-// The whole repo subtree, not just the settings key: every read that names the
+// Rename and transfer both change the repo's name or owner, so they invalidate
+// the whole repo subtree, not just the settings key: every read that names the
 // repo goes stale, and Bitbucket's rename rewrites the origin URL as well.
-// Awaited, so the rename stays pending until the new name reads back.
+// Awaited, so each write stays pending until the new identity reads back.
+export function useTransferRepo(repo: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (a: { newOwner: string; newName: string | null }) =>
+      api.forgeRepoTransfer(repo, a.newOwner, a.newName),
+    onSettled: () => invalidateRepoAfterWrite(queryClient, repo),
+  });
+}
+
 export function useRenameRepo(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({

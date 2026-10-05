@@ -50,9 +50,11 @@ import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   useConfirmSwapFocus,
 } from "./parts";
+import { reseedRename } from "./rename-seed";
 import { ScopeRefreshHint } from "./ScopeRefreshHint";
 
 /** The provider-neutral facts the danger actions need, sourced from whichever
@@ -334,18 +336,18 @@ function RenameAction({
   const online = useOnline();
   const current = info.currentName;
   const [name, setName] = useState(current);
-  // A refreshed name replaces the field unless it holds an edit of its own: it
-  // still shows the name it was seeded from, or the one a rename sent (which
-  // Bitbucket may read back as a normalized slug). Never a remount, which
-  // would drop focus from the field or the button.
+  // Reseeded in render per `reseedRename`, never by a remount, which would drop
+  // focus from the field or the button.
   const [seededName, setSeededName] = useState(current);
   const [sentName, setSentName] = useState<string | null>(null);
-  if (current !== seededName) {
-    setSeededName(current);
-    setSentName(null);
-    if (name.trim() === seededName || name.trim() === sentName) {
-      setName(current);
-    }
+  const reseed = reseedRename(
+    { name, seeded: seededName, sent: sentName },
+    current,
+  );
+  if (reseed !== null) {
+    setName(reseed.name);
+    setSeededName(reseed.seeded);
+    setSentName(reseed.sent);
   }
   const isGitLab = provider === "gitlab";
   const copy = DANGER_COPY[provider].rename;
@@ -369,7 +371,7 @@ function RenameAction({
       case !valid:
         return copy.invalid;
       case !changed:
-        return "No changes to save";
+        return NO_CHANGES_REASON;
       default:
         return undefined;
     }

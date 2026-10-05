@@ -20,6 +20,7 @@ import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   SAVING_REASON,
@@ -317,7 +318,7 @@ function VariableRow({
           reason={
             writeHeld ??
             (saving ? SAVING_REASON : undefined) ??
-            (dirty ? undefined : "No changes to save")
+            (dirty ? undefined : NO_CHANGES_REASON)
           }
           onClick={() => onSave(draft)}
         >

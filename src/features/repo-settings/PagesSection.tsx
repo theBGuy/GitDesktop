@@ -34,6 +34,7 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
   SAVING_REASON,
@@ -314,7 +315,7 @@ function PagesEnabled({
       case !branch:
         return "Pick a branch";
       case !sourceChanged:
-        return "No changes to save";
+        return NO_CHANGES_REASON;
       default:
         return undefined;
     }
@@ -452,7 +453,7 @@ function PagesEnabled({
             reason={
               offlineReason ??
               (update.isPending ? updateHeld("cname") : undefined) ??
-              (cname === pages.cname ? "No changes to save" : undefined)
+              (cname === pages.cname ? NO_CHANGES_REASON : undefined)
             }
             onClick={handleSaveDomain}
           >

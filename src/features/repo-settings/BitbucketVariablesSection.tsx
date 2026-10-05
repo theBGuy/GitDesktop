@@ -27,6 +27,7 @@ import {
   ACT_PENDING_REASON,
   AsyncErrorCard,
   InlineConfirm,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   useConfirmSwapFocus,
@@ -307,7 +308,7 @@ function VariableRow({
       case update.isPending:
         return ACT_PENDING_REASON;
       case !dirty:
-        return "No changes to save";
+        return NO_CHANGES_REASON;
       default:
         return undefined;
     }

@@ -43,6 +43,8 @@ import { useOnline } from "@/lib/use-online";
 import { DescriptionField } from "./DescriptionField";
 import {
   ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";
@@ -192,9 +194,9 @@ function BitbucketGeneralForm({
       case update.isPending:
         return ACT_PENDING_REASON;
       case busy:
-        return "Wait for the AI draft to finish";
+        return AI_DRAFT_PENDING_REASON;
       case !dirty:
-        return "No changes to save";
+        return NO_CHANGES_REASON;
       default:
         return undefined;
     }
