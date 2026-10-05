@@ -37,11 +37,13 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
+  ACT_PENDING_REASON,
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
+  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 import {
@@ -323,6 +325,16 @@ function DependabotDialog({
     setSelected(new Set());
     setInterval("weekly");
   });
+  const createHeldReason = (() => {
+    switch (true) {
+      case pending:
+        return ACT_PENDING_REASON;
+      case selected.size === 0:
+        return "Select at least one ecosystem";
+      default:
+        return undefined;
+    }
+  })();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -377,15 +389,17 @@ function DependabotDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
+          {/* No offline rung: dependabot.yml is a local working-tree write. */}
+          <DisabledReasonButton
             disabled={selected.size === 0 || pending}
+            reason={createHeldReason}
             onClick={() =>
               onCreate(generateDependabot([...selected], interval))
             }
           >
             {pending && <Spinner data-icon="inline-start" />}
             Create dependabot.yml
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -529,19 +543,23 @@ function SecurityForm({
 
       {dirty && (
         <div className="flex items-center justify-end gap-2 pt-1">
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="sm"
             onClick={() => setEdit(null)}
             disabled={apply.isPending}
+            reason={apply.isPending ? SAVING_REASON : undefined}
           >
             Discard
-          </Button>
+          </DisabledReasonButton>
           <DisabledReasonButton
             size="sm"
             onClick={save}
             disabled={apply.isPending || !online}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={
+              (online ? undefined : OFFLINE_WRITE_REASON) ??
+              (apply.isPending ? ACT_PENDING_REASON : undefined)
+            }
           >
             {apply.isPending && <Spinner data-icon="inline-start" />}
             Save changes

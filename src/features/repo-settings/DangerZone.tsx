@@ -48,6 +48,7 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
+  ACT_PENDING_REASON,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   useConfirmSwapFocus,
@@ -132,7 +133,10 @@ function DangerDialog({
             disabled={
               !matches || disabled || pending || heldReason !== undefined
             }
-            reason={heldReason}
+            reason={
+              heldReason ??
+              (pending && matches && !disabled ? ACT_PENDING_REASON : undefined)
+            }
             onClick={onConfirm}
           >
             {pending && <Spinner data-icon="inline-start" />}
@@ -354,7 +358,12 @@ function RenameAction({
           variant="outline"
           size="sm"
           disabled={!valid || !changed || rename.isPending || !online}
-          reason={online ? undefined : OFFLINE_WRITE_REASON}
+          reason={
+            (online ? undefined : OFFLINE_WRITE_REASON) ??
+            (rename.isPending && valid && changed
+              ? ACT_PENDING_REASON
+              : undefined)
+          }
           onClick={handleRename}
         >
           {rename.isPending && <Spinner data-icon="inline-start" />}
@@ -653,15 +662,19 @@ function LeaveForkNetworkAction({
             buttons squeezed the copy into a tall, narrow column. */}
         <div className="flex shrink-0 flex-col gap-2">
           {forkAction[provider]()}
-          <Button
+          {/* No offline rung: a read probe that fails loudly, never a parked
+              write. `w-full` keeps the button spanning the stacked column. */}
+          <DisabledReasonButton
             variant="outline"
             size="sm"
+            className="w-full"
             disabled={rechecking}
+            reason={rechecking ? "Checking fork status…" : undefined}
             onClick={recheck}
           >
             {rechecking && <Spinner data-icon="inline-start" />}
             Re-check fork status
-          </Button>
+          </DisabledReasonButton>
         </div>
       </Row>
     </>

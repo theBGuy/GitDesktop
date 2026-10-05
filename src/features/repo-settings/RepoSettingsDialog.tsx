@@ -94,6 +94,7 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 import { RulesetsSection } from "./RulesetsSection";
@@ -654,7 +655,10 @@ function WebhookRow({
               size="sm"
               variant="ghost"
               disabled={ping.isPending || !online}
-              reason={offlineReason}
+              reason={
+                offlineReason ??
+                (ping.isPending ? ACT_PENDING_REASON : undefined)
+              }
               title="Send a ping event"
               onClick={handlePing}
             >
@@ -666,7 +670,10 @@ function WebhookRow({
                 size="sm"
                 variant="ghost"
                 disabled={test.isPending || !online}
-                reason={offlineReason}
+                reason={
+                  offlineReason ??
+                  (test.isPending ? ACT_PENDING_REASON : undefined)
+                }
                 title="Trigger a test push event"
                 onClick={handleTest}
               >
@@ -833,7 +840,10 @@ function DeliveryRow({
               size="xs"
               variant="ghost"
               disabled={redeliver.isPending || !online}
-              reason={online ? undefined : OFFLINE_WRITE_REASON}
+              reason={
+                (online ? undefined : OFFLINE_WRITE_REASON) ??
+                (redeliver.isPending ? ACT_PENDING_REASON : undefined)
+              }
               onClick={handleRedeliver}
             >
               {redeliver.isPending ? (
@@ -1031,9 +1041,14 @@ function WebhookForm({
       </div>
 
       <div className="flex items-center justify-end gap-2 pt-2">
-        <Button variant="outline" onClick={onDone} disabled={pending}>
+        <DisabledReasonButton
+          variant="outline"
+          onClick={onDone}
+          disabled={pending}
+          reason={pending ? SAVING_REASON : undefined}
+        >
           Cancel
-        </Button>
+        </DisabledReasonButton>
         <DisabledReasonButton
           disabled={pending || !urlValid || !eventsValid || !online}
           reason={submitHeldReason}

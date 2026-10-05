@@ -1,6 +1,7 @@
 import { HeartIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,7 +10,12 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm, RemoteFormSection, useConfirmSwapFocus } from "./parts";
+import {
+  ACT_PENDING_REASON,
+  InlineConfirm,
+  RemoteFormSection,
+  useConfirmSwapFocus,
+} from "./parts";
 import {
   type PendingSent,
   reconcileTouched,
@@ -310,14 +316,20 @@ function FundingForm({
               Remove sponsor button
             </Button>
           ))}
-        <Button disabled={!dirty || set.isPending} onClick={save}>
+        {/* A form save under either label, so `!dirty` stays a native disable;
+            no offline rung, since FUNDING.yml is a local working-tree write. */}
+        <DisabledReasonButton
+          disabled={!dirty || set.isPending}
+          reason={dirty && set.isPending ? ACT_PENDING_REASON : undefined}
+          onClick={save}
+        >
           {set.isPending ? (
             <Spinner data-icon="inline-start" />
           ) : (
             <HeartIcon data-icon="inline-start" />
           )}
           {exists ? "Save changes" : "Add Sponsor button"}
-        </Button>
+        </DisabledReasonButton>
       </div>
     </div>
   );
