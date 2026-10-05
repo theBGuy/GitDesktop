@@ -127,8 +127,9 @@ pub async fn git_conflict_sides(
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
     // NotFound means the file is gone (a side or the user deleted it): it reads
-    // as "" with `working_exists` false. Every other read failure refuses the whole read,
-    // so no caller can mistake an unreadable file for a marker-free one.
+    // as "" with `working_exists` false. Every other read failure refuses the
+    // whole read, so no caller can mistake an unreadable file for a marker-free
+    // one.
     let (working_bytes, working_exists) =
         match tokio::fs::read(Path::new(&repo_path).join(&path)).await {
             Ok(bytes) => (bytes, true),
