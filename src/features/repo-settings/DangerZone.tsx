@@ -239,8 +239,8 @@ const DANGER_COPY: Record<
   },
   gitlab: {
     rename: {
-      desc: "Renames the name and path; old paths redirect.",
-      toast: (name) => `Renamed to ${name} — links redirect`,
+      desc: "Renaming changes the name and path; GitDesktop will update your local 'origin' remote automatically.",
+      toast: (name) => `Renamed to ${name} — origin remote updated`,
       invalid:
         "Start with a letter or digit, then use only letters, digits, '.', '-', and '_'",
     },
@@ -257,7 +257,7 @@ const DANGER_COPY: Record<
       desc: "Move this project to another group or user namespace.",
       dialogTitle: "Transfer project",
       dialogDesc:
-        "Transferring moves the project (and its issues, merge requests, and settings) to the new namespace — a group you own or maintain. The project URL changes; old paths redirect.",
+        "Transferring moves the project (and its issues, merge requests, and settings) to the new namespace — a group you own or maintain. The project URL changes; GitDesktop will update your local 'origin' remote automatically.",
       toast: "Project transferred",
       ownerLabel: "New namespace (group path or username)",
       ownerPlaceholder: "group/subgroup or username",

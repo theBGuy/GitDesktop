@@ -3924,9 +3924,9 @@ pub async fn forge_gl_issue_unlink(
     )
 }
 
-/// Rename the repository, behind the abstraction. GitHub renames the repo
-/// (old links redirect); GitLab renames both the display name and the URL slug
-/// (old paths redirect).
+/// Rename the repository, behind the abstraction. GitHub redirects reads and writes.
+/// GitLab redirects reads only; Bitbucket's old slug stops resolving entirely.
+/// GitLab and Bitbucket rewrite origin so subsequent writes use the new path.
 #[tauri::command]
 pub async fn forge_repo_rename(
     state: tauri::State<'_, crate::state::AppState>,
@@ -3934,7 +3934,7 @@ pub async fn forge_repo_rename(
     new_name: String,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::rename_repo(&repo_path, &new_name).await,
+        Some((Provider::GitLab, _)) => gitlab::rename_repo(&state, &repo_path, &new_name).await,
         // Bitbucket's rename changes the slug and the OLD slug 404s (no redirect),
         // so the local origin remote is rewritten — hence the state handle.
         Some((Provider::Bitbucket, _)) => {
@@ -3980,12 +3980,13 @@ pub async fn forge_repo_set_visibility(repo_path: String, visibility: String) ->
 /// GitHub takes a user/org (with an optional rename); GitLab a namespace path.
 #[tauri::command]
 pub async fn forge_repo_transfer(
+    state: tauri::State<'_, crate::state::AppState>,
     repo_path: String,
     new_owner: String,
     new_name: Option<String>,
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::transfer_repo(&repo_path, &new_owner).await,
+        Some((Provider::GitLab, _)) => gitlab::transfer_repo(&state, &repo_path, &new_owner).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Transferring isn't available via the Bitbucket API — use the repository's settings on Bitbucket.".into(),
         )),
