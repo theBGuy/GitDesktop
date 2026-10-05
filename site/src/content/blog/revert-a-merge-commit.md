@@ -72,10 +72,10 @@ ancestry, the re-merge trap below is not yours either.)
 
 `-m` answers Git's question by number. `git revert -m 1` says: treat
 parent 1 as the line to keep, and undo what the merge brought in
-from the other side — precisely, everything that distinguishes the
-merge's tree from that parent, hand-made conflict resolutions
-included. `git diff e1c284b^1 e1c284b` previews exactly what the
-revert will take out. On `main`, `-m 1` is almost always the answer.
+from the other side — everything that distinguishes the merge's
+tree from that parent, hand-made conflict resolutions included.
+`git diff e1c284b^1 e1c284b` previews what the revert will take
+out. On `main`, `-m 1` is almost always the answer.
 
 `-m 2` is the other answer, and on `main` it backfires: it keeps the
 branch's side and undoes what came in from parent 1, stripping out
