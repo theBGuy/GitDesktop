@@ -24,6 +24,7 @@ import type { BitbucketHook } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
@@ -169,6 +170,7 @@ export function BitbucketWebhooksSection({
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"
                     title="Delete"
+                    aria-label={`Delete webhook ${h.url}`}
                     onClick={() => setConfirming(h.uuid)}
                   >
                     <TrashIcon />
@@ -207,6 +209,7 @@ function HookForm({
   const urlValid =
     url.trim().startsWith("https://") || url.trim().startsWith("http://");
   const canSave = urlValid && events.length > 0 && !pending && online;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning =
     events.length === 0
       ? "Select at least one event."
@@ -319,7 +322,7 @@ function HookForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canSave}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
             onClick={save}
           >
             {pending && <Spinner data-icon="inline-start" />}

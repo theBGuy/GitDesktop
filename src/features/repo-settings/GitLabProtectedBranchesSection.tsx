@@ -29,6 +29,7 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import {
+  ACT_PENDING_REASON,
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
@@ -234,6 +235,7 @@ function ProtectedBranchRow({
             className="text-muted-foreground"
             disabled
             reason={inheritedHint}
+            aria-label={`Unprotect ${branch.name}`}
           >
             Unprotect
           </DisabledReasonButton>
@@ -244,6 +246,7 @@ function ProtectedBranchRow({
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
             onClick={onConfirm}
+            aria-label={`Unprotect ${branch.name}`}
           >
             Unprotect
           </Button>
@@ -302,6 +305,7 @@ function ProtectBranchForm({
   const duplicate = existing.some((b) => b.name === trimmed);
   const canProtect =
     trimmed.length > 0 && !duplicate && !protectBranch.isPending && online;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning = !trimmed
     ? "Enter a branch name."
     : duplicate
@@ -408,7 +412,10 @@ function ProtectBranchForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canProtect}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={
+              offlineReason ??
+              (protectBranch.isPending ? ACT_PENDING_REASON : undefined)
+            }
             onClick={submit}
           >
             {protectBranch.isPending && <Spinner data-icon="inline-start" />}

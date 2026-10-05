@@ -101,17 +101,18 @@ export function CollaboratorsSection({
     !add.isPending &&
     online &&
     rolesUnknownReason === undefined;
-  // The username is the blocker to name first: it's the one the user can fix here.
   const inviteHeldReason = (() => {
     switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      // `add` also carries row role changes, and its variables can't tell an
+      // invite from one, so the in-flight write may not be Invite's own.
+      case add.isPending:
+        return SAVING_REASON;
       case username.trim() === "":
         return "Enter a GitHub username";
       case !validUsername(username.trim()):
         return "That isn't a valid GitHub username";
-      case !online:
-        return OFFLINE_WRITE_REASON;
-      case add.isPending:
-        return SAVING_REASON;
       default:
         return rolesUnknownReason;
     }

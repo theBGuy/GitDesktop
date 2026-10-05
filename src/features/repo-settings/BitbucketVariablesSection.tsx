@@ -24,6 +24,7 @@ import type { BitbucketPipelineVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   AsyncErrorCard,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -98,6 +99,24 @@ export function BitbucketVariablesSection({
         ? null
         : "Keys use only letters, digits, and underscores."
     : null;
+  // Every hold carries a reason, so Add never goes natively disabled and keeps
+  // focus through a save, including the field reset after one succeeds.
+  const addHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case create.isPending:
+        return ACT_PENDING_REASON;
+      case !key.trim():
+        return "Enter a variable key";
+      case keyWarning !== null:
+        return keyWarning;
+      case value.length === 0:
+        return "Enter a variable value";
+      default:
+        return undefined;
+    }
+  })();
 
   function patchRow(row: BitbucketPipelineVariable) {
     queryClient.setQueryData<BitbucketPipelineVariable[]>(
@@ -182,7 +201,7 @@ export function BitbucketVariablesSection({
             <DisabledReasonButton
               size="sm"
               disabled={!canAdd}
-              reason={online ? undefined : OFFLINE_WRITE_REASON}
+              reason={addHeldReason}
               onClick={addVariable}
             >
               {create.isPending ? (
@@ -438,6 +457,7 @@ export function PipelinesDisabledBanner({
   onEnable: () => void;
 }) {
   const online = useOnline();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-dashed p-4 text-xs">
       <div className="min-w-0">
@@ -452,7 +472,7 @@ export function PipelinesDisabledBanner({
       <DisabledReasonButton
         size="sm"
         disabled={pending || !online}
-        reason={online ? undefined : OFFLINE_WRITE_REASON}
+        reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
         onClick={onEnable}
       >
         {pending && <Spinner data-icon="inline-start" />}

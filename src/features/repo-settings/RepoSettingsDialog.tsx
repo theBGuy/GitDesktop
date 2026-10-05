@@ -89,6 +89,7 @@ import { GitLabVariablesSection } from "./GitLabVariablesSection";
 import { GitLabWebhooksSection } from "./GitLabWebhooksSection";
 import { PagesSection } from "./PagesSection";
 import {
+  ACT_PENDING_REASON,
   DeliveryPayload,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -692,6 +693,7 @@ function WebhookRow({
               variant="ghost"
               className="text-destructive hover:text-destructive"
               onClick={() => setConfirmingDelete(true)}
+              aria-label={`Delete webhook ${hook.config.url}`}
             >
               <TrashIcon data-icon="inline-start" />
               Delete
@@ -899,6 +901,20 @@ function WebhookForm({
   const hadSecret = hook?.config.secret != null;
   const urlValid = /^https?:\/\/.+/.test(url.trim());
   const eventsValid = allEvents || events.size > 0;
+  const submitHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case pending:
+        return ACT_PENDING_REASON;
+      case !urlValid:
+        return "Enter a valid http(s) URL";
+      case !eventsValid:
+        return "Select at least one event";
+      default:
+        return undefined;
+    }
+  })();
 
   function toggleEvent(id: string, on: boolean) {
     setEvents((prev) => {
@@ -1020,15 +1036,7 @@ function WebhookForm({
         </Button>
         <DisabledReasonButton
           disabled={pending || !urlValid || !eventsValid || !online}
-          reason={
-            !urlValid
-              ? "Enter a valid http(s) URL"
-              : !eventsValid
-                ? "Select at least one event"
-                : !online
-                  ? OFFLINE_WRITE_REASON
-                  : undefined
-          }
+          reason={submitHeldReason}
           onClick={submit}
         >
           {pending && <Spinner data-icon="inline-start" />}

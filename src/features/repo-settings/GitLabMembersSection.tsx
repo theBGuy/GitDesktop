@@ -27,6 +27,7 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import {
+  ACT_PENDING_REASON,
   HeldRoleSelect,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -83,17 +84,16 @@ export function GitLabMembersSection({
   const [activeIndex, setActiveIndex] = useState(-1);
 
   const canAdd = validUsername(username.trim()) && !add.isPending && online;
-  // The username is the blocker to name first: it's the one the user can fix here.
   const addHeldReason = (() => {
     switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case add.isPending:
+        return ACT_PENDING_REASON;
       case username.trim() === "":
         return "Enter a GitLab username";
       case !validUsername(username.trim()):
         return "That isn't a valid GitLab username";
-      case !online:
-        return OFFLINE_WRITE_REASON;
-      case add.isPending:
-        return SAVING_REASON;
       default:
         return undefined;
     }

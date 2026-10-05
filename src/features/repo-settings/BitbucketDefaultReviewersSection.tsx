@@ -153,6 +153,7 @@ function ReviewerRow({
   onRemove: () => void;
 }) {
   const hint = userRefHint(reviewer, all);
+  const rowName = hint ? `${reviewer.label} (${hint})` : reviewer.label;
   const swapFocus = useConfirmSwapFocus();
   return (
     <div
@@ -168,10 +169,7 @@ function ReviewerRow({
       )}
     >
       <div className="min-w-0 flex-1">
-        <p
-          className="truncate font-medium"
-          title={hint ? `${reviewer.label} (${hint})` : reviewer.label}
-        >
+        <p className="truncate font-medium" title={rowName}>
           {reviewer.label}
           {hint && <span className="text-muted-foreground"> · {hint}</span>}
         </p>
@@ -194,6 +192,7 @@ function ReviewerRow({
           className="text-muted-foreground hover:text-destructive"
           onClick={onConfirm}
           title="Remove"
+          aria-label={`Remove ${rowName}`}
         >
           <XIcon />
         </Button>

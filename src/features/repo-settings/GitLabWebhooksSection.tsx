@@ -32,6 +32,7 @@ import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   DeliveryPayload,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -222,6 +223,7 @@ export function GitLabWebhooksSection({
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"
                     title="Delete"
+                    aria-label={`Delete webhook ${h.url}`}
                     onClick={() => setConfirming(h.id)}
                   >
                     <TrashIcon />
@@ -261,6 +263,7 @@ function HookForm({
   const urlValid =
     url.trim().startsWith("https://") || url.trim().startsWith("http://");
   const canSave = urlValid && events.length > 0 && !pending && online;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning = !url.trim()
     ? null
     : !urlValid
@@ -360,7 +363,7 @@ function HookForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canSave}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
             onClick={save}
           >
             {pending && <Spinner data-icon="inline-start" />}
