@@ -109,7 +109,7 @@ test("diffSectionStats reads a CRLF diff to the same list", () => {
 });
 
 test("an unkeyable or non-string input never blanks the rest", () => {
-  const withJunk = `diff --git garbage\n+x\n${DIFF}diff --git\n`;
+  const withJunk = `diff --git garbage\n+x\n${DIFF}diff --git nonsense\n`;
   assert.deepEqual(diffSectionStats(withJunk), EXPECTED);
   assert.deepEqual(diffSectionStats(undefined), []);
   assert.deepEqual(diffSectionStats(""), []);

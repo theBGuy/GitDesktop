@@ -262,8 +262,8 @@ export function promptFileList(
   diffText: string,
 ): { files: PrPromptInput["files"]; derived: boolean } {
   if (files.length > 0 || !diffText.trim()) return { files, derived: false };
-  const derived = diffSectionStats(diffText);
-  return { files: derived, derived: derived.length > 0 };
+  const fromDiff = diffSectionStats(diffText);
+  return { files: fromDiff, derived: fromDiff.length > 0 };
 }
 
 /** The "Files changed" heading and list, plus the derived-list disclosure. */

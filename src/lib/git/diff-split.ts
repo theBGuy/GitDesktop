@@ -1,3 +1,5 @@
+import type { DiffStatEntry } from "./types";
+
 const encoder = new TextEncoder();
 
 /** git's `quote_c_style` single-character escapes, mapped to their byte. */
@@ -124,14 +126,6 @@ export function sectionFilePath(section: string): string | undefined {
   );
 }
 
-/** One file's change counts, read off its own `diff --git` section. */
-export interface DiffSectionStat {
-  path: string;
-  added: number;
-  deleted: number;
-  isBinary: boolean;
-}
-
 /**
  * Per-file `+added -deleted` counts read off a unified diff that arrived without
  * a file list. Paths come from `sectionFilePath`, the decoder `splitUnifiedDiff`
@@ -139,9 +133,9 @@ export interface DiffSectionStat {
  * Only lines inside a hunk count: a `+++`/`---` header is never a change, and a
  * hunk line spelled that way always is one.
  */
-export function diffSectionStats(diff: string): DiffSectionStat[] {
+export function diffSectionStats(diff: string): DiffStatEntry[] {
   if (typeof diff !== "string") return [];
-  const stats: DiffSectionStat[] = [];
+  const stats: DiffStatEntry[] = [];
   for (const part of diff.split(/^(?=diff --git )/m)) {
     if (!part.trim()) continue;
     try {

@@ -204,8 +204,9 @@ export function useGeneratePrDescription(repoPath: string) {
             getDiff(settings),
             readRepoInstructions(repoPath),
           ]);
-          // A change request's forge file list can be missing beside a real diff;
-          // the prompt then lists files off the diff, so only an empty diff refuses.
+          // Only a change request derives its list from the diff: a forge list can be
+          // missing beside a real diff, while a local empty list beside text is a
+          // ref-move race between the backend's twin spawns, so it refuses on purpose.
           const listed =
             emptyScope === "change-request"
               ? promptFileList(diff.files, diff.text).files

@@ -72,7 +72,8 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// `repo_key` is the worktree-stable identity (an absolute path), so a main checkout
 /// and a linked worktree of the same repo produce the same key and collide on the
 /// claim — which is exactly the dedup we want. The head is canonicalized by
-/// [`canonical_head`], so every spelling of one head takes the same claim.
+/// [`canonical_head`], so every spelling of one head at least 12 hex chars long takes
+/// the same claim.
 fn composite_key(repo_key: &str, target: &str, head_sha: &str, action: &str) -> String {
     let head = canonical_head(head_sha);
     format!("{repo_key}:{target}:{head}:{action}")
