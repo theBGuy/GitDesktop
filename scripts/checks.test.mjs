@@ -4553,3 +4553,168 @@ test("the review prompt discloses an incomplete external review list", async () 
     hooks.deregister();
   }
 });
+
+// A partial read whose findings all filtered away still discloses, as a header-only
+// section that never pulls in the clause vetting findings it doesn't carry. The own
+// flag follows the same rule; the notes flag only rides beside lifted notes and never
+// renders a section of its own. Every flag unset keeps the prompt byte-identical.
+const EXTERNAL_HEADER_ONLY =
+  "## Other AI reviewers\n[external review list may be incomplete — findings may exist that were not read]";
+const EXTERNAL_CLAUSE_HEAD = "You are ALSO given findings that OTHER";
+const OWN_INCOMPLETE_LINE =
+  "[own comments list may be incomplete — further dispositions may exist on the PR thread that were not read]";
+const OWN_HEADER_ONLY =
+  "## Your prior GitDesktop comments on this PR\n[none were read, but the PR's comment read may be incomplete — recorded dispositions and refutations may exist on the PR thread; do not treat their absence here as evidence they don't exist]";
+const OWN_CLAUSE_HEAD = "You are ALSO given comments attributed to GitDesktop";
+const NOTES_INCOMPLETE_LINE =
+  "[a newer notes comment may exist — the PR conversation read may be incomplete]";
+
+function reviewPromptBase() {
+  return {
+    title: "t",
+    body: "",
+    commitSubjects: [],
+    diffText: "diff --git a/x b/x\n+1\n",
+    diffTruncated: false,
+    files: [{ path: "x", added: 1, deleted: 0, isBinary: false }],
+  };
+}
+
+test("a partial external read with no surviving findings renders a header-only marker", async () => {
+  const hooks = installSrcHooks();
+  try {
+    const { buildReviewPrompt } = await import("@/lib/ai/prompt");
+    const base = reviewPromptBase();
+    const plain = buildReviewPrompt(base, "general");
+    // Negative control: absent, false, or empty findings without the flag change nothing.
+    for (const extra of [
+      { externalIncomplete: false },
+      { externalFindings: "", externalIncomplete: false },
+    ]) {
+      const same = buildReviewPrompt({ ...base, ...extra }, "general");
+      assert.equal(same.prompt, plain.prompt);
+      assert.equal(same.system, plain.system);
+    }
+    const partial = buildReviewPrompt(
+      { ...base, externalIncomplete: true },
+      "general",
+    );
+    assert.equal(
+      partial.prompt,
+      plain.prompt.replace(
+        "\n\n## Diff\n",
+        () => `\n\n${EXTERNAL_HEADER_ONLY}\n\n## Diff\n`,
+      ),
+    );
+    // The clause says findings were given; none were, so it stays out.
+    assert.equal(partial.system, plain.system);
+    assert.ok(!partial.system.includes(EXTERNAL_CLAUSE_HEAD));
+    // The with-findings arm keeps its own line and its clause.
+    const withFindings = buildReviewPrompt(
+      {
+        ...base,
+        externalFindings: "### CodeRabbit\n- `x:1` — possible bug",
+        externalIncomplete: true,
+      },
+      "general",
+    );
+    assert.ok(!withFindings.prompt.includes(EXTERNAL_HEADER_ONLY));
+    assert.ok(withFindings.system.includes(EXTERNAL_CLAUSE_HEAD));
+  } finally {
+    hooks.deregister();
+  }
+});
+
+test("the review prompt discloses an incomplete own-comments read", async () => {
+  const hooks = installSrcHooks();
+  try {
+    const { buildReviewPrompt } = await import("@/lib/ai/prompt");
+    const base = reviewPromptBase();
+    const ownItems = ["- (bot)\n  fixed in `abc1234`"];
+    // With items: one line after the section body, clause unchanged.
+    const complete = buildReviewPrompt({ ...base, ownItems }, "general");
+    assert.equal(
+      buildReviewPrompt({ ...base, ownItems, ownIncomplete: false }, "general")
+        .prompt,
+      complete.prompt,
+    );
+    assert.ok(!complete.prompt.includes(OWN_INCOMPLETE_LINE));
+    const partial = buildReviewPrompt(
+      { ...base, ownItems, ownIncomplete: true },
+      "general",
+    );
+    assert.equal(
+      partial.prompt,
+      complete.prompt.replace(
+        `${ownItems[0]}\n\n`,
+        () => `${ownItems[0]}\n${OWN_INCOMPLETE_LINE}\n\n`,
+      ),
+    );
+    assert.equal(partial.system, complete.system);
+    assert.ok(partial.system.includes(OWN_CLAUSE_HEAD));
+    // A distilled ledger takes the same line.
+    assert.ok(
+      buildReviewPrompt(
+        { ...base, ownItems, ownDistilled: true, ownIncomplete: true },
+        "general",
+      ).prompt.includes(`${ownItems[0]}\n${OWN_INCOMPLETE_LINE}\n\n`),
+    );
+    // Zero items: header-only marker, no clause; unset ⇒ byte-identical.
+    const plain = buildReviewPrompt(base, "general");
+    for (const extra of [{ ownIncomplete: false }, { ownItems: [] }]) {
+      assert.equal(
+        buildReviewPrompt({ ...base, ...extra }, "general").prompt,
+        plain.prompt,
+      );
+    }
+    const none = buildReviewPrompt(
+      { ...base, ownItems: [], ownIncomplete: true },
+      "general",
+    );
+    assert.equal(
+      none.prompt,
+      plain.prompt.replace(
+        "\n\n## Diff\n",
+        () => `\n\n${OWN_HEADER_ONLY}\n\n## Diff\n`,
+      ),
+    );
+    assert.equal(none.system, plain.system);
+    assert.ok(!none.system.includes(OWN_CLAUSE_HEAD));
+  } finally {
+    hooks.deregister();
+  }
+});
+
+test("the review prompt cautions that newer reviewer notes may exist", async () => {
+  const hooks = installSrcHooks();
+  try {
+    const { buildReviewPrompt } = await import("@/lib/ai/prompt");
+    const base = { ...reviewPromptBase(), reviewNotes: "Keep the retry." };
+    const notesHead = "## Author's notes for reviewers\nKeep the retry.";
+    const complete = buildReviewPrompt(base, "general").prompt;
+    assert.equal(
+      buildReviewPrompt({ ...base, reviewNotesIncomplete: false }, "general")
+        .prompt,
+      complete,
+    );
+    assert.ok(!complete.includes(NOTES_INCOMPLETE_LINE));
+    assert.ok(complete.includes(`${notesHead}\n\n`));
+    assert.equal(
+      buildReviewPrompt({ ...base, reviewNotesIncomplete: true }, "general")
+        .prompt,
+      complete.replace(
+        `${notesHead}\n\n`,
+        () => `${notesHead}\n${NOTES_INCOMPLETE_LINE}\n\n`,
+      ),
+    );
+    // No notes ⇒ no section for the caveat to ride, and the prompt is unchanged.
+    const noNotes = reviewPromptBase();
+    assert.equal(
+      buildReviewPrompt({ ...noNotes, reviewNotesIncomplete: true }, "general")
+        .prompt,
+      buildReviewPrompt(noNotes, "general").prompt,
+    );
+  } finally {
+    hooks.deregister();
+  }
+});

@@ -32,13 +32,22 @@ export const REVIEWER_NOTES_MARKER = "🗒️ **Notes for reviewers**";
  *  the reader back to the emoji-bearing constant. */
 const REVIEWER_NOTES_ANCHOR = "**Notes for reviewers**";
 
+/** What `buildReviewPrompt` needs about the author's lifted reviewer notes. */
+export interface ReviewerNotesContext {
+  reviewNotes?: string;
+  /** The conversation read was partial, so a newer notes comment than the lifted
+   *  one may exist. Only ever set alongside `reviewNotes`. */
+  reviewNotesIncomplete?: boolean;
+}
+
 export async function resolveReviewerNotesContext(
   repoPath: string,
   prNumber: number,
-): Promise<{ reviewNotes?: string }> {
+): Promise<ReviewerNotesContext> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) return {};
 
   let items: Awaited<ReturnType<typeof forgePrExternalReviews>>["items"];
+  let truncated: boolean;
   let prAuthor: string;
   try {
     // Origin-pinned, matching `own-context.ts`: notes belong to the fork's own PR.
@@ -47,8 +56,11 @@ export async function resolveReviewerNotesContext(
       forgePrExternalReviews(repoPath, prNumber, "origin"),
       forgePrView(repoPath, prNumber, "origin"),
     ]);
-    // `itemsTruncated` is deliberately unread here (deferred): notes past a cap are missed.
+    // Disclosed only beside lifted notes. A partial read with NO notes found stays
+    // silent by design: notes are author instructions, and an "unseen notes may
+    // exist" line gives the model nothing to act on and no section to carry it.
     items = reviews.items;
+    truncated = reviews.itemsTruncated;
     prAuthor = pr.author;
   } catch {
     return {};
@@ -75,7 +87,9 @@ export async function resolveReviewerNotesContext(
 
   const reviewNotes = extractNotesBody(newest.body);
   if (!reviewNotes) return {};
-  return { reviewNotes };
+  return truncated
+    ? { reviewNotes, reviewNotesIncomplete: true }
+    : { reviewNotes };
 }
 
 /** Returns the notes body from a comment whose FIRST non-empty line is the notes

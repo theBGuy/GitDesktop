@@ -12,7 +12,10 @@ import {
   resolveExternalContext,
 } from "@/lib/ai/external-context";
 import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
-import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
+import {
+  type ReviewerNotesContext,
+  resolveReviewerNotesContext,
+} from "@/lib/ai/notes-context";
 import {
   type OwnCommentsContext,
   resolveOwnCommentsContext,
@@ -636,7 +639,7 @@ export async function startReview(
     const [external, own, notes, docs, repoInstructions]: [
       ExternalContext,
       OwnCommentsContext,
-      { reviewNotes?: string },
+      ReviewerNotesContext,
       DocSurfacesContext,
       string | null,
     ] = await Promise.all([

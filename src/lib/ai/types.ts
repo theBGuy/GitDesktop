@@ -173,6 +173,10 @@ export interface ReviewPromptInput {
    *  is fed to both review modes and never subject to the extras budget. Absent ⇒
    *  the section is omitted; the prompt is byte-for-byte identical to before. */
   reviewNotes?: string;
+  /** The conversation read the notes were lifted from was partial, so a newer
+   *  notes comment may exist. Read only beside `reviewNotes`; absent/false ⇒ no
+   *  disclosure line (prompt unchanged). */
+  reviewNotesIncomplete?: boolean;
   /** Prior review's raw finding markdown — soft, re-verifiable context. When
    *  absent, the prompt is byte-for-byte identical to a first-ever review. */
   priorFindings?: string;
@@ -196,7 +200,9 @@ export interface ReviewPromptInput {
   /** Whether any external finding may be stale (made against an older commit). */
   externalStale?: boolean;
   /** The forge's external-review read hit a cap or kept a partial read, so the
-   *  findings may be incomplete. Absent/false ⇒ no disclosure line (prompt unchanged). */
+   *  findings may be incomplete. With no `externalFindings` it renders a
+   *  header-only section saying findings may exist unread. Absent/false ⇒ no
+   *  disclosure line (prompt unchanged). */
   externalIncomplete?: boolean;
   /** One formatted block per comment attributed to GitDesktop on this PR — agent
    *  follow-ups (refutations / "fixed in `<sha>`" replies) and thread replies,
@@ -210,6 +216,11 @@ export interface ReviewPromptInput {
    *  the budget), so it was compressed rather than cut. Flips the own-section
    *  preamble to frame it as a compressed summary. */
   ownDistilled?: boolean;
+  /** The forge read our own comments came from hit a cap or kept a partial read,
+   *  so some may be missing. With `ownItems` it appends a disclosure line; with
+   *  none it renders a header-only section saying they may exist unread.
+   *  Absent/false ⇒ no disclosure line (prompt unchanged). */
+  ownIncomplete?: boolean;
   /** The repository's documentation surfaces as PATHS (never contents), derived
    *  from what git tracks by `resolveDocSurfacesContext`. Makes documentation a
    *  single finding class the review can sweep whole — including surfaces the

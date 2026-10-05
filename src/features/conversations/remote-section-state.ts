@@ -153,9 +153,10 @@ export function parkedUnlessPermanent(q: {
  *  Retry and outranks `truncated`: unlike {@link unknownListNotice}, where the wire
  *  makes the two exclusive, `isError` here is the threads query's own refresh
  *  state over a retained capped payload, and its Retry can bring in newer
- *  threads. `truncated` is the loaded read's wire flag, never the drawn count;
- *  it re-reads the same cap on refetch or reconnect, so it outranks a park and
- *  offers no Retry. A park never offers Retry and outranks the failure it
+ *  threads. `truncated` is the loaded read's wire flag, never the drawn count. It
+ *  outranks a park and offers no Retry: a capped read re-reads the same list, and
+ *  though a failed reply top-up may fill in on a refetch, the bool-only flag
+ *  can't tell the two apart. A park never offers Retry and outranks the failure it
  *  follows. A loaded empty answer stays quiet offline, like a list's empty rung. */
 export function reviewCommentsNotice(input: {
   threadCount: number | undefined;

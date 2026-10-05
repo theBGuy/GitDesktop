@@ -1107,8 +1107,9 @@ export function ReviewThreadsBlock({
 }: {
   /** `undefined` while the read hasn't loaded; `[]` is a loaded answer. */
   threads: ReviewThreadOut[] | undefined;
-  /** The threads read's `threadsTruncated` wire flag: the read hit a cap, so the
-   *  threads may be partial. Required so no caller can silently drop it. */
+  /** The threads read's `threadsTruncated` wire flag: the read hit a cap or a
+   *  thread's replies could not all be read, so the threads may be partial.
+   *  Required so no caller can silently drop it. */
   truncated: boolean;
   isError: boolean;
   /** The threads read is parked waiting for a connection (react-query's

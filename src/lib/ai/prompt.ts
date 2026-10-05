@@ -818,9 +818,12 @@ export function buildReviewPrompt(
   // stopping mid-sentence: every cut that reaches a review prompt discloses
   // itself. Mode-agnostic — it feeds both general and security runs.
   if (input.reviewNotes?.trim()) {
-    promptParts.push(
-      `## Author's notes for reviewers\n${capBody(input.reviewNotes.trim(), 8000)}`,
-    );
+    let notesSection = `## Author's notes for reviewers\n${capBody(input.reviewNotes.trim(), 8000)}`;
+    if (input.reviewNotesIncomplete) {
+      notesSection +=
+        "\n[a newer notes comment may exist — the PR conversation read may be incomplete]";
+    }
+    promptParts.push(notesSection);
   }
   const commitsSection = commitListSection(
     "## Commits",
@@ -851,7 +854,15 @@ export function buildReviewPrompt(
   // pressure) — a clause is only appended when its section is in the prompt.
   let renderedOwn = false;
   let renderedExternal = false;
-  if (hasPrior || hasOwn || hasExternal) {
+  // A partial read with nothing to show still renders its header-only marker, so
+  // either flag alone opens the block (the budget sees no text and spends nothing).
+  if (
+    hasPrior ||
+    hasOwn ||
+    hasExternal ||
+    input.ownIncomplete ||
+    input.externalIncomplete
+  ) {
     const extras = budgetReviewExtras({
       diffLen: budgeted.text.length,
       deltaText:
@@ -897,6 +908,10 @@ export function buildReviewPrompt(
           ? "\n[distilled summary truncated]"
           : "\n[own comments truncated — the opening comment and the newest follow-ups take precedence; comments in between are omitted first, and any comment that was itself cut says so inline]";
       }
+      if (input.ownIncomplete) {
+        ownSection +=
+          "\n[own comments list may be incomplete — further dispositions may exist on the PR thread that were not read]";
+      }
       promptParts.push(ownSection);
       renderedOwn = true;
     } else if (hasOwn && extras.ownDropped) {
@@ -905,6 +920,12 @@ export function buildReviewPrompt(
       // `renderedOwn`: the clause describes content this marker doesn't carry.
       promptParts.push(
         "## Your prior GitDesktop comments on this PR\n[omitted to keep the current diff in context — recorded dispositions and refutations may exist on the PR thread; do not treat their absence here as evidence they don't exist]",
+      );
+    } else if (!hasOwn && input.ownIncomplete) {
+      // A partial read that found none is not "nothing on record" either. No
+      // `renderedOwn`, for the same reason as the dropped marker above.
+      promptParts.push(
+        "## Your prior GitDesktop comments on this PR\n[none were read, but the PR's comment read may be incomplete — recorded dispositions and refutations may exist on the PR thread; do not treat their absence here as evidence they don't exist]",
       );
     }
     // Only render the external section when something actually fit — under
@@ -926,6 +947,12 @@ export function buildReviewPrompt(
       }
       promptParts.push(extSection);
       renderedExternal = true;
+    } else if (!hasExternal && input.externalIncomplete) {
+      // A partial read with no surviving findings: no `renderedExternal`, since the
+      // clause vets findings this marker doesn't carry.
+      promptParts.push(
+        "## Other AI reviewers\n[external review list may be incomplete — findings may exist that were not read]",
+      );
     }
   }
 

@@ -94,8 +94,9 @@ export interface ReviewThreadOut {
 export interface ReviewThreadsOut {
   threads: ReviewThreadOut[];
   /** True when the threads read hit a pagination cap, so `threads` may be
-   *  partial (an exact-cap list can be complete); a refetch returns the same
-   *  list. A failed read rejects instead. */
+   *  partial (an exact-cap list can be complete), or when a thread's replies
+   *  could not all be read (a refetch may fill those in). A failed threads read
+   *  rejects instead. */
   threadsTruncated: boolean;
 }
 
