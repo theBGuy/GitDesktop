@@ -171,7 +171,7 @@ export function rerunSuccessMessage(
     case failedOnly:
       return "Re-running failed jobs";
     default:
-      return "Re-running workflow";
+      return "Re-running all jobs";
   }
 }
 

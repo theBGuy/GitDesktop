@@ -9,8 +9,8 @@ export interface PrPollInfo {
   isDraft: boolean;
   author: string;
   reviewDecision: string;
-  /** Check rollup of the head commit: SUCCESS/FAILURE/PENDING/EXPECTED/"", or
-   *  CANCELLED when the confirm finds cancelled runs and nothing failed or
+  /** Check rollup of the head commit: SUCCESS/FAILURE/ERROR/PENDING/EXPECTED/"",
+   *  or CANCELLED when the confirm finds cancelled runs and nothing failed or
    *  still in flight (GitHub only). */
   checksState: string;
   /** True when `checksState` is a red rollup this poll could not confirm against
