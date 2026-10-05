@@ -1177,12 +1177,15 @@ or re-run); **Bitbucket PRs** get it from the PR's
 commit build statuses, but those **link out only** (name, state, and URL —
 Bitbucket exposes no fetchable job logs).
 
-A red build restarts from the rollup itself: a button beside the summary line. On
-**GitHub** it reads **Re-run failed jobs**, appears once a run behind a failing
-check has finished, and restarts the failed jobs of every such run; on **GitLab**
-it reads **Retry pipeline**, appears as soon as a job fails, and retries the
+A red or cancelled build restarts from the rollup itself: a button beside the
+summary line. On **GitHub** it reads **Re-run failed jobs**, appears once a run
+behind a failing check has finished, and restarts the failed jobs of every such
+run; a finished run that was cancelled without failing gets **Re-run all jobs**
+instead, offered once no failed run is waiting. On **GitLab** it reads **Retry
+pipeline**, appears as soon as a job fails or is canceled, and retries the
 pipeline's failed and canceled jobs. The command palette carries it as **Re-run
-failed jobs / Retry pipeline**, palette-only by default — bind a key in Settings.
+failed jobs / Re-run all jobs / Retry pipeline**, palette-only by default — bind
+a key in Settings.
 One flaky job doesn't need the whole batch: each failed row with a fetchable job
 carries its own **Re-run** (GitHub, once that job's run has finished) or
 **Retry** (GitLab, as soon as the job fails) beside **Open full run** — GitHub

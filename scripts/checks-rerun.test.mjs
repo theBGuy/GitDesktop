@@ -19,6 +19,7 @@ import {
   failedRunSignatures,
   rerunnableJobs,
   rerunnableRuns,
+  rerunSignatures,
   stillLatchedRunIds,
 } from "../src/features/pulls/checks-rerun.ts";
 
@@ -58,7 +59,9 @@ test("a failed check with no completion time contributes no run", () => {
     failedRunSignatures(checks, bucketOf),
     new Map([["7", "2026-01-01T10:00:00Z"]]),
   );
-  assert.deepEqual(offer({ checks }), [["7", "2026-01-01T10:00:00Z"]]);
+  assert.deepEqual(offer({ checks }), [
+    ["7", "2026-01-01T10:00:00Z", "failed"],
+  ]);
 });
 
 test("a run's signature joins its failed checks' completions, sorted", () => {
@@ -114,7 +117,7 @@ test("a changed signature releases the latch", () => {
   // IS a new attempt's failure — no pending snapshot need ever be observed.
   const checks = [check({ runId: "7", completedAt: "t2" })];
   assert.deepEqual(offer({ checks, latched: new Map([["7", "t1"]]) }), [
-    ["7", "t2"],
+    ["7", "t2", "failed"],
   ]);
 });
 
@@ -169,6 +172,165 @@ test("a latched run with no failed checks left is no longer still-latched", () =
   const latched = new Map([["7", "t1"]]);
   const checks = [check({ runId: "7", status: "SUCCESS", completedAt: "t2" })];
   assert.deepEqual(stillLatchedRunIds(checks, bucketOf, latched), []);
+});
+
+// ── Cancelled runs ───────────────────────────────────────────────────────────
+//
+// A run with no failed check but a cancelled one re-runs whole: there is no
+// failed job to name. Admission keys on the raw CANCELLED status, never the
+// skipped bucket it presents in.
+
+const cancelled = (over) => check({ status: "CANCELLED", ...over });
+
+test("a cancelled-only run is offered whole, signed by its cancelled completions", () => {
+  const checks = [
+    cancelled({ name: "b", runId: "7", completedAt: "t2" }),
+    cancelled({ name: "a", runId: "7", completedAt: "t1" }),
+    check({ name: "ok", runId: "7", status: "SUCCESS", completedAt: "t0" }),
+  ];
+  assert.deepEqual(
+    rerunSignatures(checks, bucketOf),
+    new Map([["7", { signature: "t1 t2", mode: "cancelled" }]]),
+  );
+  assert.deepEqual(offer({ checks }), [["7", "t1 t2", "cancelled"]]);
+  assert.deepEqual(failedRunSignatures(checks, bucketOf), new Map());
+});
+
+test("skipped, neutral and stale runs are not offered", () => {
+  const checks = ["SKIPPED", "NEUTRAL", "STALE"].map((status, i) =>
+    check({ status, runId: String(i), completedAt: "t1" }),
+  );
+  assert.deepEqual(rerunSignatures(checks, bucketOf), new Map());
+  assert.deepEqual(offer({ checks }), []);
+  assert.deepEqual(offer({ checks, provider: "gitlab" }), []);
+});
+
+test("a run with a failed check keeps the failed offer, whatever was cancelled", () => {
+  // Re-run-failed restarts that run's cancelled jobs too, so nothing changes.
+  const checks = [
+    check({ runId: "7", completedAt: "t1" }),
+    cancelled({ runId: "7", completedAt: "t2" }),
+  ];
+  assert.deepEqual(offer({ checks }), [["7", "t1", "failed"]]);
+});
+
+test("an undated failed row keeps its run off the cancelled arm", () => {
+  // A failed-bucket row with no completion offers nothing today; a dated
+  // cancelled sibling must not flip that run to a re-run of every job.
+  const checks = [
+    check({ name: "external", runId: "7", completedAt: undefined }),
+    cancelled({ name: "build", runId: "7", completedAt: "t1" }),
+  ];
+  assert.deepEqual(rerunSignatures(checks, bucketOf), new Map());
+  assert.deepEqual(offer({ checks }), []);
+  assert.deepEqual(offer({ checks, provider: "gitlab" }), []);
+});
+
+// The collapse kernel keeps a run cancelled before it started beside the run
+// that replaced it (no start to order it by), in both of these shapes.
+const T1 = "2026-01-01T10:01:00Z";
+const T2 = "2026-01-01T10:02:00Z";
+const T3 = "2026-01-01T10:03:00Z";
+const T4 = "2026-01-01T10:04:00Z";
+
+test("a cancelled run a later same-named attempt superseded is not offered", () => {
+  const checks = [
+    check({
+      name: "fragment",
+      runId: "2",
+      status: "SUCCESS",
+      startedAt: T3,
+      completedAt: T4,
+    }),
+    cancelled({ name: "fragment", runId: "1", completedAt: T2 }),
+  ];
+  assert.deepEqual(rerunSignatures(checks, bucketOf), new Map());
+  assert.deepEqual(offer({ checks }), [], "a green PR offers nothing");
+  // A start exactly at the cancellation is supersession too.
+  checks[0] = { ...checks[0], startedAt: T2 };
+  assert.deepEqual(offer({ checks }), []);
+});
+
+test("a newer cancelled run beside an older success is still offered", () => {
+  const checks = [
+    cancelled({ name: "fragment", runId: "2", completedAt: T4 }),
+    check({
+      name: "fragment",
+      runId: "1",
+      status: "SUCCESS",
+      startedAt: T1,
+      completedAt: T2,
+    }),
+  ];
+  assert.deepEqual(offer({ checks }), [["2", T4, "cancelled"]]);
+  // A later row under another name is no supersession evidence.
+  const other = [
+    cancelled({ name: "build", runId: "2", completedAt: T2 }),
+    check({ name: "lint", runId: "3", status: "SUCCESS", startedAt: T3 }),
+  ];
+  assert.deepEqual(offer({ checks: other }), [["2", T2, "cancelled"]]);
+});
+
+test("a cancelled check with no completion time contributes no run", () => {
+  const checks = [cancelled({ runId: "7", completedAt: undefined })];
+  assert.deepEqual(offer({ checks }), []);
+});
+
+test("GitHub offers failed runs before cancelled-only ones", () => {
+  // One button names one operation: the cancelled run waits until no failed run
+  // is offered — here, once the failed run's latch stands.
+  const checks = [
+    check({ runId: "7", completedAt: "t1" }),
+    cancelled({ runId: "8", completedAt: "t2" }),
+  ];
+  assert.deepEqual(offer({ checks }), [["7", "t1", "failed"]]);
+  assert.deepEqual(offer({ checks, latched: new Map([["7", "t1"]]) }), [
+    ["8", "t2", "cancelled"],
+  ]);
+});
+
+test("GitLab retries failed and cancelled-only runs together", () => {
+  // Its retry restarts failed and canceled jobs alike: one operation for both.
+  const checks = [
+    check({ runId: "7", completedAt: "t1" }),
+    cancelled({ runId: "8", completedAt: "t2" }),
+  ];
+  assert.deepEqual(offer({ checks, provider: "gitlab" }), [
+    ["7", "t1", "failed"],
+    ["8", "t2", "cancelled"],
+  ]);
+});
+
+test("GitHub drops a cancelled run that still has a job in flight", () => {
+  const checks = [
+    cancelled({ runId: "7", completedAt: "t1" }),
+    check({ runId: "7", status: "IN_PROGRESS" }),
+  ];
+  assert.deepEqual(offer({ checks, runningRunIds: ["7"] }), []);
+  assert.deepEqual(
+    offer({ checks, runningRunIds: ["7"], provider: "gitlab" }),
+    [["7", "t1", "cancelled"]],
+    "the running-run subtraction stays GitHub-only",
+  );
+});
+
+test("a cancelled run's latch holds until its signature moves", () => {
+  const before = [cancelled({ runId: "7", completedAt: "t1" })];
+  const offered = offer({ checks: before });
+  assert.deepEqual(offered, [["7", "t1", "cancelled"]]);
+  // The click latches the run at the signature it was offered under.
+  const latched = new Map([[offered[0][0], offered[0][1]]]);
+  assert.deepEqual(offer({ checks: before, latched }), [], "suppressed");
+  assert.deepEqual(stillLatchedRunIds(before, bucketOf, latched), ["7"]);
+  // A new attempt cancelled again, with a fresh completion: released.
+  const recancelled = [cancelled({ runId: "7", completedAt: "t2" })];
+  assert.deepEqual(offer({ checks: recancelled, latched }), [
+    ["7", "t2", "cancelled"],
+  ]);
+  assert.deepEqual(stillLatchedRunIds(recancelled, bucketOf, latched), []);
+  // …or one that failed outright: released onto the failed offer.
+  const failed = [check({ runId: "7", completedAt: "t3" })];
+  assert.deepEqual(offer({ checks: failed, latched }), [["7", "t3", "failed"]]);
 });
 
 // ── Per-job re-run ───────────────────────────────────────────────────────────
@@ -293,11 +455,17 @@ test("passed and pending jobs are not offered", () => {
   assert.deepEqual(jobOffer({ checks }), []);
 });
 
-test("a cancelled job is not offered", () => {
-  // Out of scope by design: a cancelled GitLab job is forge-retryable but sits in
-  // the skipped bucket, and the run-level Retry (which fires on cancelled) covers it.
+test("a cancelled job is not offered, and its run is", () => {
+  // Per-job offers stay failed-only: the run-level offer re-runs a cancelled run.
   const checks = [jobCheck({ status: "CANCELLED", completedAt: "t1" })];
-  assert.deepEqual(jobOffer({ checks, provider: "gitlab" }), []);
+  for (const provider of ["github", "gitlab"]) {
+    assert.deepEqual(jobOffer({ checks, provider }), [], provider);
+    assert.deepEqual(
+      offer({ checks, provider }),
+      [["7", "t1", "cancelled"]],
+      provider,
+    );
+  }
 });
 
 // ── Collapsed GitHub input ───────────────────────────────────────────────────
@@ -337,6 +505,6 @@ test("a same-named failed row that survives the collapse keeps its offer", () =>
     jobCheck({ jobId: "jp", runId: "7", completedAt: "t1" }),
     jobCheck({ jobId: "jr", runId: "8", status: "SUCCESS", completedAt: "t2" }),
   ];
-  assert.deepEqual(offer({ checks }), [["7", "t1"]]);
+  assert.deepEqual(offer({ checks }), [["7", "t1", "failed"]]);
   assert.deepEqual(jobOffer({ checks }), [["jp", "t1", "7"]]);
 });

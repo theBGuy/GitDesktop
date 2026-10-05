@@ -69,10 +69,10 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { checkPresentation, isOutstanding } from "./check-presentation";
 import {
-  failedRunSignatures,
   type JobRerunCandidate,
   rerunnableJobs,
   rerunnableRuns,
+  rerunSignatures,
   stillLatchedRunIds,
 } from "./checks-rerun";
 import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
@@ -658,8 +658,8 @@ export function ChecksRollup({
   // mutations' own `isPending` would flicker between them.
   const [approving, setApproving] = useState(false);
   const [rerunning, setRerunning] = useState(false);
-  // Runs re-run from this rollup, each against the completion signature its
-  // failed checks carried at the time. A latch releases on EVIDENCE OF A NEW
+  // Runs re-run from this rollup, each against the `rerunSignatures` entry it
+  // carried at the time. A latch releases on EVIDENCE OF A NEW
   // ATTEMPT — a changed signature — never on observing a transient: refetches
   // can miss the pending window entirely, and a raced-empty snapshot must not
   // release a run that is in fact still re-running.
@@ -829,10 +829,12 @@ export function ChecksRollup({
   const jobCandidateById = new Map(jobCandidates.map((c) => [c[0], c]));
   // The one offer this rollup makes, or null when any gate closes — the button
   // and the palette action both read it, so no gate can hold for one and not the
-  // other.
+  // other. On GitHub the candidates share one mode (failed runs outrank
+  // cancelled-only ones), so the label names exactly what the batch fires.
+  const rerunFailedOnly = rerunnable.every(([, , mode]) => mode === "failed");
   const rerunOffer =
     canRerun && !stale && rerunnable.length > 0
-      ? checksRerunOffer(rerunProvider)
+      ? checksRerunOffer(rerunProvider, rerunFailedOnly)
       : null;
 
   // Approving and re-running are repo writes, so an explicitly read-only viewer
@@ -851,7 +853,7 @@ export function ChecksRollup({
   // switch lands, while the transient wording doesn't.
   const heldReason =
     writeReason ?? (stale ? PR_SWITCH_LOADING_REASON : undefined);
-  // ONE busy notion for both re-run paths — the failed-checks batch and any
+  // ONE busy notion for both re-run paths — the run-level batch and any
   // single job. They act on the same runs, so an overlapping submission just
   // buys the forge's mid-run refusal; every control holds while either runs.
   const rerunBusy = rerunning || rerunningJob !== null;
@@ -922,7 +924,7 @@ export function ChecksRollup({
     }
   }
 
-  async function rerunFailedChecks() {
+  async function rerunOfferedRuns() {
     if (writeBlocked || stale || rerunBusy) return;
     // Read before the first await: the button may be gone by the end of the
     // batch, and `activeElement` then reads `<body>` for a palette run and a
@@ -935,9 +937,14 @@ export function ChecksRollup({
     try {
       // Sequential, and each failure is reported on its own: one run raced to
       // "in progress" by the forge must not strand the rest of the batch.
-      for (const [id, signature] of rerunnable) {
+      for (const [id, signature, mode] of rerunnable) {
         try {
-          await rerun.mutateAsync({ runId: id, failed: true, lens });
+          // A cancelled-only run has no failed job, so it re-runs whole.
+          await rerun.mutateAsync({
+            runId: id,
+            failed: mode === "failed",
+            lens,
+          });
           startedIds.push(id);
           setRecentlyRerun((prev) => new Map(prev).set(id, signature));
         } catch (e) {
@@ -945,16 +952,17 @@ export function ChecksRollup({
         }
       }
       if (startedIds.length > 0) {
-        toast.success(rerunSuccessMessage(rerunProvider, true));
+        toast.success(rerunSuccessMessage(rerunProvider, rerunFailedOnly));
         scheduleChecksRepair(startedIds);
       }
     } finally {
       setRerunning(false);
     }
-    // Hand off only when every id of THIS batch latched — the state that retires
-    // the offer and takes the button with it — and only while focus is still
-    // unclaimed: restore what the activation would otherwise lose, never
-    // override a move the user made during the await.
+    // Hand off only when every id of THIS batch latched: that retires the batch's
+    // offer, so the button may unmount (or return naming the next one, the
+    // cancelled runs behind GitHub's failed batch), while a partial batch keeps it
+    // up for the retry. Only while focus is still unclaimed: restore what the
+    // activation would otherwise lose, never override a move made during the await.
     const unclaimed =
       document.activeElement === document.body ||
       document.activeElement === rerunButtonRef.current;
@@ -985,7 +993,7 @@ export function ChecksRollup({
       // pipeline-level Retry and the per-job Retry of the run's OTHER failed
       // jobs until the next snapshot moves the signature — self-releasing, and
       // accepted.
-      const signature = failedRunSignatures(checks, bucketOf).get(runId);
+      const signature = rerunSignatures(checks, bucketOf).get(runId)?.signature;
       if (signature !== undefined)
         setRecentlyRerun((prev) => new Map(prev).set(runId, signature));
       scheduleChecksRepair([runId]);
@@ -1009,7 +1017,7 @@ export function ChecksRollup({
   // read-only viewer buy an API rejection.
   useHotkeyAction(
     "pr-rerun-failed-checks",
-    () => void rerunFailedChecks(),
+    () => void rerunOfferedRuns(),
     rerunOffer !== null &&
       !writeBlocked &&
       !writeAccess.isPending &&
@@ -1187,7 +1195,7 @@ export function ChecksRollup({
                 disabled={rerunHeld}
                 reason={rerunning ? undefined : rerunHeldReason}
                 title={RERUN_TITLES[rerunOffer.kind]}
-                onClick={() => void rerunFailedChecks()}
+                onClick={() => void rerunOfferedRuns()}
               >
                 {rerunning ? (
                   <Spinner data-icon="inline-start" />

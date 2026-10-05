@@ -9,7 +9,9 @@ export interface PrPollInfo {
   isDraft: boolean;
   author: string;
   reviewDecision: string;
-  /** Check rollup of the head commit: SUCCESS/FAILURE/PENDING/"". */
+  /** Check rollup of the head commit: SUCCESS/FAILURE/PENDING/EXPECTED/"", or
+   *  CANCELLED when the confirm finds cancelled runs and nothing failed or
+   *  still in flight (GitHub only). */
   checksState: string;
   /** True when `checksState` is a red rollup this poll could not confirm against
    *  the head's latest runs, so it may flip back next poll: the poller holds the
@@ -198,8 +200,9 @@ export interface PrInfo {
 }
 
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks; "neutral" =
- *  finished without a verdict (a cancelled pipeline). GitHub never sends "neutral":
- *  its rollup enum has no cancelled value (see `rollup_state_to_ci`). */
+ *  finished without a verdict (a cancelled pipeline). On GitHub it comes only from
+ *  the red-row confirm, since GitHub's own rollup enum folds cancelled into FAILURE
+ *  (see `rollup_state_to_ci`). */
 export type CiStatus = "passing" | "failing" | "pending" | "none" | "neutral";
 
 /** One PR's CI rollup keyed by number — the PR-list row-icon hydration payload.

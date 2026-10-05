@@ -20,7 +20,9 @@ export interface PollBaseline {
  *
  * Cost: a confirm outage longer than the limit can still send one false
  * failed/passed pair for a superseded failure — what every poll did before the
- * confirm existed, now bounded in time instead of repeating.
+ * confirm existed, now bounded in time instead of repeating. A cancelled-only
+ * head is the same class: past the limit its precomputed FAILURE notifies once,
+ * until the confirm recovers and lands it CANCELLED.
  *
  * Kept free of runtime imports so the node test harness can load it directly.
  */
