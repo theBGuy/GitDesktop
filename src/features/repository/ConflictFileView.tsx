@@ -34,6 +34,7 @@ import {
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
+import { markerStagePrompt } from "./conflict-confirms";
 
 const baseName = (path: string) => path.split("/").pop() || path;
 
@@ -343,15 +344,13 @@ export function ConflictFileView({
 
   // The button and the palette action both land here, so this is the one gate:
   // staging is a plain `git add`, which would take any remaining markers along.
+  // It asks the generic stage routes' question, from their shared builder.
   async function markResolved() {
     if (file.data && markNeedsConfirm(file.data)) {
-      const name = baseName(path);
-      const ok = await useConfirm.getState().ask({
-        title: `Stage ${name} with conflict markers?`,
-        body: `${name} still has conflict markers. Staging it marks the conflict resolved with the markers in the file, and they'll be committed unless you remove them first.`,
-        confirmLabel: "Stage anyway",
-        confirmVariant: "destructive",
-      });
+      const flag = { name: baseName(path), unchecked: false };
+      const ok = await useConfirm
+        .getState()
+        .ask(markerStagePrompt([flag], false));
       if (!ok) return;
     }
     try {

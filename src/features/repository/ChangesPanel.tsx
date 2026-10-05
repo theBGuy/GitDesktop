@@ -34,6 +34,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
+import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import { markNeedsConfirm } from "@/lib/git/conflict-parse";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -61,7 +63,7 @@ import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { flattenPathTree } from "@/lib/path-tree";
+import { flattenPathTree, pathBasename } from "@/lib/path-tree";
 import { CHANGES_VIEW_MODES } from "@/lib/settings/api";
 import {
   useAiEnabled,
@@ -69,6 +71,7 @@ import {
   useSaveSettings,
   useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
@@ -77,6 +80,7 @@ import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
+import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
 
@@ -94,6 +98,45 @@ function unstagePaths(entry: FileEntry): string[] {
  *  and aborts the whole pathspec batch — every stage path filters these out. */
 function canStage(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) === null;
+}
+
+function isConflicted(entry: FileEntry): boolean {
+  return entry.unstaged === "conflicted" || entry.staged === "conflicted";
+}
+
+/** Sides reads in flight at once: each spawns several git processes, and a
+ *  Stage all can cover hundreds of conflicts. */
+const SIDES_READ_CHUNK = 4;
+
+/** Whether a stage of `conflicted` may go ahead: true when no file still holds
+ *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
+ *  cached read can predate the markers; a failed read asks rather than staging
+ *  silently or refusing. Resolves false without asking if the active repo
+ *  changed during the reads. Never rejects. */
+async function confirmMarkerStage(
+  repoPath: string,
+  conflicted: FileEntry[],
+  bulk: boolean,
+): Promise<boolean> {
+  // Index-aligned with `conflicted`: chunks run in order and append in order.
+  const reads: PromiseSettledResult<ConflictSides>[] = [];
+  for (let i = 0; i < conflicted.length; i += SIDES_READ_CHUNK) {
+    const chunk = conflicted.slice(i, i + SIDES_READ_CHUNK);
+    reads.push(
+      ...(await Promise.allSettled(
+        chunk.map((e) => conflictSides(repoPath, e.path, [])),
+      )),
+    );
+  }
+  const flags = conflicted.flatMap((e, i): MarkerFlag[] => {
+    const read = reads[i];
+    const name = pathBasename(e.path);
+    if (read.status === "rejected") return [{ name, unchecked: true }];
+    return markNeedsConfirm(read.value) ? [{ name, unchecked: false }] : [];
+  });
+  if (flags.length === 0) return true;
+  if (useUiStore.getState().repoPath !== repoPath) return false;
+  return useConfirm.getState().ask(markerStagePrompt(flags, bulk));
 }
 
 /** The discard-copy predicate: recycle-bin refusal keys on the reserved NAME,
@@ -279,6 +322,10 @@ export function ChangesPanel({
   const [blamePath, setBlamePath] = useState<string | null>(null);
   // The one shared context menu acts on whatever was right-clicked.
   const [menuTarget, setMenuTarget] = useState<MenuTarget>(null);
+  // A conflicted stage's marker check and prompt are in flight. The state drives
+  // the `mutating` disables; the ref is the fire-time refusal in stageGuarded.
+  const [checking, setChecking] = useState(false);
+  const checkingRef = useRef(false);
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLElement | null>(null);
   const viewToggleRef = useRef<HTMLButtonElement>(null);
@@ -292,9 +339,7 @@ export function ChangesPanel({
   const pendingFocusSource = useRef<string | null>(null);
 
   const entries = status.data?.entries ?? [];
-  const conflictedPaths = entries
-    .filter((e) => e.unstaged === "conflicted" || e.staged === "conflicted")
-    .map((e) => e.path);
+  const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
 
@@ -724,7 +769,7 @@ export function ChangesPanel({
     // refresh must stay where it is.
     if (nextKey !== null && focusIsOrphaned()) focusRow(nextKey);
   }, [activeFolderKey, navIndex]);
-  const mutating = stage.isPending || unstage.isPending;
+  const mutating = stage.isPending || unstage.isPending || checking;
   const onError = (e: unknown) => toastError(e);
 
   function toggleKind(kind: FilterKind, on: boolean) {
@@ -803,6 +848,47 @@ export function ChangesPanel({
     setActiveFolderKey(row.type === "folder" ? key : null);
   }
 
+  /** Every stage route's one `git add` (no await unless a target is conflicted);
+   *  a file still holding markers asks first, and a decline stages NOTHING. Only
+   *  the captured targets and repo are used past the prompt, and a repo switch
+   *  meanwhile drops the stage, since the mutation would retarget. Resolves
+   *  whether it staged. */
+  async function stageGuarded(targets: FileEntry[]): Promise<boolean> {
+    const pathspecs = targets.map((e) => literalPathspec(e.path));
+    const conflicted = targets.filter(isConflicted);
+    if (conflicted.length === 0) {
+      await stage.mutateAsync(pathspecs);
+      return true;
+    }
+    // The ref, not the disables, is the guarantee: the menu items never read
+    // `mutating`, so they skip the disables and get the toast instead. Refused
+    // before the try, so the first check's flags survive.
+    if (checkingRef.current) {
+      toast.info("Still checking files for conflict markers");
+      return false;
+    }
+    const firedOn = repoPath;
+    // `checking` drops in the same tick the stage starts, with no await between
+    // it and `stage.isPending` taking over the disables.
+    let staging: Promise<unknown>;
+    checkingRef.current = true;
+    setChecking(true);
+    try {
+      const ok = await confirmMarkerStage(
+        firedOn,
+        conflicted,
+        targets.length > 1,
+      );
+      if (!ok || useUiStore.getState().repoPath !== firedOn) return false;
+      staging = stage.mutateAsync(pathspecs);
+    } finally {
+      checkingRef.current = false;
+      setChecking(false);
+    }
+    await staging;
+    return true;
+  }
+
   // Toggle one file's staged state — the row's +/- button and the single menu.
   function handleToggle(entry: FileEntry, staged: boolean) {
     if (staged) {
@@ -812,7 +898,7 @@ export function ChangesPanel({
     // Fire-time guard: the affordances are already disabled, but a later call
     // site must not reach a `git add` that dies reading the device.
     if (!canStage(entry)) return;
-    void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
+    void stageGuarded([entry]).catch(onError);
   }
 
   /** The key of the first folder row whose path satisfies `match` in `section`'s
@@ -1021,9 +1107,7 @@ export function ChangesPanel({
   }
 
   function stageAll() {
-    void stage
-      .mutateAsync(stageableUnstaged.map((e) => literalPathspec(e.path)))
-      .catch(onError);
+    void stageGuarded(stageableUnstaged).catch(onError);
   }
 
   function unstageAll() {
@@ -1038,10 +1122,7 @@ export function ChangesPanel({
   async function stageSelected() {
     if (stageableSelected.length === 0) return;
     try {
-      await stage.mutateAsync(
-        stageableSelected.map((e) => literalPathspec(e.path)),
-      );
-      setSelectedKeys(new Set());
+      if (await stageGuarded(stageableSelected)) setSelectedKeys(new Set());
     } catch (e) {
       onError(e);
     }
