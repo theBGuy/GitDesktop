@@ -78,8 +78,9 @@ export function ModelPicker({
   const available = useAgentModels(agent, {
     enabled: wanted && agentTabShowing,
   });
-  // Verbatim: the CLI orders its own catalog (its providers first), and the
-  // fallback is that CLI's static suggestions.
+  // Verbatim: the CLI orders its own catalog (opencode puts its providers
+  // first, codex sorts by priority), and the fallback is that CLI's static
+  // suggestions.
   const models = available.data?.models ?? [];
 
   return (

@@ -767,7 +767,7 @@ export const capabilities: Capability[] = [
     group: "AI · agents & sessions",
     ai: true,
     label:
-      "Delegate a task to a Claude, Codex, Copilot or opencode agent — searchable model picker (opencode's live catalog), any typed id accepted",
+      "Delegate a task to a Claude, Codex, Copilot or opencode agent — searchable model picker (live opencode, Codex and Copilot catalogs), any typed id accepted",
     highlight: true,
   },
   {

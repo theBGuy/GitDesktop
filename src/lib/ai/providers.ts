@@ -143,25 +143,40 @@ export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
   "claude-cli": ["sonnet", "opus", "haiku", "fable"],
   // Codex ids are plan-specific (they depend on the ChatGPT plan), so none is a
   // safe forced default — blank stays the default-on-switch (account default,
-  // which always works) via `defaultModelForProvider`; these are pick-from hints.
-  // Verified against codex's own `~/.codex/models_cache.json` (the models it
-  // exposes with visibility:"list" + supported_in_api), not guessed.
-  "codex-cli": ["gpt-5.5", "gpt-5.4-mini"],
-  // Copilot: a curated subset of the `/model` catalog (the picker still free-types
-  // any id; blank = Copilot's own default). Slugs are the lowercased display names —
-  // verified pattern from "Claude Haiku 4.5" → claude-haiku-4.5.
+  // which always works) via `defaultModelForProvider`; these are pick-from hints
+  // for when the live `codex debug models` listing is unavailable. The
+  // visibility:"list" + supported_in_api set from `~/.codex/models_cache.json`,
+  // in priority order (codex-cli 0.153.3, 2026-10-05).
+  "codex-cli": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  // Copilot: `auto` (a valid `--model` the CLI never lists) then the full
+  // `copilot help config` model block in its order (Copilot CLI 1.0.75,
+  // 2026-10-05); the fallback when the live listing is unavailable. The picker
+  // still free-types any id; blank = Copilot's own default.
   "copilot-cli": [
     "auto",
-    "gpt-5-mini",
-    "claude-haiku-4.5",
+    "claude-sonnet-5",
     "claude-sonnet-4.6",
-    "gpt-5.4",
-    "gpt-5.3-codex",
-    "mai-code-1-flash-picker",
-    "gpt-5.5",
+    "claude-sonnet-4.5",
+    "claude-haiku-4.5",
+    "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4.8",
+    "claude-opus-4.8-fast",
     "claude-opus-4.7",
     "claude-opus-4.6",
+    "claude-opus-4.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5-mini",
+    "gemini-3.1-pro-preview",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "kimi-k2.7-code",
   ],
   // opencode takes `provider/model`. The `opencode/…` namespace is its own hosted
   // catalog — what the CLI lists before any provider key is configured — and it
