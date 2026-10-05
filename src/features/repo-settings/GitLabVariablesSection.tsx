@@ -74,8 +74,11 @@ export function GitLabVariablesSection({
     switch (true) {
       case !online:
         return OFFLINE_WRITE_REASON;
+      // Shared with every row's Save: only an in-flight create is Add's own.
       case setVariable.isPending:
-        return ACT_PENDING_REASON;
+        return setVariable.variables?.create
+          ? ACT_PENDING_REASON
+          : SAVING_REASON;
       case !key.trim():
         return "Enter a variable key";
       case keyWarning !== null:

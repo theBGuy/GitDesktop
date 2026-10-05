@@ -109,7 +109,8 @@ export const OFFLINE_WRITE_REASON =
 /** The hold reason while a row's last change is still saving. */
 export const SAVING_REASON = "Saving your last change…";
 
-/** The hold reason on a confirm's act button while its change is in flight. */
+/** The hold reason on a write's own trigger (a confirm's act button, a
+ *  create/save/enable submit) while that write is in flight. */
 export const ACT_PENDING_REASON = "Applying this change…";
 
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
