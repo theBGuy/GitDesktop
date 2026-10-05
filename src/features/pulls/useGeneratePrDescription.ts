@@ -10,6 +10,7 @@ import {
   buildPrPrompt,
   extractPrDraft,
   needsStructuredLabelPick,
+  promptFileList,
 } from "@/lib/ai/prompt";
 import { isCliProvider } from "@/lib/ai/providers";
 import type { AiSettings, PromptProvider } from "@/lib/ai/types";
@@ -178,8 +179,10 @@ export function useGeneratePrDescription(repoPath: string) {
        *  Empty ⇒ no Jira mentions proposed. Mutually exclusive with
        *  `issueCandidates` — `buildPrPrompt` gives natives precedence. */
       jiraCandidates?: JiraCandidate[],
-      /** Which set of changes the "nothing to describe" toasts name; the
-       *  change-request noun follows `provider` (GitLab: merge request). */
+      /** Which set of changes the "nothing to describe" toasts name, and
+       *  whether an empty file list may be read off the diff text (change
+       *  requests only); the change-request noun follows `provider`
+       *  (GitLab: merge request). */
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
       /** Omit and the pick runs whenever the draft needs it. */
       labelPick?: LabelPickGate,
@@ -203,7 +206,14 @@ export function useGeneratePrDescription(repoPath: string) {
             getDiff(settings),
             readRepoInstructions(repoPath),
           ]);
-          if (diff.files.length === 0) {
+          // Only a change request derives its list from the diff: a forge list can be
+          // missing beside a real diff, while a local empty list beside text is a
+          // ref-move race between the backend's twin spawns, so it refuses on purpose.
+          const listed =
+            emptyScope === "change-request"
+              ? promptFileList(diff.files, diff.text).files
+              : diff.files;
+          if (listed.length === 0) {
             const scope =
               emptyScope === "change-request"
                 ? `in this ${provider === "gitlab" ? "merge request" : "pull request"}`

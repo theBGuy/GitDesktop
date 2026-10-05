@@ -34,7 +34,7 @@ import {
   gitCommitDiff,
   readRepoInstructions,
 } from "@/lib/git/api";
-import { sectionFilePath } from "@/lib/git/diff-split";
+import { diffSectionStats } from "@/lib/git/diff-split";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { type DiffStatEntry, prHeadSha } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
@@ -229,34 +229,6 @@ function automationTarget(event: AutomationEvent): ReviewTarget {
     lens: "origin",
     ref: targetRef(event),
   };
-}
-
-/** Derives a per-file +/- summary from unified diff text — for `gh pr diff`,
- *  which (unlike `git diff --numstat`) returns no file counts. */
-function filesFromDiff(text: string): DiffStatEntry[] {
-  return text
-    .split(/^(?=diff --git )/m)
-    .filter((s) => s.trim())
-    .flatMap((section) => {
-      // Same decoder `splitUnifiedDiff` keys with — a different rule here lets an
-      // AI-ignored file's name and counts survive `filterDiffByAiIgnore` (a
-      // C-quoted path has no bare ` b/`). Unkeyable sections are dropped, as
-      // `splitUnifiedDiff` drops them, so the key sets stay identical.
-      const path = sectionFilePath(section);
-      if (!path) return [];
-      let added = 0;
-      let deleted = 0;
-      for (const line of section.split("\n")) {
-        if (line.startsWith("+") && !line.startsWith("+++")) added++;
-        else if (line.startsWith("-") && !line.startsWith("---")) deleted++;
-      }
-      return {
-        path,
-        added,
-        deleted,
-        isBinary: section.includes("\nBinary files "),
-      };
-    });
 }
 
 /**
@@ -1403,7 +1375,7 @@ async function resolveDiff(
       event.target.number,
       "origin",
     );
-    return { text, truncated: false, files: filesFromDiff(text) };
+    return { text, truncated: false, files: diffSectionStats(text) };
   }
   if (event.target.type === "remote") {
     // Remote pr-open: the local branches are only a shortcut (they carry numstat) and
@@ -1423,7 +1395,7 @@ async function resolveDiff(
     // Origin-pinned — the poller is origin-scoped, so this tracks the fork's own PRs.
     const providerDiff = async () => {
       const text = await forgePrDiff(repoPath, prNumber, "origin");
-      return { text, truncated: false, files: filesFromDiff(text) };
+      return { text, truncated: false, files: diffSectionStats(text) };
     };
     const localRefsFresh = async (): Promise<boolean> => {
       // Short-circuit before the probes: with no head sha the answer is false
