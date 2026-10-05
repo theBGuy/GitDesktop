@@ -179,8 +179,10 @@ export function useGeneratePrDescription(repoPath: string) {
        *  Empty ⇒ no Jira mentions proposed. Mutually exclusive with
        *  `issueCandidates` — `buildPrPrompt` gives natives precedence. */
       jiraCandidates?: JiraCandidate[],
-      /** Which set of changes the "nothing to describe" toasts name; the
-       *  change-request noun follows `provider` (GitLab: merge request). */
+      /** Which set of changes the "nothing to describe" toasts name, and
+       *  whether an empty file list may be read off the diff text (change
+       *  requests only); the change-request noun follows `provider`
+       *  (GitLab: merge request). */
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
       /** Omit and the pick runs whenever the draft needs it. */
       labelPick?: LabelPickGate,
