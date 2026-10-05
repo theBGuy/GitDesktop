@@ -89,6 +89,9 @@ host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
 dialog. Commit-level destructive prompts (checkout, revert, cherry-pick, undo)
 share their wording through `src/features/history/commit-confirms.ts`: a new
 route to one of those ops imports the existing prompt, never re-spells it.
+Staging-over-conflict-markers prompts likewise live in
+`src/features/repository/conflict-confirms.ts`: the generic stage gate and
+Mark resolved both build theirs there.
 
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change

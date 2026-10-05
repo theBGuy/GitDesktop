@@ -1018,7 +1018,7 @@ split into regions. **Mark resolved** asks before staging a file that still has 
 markers, giving you the chance to clean them up first. The command palette offers all of
 these as **Mark conflict resolved**. Staging a conflicted file any other way (its row's
 **+** button, the right-click menu, **Stage all**, or the palette) asks the same question
-while markers remain.
+while markers remain, and always asks for a binary or very large file it can't check.
 
 {{ai}}## Resolve conflicts with AI
 

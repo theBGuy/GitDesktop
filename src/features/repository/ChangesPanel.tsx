@@ -80,6 +80,7 @@ import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
+import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
 
@@ -103,52 +104,6 @@ function isConflicted(entry: FileEntry): boolean {
   return entry.unstaged === "conflicted" || entry.staged === "conflicted";
 }
 
-/** A conflicted file a stage would carry markers into; `unchecked` = its sides
- *  read failed, for any cause (oversize, binary, a git error). */
-interface MarkerFlag {
-  name: string;
-  unchecked: boolean;
-}
-
-/** Up to three base names, else a count. */
-function flaggedNames(flags: MarkerFlag[]): string {
-  return flags.length <= 3
-    ? flags.map((f) => f.name).join(", ")
-    : `${flags.length} files`;
-}
-
-/** The stage-over-markers prompt; one file reads exactly as Mark resolved's. A
- *  `bulk` action never titles itself after one file, since it stages more. */
-function markerStagePrompt(flags: MarkerFlag[], bulk: boolean) {
-  const marked = flags.filter((f) => !f.unchecked);
-  const unchecked = flags.filter((f) => f.unchecked);
-  const markers =
-    unchecked.length > 0 ? "possible conflict markers" : "conflict markers";
-  const which = unchecked.length > 0 ? "any" : "the";
-  const one = flags.length === 1;
-  const clauses: string[] = [];
-  if (marked.length > 0)
-    clauses.push(
-      `${flaggedNames(marked)} still ${marked.length === 1 ? "has" : "have"} conflict markers.`,
-    );
-  if (unchecked.length > 0)
-    clauses.push(
-      `${flaggedNames(unchecked)} couldn't be checked for conflict markers.`,
-    );
-  clauses.push(
-    one
-      ? `Staging it marks the conflict resolved with ${which} markers in the file, and they'll be committed unless you remove them first.`
-      : `Staging them marks those conflicts resolved with ${which} markers in the files, and they'll be committed unless you remove them first.`,
-  );
-  return {
-    title:
-      one && !bulk
-        ? `Stage ${flags[0].name} with ${markers}?`
-        : `Stage files with ${markers}?`,
-    body: clauses.join(" "),
-  };
-}
-
 /** Sides reads in flight at once: each spawns several git processes, and a
  *  Stage all can cover hundreds of conflicts. */
 const SIDES_READ_CHUNK = 4;
@@ -156,7 +111,8 @@ const SIDES_READ_CHUNK = 4;
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
  *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
  *  cached read can predate the markers; a failed read asks rather than staging
- *  silently or refusing. Never rejects. */
+ *  silently or refusing. Resolves false without asking if the active repo
+ *  changed during the reads. Never rejects. */
 async function confirmMarkerStage(
   repoPath: string,
   conflicted: FileEntry[],
@@ -179,11 +135,8 @@ async function confirmMarkerStage(
     return markNeedsConfirm(read.value) ? [{ name, unchecked: false }] : [];
   });
   if (flags.length === 0) return true;
-  return useConfirm.getState().ask({
-    ...markerStagePrompt(flags, bulk),
-    confirmLabel: "Stage anyway",
-    confirmVariant: "destructive",
-  });
+  if (useUiStore.getState().repoPath !== repoPath) return false;
+  return useConfirm.getState().ask(markerStagePrompt(flags, bulk));
 }
 
 /** The discard-copy predicate: recycle-bin refusal keys on the reserved NAME,
@@ -369,6 +322,10 @@ export function ChangesPanel({
   const [blamePath, setBlamePath] = useState<string | null>(null);
   // The one shared context menu acts on whatever was right-clicked.
   const [menuTarget, setMenuTarget] = useState<MenuTarget>(null);
+  // A conflicted stage's marker check and prompt are in flight. The state drives
+  // the `mutating` disables; the ref is the fire-time refusal in stageGuarded.
+  const [checking, setChecking] = useState(false);
+  const checkingRef = useRef(false);
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLElement | null>(null);
   const viewToggleRef = useRef<HTMLButtonElement>(null);
@@ -812,7 +769,7 @@ export function ChangesPanel({
     // refresh must stay where it is.
     if (nextKey !== null && focusIsOrphaned()) focusRow(nextKey);
   }, [activeFolderKey, navIndex]);
-  const mutating = stage.isPending || unstage.isPending;
+  const mutating = stage.isPending || unstage.isPending || checking;
   const onError = (e: unknown) => toastError(e);
 
   function toggleKind(kind: FilterKind, on: boolean) {
@@ -899,16 +856,32 @@ export function ChangesPanel({
   async function stageGuarded(targets: FileEntry[]): Promise<boolean> {
     const pathspecs = targets.map((e) => literalPathspec(e.path));
     const conflicted = targets.filter(isConflicted);
-    if (conflicted.length > 0) {
-      const firedOn = repoPath;
+    if (conflicted.length === 0) {
+      await stage.mutateAsync(pathspecs);
+      return true;
+    }
+    // The ref, not the disables, is the guarantee: the menu items never read
+    // `mutating`. Refused before the try, so the first check's flags survive.
+    if (checkingRef.current) return false;
+    const firedOn = repoPath;
+    // `checking` drops in the same tick the stage starts, with no await between
+    // it and `stage.isPending` taking over the disables.
+    let staging: Promise<unknown>;
+    checkingRef.current = true;
+    setChecking(true);
+    try {
       const ok = await confirmMarkerStage(
         firedOn,
         conflicted,
         targets.length > 1,
       );
       if (!ok || useUiStore.getState().repoPath !== firedOn) return false;
+      staging = stage.mutateAsync(pathspecs);
+    } finally {
+      checkingRef.current = false;
+      setChecking(false);
     }
-    await stage.mutateAsync(pathspecs);
+    await staging;
     return true;
   }
 
