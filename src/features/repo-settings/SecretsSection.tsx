@@ -31,6 +31,7 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
 import {
+  ACT_PENDING_REASON,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
@@ -193,6 +194,24 @@ function SecretsList({
   const online = useOnline();
   const invalid = nameError(name);
   const canAdd = !!name && !!value && !invalid && !set.isPending && online;
+  // Every hold carries a reason, so Add never goes natively disabled and keeps
+  // focus through a save, including the field reset after one succeeds.
+  const addHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case set.isPending:
+        return ACT_PENDING_REASON;
+      case !name:
+        return "Enter a secret name";
+      case !!invalid:
+        return invalid;
+      case !value:
+        return "Enter a secret value";
+      default:
+        return undefined;
+    }
+  })();
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -246,7 +265,7 @@ function SecretsList({
           <DisabledReasonButton
             size="sm"
             disabled={!canAdd}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={addHeldReason}
             onClick={add}
           >
             {set.isPending ? (
@@ -312,6 +331,21 @@ function VariablesList({
   const online = useOnline();
   const invalid = nameError(name);
   const canAdd = !!name && !invalid && !set.isPending && online;
+  // Reasoned like the secrets form's Add, so Save keeps focus through a save.
+  const saveHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case set.isPending:
+        return ACT_PENDING_REASON;
+      case !name:
+        return "Enter a variable name";
+      case !!invalid:
+        return invalid;
+      default:
+        return undefined;
+    }
+  })();
 
   async function add() {
     try {
@@ -361,7 +395,7 @@ function VariablesList({
           <DisabledReasonButton
             size="sm"
             disabled={!canAdd}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={saveHeldReason}
             onClick={add}
           >
             {set.isPending ? (

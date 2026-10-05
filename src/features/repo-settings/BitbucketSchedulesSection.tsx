@@ -33,6 +33,7 @@ import {
   PipelinesDisabledBanner,
 } from "./BitbucketVariablesSection";
 import {
+  ACT_PENDING_REASON,
   HeldSwitch,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -229,6 +230,7 @@ function ScheduleRow({
   const syncing = schedule.uuid.startsWith("pending:");
   const online = useOnline();
   const swapFocus = useConfirmSwapFocus();
+  const deleteLabel = `Delete schedule for ${schedule.refName} (${schedule.cronPattern})`;
   const toggleHeld = (() => {
     switch (true) {
       case syncing:
@@ -277,6 +279,7 @@ function ScheduleRow({
           className="text-muted-foreground"
           disabled
           reason="Syncing with Bitbucket…"
+          aria-label={deleteLabel}
         >
           Delete
         </DisabledReasonButton>
@@ -287,6 +290,7 @@ function ScheduleRow({
           variant="ghost"
           className="text-muted-foreground hover:text-destructive"
           onClick={onConfirm}
+          aria-label={deleteLabel}
         >
           Delete
         </Button>
@@ -316,6 +320,7 @@ function ScheduleForm({
   const cronValid = cron.trim().length > 0;
   const canSave =
     refName.length > 0 && cronValid && !create.isPending && online;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning = !refName
     ? "Pick a branch."
     : !cronValid
@@ -395,7 +400,10 @@ function ScheduleForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canSave}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={
+              offlineReason ??
+              (create.isPending ? ACT_PENDING_REASON : undefined)
+            }
             onClick={submit}
           >
             {create.isPending && <Spinner data-icon="inline-start" />}

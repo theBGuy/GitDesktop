@@ -30,6 +30,7 @@ import type { PagesInfo } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
@@ -111,6 +112,7 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
     .map((b) => b.name)
     .filter((n) => !n.startsWith("gd/session/"));
   const canEnable = (mode === "workflow" || !!branch) && !enable.isPending;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -193,7 +195,9 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
       <DisabledReasonButton
         size="sm"
         disabled={!canEnable || !online}
-        reason={online ? undefined : OFFLINE_WRITE_REASON}
+        reason={
+          offlineReason ?? (enable.isPending ? ACT_PENDING_REASON : undefined)
+        }
         onClick={handleEnable}
       >
         {enable.isPending && <Spinner data-icon="inline-start" />}

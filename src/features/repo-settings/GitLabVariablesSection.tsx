@@ -18,9 +18,11 @@ import type { GitLabVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -66,6 +68,24 @@ export function GitLabVariablesSection({
         ? null
         : "Keys use only letters, digits, and underscores."
     : null;
+  // Every hold carries a reason, so Add never goes natively disabled and keeps
+  // focus through a save, including the field reset after one succeeds.
+  const addHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case setVariable.isPending:
+        return ACT_PENDING_REASON;
+      case !key.trim():
+        return "Enter a variable key";
+      case keyWarning !== null:
+        return keyWarning;
+      case value.length === 0:
+        return "Enter a variable value";
+      default:
+        return undefined;
+    }
+  })();
 
   // Awaited, not per-call callbacks: this subtree unmounts when the dialog
   // closes or the rail crossfades to another section, and react-query drops
@@ -143,7 +163,7 @@ export function GitLabVariablesSection({
           <DisabledReasonButton
             size="sm"
             disabled={!canAdd}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={addHeldReason}
             onClick={addVariable}
           >
             {setVariable.isPending ? (
@@ -230,6 +250,11 @@ function VariableRow({
 }) {
   const [draft, setDraft] = useState(variable.value);
   const dirty = draft !== variable.value;
+  // A key can repeat across environment scopes; a scoped row's name says which.
+  const scoped = variable.environmentScope !== "*";
+  const rowName = scoped
+    ? `${variable.key} (${variable.environmentScope})`
+    : variable.key;
   const swapFocus = useConfirmSwapFocus();
 
   return (
@@ -241,7 +266,7 @@ function VariableRow({
         >
           {variable.key}
         </p>
-        {variable.environmentScope !== "*" && (
+        {scoped && (
           <StatusDetailChip
             variant="secondary"
             label={variable.environmentScope}
@@ -267,6 +292,7 @@ function VariableRow({
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
             onClick={onConfirm}
+            aria-label={`Delete ${rowName}`}
             title="Delete"
           >
             <XIcon />
@@ -285,7 +311,7 @@ function VariableRow({
           size="sm"
           variant="outline"
           disabled={!dirty || saving || writeHeld !== undefined}
-          reason={writeHeld}
+          reason={writeHeld ?? (dirty && saving ? SAVING_REASON : undefined)}
           onClick={() => onSave(draft)}
         >
           Save

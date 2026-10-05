@@ -279,6 +279,7 @@ function DependabotVersionUpdates({
               size="sm"
               className="shrink-0"
               onClick={() => setConfirmingRemove(true)}
+              aria-label="Remove Dependabot version updates"
             >
               Remove
             </Button>

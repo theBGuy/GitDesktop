@@ -23,6 +23,7 @@ import type { BitbucketBranchRestriction } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
@@ -176,6 +177,7 @@ export function BitbucketBranchRestrictionsSection({
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"
                     onClick={() => setConfirming(r.id)}
+                    aria-label={`Delete ${kindLabel(r.kind)} on ${r.pattern}`}
                   >
                     Delete
                   </Button>
@@ -217,6 +219,7 @@ function RestrictionForm({
     !needsValue ||
     (Number.isInteger(numValue) && numValue >= 1 && numValue <= 10);
   const canSave = trimmed.length > 0 && valueValid && !pending && online;
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const warning = !trimmed
     ? "Enter a branch pattern."
     : !valueValid
@@ -322,7 +325,7 @@ function RestrictionForm({
           <DisabledReasonButton
             size="sm"
             disabled={!canSave}
-            reason={online ? undefined : OFFLINE_WRITE_REASON}
+            reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
             onClick={submit}
           >
             {pending && <Spinner data-icon="inline-start" />}

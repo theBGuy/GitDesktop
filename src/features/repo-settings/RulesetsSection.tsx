@@ -31,6 +31,7 @@ import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
+  ACT_PENDING_REASON,
   HeldRoleSelect,
   InlineConfirm,
   OFFLINE_WRITE_REASON,
@@ -492,6 +493,7 @@ function RulesetList({
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"
                     title="Delete"
+                    aria-label={`Delete ruleset ${rs.name}`}
                     onClick={() => setConfirming(rs.id)}
                   >
                     <TrashIcon />
@@ -574,6 +576,7 @@ function RulesetForm({
   const update = useUpdateRuleset(repoPath);
   const pending = create.isPending || update.isPending;
   const online = useOnline();
+  const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const seed = useMemo(
     () => (original ? rulesetToDraft(original) : BLANK),
     [original],
@@ -785,7 +788,7 @@ function RulesetForm({
         <DisabledReasonButton
           onClick={save}
           disabled={pending || !d.name.trim() || !online}
-          reason={online ? undefined : OFFLINE_WRITE_REASON}
+          reason={offlineReason ?? (pending ? ACT_PENDING_REASON : undefined)}
         >
           {pending && <Spinner data-icon="inline-start" />}
           {id != null ? "Save ruleset" : "Create ruleset"}
