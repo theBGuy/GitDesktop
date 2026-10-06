@@ -24,33 +24,13 @@ import {
   useRepoMutation,
 } from "./internal";
 import {
+  type PendingPrWrite,
   PR_WRITES_KEY,
   type PrWriteKind,
-  prBaseDivergencePrefix,
-  prReviewThreadsKey,
+  pendingPrWriteTarget,
   prWriteKey,
-} from "./prs";
-
-/** One in-flight PR write. `target` is the PR number its variables carry (the
- *  stack number for "stack-dissolve"); `lens` is null where they carry none. */
-export interface PendingPrWrite {
-  kind: PrWriteKind;
-  target: number | null;
-  lens: RemoteLens | null;
-}
-
-/** Reads a write's variables, which the filter sees as `unknown`: a bare number,
- *  or an object carrying `number` and optionally `lens`. */
-function pendingPrWriteTarget(vars: unknown): Omit<PendingPrWrite, "kind"> {
-  if (typeof vars === "number") return { target: vars, lens: null };
-  if (typeof vars !== "object" || vars === null)
-    return { target: null, lens: null };
-  const { number, lens } = vars as Record<string, unknown>;
-  return {
-    target: typeof number === "number" ? number : null,
-    lens: lens === "origin" || lens === "upstream" ? lens : null,
-  };
-}
+} from "./pr-writes";
+import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
 
 /**
  * Every PR write against `repo` that is in flight, one entry per INVOCATION — an
@@ -438,7 +418,9 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
 }
 
 /** Merge a PR on the forge. The variables name the PR they target (`number` +
- *  `lens`), so the view can scope its busy hold to that PR alone. */
+ *  `lens`), so the view can scope its busy hold to that PR alone. `stack` rides
+ *  them only to name the native stack the merge cascades through (the forge call
+ *  ignores it), so every member's view can hold while the stack lands. */
 export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -446,6 +428,7 @@ export function useMergePr(repo: string) {
     async (args: {
       number: number;
       lens: RemoteLens;
+      stack: number | null;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
       /** GitLab stale-view guard (the MR head sha); GitHub ignores it. */

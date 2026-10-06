@@ -679,8 +679,8 @@ export function LocalPrView({
   // DisabledReasonButton, never the trigger — its own inner useButton swallows
   // activation while blocked, which is what actually keeps the menu shut.
   // A local merge advances refs every local PR shares (and touches the working tree
-  // when its base is the current branch), so ANY one in flight holds this PR's Merge
-  // too — only the wording is scoped, naming the merge actually running.
+  // when its base is the current branch), so any merge this mounted view started
+  // holds this PR's Merge too — only the wording is scoped, naming that merge.
   const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
   const running = merge.isPending ? merge.variables : undefined;
   // This same string doubles as the hover title while nothing blocks. The

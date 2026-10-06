@@ -34,6 +34,7 @@ import {
   useRepoMutation,
   workingTreeKeys,
 } from "./internal";
+import { prWriteKey } from "./pr-writes";
 
 export function usePrsForBranch(
   repo: string,
@@ -954,30 +955,6 @@ export function useCommentIssue(repo: string, lens: RemoteLens) {
     api.forgeIssueComment(repo, args.number, args.body, lens),
   );
 }
-
-/** The PR writes whose in-flight state a PR view holds its controls on. */
-export type PrWriteKind =
-  | "comment"
-  | "merge"
-  | "close"
-  | "reopen"
-  | "set-draft"
-  | "approve"
-  | "unapprove"
-  | "request-changes"
-  | "unrequest-changes"
-  | "gl-arm-auto-merge"
-  | "gl-cancel-auto-merge"
-  | "stack-dissolve";
-
-/** Filter prefix for EVERY PR write ({@link prWriteKey}); read by pr-actions.ts
- *  `usePendingPrWrites`. */
-export const PR_WRITES_KEY = ["pr-write"] as const;
-
-/** A PR write's mutation key. Static per repo, so it never detaches a pending write
- *  across a PR switch, while a repo switch pins the write to the repo it fired in. */
-export const prWriteKey = (kind: PrWriteKind, repo: string) =>
-  [...PR_WRITES_KEY, kind, repo] as const;
 
 export function useCommentPr(repo: string, lens: RemoteLens) {
   return useOptimisticCreateCommentMutation(

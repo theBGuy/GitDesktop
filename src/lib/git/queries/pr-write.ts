@@ -8,7 +8,7 @@ import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
-import { prWriteKey } from "./prs";
+import { prWriteKey } from "./pr-writes";
 
 export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(

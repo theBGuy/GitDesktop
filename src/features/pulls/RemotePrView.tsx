@@ -112,6 +112,8 @@ import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
   invalidateRepoAfterWrite,
+  isPendingFor,
+  isStackMergePendingFor,
   PIPELINE_IN_FLIGHT,
   type PrWriteKind,
   prDiffOptions,
@@ -693,12 +695,26 @@ export function RemotePrView({
   // variables carry one. Most lens-less kinds are GitLab/Bitbucket-only, where the
   // lens is always origin, so the bare number is the whole identity.
   const writePending = (kind: PrWriteKind) =>
-    pendingWrites.some(
-      (w) =>
-        w.kind === kind &&
-        w.target === number &&
-        (w.lens === null || w.lens === lens),
-    );
+    isPendingFor(pendingWrites, kind, number, lens);
+  // The native stack this PR sits in, parsed once — the number a dissolve writes and
+  // a cascading merge names. A native stack's id is a numeric string by contract, so
+  // a value that won't parse means the contract broke: null then withdraws Dissolve
+  // (and its palette twin) rather than sending the forge a NaN.
+  const nativeStackNumber = (() => {
+    const info = details.data?.stack;
+    if (!isNativeStack(info)) return null;
+    const parsed = Number(info?.id);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  })();
+  // A GitHub stack merge also lands every open member below the merged one, so a
+  // merge fired from any member holds the whole stack — members above it too,
+  // which it only holds. A PR whose stack probe failed has no number to match, so a
+  // cascade can't hold it. GitLab merges one MR, so its auto-merge never cascades.
+  const stackMergePending = isStackMergePendingFor(
+    pendingWrites,
+    nativeStackNumber,
+    lens,
+  );
   // Comment variables carry no lens (prs.ts), so a lens flip at the same number
   // holds the other lens's PR until the post settles — accepted, it only holds.
   const commentPending = writePending("comment");
@@ -720,6 +736,7 @@ export function RemotePrView({
     details.isPlaceholderData ||
     commentPending ||
     mergePending ||
+    stackMergePending ||
     closePending ||
     reopenPending ||
     approvePending ||
@@ -946,27 +963,20 @@ export function RemotePrView({
     resetStackWrites();
   }, [stackWriteKey]);
 
-  // The stack number the dissolve writes, parsed once. A native stack's id is a
-  // numeric string by contract, so a value that won't parse means the contract
-  // broke — null then withdraws the affordance (and its palette twin with it)
-  // rather than sending the forge a NaN.
-  const dissolveStackNumber = (() => {
-    const info = details.data?.stack;
-    if (!isNativeStack(info)) return null;
-    const parsed = Number(info?.id);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-  })();
   // Dissolve is offered only for a stack GitDesktop can actually write: a
   // GitHub-native one (a GitLab-inferred chain has no stack to dissolve).
   // Permission only enables: a viewer without push keeps the control, held
   // with `writeReason`, like Merge.
   const canDissolveStack =
-    dissolveStackNumber !== null && details.data?.state === "OPEN" && canEdit;
+    nativeStackNumber !== null && details.data?.state === "OPEN" && canEdit;
   // Read like `busy`'s terms: a dissolve holds only the stack it targets, which
   // every member of that stack shares. Its variables carry no lens (pr-write.ts), so
   // a lens flip onto an equal stack number holds that one too — accepted, it only holds.
-  const dissolvePending = pendingWrites.some(
-    (w) => w.kind === "stack-dissolve" && w.target === dissolveStackNumber,
+  const dissolvePending = isPendingFor(
+    pendingWrites,
+    "stack-dissolve",
+    nativeStackNumber,
+    lens,
   );
 
   async function dissolveStack() {
@@ -974,7 +984,7 @@ export function RemotePrView({
     // The confirm names this stack's id and size, both read off the rendered PR.
     if (
       !info ||
-      dissolveStackNumber === null ||
+      nativeStackNumber === null ||
       details.isPlaceholderData ||
       writeBlocked
     )
@@ -988,7 +998,7 @@ export function RemotePrView({
     });
     if (!ok) return;
     try {
-      await stackDissolve.mutateAsync(dissolveStackNumber);
+      await stackDissolve.mutateAsync(nativeStackNumber);
       toast.success(`Dissolved stack #${info.id}`);
     } catch (e) {
       onError(e);
@@ -1751,6 +1761,7 @@ export function RemotePrView({
       const outcome = await mergePr.mutateAsync({
         number,
         lens,
+        stack: nativeStackNumber,
         strategy: mergeStrategy,
         deleteBranch: deleteHead,
         sha,
@@ -1956,6 +1967,8 @@ export function RemotePrView({
         return "Posting your comment…";
       case mergePending:
         return `Merging this ${prNoun}…`;
+      case stackMergePending:
+        return `Merging stack #${nativeStackNumber}…`;
       case closePending:
         return `Closing this ${prNoun}…`;
       case reopenPending:
