@@ -3069,7 +3069,7 @@ fn confirm_red_rollup(
         return RedVerdict::Kept;
     }
     let collapsed = collapse_superseded_checks(c.checks, Some(&c.events));
-    let latest = drop_superseded_relics(collapsed, Some(&c.events));
+    let latest = drop_superseded_relics(collapsed, &c.events);
     derive_rollup_state(&latest).map_or(RedVerdict::Kept, |s| RedVerdict::Confirmed(s.to_string()))
 }
 
@@ -3078,33 +3078,22 @@ fn confirm_red_rollup(
 /// its real completion. Events resolve through `runs` on the collapse's (name, workflow,
 /// start) join and must agree on one non-empty value: a push run and its pull_request
 /// twin are independent, so retiring across them would read a cancelled run green. A
-/// relic with no real completion or event stays, as does every relic when `runs` is
-/// `None`. Stricter than `superseded()` in checks-rerun.ts, which has no events and errs
-/// toward withholding the offer.
-fn drop_superseded_relics(checks: Vec<RawCheck>, runs: Option<&[CheckRunEvent]>) -> Vec<RawCheck> {
-    fn started(c: &RawCheck) -> Option<&str> {
-        c.started_at.as_deref().filter(|s| real_check_time(s))
-    }
+/// relic with no real completion or event stays. Stricter than `superseded()` in
+/// checks-rerun.ts, which has no events and errs toward withholding the offer.
+fn drop_superseded_relics(checks: Vec<RawCheck>, runs: &[CheckRunEvent]) -> Vec<RawCheck> {
     fn event_of<'a>(runs: &'a [CheckRunEvent], c: &RawCheck) -> Option<&'a str> {
         let mut hits = runs
             .iter()
-            .filter(|r| {
-                r.name == c.name
-                    && r.workflow == c.workflow_name
-                    && r.started_at.as_deref() == started(c)
-            })
+            .filter(|r| joins_event(r, c))
             .map(|r| r.event.as_str());
         let event = hits.next().filter(|e| !e.is_empty())?;
         hits.all(|e| e == event).then_some(event)
     }
-    let Some(runs) = runs else {
-        return checks;
-    };
     let superseded = |i: usize, c: &RawCheck| -> bool {
         if c.typename != "CheckRun"
             || c.name.is_empty()
             || !c.conclusion.eq_ignore_ascii_case("CANCELLED")
-            || started(c).is_some()
+            || check_started(c).is_some()
         {
             return false;
         }
@@ -3118,7 +3107,7 @@ fn drop_superseded_relics(checks: Vec<RawCheck>, runs: Option<&[CheckRunEvent]>)
             j != i
                 && other.name == c.name
                 && other.workflow_name == c.workflow_name
-                && started(other).is_some_and(|s| at_least_as_new(s, done))
+                && check_started(other).is_some_and(|s| at_least_as_new(s, done))
                 && event_of(runs, other) == Some(event)
         })
     };
@@ -4655,6 +4644,18 @@ fn at_least_as_new(candidate: &str, incumbent: &str) -> bool {
     candidate >= incumbent
 }
 
+/// A row's real start, or `None` when it is undated.
+fn check_started(c: &RawCheck) -> Option<&str> {
+    c.started_at.as_deref().filter(|s| real_check_time(s))
+}
+
+/// Whether an events row describes `c`: the (name, workflow, start) join through which
+/// both [`collapse_superseded_checks`] and [`drop_superseded_relics`] resolve a
+/// CheckRun's event. Each applies its own rule to how many rows may join.
+fn joins_event(r: &CheckRunEvent, c: &RawCheck) -> bool {
+    r.name == c.name && r.workflow == c.workflow_name && r.started_at.as_deref() == check_started(c)
+}
+
 /// Keeps only the newest row per [`SupersedeKey`], so a workflow re-triggered by PR
 /// events reads as its latest run. Keying needs a real start: an undated row (queued,
 /// or cancelled before it started) has no order, and `(name, workflow, no start)` names
@@ -4667,23 +4668,16 @@ fn collapse_superseded_checks(
     checks: Vec<RawCheck>,
     runs: Option<&[CheckRunEvent]>,
 ) -> Vec<RawCheck> {
-    fn started(c: &RawCheck) -> Option<&str> {
-        c.started_at.as_deref().filter(|s| real_check_time(s))
-    }
     let keep: Vec<bool> = {
         let event_of = |c: &RawCheck| -> Option<String> {
-            let mut hits = runs?.iter().filter(|r| {
-                r.name == c.name
-                    && r.workflow == c.workflow_name
-                    && r.started_at.as_deref() == started(c)
-            });
+            let mut hits = runs?.iter().filter(|r| joins_event(r, c));
             let hit = hits.next()?;
             hits.next().is_none().then(|| hit.event.clone())
         };
         let keys: Vec<Option<(SupersedeKey, &str)>> = checks
             .iter()
             .map(|c| {
-                let start = started(c)?;
+                let start = check_started(c)?;
                 let key = if !c.name.is_empty() {
                     if c.typename != "CheckRun" || c.workflow_name.is_empty() {
                         return None;
@@ -10518,11 +10512,10 @@ github.acme.com
                     done("fragment", T2, "SUCCESS"),
                 ];
                 let checks = || nodes.iter().map(rollup_node_check).collect::<Vec<_>>();
-                assert_eq!(drop_superseded_relics(checks(), None).len(), 2);
-                assert_eq!(drop_superseded_relics(checks(), Some(&[])).len(), 2);
+                assert_eq!(drop_superseded_relics(checks(), &[]).len(), 2);
                 // Control: the same rows with their events retire the relic.
                 let events = check_run_events_of(&nodes);
-                assert_eq!(drop_superseded_relics(checks(), Some(&events)).len(), 1);
+                assert_eq!(drop_superseded_relics(checks(), &events).len(), 1);
             }
 
             #[test]
