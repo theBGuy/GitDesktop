@@ -10101,6 +10101,19 @@ async fn poll_fork_ready(id: u64) -> bool {
     false
 }
 
+fn star_result(code: i32, stderr: &str) -> AppResult<()> {
+    // A 304 means the project was already in the desired star state — success.
+    if code == 0 || mask_host_tokens(stderr).contains("304") {
+        return Ok(());
+    }
+    let msg = stderr.trim();
+    Err(AppError::Glab(if msg.is_empty() {
+        format!("glab exited with code {code} toggling the star")
+    } else {
+        msg.to_string()
+    }))
+}
+
 /// Star (`POST …/star`) or unstar (`POST …/unstar`) a GitLab project by name. A 304
 /// (already in the desired state) is success.
 pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
@@ -10110,19 +10123,7 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     let action = if star { "star" } else { "unstar" };
     let endpoint = format!("projects/{enc}/{action}");
     let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    if out.code != 0 {
-        // A 304 means the project was already in the desired star state — success.
-        if out.stderr.contains("304") {
-            return Ok(());
-        }
-        let msg = out.stderr.trim();
-        return Err(AppError::Glab(if msg.is_empty() {
-            format!("glab exited with code {} toggling the star", out.code)
-        } else {
-            msg.to_string()
-        }));
-    }
-    Ok(())
+    star_result(out.code, &out.stderr)
 }
 
 /// Whether the signed-in user has starred `owner/name`. GitLab has no direct
@@ -12233,6 +12234,32 @@ mod tests {
         // "best" deliberately avoids `similarity` (member-scoped → empty public
         // searches); star_count is the relevance proxy.
         assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn star_result_rejects_a_304_in_the_request_url() {
+        assert!(star_result(0, "").is_ok());
+        assert!(star_result(1, "glab: 304 Not Modified").is_ok());
+        let stderr = "Post \"https://gitlab.com/api/v4/projects/acme%2Fhttp-304-cache/star\": dial tcp: lookup gitlab.com: no such host";
+        assert!(!mask_host_tokens(stderr).contains("304"));
+        assert!(matches!(
+            star_result(1, stderr),
+            Err(AppError::Glab(detail)) if detail == stderr
+        ));
+    }
+
+    #[test]
+    fn star_result_rejects_a_304_in_the_host_port() {
+        let stderr = "dial tcp 10.0.0.5:3040: connect: connection refused";
+        assert!(!mask_host_tokens(stderr).contains("304"));
+        assert!(matches!(
+            star_result(1, stderr),
+            Err(AppError::Glab(detail)) if detail == stderr
+        ));
+        assert!(matches!(
+            star_result(1, "  "),
+            Err(AppError::Glab(detail)) if detail == "glab exited with code 1 toggling the star"
+        ));
     }
 
     #[test]
