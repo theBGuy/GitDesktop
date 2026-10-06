@@ -301,7 +301,13 @@ function StackHeader({
         <DisabledReasonButton
           variant="ghost"
           size="xs"
-          className="cursor-pointer text-muted-foreground hover:text-destructive focus-visible:text-destructive"
+          // The destructive tone belongs to the live arm only: a held button
+          // regains full opacity under keyboard focus, so it would paint red.
+          className={cn(
+            "text-muted-foreground",
+            !(dissolving || disabled) &&
+              "cursor-pointer hover:text-destructive focus-visible:text-destructive",
+          )}
           disabled={dissolving || disabled}
           // The spinner already says a dissolve is running.
           reason={dissolving ? undefined : reason}
@@ -342,6 +348,7 @@ export function StackOffer({
   onConfirm,
   onCancel,
   disabled,
+  reason,
   ref,
 }: {
   offer: StackOfferKind;
@@ -359,6 +366,8 @@ export function StackOffer({
    *  has to hold too: it focuses Confirm, which is disabled here. Cancel stays
    *  live: it only dismisses. */
   disabled?: boolean;
+  /** Why `disabled` holds the offer, as its tooltip and announced reason. */
+  reason?: string;
   ref?: Ref<StackOfferHandle>;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -402,15 +411,16 @@ export function StackOffer({
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {line}
         </p>
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="xs"
-          className="shrink-0 cursor-pointer"
+          className="cursor-pointer"
           disabled={disabled}
+          reason={reason}
           onClick={() => setExpanded(true)}
         >
           {offer.kind === "create" ? "Create stack" : "Add to stack"}
-        </Button>
+        </DisabledReasonButton>
       </div>
     );
   }
@@ -469,16 +479,18 @@ export function StackOffer({
           : "It'll merge with the stack, bottom to top."}
       </p>
       <div className="mt-1.5 flex items-center gap-2">
-        <Button
+        <DisabledReasonButton
           ref={confirmRef}
           size="xs"
           className="cursor-pointer"
           disabled={pending || disabled}
+          // The spinner already says a write is running.
+          reason={pending ? undefined : reason}
           onClick={onConfirm}
         >
           {pending && <Spinner data-icon="inline-start" />}
           {confirmLabel}
-        </Button>
+        </DisabledReasonButton>
         <Button
           variant="outline"
           size="xs"

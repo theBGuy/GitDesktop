@@ -414,9 +414,9 @@ export function RemotePrView({
   const checkout = useCheckoutPr(repoPath, lens);
   const repoStatus = useRepoStatus(repoPath);
   const applySuggestion = useApplySuggestion(repoPath);
-  const mergePr = useMergePr(repoPath, lens);
-  const closePr = useClosePr(repoPath, lens);
-  const reopenPr = useReopenPr(repoPath, lens);
+  const mergePr = useMergePr(repoPath);
+  const closePr = useClosePr(repoPath);
+  const reopenPr = useReopenPr(repoPath);
   // Approval + reviewer state drives the approve toggle and Request-changes
   // control (GitLab + Bitbucket); only fetched for a ready repo with an open MR
   // (null disables the read for GitHub / closed MRs).
@@ -520,7 +520,7 @@ export function RemotePrView({
   const deleteReviewComment = useDeleteReviewComment(repoPath, lens);
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
-  const setDraft = useSetPrDraft(repoPath, lens);
+  const setDraft = useSetPrDraft(repoPath);
   const editPr = useEditPr(repoPath, lens);
   // File:line-anchored review threads, shared by the Conversation block and the
   // Files-tab diff anchors — so the read lives at the top level. It gates on the PR
@@ -683,23 +683,52 @@ export function RemotePrView({
   // Ready/Convert routes through `gh pr ready [--undo]`).
   const isGitHubProvider = providerKey === "github";
   const draftPairVisible = canToggleDraft || (isGitHubProvider && canWrite);
-  // One in-flight PR mutation at a time: every footer/state control and its palette
-  // twin disables while any of these runs. Declared above the palette wiring so both
-  // share the exact same gate. Placeholder details are the previously shown PR's and
-  // the footer's verbs derive from them, so the same gate holds through a switch.
+  // A write holds only the PR it targets, read off its variables: this view swaps
+  // PRs without remounting, so an observer's pending state outlives the switch. Not
+  // reset on switch: returning mid-flight must still find the write held.
+  const targetsShownPr = (
+    v: { number: number; lens: RemoteLens } | undefined,
+  ) => v?.number === number && v.lens === lens;
+  // The comment variables carry no lens (prs.ts), so a lens flip at the same number
+  // holds the other lens's PR until the post settles — accepted, it only holds.
+  const commentPending =
+    comment.isPending && comment.variables?.number === number;
+  const mergePending = mergePr.isPending && targetsShownPr(mergePr.variables);
+  const closePending = closePr.isPending && targetsShownPr(closePr.variables);
+  const reopenPending =
+    reopenPr.isPending && targetsShownPr(reopenPr.variables);
+  // GitLab/Bitbucket-only writes: the lens there is always origin, so the bare
+  // number they send is the whole identity.
+  const approvePending = approvePr.isPending && approvePr.variables === number;
+  const unapprovePending =
+    unapprovePr.isPending && unapprovePr.variables === number;
+  const requestChangesPending =
+    requestChangesPr.isPending && requestChangesPr.variables?.number === number;
+  const unrequestChangesPending =
+    unrequestChangesPr.isPending && unrequestChangesPr.variables === number;
+  const armAutoMergePending =
+    armAutoMerge.isPending && targetsShownPr(armAutoMerge.variables);
+  const cancelAutoMergePending =
+    cancelAutoMerge.isPending && targetsShownPr(cancelAutoMerge.variables);
+  const setDraftPending =
+    setDraft.isPending && targetsShownPr(setDraft.variables);
+  // Every footer/state control and its palette twin holds while a write to THIS PR
+  // runs; another PR's write holds nothing here. Declared above the palette wiring so
+  // both share the exact same gate. Placeholder details are the previously shown PR's
+  // and the footer's verbs derive from them, so the same gate holds through a switch.
   const busy =
     details.isPlaceholderData ||
-    comment.isPending ||
-    mergePr.isPending ||
-    closePr.isPending ||
-    reopenPr.isPending ||
-    approvePr.isPending ||
-    unapprovePr.isPending ||
-    requestChangesPr.isPending ||
-    unrequestChangesPr.isPending ||
-    armAutoMerge.isPending ||
-    cancelAutoMerge.isPending ||
-    setDraft.isPending;
+    commentPending ||
+    mergePending ||
+    closePending ||
+    reopenPending ||
+    approvePending ||
+    unapprovePending ||
+    requestChangesPending ||
+    unrequestChangesPending ||
+    armAutoMergePending ||
+    cancelAutoMergePending ||
+    setDraftPending;
   // WHICH draft action exists is picked off `isDraft`, so placeholder details would
   // offer the PREVIOUS PR's. Retain the last FRESH value and the PR it belonged to;
   // a mismatch means nothing fresh has landed for this one yet, and neither action is
@@ -721,7 +750,7 @@ export function RemotePrView({
   // never run for a write the forge had already taken.
   async function markReadyForReview() {
     try {
-      await setDraft.mutateAsync({ number, draft: false });
+      await setDraft.mutateAsync({ number, lens, draft: false });
       toast.success("Marked ready for review");
       void fireReadyReview();
     } catch (e) {
@@ -730,7 +759,7 @@ export function RemotePrView({
   }
   async function convertToDraft() {
     try {
-      await setDraft.mutateAsync({ number, draft: true });
+      await setDraft.mutateAsync({ number, lens, draft: true });
       toast.success("Converted to draft");
     } catch (e) {
       onError(e);
@@ -865,7 +894,8 @@ export function RemotePrView({
   async function confirmStackOffer() {
     // `offerEnabled` withholds the offer entirely until details are the selected
     // PR's, so the placeholder arm here is insurance against a looser gate later.
-    if (!stackOffer || details.isPlaceholderData) return;
+    // Permission holds the offer rather than hiding it, so the refusal lives here.
+    if (!stackOffer || details.isPlaceholderData || writeBlocked) return;
     if (stackOffer.kind === "create") {
       try {
         const outcome = await stackCreate.mutateAsync(stackOffer.members);
@@ -932,6 +962,11 @@ export function RemotePrView({
   // with `writeReason`, like Merge.
   const canDissolveStack =
     dissolveStackNumber !== null && details.data?.state === "OPEN" && canEdit;
+  // Scoped like `busy`: a dissolve holds only the stack it targets, which every
+  // member of that stack shares. Its variables carry no lens (pr-write.ts), so a
+  // lens flip onto an equal stack number holds that one too — accepted, it only holds.
+  const dissolvePending =
+    stackDissolve.isPending && stackDissolve.variables === dissolveStackNumber;
 
   async function dissolveStack() {
     const info = details.data?.stack;
@@ -962,12 +997,18 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-stack-create",
     () => offerRef.current?.expand(),
-    isSelectedPr && !details.isPlaceholderData && stackOffer?.kind === "create",
+    isSelectedPr &&
+      !details.isPlaceholderData &&
+      !writeBlocked &&
+      stackOffer?.kind === "create",
   );
   useHotkeyAction(
     "pr-stack-add",
     () => offerRef.current?.expand(),
-    isSelectedPr && !details.isPlaceholderData && stackOffer?.kind === "add",
+    isSelectedPr &&
+      !details.isPlaceholderData &&
+      !writeBlocked &&
+      stackOffer?.kind === "add",
   );
   useHotkeyAction(
     "pr-stack-dissolve",
@@ -976,7 +1017,7 @@ export function RemotePrView({
       !details.isPlaceholderData &&
       canDissolveStack &&
       !writeBlocked &&
-      !stackDissolve.isPending,
+      !dissolvePending,
   );
 
   // Server truth first; the local preview only fills the gap where the forge has none.
@@ -1634,7 +1675,7 @@ export function RemotePrView({
     if (!ok) return;
     if (!(await postRidingDraft())) return;
     try {
-      await closePr.mutateAsync(number);
+      await closePr.mutateAsync({ number, lens });
       // The riding comment posts without the "Comment added" toast the ordinary
       // submit gets, so the confirmation here has to account for both writes.
       toast.success(
@@ -1657,7 +1698,7 @@ export function RemotePrView({
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft())) return;
     try {
-      await reopenPr.mutateAsync(number);
+      await reopenPr.mutateAsync({ number, lens });
       toast.success(
         withComment
           ? `Reopened #${number} and posted your comment`
@@ -1680,26 +1721,35 @@ export function RemotePrView({
     // The checkbox is hidden/disabled for a default or rule-protected head, but
     // force the flag false here too so a stale `true` can't reach the forge.
     const deleteHead = deleteBranch && !headIsDefault && !headDeletionBlocked;
+    // The merge can settle after the view has moved to another PR, whose own merge
+    // dialog may be open by then: only close the dialog while this PR is on screen.
+    // Toasts and the queue record (keyed per PR) stand regardless: the write happened.
+    const startedFor = entityKey;
+    const closeDialogIfStillHere = () => {
+      if (startedFor === entityKeyRef.current) setMergeOpen(false);
+    };
     if (mergeAuto) {
       // Arm merge-when-pipeline-succeeds instead of merging now (GitLab-only).
       try {
         await armAutoMerge.mutateAsync({
           number,
+          lens,
           strategy: mergeStrategy,
           deleteBranch: deleteHead,
           sha,
         });
-        setMergeOpen(false);
+        closeDialogIfStillHere();
         toast.success("Auto-merge enabled — merges when the pipeline passes");
       } catch (e) {
         onError(e);
-        setMergeOpen(false);
+        closeDialogIfStillHere();
       }
       return;
     }
     try {
       const outcome = await mergePr.mutateAsync({
         number,
+        lens,
         strategy: mergeStrategy,
         deleteBranch: deleteHead,
         sha,
@@ -1713,11 +1763,12 @@ export function RemotePrView({
         // state, so record it: the chip below is the only lasting sign the
         // merge is waiting rather than done.
         markMergeQueued(queuedKey);
-        setQueuedWarning(
-          outcome.cleanupWarning
-            ? { key: queuedKey, text: outcome.cleanupWarning }
-            : null,
-        );
+        // The warning slot is shared by every PR: a new warning overwrites it (last
+        // one wins), while a clear only drops this PR's own, never another's.
+        if (outcome.cleanupWarning)
+          setQueuedWarning({ key: queuedKey, text: outcome.cleanupWarning });
+        else
+          setQueuedWarning((prev) => (prev?.key === queuedKey ? null : prev));
       } else {
         toast.success(`Merged #${number}`);
         // Merged for real; a cleanupWarning here means only the post-merge
@@ -1727,7 +1778,7 @@ export function RemotePrView({
           toast.warning(outcome.cleanupWarning, { duration: 10000 });
         }
       }
-      setMergeOpen(false);
+      closeDialogIfStillHere();
     } catch (e) {
       // Where the rules are the known reason, say which requirement is unmet
       // alongside the refusal — the same line the strip is already showing, and
@@ -1740,7 +1791,7 @@ export function RemotePrView({
             blockedMergeLine(blockedRequirements, blockedApprovals),
         );
       else onError(e);
-      setMergeOpen(false);
+      closeDialogIfStillHere();
     }
   }
 
@@ -1895,31 +1946,32 @@ export function RemotePrView({
   const staleReason = detailsStale ? PR_SWITCH_LOADING_REASON : undefined;
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
+  // Same scoped terms as `busy`, so it never names another PR's write.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
-      case comment.isPending:
+      case commentPending:
         return "Posting your comment…";
-      case mergePr.isPending:
+      case mergePending:
         return `Merging this ${prNoun}…`;
-      case closePr.isPending:
+      case closePending:
         return `Closing this ${prNoun}…`;
-      case reopenPr.isPending:
+      case reopenPending:
         return `Reopening this ${prNoun}…`;
-      case approvePr.isPending:
+      case approvePending:
         return "Submitting your approval…";
-      case unapprovePr.isPending:
+      case unapprovePending:
         return "Revoking your approval…";
-      case requestChangesPr.isPending:
+      case requestChangesPending:
         return "Requesting changes…";
-      case unrequestChangesPr.isPending:
+      case unrequestChangesPending:
         return "Revoking your change request…";
-      case armAutoMerge.isPending:
+      case armAutoMergePending:
         return "Enabling auto-merge…";
-      case cancelAutoMerge.isPending:
+      case cancelAutoMergePending:
         return "Canceling auto-merge…";
-      case setDraft.isPending:
+      case setDraftPending:
         return "Updating draft status…";
       default:
         return undefined;
@@ -2347,7 +2399,7 @@ export function RemotePrView({
 
   async function doCancelAutoMerge() {
     try {
-      await cancelAutoMerge.mutateAsync(number);
+      await cancelAutoMerge.mutateAsync({ number, lens });
       toast.success("Auto-merge canceled");
     } catch (e) {
       onError(e);
@@ -2835,7 +2887,7 @@ export function RemotePrView({
           currentNumber={number}
           onSelect={(n) => selectPrWithAlign({ kind: "remote", id: String(n) })}
           onDissolve={canDissolveStack ? dissolveStack : undefined}
-          dissolving={stackDissolve.isPending}
+          dissolving={dissolvePending}
           // `dissolveStack` refuses without push or while the rendered stack is
           // the previous PR's, so hold its control — without the spinner a real
           // write would show. Permission outranks the switch, as on Merge.
@@ -2848,9 +2900,11 @@ export function RemotePrView({
             offer={stackOffer}
             rows={offerRows}
             pending={stackCreate.isPending || stackAdd.isPending}
-            // Unreachable while stale — no offer exists then — so this is the
-            // rendered twin of `confirmStackOffer`'s insurance arm, not a live gate.
-            disabled={detailsStale}
+            // The rendered twin of `confirmStackOffer`'s refusals. Permission only
+            // enables, so a viewer without push sees the offer held with its reason;
+            // the stale arm is unreachable today (no offer exists then).
+            disabled={detailsStale || writeBlocked}
+            reason={writeReason ?? staleReason}
             error={
               stackWriteError ? presentError(stackWriteError).summary : null
             }
@@ -2992,7 +3046,7 @@ export function RemotePrView({
                   })),
                 })),
           }}
-          posting={comment.isPending}
+          posting={commentPending}
           // The context above is seeded from the rendered PR, so through a switch
           // `stale` holds both the run and the post — without the spinner that
           // `posting` shows for a real one.
@@ -3750,7 +3804,7 @@ export function RemotePrView({
         onDeleteBranchChange={setDeleteBranch}
         headIsDefault={headIsDefault}
         deletionBlocked={headDeletionBlocked}
-        pending={mergeAuto ? armAutoMerge.isPending : mergePr.isPending}
+        pending={mergeAuto ? armAutoMergePending : mergePending}
         onConfirm={confirmMerge}
         auto={mergeAuto}
         stackNotice={stackMerge?.notice}

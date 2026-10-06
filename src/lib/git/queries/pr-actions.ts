@@ -203,17 +203,18 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
   });
 }
 
-/** Toggle a PR/MR's draft state both ways on all three providers. `lens` threads the
- *  fork identity through to the GitHub arm. Optimistically patches `isDraft` with
- *  field-scoped rollback so the badge flips instantly; the repo-wide invalidate on
- *  settle reconciles server truth and refreshes the merge gate. */
-export function useSetPrDraft(repo: string, lens: RemoteLens) {
+/** Toggle a PR/MR's draft state both ways on all three providers. `args.lens` threads
+ *  the fork identity through to the GitHub arm and, with `number`, names the PR the
+ *  write targets — the view scopes its busy hold on that pair. Optimistically patches
+ *  `isDraft` with field-scoped rollback so the badge flips instantly; the repo-wide
+ *  invalidate on settle reconciles server truth and refreshes the merge gate. */
+export function useSetPrDraft(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { number: number; draft: boolean }) =>
-      api.forgePrSetDraft(repo, args.number, args.draft, lens),
+    mutationFn: (args: { number: number; lens: RemoteLens; draft: boolean }) =>
+      api.forgePrSetDraft(repo, args.number, args.draft, args.lens),
     onMutate: async (args) => {
-      const key = ["repo", repo, "pr", lens, args.number] as const;
+      const key = ["repo", repo, "pr", args.lens, args.number] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<PrDetails>(key);
       queryClient.setQueryData<PrDetails>(key, (d) =>
@@ -360,12 +361,15 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
   });
 }
 
-export function useMergePr(repo: string, lens: RemoteLens) {
+/** Merge a PR on the forge. The variables name the PR they target (`number` +
+ *  `lens`), so the view can scope its busy hold to that PR alone. */
+export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     async (args: {
       number: number;
+      lens: RemoteLens;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
       /** GitLab stale-view guard (the MR head sha); GitHub ignores it. */
@@ -377,7 +381,7 @@ export function useMergePr(repo: string, lens: RemoteLens) {
         args.strategy,
         args.deleteBranch,
         args.sha,
-        lens,
+        args.lens,
       );
       // The remote advanced but the local repo is now stale (ahead/behind, history,
       // tracking refs). Kick off a background pruning fetch so they catch up —
@@ -493,12 +497,14 @@ export function useGlMrMergeState(repo: string, number: number | null) {
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
- *  pipeline just passed, so the whole MR view must refresh. */
+ *  pipeline just passed, so the whole MR view must refresh. `lens` rides the
+ *  variables only to name the target PR (GitLab has no upstream lens). */
 export function useGlArmAutoMerge(repo: string) {
   return useRepoMutation(
     repo,
     (args: {
       number: number;
+      lens: RemoteLens;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
       /** Stale-view guard (the MR head sha) — GitLab 409s if the head moved. */
@@ -514,9 +520,10 @@ export function useGlArmAutoMerge(repo: string) {
   );
 }
 
+/** Same identity-only `lens` as {@link useGlArmAutoMerge}. */
 export function useGlCancelAutoMerge(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgeGlMrCancelAutoMerge(repo, number),
+  return useRepoMutation(repo, (args: { number: number; lens: RemoteLens }) =>
+    api.forgeGlMrCancelAutoMerge(repo, args.number),
   );
 }
 
@@ -530,15 +537,17 @@ export function useGlRemoveForkRelationship(repo: string) {
   });
 }
 
-export function useClosePr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrClose(repo, number, lens),
+/** Close/reopen carry their target (`number` + `lens`) in the variables, like
+ *  {@link useMergePr}, so a view's busy hold can be scoped to that PR. */
+export function useClosePr(repo: string) {
+  return useRepoMutation(repo, (args: { number: number; lens: RemoteLens }) =>
+    api.forgePrClose(repo, args.number, args.lens),
   );
 }
 
-export function useReopenPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrReopen(repo, number, lens),
+export function useReopenPr(repo: string) {
+  return useRepoMutation(repo, (args: { number: number; lens: RemoteLens }) =>
+    api.forgePrReopen(repo, args.number, args.lens),
   );
 }
 
