@@ -66,7 +66,9 @@ export function AsyncErrorCard({
 }: {
   title: ReactNode;
   error: unknown;
-  /** A closing note in the card's own muted style (permissions, next steps). */
+  /** A permission-conditional closing note, in the card's muted style. Dropped
+   *  under a transport failure, where it would blame a role for a connection
+   *  problem. */
   hint?: ReactNode;
   children?: ReactNode;
   /** Omitted for a failure a retry can't change. */
@@ -84,8 +86,6 @@ export function AsyncErrorCard({
         </p>
       )}
       {children}
-      {/* Hints are permission-conditional copy, so under a transport failure
-          they would blame a role for a connection problem. */}
       {hint && !isTransportError(error) && (
         <div className="mt-2 text-muted-foreground">{hint}</div>
       )}
@@ -619,9 +619,12 @@ const FORM_SWAP_PREFIX = "form:";
 /** The swap key a section's Add control shares with its create form's exits. */
 export const NEW_FORM_SWAP_KEY = `${FORM_SWAP_PREFIX}new`;
 
-/** The swap key a row's form opener ("edit", "deliveries") shares with the
- *  exits of the view it opens; distinct from the row's own confirm key. */
-export function rowFormSwapKey(kind: string, id: string | number): string {
+/** The swap key a row's form opener shares with the exits of the view it
+ *  opens; distinct from the row's own confirm key. */
+export function rowFormSwapKey(
+  kind: "edit" | "deliveries",
+  id: string | number,
+): string {
   return `${FORM_SWAP_PREFIX}${kind}:${id}`;
 }
 
