@@ -651,7 +651,11 @@ fn json_body_args<'a>(method: &'a str, endpoint: &'a str) -> [&'a str; 8] {
 pub(crate) async fn project_path(repo_path: &str) -> AppResult<String> {
     let url =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
-    crate::forge::remote_path(&url).ok_or_else(|| {
+    project_path_from_url(&url)
+}
+
+fn project_path_from_url(url: &str) -> AppResult<String> {
+    crate::forge::remote_path(url).ok_or_else(|| {
         AppError::Glab("could not determine the GitLab project from the origin remote".into())
     })
 }
@@ -8342,9 +8346,288 @@ pub async fn update_repo_settings(
     Ok(settings_from_project(p))
 }
 
-/// Rename the project: both the display name and the URL slug, so the app and
-/// the web agree (GitLab redirects the old path). Validated live.
-pub async fn rename_repo(repo_path: &str, new_name: &str) -> AppResult<()> {
+/// Preserve the origin's transport and authority verbatim, including self-hosted
+/// hosts, credentials and ports. An unparseable origin must be left alone.
+fn rewritten_origin_url(old_url: &str, new_project_path: &str) -> Option<String> {
+    let old_url = old_url.trim();
+    if old_url.chars().any(|c| c.is_whitespace() || c.is_control())
+        || old_url.contains(['?', '#', '\\'])
+    {
+        return None;
+    }
+    let path = if let Some((_, rest)) = old_url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        if authority.is_empty() {
+            return None;
+        }
+        let parsed = tauri::Url::parse(old_url).ok()?;
+        parsed.host_str()?;
+        path
+    } else {
+        let rest = match old_url.split_once('@') {
+            Some((user, rest)) if !user.is_empty() && !user.contains(['/', ':']) => rest,
+            Some(_) => return None,
+            None => old_url,
+        };
+        let (host, path) = if rest.starts_with('[') {
+            let (host, path) = rest.split_once("]:")?;
+            (format!("{host}]"), path)
+        } else {
+            let (host, path) = rest.split_once(':')?;
+            (host.to_string(), path)
+        };
+        if !crate::forge::is_safe_authority(&host.replace('_', "-")) {
+            return None;
+        }
+        path
+    };
+    let prefix = &old_url[..old_url.len() - path.len()];
+    let path = path.strip_suffix('/').unwrap_or(path);
+    if path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_matches('/')
+        .is_empty()
+    {
+        return None;
+    }
+    let suffix = if path.ends_with(".git") { ".git" } else { "" };
+    Some(format!("{prefix}{new_project_path}{suffix}"))
+}
+
+fn displayed_origin_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let Some((_, host)) = authority.rsplit_once('@') else {
+        return url.to_string();
+    };
+    let slash = if rest.contains('/') { "/" } else { "" };
+    format!("{scheme}://{host}{slash}{path}")
+}
+
+fn exact_value_pattern(value: &str) -> String {
+    let mut pattern = String::from("^");
+    for c in value.chars() {
+        if matches!(
+            c,
+            '^' | '.' | '[' | '$' | '(' | ')' | '|' | '*' | '+' | '?' | '{' | '\\'
+        ) {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push('$');
+    pattern
+}
+
+fn origin_url_after(old_url: &str, old_path: &str, new_path: &str) -> Option<String> {
+    // An insteadOf alias may supply part of the expanded project path.
+    // Only replace the stored path when it already names that whole project.
+    if crate::forge::remote_path(old_url).as_deref() != Some(old_path) {
+        return None;
+    }
+    rewritten_origin_url(old_url, new_path).filter(|url| url != old_url.trim())
+}
+
+struct ProjectOrigin {
+    stored_url: String,
+    expanded_url: String,
+    path: String,
+}
+
+#[derive(Clone, Copy)]
+enum OriginMove {
+    Rename,
+    Transfer,
+}
+
+impl OriginMove {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Rename => "Renamed",
+            Self::Transfer => "Transferred",
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::Transfer => "transfer",
+        }
+    }
+}
+
+fn first_stored_origin_url(output: &str) -> Option<&str> {
+    output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+async fn stored_origin_url(repo_path: &str) -> AppResult<String> {
+    // get-url resolves the first URL; config --get returns the last.
+    let out = crate::git::runner::run_git(
+        Some(repo_path),
+        &["config", "--get-all", "remote.origin.url"],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await?;
+    first_stored_origin_url(&out.stdout_lossy())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::Glab("the origin remote has no stored URL".into()))
+}
+
+async fn project_origin_before_move(repo_path: &str) -> AppResult<ProjectOrigin> {
+    let expanded_url =
+        crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
+    let path = project_path_from_url(&expanded_url)?;
+    let stored_url = stored_origin_url(repo_path).await?;
+    Ok(ProjectOrigin {
+        stored_url,
+        expanded_url,
+        path,
+    })
+}
+
+fn origin_matches_snapshot(captured_url: &str, current_url: &str) -> bool {
+    captured_url.trim() == current_url.trim()
+}
+
+async fn rewrite_origin_after(
+    state: &AppState,
+    repo_path: &str,
+    origin: &ProjectOrigin,
+    new_path: &str,
+    operation: OriginMove,
+) -> AppResult<()> {
+    if new_path == origin.path {
+        return Ok(());
+    }
+    let verb = operation.verb();
+    let Some(new_url) = origin_url_after(&origin.stored_url, &origin.path, new_path) else {
+        if origin.stored_url != origin.expanded_url {
+            let suggested_url = rewritten_origin_url(&origin.expanded_url, new_path)
+                .unwrap_or_else(|| format!("the URL for {new_path}"));
+            let display_url = displayed_origin_url(&suggested_url);
+            return Err(AppError::Glab(format!(
+                "{verb} on GitLab, but the local 'origin' URL alias couldn't be updated — \
+                 set it to {display_url} manually."
+            )));
+        }
+        return Ok(());
+    };
+    let check_error = |e: AppError| {
+        let display_url = displayed_origin_url(&new_url);
+        let e = e
+            .to_string()
+            .replace(&origin.stored_url, &displayed_origin_url(&origin.stored_url))
+            .replace(
+                &origin.expanded_url,
+                &displayed_origin_url(&origin.expanded_url),
+            )
+            .replace(&new_url, &display_url);
+        AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' remote couldn't be checked — \
+             set it to {display_url} manually. ({e})"
+        ))
+    };
+    // Hold the working-tree lock across compare-and-set; use the plain runner
+    // inside it because mutating runners would acquire the same lock again.
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = crate::git::runner::acquire_repo_lock(
+        &domain,
+        crate::git::runner::LOCK_WAIT_TIMEOUT,
+        "a GitLab origin update",
+    )
+    .await
+    .map_err(check_error)?;
+    let current = stored_origin_url(repo_path).await.map_err(check_error)?;
+    if !origin_matches_snapshot(&origin.stored_url, &current) {
+        let display_url = displayed_origin_url(&new_url);
+        let action = operation.action();
+        return Err(AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' remote was changed while the \
+             {action} was in flight — set it to {display_url} manually."
+        )));
+    }
+    let expected_url = rewritten_origin_url(&origin.expanded_url, new_path).ok_or_else(|| {
+        AppError::Glab(format!(
+            "{verb} on GitLab, but the new 'origin' destination couldn't be determined — \
+             update it manually."
+        ))
+    })?;
+    // --get-url expands insteadOf locally without opening a transport. A moved
+    // stored path must still expand to the intended destination before it is saved.
+    let expanded = crate::git::runner::run_git(
+        Some(repo_path),
+        &["ls-remote", "--get-url", &new_url],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_err(check_error)?;
+    if expanded.stdout_lossy().trim() != expected_url {
+        let display_url = displayed_origin_url(&expected_url);
+        return Err(AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' URL alias no longer resolves to \
+             the project's new path — set it to {display_url} manually."
+        )));
+    }
+    // set-url matches expanded URLs; an anchored, escaped config value-pattern
+    // targets the stored primary, leaving secondaries alone without requiring
+    // Git 2.30's --fixed-value flag.
+    let old_pattern = exact_value_pattern(&origin.stored_url);
+    if let Err(e) = crate::git::runner::run_git(
+        Some(repo_path),
+        &["config", "remote.origin.url", &new_url, &old_pattern],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        let display_url = displayed_origin_url(&new_url);
+        let e = e
+            .to_string()
+            .replace(
+                &old_pattern,
+                &exact_value_pattern(&displayed_origin_url(&origin.stored_url)),
+            )
+            .replace(&origin.stored_url, &displayed_origin_url(&origin.stored_url))
+            .replace(&new_url, &display_url);
+        return Err(AppError::Glab(format!(
+            "{verb} on GitLab, but the local 'origin' remote couldn't be updated — \
+             set it to {display_url} manually. ({e})"
+        )));
+    }
+    crate::git::remote::invalidate_remote_url_cache(repo_path, "origin");
+    Ok(())
+}
+
+fn updated_project_path(stdout: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct UpdatedProject {
+        path_with_namespace: Option<String>,
+    }
+    serde_json::from_slice::<UpdatedProject>(stdout)
+        .ok()?
+        .path_with_namespace
+        .filter(|path| !path.trim().is_empty())
+}
+
+fn renamed_project_path(old_path: &str, new_name: &str) -> String {
+    let new_name = new_name.trim();
+    match old_path.rsplit_once('/') {
+        Some((namespace, _)) => format!("{namespace}/{new_name}"),
+        None => new_name.to_string(),
+    }
+}
+
+fn transferred_project_path(old_path: &str, namespace: &str) -> String {
+    let slug = old_path.rsplit('/').next().unwrap_or(old_path);
+    let namespace = namespace.trim().trim_matches('/');
+    format!("{namespace}/{slug}")
+}
+
+/// Rename both the display name and URL slug, then rewrite origin: GitLab's old
+/// path redirects reads only; writes return 405 (measured 2026-10-05).
+pub async fn rename_repo(state: &AppState, repo_path: &str, new_name: &str) -> AppResult<()> {
     let new_name = new_name.trim();
     // GitLab paths: alphanumeric start, then letters/digits/`.`/`-`/`_`.
     let valid = new_name
@@ -8359,11 +8642,12 @@ pub async fn rename_repo(repo_path: &str, new_name: &str) -> AppResult<()> {
             "project names must start with a letter or digit and use only letters, digits, '.', '-' or '_'".into(),
         ));
     }
-    let enc = encode_project(&project_path(repo_path).await?);
+    let origin = project_origin_before_move(repo_path).await?;
+    let enc = encode_project(&origin.path);
     let endpoint = format!("projects/{enc}");
     let name_arg = format!("name={new_name}");
     let path_arg = format!("path={new_name}");
-    run_glab(
+    let out = run_glab(
         Some(repo_path),
         &[
             "api", "--method", "PUT", &endpoint, "-f", &name_arg, "-f", &path_arg,
@@ -8371,7 +8655,9 @@ pub async fn rename_repo(repo_path: &str, new_name: &str) -> AppResult<()> {
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
-    Ok(())
+    let new_path = updated_project_path(&out.stdout)
+        .unwrap_or_else(|| renamed_project_path(&origin.path, new_name));
+    rewrite_origin_after(state, repo_path, &origin, &new_path, OriginMove::Rename).await
 }
 
 /// Archive / unarchive the project (their own POST endpoints, not a PUT field).
@@ -8412,23 +8698,26 @@ pub async fn set_visibility(repo_path: &str, visibility: &str) -> AppResult<()> 
 
 /// Transfer the project to another namespace (a group path or username the
 /// viewer controls). Owner-only, enforced server-side.
-pub async fn transfer_repo(repo_path: &str, namespace: &str) -> AppResult<()> {
+pub async fn transfer_repo(state: &AppState, repo_path: &str, namespace: &str) -> AppResult<()> {
     let namespace = namespace.trim().trim_matches('/');
     if namespace.is_empty() || namespace.starts_with('-') {
         return Err(AppError::InvalidArgument(
             "a destination namespace is required".into(),
         ));
     }
-    let enc = encode_project(&project_path(repo_path).await?);
+    let origin = project_origin_before_move(repo_path).await?;
+    let enc = encode_project(&origin.path);
     let ns = encode_query_value(namespace);
     let endpoint = format!("projects/{enc}/transfer?namespace={ns}");
-    run_glab(
+    let out = run_glab(
         Some(repo_path),
         &["api", "--method", "PUT", &endpoint],
         GLAB_NETWORK_TIMEOUT,
     )
     .await?;
-    Ok(())
+    let new_path = updated_project_path(&out.stdout)
+        .unwrap_or_else(|| transferred_project_path(&origin.path, namespace));
+    rewrite_origin_after(state, repo_path, &origin, &new_path, OriginMove::Transfer).await
 }
 
 /// Permanently delete the project. Owner-only, enforced server-side; on
@@ -10274,6 +10563,474 @@ mod my_work_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewritten_origin_preserves_transport_authority_and_git_suffix() {
+        for (old_url, new_path, expected) in [
+            (
+                "https://gitlab.com/group/proj.git",
+                "group/renamed",
+                "https://gitlab.com/group/renamed.git",
+            ),
+            (
+                "https://user@gitlab.example.com:8443/group/sub/proj",
+                "group/sub/renamed",
+                "https://user@gitlab.example.com:8443/group/sub/renamed",
+            ),
+            (
+                "HTTPS://user:token@GitLab.Example.com:443/group/proj.git",
+                "group/renamed",
+                "HTTPS://user:token@GitLab.Example.com:443/group/renamed.git",
+            ),
+            (
+                "ssh://git@gitlab.com/group/proj.git",
+                "group/renamed",
+                "ssh://git@gitlab.com/group/renamed.git",
+            ),
+            (
+                "ssh://gitlab.com/group/proj.git",
+                "group/renamed",
+                "ssh://gitlab.com/group/renamed.git",
+            ),
+            (
+                "ssh://git@GitLab.Example.com:2222/group/sub/proj",
+                "group/sub/renamed",
+                "ssh://git@GitLab.Example.com:2222/group/sub/renamed",
+            ),
+            (
+                "git@gitlab.com:group/proj.git",
+                "group/renamed",
+                "git@gitlab.com:group/renamed.git",
+            ),
+            (
+                "git@GitLab.Example.com:group/sub/proj",
+                "group/sub/renamed",
+                "git@GitLab.Example.com:group/sub/renamed",
+            ),
+            (
+                "https://gitlab.com/group/sub/proj.git",
+                "newgroup/proj",
+                "https://gitlab.com/newgroup/proj.git",
+            ),
+            (
+                "http://gitlab.example.com:8080/group/proj",
+                "newgroup/proj",
+                "http://gitlab.example.com:8080/newgroup/proj",
+            ),
+            (
+                "ssh://git@[2001:db8::1]:2222/group/proj.git",
+                "newgroup/proj",
+                "ssh://git@[2001:db8::1]:2222/newgroup/proj.git",
+            ),
+            (
+                "git@[2001:db8::1]:group/proj.git",
+                "newgroup/proj",
+                "git@[2001:db8::1]:newgroup/proj.git",
+            ),
+            (
+                "gl:group/proj.git",
+                "group/renamed",
+                "gl:group/renamed.git",
+            ),
+            (
+                "git@gitlab_work:g/p.git",
+                "g/renamed",
+                "git@gitlab_work:g/renamed.git",
+            ),
+            (
+                "gitlab_work:g/p.git",
+                "g/renamed",
+                "gitlab_work:g/renamed.git",
+            ),
+            (
+                "https://host/g/p.git/",
+                "g/renamed",
+                "https://host/g/renamed.git",
+            ),
+            (
+                "git+ssh://git@GitLab.Example.com:2222/group/proj.git",
+                "group/renamed",
+                "git+ssh://git@GitLab.Example.com:2222/group/renamed.git",
+            ),
+            (
+                "git://GitLab.Example.com:9418/group/proj.git",
+                "group/renamed",
+                "git://GitLab.Example.com:9418/group/renamed.git",
+            ),
+            (
+                "ssh+custom://host/g/p.git",
+                "g/renamed",
+                "ssh+custom://host/g/renamed.git",
+            ),
+        ] {
+            assert_eq!(
+                rewritten_origin_url(old_url, new_path).as_deref(),
+                Some(expected),
+                "{old_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewritten_origin_leaves_unparseable_urls_alone() {
+        for old_url in [
+            "",
+            "garbage",
+            "/local/path",
+            "https://gitlab.com",
+            "https://gitlab.com/",
+            "https:///group/proj.git",
+            "https://gitlab.com/.git",
+            "https://gitlab.com:bad/group/proj",
+            "ssh://git@gitlab.com/",
+            "git@gitlab.com:",
+            "git@:group/proj",
+            "@gitlab.com:group/proj",
+            "git@bad host:group/proj",
+            "git@gitlab.com:group/proj\nother",
+            "https://gitlab.com/group/proj?query",
+            "https://gitlab.com/group/proj#fragment",
+            "file:///group/proj",
+        ] {
+            assert_eq!(
+                rewritten_origin_url(old_url, "group/new"),
+                None,
+                "{old_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn displayed_origin_removes_only_scheme_url_userinfo() {
+        for (url, expected) in [
+            (
+                "https://oauth2:TOKEN@host:8443/g/p.git",
+                "https://host:8443/g/p.git",
+            ),
+            ("https://user@host/g/p.git", "https://host/g/p.git"),
+            ("https://host/g/p.git", "https://host/g/p.git"),
+            ("ssh://git@host/g/p.git", "ssh://host/g/p.git"),
+            ("git@host:g/p.git", "git@host:g/p.git"),
+            ("gl:g/p.git", "gl:g/p.git"),
+        ] {
+            assert_eq!(displayed_origin_url(url), expected);
+        }
+    }
+
+    #[test]
+    fn origin_update_requires_the_expected_path_and_a_changed_url() {
+        for (old_url, old_path, new_path, expected) in [
+            (
+                "https://host/g/p.git",
+                "g/p",
+                "g/new",
+                Some("https://host/g/new.git"),
+            ),
+            ("gl:p.git", "g/p", "g/new", None),
+            ("https://host/g/p.git", "g/other", "g/new", None),
+            ("https://host/g/p.git", "g/p", "g/p", None),
+            (" https://host/g/p.git ", "g/p", "g/p", None),
+            (
+                "git://host/g/p.git",
+                "g/p",
+                "g/new",
+                Some("git://host/g/new.git"),
+            ),
+        ] {
+            assert_eq!(
+                origin_url_after(old_url, old_path, new_path).as_deref(),
+                expected,
+                "{old_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_snapshot_comparison_trims_only_surrounding_whitespace() {
+        let captured = "https://user@host/g/p.git";
+        for (current, expected) in [
+            (captured, true),
+            (" https://user@host/g/p.git\r\n", true),
+            ("https://user@host/other/p.git", false),
+            ("https://user@other/g/p.git", false),
+            ("https://other@host/g/p.git", false),
+            ("ssh://user@host/g/p.git", false),
+            ("", false),
+        ] {
+            assert_eq!(origin_matches_snapshot(captured, current), expected);
+            assert_eq!(origin_matches_snapshot(current, captured), expected);
+        }
+    }
+
+    #[test]
+    fn exact_value_pattern_escapes_posix_ere_metacharacters() {
+        for (value, expected) in [
+            ("https://host/g/p.git", r"^https://host/g/p\.git$"),
+            (
+                "git+ssh://git@[2001:db8::1]:2222/g/p.git",
+                r"^git\+ssh://git@\[2001:db8::1]:2222/g/p\.git$",
+            ),
+            (r"^.[$()|*+?{\]}", r"^\^\.\[\$\(\)\|\*\+\?\{\\]}$"),
+        ] {
+            assert_eq!(exact_value_pattern(value), expected);
+        }
+    }
+
+    #[test]
+    fn stored_origin_selects_the_first_nonempty_url() {
+        for (output, expected) in [
+            ("", None),
+            (" \r\n\n", None),
+            ("https://host/g/p.git\n", Some("https://host/g/p.git")),
+            (
+                " \r\n https://first/g/p.git \r\nhttps://second/g/p.git\n",
+                Some("https://first/g/p.git"),
+            ),
+        ] {
+            assert_eq!(first_stored_origin_url(output), expected);
+        }
+    }
+
+    async fn origin_test_git(repo: &str, args: &[&str]) -> String {
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string()
+    }
+
+    async fn origin_test_repo(url: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gitlab-origin-move-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        origin_test_git(&repo, &["init", "-q"]).await;
+        origin_test_git(&repo, &["remote", "add", "origin", url]).await;
+        (dir, repo)
+    }
+
+    #[tokio::test]
+    async fn origin_rewrite_updates_only_the_first_of_multiple_urls() {
+        let (_dir, repo) = origin_test_repo("git+ssh://git@[2001:db8::1]:2222/g/p.git").await;
+        origin_test_git(
+            &repo,
+            &["config", "--add", "remote.origin.url", "https://second/g/p.git"],
+        )
+        .await;
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        assert_eq!(origin.stored_url, "git+ssh://git@[2001:db8::1]:2222/g/p.git");
+        assert_eq!(origin.expanded_url, origin.stored_url);
+        rewrite_origin_after(
+            &AppState::default(),
+            &repo,
+            &origin,
+            "g/renamed",
+            OriginMove::Rename,
+        )
+        .await
+        .unwrap();
+        let urls = origin_test_git(&repo, &["config", "--get-all", "remote.origin.url"]).await;
+        assert_eq!(
+            urls.lines().collect::<Vec<_>>(),
+            [
+                "git+ssh://git@[2001:db8::1]:2222/g/renamed.git",
+                "https://second/g/p.git",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn path_scoped_alias_allows_rename_but_discloses_transfer_outside_prefix() {
+        let (dir, repo) = origin_test_repo("https://alias/g/p.git").await;
+        origin_test_git(
+            &repo,
+            &[
+                "config",
+                "url.https://oauth2:TEST_TOKEN@host/g/.insteadOf",
+                "https://alias/g/",
+            ],
+        )
+        .await;
+        let state = AppState::default();
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        assert_eq!(origin.path, "g/p");
+        rewrite_origin_after(&state, &repo, &origin, "g/renamed", OriginMove::Rename)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_origin_url(&repo).await.unwrap(),
+            "https://alias/g/renamed.git"
+        );
+        let renamed = project_origin_before_move(&repo).await.unwrap();
+        assert_eq!(
+            renamed.expanded_url,
+            "https://oauth2:TEST_TOKEN@host/g/renamed.git"
+        );
+        let before = std::fs::read(dir.path().join(".git/config")).unwrap();
+        let error = rewrite_origin_after(
+            &state,
+            &repo,
+            &renamed,
+            "other/renamed",
+            OriginMove::Transfer,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Transferred on GitLab"));
+        assert!(error.contains("set it to https://host/other/renamed.git manually"));
+        assert!(!error.contains("TEST_TOKEN"));
+        assert_eq!(std::fs::read(dir.path().join(".git/config")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn origin_rewrite_preserves_a_concurrently_changed_origin() {
+        let (_dir, repo) = origin_test_repo("https://host/g/p.git").await;
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        let changed = "https://host/other/p.git";
+        origin_test_git(&repo, &["remote", "set-url", "origin", changed]).await;
+        let error = rewrite_origin_after(
+            &AppState::default(),
+            &repo,
+            &origin,
+            "g/renamed",
+            OriginMove::Rename,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("changed while"));
+        assert_eq!(stored_origin_url(&repo).await.unwrap(), changed);
+    }
+
+    #[tokio::test]
+    async fn origin_rewrite_preserves_stored_url_and_invalidates_expanded_cache() {
+        let (_dir, repo) = origin_test_repo("https://host/g/p.git").await;
+        origin_test_git(
+            &repo,
+            &[
+                "config",
+                "url.https://oauth2:TEST_TOKEN@host/.insteadOf",
+                "https://host/",
+            ],
+        )
+        .await;
+        let cached = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(cached, "https://oauth2:TEST_TOKEN@host/g/p.git");
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        assert_eq!(origin.stored_url, "https://host/g/p.git");
+        assert_eq!(origin.expanded_url, cached);
+        rewrite_origin_after(
+            &AppState::default(),
+            &repo,
+            &origin,
+            "newgroup/p",
+            OriginMove::Transfer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_origin_url(&repo).await.unwrap(),
+            "https://host/newgroup/p.git"
+        );
+        assert_eq!(
+            crate::git::remote::git_remote_url(repo, "origin".into())
+                .await
+                .unwrap(),
+            "https://oauth2:TEST_TOKEN@host/newgroup/p.git"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_rewrite_leaves_an_unchanged_project_untouched() {
+        let (dir, repo) = origin_test_repo("https://host/g/p.git").await;
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        let before = std::fs::read(dir.path().join(".git/config")).unwrap();
+        rewrite_origin_after(
+            &AppState::default(),
+            &repo,
+            &origin,
+            "g/p",
+            OriginMove::Rename,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join(".git/config")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn origin_rewrite_discloses_an_alias_that_supplies_the_namespace() {
+        let (_dir, repo) = origin_test_repo("gl:p.git").await;
+        origin_test_git(
+            &repo,
+            &[
+                "config",
+                "url.https://oauth2:TEST_TOKEN@host/g/.insteadOf",
+                "gl:",
+            ],
+        )
+        .await;
+        let origin = project_origin_before_move(&repo).await.unwrap();
+        assert_eq!(origin.path, "g/p");
+        let error = rewrite_origin_after(
+            &AppState::default(),
+            &repo,
+            &origin,
+            "g/renamed",
+            OriginMove::Rename,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Renamed on GitLab"));
+        assert!(error.contains("set it to https://host/g/renamed.git manually"));
+        assert!(!error.contains("TEST_TOKEN"));
+        assert_eq!(stored_origin_url(&repo).await.unwrap(), "gl:p.git");
+    }
+
+    #[test]
+    fn updated_project_path_reads_only_the_returned_full_path() {
+        for (body, expected) in [
+            (
+                r#"{"path_with_namespace":"canonical/sub/project","id":42,"name":null}"#,
+                Some("canonical/sub/project"),
+            ),
+            ("", None),
+            ("not json", None),
+            ("{}", None),
+            (r#"{"path_with_namespace":null}"#, None),
+            (r#"{"path_with_namespace":42}"#, None),
+            (r#"{"path_with_namespace":""}"#, None),
+            (r#"{"path_with_namespace":"  "}"#, None),
+        ] {
+            assert_eq!(updated_project_path(body.as_bytes()).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn rename_fallback_replaces_only_the_last_segment() {
+        for (old_path, new_name, expected) in [
+            ("group/proj", "renamed", "group/renamed"),
+            ("group/sub/proj", " renamed ", "group/sub/renamed"),
+            ("group/sub/proj", "proj", "group/sub/proj"),
+        ] {
+            assert_eq!(renamed_project_path(old_path, new_name), expected);
+        }
+    }
+
+    #[test]
+    fn transfer_fallback_preserves_the_last_segment() {
+        for (old_path, namespace, expected) in [
+            ("group/sub/proj", "newgroup", "newgroup/proj"),
+            ("group/proj", "newgroup/sub", "newgroup/sub/proj"),
+            ("group/sub/proj", " /newgroup/sub/ ", "newgroup/sub/proj"),
+        ] {
+            assert_eq!(transferred_project_path(old_path, namespace), expected);
+        }
+    }
 
     #[test]
     fn an_unreachable_host_rejects_the_sign_in_probe_instead_of_signing_out() {

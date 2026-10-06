@@ -865,8 +865,8 @@ active forks. GitHub is unchanged.
 - **Project settings**: **General** (description, topics, default branch,
   access levels, merge method and squash policy), **Members**, **Protected
   branches** (per-rule access + force-push policy), **Webhooks** (delivery
-  log + re-send), **CI/CD variables**, and a **Danger zone** (rename,
-  archive, visibility, transfer, delete).
+  log + re-send), **CI/CD variables**, and a **Danger zone** (rename and
+  transfer update your local `origin`; archive, visibility, delete).
 
 </details>
 

@@ -425,10 +425,10 @@ menu item appears only when you have it, greyed out while your access is being c
   token; **send a test event**; and debug with the **delivery log** — each delivery's
   request/response payloads, with one-click **re-send**. A hook GitLab auto-disabled
   after failures shows a **disabled** badge.
-- **Danger zone** — **rename** (name + path, old paths redirect),
-  **archive / unarchive**, **change visibility**, **transfer** to another namespace,
-  and **delete**. The Owner-only actions disable with an explanation when you're a
-  Maintainer.
+- **Danger zone** — **rename** (name + path) and **transfer** to a new namespace
+  (GitDesktop updates your local \`origin\` remote automatically for both),
+  **archive / unarchive**, **change visibility**, and **delete**. The Owner-only
+  actions disable with an explanation when you're a Maintainer.
 
 ## Bitbucket repositories
 

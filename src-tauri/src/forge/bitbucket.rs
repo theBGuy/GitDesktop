@@ -4628,11 +4628,9 @@ fn rewritten_origin_url(old_url: &str, ws: &str, new_slug: &str) -> Option<Strin
     }
 }
 
-/// Rename the repository: `PUT repositories/{ws}/{slug} {name}` → the server slugifies
-/// the name (lowercase, spaces→dashes) and returns the new `slug`. Unlike GitLab, the
-/// OLD slug 404s immediately (no redirect), so the local `origin` remote must be
-/// rewritten. If the rename succeeds but `remote set-url` then fails, the error
-/// discloses the partial state so the user can fix the remote by hand.
+/// Rename the repository and rewrite origin, as GitLab's arm does.
+/// Bitbucket's old slug 404s outright; GitLab still redirects reads.
+/// A local update failure discloses the completed rename and manual repair URL.
 pub async fn rename_repo(state: &crate::state::AppState, repo_path: &str, new_name: &str) -> AppResult<()> {
     let new_name = new_name.trim();
     if new_name.is_empty() || new_name.starts_with('-') {
