@@ -568,7 +568,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       >
         <DotsThreeVerticalIcon />
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-60">
+      {/* Sized for the held settings item's longest reason on one line, with
+          room for a vertical scrollbar when the menu outgrows the window. */}
+      <DropdownMenuContent className="w-96">
         {canViewOnHost && (
           <DropdownMenuItem onClick={() => openWeb()}>
             <ArrowSquareOutIcon />

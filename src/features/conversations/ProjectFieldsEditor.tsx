@@ -54,6 +54,7 @@ import type {
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useUiStore } from "@/lib/stores/ui";
+import { useRetryFocusRescue } from "./ConversationListPanel";
 import {
   NO_ACCESS_REASON,
   projectScopeReadOnly,
@@ -655,8 +656,17 @@ function BoardSection({
   const defs = useProjectFields(repoPath, board.project.id, open);
   const writable = (defs.data?.fields ?? []).filter(isWritable);
   const baseline = seed ?? seedBoard(board);
+  // Keyed on this section's own error: a pressed Retry starts fetching and
+  // unmounts, and the section survives to take the focus.
+  const defsRescue = useRetryFocusRescue(
+    refreshFailed(defs) && defs.error !== null,
+  );
   return (
-    <div className="space-y-2">
+    <div
+      ref={defsRescue.hostRef}
+      tabIndex={-1}
+      className="space-y-2 outline-none"
+    >
       {showTitle && (
         <p
           className="truncate text-[11px] font-medium"
@@ -685,6 +695,7 @@ function BoardSection({
             {presentError(defs.error).summary}
           </p>
           <Button
+            ref={defsRescue.retryRef}
             variant="outline"
             size="xs"
             className="mt-1.5"
