@@ -22,7 +22,7 @@ use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
 use crate::forge::gitlab::{encode_project, glab_output_is_404, project_path};
 use crate::forge::glab::{run_glab_raw, GlabOutput, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
-use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit};
+use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit, mask_host_tokens};
 
 /// A report bigger than this is refused rather than parsed. `run_glab_raw` has
 /// already buffered the whole artifact by the time we look, so the cap bounds the
@@ -443,6 +443,7 @@ fn classify_call_failure(stdout: &str, stderr: &str) -> (GlFindingAvailability, 
     // paywalled read with a bare `403 Forbidden` and no explanation anyway, so the
     // client supplies the context the server withholds.
     let hay = format!("{}\n{stderr}", message.as_deref().unwrap_or_default()).to_ascii_lowercase();
+    let hay = mask_host_tokens(&hay);
     if hay.contains("403") || hay.contains("forbidden") {
         (GlFindingAvailability::Forbidden, detail)
     } else {
@@ -459,11 +460,12 @@ fn classify_or_reject(
     stderr: &str,
 ) -> AppResult<(GlFindingAvailability, Option<String>)> {
     let (availability, detail) = classify_call_failure(stdout, stderr);
+    let transport_residue = mask_host_tokens(stderr);
     let rate_limited = gh_error_is_rate_limit(Some(stderr))
         || stderr.to_ascii_lowercase().contains("too many requests");
     if availability == GlFindingAvailability::Indeterminate
         && !rate_limited
-        && gh_error_is_network(Some(stderr))
+        && gh_error_is_network(Some(&transport_residue))
     {
         return Err(AppError::Glab(detail.unwrap_or_else(|| {
             "Couldn't reach GitLab to load the security findings.".to_string()
@@ -2160,6 +2162,47 @@ mod tests {
             code_quality_envelope(bodies(&[report]), 100).findings.len(),
             2
         );
+    }
+
+    #[test]
+    fn transport_identifiers_cannot_supply_a_forbidden_verdict() {
+        for stderr in [
+            "dial tcp proxy-403.example:443: connect: connection refused",
+            "Get \"https://gitlab.example/api/v4/projects/1/jobs/11403123456/artifacts\": connection refused",
+            "dial tcp forbidden.example:443: connect: connection refused",
+        ] {
+            for stdout in [String::new(), json!({ "message": stderr }).to_string()] {
+                let (availability, detail) = classify_call_failure(&stdout, stderr);
+                assert_eq!(availability, GlFindingAvailability::Indeterminate, "{stderr}");
+                assert_eq!(detail.as_deref(), Some(stderr));
+                assert!(matches!(
+                    classify_or_reject(&stdout, stderr),
+                    Err(AppError::Glab(detail)) if detail == stderr
+                ));
+            }
+        }
+        for (stdout, stderr) in [
+            ("", "403 Forbidden"),
+            (r#"{"message":"403 Forbidden"}"#, "glab: HTTP 403"),
+        ] {
+            assert_eq!(
+                classify_or_reject(stdout, stderr).unwrap().0,
+                GlFindingAvailability::Forbidden
+            );
+        }
+    }
+
+    #[test]
+    fn transport_vote_masks_host_digits_and_url_paths() {
+        let stderr = "dial tcp proxy-401.example:443: connect: connection refused";
+        assert!(matches!(
+            classify_or_reject("", stderr),
+            Err(AppError::Glab(detail)) if detail == stderr
+        ));
+        let stderr = "HTTP 501: Not Implemented (https://example.com/acme/network-tools)";
+        let (availability, detail) = classify_or_reject("", stderr).expect("an HTTP answer");
+        assert_eq!(availability, GlFindingAvailability::Indeterminate);
+        assert_eq!(detail.as_deref(), Some(stderr));
     }
 
     #[test]

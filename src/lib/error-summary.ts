@@ -417,9 +417,10 @@ const IDENTIFIER_TOKENS = /https?:\/\/[^\s"')]+|\b[A-Z][A-Z0-9_]+-\d+\b/g;
 const HOST_TOKENS =
   /(?<![A-Za-z0-9-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?![A-Za-z0-9-])/g;
 
-/** Only Go's lookup/dial positions identify undotted hosts without a known host.
+/** Only transport grammar positions identify undotted hosts without a known host.
  *  Leading delimiters outside those positions must preserve diagnostics. */
-const GO_TRANSPORT_HOST_TOKENS = /\b(lookup |dial tcp )\S+/g;
+const GO_TRANSPORT_HOST_TOKENS =
+  /\b(lookup|dial\s+tcp|error\s+connecting\s+to)\s+\S+/g;
 const IPV6_HOST_TOKENS = /\[[a-fA-F0-9]*:[a-fA-F0-9:]*\](?::\d+)?/g;
 
 /** URLs mask before hosts so their path tokens cannot survive. Go's complete
@@ -507,8 +508,9 @@ const TRANSPORT_GATE_PHRASES = [
   ...GH_OUTAGE_PHRASES,
 ];
 
-/** Scope hints must respect Rust transport evidence: the humanized prefix shared
- *  across Rust forge modules and the suffix markers from forge/http.rs. */
+/** Scope hints respect networkSummary's verdict, the "Couldn't reach " prefix,
+ *  Rust ": <phrase>" suffixes, anchored ": eof", and the masked
+ *  TRANSPORT_GATE_PHRASES scan. */
 export function isTransportError(error: unknown): boolean {
   const message = errorMessage(error).trim();
   const lower = message.toLowerCase();

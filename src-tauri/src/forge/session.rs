@@ -353,12 +353,13 @@ pub(crate) enum GhFailure {
 /// Rate-limit and not-found evidence outrank transport words.
 /// `Answered` covers any un-worded nonzero exit, including 401/403 and empty stderr.
 pub(crate) fn classify_gh_failure(stderr: &str) -> GhFailure {
+    let stderr = mask_host_tokens(stderr);
     // Check not-found before network: gh's 404 text embeds network-worded slugs.
-    if gh_error_is_rate_limit(Some(stderr)) {
+    if gh_error_is_rate_limit(Some(&stderr)) {
         GhFailure::RateLimited
-    } else if gh_error_is_not_found(stderr) {
+    } else if gh_error_is_not_found(&stderr) {
         GhFailure::NotFound
-    } else if gh_error_is_network(Some(stderr)) {
+    } else if gh_error_is_network(Some(&stderr)) {
         GhFailure::Transport
     } else {
         GhFailure::Answered
@@ -692,7 +693,7 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     classify_gh_text_report(out.code, &report, host_str)
 }
 
-/// Dotted hosts, bracketed IPv6 literals with an optional port, or scheme URLs.
+/// Dotted hosts, tokens containing bracketed IPv6 spans, or scheme URLs.
 /// Leading delimiters must preserve `(Client.Timeout` as a Go diagnostic;
 /// only URL recognition may trim leading quotes and `(`.
 fn is_host_or_url_token(word: &str) -> bool {
@@ -702,19 +703,15 @@ fn is_host_or_url_token(word: &str) -> bool {
             !label.is_empty()
                 && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
         });
-    // Unlike TS's lookup/dial masking, Rust keeps undotted hosts dependent on
-    // known-host or login-report context; only bracketed IPv6 joins this grammar.
+    // Unlike TS's transport-position masking, Rust's undotted hosts need known-host
+    // or login-report context; bracketed IPv6 spans count anywhere in a token.
     let ipv6 = word
-        .strip_prefix('[')
-        .and_then(|value| value.split_once(']'))
-        .is_some_and(|(address, suffix)| {
-            let suffix = suffix.trim_end_matches([':', ',', '.', ';', ')', '"', '\'']);
+        .split('[')
+        .skip(1)
+        .filter_map(|value| value.split_once(']'))
+        .any(|(address, _)| {
             address.contains(':')
                 && address.bytes().all(|c| c.is_ascii_hexdigit() || c == b':')
-                && (suffix.is_empty()
-                    || suffix.strip_prefix(':').is_some_and(|port| {
-                        !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit())
-                    }))
         });
     // Go errors wrap URLs in quotes; status text can wrap them in parentheses.
     let url = word
@@ -3584,6 +3581,45 @@ check your internet connection or https://githubstatus.com";
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn bracketed_ipv6_spans_mask_the_whole_token() {
+        for token in [
+            "[::1]:52->[2001:db8::401]:443:",
+            "peer=[2001:db8::401]:443:",
+        ] {
+            let error = format!("read tcp {token} read: connection reset by peer");
+            let masked = mask_host_tokens(&error);
+            assert!(!masked.contains("401"), "{masked}");
+            assert!(!masked.contains('['), "{masked}");
+            assert!(gh_error_is_network(Some(&masked)), "{masked}");
+        }
+        for token in ["index[401]", "gitlab-429"] {
+            assert_eq!(mask_host_tokens(token), token);
+        }
+    }
+
+    #[test]
+    fn gh_failure_masks_identifiers_before_all_votes() {
+        assert!(matches!(
+            classify_gh_failure("dial tcp proxy-401.example:443: connect: connection refused"),
+            GhFailure::Transport
+        ));
+        assert!(matches!(
+            classify_gh_failure("HTTP 501: Not Implemented (https://example.com/acme/network-tools)"),
+            GhFailure::Answered
+        ));
+        for stderr in [
+            "http 429: connection throttled (https://example.com/acme/network-tools)",
+            "rate limit exceeded on proxy-401.example: connection throttled",
+        ] {
+            assert!(matches!(classify_gh_failure(stderr), GhFailure::RateLimited));
+        }
+        assert!(matches!(
+            classify_gh_failure("http 404: Not Found (https://example.com/acme/network-tools)"),
+            GhFailure::NotFound
+        ));
     }
 
     #[test]

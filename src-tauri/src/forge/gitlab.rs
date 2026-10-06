@@ -28,7 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
-use crate::forge::session::{classify_glab_failure_for_host, GlabFailure};
+use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
     FORK_POLL_DELAY, README_CANDIDATES,
@@ -10013,6 +10013,19 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
     })
 }
 
+fn fork_failure(code: i32, stderr: &str) -> AppError {
+    let scan = mask_host_tokens(stderr).to_ascii_lowercase();
+    if scan.contains("409") || scan.contains("already") {
+        return AppError::Glab("You already have a fork of this project on GitLab.".into());
+    }
+    let msg = stderr.trim();
+    AppError::Glab(if msg.is_empty() {
+        format!("glab exited with code {code} forking the project")
+    } else {
+        msg.to_string()
+    })
+}
+
 /// Fork a GitLab project by `owner/name` into the caller's namespace. `glab api -X
 /// POST projects/{enc}/fork` returns the new project; we poll `projects/{id}` until
 /// `import_status == "finished"` (bounded 5×2s → `ready`). A 409 (already forked)
@@ -10027,18 +10040,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     // instead of an opaque glab error or a fabricated success.
     let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     if out.code != 0 {
-        let stderr = out.stderr.to_ascii_lowercase();
-        if stderr.contains("409") || stderr.contains("already") {
-            return Err(AppError::Glab(
-                "You already have a fork of this project on GitLab.".into(),
-            ));
-        }
-        let msg = out.stderr.trim();
-        return Err(AppError::Glab(if msg.is_empty() {
-            format!("glab exited with code {} forking the project", out.code)
-        } else {
-            msg.to_string()
-        }));
+        return Err(fork_failure(out.code, &out.stderr));
     }
     let fork: Value = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| {
@@ -10099,6 +10101,19 @@ async fn poll_fork_ready(id: u64) -> bool {
     false
 }
 
+fn star_result(code: i32, stderr: &str) -> AppResult<()> {
+    // A 304 means the project was already in the desired star state — success.
+    if code == 0 || mask_host_tokens(stderr).contains("304") {
+        return Ok(());
+    }
+    let msg = stderr.trim();
+    Err(AppError::Glab(if msg.is_empty() {
+        format!("glab exited with code {code} toggling the star")
+    } else {
+        msg.to_string()
+    }))
+}
+
 /// Star (`POST …/star`) or unstar (`POST …/unstar`) a GitLab project by name. A 304
 /// (already in the desired state) is success.
 pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
@@ -10108,19 +10123,7 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     let action = if star { "star" } else { "unstar" };
     let endpoint = format!("projects/{enc}/{action}");
     let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    if out.code != 0 {
-        // A 304 means the project was already in the desired star state — success.
-        if out.stderr.contains("304") {
-            return Ok(());
-        }
-        let msg = out.stderr.trim();
-        return Err(AppError::Glab(if msg.is_empty() {
-            format!("glab exited with code {} toggling the star", out.code)
-        } else {
-            msg.to_string()
-        }));
-    }
-    Ok(())
+    star_result(out.code, &out.stderr)
 }
 
 /// Whether the signed-in user has starred `owner/name`. GitLab has no direct
@@ -10159,6 +10162,8 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
 /// (`404 Not Found`); some builds echo the JSON body (`{"message":"404 ... Not
 /// Found"}`) too, so scan both. Pure, so it's unit-testable.
 pub(crate) fn glab_output_is_404(stderr: &str, stdout: &str) -> bool {
+    let stderr = mask_host_tokens(stderr);
+    let stdout = mask_host_tokens(stdout);
     let hay = format!("{stderr}\n{stdout}").to_ascii_lowercase();
     hay.contains("404") || hay.contains("not found")
 }
@@ -12229,6 +12234,58 @@ mod tests {
         // "best" deliberately avoids `similarity` (member-scoped → empty public
         // searches); star_count is the relevance proxy.
         assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn star_result_rejects_a_304_in_the_request_url() {
+        assert!(star_result(0, "").is_ok());
+        assert!(star_result(1, "glab: 304 Not Modified").is_ok());
+        let stderr = "Post \"https://gitlab.com/api/v4/projects/acme%2Fhttp-304-cache/star\": dial tcp: lookup gitlab.com: no such host";
+        assert!(!mask_host_tokens(stderr).contains("304"));
+        assert!(matches!(
+            star_result(1, stderr),
+            Err(AppError::Glab(detail)) if detail == stderr
+        ));
+    }
+
+    #[test]
+    fn star_result_rejects_a_304_in_the_host_port() {
+        let stderr = "dial tcp 10.0.0.5:3040: connect: connection refused";
+        assert!(!mask_host_tokens(stderr).contains("304"));
+        assert!(matches!(
+            star_result(1, stderr),
+            Err(AppError::Glab(detail)) if detail == stderr
+        ));
+        assert!(matches!(
+            star_result(1, "  "),
+            Err(AppError::Glab(detail)) if detail == "glab exited with code 1 toggling the star"
+        ));
+    }
+
+    #[test]
+    fn fork_failure_keeps_transport_details_and_names_real_conflicts() {
+        assert!(matches!(
+            fork_failure(1, "glab: HTTP 409 Conflict"),
+            AppError::Glab(detail) if detail == "You already have a fork of this project on GitLab."
+        ));
+        let stderr = "Post \"https://gitlab.example/api/v4/projects/acme%2F409-page/fork\": dial tcp 192.0.2.1:443: connect: connection refused";
+        assert!(matches!(
+            fork_failure(1, stderr),
+            AppError::Glab(detail) if detail == stderr
+        ));
+    }
+
+    #[test]
+    fn glab_output_404_masks_transport_identifiers_in_both_streams() {
+        for transport in [
+            "Get \"https://gitlab.example/api/v4/projects/1/jobs/11404123456/artifacts\": connection refused",
+            "dial tcp proxy-404.example:443: connect: connection refused",
+        ] {
+            assert!(!glab_output_is_404(transport, ""), "{transport}");
+            assert!(!glab_output_is_404("", transport), "{transport}");
+        }
+        assert!(glab_output_is_404("404 Not Found", ""));
+        assert!(glab_output_is_404("", r#"{"message":"404 File Not Found"}"#));
     }
 
     #[test]
