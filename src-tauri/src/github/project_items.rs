@@ -3,12 +3,15 @@
 use std::future::Future;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::project_fields::{field_value_selection, parse_field_value, ProjectFieldValue};
-use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
+use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
+use crate::github::runner::{
+    map_scope_error, run_gh_input, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,16 +90,6 @@ const ITEMS_SCOPE_HINT: &str =
 const ITEMS_POINTER: &str = "/data/node/items";
 const PAGE_CAP: usize = 5;
 
-fn map_scope_error(e: AppError) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(ITEMS_SCOPE_HINT.to_string());
-        }
-    }
-    e
-}
-
 pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:20){ nodes{ login avatarUrl } }";
 
 pub(crate) fn board_item_selection(rich: bool) -> String {
@@ -127,30 +120,26 @@ fn project_items_query(include_archived: bool, rich: bool) -> String {
     )
 }
 
-fn build_items_args(
+/// The page request's stdin body: the board filter is user text of any length, so it
+/// rides `GRAPHQL_INPUT_ARGS` like the other project writes. An absent cursor or
+/// filter is omitted, never sent as null.
+fn build_items_input(
     project_id: &str,
     after: Option<&str>,
     query: Option<&str>,
     include_archived: Option<bool>,
     rich: Option<bool>,
-) -> Vec<String> {
-    let mut args = vec![
-        "api".to_string(),
-        "graphql".to_string(),
-        "-f".to_string(),
-        format!(
-            "query={}",
-            project_items_query(include_archived.unwrap_or(false), rich.unwrap_or(false))
-        ),
-        "-f".to_string(),
-        format!("id={project_id}"),
-    ];
+) -> String {
+    let mut variables = json!({"id": project_id});
     for (key, value) in [("after", after), ("q", query)] {
         if let Some(value) = value {
-            args.extend(["-f".to_string(), format!("{key}={value}")]);
+            variables[key] = json!(value);
         }
     }
-    args
+    graphql_input(
+        &project_items_query(include_archived.unwrap_or(false), rich.unwrap_or(false)),
+        variables,
+    )
 }
 
 #[derive(Deserialize)]
@@ -385,7 +374,7 @@ async fn load_items<F, Fut>(
     mut fetch: F,
 ) -> AppResult<BoardItems>
 where
-    F: FnMut(Vec<String>) -> Fut,
+    F: FnMut(&'static [&'static str], String) -> Fut,
     Fut: Future<Output = AppResult<String>>,
 {
     let mut board = BoardItems {
@@ -395,8 +384,10 @@ where
         end_cursor: None,
     };
     for _ in 0..PAGE_CAP {
-        let args = build_items_args(project_id, after.as_deref(), query, include_archived, rich);
-        let output = fetch(args).await.map_err(map_scope_error)?;
+        let input = build_items_input(project_id, after.as_deref(), query, include_archived, rich);
+        let output = fetch(&GRAPHQL_INPUT_ARGS, input)
+            .await
+            .map_err(|e| map_scope_error(e, PROJECT_READ_SCOPE, ITEMS_SCOPE_HINT))?;
         let page = parse_page(&output)?;
         board.items.extend(page.items);
         board.total_count = page.total_count;
@@ -426,9 +417,8 @@ pub async fn gh_project_items(
         query.as_deref(),
         include_archived,
         rich,
-        |args| async move {
-            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            let out = run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+        |args, input| async move {
+            let out = run_gh_input(Some(repo_path), args, &input, GH_NETWORK_TIMEOUT).await?;
             Ok(out.stdout_lossy())
         },
     )
@@ -769,8 +759,8 @@ mod tests {
             Some("  status:Todo  "),
             Some(true),
             Some(true),
-            |args| {
-                requests.push(args);
+            |_, input| {
+                requests.push(input_json(&input));
                 ready(Ok(pages.next().expect("at most two pages")))
             },
         )
@@ -788,23 +778,28 @@ mod tests {
         assert!(!board.truncated);
         assert!(board.end_cursor.is_none());
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].contains(&"after=start".into()));
-        assert!(requests[1].contains(&"after=next".into()));
-        for args in requests {
-            assert!(args.contains(&format!("query={}", project_items_query(true, true))));
-            assert!(args.contains(&"q=  status:Todo  ".into()));
+        assert_eq!(requests[0]["variables"]["after"], "start");
+        assert_eq!(requests[1]["variables"]["after"], "next");
+        for payload in requests {
+            assert_eq!(payload["query"], project_items_query(true, true));
+            assert_eq!(payload["variables"]["q"], "  status:Todo  ");
         }
+    }
+
+    fn input_json(input: &str) -> Value {
+        serde_json::from_str(input).expect("input is JSON")
     }
 
     #[tokio::test]
     async fn five_page_cap_reports_more_remaining_or_exhaustion() {
         for more_remaining in [false, true] {
             let mut calls = 0;
-            let board = load_items("project", None, None, None, None, |args| {
+            let board = load_items("project", None, None, None, None, |_, input| {
+                let variables = &input_json(&input)["variables"];
                 if calls == 0 {
-                    assert!(!args.iter().any(|arg| arg.starts_with("after=")));
+                    assert!(variables.get("after").is_none());
                 } else {
-                    assert!(args.contains(&format!("after=cursor-{calls}")));
+                    assert_eq!(variables["after"], format!("cursor-{calls}"));
                 }
                 calls += 1;
                 assert!(calls <= 5);
@@ -849,7 +844,7 @@ mod tests {
     #[tokio::test]
     async fn empty_connection_stops_after_one_fetch() {
         let mut calls = 0;
-        let board = load_items("project", None, None, None, None, |_| {
+        let board = load_items("project", None, None, None, None, |_, _| {
             calls += 1;
             ready(Ok(page(json!([]), false, None)))
         })
@@ -872,30 +867,50 @@ mod tests {
                     Some(""),
                     Some("  unknown:qualifier \"quoted\"\n@file  "),
                 ] {
-                    let args = build_items_args(
+                    let input = build_items_input(
                         "@project",
                         Some("@cursor\"}"),
                         filter,
                         include_archived,
                         rich,
                     );
-                    assert_eq!(&args[..2], &["api", "graphql"]);
-                    assert!(args.contains(&format!("query={query}")));
-                    assert!(args.contains(&"id=@project".into()));
-                    assert!(args.contains(&"after=@cursor\"}".into()));
-                    assert_eq!(
-                        args.iter().filter(|arg| arg.starts_with("q=")).count(),
-                        usize::from(filter.is_some())
-                    );
+                    let mut variables = json!({"id": "@project", "after": "@cursor\"}"});
                     if let Some(filter) = filter {
-                        assert!(args.contains(&format!("q={filter}")));
+                        variables["q"] = json!(filter);
                     }
-                    for pair in args[2..].as_chunks::<2>().0 {
-                        assert_eq!(pair[0], "-f");
-                    }
+                    assert_eq!(
+                        input_json(&input),
+                        json!({"query": query, "variables": variables})
+                    );
                 }
             }
         }
+    }
+
+    /// What the page loop hands its fetch is what `gh_project_items` forwards to
+    /// `run_gh_input`: the fixed stdin argv, with the filter only in the body.
+    #[tokio::test]
+    async fn a_long_board_filter_round_trips_through_stdin() {
+        let filter = "label:\"needs triage\" @file\n".repeat(2000);
+        assert!(filter.encode_utf16().count() > 32_767);
+        let mut requests = Vec::new();
+        load_items("PVT_one", None, Some(&filter), None, None, |args, input| {
+            requests.push((args, input));
+            ready(Ok(page(json!([]), false, None)))
+        })
+        .await
+        .unwrap();
+        let [(args, input)] = requests.as_slice() else {
+            panic!("expected one request, got {}", requests.len());
+        };
+        assert_eq!(
+            *args,
+            ["api", "graphql", "--method", "POST", "--input", "-"]
+        );
+        assert_eq!(
+            input_json(input),
+            json!({"query": project_items_query(false, false), "variables": {"id": "PVT_one", "q": filter}})
+        );
     }
 
     #[test]
@@ -994,7 +1009,7 @@ mod tests {
             "GraphQL: Your token has not been granted the required scopes to execute this query.",
             "missing scope read:project",
         ] {
-            let result = load_items("project", None, None, None, None, |_| {
+            let result = load_items("project", None, None, None, None, |_, _| {
                 ready(Err(AppError::Gh(raw.into())))
             })
             .await;
@@ -1003,14 +1018,16 @@ mod tests {
             };
             assert_eq!(message, ITEMS_SCOPE_HINT);
         }
-        assert_eq!(
-            map_scope_error(AppError::Gh("connection reset".into())).to_string(),
-            "connection reset"
-        );
-        assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("required scopes".into())),
-            AppError::InvalidArgument(_)
-        ));
+        let reset = load_items("project", None, None, None, None, |_, _| {
+            ready(Err(AppError::Gh("connection reset".into())))
+        })
+        .await;
+        assert_eq!(reset.err().unwrap().to_string(), "connection reset");
+        let invalid = load_items("project", None, None, None, None, |_, _| {
+            ready(Err(AppError::InvalidArgument("required scopes".into())))
+        })
+        .await;
+        assert!(matches!(invalid, Err(AppError::InvalidArgument(_))));
     }
 
     #[tokio::test]
@@ -1031,7 +1048,7 @@ mod tests {
                 false,
                 None,
             );
-            let board = load_items("project", None, None, None, None, |_| {
+            let board = load_items("project", None, None, None, None, |_, _| {
                 ready(Ok(output.clone()))
             })
             .await
@@ -1072,7 +1089,7 @@ mod tests {
             page(json!([]), true, None),
         ] {
             let result =
-                load_items("project", None, None, None, None, |_| ready(Ok(output.clone()))).await;
+                load_items("project", None, None, None, None, |_, _| ready(Ok(output.clone()))).await;
             let Err(AppError::Gh(message)) = result else {
                 panic!("expected unreadable error")
             };

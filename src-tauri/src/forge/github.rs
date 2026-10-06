@@ -947,7 +947,7 @@ fn gh_auth_cache() -> &'static GhAuthCache {
 /// The cached auth result for `host`, only if an entry exists AND was probed less
 /// than `ttl` ago.
 fn auth_cache_get(host: &str, ttl: std::time::Duration) -> Option<bool> {
-    let guard = gh_auth_cache().lock().unwrap();
+    let guard = gh_auth_cache().lock().unwrap_or_else(|p| p.into_inner());
     let (probed_at, authed) = guard.get(host)?;
     if probed_at.elapsed() < ttl {
         Some(*authed)
@@ -960,7 +960,7 @@ fn auth_cache_get(host: &str, ttl: std::time::Duration) -> Option<bool> {
 fn auth_cache_put(host: &str, authed: bool) {
     gh_auth_cache()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|p| p.into_inner())
         .insert(host.to_string(), (std::time::Instant::now(), authed));
 }
 

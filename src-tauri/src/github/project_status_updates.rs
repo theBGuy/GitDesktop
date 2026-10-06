@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
-use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{
+    map_scope_error, run_gh, run_gh_input, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,16 +55,6 @@ const UPDATE_POINTER: &str = "/data/updateProjectV2StatusUpdate/statusUpdate";
 const DELETE_POINTER: &str = "/data/deleteProjectV2StatusUpdate/deletedStatusUpdateId";
 const NODE_SELECTION: &str =
     "id body status startDate targetDate createdAt updatedAt creator{ login avatarUrl }";
-
-fn map_scope_error(e: AppError, hint: &str) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(hint.to_string());
-        }
-    }
-    e
-}
 
 fn status_updates_query() -> String {
     // Keep first:25 paired with the history's "older updates" note: the frontend
@@ -282,7 +274,7 @@ async fn write(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> 
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(|e| map_scope_error(e, WRITE_SCOPE_HINT))?;
+    .map_err(|e| map_scope_error(e, PROJECT_READ_SCOPE, WRITE_SCOPE_HINT))?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
@@ -296,7 +288,7 @@ pub async fn gh_project_status_updates(
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| map_scope_error(e, READ_SCOPE_HINT))?;
+        .map_err(|e| map_scope_error(e, PROJECT_READ_SCOPE, READ_SCOPE_HINT))?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the project status updates",
@@ -723,13 +715,20 @@ mod tests {
             (READ_SCOPE_HINT, "GraphQL: Your token has not been granted the required scopes to execute this query."),
             (WRITE_SCOPE_HINT, "missing scope read:project"),
         ] {
-            let AppError::Gh(message) = map_scope_error(AppError::Gh(raw.into()), hint) else {
+            let AppError::Gh(message) =
+                map_scope_error(AppError::Gh(raw.into()), PROJECT_READ_SCOPE, hint)
+            else {
                 panic!("expected Gh error");
             };
             assert_eq!(message, hint);
         }
         assert_eq!(
-            map_scope_error(AppError::Gh("connection reset".into()), READ_SCOPE_HINT).to_string(),
+            map_scope_error(
+                AppError::Gh("connection reset".into()),
+                PROJECT_READ_SCOPE,
+                READ_SCOPE_HINT
+            )
+            .to_string(),
             "connection reset"
         );
     }

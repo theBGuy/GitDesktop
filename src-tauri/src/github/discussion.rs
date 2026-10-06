@@ -6,7 +6,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, IssueReactions};
 use crate::github::pr::{PrAuthor, PrRef, RepoLabel};
-use crate::github::runner::{run_gh, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{map_scope_error, run_gh, GhOutput, GH_NETWORK_TIMEOUT};
 
 /// Discussions are Labelable, so labels come back as a `{ nodes: [...] }`
 /// connection (name + color; id stays empty, like PR-embedded labels).
@@ -624,20 +624,14 @@ const DISCUSSION_SCOPE_HINT: &str = "Writing discussions needs the write:discuss
 /// `gh auth login` often lacks — name that cause instead of the raw gh failure.
 /// The GUI discussions surfaces carry the reconnect path; other callers (MCP)
 /// get the cause alone, so this stays a sentence.
-fn map_scope_error(e: AppError) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("write:discussion") || lower.contains("required scopes") {
-            return AppError::Gh(DISCUSSION_SCOPE_HINT.to_string());
-        }
-    }
-    e
+fn discussion_scope_error(e: AppError) -> AppError {
+    map_scope_error(e, "write:discussion", DISCUSSION_SCOPE_HINT)
 }
 
 async fn run_mutation(repo_path: &str, args: &[&str]) -> AppResult<GhOutput> {
     run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT)
         .await
-        .map_err(map_scope_error)
+        .map_err(discussion_scope_error)
 }
 
 const CREATE_MUTATION: &str = "mutation($repoId:ID!,$categoryId:ID!,$title:String!,$body:String!){ createDiscussion(input:{repositoryId:$repoId, categoryId:$categoryId, title:$title, body:$body}){ discussion{ number url } } }";
@@ -1041,7 +1035,7 @@ mod tests {
             "error: the token is missing the write:discussion scope",
             "GraphQL: Your token has not been granted the required scopes.",
         ] {
-            let AppError::Gh(msg) = map_scope_error(AppError::Gh(raw.into())) else {
+            let AppError::Gh(msg) = discussion_scope_error(AppError::Gh(raw.into())) else {
                 panic!("expected the Gh variant");
             };
             assert_eq!(msg, DISCUSSION_SCOPE_HINT);
@@ -1050,7 +1044,7 @@ mod tests {
 
     #[test]
     fn unrelated_failures_pass_through_untouched() {
-        let AppError::Gh(msg) = map_scope_error(AppError::Gh(
+        let AppError::Gh(msg) = discussion_scope_error(AppError::Gh(
             "GraphQL: Could not resolve to a Discussion with the number 999.".into(),
         )) else {
             panic!("expected the Gh variant");
@@ -1060,7 +1054,7 @@ mod tests {
             "GraphQL: Could not resolve to a Discussion with the number 999."
         );
         assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("write:discussion".into())),
+            discussion_scope_error(AppError::InvalidArgument("write:discussion".into())),
             AppError::InvalidArgument(_)
         ));
     }
