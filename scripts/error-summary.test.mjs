@@ -1057,17 +1057,60 @@ test("transport hint gate recognizes gh DNS/502/proxy, Rust prefix and both Rust
   }
 });
 
-test("transport hint gate recognizes unexpected EOF, Client.Timeout, proxyconnect and four outage phrases", () => {
-  for (const message of [
+for (const [name, kind, message] of [
+  [
+    "bare EOF suffix",
+    "gh",
+    'Get "https://api.github.com/user": EOF',
+  ],
+  [
+    "unexpected EOF",
+    "gh",
     'Get "https://api.github.com/user": unexpected EOF',
+  ],
+  [
+    "Client.Timeout",
+    "gh",
     'Get "https://api.github.com/user": net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
+  ],
+  [
+    "proxyconnect",
+    "gh",
     'Get "https://api.github.com/user": proxyconnect',
+  ],
+  [
+    "bad gateway",
+    "bitbucket",
     'Post "https://github.com/login/oauth/token": Bad Gateway',
+  ],
+  [
+    "service unavailable",
+    "bitbucket",
     'Post "https://github.com/login/oauth/token": Service Unavailable',
+  ],
+  [
+    "gateway timeout",
+    "bitbucket",
     'Post "https://github.com/login/oauth/token": Gateway Timeout',
+  ],
+  [
+    "proxy authentication required",
+    "bitbucket",
     'Post "https://github.com/login/oauth/token": Proxy Authentication Required',
+  ],
+]) {
+  test(`transport hint gate recognizes ${name}`, () => {
+    assert.equal(isTransportError(appError(kind, message)), true, message);
+  });
+}
+
+test("transport hint gate leaves EOF prose eligible for scope hints", () => {
+  for (const message of [
+    "EOF",
+    "The parser expected an EOF marker",
+    'Get "https://api.github.com/user": EOF while parsing a response',
   ]) {
-    assert.equal(isTransportError(appError("gh", message)), true, message);
+    assert.equal(isTransportError(appError("gh", message)), false, message);
   }
 });
 

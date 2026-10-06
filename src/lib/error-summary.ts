@@ -484,17 +484,14 @@ function networkSummary(
     : null;
 }
 
-/** Scope-hint parity with forge/session.rs NETWORKISH, GH_NETWORKISH_EXTRA and
- *  OFFLINE_STATUS: Go timeout/EOF diagnostics and proxy outages. These phrases
- *  affect the hint gate only; presentation keeps its narrower classifier. */
+/** Measured subset of forge/session.rs NETWORKISH, GH_NETWORKISH_EXTRA and
+ *  OFFLINE_STATUS for scope hints. Bare EOF requires an anchored error suffix;
+ *  presentation keeps its narrower classifier. */
 const TRANSPORT_GATE_PHRASES = [
   "unexpected eof",
   "client.timeout",
   "proxyconnect",
-  "bad gateway",
-  "service unavailable",
-  "gateway timeout",
-  "proxy authentication required",
+  ...GH_OUTAGE_PHRASES,
 ];
 
 /** Scope hints must respect Rust transport evidence: the humanized prefix shared
@@ -506,6 +503,7 @@ export function isTransportError(error: unknown): boolean {
     (isAppError(error) && networkSummary(error.kind, message) !== null) ||
     message.startsWith("Couldn't reach ") ||
     RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`)) ||
+    lower.endsWith(": eof") ||
     TRANSPORT_GATE_PHRASES.some((phrase) => hasStandaloneWord(lower, phrase))
   );
 }

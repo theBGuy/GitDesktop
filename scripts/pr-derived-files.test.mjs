@@ -225,15 +225,20 @@ function bothFilesSections(diffText, files, filesUnknown, provider) {
 test("filesUnknown absent or false renders byte-identically", () => {
   const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
   for (const unknown of [undefined, false]) {
-    assert.equal(bothFilesSections(DIFF, [], unknown), EXPECTED_SECTION);
-    assert.equal(
-      bothFilesSections(DIFF, files, unknown),
-      "## Files changed\nx.rs +3 -1",
-    );
-    assert.equal(
-      bothFilesSections("", [], unknown),
-      "## Files changed\n(none)",
-    );
+    for (const provider of [undefined, "gitlab"]) {
+      assert.equal(
+        bothFilesSections(DIFF, [], unknown, provider),
+        EXPECTED_SECTION,
+      );
+      assert.equal(
+        bothFilesSections(DIFF, files, unknown, provider),
+        "## Files changed\nx.rs +3 -1",
+      );
+      assert.equal(
+        bothFilesSections("", [], unknown, provider),
+        "## Files changed\n(none)",
+      );
+    }
   }
 });
 

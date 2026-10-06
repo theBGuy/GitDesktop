@@ -268,9 +268,9 @@ export function promptFileList(
   return { files: fromDiff, derived: fromDiff.length > 0 };
 }
 
-/** Disclose derived lists and failed or capped reads. GitLab overflow can cap
- *  both the list and diff from the same /changes response, so its diff cannot
- *  vouch for completeness, including when the list is derived from it. */
+/** GitLab's /changes cap affects both the list and diff, including derived lists.
+ *  Without a disclosure, output is byte-identical to the generate.rs MCP twin,
+ *  whose numstat lists are never partial. */
 function filesChangedSection(
   files: PrPromptInput["files"],
   diffText: string,
