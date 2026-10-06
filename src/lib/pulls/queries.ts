@@ -185,8 +185,8 @@ export function useClearReviews(
 
 /** Third-party AI-reviewer findings on a remote PR (Copilot/CodeRabbit/…), for
  *  the Review panel's "build on external reviews" banner. Remote PRs only;
- *  best-effort (errors degrade to no banner). Returns the kept findings plus the
- *  distinct reviewer display names. */
+ *  best-effort (errors degrade to no banner). Returns the kept findings, the
+ *  distinct reviewer display names, and whether the read may be partial. */
 export function useExternalReviews(repo: string, kind: PrKind, ref: string) {
   // Harvested behind the forge abstraction for GitHub + GitLab; Bitbucket has no
   // bot-review ecosystem, so the query is disabled there (no banner, no round trip).
@@ -206,12 +206,12 @@ export function useExternalReviews(repo: string, kind: PrKind, ref: string) {
     queryKey: ["external-reviews", repo, ref, provider ?? "pending"],
     queryFn: async () => {
       // Only runs when enabled, so provider is guaranteed a resolved non-Bitbucket value.
-      const { items } = await fetchExternalFindings(
+      const { items, incomplete } = await fetchExternalFindings(
         repo,
         Number(ref),
         provider ?? undefined,
       );
-      return { items, reviewers: externalReviewerNames(items) };
+      return { items, reviewers: externalReviewerNames(items), incomplete };
     },
     enabled,
     staleTime: 60_000,

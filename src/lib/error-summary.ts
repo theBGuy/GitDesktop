@@ -1,5 +1,5 @@
 import type { DroppedCommit, PullWouldDrop } from "@/lib/git/api";
-import { type AppError, isAppError } from "@/lib/tauri/invoke";
+import { type AppError, errorMessage, isAppError } from "@/lib/tauri/invoke";
 
 /** A humanized error, split into what a toast shows (a calm one-liner) and what
  *  the Details dialog shows (the full raw text). Pure — derived from the thrown
@@ -413,12 +413,14 @@ const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
  *  `ABC-401`) would otherwise read as an answered status. */
 const IDENTIFIER_TOKENS = /https?:\/\/[^\s"')]+|\b[A-Z][A-Z0-9_]+-\d+\b/g;
 
-/** Bare dotted hosts with one optional numeric port (`gitlab-429.acme.com:8443`),
- *  the dotted arm of Rust's `is_host_or_url_token` (forge/session.rs). Rust's
- *  undotted-host rules need the probed host or gh's report grammar, which no
- *  message here carries, so an undotted label like `gitlab-429` still reads. */
+/** Bare dotted hosts with one optional numeric port, matching Rust's dotted arm. */
 const HOST_TOKENS =
   /(?<![A-Za-z0-9-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?![A-Za-z0-9-])/g;
+
+/** Only Go's lookup/dial positions identify undotted hosts without a known host.
+ *  Leading delimiters outside those positions must preserve diagnostics. */
+const GO_TRANSPORT_HOST_TOKENS = /\b(lookup |dial tcp )\S+/g;
+const IPV6_HOST_TOKENS = /\[[a-fA-F0-9]*:[a-fA-F0-9:]*\](?::\d+)?/g;
 
 function isAsciiAlphanumeric(c: string | undefined): boolean {
   return c !== undefined && /[a-z0-9]/i.test(c);
@@ -454,6 +456,8 @@ function networkSummary(
   // URLs mask first, so a URL's path digits never outlive its host.
   const text = message
     .replace(IDENTIFIER_TOKENS, " ")
+    .replace(GO_TRANSPORT_HOST_TOKENS, "$1 ")
+    .replace(IPV6_HOST_TOKENS, " ")
     .replace(HOST_TOKENS, " ")
     .toLowerCase();
   if (
@@ -478,6 +482,17 @@ function networkSummary(
   return transport
     ? `Couldn't reach ${host} — check your network connection.`
     : null;
+}
+
+/** Scope hints must follow transport presentation: the humanized prefix shared
+ *  across Rust forge modules and the suffix markers from forge/http.rs. */
+export function isTransportError(error: unknown): boolean {
+  const message = errorMessage(error).trim();
+  return (
+    (isAppError(error) && networkSummary(error.kind, message) !== null) ||
+    message.startsWith("Couldn't reach ") ||
+    RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`))
+  );
 }
 
 /** The `git` kind is the only one carrying a stderr blob distinct from its

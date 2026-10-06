@@ -692,16 +692,29 @@ async fn github_health_text_fallback(host: Option<&str>) -> SessionHealth {
     classify_gh_text_report(out.code, &report, host_str)
 }
 
-/// Whether `word` is a dotted host once trailing non-hostname characters and
-/// one numeric `:port` are trimmed, or a scheme URL. Callers do the masking.
-/// Never trim host prefixes — `(client.timeout` must remain a Go transport
-/// diagnostic (only the URL arm trims leading quotes and `(`).
+/// Dotted hosts, bracketed IPv6 literals with an optional port, or scheme URLs.
+/// Leading delimiters must preserve `(Client.Timeout` as a Go diagnostic;
+/// only URL recognition may trim leading quotes and `(`.
 fn is_host_or_url_token(word: &str) -> bool {
     let bare = trim_host_token_suffix(word);
     let host = bare.contains('.')
         && bare.split('.').all(|label| {
             !label.is_empty()
                 && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        });
+    // Unlike TS's lookup/dial masking, Rust keeps undotted hosts dependent on
+    // known-host or login-report context; only bracketed IPv6 joins this grammar.
+    let ipv6 = word
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']'))
+        .is_some_and(|(address, suffix)| {
+            let suffix = suffix.trim_end_matches([':', ',', '.', ';', ')', '"', '\'']);
+            address.contains(':')
+                && address.bytes().all(|c| c.is_ascii_hexdigit() || c == b':')
+                && (suffix.is_empty()
+                    || suffix.strip_prefix(':').is_some_and(|port| {
+                        !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit())
+                    }))
         });
     // Go errors wrap URLs in quotes; status text can wrap them in parentheses.
     let url = word
@@ -713,7 +726,7 @@ fn is_host_or_url_token(word: &str) -> bool {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
         });
-    host || url
+    host || ipv6 || url
 }
 
 /// Trim only trailing punctuation and one numeric port; leading delimiters
@@ -2536,6 +2549,19 @@ mod tests {
     }
 
     #[test]
+    fn gh_json_ipv6_401_hosts_are_offline() {
+        for error in [
+            "dial tcp [2001:db8::401]:443: connect: connection refused",
+            "connect to [2001:db8::401]: connection refused",
+        ] {
+            for (health, reprobe) in classify_both(&one_account("error", Some(error))) {
+                assert_eq!(health.state, SessionState::Offline, "{error}");
+                assert!(!reprobe, "{error}");
+            }
+        }
+    }
+
+    #[test]
     fn gh_json_auth_refusal_stays_broken_despite_network_words() {
         // gh 2.94.0's live wording for a rejected token, measured with a bogus GH_TOKEN.
         let live_401 = "non-200 OK status code: 401 Unauthorized body: \"{\\r\\n  \\\"message\\\": \\\"Bad credentials\\\",\\r\\n  \\\"documentation_url\\\": \\\"https://docs.github.com/rest\\\",\\r\\n  \\\"status\\\": \\\"401\\\"\\r\\n}\"";
@@ -3313,6 +3339,20 @@ check your internet connection or https://githubstatus.com";
     }
 
     // ── glab failure classifier ──
+    #[test]
+    fn glab_ipv6_429_hosts_are_offline() {
+        for error in [
+            "dial tcp [2001:db8::429]:443: connect: connection refused",
+            "connect to [2001:db8::429]: connection refused",
+        ] {
+            assert_eq!(classify_glab_failure(error), GlabFailure::Offline, "{error}");
+        }
+        assert_eq!(
+            classify_glab_failure("dial tcp [2001:db8::429]:443: HTTP 429"),
+            GlabFailure::RateLimited
+        );
+    }
+
     #[test]
     fn glab_host_and_url_tokens_do_not_vote_for_auth_or_throttle() {
         // SYNTHETIC: host labels, ports and URL paths cannot supply a verdict.
