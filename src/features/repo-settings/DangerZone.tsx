@@ -258,7 +258,7 @@ const DANGER_COPY: Record<
       dialogTitle: "Transfer project",
       dialogDesc:
         "Transferring moves the project (and its issues, merge requests, and settings) to the new namespace — a group you own or maintain. The project URL changes; GitDesktop will update your local 'origin' remote automatically.",
-      toast: "Project transferred",
+      toast: "Project transferred — origin remote updated",
       ownerLabel: "New namespace (group path or username)",
       ownerPlaceholder: "group/subgroup or username",
       ownerMissing: "Enter the new namespace",
