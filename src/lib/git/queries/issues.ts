@@ -728,7 +728,10 @@ export function useToggleReaction(repo: string, target: api.ReactionTarget) {
           ),
     (args) => args.reactionsKey,
     (data, args) => {
-      const base: IssueReactions = data ?? { body: [], comments: {} };
+      // Never creates the entry: the helper rolls back only a defined snapshot, so a
+      // patch over an empty cache would outlive a failed write.
+      if (data === undefined) return undefined;
+      const base = data;
       if (args.subjectId === args.bodyId) {
         return {
           ...base,
