@@ -51,6 +51,11 @@ export interface PendingPrWrite {
   members: number[] | null;
 }
 
+/** A value that is a number, or null. */
+function num(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
 /** The numbers in a list, or none when it isn't one. */
 function numberList(value: unknown): number[] {
   return Array.isArray(value)
@@ -84,14 +89,9 @@ export function pendingPrWriteTarget(
   >;
   const members = numberList(pullRequests);
   return {
-    target: typeof number === "number" ? number : null,
+    target: num(number),
     lens: lens === "origin" || lens === "upstream" ? lens : null,
-    stack:
-      typeof stack === "number"
-        ? stack
-        : typeof stackNumber === "number"
-          ? stackNumber
-          : null,
+    stack: num(stack) ?? num(stackNumber),
     members: members.length > 0 ? members : null,
   };
 }

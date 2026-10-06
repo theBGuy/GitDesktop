@@ -354,6 +354,9 @@ export function StackOffer({
   offer: StackOfferKind;
   /** The offer's members, bottom→top — same order as `offer.members`. */
   rows: StackOfferRow[];
+  /** A stack write naming this PR is in flight, possibly fired from another
+   *  member's view or before a remount, so the preview renders expanded and held
+   *  whatever this mount's own expansion says. */
   pending: boolean;
   /** The write's failure message, shown verbatim: the forge's 422s name the
    *  exact rule that was broken, which no rewrite of ours would improve. */
@@ -405,7 +408,9 @@ export function StackOffer({
       ? `These ${count} pull requests form a chain.`
       : `This chain sits on stack #${offer.stackNumber}.`;
 
-  if (!expanded) {
+  // A pending write overrides collapse without touching `expanded`, so the focus
+  // effect above never fires for it.
+  if (!expanded && !pending) {
     return (
       <div className="flex items-center gap-2">
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">

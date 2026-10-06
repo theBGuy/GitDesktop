@@ -1287,7 +1287,15 @@ export function RemotePrView({
    *  and just pushes when there are none. `withAi` hands the conflicts the backend
    *  just reported straight to the AI walk, so the takeover opens already working. */
   async function runResolve(withAi: boolean) {
-    if (details.isPlaceholderData || resolve || resolveMergePending) return;
+    // A running discard may be deleting the very worktree the backend would hand
+    // back, so a resolve waits for it.
+    if (
+      details.isPlaceholderData ||
+      resolve ||
+      resolveMergePending ||
+      abortResolvePending
+    )
+      return;
     const info = details.data;
     if (!info) return;
     const startedFor = entityKey;
@@ -1363,7 +1371,8 @@ export function RemotePrView({
       !details.isPlaceholderData &&
       (canResolveConflicts || resolveWorktree !== null) &&
       !resolve &&
-      !resolveMergePending,
+      !resolveMergePending &&
+      !abortResolvePending,
   );
 
   /** Bring the head up to date with its base, on the remote. The rebase variant
@@ -2582,9 +2591,8 @@ export function RemotePrView({
   });
   // A files read with nothing to draw: the Files tab shows its notice alone.
   const filesMissing = pr.filesUnknown && pr.files.length === 0;
-  // Whether the header's +/- totals are unreadable. GitHub's totals are PR-level
-  // and survive a partial files list; GitLab's and Bitbucket's are summed from the
-  // rows, so they hide whenever the files are unknown.
+  // Whether the header's +/- totals are unreadable: always with no rows to show, and
+  // with a partial list wherever the provider sums its totals from those rows.
   const totalsUnknown =
     pr.filesUnknown &&
     (pr.files.length === 0 || TOTALS_FROM_FILES[providerKey]);
@@ -2862,9 +2870,7 @@ export function RemotePrView({
           <span className="font-mono">{pr.headRefName}</span>
           <span>→</span>
           <span className="font-mono">{pr.baseRefName}</span>
-          {/* GitHub's totals are PR-level and survive a partial files list;
-              GitLab's and Bitbucket's are summed from the rows, so they hide
-              whenever the files are unknown. The Files notice explains the gap. */}
+          {/* Hidden while `totalsUnknown`; the Files notice explains the gap. */}
           {!totalsUnknown && (
             <DiffStat
               added={pr.additions}
