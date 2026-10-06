@@ -3935,8 +3935,6 @@ pub async fn forge_repo_rename(
 ) -> AppResult<()> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::rename_repo(&state, &repo_path, &new_name).await,
-        // Bitbucket's rename changes the slug and the OLD slug 404s (no redirect),
-        // so the local origin remote is rewritten — hence the state handle.
         Some((Provider::Bitbucket, _)) => {
             bitbucket::rename_repo(&state, &repo_path, &new_name).await
         }

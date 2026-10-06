@@ -8407,6 +8407,21 @@ fn displayed_origin_url(url: &str) -> String {
     format!("{scheme}://{host}{slash}{path}")
 }
 
+fn exact_value_pattern(value: &str) -> String {
+    let mut pattern = String::from("^");
+    for c in value.chars() {
+        if matches!(
+            c,
+            '^' | '.' | '[' | '$' | '(' | ')' | '|' | '*' | '+' | '?' | '{' | '\\'
+        ) {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push('$');
+    pattern
+}
+
 fn origin_url_after(old_url: &str, old_path: &str, new_path: &str) -> Option<String> {
     // An insteadOf alias may supply part of the expanded project path.
     // Only replace the stored path when it already names that whole project.
@@ -8556,17 +8571,13 @@ async fn rewrite_origin_after(
              the project's new path — set it to {display_url} manually."
         )));
     }
-    // set-url matches its old-URL regex against expanded URLs. A fixed-value
-    // config update targets the stored primary without changing secondary entries.
+    // set-url matches expanded URLs; an anchored, escaped config value-pattern
+    // targets the stored primary, leaving secondaries alone without requiring
+    // Git 2.30's --fixed-value flag.
+    let old_pattern = exact_value_pattern(&origin.stored_url);
     if let Err(e) = crate::git::runner::run_git(
         Some(repo_path),
-        &[
-            "config",
-            "--fixed-value",
-            "remote.origin.url",
-            &new_url,
-            &origin.stored_url,
-        ],
+        &["config", "remote.origin.url", &new_url, &old_pattern],
         crate::git::runner::DEFAULT_TIMEOUT,
     )
     .await
@@ -8574,6 +8585,10 @@ async fn rewrite_origin_after(
         let display_url = displayed_origin_url(&new_url);
         let e = e
             .to_string()
+            .replace(
+                &old_pattern,
+                &exact_value_pattern(&displayed_origin_url(&origin.stored_url)),
+            )
             .replace(&origin.stored_url, &displayed_origin_url(&origin.stored_url))
             .replace(&new_url, &display_url);
         return Err(AppError::Glab(format!(
@@ -10748,6 +10763,20 @@ mod tests {
     }
 
     #[test]
+    fn exact_value_pattern_escapes_posix_ere_metacharacters() {
+        for (value, expected) in [
+            ("https://host/g/p.git", r"^https://host/g/p\.git$"),
+            (
+                "git+ssh://git@[2001:db8::1]:2222/g/p.git",
+                r"^git\+ssh://git@\[2001:db8::1]:2222/g/p\.git$",
+            ),
+            (r"^.[$()|*+?{\]}", r"^\^\.\[\$\(\)\|\*\+\?\{\\]}$"),
+        ] {
+            assert_eq!(exact_value_pattern(value), expected);
+        }
+    }
+
+    #[test]
     fn stored_origin_selects_the_first_nonempty_url() {
         for (output, expected) in [
             ("", None),
@@ -10784,14 +10813,14 @@ mod tests {
 
     #[tokio::test]
     async fn origin_rewrite_updates_only_the_first_of_multiple_urls() {
-        let (_dir, repo) = origin_test_repo("https://first/g/p.git").await;
+        let (_dir, repo) = origin_test_repo("git+ssh://git@[2001:db8::1]:2222/g/p.git").await;
         origin_test_git(
             &repo,
             &["config", "--add", "remote.origin.url", "https://second/g/p.git"],
         )
         .await;
         let origin = project_origin_before_move(&repo).await.unwrap();
-        assert_eq!(origin.stored_url, "https://first/g/p.git");
+        assert_eq!(origin.stored_url, "git+ssh://git@[2001:db8::1]:2222/g/p.git");
         assert_eq!(origin.expanded_url, origin.stored_url);
         rewrite_origin_after(
             &AppState::default(),
@@ -10805,7 +10834,10 @@ mod tests {
         let urls = origin_test_git(&repo, &["config", "--get-all", "remote.origin.url"]).await;
         assert_eq!(
             urls.lines().collect::<Vec<_>>(),
-            ["https://first/g/renamed.git", "https://second/g/p.git"]
+            [
+                "git+ssh://git@[2001:db8::1]:2222/g/renamed.git",
+                "https://second/g/p.git",
+            ]
         );
     }
 

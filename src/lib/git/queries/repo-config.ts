@@ -287,9 +287,9 @@ export function useSetArchived(repo: string) {
   });
 }
 
-// Rename and transfer await invalidation of the repo subtree.
-// GitLab renames and transfers, and Bitbucket renames, rewrite
-// the origin URL too.
+// Rename and transfer change name/owner, so they await whole-repo invalidation:
+// every read naming the repo goes stale. GitLab (rename, transfer) and
+// Bitbucket (rename) also rewrite origin.
 export function useTransferRepo(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
