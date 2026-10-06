@@ -281,7 +281,8 @@ there stays put while it catches up.
 
 Each row is a single line: a pull-request or issue glyph, the item's number, its
 title, then the forge's mark beside the repository it lives in, and when it last
-changed. That mark is monochrome, drawn in the same ink as the rest of the row. The
+changed. That mark is monochrome, drawn in the same ink as the rest of the row.
+A draft pull or merge request carries a Draft badge after its title. The
 number beside the title in the header is how many items came back, and each tab
 carries its own count.
 

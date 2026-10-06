@@ -5,9 +5,9 @@
 //! auth and never handles a token. Account-scoped — no repo path — because the
 //! whole point is the items that live OUTSIDE the checked-out repo.
 //!
-//! Two queries, because GitHub's `involves:` qualifier does NOT cover
-//! review-requested (see [`INVOLVES_ARGS`]); their results ride the neutral
-//! [`merge_legs`] alongside the other providers'.
+//! Three queries: `involves:` does NOT cover review-requested, and measured gh
+//! behavior rejects `isDraft` on `search issues`, so involved PRs need their own
+//! `search prs` leg. Their results ride the neutral [`merge_legs`].
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -53,6 +53,8 @@ struct GhSearchItem {
     #[serde(default)]
     is_pull_request: Option<bool>,
     #[serde(default)]
+    is_draft: Option<bool>,
+    #[serde(default)]
     repository: Option<GhRepoRef>,
     #[serde(default)]
     updated_at: Option<String>,
@@ -62,9 +64,11 @@ struct GhSearchItem {
     author: Option<GhAuthorRef>,
 }
 
-/// The `--json` field set both legs request; identical so the two parse through
-/// the same intake shape.
-const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
+/// The issues leg cannot request `isDraft`: gh 2.94.0 rejects that JSON field
+/// on `search issues` (measured), while `search prs` accepts it.
+const MY_WORK_ISSUE_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
+const MY_WORK_PR_FIELDS: &str =
+    "number,title,isPullRequest,repository,updatedAt,url,author,isDraft";
 
 /// Leg 1. GitHub's `involves:` is author OR assignee OR mentions OR commenter —
 /// it does NOT cover review-requested, which is a separate qualifier
@@ -73,10 +77,9 @@ const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,ur
 /// `--sort updated --order desc` is required, not cosmetic: gh defaults to
 /// best-match, so a relevance-ranked `--limit 200` would drop recent items for
 /// accounts with more than 200 open hits.
-const INVOLVES_ARGS: &[&str] = &[
+const INVOLVES_PRS_ARGS: &[&str] = &[
     "search",
-    "issues",
-    "--include-prs",
+    "prs",
     "--involves=@me",
     "--state=open",
     "--limit",
@@ -86,10 +89,27 @@ const INVOLVES_ARGS: &[&str] = &[
     "--order",
     "desc",
     "--json",
-    MY_WORK_FIELDS,
+    MY_WORK_PR_FIELDS,
 ];
 
-/// Leg 2: the pull requests awaiting the user's review, which leg 1 cannot see.
+/// Leg 2 is issues-only so its JSON fields exclude the rejected `isDraft`.
+/// It must retain newest-first ordering for the same per-leg cap as the PRs.
+const INVOLVES_ISSUES_ARGS: &[&str] = &[
+    "search",
+    "issues",
+    "--involves=@me",
+    "--state=open",
+    "--limit",
+    "200",
+    "--sort",
+    "updated",
+    "--order",
+    "desc",
+    "--json",
+    MY_WORK_ISSUE_FIELDS,
+];
+
+/// Leg 3: the pull requests awaiting the user's review, which `involves:` cannot see.
 /// Every hit here is a PR by construction — `gh search prs` cannot return an
 /// issue — which is what [`my_work`] passes as this leg's `is_pull_request`
 /// default.
@@ -105,16 +125,16 @@ const REVIEW_REQUESTED_ARGS: &[&str] = &[
     "--order",
     "desc",
     "--json",
-    MY_WORK_FIELDS,
+    MY_WORK_PR_FIELDS,
 ];
 
 /// Narrow one intake hit to a wire item, or `None` when it can't address
 /// anything: a hit without number, title, url, or a splittable `owner/name` has
 /// no usable link, so it is dropped rather than rendered broken.
 ///
-/// `default_is_pull_request` applies only when gh omits the field: the
-/// review-requested leg queries `gh search prs`, where every hit is a PR, so a
-/// blanket `false` there would file the whole leg as issues.
+/// `default_is_pull_request` applies only when gh omits the field: both PR legs
+/// query `gh search prs`, where every hit is a PR, so a blanket `false` would
+/// classify those PRs as issues.
 fn item_from_intake(raw: GhSearchItem, default_is_pull_request: bool) -> Option<MyWorkItem> {
     let number = raw.number?;
     let title = raw.title.filter(|t| !t.is_empty())?;
@@ -137,6 +157,7 @@ fn item_from_intake(raw: GhSearchItem, default_is_pull_request: bool) -> Option<
         number,
         title,
         is_pull_request: raw.is_pull_request.unwrap_or(default_is_pull_request),
+        is_draft: raw.is_draft.unwrap_or(false),
         repo_full_name,
         repo_owner,
         repo_name,
@@ -177,61 +198,93 @@ fn parse_my_work(stdout: &str, default_is_pull_request: bool) -> AppResult<MyWor
 /// Every open pull request and issue involving the signed-in GitHub user,
 /// across every repo they can see, plus the ones awaiting their review.
 ///
-/// Sequential rather than concurrent: two `gh` spawns keep the failure mode
-/// simple, and either leg failing fails the call rather than half-filling the
+/// Sequential rather than concurrent: three `gh` spawns keep the failure mode
+/// simple, and any leg failing fails the call rather than partially filling the
 /// inbox.
 pub async fn my_work() -> AppResult<MyWorkPage> {
-    let involves = run_gh(None, INVOLVES_ARGS, GH_NETWORK_TIMEOUT).await?;
-    let involves = parse_my_work(&involves.stdout_lossy(), false)?;
+    let involves_prs = run_gh(None, INVOLVES_PRS_ARGS, GH_NETWORK_TIMEOUT).await?;
+    let involves_prs = parse_my_work(&involves_prs.stdout_lossy(), true)?;
+    let involves_issues = run_gh(None, INVOLVES_ISSUES_ARGS, GH_NETWORK_TIMEOUT).await?;
+    let involves_issues = parse_my_work(&involves_issues.stdout_lossy(), false)?;
     let review_requested = run_gh(None, REVIEW_REQUESTED_ARGS, GH_NETWORK_TIMEOUT).await?;
-    // Leg 2 is `gh search prs`: an omitted `isPullRequest` still means PR.
+    // `gh search prs`: an omitted `isPullRequest` still means PR.
     let review_requested = parse_my_work(&review_requested.stdout_lossy(), true)?;
-    Ok(merge_legs(vec![involves, review_requested], MY_WORK_LIMIT))
+    Ok(merge_legs(
+        vec![involves_prs, involves_issues, review_requested],
+        MY_WORK_LIMIT,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_legs, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ARGS,
-        MY_WORK_FIELDS, MY_WORK_LIMIT, REVIEW_REQUESTED_ARGS,
+        merge_legs, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ISSUES_ARGS,
+        INVOLVES_PRS_ARGS, MY_WORK_ISSUE_FIELDS, MY_WORK_LIMIT, MY_WORK_PR_FIELDS, REVIEW_REQUESTED_ARGS,
     };
     use serde_json::{json, Value};
 
-    /// The two-leg merge as [`super::my_work`] performs it — the GitHub arm's
-    /// own shape over the neutral N-leg fold.
+    /// A two-leg fold over the neutral N-leg merge — what the merge-semantics
+    /// tests below need; [`super::my_work`] itself folds three legs.
     fn merge_my_work(involves: MyWorkLeg, review_requested: MyWorkLeg) -> MyWorkPage {
         merge_legs(vec![involves, review_requested], MY_WORK_LIMIT)
     }
 
-    /// A real `gh search issues --include-prs --involves=@me --state=open
-    /// --limit 3 --json …` response (gh 2.x), structure byte-faithful; the
-    /// third-party author logins are stand-ins.
-    const GH_FIXTURE: &str = r#"[{"author":{"id":"U_kgDODHf_mg","is_bot":false,"login":"octo-cat","type":"User","url":"https://github.com/octo-cat"},"isPullRequest":true,"number":309,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"feat(settings): accent colour and UI font appearance","updatedAt":"2026-09-05T23:21:02Z","url":"https://github.com/theBGuy/GitDesktop/pull/309"},{"author":{"id":"MDM6Qm90NDk2OTkzMzM=","is_bot":false,"login":"dependabot[bot]","type":"Bot","url":"https://github.com/apps/dependabot"},"isPullRequest":true,"number":300,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"chore(deps): bump astro from 6.4.8 to 7.1.6","updatedAt":"2026-09-04T15:30:38Z","url":"https://github.com/theBGuy/GitDesktop/pull/300"},{"author":{"id":"MDQ6VXNlcjY4Nzc1OTU=","is_bot":false,"login":"octo-dev","type":"User","url":"https://github.com/octo-dev"},"isPullRequest":false,"number":262,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"feat: Markdown preview view for md files present in diffs","updatedAt":"2026-09-05T07:06:45Z","url":"https://github.com/theBGuy/GitDesktop/issues/262"}]"#;
+    /// The old real `gh search issues --include-prs` capture's structure,
+    /// hand-reshaped to the issues-leg shape: `isPullRequest` flipped and PR URLs
+    /// rewritten as issue URLs. Third-party author logins are stand-ins.
+    const GH_FIXTURE: &str = r#"[{"author":{"id":"U_kgDODHf_mg","is_bot":false,"login":"octo-cat","type":"User","url":"https://github.com/octo-cat"},"isPullRequest":false,"number":309,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"feat(settings): accent colour and UI font appearance","updatedAt":"2026-09-05T23:21:02Z","url":"https://github.com/theBGuy/GitDesktop/issues/309"},{"author":{"id":"MDM6Qm90NDk2OTkzMzM=","is_bot":false,"login":"dependabot[bot]","type":"Bot","url":"https://github.com/apps/dependabot"},"isPullRequest":false,"number":300,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"chore(deps): bump astro from 6.4.8 to 7.1.6","updatedAt":"2026-09-04T15:30:38Z","url":"https://github.com/theBGuy/GitDesktop/issues/300"},{"author":{"id":"MDQ6VXNlcjY4Nzc1OTU=","is_bot":false,"login":"octo-dev","type":"User","url":"https://github.com/octo-dev"},"isPullRequest":false,"number":262,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"feat: Markdown preview view for md files present in diffs","updatedAt":"2026-09-05T07:06:45Z","url":"https://github.com/theBGuy/GitDesktop/issues/262"}]"#;
 
-    /// Both legs are pinned here because each carries a correctness constraint,
+    /// Captured 2026-10-06 with gh 2.94.0: `gh search prs --involves=@me
+    /// --state=open --limit 3 --sort updated --order desc --json <MY_WORK_PR_FIELDS>`.
+    /// Byte-faithful except the human author's login and profile URL use
+    /// `octo-cat` / `https://github.com/octo-cat`; bot and repo names are unchanged.
+    const GH_PR_FIXTURE: &str = r#"[{"author":{"id":"MDQ6VXNlcjYwMzA4Njcw","is_bot":false,"login":"octo-cat","type":"User","url":"https://github.com/octo-cat"},"isDraft":false,"isPullRequest":true,"number":512,"repository":{"name":"dispatch","nameWithOwner":"BetaBots-LLC/dispatch"},"title":"chore(deps,ci/cd): refresh runtimes, dependencies, and release tooling","updatedAt":"2026-10-06T16:12:01Z","url":"https://github.com/BetaBots-LLC/dispatch/pull/512"},{"author":{"id":"MDQ6VXNlcjYwMzA4Njcw","is_bot":false,"login":"octo-cat","type":"User","url":"https://github.com/octo-cat"},"isDraft":false,"isPullRequest":true,"number":7,"repository":{"name":"GitDesktopTesting","nameWithOwner":"theBGuy/GitDesktopTesting"},"title":"Add order total helper","updatedAt":"2026-10-06T02:23:11Z","url":"https://github.com/theBGuy/GitDesktopTesting/pull/7"},{"author":{"id":"MDM6Qm90NDk2OTkzMzM=","is_bot":false,"login":"dependabot[bot]","type":"Bot","url":"https://github.com/apps/dependabot"},"isDraft":false,"isPullRequest":true,"number":448,"repository":{"name":"GitDesktop","nameWithOwner":"theBGuy/GitDesktop"},"title":"chore(deps): bump ai from 6.0.292 to 6.0.300","updatedAt":"2026-10-02T11:22:16Z","url":"https://github.com/theBGuy/GitDesktop/pull/448"}]"#;
+
+    #[test]
+    fn my_work_maps_the_real_pull_request_fixture() {
+        let items = parse_my_work(GH_PR_FIXTURE, true).unwrap().items;
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|item| item.is_pull_request));
+        assert!(items.iter().all(|item| !item.is_draft));
+        assert_eq!(serde_json::to_value(&items[0]).unwrap()["isDraft"], false);
+    }
+
+    /// All three legs are pinned because each carries a correctness constraint,
     /// not just a preference: without `--sort updated`, gh's best-match default
     /// makes `--limit 200` a relevance subset that can omit recent items.
     #[test]
     fn args_carry_the_whole_inbox_query() {
-        assert!(INVOLVES_ARGS.starts_with(&["search", "issues"]));
-        for flag in ["--include-prs", "--involves=@me", "--state=open"] {
-            assert!(INVOLVES_ARGS.contains(&flag), "involves leg missing {flag}");
+        assert!(INVOLVES_PRS_ARGS.starts_with(&["search", "prs"]));
+        assert!(INVOLVES_ISSUES_ARGS.starts_with(&["search", "issues"]));
+        for args in [INVOLVES_PRS_ARGS, INVOLVES_ISSUES_ARGS] {
+            assert!(args.contains(&"--involves=@me"));
         }
 
-        // `involves:` doesn't cover review-requested, so the second leg exists.
+        // `involves:` doesn't cover review-requested.
         assert!(REVIEW_REQUESTED_ARGS.starts_with(&["search", "prs"]));
         assert!(REVIEW_REQUESTED_ARGS.contains(&"--review-requested=@me"));
-        assert!(REVIEW_REQUESTED_ARGS.contains(&"--state=open"));
-        // `--include-prs` is an issues-search flag; `gh search prs` rejects it.
-        assert!(!REVIEW_REQUESTED_ARGS.contains(&"--include-prs"));
+        assert_eq!(
+            MY_WORK_ISSUE_FIELDS,
+            "number,title,isPullRequest,repository,updatedAt,url,author"
+        );
+        assert!(!MY_WORK_ISSUE_FIELDS
+            .split(',')
+            .any(|field| field == "isDraft"));
+        assert_eq!(
+            MY_WORK_PR_FIELDS,
+            "number,title,isPullRequest,repository,updatedAt,url,author,isDraft"
+        );
 
         let limit = MY_WORK_LIMIT.to_string();
-        for args in [INVOLVES_ARGS, REVIEW_REQUESTED_ARGS] {
+        for (args, fields) in [
+            (INVOLVES_PRS_ARGS, MY_WORK_PR_FIELDS),
+            (INVOLVES_ISSUES_ARGS, MY_WORK_ISSUE_FIELDS),
+            (REVIEW_REQUESTED_ARGS, MY_WORK_PR_FIELDS),
+        ] {
             let has_pair = |pair: &[&str; 2]| args.windows(2).any(|w| w == pair.as_slice());
-            assert!(
-                args.contains(&MY_WORK_FIELDS),
-                "{args:?} lost the field set"
-            );
+            assert!(args.contains(&"--state=open"));
+            assert!(!args.contains(&"--include-prs"));
+            assert!(has_pair(&["--json", fields]), "{args:?} lost the field set");
             // Newest-first, or the limit truncates by relevance instead of age.
             assert!(
                 has_pair(&["--sort", "updated"]),
@@ -261,6 +314,7 @@ mod tests {
             [
                 "authorLogin",
                 "host",
+                "isDraft",
                 "isPullRequest",
                 "number",
                 "provider",
@@ -278,12 +332,13 @@ mod tests {
                 "provider": "github",
                 "number": 309,
                 "title": "feat(settings): accent colour and UI font appearance",
-                "isPullRequest": true,
+                "isPullRequest": false,
+                "isDraft": false,
                 "repoFullName": "theBGuy/GitDesktop",
                 "repoOwner": "theBGuy",
                 "repoName": "GitDesktop",
                 "host": "github.com",
-                "url": "https://github.com/theBGuy/GitDesktop/pull/309",
+                "url": "https://github.com/theBGuy/GitDesktop/issues/309",
                 // gh's `…SSZ` is zero-padded to the merge's fixed width.
                 "updatedAt": "2026-09-05T23:21:02.000Z",
                 "authorLogin": "octo-cat",
@@ -292,7 +347,9 @@ mod tests {
 
         // An issue keeps `isPullRequest: false`, and a bracketed bot login rides
         // through unchanged.
-        assert!(!items[2].is_pull_request);
+        assert!(items
+            .iter()
+            .all(|item| !item.is_pull_request && !item.is_draft));
         assert_eq!(items[1].author_login.as_deref(), Some("dependabot[bot]"));
 
         // The items ride inside the page envelope, whose own two keys the
@@ -396,6 +453,25 @@ mod tests {
     }
 
     #[test]
+    fn my_work_maps_draft_status_on_a_pull_request_leg() {
+        let raw = json!([
+            {"number": 1, "title": "draft", "isDraft": true,
+             "repository": {"nameWithOwner": "octo/repo"},
+             "url": "https://github.com/octo/repo/pull/1"},
+            {"number": 2, "title": "omitted",
+             "repository": {"nameWithOwner": "octo/repo"},
+             "url": "https://github.com/octo/repo/pull/2"},
+        ]);
+        let items = parse_my_work(&raw.to_string(), true).unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.is_pull_request));
+        assert!(items[0].is_draft);
+        assert!(!items[1].is_draft);
+        assert_eq!(serde_json::to_value(&items[0]).unwrap()["isDraft"], true);
+        assert_eq!(serde_json::to_value(&items[1]).unwrap()["isDraft"], false);
+    }
+
+    #[test]
     fn my_work_distinguishes_an_empty_inbox_from_unreadable_output() {
         let empty = parse_my_work("[]", false).unwrap();
         assert!(empty.items.is_empty());
@@ -429,7 +505,7 @@ mod tests {
             "{review_leg:?}"
         );
 
-        // The involves leg keeps the opposite default: there an omitted flag
+        // The involves-issues leg keeps the opposite default: there an omitted flag
         // really can mean an issue.
         let involves_leg = parse_my_work(&raw, false).unwrap().items;
         assert!(involves_leg[0].is_pull_request);
@@ -459,7 +535,7 @@ mod tests {
         ];
         // #300 is in BOTH legs (review-requested AND involving) — the real
         // overlap observed against gh; #2 is review-requested only, the whole
-        // reason the second leg exists.
+        // reason the review-requested leg exists.
         let review_requested = vec![
             item(300, shared, "2026-09-04T15:30:38Z"),
             item(

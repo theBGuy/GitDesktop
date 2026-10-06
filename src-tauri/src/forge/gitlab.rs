@@ -345,6 +345,11 @@ fn my_work_item_from_value(raw: &serde_json::Value, is_pull_request: bool) -> Op
         number,
         title,
         is_pull_request,
+        is_draft: is_pull_request
+            && raw
+                .get("draft")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         repo_full_name,
         repo_owner,
         repo_name,
@@ -10287,6 +10292,7 @@ mod my_work_tests {
                 number: 1,
                 title: "t".into(),
                 is_pull_request: true,
+                is_draft: false,
                 repo_full_name: "g/p".into(),
                 repo_owner: "g".into(),
                 repo_name: "p".into(),
@@ -10509,7 +10515,7 @@ mod my_work_tests {
             "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/42",
             "updated_at": "2026-09-05T23:21:02.987Z",
             "author": {"username": "octo-cat"},
-            "draft": false,
+            "draft": true,
             "source_branch": "feat/x",
             "references": {"full": "group/sub/proj!42"}
         });
@@ -10517,6 +10523,7 @@ mod my_work_tests {
         assert_eq!(item.provider, Provider::GitLab);
         assert_eq!(item.number, 42);
         assert!(item.is_pull_request);
+        assert!(item.is_draft);
         assert_eq!(item.repo_full_name, "group/sub/proj");
         assert_eq!(item.repo_owner, "sub");
         assert_eq!(item.repo_name, "proj");
@@ -10531,11 +10538,13 @@ mod my_work_tests {
         let self_managed = json!({
             "iid": 1, "title": "t",
             "web_url": "https://gitlab.acme.dev:8443/g/p/-/issues/1",
-            "updated_at": "2026-09-05T23:21:02Z"
+            "updated_at": "2026-09-05T23:21:02Z",
+            "draft": true
         });
         let item = my_work_item_from_value(&self_managed, false).expect("maps");
         assert_eq!(item.host, "gitlab.acme.dev");
         assert!(!item.is_pull_request);
+        assert!(!item.is_draft);
         // A missing author is absence, not a fabricated login.
         assert_eq!(item.author_login, None);
     }
@@ -10548,7 +10557,7 @@ mod my_work_tests {
             "web_url": "https://gitlab.com/g/p/-/merge_requests/7",
             "updated_at": "2026-09-05T00:00:00Z"
         });
-        assert!(my_work_item_from_value(&good, true).is_some());
+        assert!(!my_work_item_from_value(&good, true).expect("maps").is_draft);
         for bad in [
             // No iid / title / web_url.
             json!({"title": "t", "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),

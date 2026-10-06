@@ -35,6 +35,8 @@ pub struct MyWorkItem {
     pub number: u64,
     pub title: String,
     pub is_pull_request: bool,
+    /// Always false for issues.
+    pub is_draft: bool,
     /// The repo's full path as its provider spells it. On GitHub and Bitbucket
     /// that is `owner/name`; on GitLab a nested group path
     /// (`group/subgroup/name`) makes it LONGER than `repo_owner`/`repo_name`
@@ -188,6 +190,7 @@ mod tests {
             number,
             title: "t".into(),
             is_pull_request: true,
+            is_draft: false,
             repo_full_name: "group/proj".into(),
             repo_owner: "group".into(),
             repo_name: "proj".into(),
@@ -228,6 +231,7 @@ mod tests {
             [
                 "authorLogin",
                 "host",
+                "isDraft",
                 "isPullRequest",
                 "number",
                 "provider",
