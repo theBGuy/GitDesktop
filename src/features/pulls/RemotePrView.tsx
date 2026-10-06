@@ -696,10 +696,10 @@ export function RemotePrView({
   // lens is always origin, so the bare number is the whole identity.
   const writePending = (kind: PrWriteKind) =>
     isPendingFor(pendingWrites, kind, number, lens);
-  // The native stack this PR sits in, parsed once — the number a dissolve writes and
-  // a cascading merge names. A native stack's id is a numeric string by contract, so
-  // a value that won't parse means the contract broke: null then withdraws Dissolve
-  // (and its palette twin) rather than sending the forge a NaN.
+  // The native stack this PR sits in, parsed once — the number a dissolve writes
+  // and a cascading merge names. A native stack's id is a numeric string by
+  // contract, so a value that won't parse means the contract broke: null then
+  // withdraws Dissolve (and its palette twin) rather than sending the forge a NaN.
   const nativeStackNumber = (() => {
     const info = details.data?.stack;
     if (!isNativeStack(info)) return null;
@@ -729,9 +729,10 @@ export function RemotePrView({
   const cancelAutoMergePending = writePending("gl-cancel-auto-merge");
   const setDraftPending = writePending("set-draft");
   // Every footer/state control and its palette twin holds while a write to THIS PR
-  // runs, or a stack merge cascading through its native stack; any other write holds
-  // nothing here. Declared above the palette wiring so both share the exact same gate. Placeholder details are the previously shown PR's
-  // and the footer's verbs derive from them, so the same gate holds through a switch.
+  // runs, or a stack merge cascading through its native stack; any other write
+  // holds nothing here. Declared above the palette wiring so both share the exact
+  // same gate. Placeholder details are the previously shown PR's and the footer's
+  // verbs derive from them, so the same gate holds through a switch.
   const busy =
     details.isPlaceholderData ||
     commentPending ||
@@ -969,9 +970,9 @@ export function RemotePrView({
   // with `writeReason`, like Merge.
   const canDissolveStack =
     nativeStackNumber !== null && details.data?.state === "OPEN" && canEdit;
-  // Read like `busy`'s terms: a dissolve holds only the stack it targets, which
-  // every member of that stack shares. Its variables carry no lens (pr-write.ts), so
-  // a lens flip onto an equal stack number holds that one too — accepted, it only holds.
+  // Read like `busy`'s terms: a dissolve holds only the stack it targets, which all
+  // its members share. The variables carry no lens (pr-write.ts), so a lens flip
+  // onto an equal stack number holds that one too; accepted, since it only holds.
   const dissolvePending = isPendingFor(
     pendingWrites,
     "stack-dissolve",
@@ -1734,7 +1735,7 @@ export function RemotePrView({
     const deleteHead = deleteBranch && !headIsDefault && !headDeletionBlocked;
     // The merge can settle after the view has moved to another PR, whose own merge
     // dialog may be open by then: only close the dialog while this PR is on screen.
-    // Toasts and the queue record (keyed per PR) stand regardless: the write happened.
+    // Toasts and the queue record (keyed per PR) stand: the write happened.
     const startedFor = entityKey;
     const closeDialogIfStillHere = () => {
       if (startedFor === entityKeyRef.current) setMergeOpen(false);
