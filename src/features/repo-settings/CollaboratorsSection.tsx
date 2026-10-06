@@ -96,11 +96,6 @@ export function CollaboratorsSection({
   // hand — `<RelativeTime>` can't render there.
   const now = useRelativeNow();
 
-  const canAdd =
-    validUsername(username.trim()) &&
-    !add.isPending &&
-    online &&
-    rolesUnknownReason === undefined;
   const inviteHeldReason = (() => {
     switch (true) {
       case !online:
@@ -117,6 +112,7 @@ export function CollaboratorsSection({
         return rolesUnknownReason;
     }
   })();
+  const canAdd = inviteHeldReason === undefined;
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const collabRoleHeld =
     rolesUnknownReason ??

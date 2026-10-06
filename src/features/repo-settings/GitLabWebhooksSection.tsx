@@ -34,10 +34,14 @@ import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
   DeliveryPayload,
+  formExitSwapKey,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  rowFormSwapKey,
   SAVING_REASON,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -121,11 +125,20 @@ export function GitLabWebhooksSection({
     }
   }
 
+  const listed = (hookId: string) =>
+    hooks.data?.some((h) => h.id === hookId) ?? false;
+
   if (viewingEvents) {
     return (
       <HookDeliveries
         repoPath={repoPath}
         hook={viewingEvents}
+        swapFocusRef={swapFocus(
+          formExitSwapKey(
+            rowFormSwapKey("deliveries", viewingEvents.id),
+            listed(viewingEvents.id),
+          ),
+        )}
         onBack={() => setViewingEvents(null)}
       />
     );
@@ -136,6 +149,14 @@ export function GitLabWebhooksSection({
       <HookForm
         repoPath={repoPath}
         hook={editing === "new" ? null : editing}
+        swapFocusRef={swapFocus(
+          editing === "new"
+            ? NEW_FORM_SWAP_KEY
+            : formExitSwapKey(
+                rowFormSwapKey("edit", editing.id),
+                listed(editing.id),
+              ),
+        )}
         onDone={() => setEditing(null)}
       />
     );
@@ -148,6 +169,7 @@ export function GitLabWebhooksSection({
           Webhooks GitLab fires for this project's events.
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           onClick={() => setEditing("new")}
@@ -218,6 +240,7 @@ export function GitLabWebhooksSection({
                     <ArrowClockwiseIcon />
                   </DisabledReasonButton>
                   <Button
+                    ref={swapFocus(rowFormSwapKey("deliveries", h.id))}
                     size="sm"
                     variant="ghost"
                     title="Recent deliveries"
@@ -226,6 +249,7 @@ export function GitLabWebhooksSection({
                     <ClockCounterClockwiseIcon />
                   </Button>
                   <Button
+                    ref={swapFocus(rowFormSwapKey("edit", h.id))}
                     size="sm"
                     variant="ghost"
                     title="Edit"
@@ -257,10 +281,13 @@ export function GitLabWebhooksSection({
 function HookForm({
   repoPath,
   hook,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   hook: GitLabHook | null;
+  /** Hands focus back to the control that opened this form when it closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useGlCreateHook(repoPath);
@@ -324,7 +351,7 @@ function HookForm({
 
   return (
     <div className="min-w-0 space-y-3">
-      <Button size="sm" variant="ghost" onClick={onDone}>
+      <Button ref={swapFocusRef} size="sm" variant="ghost" onClick={onDone}>
         <CaretLeftIcon data-icon="inline-start" />
         Back to webhooks
       </Button>
@@ -385,10 +412,16 @@ function HookForm({
         </div>
         {warning && <p className="text-[11px] text-warning">{warning}</p>}
         <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <Button variant="outline" size="sm" onClick={onDone}>
+          <Button
+            ref={swapFocusRef}
+            variant="outline"
+            size="sm"
+            onClick={onDone}
+          >
             Cancel
           </Button>
           <DisabledReasonButton
+            ref={swapFocusRef}
             size="sm"
             disabled={saveHeldReason !== undefined}
             reason={saveHeldReason}
@@ -406,10 +439,13 @@ function HookForm({
 function HookDeliveries({
   repoPath,
   hook,
+  swapFocusRef,
   onBack,
 }: {
   repoPath: string;
   hook: GitLabHook;
+  /** Hands focus back to the row's deliveries control on Back. */
+  swapFocusRef: SwapFocusRef;
   onBack: () => void;
 }) {
   const events = useGlHookEvents(repoPath, hook.id);
@@ -444,7 +480,7 @@ function HookDeliveries({
   return (
     <div className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-2">
-        <Button size="sm" variant="ghost" onClick={onBack}>
+        <Button ref={swapFocusRef} size="sm" variant="ghost" onClick={onBack}>
           <CaretLeftIcon data-icon="inline-start" />
           Back to webhooks
         </Button>

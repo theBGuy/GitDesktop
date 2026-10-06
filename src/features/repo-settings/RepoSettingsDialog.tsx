@@ -91,10 +91,14 @@ import { PagesSection } from "./PagesSection";
 import {
   ACT_PENDING_REASON,
   DeliveryPayload,
+  formExitSwapKey,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  rowFormSwapKey,
   SAVING_REASON,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 import { RulesetsSection } from "./RulesetsSection";
@@ -482,12 +486,20 @@ function WebhooksSection({
   // null = list view; a Webhook = editing it; "new" = the create form.
   const [editing, setEditing] = useState<Webhook | "new" | null>(null);
   const [deliveriesFor, setDeliveriesFor] = useState<Webhook | null>(null);
+  const swapFocus = useConfirmSwapFocus();
+  const listed = (id: number) => hooks.data?.some((h) => h.id === id) ?? false;
 
   if (deliveriesFor) {
     return (
       <DeliveriesView
         repoPath={repoPath}
         hook={deliveriesFor}
+        swapFocusRef={swapFocus(
+          formExitSwapKey(
+            rowFormSwapKey("deliveries", deliveriesFor.id),
+            listed(deliveriesFor.id),
+          ),
+        )}
         onBack={() => setDeliveriesFor(null)}
       />
     );
@@ -498,6 +510,14 @@ function WebhooksSection({
       <WebhookForm
         repoPath={repoPath}
         hook={editing === "new" ? null : editing}
+        swapFocusRef={swapFocus(
+          editing === "new"
+            ? NEW_FORM_SWAP_KEY
+            : formExitSwapKey(
+                rowFormSwapKey("edit", editing.id),
+                listed(editing.id),
+              ),
+        )}
         onDone={() => setEditing(null)}
       />
     );
@@ -514,6 +534,7 @@ function WebhooksSection({
             : "Send a POST to a URL when events happen in this repo."}
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           variant="outline"
@@ -539,6 +560,7 @@ function WebhooksSection({
             key={hook.id}
             repoPath={repoPath}
             hook={hook}
+            swapFocus={swapFocus}
             onEdit={() => setEditing(hook)}
             onDeliveries={() => setDeliveriesFor(hook)}
           />
@@ -551,11 +573,14 @@ function WebhooksSection({
 function WebhookRow({
   repoPath,
   hook,
+  swapFocus,
   onEdit,
   onDeliveries,
 }: {
   repoPath: string;
   hook: Webhook;
+  /** The section's swap hook: this row's Delete confirm and form openers. */
+  swapFocus: ReturnType<typeof useConfirmSwapFocus>;
   onEdit: () => void;
   onDeliveries: () => void;
 }) {
@@ -563,7 +588,6 @@ function WebhookRow({
   const test = useTestWebhook(repoPath);
   const del = useDeleteWebhook(repoPath);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const swapFocus = useConfirmSwapFocus();
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
 
@@ -645,7 +669,7 @@ function WebhookRow({
             actLabel="Remove"
             pending={del.isPending}
             heldReason={offlineReason}
-            swapFocusRef={swapFocus()}
+            swapFocusRef={swapFocus(hook.id)}
             onCancel={() => setConfirmingDelete(false)}
             onAct={handleDelete}
           />
@@ -682,6 +706,7 @@ function WebhookRow({
               </DisabledReasonButton>
             )}
             <Button
+              ref={swapFocus(rowFormSwapKey("deliveries", hook.id))}
               size="sm"
               variant="ghost"
               title="Recent deliveries"
@@ -690,12 +715,17 @@ function WebhookRow({
               <ClockCounterClockwiseIcon data-icon="inline-start" />
               Deliveries
             </Button>
-            <Button size="sm" variant="ghost" onClick={onEdit}>
+            <Button
+              ref={swapFocus(rowFormSwapKey("edit", hook.id))}
+              size="sm"
+              variant="ghost"
+              onClick={onEdit}
+            >
               <PencilSimpleIcon data-icon="inline-start" />
               Edit
             </Button>
             <Button
-              ref={swapFocus()}
+              ref={swapFocus(hook.id)}
               size="sm"
               variant="ghost"
               className="text-destructive hover:text-destructive"
@@ -715,10 +745,13 @@ function WebhookRow({
 function DeliveriesView({
   repoPath,
   hook,
+  swapFocusRef,
   onBack,
 }: {
   repoPath: string;
   hook: Webhook;
+  /** Hands focus back to the row's Deliveries control on Back. */
+  swapFocusRef: SwapFocusRef;
   onBack: () => void;
 }) {
   const deliveries = useWebhookDeliveries(repoPath, hook.id, true);
@@ -727,6 +760,7 @@ function DeliveriesView({
     <div className="min-w-0 space-y-3">
       <div className="flex items-center gap-2">
         <button
+          ref={swapFocusRef}
           type="button"
           onClick={onBack}
           className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
@@ -881,10 +915,13 @@ function DeliveryRow({
 function WebhookForm({
   repoPath,
   hook,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   hook: Webhook | null;
+  /** Hands focus back to the control that opened this form when it closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useCreateWebhook(repoPath);
@@ -958,7 +995,9 @@ function WebhookForm({
     <div className="space-y-4">
       <div className="space-y-1.5">
         <Label htmlFor="hook-url">Payload URL</Label>
+        {/* The form's first keyed node, so opening it lands here, not on Cancel. */}
         <Input
+          ref={swapFocusRef}
           id="hook-url"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
@@ -1042,6 +1081,7 @@ function WebhookForm({
 
       <div className="flex items-center justify-end gap-2 pt-2">
         <DisabledReasonButton
+          ref={swapFocusRef}
           variant="outline"
           onClick={onDone}
           disabled={pending}
@@ -1050,7 +1090,8 @@ function WebhookForm({
           Cancel
         </DisabledReasonButton>
         <DisabledReasonButton
-          disabled={pending || !urlValid || !eventsValid || !online}
+          ref={swapFocusRef}
+          disabled={submitHeldReason !== undefined}
           reason={submitHeldReason}
           onClick={submit}
         >

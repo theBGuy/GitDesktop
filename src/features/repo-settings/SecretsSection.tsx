@@ -193,7 +193,6 @@ function SecretsList({
   const now = useRelativeNow();
   const online = useOnline();
   const invalid = nameError(name);
-  const canAdd = !!name && !!value && !invalid && !set.isPending && online;
   // Every hold carries a reason, so Add never goes natively disabled and keeps
   // focus through a save, including the field reset after one succeeds.
   const addHeldReason = (() => {
@@ -264,7 +263,7 @@ function SecretsList({
           />
           <DisabledReasonButton
             size="sm"
-            disabled={!canAdd}
+            disabled={addHeldReason !== undefined}
             reason={addHeldReason}
             onClick={add}
           >
@@ -330,7 +329,6 @@ function VariablesList({
   const [confirming, setConfirming] = useState<string | null>(null);
   const online = useOnline();
   const invalid = nameError(name);
-  const canAdd = !!name && !invalid && !set.isPending && online;
   // Reasoned like the secrets form's Add, so Save keeps focus through a save.
   const saveHeldReason = (() => {
     switch (true) {
@@ -394,7 +392,7 @@ function VariablesList({
           />
           <DisabledReasonButton
             size="sm"
-            disabled={!canAdd}
+            disabled={saveHeldReason !== undefined}
             reason={saveHeldReason}
             onClick={add}
           >

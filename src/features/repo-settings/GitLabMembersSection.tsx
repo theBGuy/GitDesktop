@@ -83,7 +83,6 @@ export function GitLabMembersSection({
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
 
-  const canAdd = validUsername(username.trim()) && !add.isPending && online;
   const addHeldReason = (() => {
     switch (true) {
       case !online:
@@ -98,6 +97,7 @@ export function GitLabMembersSection({
         return undefined;
     }
   })();
+  const canAdd = addHeldReason === undefined;
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const roleHeld =
     offlineReason ?? (update.isPending ? SAVING_REASON : undefined);

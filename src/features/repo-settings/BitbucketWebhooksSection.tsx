@@ -25,9 +25,13 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
+  formExitSwapKey,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  rowFormSwapKey,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -86,10 +90,18 @@ export function BitbucketWebhooksSection({
   }
 
   if (editing) {
+    const exitKey =
+      editing === "new"
+        ? NEW_FORM_SWAP_KEY
+        : formExitSwapKey(
+            rowFormSwapKey("edit", editing.uuid),
+            hooks.data?.some((h) => h.uuid === editing.uuid) ?? false,
+          );
     return (
       <HookForm
         repoPath={repoPath}
         hook={editing === "new" ? null : editing}
+        swapFocusRef={swapFocus(exitKey)}
         onDone={() => setEditing(null)}
       />
     );
@@ -102,6 +114,7 @@ export function BitbucketWebhooksSection({
           Webhooks Bitbucket fires for this repository's events.
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           onClick={() => setEditing("new")}
@@ -157,6 +170,7 @@ export function BitbucketWebhooksSection({
               ) : (
                 <>
                   <Button
+                    ref={swapFocus(rowFormSwapKey("edit", h.uuid))}
                     size="sm"
                     variant="ghost"
                     title="Edit"
@@ -188,10 +202,13 @@ export function BitbucketWebhooksSection({
 function HookForm({
   repoPath,
   hook,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   hook: BitbucketHook | null;
+  /** Hands focus back to the control that opened this form when it closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useBbCreateHook(repoPath);
@@ -243,7 +260,7 @@ function HookForm({
 
   return (
     <div className="min-w-0 space-y-3">
-      <Button size="sm" variant="ghost" onClick={onDone}>
+      <Button ref={swapFocusRef} size="sm" variant="ghost" onClick={onDone}>
         <CaretLeftIcon data-icon="inline-start" />
         Back to webhooks
       </Button>
@@ -316,10 +333,16 @@ function HookForm({
         </div>
         {warning && <p className="text-[11px] text-warning">{warning}</p>}
         <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <Button variant="outline" size="sm" onClick={onDone}>
+          <Button
+            ref={swapFocusRef}
+            variant="outline"
+            size="sm"
+            onClick={onDone}
+          >
             Cancel
           </Button>
           <DisabledReasonButton
+            ref={swapFocusRef}
             size="sm"
             disabled={!canSave}
             reason={

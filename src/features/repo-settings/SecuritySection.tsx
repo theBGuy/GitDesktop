@@ -41,6 +41,8 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
+  NO_CHANGES_REASON,
+  NO_CHANGES_TO_DISCARD_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
   SAVING_REASON,
@@ -413,7 +415,7 @@ function DependabotDialog({
           </Button>
           {/* No offline rung: dependabot.yml is a local working-tree write. */}
           <DisabledReasonButton
-            disabled={selected.size === 0 || pending}
+            disabled={createHeldReason !== undefined}
             reason={createHeldReason}
             onClick={() =>
               onCreate(generateDependabot([...selected], interval))
@@ -493,6 +495,30 @@ function SecurityForm({
   if (reconciled.pending !== pending) setPending(reconciled.pending);
   const draft: Draft = { ...seed, ...edit };
   const dirty = edit !== null;
+  // Both stay mounted, held by reason, so a save or discard that settles the
+  // form clean keeps focus on the button pressed.
+  const saveHeldReason = (() => {
+    switch (true) {
+      case !online:
+        return OFFLINE_WRITE_REASON;
+      case apply.isPending:
+        return ACT_PENDING_REASON;
+      case !dirty:
+        return NO_CHANGES_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  const discardHeldReason = (() => {
+    switch (true) {
+      case apply.isPending:
+        return SAVING_REASON;
+      case !dirty:
+        return NO_CHANGES_TO_DISCARD_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   function set(key: SecurityFeature, value: boolean) {
     setEdit((e) => {
@@ -563,31 +589,26 @@ function SecurityForm({
         </p>
       )}
 
-      {dirty && (
-        <div className="flex items-center justify-end gap-2 pt-1">
-          <DisabledReasonButton
-            variant="outline"
-            size="sm"
-            onClick={() => setEdit(null)}
-            disabled={apply.isPending}
-            reason={apply.isPending ? SAVING_REASON : undefined}
-          >
-            Discard
-          </DisabledReasonButton>
-          <DisabledReasonButton
-            size="sm"
-            onClick={save}
-            disabled={apply.isPending || !online}
-            reason={
-              (online ? undefined : OFFLINE_WRITE_REASON) ??
-              (apply.isPending ? ACT_PENDING_REASON : undefined)
-            }
-          >
-            {apply.isPending && <Spinner data-icon="inline-start" />}
-            Save changes
-          </DisabledReasonButton>
-        </div>
-      )}
+      <div className="flex items-center justify-end gap-2 pt-1">
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          onClick={() => setEdit(null)}
+          disabled={discardHeldReason !== undefined}
+          reason={discardHeldReason}
+        >
+          Discard
+        </DisabledReasonButton>
+        <DisabledReasonButton
+          size="sm"
+          onClick={save}
+          disabled={saveHeldReason !== undefined}
+          reason={saveHeldReason}
+        >
+          {apply.isPending && <Spinner data-icon="inline-start" />}
+          Save changes
+        </DisabledReasonButton>
+      </div>
     </div>
   );
 }

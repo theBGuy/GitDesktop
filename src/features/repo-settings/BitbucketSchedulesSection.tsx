@@ -36,8 +36,10 @@ import {
   ACT_PENDING_REASON,
   HeldSwitch,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -68,6 +70,7 @@ export function BitbucketSchedulesSection({
 
   const [creating, setCreating] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const swapFocus = useConfirmSwapFocus();
 
   function patchRow(row: BitbucketPipelineSchedule) {
     queryClient.setQueryData<BitbucketPipelineSchedule[]>(
@@ -149,6 +152,7 @@ export function BitbucketSchedulesSection({
             .filter((n) => !n.startsWith("gd/session/"))}
           onPatch={patchRow}
           onReconcile={reconcileAfterCreate}
+          swapFocusRef={swapFocus(NEW_FORM_SWAP_KEY)}
           onDone={() => setCreating(false)}
         />
       </PipelinesConfigGate>
@@ -163,6 +167,7 @@ export function BitbucketSchedulesSection({
             Run a pipeline on a branch automatically, on a cron schedule.
           </p>
           <Button
+            ref={swapFocus(NEW_FORM_SWAP_KEY)}
             data-confirm-fallback
             size="sm"
             onClick={() => setCreating(true)}
@@ -194,6 +199,7 @@ export function BitbucketSchedulesSection({
               onToggle={(next) => handleToggle(s.uuid, next)}
               confirming={confirming === s.uuid}
               pending={remove.isPending}
+              swapFocusRef={swapFocus(s.uuid)}
               onConfirm={() => setConfirming(s.uuid)}
               onCancel={() => setConfirming(null)}
               onRemove={() => handleRemove(s.uuid)}
@@ -211,6 +217,7 @@ function ScheduleRow({
   onToggle,
   confirming,
   pending,
+  swapFocusRef,
   onConfirm,
   onCancel,
   onRemove,
@@ -220,6 +227,8 @@ function ScheduleRow({
   onToggle: (enabled: boolean) => void;
   confirming: boolean;
   pending: boolean;
+  /** The section's confirm-swap ref for this row's Delete. */
+  swapFocusRef: SwapFocusRef;
   onConfirm: () => void;
   onCancel: () => void;
   onRemove: () => void;
@@ -229,7 +238,6 @@ function ScheduleRow({
   // would 404, so both controls stay disabled while it's syncing.
   const syncing = schedule.uuid.startsWith("pending:");
   const online = useOnline();
-  const swapFocus = useConfirmSwapFocus();
   const deleteLabel = `Delete schedule for ${schedule.refName} (${schedule.cronPattern})`;
   const toggleHeld = (() => {
     switch (true) {
@@ -267,13 +275,13 @@ function ScheduleRow({
           actLabel="Delete"
           pending={pending}
           heldReason={online ? undefined : OFFLINE_WRITE_REASON}
-          swapFocusRef={swapFocus()}
+          swapFocusRef={swapFocusRef}
           onCancel={onCancel}
           onAct={onRemove}
         />
       ) : syncing ? (
         <DisabledReasonButton
-          ref={swapFocus()}
+          ref={swapFocusRef}
           size="sm"
           variant="ghost"
           className="text-muted-foreground"
@@ -285,7 +293,7 @@ function ScheduleRow({
         </DisabledReasonButton>
       ) : (
         <Button
-          ref={swapFocus()}
+          ref={swapFocusRef}
           size="sm"
           variant="ghost"
           className="text-muted-foreground hover:text-destructive"
@@ -304,12 +312,15 @@ function ScheduleForm({
   branches,
   onPatch,
   onReconcile,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   branches: string[];
   onPatch: (row: BitbucketPipelineSchedule) => void;
   onReconcile: () => void;
+  /** Hands focus back to Add schedule when this form closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useBbCreateSchedule(repoPath);
@@ -379,7 +390,10 @@ function ScheduleForm({
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="bb-schedule-cron">Cron pattern</Label>
+          {/* The form's first keyed node, so opening it lands here: the branch
+              comes preselected, and the cron is what needs typing. */}
           <Input
+            ref={swapFocusRef}
             id="bb-schedule-cron"
             value={cron}
             onChange={(e) => setCron(e.target.value)}
@@ -394,10 +408,16 @@ function ScheduleForm({
         </div>
         {warning && <p className="text-[11px] text-warning">{warning}</p>}
         <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <Button variant="outline" size="sm" onClick={onDone}>
+          <Button
+            ref={swapFocusRef}
+            variant="outline"
+            size="sm"
+            onClick={onDone}
+          >
             Cancel
           </Button>
           <DisabledReasonButton
+            ref={swapFocusRef}
             size="sm"
             disabled={!canSave}
             reason={
