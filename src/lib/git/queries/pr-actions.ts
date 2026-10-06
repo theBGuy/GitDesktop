@@ -24,48 +24,65 @@ import {
   useRepoMutation,
 } from "./internal";
 import {
+  LOCAL_PR_WRITES_KEY,
+  type PendingLocalPrWrite,
   type PendingPrWrite,
   PR_WRITES_KEY,
-  type PrWriteKind,
-  pendingPrWriteTarget,
+  pendingWritesFor,
   prWriteKey,
+  readPendingLocalPrWrite,
+  readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
 
 /**
- * Every PR write against `repo` that is in flight, one entry per INVOCATION — an
- * observer tracks only its latest call, so a second write from the same hook would
- * hide the first. Computed from the cache on every snapshot rather than through
- * `useMutationState`, for the `<Activity>` blind spot `usePendingBoardWrites`
- * (projects.ts) documents.
+ * Every write filed under `prefix` against `repo` that is in flight, one entry per
+ * INVOCATION — an observer tracks only its latest call, so a second write from the
+ * same hook would hide the first. Computed from the cache on every snapshot rather
+ * than through `useMutationState`, for the `<Activity>` blind spot
+ * `usePendingBoardWrites` (projects.ts) documents. `read` must be module-stable.
  */
-export function usePendingPrWrites(repo: string): PendingPrWrite[] {
+function usePendingWritesUnder<W>(
+  prefix: readonly string[],
+  repo: string,
+  read: (kind: string, vars: unknown) => W,
+): W[] {
   const cache = useQueryClient().getMutationCache();
   // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
   // keeps one identity, as `useSyncExternalStore` requires.
-  const snapshot = useRef<PendingPrWrite[]>([]);
+  const snapshot = useRef<W[]>([]);
   const getSnapshot = useCallback(() => {
-    const next = cache
-      .findAll({ mutationKey: PR_WRITES_KEY, status: "pending" })
-      .flatMap((m): PendingPrWrite[] => {
-        const [, kind, keyRepo] = m.options.mutationKey ?? [];
-        if (keyRepo !== repo || typeof kind !== "string") return [];
-        return [
-          {
-            kind: kind as PrWriteKind,
-            ...pendingPrWriteTarget(m.state.variables),
-          },
-        ];
-      });
+    const next = pendingWritesFor(
+      cache
+        .findAll({ mutationKey: prefix, status: "pending" })
+        .map((m) => ({ key: m.options.mutationKey, vars: m.state.variables })),
+      repo,
+      read,
+    );
     snapshot.current = replaceEqualDeep(snapshot.current, next);
     return snapshot.current;
-  }, [cache, repo]);
+  }, [cache, prefix, repo, read]);
   const subscribe = useCallback(
     (onStoreChange: () => void) =>
       cache.subscribe(notifyManager.batchCalls(onStoreChange)),
     [cache],
   );
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** Every PR write against `repo` that is in flight ({@link usePendingWritesUnder}). */
+export function usePendingPrWrites(repo: string): PendingPrWrite[] {
+  return usePendingWritesUnder(PR_WRITES_KEY, repo, readPendingPrWrite);
+}
+
+/** Every local-PR write against `repo` that is in flight — read from the cache, so a
+ *  remounted local PR view still sees a write an earlier mount started. */
+export function usePendingLocalPrWrites(repo: string): PendingLocalPrWrite[] {
+  return usePendingWritesUnder(
+    LOCAL_PR_WRITES_KEY,
+    repo,
+    readPendingLocalPrWrite,
+  );
 }
 
 /** A merge/pull request's approval state — the approve/unapprove toggle's driver
@@ -482,10 +499,12 @@ export const prUpdateBranchKeys = (
  *  re-runs `prUpdateBranchKeys` once it has. Only the remote moved, so this pass is
  *  narrow: those keys plus the divergence key by name (it is a sibling of the PR
  *  subtree, not a child). Keyed off the args like the label mutation, which
- *  `useRepoMutation`'s static option can't do. */
+ *  `useRepoMutation`'s static option can't do. The variables name the PR, so the
+ *  view holds each PR's update on its own. */
 export function usePrUpdateBranch(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: prWriteKey("update-branch", repo),
     mutationFn: (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
     onSettled: (_d, _e, args) => {
@@ -773,8 +792,14 @@ export function useUnminimizeComment(repo: string) {
   );
 }
 
-export function useCheckoutPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.ghPrCheckout(repo, number, lens),
+/** Check out a PR's head locally. A working-tree write, so the view holds every PR's
+ *  checkout while any one runs; the variables still name the PR (`number` + `lens`)
+ *  it is for, so only that PR's view claims it as its own. */
+export function useCheckoutPr(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { number: number; lens: RemoteLens }) =>
+      api.ghPrCheckout(repo, args.number, args.lens),
+    { identity: prWriteKey("checkout", repo) },
   );
 }

@@ -114,8 +114,10 @@ import {
   invalidateRepoAfterWrite,
   isPendingFor,
   isStackMergePendingFor,
+  isStackWritePendingFor,
   PIPELINE_IN_FLIGHT,
   type PrWriteKind,
+  pendingWriteOfKind,
   prDiffOptions,
   prUpdateBranchKeys,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -301,6 +303,14 @@ const PROVIDER_MERGE_STRATEGIES: Record<
   bitbucket: ["merge", "squash", "fast_forward"],
 };
 
+/** Whether a provider's +/- totals are summed from the file rows, which a partial
+ *  files read undercounts, rather than reported for the whole PR (GitHub). */
+const TOTALS_FROM_FILES: Record<ForgeProvider, boolean> = {
+  github: false,
+  gitlab: true,
+  bitbucket: true,
+};
+
 /** Tab labels for this view's sections, function-valued because three of the four
  *  carry a live count. An unread or possibly partial list has no count to show,
  *  not its length. */
@@ -415,7 +425,7 @@ export function RemotePrView({
   const ghHost = useForgeGhHost(repoPath);
   const mentions = useMentionCandidates({ repoPath, lens, provider });
   const comment = useCommentPr(repoPath, lens);
-  const checkout = useCheckoutPr(repoPath, lens);
+  const checkout = useCheckoutPr(repoPath);
   const repoStatus = useRepoStatus(repoPath);
   const applySuggestion = useApplySuggestion(repoPath);
   const mergePr = useMergePr(repoPath);
@@ -728,6 +738,16 @@ export function RemotePrView({
   const armAutoMergePending = writePending("gl-arm-auto-merge");
   const cancelAutoMergePending = writePending("gl-cancel-auto-merge");
   const setDraftPending = writePending("set-draft");
+  const updateBranchPending = writePending("update-branch");
+  const resolveMergePending = writePending("resolve-merge");
+  // A stack create or add holds the offer of every PR it names, whichever PR fired it.
+  const stackWritePending = isStackWritePendingFor(pendingWrites, number, lens);
+  // Repo-wide by design: checkout writes the working tree, and a discard deletes a
+  // resolve worktree whose variables name no PR. Only checkout's own PR spins.
+  const runningCheckout = pendingWriteOfKind(pendingWrites, "checkout");
+  const checkoutPending = writePending("checkout");
+  const abortResolvePending =
+    pendingWriteOfKind(pendingWrites, "abort-resolve") !== undefined;
   // Every footer/state control and its palette twin holds while a write to THIS PR
   // runs, or a stack merge cascading through its native stack; any other write
   // holds nothing here. Declared above the palette wiring so both share the exact
@@ -913,7 +933,13 @@ export function RemotePrView({
     // `offerEnabled` withholds the offer entirely until details are the selected
     // PR's, so the placeholder arm here is insurance against a looser gate later.
     // Permission holds the offer rather than hiding it, so the refusal lives here.
-    if (!stackOffer || details.isPlaceholderData || writeBlocked) return;
+    if (
+      !stackOffer ||
+      details.isPlaceholderData ||
+      writeBlocked ||
+      stackWritePending
+    )
+      return;
     if (stackOffer.kind === "create") {
       try {
         const outcome = await stackCreate.mutateAsync(stackOffer.members);
@@ -951,10 +977,10 @@ export function RemotePrView({
 
   // Write state belongs to ONE offer on ONE PR: this component isn't remounted
   // per PR (RepositoryView renders it without a key), and a list refetch can
-  // reshape the chain under the same PR. Either way a surviving error — or
-  // pending flag — would render against an offer it was never fired for, so
-  // both triggers reset through this one path. The ref makes the mount pass a
-  // no-op: there's nothing to clear yet.
+  // reshape the chain under the same PR. Either way a surviving error would render
+  // against an offer it was never fired for, so both triggers reset through this one
+  // path. The hold survives it: `reset()` detaches the observer, never the pending
+  // write `stackWritePending` reads. The ref makes the mount pass a no-op.
   const stackWriteKey = `${number}|${stackOffer ? offerIdentity(stackOffer) : ""}`;
   const stackWriteFor = useRef(stackWriteKey);
   const resetStackWrites = useEffectEvent(() => cancelStackOffer());
@@ -1255,13 +1281,21 @@ export function RemotePrView({
     !defaultBranchSettling &&
     !rulesSettling &&
     updateBlockedReason === undefined &&
-    !updateBranch.isPending;
+    !updateBranchPending;
 
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
    *  and just pushes when there are none. `withAi` hands the conflicts the backend
    *  just reported straight to the AI walk, so the takeover opens already working. */
   async function runResolve(withAi: boolean) {
-    if (details.isPlaceholderData || resolve) return;
+    // A running discard may be deleting the very worktree the backend would hand
+    // back, so a resolve waits for it.
+    if (
+      details.isPlaceholderData ||
+      resolve ||
+      resolveMergePending ||
+      abortResolvePending
+    )
+      return;
     const info = details.data;
     if (!info) return;
     const startedFor = entityKey;
@@ -1337,7 +1371,8 @@ export function RemotePrView({
       !details.isPlaceholderData &&
       (canResolveConflicts || resolveWorktree !== null) &&
       !resolve &&
-      !mergeRemotePr.isPending,
+      !resolveMergePending &&
+      !abortResolvePending,
   );
 
   /** Bring the head up to date with its base, on the remote. The rebase variant
@@ -1351,9 +1386,10 @@ export function RemotePrView({
     // any future caller — no UI gate is the only thing between a viewer who may
     // not push (or a second click) and the mutation. It derives from the rendered
     // PR, the previous one during a switch — hence the placeholder refusal above.
+    // Per PR: each update is its own forge-side job on its own head branch.
     if (
       updateBlockedReason !== undefined ||
-      updateBranch.isPending ||
+      updateBranchPending ||
       updatingBranch ||
       // A promotion pull request would merge the base back INTO the head. The
       // demotion has to live here too, or it is only as good as the surfaces that
@@ -1751,7 +1787,9 @@ export function RemotePrView({
           sha,
         });
         closeDialogIfStillHere();
-        toast.success("Auto-merge enabled — merges when the pipeline passes");
+        toast.success(
+          `Auto-merge enabled for #${number} — merges when the pipeline passes`,
+        );
       } catch (e) {
         onError(e);
         closeDialogIfStillHere();
@@ -2399,13 +2437,16 @@ export function RemotePrView({
   }
 
   async function checkoutHead(headRefName: string) {
+    // Any checkout in flight refuses another, whichever PR it is for: both write
+    // the one working tree.
+    if (runningCheckout) return;
     // Read at fire time: the promote's claim never re-renders anything.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
     try {
-      await checkout.mutateAsync(number);
+      await checkout.mutateAsync({ number, lens });
       toast.success(`Checked out ${headRefName}`);
     } catch (e) {
       onError(e);
@@ -2415,7 +2456,7 @@ export function RemotePrView({
   async function doCancelAutoMerge() {
     try {
       await cancelAutoMerge.mutateAsync({ number, lens });
-      toast.success("Auto-merge canceled");
+      toast.success(`Auto-merge canceled for #${number}`);
     } catch (e) {
       onError(e);
     }
@@ -2550,11 +2591,11 @@ export function RemotePrView({
   });
   // A files read with nothing to draw: the Files tab shows its notice alone.
   const filesMissing = pr.filesUnknown && pr.files.length === 0;
-  // Whether the header's +/- totals are unreadable. GitHub's totals are PR-level
-  // and survive a partial files list; Bitbucket's are summed from the rows, so
-  // they hide whenever its files are unknown.
+  // Whether the header's +/- totals are unreadable: always with no rows to show, and
+  // with a partial list wherever the provider sums its totals from those rows.
   const totalsUnknown =
-    pr.filesUnknown && (pr.files.length === 0 || provider === "bitbucket");
+    pr.filesUnknown &&
+    (pr.files.length === 0 || TOTALS_FROM_FILES[providerKey]);
 
   // The header's meta fields, row-major, as label/value pairs for the grid
   // below: an editable field emits its trigger as the label cell and its chips
@@ -2765,20 +2806,25 @@ export function RemotePrView({
                 Checked out
               </span>
             ) : (
-              <Button
+              <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={checkout.isPending}
+                disabled={runningCheckout !== undefined}
+                reason={
+                  checkoutPending || runningCheckout?.target == null
+                    ? "Checking out…"
+                    : `Checking out #${runningCheckout.target}…`
+                }
                 onClick={() => void checkoutHead(pr.headRefName)}
                 title={`Check out ${pr.headRefName} locally`}
               >
-                {checkout.isPending ? (
+                {checkoutPending ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
                   <GitBranchIcon data-icon="inline-start" />
                 )}
                 Checkout
-              </Button>
+              </DisabledReasonButton>
             ))}
           {isOpen && canEdit && (
             // A natively-disabled Button swallows its own `title`, so the wait
@@ -2824,9 +2870,7 @@ export function RemotePrView({
           <span className="font-mono">{pr.headRefName}</span>
           <span>→</span>
           <span className="font-mono">{pr.baseRefName}</span>
-          {/* GitHub's totals are PR-level and survive a partial files list;
-              Bitbucket's are summed from the rows, so they hide whenever its files
-              are unknown. The Files notice explains the gap. */}
+          {/* Hidden while `totalsUnknown`; the Files notice explains the gap. */}
           {!totalsUnknown && (
             <DiffStat
               added={pr.additions}
@@ -2914,7 +2958,7 @@ export function RemotePrView({
             ref={offerRef}
             offer={stackOffer}
             rows={offerRows}
-            pending={stackCreate.isPending || stackAdd.isPending}
+            pending={stackWritePending}
             // The rendered twin of `confirmStackOffer`'s refusals. Permission only
             // enables, so a viewer without push sees the offer held with its reason;
             // the stale arm is unreachable today (no offer exists then).
@@ -2975,11 +3019,7 @@ export function RemotePrView({
         provider={provider}
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
-        busy={
-          mergeRemotePr.isPending ||
-          abortRemotePrResolve.isPending ||
-          detailsStale
-        }
+        busy={resolveMergePending || abortResolvePending || detailsStale}
         conflictFiles={predictedFiles}
         predictedClean={predictedClean}
         forgeUnreachable={forgeUnreachable}
@@ -2991,7 +3031,7 @@ export function RemotePrView({
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.
         updateBusy={
-          updateBranch.isPending ||
+          updateBranchPending ||
           updatingBranch ||
           detailsStale ||
           defaultBranchSettling ||
@@ -3001,7 +3041,7 @@ export function RemotePrView({
         // own arm rather than claiming the pull request is still loading.
         updateAwaitingDefault={defaultBranchSettling}
         updateAwaitingRules={rulesSettling}
-        updateSubmitting={updateBranch.isPending}
+        updateSubmitting={updateBranchPending}
         onResolve={() => void runResolve(false)}
         onResolveWithAi={() => void runResolve(true)}
         onDiscard={() => void discardResolve()}

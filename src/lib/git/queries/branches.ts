@@ -4,6 +4,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
+import { localPrWriteKey } from "./pr-writes";
 
 export function useBranches(repo: string) {
   return useQuery({
@@ -236,6 +237,8 @@ export function useBranchDivergence(
   });
 }
 
+/** Merge `base` into `branch`. Filed with the local-PR writes because the local PR
+ *  view holds its Update branch on any running one, from whichever surface fired it. */
 export function useUpdateBranchFrom(repo: string) {
   return useRepoMutation(
     repo,
@@ -244,6 +247,7 @@ export function useUpdateBranchFrom(repo: string) {
     {
       // Local branch write — never park it offline.
       networkMode: "always",
+      identity: localPrWriteKey("update-from", repo),
     },
   );
 }

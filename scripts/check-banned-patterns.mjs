@@ -1464,14 +1464,7 @@ export const CHECKS = [
       file === JIRA_QUERIES ||
       LOCAL_QUERIES.includes(file),
     scan: unpinnedMutationIdentity,
-    allowlist: [
-      // useStackCreate renders a failed write inline off the mutation's OWN `error`
-      // and clears it with `reset()` (RemotePrView), so a detach would swallow the
-      // failure its catch deliberately stays silent for. Pinning needs that error
-      // path moved onto the awaited promise first. Covers the whole file, so a new
-      // create hook added HERE is masked — split the entry if that changes.
-      `${QUERIES_DIR}pr-write.ts`,
-    ],
+    allowlist: [],
     // Floor near the real module count (33): a low floor would let a typo in
     // QUERIES_DIR leave the scan almost entirely inert and still pass.
     expectScanned: {

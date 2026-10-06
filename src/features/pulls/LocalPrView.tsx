@@ -62,12 +62,14 @@ import { copyText } from "@/lib/clipboard";
 import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  pendingWriteOfKind,
   useBranchDiffFiles,
   useCompareBranches,
   useConflictPreview,
   useDefaultBranch,
   useForgeStatus,
   useMergeLocalPr,
+  usePendingLocalPrWrites,
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
@@ -135,6 +137,11 @@ export function LocalPrView({
   const update = useUpdateLocalPr(repoPath);
   const merge = useMergeLocalPr(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
+  // Read from the mutation cache, not the hooks' observers: this view unmounts on a
+  // local -> remote -> local hop, and a remount's fresh observers never saw the write.
+  const localWrites = usePendingLocalPrWrites(repoPath);
+  const runningMerge = pendingWriteOfKind(localWrites, "merge");
+  const runningUpdate = pendingWriteOfKind(localWrites, "update-from");
   const recovery = useStashReapplyRecovery(repoPath);
   const status = useRepoStatus(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
@@ -462,7 +469,8 @@ export function LocalPrView({
   // a landed merge still reading open, or a paused one with no `pendingMerge`
   // to reach its resolver by.
   async function doMerge(strategy: MergeStrategy) {
-    if (!pr) return;
+    // Any local merge in flight refuses another: they share the refs it advances.
+    if (!pr || runningMerge) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -528,7 +536,7 @@ export function LocalPrView({
    *  reaches the stash-and-reapply prompt only through this rejection; dropping
    *  it on teardown would withdraw the offer entirely. */
   async function doUpdateBranch() {
-    if (!pr) return;
+    if (!pr || runningUpdate) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -679,10 +687,9 @@ export function LocalPrView({
   // DisabledReasonButton, never the trigger — its own inner useButton swallows
   // activation while blocked, which is what actually keeps the menu shut.
   // A local merge advances refs every local PR shares (and touches the working tree
-  // when its base is the current branch), so any merge this mounted view started
-  // holds this PR's Merge too — only the wording is scoped, naming that merge.
-  const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
-  const running = merge.isPending ? merge.variables : undefined;
+  // when its base is the current branch), so any running local merge holds this
+  // PR's Merge too — only the wording is scoped, naming that merge.
+  const mergeBlocked = !canMerge || runningMerge !== undefined || dirtyBlocks;
   // This same string doubles as the hover title while nothing blocks. The
   // active merge outranks `dirtyBlocks`: a merge already in flight can't be
   // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
@@ -691,10 +698,12 @@ export function LocalPrView({
     switch (true) {
       case !canMerge:
         return "Approve the PR before merging";
-      case running?.head === pr.head && running.base === pr.base:
+      case runningMerge?.head === pr.head && runningMerge.base === pr.base:
         return "Merging…";
-      case running !== undefined:
-        return `Merging ${running.head} into ${running.base}…`;
+      case runningMerge?.head != null && runningMerge.base != null:
+        return `Merging ${runningMerge.head} into ${runningMerge.base}…`;
+      case runningMerge !== undefined:
+        return "Merging…";
       case dirtyBlocks:
         return "Commit or stash your changes before merging into the current branch";
       default:
@@ -1167,15 +1176,21 @@ export function LocalPrView({
                 // query is ever disabled): a FAILED read falls open to the ordinary
                 // button instead of disabling forever behind a stale "checking…".
                 disabled={
-                  updateBranchFrom.isPending ||
+                  runningUpdate !== undefined ||
                   recovery.pending ||
                   defaultBranch.isPending ||
                   rulesSettling
                 }
                 reason={(() => {
                   switch (true) {
-                    case updateBranchFrom.isPending:
+                    case runningUpdate?.head === pr.head &&
+                      runningUpdate.base === pr.base:
                       return "Updating this branch…";
+                    case runningUpdate?.head != null &&
+                      runningUpdate.base != null:
+                      return `Updating ${runningUpdate.head} from ${runningUpdate.base}…`;
+                    case runningUpdate !== undefined:
+                      return "Updating a branch…";
                     case recovery.pending:
                       return "Another git operation is running.";
                     case defaultBranch.isPending:
