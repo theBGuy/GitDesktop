@@ -84,7 +84,11 @@ export function AsyncErrorCard({
         </p>
       )}
       {children}
-      {hint && <div className="mt-2 text-muted-foreground">{hint}</div>}
+      {/* Hints are permission-conditional copy, so under a transport failure
+          they would blame a role for a connection problem. */}
+      {hint && !isTransportError(error) && (
+        <div className="mt-2 text-muted-foreground">{hint}</div>
+      )}
       {onRetry && (
         <Button
           ref={retryRef}
@@ -115,6 +119,9 @@ export const ACT_PENDING_REASON = "Applying this change…";
 
 /** The hold reason on a save or update whose form matches what's saved. */
 export const NO_CHANGES_REASON = "No changes to save";
+
+/** The hold reason on a Discard whose form matches what's saved. */
+export const NO_CHANGES_TO_DISCARD_REASON = "No changes to discard";
 
 /** The hold reason on a save while an AI description draft is still streaming
  *  into the form it would send. */
@@ -601,7 +608,29 @@ function ScopeErrorHint({ scope }: { scope: string }) {
   );
 }
 
-type SwapFocusRef = (node: HTMLElement | null) => (() => void) | undefined;
+export type SwapFocusRef = (
+  node: HTMLElement | null,
+) => (() => void) | undefined;
+
+/** Form-swap keys skip the successor marker: a row's Edit or Deliveries control
+ *  must not outrank its Delete as where focus lands after a neighbor's delete. */
+const FORM_SWAP_PREFIX = "form:";
+
+/** The swap key a section's Add control shares with its create form's exits. */
+export const NEW_FORM_SWAP_KEY = `${FORM_SWAP_PREFIX}new`;
+
+/** The swap key a row's form opener ("edit", "deliveries") shares with the
+ *  exits of the view it opens; distinct from the row's own confirm key. */
+export function rowFormSwapKey(kind: string, id: string | number): string {
+  return `${FORM_SWAP_PREFIX}${kind}:${id}`;
+}
+
+/** The swap key an inline form or detail view's exits leave under: the row
+ *  control that opened it while that row is still listed, else the section's
+ *  Add control, since a row deleted meanwhile leaves no claimant. */
+export function formExitSwapKey(rowKey: string, listed: boolean): string {
+  return listed ? rowKey : NEW_FORM_SWAP_KEY;
+}
 
 function onBody(): boolean {
   const active = document.activeElement;
@@ -676,9 +705,10 @@ function createConfirmSwapFocus() {
   return (key: string | number = ""): SwapFocusRef => {
     let ref = refs.get(key);
     if (ref === undefined) {
+      const marked = !String(key).startsWith(FORM_SWAP_PREFIX);
       ref = (node) => {
         if (node === null) return;
-        node.setAttribute(SWAP_NODE_ATTR, "");
+        if (marked) node.setAttribute(SWAP_NODE_ATTR, "");
         if (armed === key) {
           armed = null;
           if (onBody()) node.focus({ preventScroll: true });
@@ -700,7 +730,7 @@ function createConfirmSwapFocus() {
         return () => {
           node.removeEventListener("focusout", onFocusOut);
           node.removeEventListener("focusin", onFocusIn);
-          node.removeAttribute(SWAP_NODE_ATTR);
+          if (marked) node.removeAttribute(SWAP_NODE_ATTR);
           const owned =
             node.contains(document.activeElement) ||
             (stranded === node && onBody());
@@ -735,6 +765,12 @@ function createConfirmSwapFocus() {
  * previous one's (rows without one are skipped), else the first focusable
  * `data-confirm-fallback` in the `data-confirm-section`, else the list or
  * form host. Mark the row root, the section root, and its fallback controls.
+ *
+ * An inline form that renders INSTEAD of its list has no successor to find, so
+ * it hands off by key: the hook lives in the component owning the swap, and the
+ * opening control (Add under {@link NEW_FORM_SWAP_KEY}, a row's Edit under
+ * {@link rowFormSwapKey}) shares one `swapFocus(key)` with every exit of the
+ * view it opens, which leave under {@link formExitSwapKey}.
  */
 export function useConfirmSwapFocus() {
   const [swapFocus] = useState(createConfirmSwapFocus);

@@ -278,6 +278,9 @@ export function useDeleteRepo(repo: string) {
   return useMutation({ mutationFn: () => api.forgeRepoDelete(repo) });
 }
 
+// Archive, transfer and rename settle on the hook's `repo` unpinned: that is the
+// repo the write went to only because their hosts sit under DangerZone's
+// key={repoPath} remount. Drop that key and these need identity-pinned targets.
 export function useSetArchived(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({

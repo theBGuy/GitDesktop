@@ -32,12 +32,16 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
+  formExitSwapKey,
   HeldRoleSelect,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
   RemoteListSection,
+  rowFormSwapKey,
   SAVING_REASON,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -341,12 +345,24 @@ export function RulesetsSection({
   open: boolean;
 }) {
   const [editing, setEditing] = useState<number | "new" | null>(null);
+  // Both live here, above the list/editor swap: the editor's exits hand focus
+  // to a control in the list, so they need one swap hook and the list's rows.
+  const rulesets = useRulesets(repoPath, open);
+  const swapFocus = useConfirmSwapFocus();
 
   if (editing !== null) {
+    const exitKey =
+      editing === "new"
+        ? NEW_FORM_SWAP_KEY
+        : formExitSwapKey(
+            rowFormSwapKey("edit", editing),
+            rulesets.data?.some((rs) => rs.id === editing) ?? false,
+          );
     return (
       <RulesetEditor
         repoPath={repoPath}
         id={editing === "new" ? null : editing}
+        swapFocusRef={swapFocus(exitKey)}
         onDone={() => setEditing(null)}
       />
     );
@@ -354,7 +370,8 @@ export function RulesetsSection({
   return (
     <RulesetList
       repoPath={repoPath}
-      open={open}
+      rulesets={rulesets}
+      swapFocus={swapFocus}
       onNew={() => setEditing("new")}
       onEdit={setEditing}
     />
@@ -363,20 +380,21 @@ export function RulesetsSection({
 
 function RulesetList({
   repoPath,
-  open,
+  rulesets,
+  swapFocus,
   onNew,
   onEdit,
 }: {
   repoPath: string;
-  open: boolean;
+  rulesets: ReturnType<typeof useRulesets>;
+  /** The section's swap hook: row confirms and the editor's openers. */
+  swapFocus: ReturnType<typeof useConfirmSwapFocus>;
   onNew: () => void;
   onEdit: (id: number) => void;
 }) {
-  const rulesets = useRulesets(repoPath, open);
   const setEnforcement = useSetRulesetEnforcement(repoPath);
   const del = useDeleteRuleset(repoPath);
   const [confirming, setConfirming] = useState<number | null>(null);
-  const swapFocus = useConfirmSwapFocus();
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const enforcementHeld =
@@ -414,6 +432,7 @@ function RulesetList({
           protection.
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           variant="outline"
@@ -479,6 +498,7 @@ function RulesetList({
                     label={`Enforcement for ${rs.name}`}
                   />
                   <DisabledReasonButton
+                    ref={swapFocus(rowFormSwapKey("edit", rs.id))}
                     size="sm"
                     variant="ghost"
                     disabled={!canEdit}
@@ -511,10 +531,13 @@ function RulesetList({
 function RulesetEditor({
   repoPath,
   id,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   id: number | null;
+  /** Hands focus back to the control that opened this editor when it closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const existing = useRuleset(repoPath, id);
@@ -523,7 +546,12 @@ function RulesetEditor({
   // actors, unmodeled rules and conditions. The create path fetches nothing.
   const body =
     id == null ? (
-      <RulesetForm repoPath={repoPath} id={null} onDone={onDone} />
+      <RulesetForm
+        repoPath={repoPath}
+        id={null}
+        swapFocusRef={swapFocusRef}
+        onDone={onDone}
+      />
     ) : (
       <RemoteFormSection
         query={existing}
@@ -539,6 +567,7 @@ function RulesetEditor({
               repoPath={repoPath}
               id={id}
               original={original}
+              swapFocusRef={swapFocusRef}
               onDone={onDone}
             />
           </div>
@@ -549,6 +578,7 @@ function RulesetEditor({
   return (
     <div className="min-w-0 space-y-4">
       <button
+        ref={swapFocusRef}
         type="button"
         onClick={onDone}
         className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
@@ -565,11 +595,13 @@ function RulesetForm({
   repoPath,
   id,
   original,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   id: number | null;
   original?: RulesetFull;
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useCreateRuleset(repoPath);
@@ -783,6 +815,7 @@ function RulesetForm({
 
       <div className="flex items-center justify-end gap-2 pt-1">
         <DisabledReasonButton
+          ref={swapFocusRef}
           variant="outline"
           onClick={onDone}
           disabled={pending}
@@ -791,6 +824,7 @@ function RulesetForm({
           Cancel
         </DisabledReasonButton>
         <DisabledReasonButton
+          ref={swapFocusRef}
           onClick={save}
           disabled={pending || !d.name.trim() || !online}
           reason={

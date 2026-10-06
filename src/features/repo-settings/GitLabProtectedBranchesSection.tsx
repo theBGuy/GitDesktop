@@ -33,8 +33,10 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -86,6 +88,7 @@ export function GitLabProtectedBranchesSection({
   const unprotect = useGlUnprotectBranch(repoPath);
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const swapFocus = useConfirmSwapFocus();
 
   // Awaited, not per-call callbacks: this subtree unmounts when the dialog
   // closes or the rail crossfades to another section, and react-query drops
@@ -113,6 +116,7 @@ export function GitLabProtectedBranchesSection({
       <ProtectBranchForm
         repoPath={repoPath}
         existing={branches.data ?? []}
+        swapFocusRef={swapFocus(NEW_FORM_SWAP_KEY)}
         onDone={() => setEditing(false)}
       />
     );
@@ -126,6 +130,7 @@ export function GitLabProtectedBranchesSection({
           changes.
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           onClick={() => setEditing(true)}
@@ -157,6 +162,7 @@ export function GitLabProtectedBranchesSection({
             }
             confirming={confirming === b.name}
             unprotecting={unprotect.isPending}
+            swapFocusRef={swapFocus(b.name)}
             onConfirm={() => setConfirming(b.name)}
             onCancel={() => setConfirming(null)}
             onUnprotect={() => handleUnprotect(b.name)}
@@ -173,6 +179,7 @@ function ProtectedBranchRow({
   onToggleForcePush,
   confirming,
   unprotecting,
+  swapFocusRef,
   onConfirm,
   onCancel,
   onUnprotect,
@@ -182,6 +189,8 @@ function ProtectedBranchRow({
   onToggleForcePush: (allowForcePush: boolean) => void;
   confirming: boolean;
   unprotecting: boolean;
+  /** The section's confirm-swap ref for this row's Unprotect. */
+  swapFocusRef: SwapFocusRef;
   onConfirm: () => void;
   onCancel: () => void;
   onUnprotect: () => void;
@@ -189,7 +198,6 @@ function ProtectedBranchRow({
   const switchId = useId();
   const inheritedHint = "Inherited from the group — manage it there.";
   const online = useOnline();
-  const swapFocus = useConfirmSwapFocus();
   const forcePushHeld = (() => {
     switch (true) {
       case branch.inherited:
@@ -223,13 +231,13 @@ function ProtectedBranchRow({
             actLabel="Unprotect"
             pending={unprotecting}
             heldReason={online ? undefined : OFFLINE_WRITE_REASON}
-            swapFocusRef={swapFocus()}
+            swapFocusRef={swapFocusRef}
             onCancel={onCancel}
             onAct={onUnprotect}
           />
         ) : branch.inherited ? (
           <DisabledReasonButton
-            ref={swapFocus()}
+            ref={swapFocusRef}
             size="sm"
             variant="ghost"
             className="text-muted-foreground"
@@ -241,7 +249,7 @@ function ProtectedBranchRow({
           </DisabledReasonButton>
         ) : (
           <Button
-            ref={swapFocus()}
+            ref={swapFocusRef}
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive"
@@ -288,10 +296,13 @@ function ProtectedBranchRow({
 function ProtectBranchForm({
   repoPath,
   existing,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   existing: GitLabProtectedBranch[];
+  /** Hands focus back to Protect branch when this form closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const protectBranch = useGlProtectBranch(repoPath);
@@ -329,7 +340,7 @@ function ProtectBranchForm({
 
   return (
     <div className="min-w-0 space-y-3">
-      <Button size="sm" variant="ghost" onClick={onDone}>
+      <Button ref={swapFocusRef} size="sm" variant="ghost" onClick={onDone}>
         <CaretLeftIcon data-icon="inline-start" />
         Back to protected branches
       </Button>
@@ -406,10 +417,16 @@ function ProtectBranchForm({
         </div>
         {warning && <p className="text-[11px] text-warning">{warning}</p>}
         <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <Button variant="outline" size="sm" onClick={onDone}>
+          <Button
+            ref={swapFocusRef}
+            variant="outline"
+            size="sm"
+            onClick={onDone}
+          >
             Cancel
           </Button>
           <DisabledReasonButton
+            ref={swapFocusRef}
             size="sm"
             disabled={!canProtect}
             reason={

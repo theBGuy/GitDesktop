@@ -56,12 +56,6 @@ export function GitLabVariablesSection({
   const keyTaken = (variables.data ?? []).some(
     (v) => v.key === key.trim() && v.environmentScope === "*",
   );
-  const canAdd =
-    validKey(key.trim()) &&
-    value.length > 0 &&
-    !keyTaken &&
-    !setVariable.isPending &&
-    online;
   const keyWarning = key.trim()
     ? keyTaken
       ? "A variable with this key already exists — edit it below."
@@ -166,7 +160,7 @@ export function GitLabVariablesSection({
           />
           <DisabledReasonButton
             size="sm"
-            disabled={!canAdd}
+            disabled={addHeldReason !== undefined}
             reason={addHeldReason}
             onClick={addVariable}
           >

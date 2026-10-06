@@ -24,9 +24,13 @@ import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
+  formExitSwapKey,
   InlineConfirm,
+  NEW_FORM_SWAP_KEY,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
+  rowFormSwapKey,
+  type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -100,10 +104,18 @@ export function BitbucketBranchRestrictionsSection({
   }
 
   if (editing) {
+    const exitKey =
+      editing === "new"
+        ? NEW_FORM_SWAP_KEY
+        : formExitSwapKey(
+            rowFormSwapKey("edit", editing.id),
+            restrictions.data?.some((r) => r.id === editing.id) ?? false,
+          );
     return (
       <RestrictionForm
         repoPath={repoPath}
         restriction={editing === "new" ? null : editing}
+        swapFocusRef={swapFocus(exitKey)}
         onDone={() => setEditing(null)}
       />
     );
@@ -116,6 +128,7 @@ export function BitbucketBranchRestrictionsSection({
           Rules that limit who can push, merge, or delete matching branches.
         </p>
         <Button
+          ref={swapFocus(NEW_FORM_SWAP_KEY)}
           data-confirm-fallback
           size="sm"
           onClick={() => setEditing("new")}
@@ -165,6 +178,7 @@ export function BitbucketBranchRestrictionsSection({
               ) : (
                 <>
                   <Button
+                    ref={swapFocus(rowFormSwapKey("edit", r.id))}
                     size="sm"
                     variant="ghost"
                     onClick={() => setEditing(r)}
@@ -194,10 +208,13 @@ export function BitbucketBranchRestrictionsSection({
 function RestrictionForm({
   repoPath,
   restriction,
+  swapFocusRef,
   onDone,
 }: {
   repoPath: string;
   restriction: BitbucketBranchRestriction | null;
+  /** Hands focus back to the control that opened this form when it closes. */
+  swapFocusRef: SwapFocusRef;
   onDone: () => void;
 }) {
   const create = useBbCreateBranchRestriction(repoPath);
@@ -252,7 +269,7 @@ function RestrictionForm({
 
   return (
     <div className="min-w-0 space-y-3">
-      <Button size="sm" variant="ghost" onClick={onDone}>
+      <Button ref={swapFocusRef} size="sm" variant="ghost" onClick={onDone}>
         <CaretLeftIcon data-icon="inline-start" />
         Back to restrictions
       </Button>
@@ -319,10 +336,16 @@ function RestrictionForm({
         </p>
         {warning && <p className="text-[11px] text-warning">{warning}</p>}
         <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <Button variant="outline" size="sm" onClick={onDone}>
+          <Button
+            ref={swapFocusRef}
+            variant="outline"
+            size="sm"
+            onClick={onDone}
+          >
             Cancel
           </Button>
           <DisabledReasonButton
+            ref={swapFocusRef}
             size="sm"
             disabled={!canSave}
             reason={

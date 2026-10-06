@@ -87,12 +87,6 @@ export function BitbucketVariablesSection({
   }
 
   const keyTaken = (variables.data ?? []).some((v) => v.key === key.trim());
-  const canAdd =
-    validKey(key.trim()) &&
-    value.length > 0 &&
-    !keyTaken &&
-    !create.isPending &&
-    online;
   const keyWarning = key.trim()
     ? keyTaken
       ? "A variable with this key already exists — edit it below."
@@ -201,7 +195,7 @@ export function BitbucketVariablesSection({
             />
             <DisabledReasonButton
               size="sm"
-              disabled={!canAdd}
+              disabled={addHeldReason !== undefined}
               reason={addHeldReason}
               onClick={addVariable}
             >
