@@ -117,8 +117,10 @@ impl AgentKind {
     /// argv for the CLI's own model-catalog listing; None = no such surface.
     fn models_args(self) -> Option<&'static [&'static str]> {
         match self {
+            AgentKind::Codex => Some(&["debug", "models"]),
+            AgentKind::Copilot => Some(&["help", "config"]),
             AgentKind::Opencode => Some(&["models"]),
-            AgentKind::Claude | AgentKind::Codex | AgentKind::Copilot => None,
+            AgentKind::Claude => None,
         }
     }
 
@@ -764,8 +766,8 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
 
 /// Per-stream cap on captured output. `Command::output` buffers without limit,
 /// so a runaway or compromised child could exhaust memory before the timeout
-/// (which bounds duration, not bytes). No legitimate capture here approaches it
-/// — the largest, `opencode models`, is tens of KB.
+/// (which bounds duration, not bytes). No legitimate capture here approaches it:
+/// the largest, `codex debug models`, measured ~354 KB (codex-cli 0.153.3).
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Drains `stdout` and `stderr` concurrently into capped buffers, returning the
@@ -965,6 +967,129 @@ fn parse_models_output(stdout: &str) -> Vec<String> {
     out
 }
 
+/// A catalog id safe to offer as `--model`: non-empty, no whitespace or control
+/// characters.
+fn plain_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id
+            .chars()
+            .any(|c| c.is_whitespace() || c < '\x20' || c == '\x7f')
+}
+
+/// One entry of `codex debug models`; an entry that fails to deserialize is
+/// skipped without losing the rest.
+#[derive(Deserialize)]
+struct CodexCatalogEntry {
+    slug: String,
+    visibility: String,
+    priority: f64,
+    supported_in_api: bool,
+}
+
+/// Picks the picker-visible ids out of `codex debug models` JSON, in codex's own
+/// priority order. Mirrors codex's picker: a ChatGPT login offers every
+/// `visibility: "list"` model, API-key mode only those `supported_in_api`.
+/// Unparseable output yields no ids, so the caller's static fallback serves.
+fn parse_codex_models(stdout: &str, chatgpt_auth: bool) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        #[serde(default)]
+        models: Vec<serde_json::Value>,
+    }
+    let Ok(catalog) = serde_json::from_str::<Catalog>(stdout) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<CodexCatalogEntry> = catalog
+        .models
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<CodexCatalogEntry>(v).ok())
+        .filter(|e| e.visibility == "list" && (chatgpt_auth || e.supported_in_api))
+        .filter(|e| plain_model_id(&e.slug))
+        .collect();
+    // `sort_by` is stable, so equal priorities keep the CLI's order.
+    entries.sort_by(|a, b| a.priority.total_cmp(&b.priority));
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for e in entries {
+        if seen.insert(e.slug.clone()) {
+            out.push(e.slug);
+        }
+        if out.len() == MODELS_LIMIT {
+            break;
+        }
+    }
+    out
+}
+
+/// The quoted token of one `    - "<id>"` enum line of `copilot help config`;
+/// None when the line isn't in that shape.
+fn copilot_enum_item(line: &str) -> Option<&str> {
+    let quoted = line.trim().strip_prefix('-')?.trim_start();
+    quoted.strip_prefix('"')?.strip_suffix('"')
+}
+
+/// Reads the id block under `copilot help config`'s `` `model`: `` entry: the run
+/// of `- "<id>"` lines right after it, stopping at the first other line (the help
+/// lists other settings' enums in the same shape). `auto` is a valid `--model`
+/// the block never lists, so it leads. No marker or an empty block yields no ids.
+fn parse_copilot_models(stdout: &str) -> Vec<String> {
+    let mut lines = stdout.split('\n');
+    if !lines
+        .by_ref()
+        .any(|l| l.trim_start().starts_with("`model`:"))
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = vec!["auto".to_string()];
+    let mut seen: HashSet<&str> = HashSet::from(["auto"]);
+    for line in lines {
+        let Some(id) = copilot_enum_item(line) else {
+            break;
+        };
+        if out.len() == MODELS_LIMIT {
+            break;
+        }
+        // An unsafe id is dropped but stays inside the block: it is still an item.
+        if plain_model_id(id) && seen.insert(id) {
+            out.push(id.to_string());
+        }
+    }
+    if out.len() == 1 {
+        return Vec::new();
+    }
+    out
+}
+
+/// The verdict of `codex login status` (stdout+stderr): a ChatGPT login widens
+/// codex's catalog. Any failure answers false: the API-key filter is valid in both
+/// modes.
+fn codex_status_is_chatgpt(result: AppResult<(i32, String)>) -> bool {
+    match result {
+        Ok((0, text)) => text.to_ascii_lowercase().contains("chatgpt"),
+        _ => false,
+    }
+}
+
+/// Whether codex is signed in with ChatGPT (vs an API key).
+async fn codex_chatgpt_auth(binary: &Path) -> bool {
+    let Some(args) = AgentKind::Codex.auth_status_args() else {
+        return false;
+    };
+    codex_status_is_chatgpt(run_capture(binary, args, MODELS_TIMEOUT).await)
+}
+
+/// Names the CLI on a catalog listing's timeout, whose `AppError::Timeout` copy
+/// would blame a git operation; every other error passes through unchanged.
+fn catalog_listing_error(kind: AgentKind, e: AppError) -> AppError {
+    match e {
+        AppError::Timeout(secs) => AppError::Command(format!(
+            "{} model catalog timed out after {secs}s",
+            kind.label()
+        )),
+        other => other,
+    }
+}
+
 /// Lists the model ids the CLI itself reports, for the model pickers. Kinds with
 /// no catalog surface answer with an empty list rather than an error, so a caller
 /// can ask about any agent unconditionally.
@@ -979,7 +1104,9 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
             kind.label()
         ))
     })?;
-    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT).await?;
+    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT)
+        .await
+        .map_err(|e| catalog_listing_error(kind, e))?;
     if code != 0 {
         let reason = stderr
             .lines()
@@ -989,7 +1116,13 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
             .unwrap_or_else(|| format!("{} models exited with code {code}", kind.label()));
         return Err(AppError::Command(reason));
     }
-    Ok(parse_models_output(&stdout))
+    // Each CLI has its own listing shape; opencode's `/`-gated line parser would
+    // drop every codex and copilot id.
+    Ok(match kind {
+        AgentKind::Codex => parse_codex_models(&stdout, codex_chatgpt_auth(&binary).await),
+        AgentKind::Copilot => parse_copilot_models(&stdout),
+        AgentKind::Claude | AgentKind::Opencode => parse_models_output(&stdout),
+    })
 }
 
 // --- review ----------------------------------------------------------------
@@ -3515,6 +3648,247 @@ opencode/x-preview-f-free
         assert_eq!(ids.len(), MODELS_LIMIT);
         assert_eq!(ids.first().map(String::as_str), Some("p/m0"));
         assert_eq!(ids.last().map(String::as_str), Some(last.as_str()));
+    }
+
+    #[test]
+    fn models_args_name_each_clis_catalog_command() {
+        assert_eq!(AgentKind::Claude.models_args(), None);
+        assert_eq!(
+            AgentKind::Codex.models_args(),
+            Some(&["debug", "models"][..])
+        );
+        assert_eq!(
+            AgentKind::Copilot.models_args(),
+            Some(&["help", "config"][..])
+        );
+        assert_eq!(AgentKind::Opencode.models_args(), Some(&["models"][..]));
+    }
+
+    /// `codex debug models` trimmed to the fields the parser reads plus an unread
+    /// one, in the CLI's own order (measured 2026-10-05, codex-cli 0.153.3).
+    /// `gpt-api-less` is synthetic: listed but unavailable to API-key auth, and
+    /// appended out of priority order so the sort is exercised.
+    const CODEX_MODELS_OUTPUT: &str = r#"{"models":[
+        {"slug":"gpt-6-astra","display_name":"GPT-6 Astra","visibility":"list","priority":2,"supported_in_api":true},
+        {"slug":"gpt-reserve","visibility":"hide","priority":4,"supported_in_api":true},
+        {"slug":"gpt-5.6-sol","visibility":"list","priority":5,"supported_in_api":true},
+        {"slug":"gpt-5.6-terra","visibility":"list","priority":8,"supported_in_api":true},
+        {"slug":"gpt-5.6-luna","visibility":"list","priority":9,"supported_in_api":true},
+        {"slug":"gpt-5.5","visibility":"list","priority":13,"supported_in_api":true},
+        {"slug":"codex-auto-review","visibility":"hide","priority":43,"supported_in_api":true},
+        {"slug":"gpt-api-less","visibility":"list","priority":7,"supported_in_api":false}
+    ]}"#;
+
+    #[test]
+    fn codex_models_under_chatgpt_auth_keep_every_listed_id_by_priority() {
+        assert_eq!(
+            parse_codex_models(CODEX_MODELS_OUTPUT, true),
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-api-less",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_models_under_api_key_auth_drop_ids_unsupported_in_the_api() {
+        assert_eq!(
+            parse_codex_models(CODEX_MODELS_OUTPUT, false),
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_models_keep_input_order_on_equal_priority() {
+        let out = r#"{"models":[
+            {"slug":"b","visibility":"list","priority":1,"supported_in_api":true},
+            {"slug":"a","visibility":"list","priority":1,"supported_in_api":true},
+            {"slug":"first","visibility":"list","priority":0,"supported_in_api":true}
+        ]}"#;
+        assert_eq!(parse_codex_models(out, false), ["first", "b", "a"]);
+    }
+
+    #[test]
+    fn codex_models_skip_an_incomplete_entry_without_losing_the_rest() {
+        let out = r#"{"models":[
+            {"visibility":"list","priority":1,"supported_in_api":true},
+            {"slug":"no-priority","visibility":"list","supported_in_api":true},
+            {"slug":"bad-priority","visibility":"list","priority":"1","supported_in_api":true},
+            "not-an-object",
+            {"slug":"kept","visibility":"list","priority":3,"supported_in_api":true}
+        ]}"#;
+        assert_eq!(parse_codex_models(out, true), ["kept"]);
+    }
+
+    #[test]
+    fn codex_models_dedupe_to_the_first_by_priority() {
+        let out = r#"{"models":[
+            {"slug":"twin","visibility":"list","priority":1,"supported_in_api":true},
+            {"slug":"other","visibility":"list","priority":2,"supported_in_api":true},
+            {"slug":"twin","visibility":"list","priority":3,"supported_in_api":true}
+        ]}"#;
+        assert_eq!(parse_codex_models(out, true), ["twin", "other"]);
+    }
+
+    #[test]
+    fn codex_models_drop_slugs_unsafe_as_an_argument() {
+        let out = r#"{"models":[
+            {"slug":"keep-one","visibility":"list","priority":1,"supported_in_api":true},
+            {"slug":"has space","visibility":"list","priority":2,"supported_in_api":true},
+            {"slug":"bell\u0007","visibility":"list","priority":3,"supported_in_api":true},
+            {"slug":"","visibility":"list","priority":4,"supported_in_api":true},
+            {"slug":"keep-two","visibility":"list","priority":5,"supported_in_api":true}
+        ]}"#;
+        assert_eq!(parse_codex_models(out, true), ["keep-one", "keep-two"]);
+    }
+
+    #[test]
+    fn codex_models_truncate_at_the_cap() {
+        let entries: Vec<String> = (0..(MODELS_LIMIT + 500))
+            .map(|i| {
+                format!(
+                    r#"{{"slug":"m{i}","visibility":"list","priority":{i},"supported_in_api":true}}"#
+                )
+            })
+            .collect();
+        let input = format!(r#"{{"models":[{}]}}"#, entries.join(","));
+        let ids = parse_codex_models(&input, true);
+        let last = format!("m{}", MODELS_LIMIT - 1);
+        assert_eq!(ids.len(), MODELS_LIMIT);
+        assert_eq!(ids.first().map(String::as_str), Some("m0"));
+        assert_eq!(ids.last().map(String::as_str), Some(last.as_str()));
+    }
+
+    #[test]
+    fn codex_models_are_empty_for_unreadable_output() {
+        for out in [
+            "",
+            "{}",
+            "not json",
+            r#"{"models":"#,
+            r#"{"models":{}}"#,
+            "[]",
+        ] {
+            assert!(parse_codex_models(out, true).is_empty(), "{out:?}");
+        }
+    }
+
+    /// `copilot help config` around its `model` entry (measured 2026-10-05,
+    /// Copilot CLI 1.0.75; the real block lists 23 ids), then a later section in
+    /// the same enum shape that must not be read as models.
+    const COPILOT_HELP_CONFIG: &str = r#"Configuration Settings:
+
+  `logLevel`: log level for CLI; defaults to "default". Set to "all" for debug logging.
+
+  `model`: AI model to use for Copilot CLI; can be changed with /model command or --model flag option.
+    - "claude-sonnet-5"
+    - "claude-haiku-4.5"
+    - "gpt-5.6-sol"
+    - "gemini-3.1-pro-preview"
+    - "kimi-k2.7-code"
+
+  `contextTier`: context window tier for tiered-pricing models (e.g., "default" or "long_context").
+    - Can also be set with --context flag (overrides persisted setting)
+    - "late-id"
+"#;
+
+    const COPILOT_MODEL_IDS: [&str; 6] = [
+        "auto",
+        "claude-sonnet-5",
+        "claude-haiku-4.5",
+        "gpt-5.6-sol",
+        "gemini-3.1-pro-preview",
+        "kimi-k2.7-code",
+    ];
+
+    #[test]
+    fn copilot_models_read_the_model_block_in_order_with_auto_first() {
+        assert_eq!(parse_copilot_models(COPILOT_HELP_CONFIG), COPILOT_MODEL_IDS);
+    }
+
+    #[test]
+    fn copilot_models_parse_identically_with_crlf_endings() {
+        assert!(!COPILOT_HELP_CONFIG.contains('\r'));
+        let crlf = COPILOT_HELP_CONFIG.replace('\n', "\r\n");
+        assert_eq!(parse_copilot_models(&crlf), COPILOT_MODEL_IDS);
+    }
+
+    #[test]
+    fn copilot_models_stop_at_the_first_line_outside_the_block() {
+        // Prose straight after the ids ends the block just as a blank line does.
+        let out = "  `model`: AI model\n    - \"one\"\n  `next`: other\n    - \"late-id\"\n";
+        assert_eq!(parse_copilot_models(out), ["auto", "one"]);
+    }
+
+    #[test]
+    fn copilot_models_are_empty_without_the_marker_or_its_ids() {
+        assert!(parse_copilot_models("").is_empty());
+        assert!(parse_copilot_models("    - \"orphan\"\n").is_empty());
+        // A marker whose block drifted out of the quoted shape is no catalog either.
+        assert!(parse_copilot_models("  `model`: AI model\n    - claude-sonnet-5\n").is_empty());
+    }
+
+    #[test]
+    fn copilot_models_drop_ids_unsafe_as_an_argument() {
+        let out = "`model`: AI model\n - \"keep-one\"\n - \"has space\"\n - \"bell\x07\"\n - \"\"\n - \"keep-two\"\n";
+        assert_eq!(parse_copilot_models(out), ["auto", "keep-one", "keep-two"]);
+    }
+
+    #[test]
+    fn copilot_models_truncate_at_the_cap() {
+        let mut input = String::from("  `model`: AI model\n");
+        for i in 0..(MODELS_LIMIT + 500) {
+            input.push_str(&format!("    - \"m{i}\"\n"));
+        }
+        let ids = parse_copilot_models(&input);
+        let last = format!("m{}", MODELS_LIMIT - 2);
+        assert_eq!(ids.len(), MODELS_LIMIT);
+        assert_eq!(ids.first().map(String::as_str), Some("auto"));
+        assert_eq!(ids.last().map(String::as_str), Some(last.as_str()));
+    }
+
+    /// `codex login status` wording (codex-cli 0.153.3: the ChatGPT line measured
+    /// live, the rest read from the binary's strings; the API-key line ends in a
+    /// masked key).
+    #[test]
+    fn codex_status_is_chatgpt_only_for_a_successful_chatgpt_login() {
+        const CHATGPT: &str = "Logged in using ChatGPT";
+        const API_KEY: &str = "Logged in using an API key - ****WXYZ";
+        const SIGNED_OUT: &str = "Not logged in";
+        let status = |code: i32, text: &str| Ok((code, format!("{text}\n")));
+        assert!(codex_status_is_chatgpt(status(0, CHATGPT)));
+        assert!(!codex_status_is_chatgpt(status(0, API_KEY)));
+        assert!(!codex_status_is_chatgpt(status(1, SIGNED_OUT)));
+        assert!(!codex_status_is_chatgpt(status(1, CHATGPT)));
+        assert!(!codex_status_is_chatgpt(Err(AppError::Timeout(20))));
+    }
+
+    #[test]
+    fn catalog_listing_timeout_names_the_cli_and_other_errors_pass_through() {
+        let timed_out = catalog_listing_error(AgentKind::Copilot, AppError::Timeout(20));
+        assert!(matches!(timed_out, AppError::Command(_)));
+        assert_eq!(
+            timed_out.to_string(),
+            "GitHub Copilot model catalog timed out after 20s"
+        );
+        let other = catalog_listing_error(AgentKind::Codex, AppError::Command("boom".into()));
+        assert!(matches!(other, AppError::Command(ref m) if m == "boom"));
+    }
+
+    #[test]
+    fn copilot_models_dedupe_auto_and_repeats() {
+        let out = "`model`: AI model\n - \"auto\"\n - \"one\"\n - \"one\"\n";
+        assert_eq!(parse_copilot_models(out), ["auto", "one"]);
     }
 
     #[test]

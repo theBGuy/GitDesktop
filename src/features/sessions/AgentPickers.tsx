@@ -56,10 +56,10 @@ export function imageMissingAgentText(agent: AgentKind): string {
 }
 
 /** The model for a run: the agent's models are searchable — its live catalog
- *  where the CLI can list one (opencode), else that CLI's static suggestions —
- *  and any other id typed here reaches the CLI verbatim (custom providers publish
- *  ids no static list can carry). `""` is the account default and shows the
- *  placeholder. */
+ *  where the CLI can list one (opencode, Codex, Copilot), else that CLI's static
+ *  suggestions — and any other id typed here reaches the CLI verbatim (custom
+ *  providers publish ids no static list can carry). `""` is the account default
+ *  and shows the placeholder. */
 export function ModelPicker({
   value,
   onChange,
@@ -78,8 +78,9 @@ export function ModelPicker({
   const available = useAgentModels(agent, {
     enabled: wanted && agentTabShowing,
   });
-  // Verbatim: the CLI orders its own catalog (its providers first), and the
-  // fallback is that CLI's static suggestions.
+  // Verbatim: the CLI orders its own catalog (opencode puts its providers
+  // first, codex sorts by priority), and the fallback is that CLI's static
+  // suggestions.
   const models = available.data?.models ?? [];
 
   return (

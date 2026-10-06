@@ -40,8 +40,8 @@ export interface AvailableModels {
   /** Which fallback route produced these suggestions. The four are not
    *  interchangeable to a user: no key saved yet, no base URL configured, the
    *  request failed, or the provider listed nothing. Among the CLI providers only
-   *  opencode has a catalog to list — the others reach `empty` without a request
-   *  having been made, so a consumer branching on `cause` must tell those apart
+   *  claude-cli has no catalog to list — it reaches `empty` without a request
+   *  having been made, so a consumer branching on `cause` must tell it apart
    *  from a provider that genuinely listed nothing. */
   cause?: "no-key" | "no-base" | "failed" | "empty";
 }
@@ -220,10 +220,12 @@ async function fetchProviderModels(
       return shaped(() => catalogIds(json.data, "id").sort());
     }
     case "claude-cli":
-    case "codex-cli":
-    case "copilot-cli":
-      // No live model list; the static MODEL_SUGGESTIONS aliases are used.
+      // Claude Code has no catalog command; its static aliases are used.
       return [];
+    case "codex-cli":
+      return await listAgentModels("codex", settings.cliPath);
+    case "copilot-cli":
+      return await listAgentModels("copilot", settings.cliPath);
     case "opencode-cli":
       return await listAgentModels("opencode", settings.cliPath);
   }

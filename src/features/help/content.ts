@@ -2954,15 +2954,14 @@ to an implementing session**.
 opens on your **Settings → AI** default agent), **model**, and **reasoning effort**
 (Low / Medium / High / Max), and send. The model box (the same one on research and plan
 runs) filters its suggestions as you type and takes any model id you type, so a custom
-provider's models work without being on the list; for opencode it lists your CLI's
-catalog (custom providers included). Leave it empty for your account's default. The
-agent works in an **isolated git worktree**
-— a throwaway branch (\`gd/session/…\`) that never touches your working tree — and
-commits a **checkpoint** each turn. It works in the open: the conversation shows a
-**step-by-step transcript** of each file it reads, edits, searches, and command it
-runs, interleaved with its narration. **Expand any edit step** to see that file's diff
-inline, watch its **live changes** mid-turn, or read the cumulative diff under
-**Changes**.
+provider's models work without being on the list; for opencode, Codex, and Copilot it
+lists the models your CLI reports (opencode's custom providers included). Leave it
+empty for your account's default. The agent works in an **isolated git worktree** on a
+throwaway branch (\`gd/session/…\`) that never touches your working tree, and commits a
+**checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
+transcript** of each file it reads, edits, searches, and command it runs, interleaved
+with its narration. **Expand any edit step** to see that file's diff inline, watch its
+**live changes** mid-turn, or read the cumulative diff under **Changes**.
 
 In the composer you can:
 
@@ -3182,14 +3181,15 @@ Bring your own model:
 - **Ollama (local or LAN)** — a local model (your code never leaves your machine), or one
   running on another machine on your network — set its URL in Settings.
 - **Claude Code, Codex, GitHub Copilot, opencode CLIs** — *keyless*: they reuse your
-  existing CLI login, with no API key. Pick **opencode** and its model picker fills from
-  the CLI's own catalog (custom providers included), starting on your account's default
-  model. The CLI agents are **write-capable** — they power agent sessions and plan
-  mode — and can read repo files for deeper reviews. They also drive **generation**
-  (commit messages, PR descriptions, and the rest): pick one under the AI provider or
-  review model in Settings. Generation runs the CLI per request, so it's noticeably
-  slower than an HTTP provider and draws on your plan's quota; the agent only completes
-  the prepared prompt and never explores the repo on the generation path.
+  existing CLI login, with no API key. Pick **opencode**, **Codex**, or **GitHub
+  Copilot** and the model picker fills from the CLI's own catalog (opencode's custom
+  providers included); opencode and Codex start on your account's default model. The
+  CLI agents are **write-capable** (they power agent sessions and plan mode) and can
+  read repo files for deeper reviews. They also drive **generation** (commit messages,
+  PR descriptions, and the rest): pick one under the AI provider or review model in
+  Settings. Generation runs the CLI per request, so it's noticeably slower than an
+  HTTP provider and draws on your plan's quota; the agent only completes the prepared
+  prompt and never explores the repo on the generation path.
 
 You can set **separate models** for generation (commit/PR messages) versus review. Toggle
 **Use a different model for security audits** under the review model to give audits their own
