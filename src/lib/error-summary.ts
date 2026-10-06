@@ -422,6 +422,25 @@ const HOST_TOKENS =
 const GO_TRANSPORT_HOST_TOKENS = /\b(lookup |dial tcp )\S+/g;
 const IPV6_HOST_TOKENS = /\[[a-fA-F0-9]*:[a-fA-F0-9:]*\](?::\d+)?/g;
 
+/** URLs mask before hosts so their path tokens cannot survive. Go's complete
+ *  parenthesized Client.Timeout diagnostic is not a hostname. */
+function maskTransportIdentifiers(message: string): string {
+  return message
+    .replace(IDENTIFIER_TOKENS, " ")
+    .replace(GO_TRANSPORT_HOST_TOKENS, "$1 ")
+    .replace(IPV6_HOST_TOKENS, " ")
+    .replace(HOST_TOKENS, (token: string, offset: number, text: string) =>
+      token.toLowerCase() === "client.timeout" &&
+      text[offset - 1] === "(" &&
+      text
+        .slice(offset + token.length)
+        .toLowerCase()
+        .startsWith(" exceeded while awaiting headers)")
+        ? token
+        : " ",
+    );
+}
+
 function isAsciiAlphanumeric(c: string | undefined): boolean {
   return c !== undefined && /[a-z0-9]/i.test(c);
 }
@@ -453,13 +472,7 @@ function networkSummary(
     return null;
   // Both scans read the masked text: every transport phrase has a space, which
   // a masked URL, key or host can't hold, so masking hides no transport signal.
-  // URLs mask first, so a URL's path digits never outlive its host.
-  const text = message
-    .replace(IDENTIFIER_TOKENS, " ")
-    .replace(GO_TRANSPORT_HOST_TOKENS, "$1 ")
-    .replace(IPV6_HOST_TOKENS, " ")
-    .replace(HOST_TOKENS, " ")
-    .toLowerCase();
+  const text = maskTransportIdentifiers(message).toLowerCase();
   if (
     hasStandaloneWord(text, "401") ||
     hasStandaloneWord(text, "403") ||
@@ -499,12 +512,14 @@ const TRANSPORT_GATE_PHRASES = [
 export function isTransportError(error: unknown): boolean {
   const message = errorMessage(error).trim();
   const lower = message.toLowerCase();
+  const scan = maskTransportIdentifiers(message).toLowerCase();
   return (
     (isAppError(error) && networkSummary(error.kind, message) !== null) ||
     message.startsWith("Couldn't reach ") ||
     RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`)) ||
+    // URL and host tokens cannot contain the space-separated EOF suffix.
     lower.endsWith(": eof") ||
-    TRANSPORT_GATE_PHRASES.some((phrase) => hasStandaloneWord(lower, phrase))
+    TRANSPORT_GATE_PHRASES.some((phrase) => hasStandaloneWord(scan, phrase))
   );
 }
 

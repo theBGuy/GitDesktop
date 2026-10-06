@@ -1114,6 +1114,27 @@ test("transport hint gate leaves EOF prose eligible for scope hints", () => {
   }
 });
 
+for (const [name, message] of [
+  [
+    "403 with a proxyconnect URL path",
+    "HTTP 403: Resource not accessible by integration (https://github.com/o/proxyconnect)",
+  ],
+  [
+    "403 with a client.timeout.acme.com host",
+    "HTTP 403: Resource not accessible by integration on client.timeout.acme.com",
+  ],
+]) {
+  test(`transport hint gate keeps ${name} eligible for scope hints`, () => {
+    assert.equal(isTransportError(appError("gh", message)), false, message);
+  });
+}
+
+test("transport hint gate preserves a real Client.Timeout diagnostic beside a masked URL", () => {
+  const message =
+    'Get "https://client.timeout.acme.com/repos/o/proxyconnect": net/http: request canceled (Client.Timeout exceeded while awaiting headers)';
+  assert.equal(isTransportError(appError("gh", message)), true);
+});
+
 test("transport hint gate keeps a gh 403 permissions error eligible for scope hints", () => {
   assert.equal(
     isTransportError(
