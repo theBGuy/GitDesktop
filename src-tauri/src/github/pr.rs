@@ -3068,19 +3068,38 @@ fn confirm_red_rollup(
     if !trusted {
         return RedVerdict::Kept;
     }
-    let latest = drop_superseded_relics(collapse_superseded_checks(c.checks, Some(&c.events)));
+    let collapsed = collapse_superseded_checks(c.checks, Some(&c.events));
+    let latest = drop_superseded_relics(collapsed, Some(&c.events));
     derive_rollup_state(&latest).map_or(RedVerdict::Kept, |s| RedVerdict::Confirmed(s.to_string()))
 }
 
-/// Drops each CheckRun cancelled before it started that a later attempt replaced: a
-/// same-named run (of the same workflow, when the relic names one) started at or
-/// after the relic's completion. The collapse keeps such a relic, having no start to
-/// order it by. Mirrors `superseded()` in checks-rerun.ts, so the verdict and the
-/// re-run offer retire the same rows; a relic with no real completion stays.
-fn drop_superseded_relics(checks: Vec<RawCheck>) -> Vec<RawCheck> {
+/// Drops each CheckRun cancelled before it started (the collapse keeps it, having no
+/// start to order it by) once a row of its name, workflow AND event started at or after
+/// its real completion. Events resolve through `runs` on the collapse's (name, workflow,
+/// start) join and must agree on one non-empty value: a push run and its pull_request
+/// twin are independent, so retiring across them would read a cancelled run green. A
+/// relic with no real completion or event stays, as does every relic when `runs` is
+/// `None`. Stricter than `superseded()` in checks-rerun.ts, which has no events and errs
+/// toward withholding the offer.
+fn drop_superseded_relics(checks: Vec<RawCheck>, runs: Option<&[CheckRunEvent]>) -> Vec<RawCheck> {
     fn started(c: &RawCheck) -> Option<&str> {
         c.started_at.as_deref().filter(|s| real_check_time(s))
     }
+    fn event_of<'a>(runs: &'a [CheckRunEvent], c: &RawCheck) -> Option<&'a str> {
+        let mut hits = runs
+            .iter()
+            .filter(|r| {
+                r.name == c.name
+                    && r.workflow == c.workflow_name
+                    && r.started_at.as_deref() == started(c)
+            })
+            .map(|r| r.event.as_str());
+        let event = hits.next().filter(|e| !e.is_empty())?;
+        hits.all(|e| e == event).then_some(event)
+    }
+    let Some(runs) = runs else {
+        return checks;
+    };
     let superseded = |i: usize, c: &RawCheck| -> bool {
         if c.typename != "CheckRun"
             || c.name.is_empty()
@@ -3092,11 +3111,15 @@ fn drop_superseded_relics(checks: Vec<RawCheck>) -> Vec<RawCheck> {
         let Some(done) = c.completed_at.as_deref().filter(|s| real_check_time(s)) else {
             return false;
         };
+        let Some(event) = event_of(runs, c) else {
+            return false;
+        };
         checks.iter().enumerate().any(|(j, other)| {
             j != i
                 && other.name == c.name
-                && (c.workflow_name.is_empty() || other.workflow_name == c.workflow_name)
+                && other.workflow_name == c.workflow_name
                 && started(other).is_some_and(|s| at_least_as_new(s, done))
+                && event_of(runs, other) == Some(event)
         })
     };
     let keep: Vec<bool> = checks
@@ -10179,9 +10202,10 @@ github.acme.com
         /// re-derived through the same collapse kernel as the panel, behind the gate.
         mod red_rows {
             use super::super::super::{
-                apply_red_verdict, confirm_red_rollup, derive_rollup_state, github_rollup_state,
-                needs_red_confirm, parse_red_rollup_contexts, red_rollup_confirm_query,
-                rollup_node_check, rollup_state_to_ci, PrPollInfo, RedVerdict,
+                apply_red_verdict, check_run_events_of, confirm_red_rollup, derive_rollup_state,
+                drop_superseded_relics, github_rollup_state, needs_red_confirm,
+                parse_red_rollup_contexts, red_rollup_confirm_query, rollup_node_check,
+                rollup_state_to_ci, PrPollInfo, RedVerdict,
             };
             use super::{HEAD_A, HEAD_B, T1, T2, T3};
             use serde_json::{json, Value};
@@ -10402,17 +10426,8 @@ github.acme.com
             fn an_undated_relic_is_never_keyed() {
                 // Cancelled before it started: no start, so the collapse keeps it, and
                 // only a same-named run starting at or after its completion retires it.
-                let relic = |wf: &str, completed: Option<&str>| {
-                    let mut row = cr(
-                        "fragment",
-                        Some((wf, "pull_request")),
-                        None,
-                        "COMPLETED",
-                        Some("CANCELLED"),
-                    );
-                    row["completedAt"] = json!(completed);
-                    row
-                };
+                let relic =
+                    |wf: &str, completed: Option<&str>| relic_on(wf, "pull_request", completed);
                 let answer =
                     |row: Value| full("FAILURE", vec![row, done("fragment", T2, "SUCCESS")]);
                 assert_eq!(
@@ -10452,6 +10467,62 @@ github.acme.com
                 let mut status = sc("ci", "SUCCESS");
                 status["completedAt"] = json!(T1);
                 assert_eq!(rollup_node_check(&status).completed_at, None);
+            }
+
+            /// A `fragment` run of workflow `wf` on `event`, cancelled before it started.
+            fn relic_on(wf: &str, event: &str, completed: Option<&str>) -> Value {
+                let mut row = cr(
+                    "fragment",
+                    Some((wf, event)),
+                    None,
+                    "COMPLETED",
+                    Some("CANCELLED"),
+                );
+                row["completedAt"] = json!(completed);
+                row
+            }
+
+            #[test]
+            fn a_relic_is_retired_only_by_a_later_run_of_its_own_event() {
+                // `done` runs on pull_request: the push relic is an independent run.
+                let later = || done("fragment", T2, "SUCCESS");
+                let cross = full("FAILURE", vec![relic_on("ci", "push", Some(T1)), later()]);
+                assert_eq!(verdict("FAILURE", &cross), "CANCELLED");
+                let same = full(
+                    "FAILURE",
+                    vec![relic_on("ci", "pull_request", Some(T1)), later()],
+                );
+                assert_eq!(verdict("FAILURE", &same), "SUCCESS");
+                // Two undated relics under one (name, workflow) disagree on the event,
+                // so neither resolves and both stay.
+                let ambiguous = full(
+                    "FAILURE",
+                    vec![
+                        relic_on("ci", "push", Some(T1)),
+                        relic_on("ci", "pull_request", Some(T1)),
+                        later(),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &ambiguous), "CANCELLED");
+                // A relic with no workflow run has no event to resolve.
+                let mut unrun = cr("fragment", None, None, "COMPLETED", Some("CANCELLED"));
+                unrun["completedAt"] = json!(T1);
+                let no_event = full("FAILURE", vec![unrun, later()]);
+                assert_eq!(verdict("FAILURE", &no_event), "CANCELLED");
+            }
+
+            #[test]
+            fn no_events_keep_every_relic() {
+                let nodes = vec![
+                    relic_on("ci", "pull_request", Some(T1)),
+                    done("fragment", T2, "SUCCESS"),
+                ];
+                let checks = || nodes.iter().map(rollup_node_check).collect::<Vec<_>>();
+                assert_eq!(drop_superseded_relics(checks(), None).len(), 2);
+                assert_eq!(drop_superseded_relics(checks(), Some(&[])).len(), 2);
+                // Control: the same rows with their events retire the relic.
+                let events = check_run_events_of(&nodes);
+                assert_eq!(drop_superseded_relics(checks(), Some(&events)).len(), 1);
             }
 
             #[test]
