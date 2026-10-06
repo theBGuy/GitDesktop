@@ -2358,12 +2358,10 @@ mod tests {
 
     // ── gh JSON parse fixtures ──
     fn parse_hosts(json: &str) -> HashMap<String, Vec<GhJsonAccount>> {
-        #[derive(serde::Deserialize)]
-        struct W {
-            #[serde(default)]
-            hosts: HashMap<String, Vec<GhJsonAccount>>,
-        }
-        serde_json::from_str::<W>(json).unwrap().hosts
+        let GhJsonProbe::Parsed(map) = classify_gh_json_ok(json) else {
+            panic!("fixture must be a readable report: {json}");
+        };
+        map
     }
 
     #[test]
