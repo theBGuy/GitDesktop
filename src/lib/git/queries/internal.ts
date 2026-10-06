@@ -33,14 +33,16 @@ export const workingTreeKeys = (repo: string) =>
   ] as const;
 
 /**
- * The shared skeleton behind the optimistic-cache mutations in prs.ts and pr-actions.ts:
- * cancel in-flight fetches on the target key, snapshot it, apply an optimistic
- * `setQueryData` patch, roll the snapshot back on error, reconcile on settle. Wrappers
- * differ only in `keyFor(args)` (the key is derived from the args AT MUTATE TIME, so a
- * mid-flight repo/number/sha switch can never corrupt another key's cache), `patch`, and
- * `reconcile`. `TCache` is the shape stored at the key; the rollback context carries the
- * exact key + prior value. `mutationKey`, when given, files the mutation under it (the
- * same constant-key contract as `useRepoMutation`'s `identity`); omitted, it has none.
+ * The shared skeleton behind the optimistic-cache mutations in prs.ts, pr-actions.ts,
+ * and issues.ts: cancel in-flight fetches on the target key, snapshot it, apply an
+ * optimistic `setQueryData` patch, roll the snapshot back on error, reconcile on
+ * settle. Wrappers differ only in `keyFor(args)` (the key is derived from the args AT
+ * MUTATE TIME, so a mid-flight repo/number/sha switch can never corrupt another key's
+ * cache), `patch`, and `reconcile`. `TCache` is the shape stored at the key; the
+ * rollback context carries the exact key + prior value. A promise `reconcile` returns
+ * keeps the mutation pending until that refetch settles. `mutationKey`, when given,
+ * files the mutation under it (the same constant-key contract as `useRepoMutation`'s
+ * `identity`); omitted, it has none.
  */
 export function useOptimisticCacheMutation<TArgs, TData, TCache>(
   mutationFn: (args: TArgs) => Promise<TData>,
@@ -49,7 +51,7 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
   reconcile: (
     queryClient: ReturnType<typeof useQueryClient>,
     args: TArgs,
-  ) => void,
+  ) => Promise<unknown> | void,
   mutationKey?: QueryKey,
 ) {
   const queryClient = useQueryClient();

@@ -28,7 +28,11 @@ import {
   keepPreviousDataForKeyAxes,
   repoKeys,
 } from "./core";
-import { invalidateProjectBoards, useRepoMutation } from "./internal";
+import {
+  invalidateProjectBoards,
+  useOptimisticCacheMutation,
+  useRepoMutation,
+} from "./internal";
 
 export function useIssueList(
   repo: string,
@@ -686,73 +690,70 @@ function patchReactionList(
 
 /**
  * Toggles the viewer's reaction with an optimistic cache update + rollback.
- * `reactionsKey` is the reactions query; `bodyId` is the issue/PR/discussion body id
- * (anything else is a comment id). `opts` carries the GitLab-side subject (containing
- * issue/MR) — GitHub keys purely on node ids and ignores it.
+ * `target` is the GitLab-side subject kind; GitHub keys purely on node ids and
+ * ignores it and `number`. Per call, `reactionsKey` is the reactions query,
+ * `number` the containing issue/MR, and `bodyId` its body id (anything else is a
+ * comment id).
  */
-export function useToggleReaction(
-  repo: string,
-  reactionsKey: QueryKey,
-  bodyId: string,
-  opts: { target: api.ReactionTarget; number: number } = {
-    target: "discussion",
-    number: 0,
-  },
-) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (args: {
+export function useToggleReaction(repo: string, target: api.ReactionTarget) {
+  // The entity rides the variables, never the hook: its hosts stay mounted across an
+  // entity switch, so a closed-over one would retarget a pending or paused toggle.
+  return useOptimisticCacheMutation<
+    {
+      reactionsKey: QueryKey;
+      number: number;
+      bodyId: string;
       subjectId: string;
       content: string;
       active: boolean;
-    }) =>
+    },
+    void,
+    IssueReactions
+  >(
+    (args) =>
       args.active
         ? api.forgeRemoveReaction(
             repo,
-            opts.target,
-            opts.number,
+            target,
+            args.number,
             args.subjectId,
             args.content,
           )
         : api.forgeAddReaction(
             repo,
-            opts.target,
-            opts.number,
+            target,
+            args.number,
             args.subjectId,
             args.content,
           ),
-    onMutate: async (args) => {
-      await queryClient.cancelQueries({ queryKey: reactionsKey });
-      const prev = queryClient.getQueryData<IssueReactions>(reactionsKey);
-      queryClient.setQueryData<IssueReactions>(reactionsKey, (data) => {
-        const base: IssueReactions = data ?? { body: [], comments: {} };
-        if (args.subjectId === bodyId) {
-          return {
-            ...base,
-            body: patchReactionList(base.body, args.content, args.active),
-          };
-        }
+    (args) => args.reactionsKey,
+    (data, args) => {
+      // Never creates the entry: the helper rolls back only a defined snapshot, so a
+      // patch over an empty cache would outlive a failed write.
+      if (data === undefined) return undefined;
+      const base = data;
+      if (args.subjectId === args.bodyId) {
         return {
           ...base,
-          comments: {
-            ...base.comments,
-            [args.subjectId]: patchReactionList(
-              base.comments[args.subjectId] ?? [],
-              args.content,
-              args.active,
-            ),
-          },
+          body: patchReactionList(base.body, args.content, args.active),
         };
-      });
-      return { prev };
-    },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) {
-        queryClient.setQueryData(reactionsKey, ctx.prev);
       }
+      return {
+        ...base,
+        comments: {
+          ...base.comments,
+          [args.subjectId]: patchReactionList(
+            base.comments[args.subjectId] ?? [],
+            args.content,
+            args.active,
+          ),
+        },
+      };
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: reactionsKey }),
-  });
+    (queryClient, args) =>
+      queryClient.invalidateQueries({ queryKey: args.reactionsKey }),
+    ["toggle-reaction", repo, target],
+  );
 }
 
 export function useCloseIssue(repo: string, lens: RemoteLens) {

@@ -251,12 +251,7 @@ export function RemoteIssueView({
   // Feed-constant, so it's read once here rather than per event row; the
   // repo-path variant avoids the active-repo hook's second store subscription.
   const ghHost = useForgeGhHost(repoPath);
-  const toggleReactionMutation = useToggleReaction(
-    repoPath,
-    ["repo", repoPath, "issue", lens, number, "reactions"] as const,
-    details.data?.id ?? "",
-    { target: "issue", number },
-  );
+  const toggleReactionMutation = useToggleReaction(repoPath, "issue");
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
@@ -572,7 +567,14 @@ export function RemoteIssueView({
     // same flag; this arm is the belt-and-braces behind them.
     if (detailsStale) return;
     void toggleReactionMutation
-      .mutateAsync({ subjectId, content, active })
+      .mutateAsync({
+        reactionsKey: ["repo", repoPath, "issue", lens, number, "reactions"],
+        number,
+        bodyId: details.data?.id ?? "",
+        subjectId,
+        content,
+        active,
+      })
       .catch(onError);
   }
 

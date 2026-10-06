@@ -541,17 +541,12 @@ export function RemotePrView({
   // number alone (a flaky status probe mustn't hide threads); the WRITE controls
   // below stay gated on the per-provider Implemented flags.
   const reviewThreads = usePrReviewThreads(repoPath, number, lens);
-  const threadReply = useThreadReply(repoPath, number, lens);
-  const threadResolve = useThreadResolve(repoPath, number, lens);
+  const threadReply = useThreadReply(repoPath);
+  const threadResolve = useThreadResolve(repoPath);
   // The reactions fetch is gated on `canReact` (see usePrCapabilities) so it never
   // fires for a provider whose reactions aren't wired (Bitbucket).
   const reactions = usePrReactions(repoPath, canReact ? number : null, lens);
-  const toggleReactionMutation = useToggleReaction(
-    repoPath,
-    ["repo", repoPath, "pr", lens, number, "reactions"] as const,
-    details.data?.id ?? "",
-    { target: "mr", number },
-  );
+  const toggleReactionMutation = useToggleReaction(repoPath, "mr");
   const [section, setSection] = useState<PrSection>("conversation");
   // A review thread the user asked to jump to (timeline "View thread"). Handed to
   // whichever ReviewThreadList owns it; that list reveals the (possibly
@@ -2391,7 +2386,14 @@ export function RemotePrView({
     // same flag; this arm is the belt-and-braces behind them.
     if (detailsStale) return;
     try {
-      await toggleReactionMutation.mutateAsync({ subjectId, content, active });
+      await toggleReactionMutation.mutateAsync({
+        reactionsKey: ["repo", repoPath, "pr", lens, number, "reactions"],
+        number,
+        bodyId: details.data?.id ?? "",
+        subjectId,
+        content,
+        active,
+      });
     } catch (e) {
       onError(e);
     }
@@ -3250,10 +3252,15 @@ export function RemotePrView({
                 canReact={canReact}
                 onQuote={detailsStale ? undefined : quoteReply}
                 onThreadReply={(threadId, body) =>
-                  threadReply.mutateAsync({ threadId, body })
+                  threadReply.mutateAsync({ number, lens, threadId, body })
                 }
                 onThreadResolve={(threadId, resolved) =>
-                  threadResolve.mutateAsync({ threadId, resolved })
+                  threadResolve.mutateAsync({
+                    number,
+                    lens,
+                    threadId,
+                    resolved,
+                  })
                 }
                 // All four pair a rendered comment id with `number`, so they're
                 // withheld through a switch; `editHeld` covers an editor already
@@ -3301,13 +3308,23 @@ export function RemotePrView({
                 onReply={
                   canThreadReply
                     ? (threadId, body) =>
-                        threadReply.mutateAsync({ threadId, body })
+                        threadReply.mutateAsync({
+                          number,
+                          lens,
+                          threadId,
+                          body,
+                        })
                     : undefined
                 }
                 onResolve={
                   canThreadResolve
                     ? (threadId, resolved) =>
-                        threadResolve.mutateAsync({ threadId, resolved })
+                        threadResolve.mutateAsync({
+                          number,
+                          lens,
+                          threadId,
+                          resolved,
+                        })
                     : undefined
                 }
                 onEditComment={
@@ -3626,13 +3643,18 @@ export function RemotePrView({
               onReply={
                 canThreadReply
                   ? (threadId, body) =>
-                      threadReply.mutateAsync({ threadId, body })
+                      threadReply.mutateAsync({ number, lens, threadId, body })
                   : undefined
               }
               onResolve={
                 canThreadResolve
                   ? (threadId, resolved) =>
-                      threadResolve.mutateAsync({ threadId, resolved })
+                      threadResolve.mutateAsync({
+                        number,
+                        lens,
+                        threadId,
+                        resolved,
+                      })
                   : undefined
               }
               provider={providerKey}

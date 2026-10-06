@@ -218,11 +218,7 @@ export function DiscussionView({
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
   const toggleUpvoteMutation = useToggleDiscussionUpvote(repoPath, number);
-  const toggleReactionMutation = useToggleReaction(
-    repoPath,
-    ["repo", repoPath, "discussion", number, "reactions"] as const,
-    details.data?.id ?? "",
-  );
+  const toggleReactionMutation = useToggleReaction(repoPath, "discussion");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
   const closeDiscussion = useCloseDiscussion(repoPath);
@@ -445,7 +441,15 @@ export function DiscussionView({
   function toggleReaction(subjectId: string, content: string, active: boolean) {
     if (detailsStale) return;
     void toggleReactionMutation
-      .mutateAsync({ subjectId, content, active })
+      .mutateAsync({
+        reactionsKey: ["repo", repoPath, "discussion", number, "reactions"],
+        // GitHub-only surface: the forge keys on node ids and ignores the number.
+        number: 0,
+        bodyId: details.data?.id ?? "",
+        subjectId,
+        content,
+        active,
+      })
       .catch(onError);
   }
 
