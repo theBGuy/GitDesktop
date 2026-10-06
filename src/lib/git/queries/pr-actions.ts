@@ -418,9 +418,9 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
 }
 
 /** Merge a PR on the forge. The variables name the PR they target (`number` +
- *  `lens`), so the view can scope its busy hold to that PR alone. `stack` rides
- *  them only to name the native stack the merge cascades through (the forge call
- *  ignores it), so every member's view can hold while the stack lands. */
+ *  `lens`), so the view can scope its busy hold to that PR. `stack` rides them only
+ *  to name the native stack the merge cascades through (the forge call ignores it),
+ *  so every member of that stack's view holds too while the stack lands. */
 export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(

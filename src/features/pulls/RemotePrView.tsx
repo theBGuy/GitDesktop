@@ -729,8 +729,8 @@ export function RemotePrView({
   const cancelAutoMergePending = writePending("gl-cancel-auto-merge");
   const setDraftPending = writePending("set-draft");
   // Every footer/state control and its palette twin holds while a write to THIS PR
-  // runs; another PR's write holds nothing here. Declared above the palette wiring so
-  // both share the exact same gate. Placeholder details are the previously shown PR's
+  // runs, or a stack merge cascading through its native stack; any other write holds
+  // nothing here. Declared above the palette wiring so both share the exact same gate. Placeholder details are the previously shown PR's
   // and the footer's verbs derive from them, so the same gate holds through a switch.
   const busy =
     details.isPlaceholderData ||
@@ -1958,7 +1958,7 @@ export function RemotePrView({
   const staleReason = detailsStale ? PR_SWITCH_LOADING_REASON : undefined;
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
-  // Same scoped terms as `busy`, so it never names another PR's write.
+  // Same scoped terms as `busy`, so it only ever names a write that touches this PR.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:

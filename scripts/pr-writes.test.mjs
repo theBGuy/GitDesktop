@@ -128,7 +128,7 @@ test("a stack merge holds every member of its stack, in its lens", () => {
 test("an unstacked merge, or another kind naming a stack, holds no stack", () => {
   const writes = [
     write("merge", { number: 7, lens: "origin", stack: null }),
-    write("stack-dissolve", 3),
+    write("close", { number: 8, lens: "origin", stack: 3 }),
   ];
   assert.equal(isStackMergePendingFor(writes, 3, "origin"), false);
 });
