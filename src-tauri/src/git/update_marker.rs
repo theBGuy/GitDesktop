@@ -812,8 +812,7 @@ async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
         // unregistered leftover is never its job at all. Blocking I/O over a whole
         // checkout, so it runs off the async workers.
         if dir.exists() {
-            let _ =
-                tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
+            let _ = tokio::fs::remove_dir_all(&dir).await;
         }
     }
     let _ = std::fs::remove_file(root.join(format!("{stem}.lock")));

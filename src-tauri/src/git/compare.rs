@@ -463,8 +463,8 @@ impl Drop for TestRootOverride {
 /// The app-data worktrees root is the required placement: `is_session_worktree`'s
 /// app-data arm hides the checkout from every user-facing worktree surface, the
 /// OS-temp husk sweeper never scans app data, and [`is_review_worktree_temp_path`]
-/// still refuses it — so `git_remove_worktree`'s `remove_dir_all` fallback can
-/// never reach it either.
+/// refuses it, so neither `git_remove_worktree`'s forcing `worktree remove` nor its
+/// `remove_dir_all` fallback can ever reach it.
 ///
 /// Under `cfg(test)` an installed override is the ONLY resolution: with none, this
 /// answers `None` so a test neither reads nor writes the developer's real app data.
@@ -616,8 +616,7 @@ async fn demolish_persistent_review_worktree(repo_path: &str, path: &std::path::
     let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     if path.exists() && is_persistent_review_path(repo_path, &path_str).await {
         // Blocking I/O over a whole checkout, kept off the async workers.
-        let target = path.to_path_buf();
-        let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(target)).await;
+        let _ = tokio::fs::remove_dir_all(path).await;
     }
 }
 
@@ -851,8 +850,7 @@ async fn git_remove_worktree_core(
         if !path.exists() {
             break;
         }
-        let target = path.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(target)).await;
+        let _ = tokio::fs::remove_dir_all(&path).await;
         if !path.exists() {
             break;
         }
@@ -2406,9 +2404,9 @@ mod tests {
         assert!(!bare.exists());
     }
 
-    /// The `remove_dir_all` fallback guard admits only `gd-review-*` dirs directly
-    /// under the OS temp dir, so the command can't become an arbitrary recursive
-    /// delete of any caller-supplied path.
+    /// The removal gate admits only `gd-review-*` dirs directly under the OS temp dir,
+    /// so `git_remove_worktree` can neither force-remove nor recursively delete any
+    /// other caller-supplied path.
     #[test]
     fn is_review_worktree_temp_path_admits_only_temp_gd_review() {
         let temp = std::env::temp_dir();
@@ -2429,8 +2427,8 @@ mod tests {
         assert!(!super::is_review_worktree_temp_path(std::path::Path::new(
             "/home/me/gd-review-evil"
         )));
-        // NESTED under temp (not a direct child) → false: the fallback must not
-        // reach a path a level below the temp root.
+        // NESTED under temp (not a direct child) → false: the removal must not reach
+        // a path a level below the temp root.
         assert!(!super::is_review_worktree_temp_path(
             &temp.join("sub").join("gd-review-abc123-42")
         ));
