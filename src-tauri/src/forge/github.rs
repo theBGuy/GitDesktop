@@ -12,6 +12,7 @@ use crate::forge::model::{
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
     Implemented, Provider,
 };
+use crate::forge::session::mask_host_tokens;
 use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
@@ -1223,7 +1224,7 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
 /// transport/auth/rate-limit failure that must be surfaced. gh prints the HTTP status
 /// on stderr (`HTTP 404: Not Found (…)`). Pure, so it's unit-testable.
 fn gh_stderr_is_404(stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
+    let s = mask_host_tokens(stderr).to_ascii_lowercase();
     s.contains("404") || s.contains("not found")
 }
 
@@ -1432,6 +1433,12 @@ mod tests {
         assert!(!gh_stderr_is_404("HTTP 401: Bad credentials"));
         assert!(!gh_stderr_is_404("HTTP 500: Internal Server Error"));
         assert!(!gh_stderr_is_404(""));
+        let transport_verdicts = [
+            "Get \"https://api.github.com/repos/acme/404-page/readme\": dial tcp 140.82.112.6:443: connect: connection refused",
+            "error connecting to ghe-404.example\ncheck your internet connection or https://githubstatus.com",
+        ]
+        .map(gh_stderr_is_404);
+        assert_eq!(transport_verdicts, [false, false]);
     }
 
     #[test]

@@ -10013,6 +10013,19 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
     })
 }
 
+fn fork_failure(code: i32, stderr: &str) -> AppError {
+    let scan = mask_host_tokens(stderr).to_ascii_lowercase();
+    if scan.contains("409") || scan.contains("already") {
+        return AppError::Glab("You already have a fork of this project on GitLab.".into());
+    }
+    let msg = stderr.trim();
+    AppError::Glab(if msg.is_empty() {
+        format!("glab exited with code {code} forking the project")
+    } else {
+        msg.to_string()
+    })
+}
+
 /// Fork a GitLab project by `owner/name` into the caller's namespace. `glab api -X
 /// POST projects/{enc}/fork` returns the new project; we poll `projects/{id}` until
 /// `import_status == "finished"` (bounded 5×2s → `ready`). A 409 (already forked)
@@ -10027,18 +10040,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     // instead of an opaque glab error or a fabricated success.
     let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     if out.code != 0 {
-        let stderr = out.stderr.to_ascii_lowercase();
-        if stderr.contains("409") || stderr.contains("already") {
-            return Err(AppError::Glab(
-                "You already have a fork of this project on GitLab.".into(),
-            ));
-        }
-        let msg = out.stderr.trim();
-        return Err(AppError::Glab(if msg.is_empty() {
-            format!("glab exited with code {} forking the project", out.code)
-        } else {
-            msg.to_string()
-        }));
+        return Err(fork_failure(out.code, &out.stderr));
     }
     let fork: Value = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| {
@@ -12231,6 +12233,19 @@ mod tests {
         // "best" deliberately avoids `similarity` (member-scoped → empty public
         // searches); star_count is the relevance proxy.
         assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn fork_failure_keeps_transport_details_and_names_real_conflicts() {
+        assert!(matches!(
+            fork_failure(1, "glab: HTTP 409 Conflict"),
+            AppError::Glab(detail) if detail == "You already have a fork of this project on GitLab."
+        ));
+        let stderr = "Post \"https://gitlab.example/api/v4/projects/acme%2F409-page/fork\": dial tcp 192.0.2.1:443: connect: connection refused";
+        assert!(matches!(
+            fork_failure(1, stderr),
+            AppError::Glab(detail) if detail == stderr
+        ));
     }
 
     #[test]
