@@ -33,7 +33,7 @@ export const workingTreeKeys = (repo: string) =>
   ] as const;
 
 /**
- * The shared skeleton behind the optimistic-cache mutations in prs.ts and pr-actions.ts:
+ * The shared skeleton behind the optimistic-cache mutations in prs.ts, pr-actions.ts, and issues.ts:
  * cancel in-flight fetches on the target key, snapshot it, apply an optimistic
  * `setQueryData` patch, roll the snapshot back on error, reconcile on settle. Wrappers
  * differ only in `keyFor(args)` (the key is derived from the args AT MUTATE TIME, so a

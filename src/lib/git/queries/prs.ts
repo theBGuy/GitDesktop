@@ -882,26 +882,42 @@ export function useSubmitReview(repo: string, lens: RemoteLens) {
   );
 }
 
-export function useThreadReply(repo: string, number: number, lens: RemoteLens) {
-  return useRepoMutation(
-    repo,
-    (args: { threadId: string; body: string }) =>
-      api.forgePrThreadReply(repo, number, args.threadId, args.body),
-    { invalidate: [prReviewThreadsKey(repo, number, lens)] },
-  );
+// The PR rides the variables and the key pins `repo`: the thread lists' host survives
+// PR and repo switches, so a closed-over identity would resume a paused reply or
+// resolve against another PR's thread and reconcile the wrong threads key.
+export function useThreadReply(repo: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: ["thread-reply", repo],
+    mutationFn: (args: {
+      number: number;
+      lens: RemoteLens;
+      threadId: string;
+      body: string;
+    }) => api.forgePrThreadReply(repo, args.number, args.threadId, args.body),
+    onSettled: (_d, _e, args) =>
+      void queryClient.invalidateQueries({
+        queryKey: prReviewThreadsKey(repo, args.number, args.lens),
+      }),
+  });
 }
 
-export function useThreadResolve(
-  repo: string,
-  number: number,
-  lens: RemoteLens,
-) {
-  return useRepoMutation(
-    repo,
-    (args: { threadId: string; resolved: boolean }) =>
-      api.forgePrThreadResolve(repo, number, args.threadId, args.resolved),
-    { invalidate: [prReviewThreadsKey(repo, number, lens)] },
-  );
+export function useThreadResolve(repo: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: ["thread-resolve", repo],
+    mutationFn: (args: {
+      number: number;
+      lens: RemoteLens;
+      threadId: string;
+      resolved: boolean;
+    }) =>
+      api.forgePrThreadResolve(repo, args.number, args.threadId, args.resolved),
+    onSettled: (_d, _e, args) =>
+      void queryClient.invalidateQueries({
+        queryKey: prReviewThreadsKey(repo, args.number, args.lens),
+      }),
+  });
 }
 
 /** Warms a remote PR's view (metadata + diff) on row hover and adjacent rows — PR data
