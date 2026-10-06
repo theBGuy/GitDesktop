@@ -9,7 +9,9 @@ export interface PrPollInfo {
   isDraft: boolean;
   author: string;
   reviewDecision: string;
-  /** Check rollup of the head commit: SUCCESS/FAILURE/PENDING/"". */
+  /** Check rollup of the head commit: SUCCESS/FAILURE/ERROR/PENDING/EXPECTED/"",
+   *  or CANCELLED when the confirm finds cancelled runs and nothing failed or
+   *  still in flight (GitHub only). */
   checksState: string;
   /** True when `checksState` is a red rollup this poll could not confirm against
    *  the head's latest runs, so it may flip back next poll: the poller holds the
@@ -198,8 +200,9 @@ export interface PrInfo {
 }
 
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks; "neutral" =
- *  finished without a verdict (a cancelled pipeline). GitHub never sends "neutral":
- *  its rollup enum has no cancelled value (see `rollup_state_to_ci`). */
+ *  finished without a verdict (a cancelled pipeline). On GitHub it comes only from
+ *  the red-row confirm, since GitHub's own rollup enum folds cancelled into FAILURE
+ *  (see `rollup_state_to_ci`). */
 export type CiStatus = "passing" | "failing" | "pending" | "none" | "neutral";
 
 /** One PR's CI rollup keyed by number — the PR-list row-icon hydration payload.
@@ -267,6 +270,10 @@ export interface PrCheckOut {
   /** CheckRun `completedAt`. A StatusContext reports no completion at all, so start
    *  time is the only key both rollup arms can be ordered by. */
   completedAt?: string;
+  /** The GitHub Actions workflow a CheckRun belongs to. Absent for a StatusContext,
+   *  a third-party check run, and every GitLab or Bitbucket row; consumers keying
+   *  a check's identity on it fall back to the name alone there. */
+  workflow?: string;
 }
 
 /** How a pull request merges into its base, as the FORGE reports it. "checking" =

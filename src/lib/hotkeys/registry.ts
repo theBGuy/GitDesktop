@@ -1144,9 +1144,9 @@ export const ACTIONS = [
   },
   {
     id: "pr-rerun-failed-checks",
-    // Both providers' on-screen wordings, verbatim, so palette search finds the
-    // action from whichever button the user just read.
-    label: "Re-run failed jobs / Retry pipeline",
+    // Every on-screen wording the rollup button takes, verbatim, so palette search
+    // finds the action from whichever button the user just read.
+    label: "Re-run failed jobs / Re-run all jobs / Retry pipeline",
     category: "Pull requests",
     defaultBinding: null,
   },

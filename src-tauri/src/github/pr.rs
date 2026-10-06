@@ -2651,11 +2651,11 @@ pub(crate) fn ci_list_outcome<T>(
 /// an empty state string is treated the same. Unrecognized states bias to `"pending"`
 /// (conservative — never a false green). Case-insensitive.
 ///
-/// No `"neutral"` arm on this forge, deliberately: GitHub folds a cancelled check into
-/// FAILURE, and the row keeps that parity where the checks panel derives per-check
-/// (`check-presentation.ts`). Only a red enum is re-derived, over the head's contexts
-/// collapsed to each check's latest run (see [`confirm_red_rollup`]), so a superseded
-/// run can't hold a row red; green and pending enums are trusted without a fetch.
+/// GitHub's own enum folds a cancelled check into FAILURE, so `"neutral"` comes only
+/// from a confirmed CANCELLED: a red enum is re-derived over the head's contexts
+/// collapsed to each check's latest run (see [`confirm_red_rollup`]), so neither a
+/// superseded run nor a cancelled-only head holds a row red. Green and pending enums
+/// are trusted without a fetch.
 fn rollup_state_to_ci(state: Option<&str>) -> String {
     match state.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),
@@ -2664,6 +2664,7 @@ fn rollup_state_to_ci(state: Option<&str>) -> String {
             "SUCCESS" => "passing",
             "FAILURE" | "ERROR" => "failing",
             "PENDING" | "EXPECTED" => "pending",
+            "CANCELLED" => "neutral",
             // A new/unknown state → pending, never falsely green.
             _ => "pending",
         }
@@ -2833,7 +2834,7 @@ pub async fn gh_pr_list_ci(
 
 /// Whether a precomputed rollup enum gets the red-row confirm fetch: a failing row
 /// other than ERROR, so healthy rows never pay for it. ERROR is always kept as-is:
-/// [`derive_rollup_state`] never yields it, so its gate could never pass.
+/// [`github_rollup_state`] never yields it, so its gate could never pass.
 fn needs_red_confirm(state: Option<&str>) -> bool {
     rollup_state_to_ci(state) == "failing"
         && !state.is_some_and(|s| s.trim().eq_ignore_ascii_case("ERROR"))
@@ -2858,7 +2859,7 @@ fn red_rollup_confirm_query(numbers: &[u64]) -> String {
         .iter()
         .map(|n| {
             format!(
-                "p{n}: pullRequest(number:{n}){{ commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state contexts(first:100){{ totalCount nodes{{ __typename ... on CheckRun{{ name startedAt status conclusion checkSuite{{ workflowRun{{ event workflow{{ name }} }} }} }} ... on StatusContext{{ state context }} }} }} }} }} }} }} }} "
+                "p{n}: pullRequest(number:{n}){{ commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state contexts(first:100){{ totalCount nodes{{ __typename ... on CheckRun{{ name startedAt status conclusion completedAt checkSuite{{ workflowRun{{ event workflow{{ name }} }} }} }} ... on StatusContext{{ state context }} }} }} }} }} }} }} }} "
             )
         })
         .collect();
@@ -2946,9 +2947,13 @@ fn parse_red_rollup_contexts(node: &serde_json::Value) -> Option<RedRollupContex
 /// start, so the kernel never keys it: statuses aren't check runs and are always kept.
 fn rollup_node_check(n: &serde_json::Value) -> RawCheck {
     let typename = rollup_node_text(n, "/__typename");
-    let started_at = (typename == "CheckRun")
-        .then(|| rollup_node_text(n, "/startedAt"))
-        .filter(|s| real_check_time(s));
+    let check_run_time = |path: &str| {
+        (typename == "CheckRun")
+            .then(|| rollup_node_text(n, path))
+            .filter(|s| real_check_time(s))
+    };
+    let started_at = check_run_time("/startedAt");
+    let completed_at = check_run_time("/completedAt");
     RawCheck {
         name: rollup_node_text(n, "/name"),
         context: rollup_node_text(n, "/context"),
@@ -2958,43 +2963,73 @@ fn rollup_node_check(n: &serde_json::Value) -> RawCheck {
         details_url: None,
         target_url: None,
         started_at,
-        completed_at: None,
+        completed_at,
         workflow_name: rollup_node_text(n, "/checkSuite/workflowRun/workflow/name"),
         typename,
     }
 }
 
-/// GitHub's rollup enum over context rows, or `None` when any row can't be classified.
-/// Modelled on live answers (checked against the precomputed enum before any use): a
-/// cancelled, timed-out or action-required run and an ERROR status all read FAILURE,
-/// failure outranks pending, and skipped or neutral runs pass.
-fn derive_rollup_state(checks: &[RawCheck]) -> Option<&'static str> {
-    const BY_RANK: [&str; 4] = ["SUCCESS", "PENDING", "EXPECTED", "FAILURE"];
-    let mut worst: Option<usize> = None;
+/// One context row's rollup class, in verdict rank order: a genuine failure outranks
+/// work still in flight, which outranks a cancelled run.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RollupClass {
+    Success,
+    Cancelled,
+    Pending,
+    Expected,
+    Failure,
+}
+
+/// The worst class over context rows as a rollup enum, or `None` when any row can't
+/// be classified. Modelled on live answers: a timed-out or action-required run and an
+/// ERROR status read FAILURE, and skipped or neutral runs pass. `fold_cancelled`
+/// reproduces GitHub's own enum, which ranks a cancelled run as FAILURE.
+fn rollup_state_over(checks: &[RawCheck], fold_cancelled: bool) -> Option<&'static str> {
+    use RollupClass::*;
+    let mut worst: Option<RollupClass> = None;
     for c in checks {
-        let rank = match c.typename.as_str() {
+        let class = match c.typename.as_str() {
             "CheckRun" => match c.status.to_ascii_uppercase().as_str() {
                 "COMPLETED" => match c.conclusion.to_ascii_uppercase().as_str() {
-                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => 0,
-                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
-                    | "STARTUP_FAILURE" => 3,
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => Success,
+                    "CANCELLED" if fold_cancelled => Failure,
+                    "CANCELLED" => Cancelled,
+                    "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => Failure,
                     _ => return None,
                 },
-                "QUEUED" | "IN_PROGRESS" | "WAITING" | "PENDING" | "REQUESTED" => 1,
+                "QUEUED" | "IN_PROGRESS" | "WAITING" | "PENDING" | "REQUESTED" => Pending,
                 _ => return None,
             },
             "StatusContext" => match c.state.to_ascii_uppercase().as_str() {
-                "SUCCESS" => 0,
-                "PENDING" => 1,
-                "EXPECTED" => 2,
-                "FAILURE" | "ERROR" => 3,
+                "SUCCESS" => Success,
+                "PENDING" => Pending,
+                "EXPECTED" => Expected,
+                "FAILURE" | "ERROR" => Failure,
                 _ => return None,
             },
             _ => return None,
         };
-        worst = worst.max(Some(rank));
+        worst = worst.max(Some(class));
     }
-    worst.map(|r| BY_RANK[r])
+    worst.map(|class| match class {
+        Success => "SUCCESS",
+        Cancelled => "CANCELLED",
+        Pending => "PENDING",
+        Expected => "EXPECTED",
+        Failure => "FAILURE",
+    })
+}
+
+/// GitHub's precomputed rollup enum over context rows — the model the confirm checks
+/// against GitHub's own answer before trusting any derivation.
+fn github_rollup_state(checks: &[RawCheck]) -> Option<&'static str> {
+    rollup_state_over(checks, true)
+}
+
+/// The rollup verdict over context rows: GitHub's enum, except that a cancelled run
+/// reads CANCELLED below anything still in flight, so only a genuine failure is red.
+fn derive_rollup_state(checks: &[RawCheck]) -> Option<&'static str> {
+    rollup_state_over(checks, false)
 }
 
 /// What a red row's confirm established. Both non-confirmed arms leave the row on its
@@ -3011,11 +3046,12 @@ enum RedVerdict {
     Unobserved,
 }
 
-/// A red row's verdict: the enum of its checks collapsed to each one's latest run, but
-/// only once [`derive_rollup_state`] reproduces GitHub's own `precomputed` enum over the
-/// complete context set of the same head. A page short of `totalCount` (the panel's
-/// join refusal), no contexts, or a model mismatch refuses as `Kept`, so drift in the
-/// model degrades to GitHub's verdict.
+/// A red row's verdict: [`derive_rollup_state`] of its checks collapsed to each one's
+/// latest run (superseded relics dropped too), but only once [`github_rollup_state`]
+/// reproduces GitHub's own `precomputed` enum over the complete, raw context set of
+/// the same head — GitHub's enum counts every row, relics included. A page short of
+/// `totalCount` (the panel's join refusal), no contexts, or a model mismatch refuses as
+/// `Kept`, so drift in the model degrades to GitHub's verdict.
 fn confirm_red_rollup(
     precomputed: &str,
     head_oid: &str,
@@ -3028,12 +3064,63 @@ fn confirm_red_rollup(
         return RedVerdict::Unobserved;
     };
     let trusted = c.total <= c.checks.len() as u64
-        && derive_rollup_state(&c.checks) == Some(expected.as_str());
+        && github_rollup_state(&c.checks) == Some(expected.as_str());
     if !trusted {
         return RedVerdict::Kept;
     }
-    derive_rollup_state(&collapse_superseded_checks(c.checks, Some(&c.events)))
-        .map_or(RedVerdict::Kept, |s| RedVerdict::Confirmed(s.to_string()))
+    let collapsed = collapse_superseded_checks(c.checks, Some(&c.events));
+    let latest = drop_superseded_relics(collapsed, &c.events);
+    derive_rollup_state(&latest).map_or(RedVerdict::Kept, |s| RedVerdict::Confirmed(s.to_string()))
+}
+
+/// Drops each CheckRun cancelled before it started (the collapse keeps it, having no
+/// start to order it by) once a row of its name, workflow AND event started at or after
+/// its real completion. Events resolve through `runs` on the collapse's (name, workflow,
+/// start) join and must agree on one non-empty value: a push run and its pull_request
+/// twin are independent, so retiring across them would read a cancelled run green. A
+/// relic with no real completion or event stays. Stricter than `superseded()` in
+/// checks-rerun.ts, which has no events and errs toward withholding the offer.
+fn drop_superseded_relics(checks: Vec<RawCheck>, runs: &[CheckRunEvent]) -> Vec<RawCheck> {
+    fn event_of<'a>(runs: &'a [CheckRunEvent], c: &RawCheck) -> Option<&'a str> {
+        let mut hits = runs
+            .iter()
+            .filter(|r| joins_event(r, c))
+            .map(|r| r.event.as_str());
+        let event = hits.next().filter(|e| !e.is_empty())?;
+        hits.all(|e| e == event).then_some(event)
+    }
+    let superseded = |i: usize, c: &RawCheck| -> bool {
+        if c.typename != "CheckRun"
+            || c.name.is_empty()
+            || !c.conclusion.eq_ignore_ascii_case("CANCELLED")
+            || check_started(c).is_some()
+        {
+            return false;
+        }
+        let Some(done) = c.completed_at.as_deref().filter(|s| real_check_time(s)) else {
+            return false;
+        };
+        let Some(event) = event_of(runs, c) else {
+            return false;
+        };
+        checks.iter().enumerate().any(|(j, other)| {
+            j != i
+                && other.name == c.name
+                && other.workflow_name == c.workflow_name
+                && check_started(other).is_some_and(|s| at_least_as_new(s, done))
+                && event_of(runs, other) == Some(event)
+        })
+    };
+    let keep: Vec<bool> = checks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| !superseded(i, c))
+        .collect();
+    checks
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(c, keep)| keep.then_some(c))
+        .collect()
 }
 
 // NOTE: `gh pr edit` is unusable on older gh versions (its GraphQL query
@@ -3274,7 +3361,9 @@ pub struct PrPollInfo {
     pub is_draft: bool,
     pub author: String,
     pub review_decision: String,
-    /// Rollup of the head commit's checks: SUCCESS/FAILURE/PENDING/"".
+    /// Rollup of the head commit's checks: SUCCESS/FAILURE/ERROR/PENDING/EXPECTED/"", or
+    /// CANCELLED when the confirm finds cancelled runs and nothing failed or still
+    /// in flight.
     pub checks_state: String,
     /// True when `checks_state` is a red enum this poll could not confirm (the confirm
     /// answer never described this snapshot), so it may flip back next poll: the
@@ -3680,12 +3769,13 @@ struct RawCheck {
     started_at: Option<String>,
     #[serde(default)]
     completed_at: Option<String>,
-    /// `CheckRun` or `StatusContext`. Deserialize-only, like `workflow_name`: both
-    /// feed the superseded-run collapse and never reach `PrCheckOut`.
+    /// `CheckRun` or `StatusContext`. Deserialize-only: it feeds the superseded-run
+    /// collapse and never reaches `PrCheckOut`.
     #[serde(default, rename = "__typename", deserialize_with = "null_to_default")]
     typename: String,
     /// The Actions workflow a CheckRun belongs to; "" for a third-party check run,
     /// and absent on a gh too old to export it (which leaves the row uncollapsed).
+    /// Keys the collapse, and reaches `PrCheckOut::workflow` when non-empty.
     #[serde(default, rename = "workflowName", deserialize_with = "null_to_default")]
     workflow_name: String,
 }
@@ -4063,6 +4153,10 @@ pub struct PrCheckOut {
     /// start time the only key both rollup arms can be ordered by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// The Actions workflow a CheckRun belongs to; `None` for a StatusContext, a
+    /// third-party check run, and every GitLab or Bitbucket row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
 }
 
 /// One draft inline comment in a batched review submission, provider-neutral.
@@ -4550,6 +4644,18 @@ fn at_least_as_new(candidate: &str, incumbent: &str) -> bool {
     candidate >= incumbent
 }
 
+/// A row's real start, or `None` when it is undated.
+fn check_started(c: &RawCheck) -> Option<&str> {
+    c.started_at.as_deref().filter(|s| real_check_time(s))
+}
+
+/// Whether an events row describes `c`: the (name, workflow, start) join through which
+/// both [`collapse_superseded_checks`] and [`drop_superseded_relics`] resolve a
+/// CheckRun's event. Each applies its own rule to how many rows may join.
+fn joins_event(r: &CheckRunEvent, c: &RawCheck) -> bool {
+    r.name == c.name && r.workflow == c.workflow_name && r.started_at.as_deref() == check_started(c)
+}
+
 /// Keeps only the newest row per [`SupersedeKey`], so a workflow re-triggered by PR
 /// events reads as its latest run. Keying needs a real start: an undated row (queued,
 /// or cancelled before it started) has no order, and `(name, workflow, no start)` names
@@ -4562,23 +4668,16 @@ fn collapse_superseded_checks(
     checks: Vec<RawCheck>,
     runs: Option<&[CheckRunEvent]>,
 ) -> Vec<RawCheck> {
-    fn started(c: &RawCheck) -> Option<&str> {
-        c.started_at.as_deref().filter(|s| real_check_time(s))
-    }
     let keep: Vec<bool> = {
         let event_of = |c: &RawCheck| -> Option<String> {
-            let mut hits = runs?.iter().filter(|r| {
-                r.name == c.name
-                    && r.workflow == c.workflow_name
-                    && r.started_at.as_deref() == started(c)
-            });
+            let mut hits = runs?.iter().filter(|r| joins_event(r, c));
             let hit = hits.next()?;
             hits.next().is_none().then(|| hit.event.clone())
         };
         let keys: Vec<Option<(SupersedeKey, &str)>> = checks
             .iter()
             .map(|c| {
-                let start = started(c)?;
+                let start = check_started(c)?;
                 let key = if !c.name.is_empty() {
                     if c.typename != "CheckRun" || c.workflow_name.is_empty() {
                         return None;
@@ -4642,6 +4741,7 @@ fn map_gh_check(c: RawCheck) -> PrCheckOut {
         job_id,
         started_at: c.started_at.filter(|s| real_check_time(s)),
         completed_at: c.completed_at.filter(|s| real_check_time(s)),
+        workflow: Some(c.workflow_name).filter(|w| !w.is_empty()),
     }
 }
 
@@ -9116,6 +9216,8 @@ mod tests {
         assert_eq!(rollup_state_to_ci(Some("ERROR")), "failing");
         assert_eq!(rollup_state_to_ci(Some("PENDING")), "pending");
         assert_eq!(rollup_state_to_ci(Some("EXPECTED")), "pending");
+        // Only the red confirm yields CANCELLED; it takes the neutral icon.
+        assert_eq!(rollup_state_to_ci(Some("CANCELLED")), "neutral");
         // Case-insensitive.
         assert_eq!(rollup_state_to_ci(Some("success")), "passing");
         // A null rollup (no checks configured) → none.
@@ -9663,6 +9765,24 @@ github.acme.com
         const T4: &str = "2026-09-26T10:00:04Z";
         const T5: &str = "2026-09-26T10:00:05Z";
 
+        #[test]
+        fn a_check_run_carries_its_workflow_to_the_frontend() {
+            let run = map_gh_check(run_row("build", "ci", Some(T1), "CANCELLED", 1));
+            assert_eq!(run.workflow.as_deref(), Some("ci"));
+            let wire = serde_json::to_value(&run).unwrap();
+            assert_eq!(wire["workflow"], "ci");
+            // A third-party check run and a StatusContext carry none, and the
+            // key is absent on the wire rather than an empty string.
+            let third_party = map_gh_check(run_row("Cloudflare Pages", "", Some(T1), "SUCCESS", 2));
+            assert_eq!(third_party.workflow, None);
+            let status = map_gh_check(context_row("ci/prow", T1, "SUCCESS"));
+            assert_eq!(status.workflow, None);
+            assert!(serde_json::to_value(&status)
+                .unwrap()
+                .get("workflow")
+                .is_none());
+        }
+
         /// Five runs of one key, listed out of time order: 1 failure, 2 cancelled,
         /// 2 success, the newest a success.
         fn superseded_fragment_runs() -> (Vec<RawCheck>, Vec<CheckRunEvent>) {
@@ -10076,7 +10196,8 @@ github.acme.com
         /// re-derived through the same collapse kernel as the panel, behind the gate.
         mod red_rows {
             use super::super::super::{
-                apply_red_verdict, confirm_red_rollup, derive_rollup_state, needs_red_confirm,
+                apply_red_verdict, check_run_events_of, confirm_red_rollup, derive_rollup_state,
+                drop_superseded_relics, github_rollup_state, needs_red_confirm,
                 parse_red_rollup_contexts, red_rollup_confirm_query, rollup_node_check,
                 rollup_state_to_ci, PrPollInfo, RedVerdict,
             };
@@ -10233,7 +10354,7 @@ github.acme.com
             }
 
             #[test]
-            fn a_cancelled_latest_run_keeps_github_parity() {
+            fn a_cancelled_latest_run_reads_cancelled() {
                 let answer = full(
                     "FAILURE",
                     vec![
@@ -10241,30 +10362,160 @@ github.acme.com
                         done("fragment", T2, "CANCELLED"),
                     ],
                 );
-                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+                let confirmed = verdict("FAILURE", &answer);
+                assert_eq!(confirmed, "CANCELLED");
+                assert_eq!(rollup_state_to_ci(Some(&confirmed)), "neutral");
+            }
+
+            #[test]
+            fn a_cancelled_only_head_confirms_cancelled_not_failed() {
+                // GitHub's enum folds every cancelled job into FAILURE; the contexts
+                // show no genuine failure, so the row leaves red for neutral.
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        done("build", T1, "CANCELLED"),
+                        done("lint", T1, "CANCELLED"),
+                        done("docs", T1, "SKIPPED"),
+                    ],
+                );
+                assert_eq!(
+                    outcome("FAILURE", &answer),
+                    RedVerdict::Confirmed("CANCELLED".into())
+                );
+                assert_eq!(rollup_state_to_ci(Some("CANCELLED")), "neutral");
+                // With a success beside it, still cancelled.
+                let with_pass = full(
+                    "FAILURE",
+                    vec![done("build", T1, "CANCELLED"), done("lint", T1, "SUCCESS")],
+                );
+                assert_eq!(verdict("FAILURE", &with_pass), "CANCELLED");
+            }
+
+            #[test]
+            fn a_genuine_failure_or_running_job_outranks_cancelled() {
+                let failed = full(
+                    "FAILURE",
+                    vec![done("build", T1, "CANCELLED"), done("lint", T1, "FAILURE")],
+                );
+                assert_eq!(verdict("FAILURE", &failed), "FAILURE");
+                // A fresh attempt in flight beside the cancelled job reads pending.
+                let running = full(
+                    "FAILURE",
+                    vec![
+                        done("build", T1, "CANCELLED"),
+                        cr(
+                            "lint",
+                            Some(("ci", "pull_request")),
+                            Some(T2),
+                            "IN_PROGRESS",
+                            None,
+                        ),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &running), "PENDING");
             }
 
             #[test]
             fn an_undated_relic_is_never_keyed() {
-                // Cancelled before it started: no start, so no newer run supersedes it.
-                let answer = full(
-                    "FAILURE",
-                    vec![
-                        cr(
-                            "fragment",
-                            Some(("ci", "pull_request")),
-                            None,
-                            "COMPLETED",
-                            Some("CANCELLED"),
-                        ),
-                        done("fragment", T2, "SUCCESS"),
-                    ],
-                );
+                // Cancelled before it started: no start, so the collapse keeps it, and
+                // only a same-named run starting at or after its completion retires it.
+                let relic =
+                    |wf: &str, completed: Option<&str>| relic_on(wf, "pull_request", completed);
+                let answer =
+                    |row: Value| full("FAILURE", vec![row, done("fragment", T2, "SUCCESS")]);
                 assert_eq!(
                     rollup_node_check(&cr("x", None, None, "QUEUED", None)).started_at,
                     None
                 );
-                assert_eq!(verdict("FAILURE", &answer), "FAILURE");
+                // The later run passed: GitHub's enum still counts the relic (the gate
+                // matches FAILURE over the raw set), but the verdict reads green.
+                assert_eq!(
+                    outcome("FAILURE", &answer(relic("ci", Some(T1)))),
+                    RedVerdict::Confirmed("SUCCESS".into()),
+                    "the poll lands SUCCESS too, so a passed notification can fire"
+                );
+                assert_eq!(
+                    verdict("FAILURE", &answer(relic("ci", Some(T2)))),
+                    "SUCCESS"
+                );
+                // No later start: the cancellation is the newest attempt.
+                assert_eq!(
+                    verdict("FAILURE", &answer(relic("ci", Some(T3)))),
+                    "CANCELLED"
+                );
+                // Another workflow's same-named job retires nothing.
+                assert_eq!(
+                    verdict("FAILURE", &answer(relic("release", Some(T1)))),
+                    "CANCELLED"
+                );
+                // No real completion to compare: the relic stays.
+                for completed in [None, Some("0001-01-01T00:00:00Z")] {
+                    assert_eq!(
+                        verdict("FAILURE", &answer(relic("ci", completed))),
+                        "CANCELLED",
+                        "{completed:?}"
+                    );
+                }
+                // completedAt is read for CheckRuns only.
+                let mut status = sc("ci", "SUCCESS");
+                status["completedAt"] = json!(T1);
+                assert_eq!(rollup_node_check(&status).completed_at, None);
+            }
+
+            /// A `fragment` run of workflow `wf` on `event`, cancelled before it started.
+            fn relic_on(wf: &str, event: &str, completed: Option<&str>) -> Value {
+                let mut row = cr(
+                    "fragment",
+                    Some((wf, event)),
+                    None,
+                    "COMPLETED",
+                    Some("CANCELLED"),
+                );
+                row["completedAt"] = json!(completed);
+                row
+            }
+
+            #[test]
+            fn a_relic_is_retired_only_by_a_later_run_of_its_own_event() {
+                // `done` runs on pull_request: the push relic is an independent run.
+                let later = || done("fragment", T2, "SUCCESS");
+                let cross = full("FAILURE", vec![relic_on("ci", "push", Some(T1)), later()]);
+                assert_eq!(verdict("FAILURE", &cross), "CANCELLED");
+                let same = full(
+                    "FAILURE",
+                    vec![relic_on("ci", "pull_request", Some(T1)), later()],
+                );
+                assert_eq!(verdict("FAILURE", &same), "SUCCESS");
+                // Two undated relics under one (name, workflow) disagree on the event,
+                // so neither resolves and both stay.
+                let ambiguous = full(
+                    "FAILURE",
+                    vec![
+                        relic_on("ci", "push", Some(T1)),
+                        relic_on("ci", "pull_request", Some(T1)),
+                        later(),
+                    ],
+                );
+                assert_eq!(verdict("FAILURE", &ambiguous), "CANCELLED");
+                // A relic with no workflow run has no event to resolve.
+                let mut unrun = cr("fragment", None, None, "COMPLETED", Some("CANCELLED"));
+                unrun["completedAt"] = json!(T1);
+                let no_event = full("FAILURE", vec![unrun, later()]);
+                assert_eq!(verdict("FAILURE", &no_event), "CANCELLED");
+            }
+
+            #[test]
+            fn no_events_keep_every_relic() {
+                let nodes = vec![
+                    relic_on("ci", "pull_request", Some(T1)),
+                    done("fragment", T2, "SUCCESS"),
+                ];
+                let checks = || nodes.iter().map(rollup_node_check).collect::<Vec<_>>();
+                assert_eq!(drop_superseded_relics(checks(), &[]).len(), 2);
+                // Control: the same rows with their events retire the relic.
+                let events = check_run_events_of(&nodes);
+                assert_eq!(drop_superseded_relics(checks(), &events).len(), 1);
             }
 
             #[test]
@@ -10447,11 +10698,49 @@ github.acme.com
             }
 
             #[test]
-            fn derives_github_rollup_classes() {
-                let derive = |nodes: Vec<Value>| {
-                    let checks: Vec<_> = nodes.iter().map(rollup_node_check).collect();
-                    derive_rollup_state(&checks)
+            fn a_cancelled_only_poll_row_lands_confirmed_cancelled() {
+                // The poller notifies on SUCCESS/FAILURE only, so a confirmed
+                // CANCELLED fires no "Checks failed".
+                let answer = full(
+                    "FAILURE",
+                    vec![
+                        done("build", T1, "CANCELLED"),
+                        done("lint", T1, "CANCELLED"),
+                    ],
+                );
+                let mut pr = PrPollInfo {
+                    number: 400,
+                    title: String::new(),
+                    url: String::new(),
+                    state: "OPEN".into(),
+                    is_draft: false,
+                    author: String::new(),
+                    review_decision: String::new(),
+                    checks_state: "FAILURE".into(),
+                    checks_unconfirmed: false,
+                    head_sha: HEAD_A.into(),
+                    comment_count: 0,
+                    last_comment_author: String::new(),
+                    review_count: 0,
+                    last_review_author: String::new(),
+                    last_review_id: String::new(),
+                    review_requests: Vec::new(),
+                    head_ref_name: String::new(),
+                    base_ref_name: String::new(),
+                    created_at: String::new(),
                 };
+                let verdict = outcome(&pr.checks_state, &answer);
+                apply_red_verdict(&mut pr, verdict);
+                assert_eq!(pr.checks_state, "CANCELLED");
+                assert!(!pr.checks_unconfirmed, "a confirmed terminal, never held");
+            }
+
+            #[test]
+            fn derives_github_rollup_classes() {
+                let checks_of =
+                    |nodes: Vec<Value>| -> Vec<_> { nodes.iter().map(rollup_node_check).collect() };
+                let derive = |nodes: Vec<Value>| derive_rollup_state(&checks_of(nodes));
+                let github = |nodes: Vec<Value>| github_rollup_state(&checks_of(nodes));
                 assert_eq!(derive(Vec::new()), None);
                 for (conclusion, want) in [
                     ("SUCCESS", "SUCCESS"),
@@ -10459,7 +10748,7 @@ github.acme.com
                     ("SKIPPED", "SUCCESS"),
                     ("FAILURE", "FAILURE"),
                     ("TIMED_OUT", "FAILURE"),
-                    ("CANCELLED", "FAILURE"),
+                    ("CANCELLED", "CANCELLED"),
                     ("ACTION_REQUIRED", "FAILURE"),
                     ("STARTUP_FAILURE", "FAILURE"),
                 ] {
@@ -10469,6 +10758,25 @@ github.acme.com
                         "{conclusion}"
                     );
                 }
+                // GitHub's own enum, the confirm gate's model, folds cancelled into
+                // FAILURE above pending; the verdict ranks it below pending.
+                let cancelled = || done("a", T1, "CANCELLED");
+                let running = || cr("b", None, None, "IN_PROGRESS", None);
+                assert_eq!(github(vec![cancelled()]), Some("FAILURE"));
+                assert_eq!(github(vec![cancelled(), running()]), Some("FAILURE"));
+                assert_eq!(derive(vec![cancelled(), running()]), Some("PENDING"));
+                assert_eq!(
+                    derive(vec![cancelled(), done("b", T1, "FAILURE")]),
+                    Some("FAILURE")
+                );
+                assert_eq!(
+                    derive(vec![cancelled(), done("b", T1, "SUCCESS")]),
+                    Some("CANCELLED")
+                );
+                assert_eq!(
+                    derive(vec![cancelled(), sc("c", "EXPECTED")]),
+                    Some("EXPECTED")
+                );
                 for status in ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] {
                     let row = cr("a", None, None, status, None);
                     assert_eq!(derive(vec![row]), Some("PENDING"), "{status}");
@@ -10502,7 +10810,7 @@ github.acme.com
                 for field in [
                     "oid statusCheckRollup{ state contexts(first:100){ totalCount",
                     "__typename",
-                    "... on CheckRun{ name startedAt status conclusion",
+                    "... on CheckRun{ name startedAt status conclusion completedAt",
                     "workflowRun{ event workflow{ name } }",
                     "... on StatusContext{ state context }",
                 ] {

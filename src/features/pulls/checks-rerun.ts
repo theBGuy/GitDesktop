@@ -6,9 +6,38 @@ import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
  *  directly by the node test harness. */
 export type CheckBucket = "passed" | "failed" | "pending" | "skipped";
 
-/** One re-runnable run: its id, and the completion signature its failed checks
- *  carried when the list was derived. */
-export type RerunCandidate = readonly [runId: string, signature: string];
+/** Which re-run a run gets. "failed": it holds a failed-bucket check, so it keeps
+ *  the failed-jobs re-run. "cancelled": it holds no failed check but a CANCELLED
+ *  one, so there is no failed job to name and the whole run re-runs. */
+export type RerunMode = "failed" | "cancelled";
+
+/** One re-runnable run: its id, the completion signature its re-run keys on
+ *  when the list was derived, and the re-run it gets. */
+export type RerunCandidate = readonly [
+  runId: string,
+  signature: string,
+  mode: RerunMode,
+];
+
+/** Per run, every admitted check's `completedAt`, sorted and joined. */
+function completionSignatures(
+  checks: readonly PrCheckOut[],
+  admit: (check: PrCheckOut) => boolean,
+): Map<string, string> {
+  const completions = new Map<string, string[]>();
+  for (const c of checks) {
+    if (!c.runId || !c.completedAt) continue;
+    if (!admit(c)) continue;
+    const times = completions.get(c.runId);
+    if (times) times.push(c.completedAt);
+    else completions.set(c.runId, [c.completedAt]);
+  }
+  return new Map(
+    [...completions].map(
+      ([id, times]) => [id, times.sort().join(" ")] as const,
+    ),
+  );
+}
 
 /**
  * Per run, the completion signature of its failed checks: every failed-bucket
@@ -25,53 +54,97 @@ export function failedRunSignatures(
   checks: readonly PrCheckOut[],
   bucketOf: (check: PrCheckOut) => CheckBucket,
 ): Map<string, string> {
-  const completions = new Map<string, string[]>();
-  for (const c of checks) {
-    if (!c.runId || !c.completedAt) continue;
-    if (bucketOf(c) !== "failed") continue;
-    const times = completions.get(c.runId);
-    if (times) times.push(c.completedAt);
-    else completions.set(c.runId, [c.completedAt]);
-  }
-  return new Map(
-    [...completions].map(
-      ([id, times]) => [id, times.sort().join(" ")] as const,
-    ),
+  return completionSignatures(checks, (c) => bucketOf(c) === "failed");
+}
+
+/** Whether a same-named row of the same workflow started at or after `row`
+ *  finished: a later attempt replaced it. The collapse kernel keeps a run
+ *  cancelled before it started (it has no start to order by), so this evidence is
+ *  what retires one. A row with no workflow (GitLab, Bitbucket) matches on name
+ *  alone; one with a workflow is never retired by another workflow's job. */
+function superseded(row: PrCheckOut, checks: readonly PrCheckOut[]): boolean {
+  const finished = Date.parse(row.completedAt ?? "");
+  if (Number.isNaN(finished)) return false;
+  return checks.some(
+    (other) =>
+      other !== row &&
+      other.name === row.name &&
+      (row.workflow === undefined || other.workflow === row.workflow) &&
+      Date.parse(other.startedAt ?? "") >= finished,
   );
 }
 
 /**
+ * Per run, the signature its re-run offer and latch key on, with the re-run it
+ * gets: its failed checks' signature when it has any, else its CANCELLED checks'
+ * under the same `completedAt` rule. Keyed on the raw CANCELLED status, never the
+ * skipped bucket: a SKIPPED, NEUTRAL or STALE row has nothing to re-run.
+ *
+ * A run with ANY failed-bucket row stays off the cancelled arm, dated or not: an
+ * undated failure contributes no offer, and must not flip its run to re-run-all.
+ * A cancelled row a later same-named attempt superseded contributes nothing.
+ */
+export function rerunSignatures(
+  checks: readonly PrCheckOut[],
+  bucketOf: (check: PrCheckOut) => CheckBucket,
+): Map<string, { signature: string; mode: RerunMode }> {
+  const signatures = new Map<string, { signature: string; mode: RerunMode }>();
+  for (const [id, signature] of failedRunSignatures(checks, bucketOf))
+    signatures.set(id, { signature, mode: "failed" });
+  const failedRuns = new Set(
+    checks
+      .filter((c) => c.runId && bucketOf(c) === "failed")
+      .map((c) => c.runId),
+  );
+  const cancelled = completionSignatures(
+    checks,
+    (c) =>
+      c.status.toUpperCase() === "CANCELLED" &&
+      !failedRuns.has(c.runId) &&
+      !superseded(c, checks),
+  );
+  for (const [id, signature] of cancelled)
+    if (!signatures.has(id))
+      signatures.set(id, { signature, mode: "cancelled" });
+  return signatures;
+}
+
+/**
  * Of the latched runs, the ones whose latch is still STANDING: their recorded
- * signature is the one their failed checks carry right now.
+ * signature is the one their `rerunSignatures` entry carries right now.
  *
  * A latch releases on a CHANGED signature, but its key never leaves the map, so
  * key presence outlives the suppression by an entire mount. Every view derived
  * from a latch has to reproduce the latch's own release rule — ask here, never
  * `latched.has(id)`.
  *
- * A run whose failed rows are gone (its re-run went green) has no current
- * signature at all, so it reads as released too.
+ * A run with no failed or cancelled rows left (its re-run went green) has no
+ * current signature at all, so it reads as released too.
  */
 export function stillLatchedRunIds(
   checks: readonly PrCheckOut[],
   bucketOf: (check: PrCheckOut) => CheckBucket,
   latched: ReadonlyMap<string, string>,
 ): string[] {
-  const signatures = failedRunSignatures(checks, bucketOf);
+  const signatures = rerunSignatures(checks, bucketOf);
   return [...latched]
-    .filter(([id, signature]) => signatures.get(id) === signature)
+    .filter(([id, signature]) => signatures.get(id)?.signature === signature)
     .map(([id]) => id);
 }
 
 /**
  * The runs the PR checks rollup may re-run right now, each with the signature
- * that identifies the attempt they failed on.
+ * that identifies the attempt it failed or was cancelled on.
  *
  * GitHub refuses to re-run a run that is still in progress, and one run can hold
  * a failed check while a sibling job runs on. GitLab gets no such gate: it
  * collapses running/pending/manual into one PENDING check status, so an activity
  * gate would hide the offer forever on a pipeline with a manual job — a mid-run
  * retry it rejects surfaces as that run's own error toast instead.
+ *
+ * On GitHub, failed runs outrank cancelled-only ones: the rollup's one button
+ * names one operation, so cancelled-only runs are offered once no failed run is.
+ * GitLab's retry is one operation for both, so it offers them together.
  *
  * A latched run comes back only once its signature moves off the latched one —
  * release is evidence of a new attempt, never the observation of a transient, so
@@ -89,14 +162,19 @@ export function rerunnableRuns(input: {
   /** The SETTLED forge provider — `undefined` while the probe is pending. */
   provider: ForgeProvider | null | undefined;
 }): RerunCandidate[] {
-  const signatures = failedRunSignatures(input.checks, input.bucketOf);
-  const offerable =
-    input.provider === "github"
-      ? [...signatures].filter(([id]) => !input.runningRunIds.includes(id))
-      : [...signatures];
-  return offerable.filter(
-    ([id, signature]) => input.latched.get(id) !== signature,
-  );
+  const github = input.provider === "github";
+  const offerable: RerunCandidate[] = [];
+  for (const [id, { signature, mode }] of rerunSignatures(
+    input.checks,
+    input.bucketOf,
+  )) {
+    if (github && input.runningRunIds.includes(id)) continue;
+    if (input.latched.get(id) === signature) continue;
+    offerable.push([id, signature, mode]);
+  }
+  return github && offerable.some(([, , mode]) => mode === "failed")
+    ? offerable.filter(([, , mode]) => mode === "failed")
+    : offerable;
 }
 
 /** One re-runnable job: its id, the completion it carried when the list was
@@ -142,9 +220,9 @@ export type JobRerunCandidate = readonly [
  * job id per attempt, so a latch entry simply orphans once the re-run lands; it
  * dies with the per-PR remount.
  *
- * Cancelled rows are out of scope by design, not by omission: a cancelled GitLab
- * job is forge-retryable but presents in the skipped bucket, and the run-level
- * Retry (which does fire on cancelled) already covers it.
+ * Cancelled rows get no per-job offer: their path is the run-level offer in
+ * `rerunnableRuns`, which re-runs a cancelled-only run whole and leaves a run
+ * that also failed on its failed re-run.
  */
 export function rerunnableJobs(input: {
   checks: readonly PrCheckOut[];

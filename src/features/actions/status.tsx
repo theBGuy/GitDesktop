@@ -88,17 +88,21 @@ export function rerunOffers(
   return offers;
 }
 
-/** The single re-run the PR checks rollup offers when failed checks exist:
- *  failed-only on GitHub, pipeline retry on GitLab, nothing on Bitbucket (its
- *  rerun re-triggers the branch pipeline — wrong from a PR row). Reads the same
- *  labels rerunOffers renders so the surfaces can't drift. */
+/** The single re-run the PR checks rollup offers when failed or cancelled runs
+ *  exist: on GitHub failed-only, or all jobs when `failedOnly` is false (a
+ *  cancelled run with no failed job); pipeline retry on GitLab; nothing on
+ *  Bitbucket (its rerun re-triggers the branch pipeline — wrong from a PR row).
+ *  Reads the same labels rerunOffers renders so the surfaces can't drift. */
 export function checksRerunOffer(
   provider: ForgeProvider | null | undefined,
+  failedOnly: boolean,
 ): RerunOffer | null {
   if (provider === "gitlab")
     return { kind: "retry", label: RERUN_LABELS.retry };
   if (provider === "github")
-    return { kind: "failed", label: RERUN_LABELS.failed };
+    return failedOnly
+      ? { kind: "failed", label: RERUN_LABELS.failed }
+      : { kind: "all", label: RERUN_LABELS.all };
   return null;
 }
 
@@ -167,7 +171,7 @@ export function rerunSuccessMessage(
     case failedOnly:
       return "Re-running failed jobs";
     default:
-      return "Re-running workflow";
+      return "Re-running all jobs";
   }
 }
 

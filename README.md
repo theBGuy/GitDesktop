@@ -375,14 +375,16 @@ in one click.
   inline (a GitLab MR whose pipeline runs in the contributor's fork lists
   its jobs as links out, with no inline log or re-run); **Bitbucket**
   build statuses and other external checks link out (name/state/URL, no
-  fetchable logs). A failing rollup offers the re-run right on its
-  summary line — **Re-run failed jobs** on GitHub, **Retry pipeline** on
-  GitLab, and **Re-run failed jobs / Retry pipeline** in the command
-  palette (Bitbucket has no pull-request-scoped re-run). Each
-  failed row with a fetchable job re-runs on its own too: **Re-run** on
-  GitHub (offered once the job's run has finished) restarts that job
-  plus any jobs that depend on it, and **Retry** on GitLab (offered as
-  soon as the job fails) retries just that job.
+  fetchable logs). A failing or cancelled rollup offers the re-run right
+  on its summary line — **Re-run failed jobs** on GitHub (**Re-run all
+  jobs** for a run that was cancelled without failing), **Retry
+  pipeline** on GitLab, and **Re-run failed jobs / Re-run all jobs /
+  Retry pipeline** in the command palette (Bitbucket has no
+  pull-request-scoped re-run). Each failed row with a fetchable job
+  re-runs on its own too: **Re-run** on GitHub (offered once the job's
+  run has finished) restarts that job plus any jobs that depend on it,
+  and **Retry** on GitLab (offered as soon as the job fails) retries
+  just that job.
 - **Line-anchored review comments**, from Copilot, CodeRabbit, or humans:
   rendered grouped by file in the Conversation and at their exact line in
   the Files diff, with reply-in-thread, resolve/unresolve, and edit/delete

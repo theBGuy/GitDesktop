@@ -1498,6 +1498,7 @@ fn checks_from_status_page(
             job_id: None,
             started_at: s.created_on.filter(|t| !t.is_empty()),
             completed_at: s.updated_on.filter(|t| !t.is_empty()),
+            workflow: None,
         })
         .collect();
     (checks, more)

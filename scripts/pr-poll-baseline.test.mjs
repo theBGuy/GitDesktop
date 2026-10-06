@@ -99,6 +99,29 @@ test("a confirmed poll resets the streak", () => {
   assert.equal(after.row.checksState, "SUCCESS", "a fresh streak holds again");
 });
 
+test("a confirmed CANCELLED verdict is a terminal baseline, never held", () => {
+  // The backend confirms a cancelled-only head as CANCELLED rather than red, so
+  // the row lands at once, with no streak to wait out.
+  const seen = replay([
+    [row({ checksState: "PENDING" })],
+    [row({ checksState: "CANCELLED" })],
+    [row({ checksState: "CANCELLED" })],
+  ]);
+  for (const landed of seen.slice(1)) {
+    assert.equal(landed.row.checksState, "CANCELLED");
+    assert.equal(landed.row.checksUnconfirmed, false);
+    assert.equal(landed.streak, 0);
+  }
+  // A later unconfirmed red read holds the CANCELLED baseline like any other.
+  const [, , held] = replay([
+    [row({ checksState: "PENDING" })],
+    [row({ checksState: "CANCELLED" })],
+    [row({ checksState: "FAILURE", checksUnconfirmed: true })],
+  ]);
+  assert.equal(held.row.checksState, "CANCELLED");
+  assert.equal(held.streak, 1);
+});
+
 test("a PR that leaves the poll drops its streak", () => {
   const first = mergePollBaseline(
     null,
