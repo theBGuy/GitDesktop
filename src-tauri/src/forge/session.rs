@@ -246,11 +246,10 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
 
 /// Classify an exit-0 `gh auth status --json hosts` body. `{"hosts":{}}` is logged out
 /// everywhere; a body that doesn't parse is Inconclusive, since no credential verdict
-/// can be read from it.
+/// can be read from it. `hosts` is required: a body without the key is not a report.
 fn classify_gh_json_ok(stdout: &str) -> GhJsonProbe {
     #[derive(serde::Deserialize)]
     struct HostsWrapper {
-        #[serde(default)]
         hosts: HashMap<String, Vec<GhJsonAccount>>,
     }
     match serde_json::from_str::<HostsWrapper>(stdout) {
@@ -4316,6 +4315,8 @@ check your internet connection or https://githubstatus.com";
             "{\"hosts\":",
             "{\"hosts\":[1,2]}",
             "<html>502</html>",
+            "{}",
+            "{\"hosts\":null}",
         ] {
             let probe = classify_gh_json_ok(body);
             assert!(

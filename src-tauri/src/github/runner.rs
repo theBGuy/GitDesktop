@@ -276,14 +276,21 @@ fn changes_gh_account(args: &[&str]) -> bool {
     )
 }
 
-/// Bumps [`GH_AUTH_EPOCH`] on drop, so a timed-out or cancelled account change still
+/// Bumps its epoch on drop, so a timed-out or cancelled account change still
 /// invalidates: its outcome is unknown.
-struct AuthEpochBump;
+struct AuthEpochBump(&'static AtomicU64);
 
 impl Drop for AuthEpochBump {
     fn drop(&mut self) {
-        bump_gh_auth_epoch();
+        self.0.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// The guard `run_gh_raw` holds for `args`; `epoch` is a parameter so tests can watch
+/// a counter no other test touches. Construction must stay lazy: a guard built and
+/// dropped for a read-only command would bump the epoch too.
+fn auth_epoch_guard(epoch: &'static AtomicU64, args: &[&str]) -> Option<AuthEpochBump> {
+    changes_gh_account(args).then(|| AuthEpochBump(epoch))
 }
 
 /// Runs the GitHub CLI and returns raw output regardless of exit code. Only a
@@ -293,7 +300,7 @@ pub async fn run_gh_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    let _epoch_bump = changes_gh_account(args).then_some(AuthEpochBump);
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
     let gh = gh_bin().await?;
     let gh_host = match repo_path {
         Some(repo) => gh_host_for_repo(repo).await,
@@ -623,14 +630,9 @@ mod tests {
 
     #[test]
     fn account_changing_commands_bump_the_auth_epoch() {
-        for args in [
-            &["auth", "switch", "--user", "octocat"][..],
-            &["auth", "login", "--web"][..],
-            &["auth", "logout"][..],
-            &["auth", "refresh", "-s", "project"][..],
-        ] {
-            assert!(changes_gh_account(args), "{args:?}");
-        }
+        // Owned by this test alone, so exact counts hold under parallel tests.
+        static EPOCH: AtomicU64 = AtomicU64::new(0);
+        let read = || EPOCH.load(Ordering::SeqCst);
         for args in [
             &["auth", "status", "--json", "hosts"][..],
             &["auth", "token", "--hostname", "github.com"][..],
@@ -639,9 +641,26 @@ mod tests {
             &[][..],
         ] {
             assert!(!changes_gh_account(args), "{args:?}");
+            drop(auth_epoch_guard(&EPOCH, args));
+            assert_eq!(read(), 0, "a read-only {args:?} must leave the epoch alone");
+        }
+        for (n, args) in [
+            &["auth", "switch", "--user", "octocat"][..],
+            &["auth", "login", "--web"][..],
+            &["auth", "logout"][..],
+            &["auth", "refresh", "-s", "project"][..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(changes_gh_account(args), "{args:?}");
+            let guard = auth_epoch_guard(&EPOCH, args);
+            assert_eq!(read(), n as u64, "the bump lands when the command ends");
+            drop(guard);
+            assert_eq!(read(), n as u64 + 1, "{args:?}");
         }
         let before = gh_auth_epoch();
-        drop(AuthEpochBump);
+        bump_gh_auth_epoch();
         assert!(gh_auth_epoch() > before);
     }
 

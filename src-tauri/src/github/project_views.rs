@@ -41,6 +41,11 @@ const VIEWS_SCOPE_HINT: &str =
     "GitHub project views need the read:project (or project) scope. Run:  gh auth refresh -s project";
 const VIEWS_POINTER: &str = "/data/node/views";
 
+/// A views read without `read:project` maps to [`VIEWS_SCOPE_HINT`].
+fn views_scope_error(e: AppError) -> AppError {
+    map_scope_error(e, PROJECT_READ_SCOPE, VIEWS_SCOPE_HINT)
+}
+
 /// One view's selection, shared by the read and every write that answers with a
 /// view, so a created or edited view parses exactly as a listed one does.
 const VIEW_SELECTION: &str = "id name layout filter \
@@ -148,7 +153,7 @@ pub async fn gh_project_views(repo_path: String, project_id: String) -> AppResul
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| map_scope_error(e, PROJECT_READ_SCOPE, VIEWS_SCOPE_HINT))?;
+        .map_err(views_scope_error)?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the project views",
@@ -595,10 +600,6 @@ mod tests {
         for pair in args[2..].chunks_exact(2) {
             assert_eq!(pair[0], "-f");
         }
-    }
-
-    fn views_scope_error(e: AppError) -> AppError {
-        map_scope_error(e, PROJECT_READ_SCOPE, VIEWS_SCOPE_HINT)
     }
 
     #[test]

@@ -874,8 +874,9 @@ mod tests {
     use crate::forge::model::RemoteListFilter;
     use std::time::Duration;
 
-    /// The memo is process-wide, so each case owns its host key; epochs are literals
-    /// because nothing in the test binary changes a gh account.
+    /// The memo is process-wide, so this test owns its host keys. The get/put pair takes
+    /// the epoch as an argument and never reads the global counter, so other tests'
+    /// bumps can't disturb these literal epochs.
     #[test]
     fn the_viewer_memo_serves_one_host_within_its_epoch_and_ttl() {
         let host = Some("memo-a.example".to_string());
