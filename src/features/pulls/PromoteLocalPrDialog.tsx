@@ -63,6 +63,9 @@ export function PromoteLocalPrDialog({
   // The label names the detected forge (all three); the noun stays two-way
   // because only GitLab calls it a merge request.
   const remoteLabel = providerLabel(forge.data?.provider);
+  // Both toasts' View, named only once the forge status has answered:
+  // `providerLabel` defaults to GitHub, and nothing gates this flow on the status.
+  const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
   const prNoun = isGitLab ? "merge request" : "pull request";
   const [draft, setDraft] = useState(false);
   const [posting, setPosting] = useState(false);
@@ -162,7 +165,10 @@ export function PromoteLocalPrDialog({
       const { live, away } = landedIn(repoPath);
       toast.success(`Opened ${prNoun} #${number}${away}`, {
         description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
+        action: {
+          label: forgeViewLabel ?? "View",
+          onClick: () => openUrl(url),
+        },
       });
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
@@ -203,9 +209,7 @@ export function PromoteLocalPrDialog({
       toastComposedError({
         title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        // Named only once the forge status has answered: `providerLabel`
-        // defaults to GitHub, and nothing gates this flow on the status.
-        view: { url, label: forge.data && `View on ${remoteLabel}` },
+        view: { url, label: forgeViewLabel },
         duration: 10000,
       });
     } finally {

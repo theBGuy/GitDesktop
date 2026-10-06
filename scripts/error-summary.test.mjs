@@ -794,9 +794,12 @@ test("names, paths and bare numbers never classify (measured misfires)", () => {
   }
 });
 
-test("io errors are never rewritten, even with transport wording", () => {
+test("io errors are never rewritten as a network failure, even with transport wording", () => {
   const message = "io error: connection refused (os error 111)";
-  assert.equal(presentError(appError("io", message)).summary, message);
+  const p = presentError(appError("io", message));
+  // Only the Rust lead goes; the OS text keeps its own words and case.
+  assert.equal(p.summary, "connection refused (os error 111)");
+  assert.equal(p.fullText, message);
 });
 
 test("GitLab outage phrases map for glab; Bitbucket and Jira keep their raw line", () => {
@@ -947,14 +950,19 @@ test("a message Rust already wrote as Couldn't reach keeps its own words", () =>
 });
 
 test("non-network kinds and git's own transport lines are untouched", () => {
-  for (const [kind, message] of [
+  for (const [kind, message, summary = message] of [
     ["command", "connection failed"],
     ["keyring", "connection failed"],
     ["invalidArgument", "connection failed"],
-    // The Rust Timeout variant's own message, which names no host.
-    ["timeout", "git operation timed out after 120s"],
+    // The Rust Timeout variant's own message, which names no host; only its
+    // display lead is capitalized.
+    [
+      "timeout",
+      "git operation timed out after 120s",
+      "Git operation timed out after 120s",
+    ],
   ]) {
-    assert.equal(presentError(appError(kind, message)).summary, message, kind);
+    assert.equal(presentError(appError(kind, message)).summary, summary, kind);
   }
   // git-kind stderr keeps its first line (see the first-contact test above).
   const p = presentError(
@@ -1175,4 +1183,165 @@ test("empty messages fall through to a non-blank summary", () => {
     "Git error",
   );
   assert.equal(presentError(new Error("")).summary, "Unexpected error");
+});
+
+// The display-register pass over the Rust `#[error]` leads (src-tauri/src/error.rs).
+
+/** The reset refusal's message as git/ops.rs builds it. */
+const RESET_REFUSAL =
+  "invalid argument: resetting would overwrite an untracked path (notes.txt) — move or remove it first";
+
+test("the reset refusal summarizes without its Rust lead, sentence-cased", () => {
+  const p = presentError(appError("invalidArgument", RESET_REFUSAL));
+  assert.equal(
+    p.summary,
+    "Resetting would overwrite an untracked path (notes.txt) — move or remove it first",
+  );
+  assert.equal(p.label, "Invalid input");
+  assert.equal(p.fullText, RESET_REFUSAL, "Details keeps the raw text");
+});
+
+test("app-written invalid-argument prose is capitalized after the lead goes", () => {
+  for (const [message, summary] of [
+    ["invalid argument: invalid branch name", "Invalid branch name"],
+    ["invalid argument: a title is required", "A title is required"],
+    [
+      "invalid argument: couldn't parse the remote URL",
+      "Couldn't parse the remote URL",
+    ],
+    ["invalid argument: no remote named upstream", "No remote named upstream"],
+    // Noun-led producer prose (measured producer spellings).
+    [
+      "invalid argument: remote does not exist: origin",
+      "Remote does not exist: origin",
+    ],
+    [
+      "invalid argument: repository names must start with a letter or digit",
+      "Repository names must start with a letter or digit",
+    ],
+    [
+      "invalid argument: due date must be YYYY-MM-DD, got 2026-13-01",
+      "Due date must be YYYY-MM-DD, got 2026-13-01",
+    ],
+    [
+      "invalid argument: binary file — resolve this conflict by hand",
+      "Binary file — resolve this conflict by hand",
+    ],
+    ["invalid argument: file is too large", "File is too large"],
+    [
+      "invalid argument: worktree path must not contain '..'",
+      "Worktree path must not contain '..'",
+    ],
+    [
+      "invalid argument: terminal command not found: wt",
+      "Terminal command not found: wt",
+    ],
+  ]) {
+    assert.equal(
+      presentError(appError("invalidArgument", message)).summary,
+      summary,
+    );
+  }
+});
+
+test("an interpolated name leading the detail keeps its case (must-not-match)", () => {
+  for (const [message, summary] of [
+    [
+      "invalid argument: main has no upstream branch to reset to.",
+      "main has no upstream branch to reset to.",
+    ],
+    [
+      "invalid argument: main's upstream moved since this was measured",
+      "main's upstream moved since this was measured",
+    ],
+    [
+      "invalid argument: deadbee is not an unpushed commit on this branch",
+      "deadbee is not an unpushed commit on this branch",
+    ],
+    [
+      "invalid argument: file_path does not exist: x",
+      "file_path does not exist: x",
+    ],
+    [
+      "invalid argument: write:discussion scope missing",
+      "write:discussion scope missing",
+    ],
+  ]) {
+    assert.equal(
+      presentError(appError("invalidArgument", message)).summary,
+      summary,
+    );
+  }
+});
+
+test("sibling kinds' Rust leads read in the summary's register", () => {
+  for (const [kind, message, summary] of [
+    [
+      "keyring",
+      "keychain error: Platform secure storage failure: locked",
+      "Platform secure storage failure: locked",
+    ],
+    [
+      "io",
+      "io error: The system cannot find the path specified. (os error 3)",
+      "The system cannot find the path specified. (os error 3)",
+    ],
+    [
+      "notARepo",
+      "not a git repository: C:\\work\\gone",
+      "Not a Git repository: C:\\work\\gone",
+    ],
+    ["gitNotFound", "git executable not found", "Git executable not found"],
+  ]) {
+    const p = presentError(appError(kind, message));
+    assert.equal(p.summary, summary, kind);
+    assert.equal(p.fullText, message, `${kind} Details keeps the raw text`);
+  }
+});
+
+test("a lead outside its kind, mid-message, or respelled is left alone (must-not-match)", () => {
+  for (const [kind, message] of [
+    // Keyed by kind: another kind quoting the lead is that kind's own text.
+    ["command", "invalid argument: resetting would overwrite x"],
+    ["gh", "keychain error: Platform secure storage failure"],
+    // Start-anchored: app prose quoting a lead mid-line.
+    ["invalidArgument", "couldn't read invalid argument: x"],
+    // Case-sensitive: only Rust's exact spelling is a lead.
+    ["invalidArgument", "Invalid argument: resetting would overwrite x"],
+    ["notARepo", "Not a git repository: C:\\x"],
+  ]) {
+    assert.equal(presentError(appError(kind, message)).summary, message, kind);
+  }
+  // A plain Error is never an AppError kind.
+  assert.equal(
+    presentError(new Error("invalid argument: resetting would overwrite x"))
+      .summary,
+    "invalid argument: resetting would overwrite x",
+  );
+});
+
+test("a lead with nothing after it falls back to the kind label", () => {
+  assert.equal(
+    presentError(appError("invalidArgument", "invalid argument: ")).summary,
+    "Invalid input",
+  );
+});
+
+test("a composed presentation of a raw refusal stays raw in Details, under its heading", () => {
+  // A lone error with a heading always composes into one headed section.
+  const p = composedErrorPresentation(
+    "Couldn't move Launch checklist",
+    [appError("invalidArgument", RESET_REFUSAL)],
+    ["Launch checklist"],
+  );
+  assert.equal(p.label, "Invalid input");
+  assert.equal(p.summary, "Couldn't move Launch checklist");
+  assert.equal(p.fullText, `Launch checklist\n${RESET_REFUSAL}`);
+  assert.equal(p.long, true);
+  // Without a heading, the own presentation keeps only its title swapped in.
+  const bare = composedErrorPresentation("Reset failed", [
+    appError("invalidArgument", RESET_REFUSAL),
+  ]);
+  assert.equal(bare.summary, "Reset failed");
+  assert.equal(bare.fullText, RESET_REFUSAL);
 });

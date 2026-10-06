@@ -351,15 +351,28 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // GitLab repos both get the create dialog (provider-aware copy; the head branch
   // is pushed first either way). The dialog picks the head/base branches itself.
   const canCreateGhPr = forgeFeatureReady(gh.data, "mrCreate");
-  const ghCreateReason = canCreateGhPr
-    ? null
-    : isGitLab
-      ? gh.data?.installed
-        ? "Sign in to GitLab (glab auth login) to work with merge requests here."
-        : "Install the GitLab CLI (glab) to work with merge requests here."
-      : provider === "bitbucket"
-        ? "Connect your Bitbucket account in Settings → Accounts to create pull requests here."
-        : "Connect this repository to GitHub to open a pull request here.";
+  const ghCreateReason = (() => {
+    switch (true) {
+      case canCreateGhPr:
+        return null;
+      // A status probe that rejected with nothing cached knows no provider, so
+      // every setup arm below would misdirect; ForgeNotReady says the same.
+      case gh.isError && gh.data === undefined:
+        return "GitDesktop couldn't reach this repository's host, so pull requests can't be opened right now. Check your network connection.";
+      // No answer yet (a cold start, or a Retry resetting the probe): nothing
+      // below is known to be the blocker.
+      case gh.isPending:
+        return "Checking this repository's host…";
+      case isGitLab && Boolean(gh.data?.installed):
+        return "Sign in to GitLab (glab auth login) to work with merge requests here.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to work with merge requests here.";
+      case provider === "bitbucket":
+        return "Connect your Bitbucket account in Settings → Accounts to create pull requests here.";
+      default:
+        return "Connect this repository to GitHub to open a pull request here.";
+    }
+  })();
   const pendingCreate = useUiStore((s) => s.pendingCreate);
   const clearPendingCreate = useUiStore((s) => s.clearPendingCreate);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);

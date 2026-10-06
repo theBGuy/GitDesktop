@@ -171,6 +171,9 @@ export function useRemoteListFilter(opts: {
   //    (`teamScopeDropped` below) — the popover note alone leaves a wrong scope on
   //    screen unexplained, and `retry: false` means both are permanent until
   //    something refetches. A scope the app can't grant announces, never vouches.
+  //    Beside another mine axis this DROPS the rows only a team request matched,
+  //    and that is deliberate: sending the unvalidated slugs could zero the whole
+  //    union (above), which loses every row instead of some.
   //  - ANSWERED: the validated path, unchanged.
   const teamScopeSettled =
     chosenTeams.length === 0 || teamsAnswered || teamsUnavailable;
@@ -329,8 +332,8 @@ export function useRemoteListFilter(opts: {
     prefsReason: prefsReady ? null : PREFS_LOADING_REASON,
     /** A saved team axis that will NOT be in the running filter, because it could not
      *  be validated (the query errored, or the token lacks the scope to read
-     *  membership) — the list is showing a wider scope than the saved one and must say
-     *  so where the rows are, not only in the popover. */
+     *  membership) — the list is showing a different scope than the saved one and must
+     *  say so where the rows are, not only in the popover. */
     teamScopeDropped: chosenTeams.length > 0 && teamsUnavailable,
     /** The forge applies the label axis itself. False = the list hook must apply it
      *  to the remote rows, or a label pick would silently do nothing to them. */

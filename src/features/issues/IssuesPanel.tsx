@@ -196,6 +196,30 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // Creation is possible only when the forge allows it AND the repo hasn't turned
   // issues off — gates every path that opens the GitHub create dialog.
   const canOpenGhCreate = canCreateGh && !issuesDisabled;
+  const ghCreateReason = (() => {
+    switch (true) {
+      case canOpenGhCreate:
+        return undefined;
+      // A status probe that rejected with nothing cached knows no provider, so
+      // every setup arm below would misdirect; ForgeNotReady says the same.
+      case gh.isError && gh.data === undefined:
+        return "GitDesktop couldn't reach this repository's host, so issues can't be opened right now. Check your network connection.";
+      // No answer yet (a cold start, or a Retry resetting the probe): nothing
+      // below is known to be the blocker.
+      case gh.isPending:
+        return "Checking this repository's host…";
+      case isBitbucket:
+        return "Bitbucket has retired its native issue tracker — link a Jira project to track issues.";
+      case isGitLab && Boolean(gh.data?.installed):
+        return "Sign in to GitLab (glab auth login) to open issues here.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to open issues here.";
+      case issuesDisabled:
+        return "Issues are disabled on this repository — enable them in the repository settings on GitHub.";
+      default:
+        return "Connect this repository to GitHub to open an issue.";
+    }
+  })();
   const onStateFilter = (s: IssueStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
@@ -458,18 +482,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           // when the forge is otherwise ready — gate it with the reason so "New" isn't
           // a button that can only fail.
           ghDisabled: !canCreateGh || issuesDisabled,
-          ghReason:
-            canCreateGh && !issuesDisabled
-              ? undefined
-              : isBitbucket
-                ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
-                : isGitLab
-                  ? gh.data?.installed
-                    ? "Sign in to GitLab (glab auth login) to open issues here."
-                    : "Install the GitLab CLI (glab) to open issues here."
-                  : issuesDisabled
-                    ? "Issues are disabled on this repository — enable them in the repository settings on GitHub."
-                    : "Connect this repository to GitHub to open an issue.",
+          ghReason: ghCreateReason,
           onGh: () => setCreateOpen(true),
           localLabel: "Local issue…",
           onLocal: () => setCreateLocalOpen(true),

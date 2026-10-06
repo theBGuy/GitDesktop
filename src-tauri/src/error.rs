@@ -266,4 +266,28 @@ mod tests {
             r#"{"kind":"gitNotFound","message":"git executable not found"}"#
         );
     }
+
+    /// `DISPLAY_LEADS` (src/lib/error-summary.ts) matches these leads byte-for-byte
+    /// to swap them for display wording, so a respelled `#[error]` here silently
+    /// leaks the raw lead into every toast — move both sides together.
+    #[test]
+    fn display_leads_match_the_frontend_mirror() {
+        let cases = [
+            (
+                AppError::InvalidArgument("x".to_string()),
+                "invalid argument: x",
+            ),
+            (AppError::Keyring("x".to_string()), "keychain error: x"),
+            (AppError::Io(std::io::Error::other("x")), "io error: x"),
+            (
+                AppError::NotARepo("x".to_string()),
+                "not a git repository: x",
+            ),
+            (AppError::GitNotFound, "git executable not found"),
+            (AppError::Timeout(120), "git operation timed out after 120s"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
 }
