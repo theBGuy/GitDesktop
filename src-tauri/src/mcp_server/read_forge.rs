@@ -170,8 +170,8 @@ impl GitDesktopMcp {
                        `filesUnknown` means files could not be fully read; `filesTruncated` means \
                        the read hit a cap (the list may be partial and retrying returns the same list). \
                        A failed read is unknown but never truncated. Retained files must not be \
-                       treated as complete. On Bitbucket, additions and deletions are summed from \
-                       files, so they are partial whenever `filesUnknown` is set. \
+                       treated as complete. On Bitbucket and GitLab, additions and deletions are \
+                       summed from files, so they are partial whenever `filesUnknown` is set. \
                        A stacked PR also carries `stack` ({id, position, size}) \
                        and `stackMembers`, the whole stack bottom→top with each layer's state. On \
                        GitHub merged layers stay listed, because merging one layer also merges \

@@ -36,10 +36,13 @@ export function useEditPr(repo: string, lens: RemoteLens) {
 /** Stack a chain of open PRs (bottom→top) into a new stack. Takes the default
  *  whole-repo invalidation: stacking rewrites every member's base and position,
  *  so the PR detail, the list, and each member's own row all go stale at once —
- *  the same reasoning as the PR-lifecycle mutations beside it. */
+ *  the same reasoning as the PR-lifecycle mutations beside it. The member list
+ *  names every PR the write holds while it runs. */
 export function useStackCreate(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (pullRequests: number[]) =>
-    api.forgeStackCreate(repo, pullRequests, lens),
+  return useRepoMutation(
+    repo,
+    (pullRequests: number[]) => api.forgeStackCreate(repo, pullRequests, lens),
+    { identity: prWriteKey("stack-create", repo) },
   );
 }
 
@@ -49,6 +52,7 @@ export function useStackAdd(repo: string, lens: RemoteLens) {
     repo,
     (args: { stackNumber: number; pullRequests: number[] }) =>
       api.forgeStackAdd(repo, args.stackNumber, args.pullRequests, lens),
+    { identity: prWriteKey("stack-add", repo) },
   );
 }
 

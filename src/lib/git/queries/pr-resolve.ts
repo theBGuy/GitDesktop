@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { useRepoMutation } from "./internal";
+import { localPrWriteKey, prWriteKey } from "./pr-writes";
 
+/** Merge a local PR in an isolated worktree. Keyed so the view's hold reads the
+ *  cache, which outlives the view's own mount. */
 export function useMergeLocalPr(repo: string) {
   return useRepoMutation(
     repo,
@@ -22,6 +25,7 @@ export function useMergeLocalPr(repo: string) {
     {
       // Local merge write — never park it offline.
       networkMode: "always",
+      identity: localPrWriteKey("merge", repo),
     },
   );
 }
@@ -69,7 +73,8 @@ export function useAbortLocalPrMerge(repo: string) {
 
 /** Merges the base into a remote PR's head branch in an isolated worktree, pushing the
  *  head when it comes out clean. Repo-wide invalidation is deliberate: a clean run moves
- *  the remote branch, so mergeability, the PR view and branch state all go stale. */
+ *  the remote branch, so mergeability, the PR view and branch state all go stale.
+ *  The variables name the PR, so the view holds each PR's resolve on its own. */
 export function useMergeRemotePr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
     repo,
@@ -82,6 +87,7 @@ export function useMergeRemotePr(repo: string, lens: RemoteLens) {
         args.message ?? null,
         lens,
       ),
+    { identity: prWriteKey("resolve-merge", repo) },
   );
 }
 
@@ -106,7 +112,8 @@ export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
   );
 }
 
-/** Discards a paused remote-PR resolution by deleting its worktree. */
+/** Discards a paused remote-PR resolution by deleting its worktree. The variables
+ *  name no PR, so the view holds this repo-wide. */
 export function useAbortRemotePrResolve(repo: string) {
   return useRepoMutation(
     repo,
@@ -115,6 +122,7 @@ export function useAbortRemotePrResolve(repo: string) {
     {
       // Local merge write — never park it offline.
       networkMode: "always",
+      identity: prWriteKey("abort-resolve", repo),
     },
   );
 }

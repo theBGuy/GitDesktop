@@ -2499,7 +2499,7 @@ test("mutation-identity-pinning sees through a generic parameter list", () => {
   assert.deepEqual(unpinnedMutationIdentity(constrained), [2]);
 });
 
-test("mutation-identity-pinning is scoped to the query modules, with one allowlisted file", () => {
+test("mutation-identity-pinning is scoped to the query modules, with no allowlist", () => {
   const check = CHECKS.find((c) => c.name === "mutation-identity-pinning");
   assert.equal(check.appliesTo("src/lib/git/queries/branches.ts"), true);
   assert.equal(check.appliesTo("src/lib/jira/queries.ts"), true);
@@ -2512,21 +2512,22 @@ test("mutation-identity-pinning is scoped to the query modules, with one allowli
   // Feature files declare no query hooks; .tsx never enters the scope.
   assert.equal(check.appliesTo("src/features/pulls/CreatePrDialog.tsx"), false);
   assert.equal(check.appliesTo("src/lib/settings/queries.ts"), false);
-  // The single exception, and the reason it is a whole file rather than a line.
-  assert.deepEqual(check.allowlist, ["src/lib/git/queries/pr-write.ts"]);
-  // An allowlisted file is SCANNED, so the entry only stays legitimate while its
-  // site is still unpinned — pin useStackCreate and the entry reports stale.
+  // No exceptions: a new one is a reviewed decision, never a leftover.
+  assert.deepEqual(check.allowlist, []);
   const flagged =
     "export function useStackCreate(repo: string, lens: RemoteLens) {\n  return useRepoMutation(repo, (prs: number[]) =>\n    api.forgeStackCreate(repo, prs, lens),\n  );\n}";
   assert.deepEqual(unpinnedMutationIdentity(flagged), [2]);
-  // End to end: the allowlisted file's hit is suppressed and its entry stays live,
-  // while the same shape in a sibling module is a violation.
+  const pinned =
+    'export function useStackCreate(repo: string, lens: RemoteLens) {\n  return useRepoMutation(\n    repo,\n    (prs: number[]) => api.forgeStackCreate(repo, prs, lens),\n    { identity: ["pr-write", "stack-create", repo] },\n  );\n}';
+  assert.deepEqual(unpinnedMutationIdentity(pinned), []);
+  // End to end: a pinned module passes and an unpinned sibling is a violation, with
+  // nothing allowlisted to go stale.
   const files = [
     "src/lib/git/queries/pr-write.ts",
     "src/lib/git/queries/branches.ts",
   ];
   const views = new Map([
-    ["src/lib/git/queries/pr-write.ts", view(flagged)],
+    ["src/lib/git/queries/pr-write.ts", view(pinned)],
     [
       "src/lib/git/queries/branches.ts",
       view(

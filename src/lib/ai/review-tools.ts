@@ -315,8 +315,8 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
         "may be partial or empty, and commitsTruncated means the read hit a cap " +
         "(the list may be partial and retrying returns the same list). " +
         "filesUnknown and filesTruncated mean the same for files. On " +
-        "Bitbucket, additions and deletions are summed from files, so they " +
-        "are partial whenever `filesUnknown` is set.",
+        "Bitbucket and GitLab, additions and deletions are summed from files, " +
+        "so they are partial whenever `filesUnknown` is set.",
       inputSchema: z.object({}),
       execute: async (_input, { abortSignal }) => {
         try {
