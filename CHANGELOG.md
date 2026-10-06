@@ -12,6 +12,87 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-10-06
+
+### Fixed
+
+- AI descriptions of a pull or merge request work even when the forge's file
+  list can't be read, and AI reviews still see which files changed: both list
+  the files from the diff itself.
+- Cancelled CI runs on GitHub and GitLab can be re-run right from a pull
+  request's checks, and on GitHub a pull request whose checks were cancelled
+  shows as cancelled in the pull request list.
+- The Codex and Copilot model pickers in Settings and in agent sessions now
+  offer the models your installed CLI actually has, read live from the CLI
+  itself.
+- AI reviews and descriptions of large pull requests on GitHub and Bitbucket
+  know when only part of the changed-file list could be loaded, and treat the
+  diff as the source of truth. AI reviews of pull and merge requests also know
+  when the conversation they draw on may be incomplete, including other AI
+  reviewers' findings, GitDesktop's own earlier replies, and the author's notes
+  for reviewers.
+- Keyboard focus stays in the project fields editor when you retry loading a
+  board's fields, and the repository menu shows "Repository settings…" with
+  its access status on a single line.
+- Connection problems are recognized even when host names or addresses resemble
+  HTTP status codes, so GitHub and GitLab can offer the right recovery guidance.
+- Review runs include external findings when the Ignore option is no longer shown.
+- Webhook and secrets lists in repository settings label connection problems
+  clearly. Error details label proxy and IPv6 failures as connection problems;
+  sign-in checks report them as offline. GitLab merge request file lists say when
+  they may be incomplete, and a merge request's line totals appear only once
+  every file is counted.
+- Renaming or moving a GitLab project in the app keeps pushes and project
+  actions working by updating the local origin remote to the project's new path.
+- Draft pull and merge requests now carry a Draft badge in My work.
+- When several GitDesktop windows watch the same Bitbucket repository, each
+  push to a pull request gets one automated review.
+- Merging, closing, reopening, commenting, draft changes, approvals,
+  auto-merge, branch updates, and starting or continuing a conflict resolution
+  on a GitHub, GitLab, or Bitbucket pull request stay available while one of
+  them finishes on a different pull request (a stack merge holds the rest of
+  its stack until it lands), and a control held by an action on the same pull
+  request says what it is waiting for or shows its progress. Checkout names the
+  pull request it is checking out, a local pull request's Merge and Update
+  branch name the branches they are waiting on, and Create stack and Add to
+  stack hold every pull request being stacked, all of them still held after
+  switching away and back. Auto-merge confirmations name their pull
+  request, and the Create stack and Add to stack offers tell a viewer without
+  push access why they can't be used.
+- After renaming a repository, settings and links show the new name as soon
+  as the rename finishes, and the name field settles on the name the forge
+  saved.
+- The AI review panel flags when the author's notes for reviewers or other AI
+  reviewers' findings may be incomplete, so you can tell when the next review
+  may be missing some of that context.
+- Review threads on GitHub pull requests now say when replies in a very long
+  conversation could not all be loaded.
+- Repository settings forms hand focus back to where you were working when
+  they close: saving, canceling, or going back from a webhook, branch rule,
+  schedule, or ruleset form returns you to the button that opened it. Security
+  settings keep Save and Discard in place, each explaining why it's
+  unavailable, and a section that fails to load over a dropped connection
+  shows just the connection problem.
+- Keyboard focus stays on the button you pressed to add or create something in
+  repository settings while it saves, and the button explains that the change
+  is being applied. Delete, Remove, and Unprotect buttons in repository
+  settings, such as those on webhooks, variables, branch rules, and rulesets,
+  now tell screen readers what they act on.
+- Buttons that save, update, rename, test, re-send, re-check, or create
+  something in repository settings keep keyboard focus while they work and
+  explain what is in progress, and Cancel and Discard say when a save is still
+  finishing. A Bitbucket pipeline variable keeps showing the value you just
+  saved.
+- Buttons in repository settings that can't act yet now say why: there are
+  no changes to save, a field needs a value or has one that won't be
+  accepted, or the typed confirmation doesn't match. Closing the Dependabot
+  setup dialog returns focus to its row.
+- Staging a conflicted file that still has conflict markers asks first, from the
+  row's **+** button, the right-click menu, **Stage all**, or the command palette,
+  so markers can't reach a commit unnoticed. Files whose markers you've removed
+  stage without a prompt, except files that can't be scanned (binary, very large,
+  or unreadable), which always ask.
+
 ## [0.13.2] - 2026-10-02
 
 ### Fixed
@@ -4576,7 +4657,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.3...HEAD
+[0.13.3]: https://github.com/theBGuy/GitDesktop/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/theBGuy/GitDesktop/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/theBGuy/GitDesktop/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/theBGuy/GitDesktop/compare/v0.12.2...v0.13.0
