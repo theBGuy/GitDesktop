@@ -1,4 +1,5 @@
 import {
+  type QueryKey,
   queryOptions,
   useMutation,
   useQuery,
@@ -33,6 +34,7 @@ import {
   useRepoMutation,
   workingTreeKeys,
 } from "./internal";
+import { prWriteKey } from "./pr-writes";
 
 export function usePrsForBranch(
   repo: string,
@@ -955,8 +957,13 @@ export function useCommentIssue(repo: string, lens: RemoteLens) {
 }
 
 export function useCommentPr(repo: string, lens: RemoteLens) {
-  return useOptimisticCreateCommentMutation(repo, "pr", lens, (args) =>
-    api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
+  return useOptimisticCreateCommentMutation(
+    repo,
+    "pr",
+    lens,
+    (args) =>
+      api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
+    prWriteKey("comment", repo),
   );
 }
 
@@ -982,6 +989,7 @@ function useOptimisticCreateCommentMutation<TData>(
     body: string;
     asBot?: boolean;
   }) => Promise<TData>,
+  mutationKey?: QueryKey,
 ) {
   return useOptimisticCacheMutation<
     { number: number; body: string; author: string; asBot?: boolean },
@@ -1009,5 +1017,6 @@ function useOptimisticCreateCommentMutation<TData>(
       return d ? { ...d, comments: [...d.comments, synthetic] } : d;
     },
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    mutationKey,
   );
 }

@@ -678,7 +678,11 @@ export function LocalPrView({
   // The Merge control's state. `disabled`/`reason` land on the rendered
   // DisabledReasonButton, never the trigger — its own inner useButton swallows
   // activation while blocked, which is what actually keeps the menu shut.
+  // A local merge advances refs every local PR shares (and touches the working tree
+  // when its base is the current branch), so any merge this mounted view started
+  // holds this PR's Merge too — only the wording is scoped, naming that merge.
   const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
+  const running = merge.isPending ? merge.variables : undefined;
   // This same string doubles as the hover title while nothing blocks. The
   // active merge outranks `dirtyBlocks`: a merge already in flight can't be
   // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
@@ -687,8 +691,10 @@ export function LocalPrView({
     switch (true) {
       case !canMerge:
         return "Approve the PR before merging";
-      case merge.isPending:
+      case running?.head === pr.head && running.base === pr.base:
         return "Merging…";
+      case running !== undefined:
+        return `Merging ${running.head} into ${running.base}…`;
       case dirtyBlocks:
         return "Commit or stash your changes before merging into the current branch";
       default:

@@ -39,7 +39,8 @@ export const workingTreeKeys = (repo: string) =>
  * differ only in `keyFor(args)` (the key is derived from the args AT MUTATE TIME, so a
  * mid-flight repo/number/sha switch can never corrupt another key's cache), `patch`, and
  * `reconcile`. `TCache` is the shape stored at the key; the rollback context carries the
- * exact key + prior value.
+ * exact key + prior value. `mutationKey`, when given, files the mutation under it (the
+ * same constant-key contract as `useRepoMutation`'s `identity`); omitted, it has none.
  */
 export function useOptimisticCacheMutation<TArgs, TData, TCache>(
   mutationFn: (args: TArgs) => Promise<TData>,
@@ -49,10 +50,12 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
     queryClient: ReturnType<typeof useQueryClient>,
     args: TArgs,
   ) => void,
+  mutationKey?: QueryKey,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn,
+    ...(mutationKey ? { mutationKey } : {}),
     onMutate: async (args: TArgs) => {
       const key = keyFor(args);
       await queryClient.cancelQueries({ queryKey: key });

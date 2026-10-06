@@ -8,6 +8,7 @@ import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
+import { prWriteKey } from "./pr-writes";
 
 export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
@@ -53,8 +54,10 @@ export function useStackAdd(repo: string, lens: RemoteLens) {
 
 /** Dissolve a stack — its members stay open on their branches, unstacked. */
 export function useStackDissolve(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (stackNumber: number) =>
-    api.forgeStackDissolve(repo, stackNumber, lens),
+  return useRepoMutation(
+    repo,
+    (stackNumber: number) => api.forgeStackDissolve(repo, stackNumber, lens),
+    { identity: prWriteKey("stack-dissolve", repo) },
   );
 }
 

@@ -1,9 +1,12 @@
 import {
+  notifyManager,
   type QueryKey,
+  replaceEqualDeep,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import * as api from "../api";
 import type {
@@ -20,7 +23,50 @@ import {
   useOptimisticCacheMutation,
   useRepoMutation,
 } from "./internal";
+import {
+  type PendingPrWrite,
+  PR_WRITES_KEY,
+  type PrWriteKind,
+  pendingPrWriteTarget,
+  prWriteKey,
+} from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
+
+/**
+ * Every PR write against `repo` that is in flight, one entry per INVOCATION — an
+ * observer tracks only its latest call, so a second write from the same hook would
+ * hide the first. Computed from the cache on every snapshot rather than through
+ * `useMutationState`, for the `<Activity>` blind spot `usePendingBoardWrites`
+ * (projects.ts) documents.
+ */
+export function usePendingPrWrites(repo: string): PendingPrWrite[] {
+  const cache = useQueryClient().getMutationCache();
+  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
+  // keeps one identity, as `useSyncExternalStore` requires.
+  const snapshot = useRef<PendingPrWrite[]>([]);
+  const getSnapshot = useCallback(() => {
+    const next = cache
+      .findAll({ mutationKey: PR_WRITES_KEY, status: "pending" })
+      .flatMap((m): PendingPrWrite[] => {
+        const [, kind, keyRepo] = m.options.mutationKey ?? [];
+        if (keyRepo !== repo || typeof kind !== "string") return [];
+        return [
+          {
+            kind: kind as PrWriteKind,
+            ...pendingPrWriteTarget(m.state.variables),
+          },
+        ];
+      });
+    snapshot.current = replaceEqualDeep(snapshot.current, next);
+    return snapshot.current;
+  }, [cache, repo]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
 
 /** A merge/pull request's approval state — the approve/unapprove toggle's driver
  *  (GitLab + Bitbucket; GitHub approves via its Review menu, so `implemented.mrApprove`
@@ -37,8 +83,10 @@ export function usePrApprovals(repo: string, number: number | null) {
 }
 
 export function useApprovePr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrApprove(repo, number, lens),
+  return useRepoMutation(
+    repo,
+    (number: number) => api.forgePrApprove(repo, number, lens),
+    { identity: prWriteKey("approve", repo) },
   );
 }
 
@@ -114,8 +162,10 @@ export function useDeletePrTask(repo: string) {
 }
 
 export function useUnapprovePr(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrUnapprove(repo, number),
+  return useRepoMutation(
+    repo,
+    (number: number) => api.forgePrUnapprove(repo, number),
+    { identity: prWriteKey("unapprove", repo) },
   );
 }
 
@@ -123,8 +173,11 @@ export function useUnapprovePr(repo: string) {
  *  on `implemented.mrRequestChanges`). The caller patches the approvals cache
  *  optimistically, like the approve toggle. */
 export function useRequestChangesPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (args: { number: number; body: string }) =>
-    api.forgePrRequestChanges(repo, args.number, args.body, lens),
+  return useRepoMutation(
+    repo,
+    (args: { number: number; body: string }) =>
+      api.forgePrRequestChanges(repo, args.number, args.body, lens),
+    { identity: prWriteKey("request-changes", repo) },
   );
 }
 
@@ -132,8 +185,10 @@ export function useRequestChangesPr(repo: string, lens: RemoteLens) {
  *  on every plan, so the request-changes control toggles there). Same
  *  caller-patches-optimistically contract as `useRequestChangesPr`. */
 export function useUnrequestChangesPr(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrUnrequestChanges(repo, number),
+  return useRepoMutation(
+    repo,
+    (number: number) => api.forgePrUnrequestChanges(repo, number),
+    { identity: prWriteKey("unrequest-changes", repo) },
   );
 }
 
@@ -203,17 +258,19 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
   });
 }
 
-/** Toggle a PR/MR's draft state both ways on all three providers. `lens` threads the
- *  fork identity through to the GitHub arm. Optimistically patches `isDraft` with
- *  field-scoped rollback so the badge flips instantly; the repo-wide invalidate on
- *  settle reconciles server truth and refreshes the merge gate. */
-export function useSetPrDraft(repo: string, lens: RemoteLens) {
+/** Toggle a PR/MR's draft state both ways on all three providers. `args.lens` threads
+ *  the fork identity through to the GitHub arm and, with `number`, names the PR the
+ *  write targets — the view scopes its busy hold on that pair. Optimistically patches
+ *  `isDraft` with field-scoped rollback so the badge flips instantly; the repo-wide
+ *  invalidate on settle reconciles server truth and refreshes the merge gate. */
+export function useSetPrDraft(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { number: number; draft: boolean }) =>
-      api.forgePrSetDraft(repo, args.number, args.draft, lens),
+    mutationKey: prWriteKey("set-draft", repo),
+    mutationFn: (args: { number: number; lens: RemoteLens; draft: boolean }) =>
+      api.forgePrSetDraft(repo, args.number, args.draft, args.lens),
     onMutate: async (args) => {
-      const key = ["repo", repo, "pr", lens, args.number] as const;
+      const key = ["repo", repo, "pr", args.lens, args.number] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<PrDetails>(key);
       queryClient.setQueryData<PrDetails>(key, (d) =>
@@ -360,12 +417,18 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
   });
 }
 
-export function useMergePr(repo: string, lens: RemoteLens) {
+/** Merge a PR on the forge. The variables name the PR they target (`number` +
+ *  `lens`), so the view can scope its busy hold to that PR. `stack` rides them only
+ *  to name the native stack the merge cascades through (the forge call ignores it),
+ *  so every member of that stack's view holds too while the stack lands. */
+export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     async (args: {
       number: number;
+      lens: RemoteLens;
+      stack: number | null;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
       /** GitLab stale-view guard (the MR head sha); GitHub ignores it. */
@@ -377,7 +440,7 @@ export function useMergePr(repo: string, lens: RemoteLens) {
         args.strategy,
         args.deleteBranch,
         args.sha,
-        lens,
+        args.lens,
       );
       // The remote advanced but the local repo is now stale (ahead/behind, history,
       // tracking refs). Kick off a background pruning fetch so they catch up —
@@ -391,6 +454,7 @@ export function useMergePr(repo: string, lens: RemoteLens) {
         .catch(() => undefined);
       return outcome;
     },
+    { identity: prWriteKey("merge", repo) },
   );
 }
 
@@ -493,12 +557,14 @@ export function useGlMrMergeState(repo: string, number: number | null) {
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
- *  pipeline just passed, so the whole MR view must refresh. */
+ *  pipeline just passed, so the whole MR view must refresh. `lens` rides the
+ *  variables only to name the target PR (GitLab has no upstream lens). */
 export function useGlArmAutoMerge(repo: string) {
   return useRepoMutation(
     repo,
     (args: {
       number: number;
+      lens: RemoteLens;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
       /** Stale-view guard (the MR head sha) — GitLab 409s if the head moved. */
@@ -511,12 +577,17 @@ export function useGlArmAutoMerge(repo: string) {
         args.deleteBranch,
         args.sha,
       ),
+    { identity: prWriteKey("gl-arm-auto-merge", repo) },
   );
 }
 
+/** Same identity-only `lens` as {@link useGlArmAutoMerge}. */
 export function useGlCancelAutoMerge(repo: string) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgeGlMrCancelAutoMerge(repo, number),
+  return useRepoMutation(
+    repo,
+    (args: { number: number; lens: RemoteLens }) =>
+      api.forgeGlMrCancelAutoMerge(repo, args.number),
+    { identity: prWriteKey("gl-cancel-auto-merge", repo) },
   );
 }
 
@@ -530,15 +601,23 @@ export function useGlRemoveForkRelationship(repo: string) {
   });
 }
 
-export function useClosePr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrClose(repo, number, lens),
+/** Close/reopen carry their target (`number` + `lens`) in the variables, like
+ *  {@link useMergePr}, so a view's busy hold can be scoped to that PR. */
+export function useClosePr(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { number: number; lens: RemoteLens }) =>
+      api.forgePrClose(repo, args.number, args.lens),
+    { identity: prWriteKey("close", repo) },
   );
 }
 
-export function useReopenPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (number: number) =>
-    api.forgePrReopen(repo, number, lens),
+export function useReopenPr(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { number: number; lens: RemoteLens }) =>
+      api.forgePrReopen(repo, args.number, args.lens),
+    { identity: prWriteKey("reopen", repo) },
   );
 }
 

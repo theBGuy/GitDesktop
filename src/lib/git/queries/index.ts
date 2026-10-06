@@ -17,6 +17,7 @@ export * from "./issues";
 export * from "./pr-actions";
 export * from "./pr-resolve";
 export * from "./pr-write";
+export * from "./pr-writes";
 export * from "./projects";
 export * from "./prs";
 export * from "./remotes";
