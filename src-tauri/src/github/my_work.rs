@@ -66,7 +66,7 @@ struct GhSearchItem {
 
 /// The issues leg cannot request `isDraft`: gh 2.94.0 rejects that JSON field
 /// on `search issues` (measured), while `search prs` accepts it.
-const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
+const MY_WORK_ISSUE_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
 const MY_WORK_PR_FIELDS: &str =
     "number,title,isPullRequest,repository,updatedAt,url,author,isDraft";
 
@@ -106,7 +106,7 @@ const INVOLVES_ISSUES_ARGS: &[&str] = &[
     "--order",
     "desc",
     "--json",
-    MY_WORK_FIELDS,
+    MY_WORK_ISSUE_FIELDS,
 ];
 
 /// Leg 3: the pull requests awaiting the user's review, which `involves:` cannot see.
@@ -219,12 +219,12 @@ pub async fn my_work() -> AppResult<MyWorkPage> {
 mod tests {
     use super::{
         merge_legs, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ISSUES_ARGS,
-        INVOLVES_PRS_ARGS, MY_WORK_FIELDS, MY_WORK_LIMIT, MY_WORK_PR_FIELDS, REVIEW_REQUESTED_ARGS,
+        INVOLVES_PRS_ARGS, MY_WORK_ISSUE_FIELDS, MY_WORK_LIMIT, MY_WORK_PR_FIELDS, REVIEW_REQUESTED_ARGS,
     };
     use serde_json::{json, Value};
 
-    /// The involves legs' and review-requested fold as [`super::my_work`]
-    /// performs it, over the neutral N-leg merge.
+    /// A two-leg fold over the neutral N-leg merge — what the merge-semantics
+    /// tests below need; [`super::my_work`] itself folds three legs.
     fn merge_my_work(involves: MyWorkLeg, review_requested: MyWorkLeg) -> MyWorkPage {
         merge_legs(vec![involves, review_requested], MY_WORK_LIMIT)
     }
@@ -264,10 +264,12 @@ mod tests {
         assert!(REVIEW_REQUESTED_ARGS.starts_with(&["search", "prs"]));
         assert!(REVIEW_REQUESTED_ARGS.contains(&"--review-requested=@me"));
         assert_eq!(
-            MY_WORK_FIELDS,
+            MY_WORK_ISSUE_FIELDS,
             "number,title,isPullRequest,repository,updatedAt,url,author"
         );
-        assert!(!MY_WORK_FIELDS.split(',').any(|field| field == "isDraft"));
+        assert!(!MY_WORK_ISSUE_FIELDS
+            .split(',')
+            .any(|field| field == "isDraft"));
         assert_eq!(
             MY_WORK_PR_FIELDS,
             "number,title,isPullRequest,repository,updatedAt,url,author,isDraft"
@@ -276,14 +278,13 @@ mod tests {
         let limit = MY_WORK_LIMIT.to_string();
         for (args, fields) in [
             (INVOLVES_PRS_ARGS, MY_WORK_PR_FIELDS),
-            (INVOLVES_ISSUES_ARGS, MY_WORK_FIELDS),
+            (INVOLVES_ISSUES_ARGS, MY_WORK_ISSUE_FIELDS),
             (REVIEW_REQUESTED_ARGS, MY_WORK_PR_FIELDS),
         ] {
             let has_pair = |pair: &[&str; 2]| args.windows(2).any(|w| w == pair.as_slice());
             assert!(args.contains(&"--state=open"));
             assert!(!args.contains(&"--include-prs"));
             assert!(has_pair(&["--json", fields]), "{args:?} lost the field set");
-            assert!(has_pair(&["--limit", "200"]));
             // Newest-first, or the limit truncates by relevance instead of age.
             assert!(
                 has_pair(&["--sort", "updated"]),
@@ -534,7 +535,7 @@ mod tests {
         ];
         // #300 is in BOTH legs (review-requested AND involving) — the real
         // overlap observed against gh; #2 is review-requested only, the whole
-        // reason the second leg exists.
+        // reason the review-requested leg exists.
         let review_requested = vec![
             item(300, shared, "2026-09-04T15:30:38Z"),
             item(

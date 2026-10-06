@@ -35,7 +35,7 @@ pub struct MyWorkItem {
     pub number: u64,
     pub title: String,
     pub is_pull_request: bool,
-    /// Always false for issues; serialized as `isDraft` by `rename_all = "camelCase"`.
+    /// Always false for issues.
     pub is_draft: bool,
     /// The repo's full path as its provider spells it. On GitHub and Bitbucket
     /// that is `owner/name`; on GitLab a nested group path
