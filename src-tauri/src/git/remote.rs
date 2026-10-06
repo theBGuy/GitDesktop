@@ -162,6 +162,8 @@ type RemoteUrlCache = Mutex<HashMap<(String, String), (Instant, String)>>;
 /// Per-`(repo_path, remote_name)` cache of the last resolved remote URL and when it was
 /// fetched. Bounded by (#repos × #remote names) — tiny, so a stale entry is simply
 /// overwritten on the next fetch rather than evicted. Only successful lookups are cached.
+/// A poisoned lock is recovered rather than propagated: every entry is TTL-bounded, so
+/// a value a panicking holder left behind ages out on its own.
 static REMOTE_URL_CACHE: OnceLock<RemoteUrlCache> = OnceLock::new();
 
 fn remote_url_cache() -> &'static RemoteUrlCache {
@@ -172,7 +174,7 @@ fn remote_url_cache() -> &'static RemoteUrlCache {
 /// than `ttl` ago. Pure over the module-level cache; the lock is held only long enough to
 /// clone the value out.
 fn cache_get(repo: &str, name: &str, ttl: Duration) -> Option<String> {
-    let guard = remote_url_cache().lock().unwrap();
+    let guard = remote_url_cache().lock().unwrap_or_else(|p| p.into_inner());
     let (fetched_at, url) = guard.get(&(repo.to_string(), name.to_string()))?;
     if fetched_at.elapsed() < ttl {
         Some(url.clone())
@@ -183,17 +185,20 @@ fn cache_get(repo: &str, name: &str, ttl: Duration) -> Option<String> {
 
 /// Record `url` as the current value for `(repo, name)`, stamped with the fetch time.
 fn cache_put(repo: &str, name: &str, url: &str) {
-    remote_url_cache().lock().unwrap().insert(
-        (repo.to_string(), name.to_string()),
-        (Instant::now(), url.to_string()),
-    );
+    remote_url_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            (repo.to_string(), name.to_string()),
+            (Instant::now(), url.to_string()),
+        );
 }
 
 /// Drop any cached entry for `(repo, name)` so the next read re-resolves immediately.
 fn cache_invalidate(repo: &str, name: &str) {
     remote_url_cache()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|p| p.into_inner())
         .remove(&(repo.to_string(), name.to_string()));
 }
 

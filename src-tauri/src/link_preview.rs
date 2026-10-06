@@ -355,14 +355,19 @@ async fn read_body_capped(mut resp: Response, cap: usize) -> AppResult<(Vec<u8>,
 }
 
 /// XHTML carries og tags as routinely as HTML does, so both types are parsed; an absent
-/// or any other content type is not.
+/// or any other content type is not. An exact compare of the media type, as
+/// [`header_claims_carried_image`] does: a substring match would accept a parameter or
+/// a decorated type that merely mentions `text/html`.
 fn is_html(headers: &header::HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
-            let v = v.to_ascii_lowercase();
-            v.contains("text/html") || v.contains("application/xhtml+xml")
+            let media_type = v.split_once(';').map_or(v, |(t, _)| t);
+            matches!(
+                media_type.trim().to_ascii_lowercase().as_str(),
+                "text/html" | "application/xhtml+xml"
+            )
         })
 }
 
@@ -1365,6 +1370,7 @@ mod tests {
             "TEXT/HTML; charset=utf-8",
             "application/xhtml+xml",
             "Application/XHTML+XML; charset=utf-8",
+            " text/html ;charset=utf-8",
         ] {
             assert!(is_html(&headers_with(Some(value))), "{value} should parse");
         }
@@ -1373,6 +1379,11 @@ mod tests {
             "image/png",
             "text/plain",
             "application/json",
+            // Types that only MENTION html, in a parameter or a decorated spelling.
+            "text/plain; charset=text/html",
+            "text/html-fragment",
+            "x-text/html",
+            "application/xhtml+xml+json",
         ] {
             assert!(
                 !is_html(&headers_with(Some(value))),

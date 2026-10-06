@@ -22,6 +22,16 @@ pub struct FileBytes {
     pub too_large: bool,
 }
 
+/// Whether `path` stays inside whatever it is joined onto: relative, with no `..`.
+/// `Path::join` REPLACES the base on an absolute or root/drive-prefixed right side,
+/// and a `..` walks out of it, so either would read a file outside the repo.
+fn is_repo_relative(path: &str) -> bool {
+    use std::path::Component;
+    std::path::Path::new(path)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// Raw file bytes (base64) at a revision, or from the working tree when
 /// `rev` is None. `None` result = the file doesn't exist there (e.g. the
 /// old side of an added file). Drives the image diff view.
@@ -42,9 +52,16 @@ pub async fn git_file_base64(
             // Nonzero exit = the path doesn't exist at that revision.
             (out.code == 0).then_some(out.stdout)
         }
-        None => tokio::fs::read(std::path::Path::new(&repo_path).join(&file_path))
-            .await
-            .ok(),
+        None => {
+            if !is_repo_relative(&file_path) {
+                return Err(AppError::InvalidArgument(format!(
+                    "invalid path: {file_path}"
+                )));
+            }
+            tokio::fs::read(std::path::Path::new(&repo_path).join(&file_path))
+                .await
+                .ok()
+        }
     };
     let Some(bytes) = bytes else { return Ok(None) };
     if bytes.len() > IMAGE_MAX_BYTES {
@@ -2763,6 +2780,80 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none());
+        }
+    }
+
+    #[test]
+    fn is_repo_relative_admits_only_paths_that_stay_under_the_base() {
+        for ok in [
+            "a.png",
+            "assets/logo.png",
+            "./a.png",
+            "a..b.png",
+            "dir/.hidden/x",
+        ] {
+            assert!(is_repo_relative(ok), "{ok} should be admitted");
+        }
+        let absolute = std::env::temp_dir()
+            .join("x.png")
+            .to_string_lossy()
+            .into_owned();
+        for bad in [
+            "../x.png",
+            "a/../../x.png",
+            "a/..",
+            "..",
+            "/etc/passwd",
+            absolute.as_str(),
+        ] {
+            assert!(!is_repo_relative(bad), "{bad} should be refused");
+        }
+        // Drive-relative, drive-absolute and UNC spellings each carry a prefix that
+        // `join` lets replace the base on Windows.
+        #[cfg(windows)]
+        for bad in [
+            r"C:\Windows\x.png",
+            "C:x.png",
+            r"\\server\share\x.png",
+            r"\x.png",
+        ] {
+            assert!(!is_repo_relative(bad), "{bad} should be refused");
+        }
+    }
+
+    /// The working-tree read cannot be steered at a file outside the repo, by `..` or
+    /// by an absolute path, while a file inside it still reads.
+    #[tokio::test]
+    async fn the_working_tree_read_stays_inside_the_repo() {
+        let tmp = tempfile::Builder::new()
+            .prefix("gd-file-bytes-escape-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let repo = repo_dir.to_string_lossy().into_owned();
+        std::fs::write(repo_dir.join("inside.png"), png_fixture(16, 16)).unwrap();
+        let outside = tmp.path().join("outside.png");
+        std::fs::write(&outside, png_fixture(16, 16)).unwrap();
+
+        let inside = git_file_base64(repo.clone(), None, "inside.png".into())
+            .await
+            .unwrap()
+            .expect("a file inside the repo reads");
+        assert!(inside.base64.is_some());
+
+        for escape in [
+            "../outside.png".to_string(),
+            "sub/../../outside.png".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let err = git_file_base64(repo.clone(), None, escape.clone())
+                .await
+                .expect_err("an escaping path is refused, not read");
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "{escape}: {err:?}"
+            );
         }
     }
 
