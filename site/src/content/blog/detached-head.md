@@ -13,8 +13,7 @@ The bug report names a release: v1.3.0 writes export timestamps in
 local time, so the same CSV reads differently on every machine that
 opens it. Your `main` has moved on since that tag went out three
 weeks ago. To see exactly what customers are running, you decide to
-check out the tag itself. Here is the repository the
-morning this starts:
+check out the tag itself. Here is the repository the morning this starts:
 
 ```sh
 $ git log --oneline --decorate -4
@@ -176,13 +175,13 @@ Your branch is up to date with 'origin/main'.
 ```
 
 Look at what the warning actually does: it counts the commits, lists
-them by hash and subject, and closes with a ready-to-run `git branch`
-line naming the tip. Nothing was deleted in this moment. The commit
-simply stopped being listed; no branch or tag names it, so `git log`
-on any branch will not show it. And suppose the terminal is gone,
-warning and hash with it. HEAD's reflog kept a line for every move
-you made, the fix commit included; this is the same machinery that
-[undoes a hard reset](/blog/undo-a-hard-reset/):
+them by hash and subject, and closes with the `git branch` command
+that keeps them, waiting only on a branch name. Nothing was deleted
+in this moment. The commit simply stopped being listed; no branch
+or tag names it, so `git log` on any branch will not show it. And
+suppose the terminal is gone, warning and hash with it. HEAD's reflog
+kept a line for each move it made, the fix commit included; this
+is the same machinery that [undoes a hard reset](/blog/undo-a-hard-reset/):
 
 ```sh
 $ git reflog -3
@@ -193,8 +192,10 @@ d6d32d7 HEAD@{2}: checkout: moving from main to v1.3.0
 
 Three entries is enough here because the exit just happened. Every
 move HEAD makes afterward pushes the entry deeper, so on a day-old
-mess drop the `-3` and scan for the `commit:` line. Either way, the
-rescue is the command Git suggested: a branch created at the hash.
+mess drop the `-3` and look for `checkout: moving from` followed by
+a full hash rather than a branch name: that hash is the commit
+you left behind. Either way, the rescue is the command Git
+suggested: a branch created at the hash.
 
 ```sh
 $ git branch fix-utc-timestamps 86c9c4d
@@ -210,8 +211,9 @@ the logs that walk that name now reach it.
 `git checkout` detaches without asking because it has two jobs,
 switching branches and restoring files, and pointing it at anything
 that is not a branch slides into the detached state as a side
-effect. Its newer sibling splits those jobs, and `git switch`
-treats detaching as something you have to ask for:
+effect. Git later split those jobs between `git switch` and
+`git restore`, and `git switch` treats detaching as something you
+have to ask for:
 
 ```sh
 $ git switch v1.3.0
@@ -222,12 +224,12 @@ fatal: a branch is expected, got remote branch 'origin/main'
 hint: If you want to detach HEAD at the commit, try again with the --detach option.
 ```
 
-The hint is the famous paragraph compressed to one line: if you want
-the detached state, say `--detach`; if you wanted a branch, name
-one. The classic accident this catches is `git checkout origin/main`.
-A remote-tracking ref is not a branch you can be on, so checkout
-detaches you there and prints the same paragraph, while switch stops
-the typo at the door.
+Refusal plus hint is the famous paragraph compressed to two lines:
+if you wanted a branch, name one; if you want the detached state,
+say `--detach`. The classic accident this catches is
+`git checkout origin/main`. A remote-tracking ref is not a branch
+you can be on, so checkout detaches you there and prints the same
+paragraph, while switch stops the typo at the door.
 
 And when the plan was always to come back and fix something, take
 the name with you in one move:
@@ -239,7 +241,8 @@ Switched to a new branch 'hotfix-1.3.1'
 
 A branch born at the tag, no detached state at any point, and every
 commit you make lands somewhere listed from the first one. The
-escape hatch the paragraph advertises works exactly as printed, too:
+`git switch -` the paragraph advertises means wherever you stood
+last; from the new branch it hops back to `main`:
 
 ```sh
 $ git switch -
@@ -249,13 +252,14 @@ Your branch is up to date with 'origin/main'.
 
 ## Or don't do any of this
 
-GitDesktop's rule for detached HEAD is to say the name everywhere.
-Checking out a commit or a tag asks first: "Check out tag v1.3.0?",
-with the move spelled out underneath: "Your files move to that tag
-and HEAD detaches, so you won't be on a branch. Switching back to a
-branch returns everything to normal, and commits you make while
-detached need a new branch to keep them." Git prints its paragraph
-after you have arrived; a client gets to ask before you go.
+[GitDesktop](/features/)'s rule for detached HEAD is to say the
+name everywhere. Checking out a commit or a tag asks first: "Check
+out tag v1.3.0?", with the move spelled out underneath: "Your
+files move to that tag and HEAD detaches, so you won't be on a
+branch. Switching back to a branch returns everything to normal,
+and commits you make while detached need a new branch to keep
+them." Git prints its paragraph after you have arrived; a client
+gets to ask before you go.
 
 Confirm it and the toast answers in the same vocabulary: "Checked
 out v1.3.0 — HEAD is detached". The branch switcher in the header
