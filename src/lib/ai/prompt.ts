@@ -252,6 +252,8 @@ function renderJiraLine(
 }
 
 const FILES_DERIVED_LINE = "[file list derived from the diff]";
+const GITLAB_FILES_UNKNOWN_LINE =
+  "[GitLab's changes limit applies to the file list and diff; both may be incomplete]";
 
 /** The files a "Files changed" section lists. An empty list beside a non-empty
  *  diff (typically a failed forge file-list read) is read off the diff and
@@ -266,13 +268,14 @@ export function promptFileList(
   return { files: fromDiff, derived: fromDiff.length > 0 };
 }
 
-/** The "Files changed" heading and list, plus one disclosure line: derived, or
- *  `unknown` (the forge's read failed or hit a cap). Without either the section
- *  is byte-identical to the MCP twin's, whose numstat lists are never partial. */
+/** GitLab's /changes cap affects both the list and diff, including derived lists.
+ *  Without a disclosure, output is byte-identical to the generate.rs MCP twin,
+ *  whose numstat lists are never partial. */
 function filesChangedSection(
   files: PrPromptInput["files"],
   diffText: string,
   unknown?: boolean,
+  provider?: PromptProvider,
 ): string {
   const listed = promptFileList(files, diffText);
   const summary = listed.files
@@ -281,6 +284,8 @@ function filesChangedSection(
     )
     .join("\n");
   const section = `## Files changed\n${summary || "(none)"}`;
+  if (unknown && provider === "gitlab")
+    return `${section}\n${GITLAB_FILES_UNKNOWN_LINE}`;
   if (listed.derived) return `${section}\n${FILES_DERIVED_LINE}`;
   if (!unknown) return section;
   return listed.files.length > 0
@@ -369,6 +374,7 @@ export function buildPrPrompt(input: PrPromptInput): {
     input.files,
     input.diffText,
     input.filesUnknown,
+    input.provider,
   );
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
@@ -837,6 +843,7 @@ export function buildReviewPrompt(
     input.files,
     input.diffText,
     input.filesUnknown,
+    input.provider,
   );
   if ((input.excludedFiles ?? 0) > 0) {
     filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;

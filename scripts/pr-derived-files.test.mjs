@@ -211,10 +211,10 @@ const PARTIAL_LINE =
 const UNAVAILABLE_LINE = "[file list unavailable — the diff is authoritative]";
 
 /** The Files changed section from both builders, which must agree. */
-function bothFilesSections(diffText, files, filesUnknown) {
-  const pr = buildPrPrompt({ ...PR_BASE, diffText, files, filesUnknown });
+function bothFilesSections(diffText, files, filesUnknown, provider) {
+  const pr = buildPrPrompt({ ...PR_BASE, diffText, files, filesUnknown, provider });
   const review = buildReviewPrompt(
-    { ...REVIEW_BASE, diffText, files, filesUnknown },
+    { ...REVIEW_BASE, diffText, files, filesUnknown, provider },
     "general",
   );
   const fromPr = filesSection(pr.prompt);
@@ -225,15 +225,20 @@ function bothFilesSections(diffText, files, filesUnknown) {
 test("filesUnknown absent or false renders byte-identically", () => {
   const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
   for (const unknown of [undefined, false]) {
-    assert.equal(bothFilesSections(DIFF, [], unknown), EXPECTED_SECTION);
-    assert.equal(
-      bothFilesSections(DIFF, files, unknown),
-      "## Files changed\nx.rs +3 -1",
-    );
-    assert.equal(
-      bothFilesSections("", [], unknown),
-      "## Files changed\n(none)",
-    );
+    for (const provider of [undefined, "gitlab"]) {
+      assert.equal(
+        bothFilesSections(DIFF, [], unknown, provider),
+        EXPECTED_SECTION,
+      );
+      assert.equal(
+        bothFilesSections(DIFF, files, unknown, provider),
+        "## Files changed\nx.rs +3 -1",
+      );
+      assert.equal(
+        bothFilesSections("", [], unknown, provider),
+        "## Files changed\n(none)",
+      );
+    }
   }
 });
 
@@ -249,4 +254,34 @@ test("filesUnknown discloses a partial or unavailable list in both builders", ()
   );
   // A derived list is whole from the diff, so it keeps its own single line.
   assert.equal(bothFilesSections(DIFF, [], true), EXPECTED_SECTION);
+});
+
+test("GitLab unknown listed, empty and derived files disclose the shared diff limit in both builders", () => {
+  const disclosure =
+    "[GitLab's changes limit applies to the file list and diff; both may be incomplete]";
+  const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
+  for (const [diff, list, expected] of [
+    [DIFF, files, `## Files changed\nx.rs +3 -1\n${disclosure}`],
+    ["", [], `## Files changed\n(none)\n${disclosure}`],
+    [DIFF, [], EXPECTED_SECTION.replace(DERIVED_LINE, disclosure)],
+  ]) {
+    const section = bothFilesSections(diff, list, true, "gitlab");
+    assert.equal(section, expected);
+    assert.ok(!section.includes("diff is authoritative"), section);
+  }
+});
+
+test("GitHub, Bitbucket and absent-provider unknown file sections stay byte-identical", () => {
+  const files = [{ path: "x.rs", added: 3, deleted: 1, isBinary: false }];
+  for (const provider of ["github", "bitbucket", undefined]) {
+    assert.equal(
+      bothFilesSections(DIFF, files, true, provider),
+      `## Files changed\nx.rs +3 -1\n${PARTIAL_LINE}`,
+    );
+    assert.equal(
+      bothFilesSections("", [], true, provider),
+      `## Files changed\n(none)\n${UNAVAILABLE_LINE}`,
+    );
+    assert.equal(bothFilesSections(DIFF, [], true, provider), EXPECTED_SECTION);
+  }
 });

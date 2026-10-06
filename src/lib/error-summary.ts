@@ -1,5 +1,5 @@
 import type { DroppedCommit, PullWouldDrop } from "@/lib/git/api";
-import { type AppError, isAppError } from "@/lib/tauri/invoke";
+import { type AppError, errorMessage, isAppError } from "@/lib/tauri/invoke";
 
 /** A humanized error, split into what a toast shows (a calm one-liner) and what
  *  the Details dialog shows (the full raw text). Pure — derived from the thrown
@@ -413,12 +413,33 @@ const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
  *  `ABC-401`) would otherwise read as an answered status. */
 const IDENTIFIER_TOKENS = /https?:\/\/[^\s"')]+|\b[A-Z][A-Z0-9_]+-\d+\b/g;
 
-/** Bare dotted hosts with one optional numeric port (`gitlab-429.acme.com:8443`),
- *  the dotted arm of Rust's `is_host_or_url_token` (forge/session.rs). Rust's
- *  undotted-host rules need the probed host or gh's report grammar, which no
- *  message here carries, so an undotted label like `gitlab-429` still reads. */
+/** Bare dotted hosts with one optional numeric port, matching Rust's dotted arm. */
 const HOST_TOKENS =
   /(?<![A-Za-z0-9-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?![A-Za-z0-9-])/g;
+
+/** Only Go's lookup/dial positions identify undotted hosts without a known host.
+ *  Leading delimiters outside those positions must preserve diagnostics. */
+const GO_TRANSPORT_HOST_TOKENS = /\b(lookup |dial tcp )\S+/g;
+const IPV6_HOST_TOKENS = /\[[a-fA-F0-9]*:[a-fA-F0-9:]*\](?::\d+)?/g;
+
+/** URLs mask before hosts so their path tokens cannot survive. Go's complete
+ *  parenthesized Client.Timeout diagnostic is not a hostname. */
+function maskTransportIdentifiers(message: string): string {
+  return message
+    .replace(IDENTIFIER_TOKENS, " ")
+    .replace(GO_TRANSPORT_HOST_TOKENS, "$1 ")
+    .replace(IPV6_HOST_TOKENS, " ")
+    .replace(HOST_TOKENS, (token: string, offset: number, text: string) =>
+      token.toLowerCase() === "client.timeout" &&
+      text[offset - 1] === "(" &&
+      text
+        .slice(offset + token.length)
+        .toLowerCase()
+        .startsWith(" exceeded while awaiting headers)")
+        ? token
+        : " ",
+    );
+}
 
 function isAsciiAlphanumeric(c: string | undefined): boolean {
   return c !== undefined && /[a-z0-9]/i.test(c);
@@ -451,11 +472,7 @@ function networkSummary(
     return null;
   // Both scans read the masked text: every transport phrase has a space, which
   // a masked URL, key or host can't hold, so masking hides no transport signal.
-  // URLs mask first, so a URL's path digits never outlive its host.
-  const text = message
-    .replace(IDENTIFIER_TOKENS, " ")
-    .replace(HOST_TOKENS, " ")
-    .toLowerCase();
+  const text = maskTransportIdentifiers(message).toLowerCase();
   if (
     hasStandaloneWord(text, "401") ||
     hasStandaloneWord(text, "403") ||
@@ -478,6 +495,32 @@ function networkSummary(
   return transport
     ? `Couldn't reach ${host} — check your network connection.`
     : null;
+}
+
+/** Measured subset of forge/session.rs NETWORKISH, GH_NETWORKISH_EXTRA and
+ *  OFFLINE_STATUS for scope hints. Bare EOF requires an anchored error suffix;
+ *  presentation keeps its narrower classifier. */
+const TRANSPORT_GATE_PHRASES = [
+  "unexpected eof",
+  "client.timeout",
+  "proxyconnect",
+  ...GH_OUTAGE_PHRASES,
+];
+
+/** Scope hints must respect Rust transport evidence: the humanized prefix shared
+ *  across Rust forge modules and the suffix markers from forge/http.rs. */
+export function isTransportError(error: unknown): boolean {
+  const message = errorMessage(error).trim();
+  const lower = message.toLowerCase();
+  const scan = maskTransportIdentifiers(message).toLowerCase();
+  return (
+    (isAppError(error) && networkSummary(error.kind, message) !== null) ||
+    message.startsWith("Couldn't reach ") ||
+    RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`)) ||
+    // URL and host tokens cannot contain the space-separated EOF suffix.
+    lower.endsWith(": eof") ||
+    TRANSPORT_GATE_PHRASES.some((phrase) => hasStandaloneWord(scan, phrase))
+  );
 }
 
 /** The `git` kind is the only one carrying a stderr blob distinct from its

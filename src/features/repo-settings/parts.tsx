@@ -31,7 +31,7 @@ import {
   sectionReadNotice,
 } from "@/features/conversations/remote-section-state";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
-import { presentError } from "@/lib/error-summary";
+import { isTransportError, presentError } from "@/lib/error-summary";
 import {
   isReconnectHostSafe,
   reconnectHostArg,
@@ -266,7 +266,9 @@ function AsyncListBody({
         retryLabel={retryLabel}
         retryRef={retryRef}
       >
-        {errorScope && <ScopeErrorHint scope={errorScope} />}
+        {errorScope && !isTransportError(error) && (
+          <ScopeErrorHint scope={errorScope} />
+        )}
       </AsyncErrorCard>
     );
   }

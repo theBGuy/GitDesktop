@@ -20,8 +20,12 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const { composedErrorPresentation, presentError, RUST_TRANSPORT_PHRASES } =
-  await import("@/lib/error-summary");
+const {
+  composedErrorPresentation,
+  isTransportError,
+  presentError,
+  RUST_TRANSPORT_PHRASES,
+} = await import("@/lib/error-summary");
 
 const REMOTE = "https://gitlab.com/x/y.git";
 const REJECTED = " ! [rejected]        main -> main (non-fast-forward)";
@@ -1008,10 +1012,136 @@ test("a real status beside a masked host still suppresses the rewrite", () => {
   }
 });
 
-test("an undotted host label still supplies status digits (accepted residual)", () => {
-  // SYNTHETIC: Rust masks this only for a probe pinned to that host.
-  const message = "lookup gitlab-429: no such host";
+test("lookup undotted 429, dial undotted 401 and IPv6 401 hosts allow the rewrite", () => {
+  // SYNTHETIC: Go transport slots identify hosts without a known probe host.
+  for (const message of [
+    "lookup gitlab-429: no such host",
+    "dial tcp proxy-401:8080: connect: connection refused",
+    "dial tcp [2001:db8::401]:443: connect: connection refused",
+    "connect to [2001:db8::401]: connection refused",
+  ]) {
+    assert.equal(
+      presentError(appError("glab", message)).summary,
+      reach("GitLab"),
+      message,
+    );
+  }
+});
+
+test("real 401 and 429 beside masked undotted and IPv6 hosts still suppress the rewrite", () => {
+  for (const message of [
+    "lookup gitlab-429: no such host; HTTP 401 unauthorized",
+    "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
+    "dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401",
+  ]) {
+    assert.equal(presentError(appError("glab", message)).summary, message, message);
+  }
+});
+
+test("glab Client.Timeout fixture keeps its raw summary", () => {
+  const message =
+    "net/http: request canceled (Client.Timeout exceeded while awaiting headers)";
   assert.equal(presentError(appError("glab", message)).summary, message);
+});
+
+test("transport hint gate recognizes gh DNS/502/proxy, Rust prefix and both Rust suffixes", () => {
+  for (const [kind, message] of [
+    ["gh", "lookup api.github.com: no such host"],
+    ["gh", "HTTP 502: Bad Gateway"],
+    ["gh", "proxyconnect tcp: connection refused"],
+    ["gh", "Couldn't reach GitHub: HTTP 401 from proxy"],
+    ["bitbucket", "Bitbucket request 401: request timed out"],
+    ["jira", "Jira request 403: connection failed"],
+  ]) {
+    assert.equal(isTransportError(appError(kind, message)), true, message);
+  }
+});
+
+for (const [name, kind, message] of [
+  [
+    "bare EOF suffix",
+    "gh",
+    'Get "https://api.github.com/user": EOF',
+  ],
+  [
+    "unexpected EOF",
+    "gh",
+    'Get "https://api.github.com/user": unexpected EOF',
+  ],
+  [
+    "Client.Timeout",
+    "gh",
+    'Get "https://api.github.com/user": net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
+  ],
+  [
+    "proxyconnect",
+    "gh",
+    'Get "https://api.github.com/user": proxyconnect',
+  ],
+  [
+    "bad gateway",
+    "bitbucket",
+    'Post "https://github.com/login/oauth/token": Bad Gateway',
+  ],
+  [
+    "service unavailable",
+    "bitbucket",
+    'Post "https://github.com/login/oauth/token": Service Unavailable',
+  ],
+  [
+    "gateway timeout",
+    "bitbucket",
+    'Post "https://github.com/login/oauth/token": Gateway Timeout',
+  ],
+  [
+    "proxy authentication required",
+    "bitbucket",
+    'Post "https://github.com/login/oauth/token": Proxy Authentication Required',
+  ],
+]) {
+  test(`transport hint gate recognizes ${name}`, () => {
+    assert.equal(isTransportError(appError(kind, message)), true, message);
+  });
+}
+
+test("transport hint gate leaves EOF prose eligible for scope hints", () => {
+  for (const message of [
+    "EOF",
+    "The parser expected an EOF marker",
+    'Get "https://api.github.com/user": EOF while parsing a response',
+  ]) {
+    assert.equal(isTransportError(appError("gh", message)), false, message);
+  }
+});
+
+for (const [name, message] of [
+  [
+    "403 with a proxyconnect URL path",
+    "HTTP 403: Resource not accessible by integration (https://github.com/o/proxyconnect)",
+  ],
+  [
+    "403 with a client.timeout.acme.com host",
+    "HTTP 403: Resource not accessible by integration on client.timeout.acme.com",
+  ],
+]) {
+  test(`transport hint gate keeps ${name} eligible for scope hints`, () => {
+    assert.equal(isTransportError(appError("gh", message)), false, message);
+  });
+}
+
+test("transport hint gate preserves a real Client.Timeout diagnostic beside a masked URL", () => {
+  const message =
+    'Get "https://client.timeout.acme.com/repos/o/proxyconnect": net/http: request canceled (Client.Timeout exceeded while awaiting headers)';
+  assert.equal(isTransportError(appError("gh", message)), true);
+});
+
+test("transport hint gate keeps a gh 403 permissions error eligible for scope hints", () => {
+  assert.equal(
+    isTransportError(
+      appError("gh", "HTTP 403: Resource not accessible by integration"),
+    ),
+    false,
+  );
 });
 
 test("empty messages fall through to a non-blank summary", () => {

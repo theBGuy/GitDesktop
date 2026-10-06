@@ -212,6 +212,9 @@ export function PrReviewPanel({
   const external = useExternalReviews(context.repoPath, prKind, prRef);
   const externalReviewers = external.data?.reviewers ?? [];
   const externalCount = external.data?.items.length ?? 0;
+  // A partial read discloses itself even with zero findings: no row would read
+  // as "no external reviews" rather than "couldn't read them all".
+  const externalIncomplete = external.data?.incomplete === true;
   const [ignoreExternal, setIgnoreExternal] = useState(false);
 
   // The author's "Notes for reviewers" on this remote PR (author-gated in the
@@ -219,6 +222,9 @@ export function PrReviewPanel({
   // per-run opt-out. No notes (or a local/Bitbucket PR) ⇒ the row stays hidden.
   const notes = useReviewerNotes(context.repoPath, prKind, prRef);
   const hasNotes = Boolean(notes.data?.reviewNotes?.trim());
+  // Set only beside lifted notes: the read was partial, so newer notes may exist.
+  const notesIncomplete =
+    hasNotes && notes.data?.reviewNotesIncomplete === true;
   const [ignoreNotes, setIgnoreNotes] = useState(false);
 
   // Review output cites `#N` constantly, so linkify it against the PR's own repo.
@@ -726,6 +732,14 @@ export function PrReviewPanel({
             </button>
           </div>
         )}
+        {notesIncomplete && !ignoreNotes && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+            <WarningIcon className="size-3 shrink-0" />
+            <span className="min-w-0">
+              Newer notes from the author may be missing.
+            </span>
+          </div>
+        )}
         {externalCount > 0 && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
             <RobotIcon className="size-3 shrink-0" />
@@ -745,6 +759,17 @@ export function PrReviewPanel({
                 ? "Use external reviews"
                 : "Ignore external reviews"}
             </button>
+          </div>
+        )}
+        {/* The zero-findings arm has no Ignore toggle, so it never hides. */}
+        {externalIncomplete && (externalCount === 0 || !ignoreExternal) && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+            <WarningIcon className="size-3 shrink-0" />
+            <span className="min-w-0">
+              {externalCount > 0
+                ? "Some external reviewer findings may be missing."
+                : "External reviewer findings may be missing."}
+            </span>
           </div>
         )}
         {cliKind !== "codex" && (

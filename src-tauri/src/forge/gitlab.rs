@@ -1809,6 +1809,8 @@ struct GlabMrChanges {
     labels: Vec<String>,
     #[serde(default, deserialize_with = "null_to_default")]
     changes: Vec<GlabChange>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    overflow: bool,
     /// The head commit's pipeline (`null` when the MR has no CI). Its jobs become the
     /// check rollup; pipelines outside the target project expose link-out checks only.
     #[serde(default)]
@@ -2281,9 +2283,11 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         url: mr.web_url,
         commits,
         files,
-        // Both files flags stay false pending the deferred /changes overflow live probe.
-        files_unknown: false,
-        files_truncated: false,
+        // PrDetails requires truncated => unknown. Overflow caps the list per GitLab docs.
+        // Presence probed 2026-10-05 on a one-file MR (all flags false); trigger unprobed.
+        // Per-entry collapsed/too_large affect line counts and have no flag home.
+        files_unknown: mr.overflow,
+        files_truncated: mr.overflow,
         reviews: Vec::new(),
         comments,
         checks,
@@ -13364,6 +13368,33 @@ mod tests {
                 "{fields}"
             );
         }
+    }
+
+    #[test]
+    fn mr_changes_overflow_true_false_null_and_missing() {
+        let base = r#""iid":6,"web_url":"u","title":"t","target_branch":"main",
+            "source_branch":"feat","state":"opened","changes":[]"#;
+        for (field, expected) in [
+            (r#", "overflow":true"#, true),
+            (r#", "overflow":false"#, false),
+            (r#", "overflow":null"#, false),
+            ("", false),
+        ] {
+            let mr: GlabMrChanges = serde_json::from_str(&format!("{{{base}{field}}}")).unwrap();
+            assert_eq!(mr.overflow, expected, "{field}");
+        }
+
+        // The async constructor has no pure fold seam; both flags must stay wired
+        // directly to overflow to preserve PrDetails' truncated-implies-unknown contract.
+        let constructor = include_str!("gitlab.rs")
+            .split_once("pub async fn view_pr(")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(constructor.contains("files_unknown: mr.overflow,"));
+        assert!(constructor.contains("files_truncated: mr.overflow,"));
     }
 
     /// The `/changes` payload the MR view already fetches carries the conflict and
