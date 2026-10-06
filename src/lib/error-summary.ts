@@ -484,14 +484,29 @@ function networkSummary(
     : null;
 }
 
-/** Scope hints must follow transport presentation: the humanized prefix shared
+/** Scope-hint parity with forge/session.rs NETWORKISH, GH_NETWORKISH_EXTRA and
+ *  OFFLINE_STATUS: Go timeout/EOF diagnostics and proxy outages. These phrases
+ *  affect the hint gate only; presentation keeps its narrower classifier. */
+const TRANSPORT_GATE_PHRASES = [
+  "unexpected eof",
+  "client.timeout",
+  "proxyconnect",
+  "bad gateway",
+  "service unavailable",
+  "gateway timeout",
+  "proxy authentication required",
+];
+
+/** Scope hints must respect Rust transport evidence: the humanized prefix shared
  *  across Rust forge modules and the suffix markers from forge/http.rs. */
 export function isTransportError(error: unknown): boolean {
   const message = errorMessage(error).trim();
+  const lower = message.toLowerCase();
   return (
     (isAppError(error) && networkSummary(error.kind, message) !== null) ||
     message.startsWith("Couldn't reach ") ||
-    RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`))
+    RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`)) ||
+    TRANSPORT_GATE_PHRASES.some((phrase) => hasStandaloneWord(lower, phrase))
   );
 }
 

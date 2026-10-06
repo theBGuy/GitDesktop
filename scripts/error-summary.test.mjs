@@ -1057,6 +1057,20 @@ test("transport hint gate recognizes gh DNS/502/proxy, Rust prefix and both Rust
   }
 });
 
+test("transport hint gate recognizes unexpected EOF, Client.Timeout, proxyconnect and four outage phrases", () => {
+  for (const message of [
+    'Get "https://api.github.com/user": unexpected EOF',
+    'Get "https://api.github.com/user": net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
+    'Get "https://api.github.com/user": proxyconnect',
+    'Post "https://github.com/login/oauth/token": Bad Gateway',
+    'Post "https://github.com/login/oauth/token": Service Unavailable',
+    'Post "https://github.com/login/oauth/token": Gateway Timeout',
+    'Post "https://github.com/login/oauth/token": Proxy Authentication Required',
+  ]) {
+    assert.equal(isTransportError(appError("gh", message)), true, message);
+  }
+});
+
 test("transport hint gate keeps a gh 403 permissions error eligible for scope hints", () => {
   assert.equal(
     isTransportError(
