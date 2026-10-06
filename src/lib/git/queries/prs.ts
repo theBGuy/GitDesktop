@@ -1,4 +1,5 @@
 import {
+  type QueryKey,
   queryOptions,
   useMutation,
   useQuery,
@@ -954,9 +955,38 @@ export function useCommentIssue(repo: string, lens: RemoteLens) {
   );
 }
 
+/** The PR writes whose in-flight state a PR view holds its controls on. */
+export type PrWriteKind =
+  | "comment"
+  | "merge"
+  | "close"
+  | "reopen"
+  | "set-draft"
+  | "approve"
+  | "unapprove"
+  | "request-changes"
+  | "unrequest-changes"
+  | "gl-arm-auto-merge"
+  | "gl-cancel-auto-merge"
+  | "stack-dissolve";
+
+/** Filter prefix for EVERY PR write ({@link prWriteKey}); read by pr-actions.ts
+ *  `usePendingPrWrites`. */
+export const PR_WRITES_KEY = ["pr-write"] as const;
+
+/** A PR write's mutation key. Static per repo, so it never detaches a pending write
+ *  across a PR switch, while a repo switch pins the write to the repo it fired in. */
+export const prWriteKey = (kind: PrWriteKind, repo: string) =>
+  [...PR_WRITES_KEY, kind, repo] as const;
+
 export function useCommentPr(repo: string, lens: RemoteLens) {
-  return useOptimisticCreateCommentMutation(repo, "pr", lens, (args) =>
-    api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
+  return useOptimisticCreateCommentMutation(
+    repo,
+    "pr",
+    lens,
+    (args) =>
+      api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
+    prWriteKey("comment", repo),
   );
 }
 
@@ -982,6 +1012,7 @@ function useOptimisticCreateCommentMutation<TData>(
     body: string;
     asBot?: boolean;
   }) => Promise<TData>,
+  mutationKey?: QueryKey,
 ) {
   return useOptimisticCacheMutation<
     { number: number; body: string; author: string; asBot?: boolean },
@@ -1009,5 +1040,6 @@ function useOptimisticCreateCommentMutation<TData>(
       return d ? { ...d, comments: [...d.comments, synthetic] } : d;
     },
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    mutationKey,
   );
 }

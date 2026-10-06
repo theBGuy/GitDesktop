@@ -56,7 +56,7 @@ import { fileURLToPath } from "node:url";
 const WRAPPERS = {
   useMutation: { fnArg: 0, fnKey: "mutationFn", optionsArg: 0, arity: [1, 1] },
   useRepoMutation: { fnArg: 1, optionsArg: 2, arity: [2, 3] },
-  useOptimisticCacheMutation: { fnArg: 0, optionsArg: null, arity: [4, 4] },
+  useOptimisticCacheMutation: { fnArg: 0, optionsArg: null, arity: [4, 5] },
 };
 
 /** Where the app's own WRAPPERS live; `useRepoMutation` there must thread

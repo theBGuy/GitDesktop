@@ -113,6 +113,7 @@ import {
   forgeFeatureReady,
   invalidateRepoAfterWrite,
   PIPELINE_IN_FLIGHT,
+  type PrWriteKind,
   prDiffOptions,
   prUpdateBranchKeys,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -138,6 +139,7 @@ import {
   useMergePr,
   useMergeRemotePr,
   useMinimizeComment,
+  usePendingPrWrites,
   usePrApprovals,
   usePrBaseDivergence,
   usePrDetails,
@@ -683,35 +685,33 @@ export function RemotePrView({
   // Ready/Convert routes through `gh pr ready [--undo]`).
   const isGitHubProvider = providerKey === "github";
   const draftPairVisible = canToggleDraft || (isGitHubProvider && canWrite);
-  // A write holds only the PR it targets, read off its variables: this view swaps
-  // PRs without remounting, so an observer's pending state outlives the switch. Not
-  // reset on switch: returning mid-flight must still find the write held.
-  const targetsShownPr = (
-    v: { number: number; lens: RemoteLens } | undefined,
-  ) => v?.number === number && v.lens === lens;
-  // The comment variables carry no lens (prs.ts), so a lens flip at the same number
+  // Every in-flight write to this repo's PRs, one entry per invocation, read from
+  // the mutation cache rather than each hook's observer: an observer tracks only its
+  // latest call, so a write fired at another PR would release this one's hold.
+  const pendingWrites = usePendingPrWrites(repoPath);
+  // A write holds only the PR it targets: its number, and its lens where the
+  // variables carry one. Most lens-less kinds are GitLab/Bitbucket-only, where the
+  // lens is always origin, so the bare number is the whole identity.
+  const writePending = (kind: PrWriteKind) =>
+    pendingWrites.some(
+      (w) =>
+        w.kind === kind &&
+        w.target === number &&
+        (w.lens === null || w.lens === lens),
+    );
+  // Comment variables carry no lens (prs.ts), so a lens flip at the same number
   // holds the other lens's PR until the post settles — accepted, it only holds.
-  const commentPending =
-    comment.isPending && comment.variables?.number === number;
-  const mergePending = mergePr.isPending && targetsShownPr(mergePr.variables);
-  const closePending = closePr.isPending && targetsShownPr(closePr.variables);
-  const reopenPending =
-    reopenPr.isPending && targetsShownPr(reopenPr.variables);
-  // GitLab/Bitbucket-only writes: the lens there is always origin, so the bare
-  // number they send is the whole identity.
-  const approvePending = approvePr.isPending && approvePr.variables === number;
-  const unapprovePending =
-    unapprovePr.isPending && unapprovePr.variables === number;
-  const requestChangesPending =
-    requestChangesPr.isPending && requestChangesPr.variables?.number === number;
-  const unrequestChangesPending =
-    unrequestChangesPr.isPending && unrequestChangesPr.variables === number;
-  const armAutoMergePending =
-    armAutoMerge.isPending && targetsShownPr(armAutoMerge.variables);
-  const cancelAutoMergePending =
-    cancelAutoMerge.isPending && targetsShownPr(cancelAutoMerge.variables);
-  const setDraftPending =
-    setDraft.isPending && targetsShownPr(setDraft.variables);
+  const commentPending = writePending("comment");
+  const mergePending = writePending("merge");
+  const closePending = writePending("close");
+  const reopenPending = writePending("reopen");
+  const approvePending = writePending("approve");
+  const unapprovePending = writePending("unapprove");
+  const requestChangesPending = writePending("request-changes");
+  const unrequestChangesPending = writePending("unrequest-changes");
+  const armAutoMergePending = writePending("gl-arm-auto-merge");
+  const cancelAutoMergePending = writePending("gl-cancel-auto-merge");
+  const setDraftPending = writePending("set-draft");
   // Every footer/state control and its palette twin holds while a write to THIS PR
   // runs; another PR's write holds nothing here. Declared above the palette wiring so
   // both share the exact same gate. Placeholder details are the previously shown PR's
@@ -962,11 +962,12 @@ export function RemotePrView({
   // with `writeReason`, like Merge.
   const canDissolveStack =
     dissolveStackNumber !== null && details.data?.state === "OPEN" && canEdit;
-  // Scoped like `busy`: a dissolve holds only the stack it targets, which every
-  // member of that stack shares. Its variables carry no lens (pr-write.ts), so a
-  // lens flip onto an equal stack number holds that one too — accepted, it only holds.
-  const dissolvePending =
-    stackDissolve.isPending && stackDissolve.variables === dissolveStackNumber;
+  // Read like `busy`'s terms: a dissolve holds only the stack it targets, which
+  // every member of that stack shares. Its variables carry no lens (pr-write.ts), so
+  // a lens flip onto an equal stack number holds that one too — accepted, it only holds.
+  const dissolvePending = pendingWrites.some(
+    (w) => w.kind === "stack-dissolve" && w.target === dissolveStackNumber,
+  );
 
   async function dissolveStack() {
     const info = details.data?.stack;
