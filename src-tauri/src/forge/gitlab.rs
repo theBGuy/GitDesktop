@@ -8539,8 +8539,8 @@ async fn rewrite_origin_after(
         "a GitLab origin update",
     )
     .await
-    .map_err(&check_error)?;
-    let current = stored_origin_url(repo_path).await.map_err(&check_error)?;
+    .map_err(check_error)?;
+    let current = stored_origin_url(repo_path).await.map_err(check_error)?;
     if !origin_matches_snapshot(&origin.stored_url, &current) {
         let display_url = displayed_origin_url(&new_url);
         let action = operation.action();
