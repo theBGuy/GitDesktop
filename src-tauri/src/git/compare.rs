@@ -615,7 +615,9 @@ async fn demolish_persistent_review_worktree(repo_path: &str, path: &std::path::
     .await;
     let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     if path.exists() && is_persistent_review_path(repo_path, &path_str).await {
-        let _ = std::fs::remove_dir_all(path);
+        // Blocking I/O over a whole checkout, kept off the async workers.
+        let target = path.to_path_buf();
+        let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(target)).await;
     }
 }
 
@@ -659,6 +661,16 @@ async fn prepare_persistent_review_worktree(
     )
 }
 
+/// The mint's name fragment: up to the first 8 hex digits of `sha`. Filtered, never
+/// byte-sliced: `validate_ref` admits any ref spelling, so a multi-byte name would split
+/// a char, and a separator would nest the mint where `git_remove_worktree` refuses it.
+fn review_mint_short(sha: &str) -> String {
+    sha.chars()
+        .filter(char::is_ascii_hexdigit)
+        .take(8)
+        .collect()
+}
+
 /// A throwaway detached worktree in the OS temp dir, deleted whole by
 /// `git_remove_worktree`. The fallback whenever the persistent one is unavailable
 /// or already hosting a review.
@@ -667,7 +679,7 @@ async fn ephemeral_review_worktree(repo_path: &str, sha: &str) -> AppResult<Opti
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let short = &sha[..sha.len().min(8)];
+    let short = review_mint_short(sha);
     let path = std::env::temp_dir().join(format!("gd-review-{short}-{nanos}"));
     let path_str = path.to_string_lossy().into_owned();
     let out = run_git_raw(
@@ -736,12 +748,11 @@ async fn git_review_worktree_core(
 }
 
 /// Whether `path` is a `git_review_worktree`-shaped review temp dir: DIRECTLY under
-/// the OS temp dir with a basename starting `gd-review-`. This is the guard for the
-/// `remove_dir_all` fallback in `git_remove_worktree` — git's own `worktree remove`
-/// refuses a non-worktree path, so that fallback is the only unbounded-delete risk
-/// and must never widen the command into an arbitrary recursive delete. Comparison
-/// is component-wise (trailing-separator safe) and case-insensitive on the file
-/// name, to match Windows.
+/// the OS temp dir with a basename starting `gd-review-`. This gates everything
+/// destructive in `git_remove_worktree` (its forcing `worktree remove` and its
+/// `remove_dir_all` fallback), so the command can never widen into removing a worktree
+/// or directory it did not hand out. Comparison is component-wise (trailing-separator
+/// safe) and case-insensitive on the file name, to match Windows.
 fn is_review_worktree_temp_path(path: &std::path::Path) -> bool {
     let temp = std::env::temp_dir();
     // The path's parent must be exactly the temp dir. Compare component sequences
@@ -763,7 +774,7 @@ fn is_review_worktree_temp_path(path: &std::path::Path) -> bool {
 /// Releases the review workspace `git_review_worktree` handed out. The persistent
 /// per-repo worktree is only unclaimed — its checkout and registration stay in place
 /// for the next review to re-point — while an ephemeral mint is removed and its
-/// administrative entry pruned. Best-effort and idempotent.
+/// administrative entry pruned. Best-effort and idempotent; any other path is refused.
 #[tauri::command]
 pub async fn git_remove_worktree(
     state: State<'_, AppState>,
@@ -788,6 +799,15 @@ async fn git_remove_worktree_core(
     // the next review re-points it.
     if is_persistent_review_path(&repo_path, &worktree_path).await {
         return Ok(());
+    }
+    // `worktree remove --force` destroys ANY registered worktree with its dirty state
+    // (the user's own and the agent-session checkouts alike), so past the two release
+    // arms only the ephemeral mint's own shape may reach it.
+    let path = std::path::PathBuf::from(&worktree_path);
+    if !is_review_worktree_temp_path(&path) {
+        return Err(AppError::InvalidArgument(format!(
+            "not a review worktree: {worktree_path}"
+        )));
     }
     // Admin work on the shared registry: serialized against a branch update's own
     // add/remove, with the same bounded wait every other worktree command takes.
@@ -823,24 +843,20 @@ async fn git_remove_worktree_core(
         .await;
         let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     }
-    // `git worktree remove` deletes the directory itself, but on Windows that
-    // recursive delete can lose a handle race (antivirus/indexer still holding the
-    // dir) and leave an EMPTY husk behind — and the results above are discarded, so
-    // it would leak in %TEMP% forever. Finish the delete ourselves, best-effort with
-    // a short backoff, GUARDED to the `gd-review-*` temp shape: an unguarded
-    // `remove_dir_all` would turn this command into an arbitrary recursive-delete
-    // primitive on any caller-supplied path. Off the guard, git-only baseline.
-    if is_review_worktree_temp_path(std::path::Path::new(&worktree_path)) {
-        for _ in 0..2 {
-            if !std::path::Path::new(&worktree_path).exists() {
-                break;
-            }
-            let _ = std::fs::remove_dir_all(&worktree_path);
-            if !std::path::Path::new(&worktree_path).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    // On Windows git's own recursive delete can lose a handle race (antivirus/indexer)
+    // and leave a husk that would leak in %TEMP% forever, so finish it here with a
+    // short backoff — a recursive delete only the shape gate above makes safe. Off the
+    // async workers: it is blocking I/O over a whole checkout.
+    for _ in 0..2 {
+        if !path.exists() {
+            break;
         }
+        let target = path.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(target)).await;
+        if !path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
     }
     Ok(())
 }
@@ -2160,9 +2176,9 @@ mod tests {
     }
 
     /// The claim is keyed on the exact path, so the release arms can't reach past
-    /// their own worktree: a same-BASENAME checkout under another parent still takes
-    /// the real removal path, and another root's persistent path never frees this
-    /// one's claim.
+    /// their own worktree: a same-BASENAME checkout under another parent fails the
+    /// review-shape gate and is refused untouched, and another root's persistent
+    /// path never frees this one's claim.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn review_worktree_release_is_scoped_to_its_own_path() {
@@ -2178,20 +2194,20 @@ mod tests {
             .unwrap()
             .expect("the review takes the persistent worktree");
 
-        // (a) Same basename, DIFFERENT parent — not this repo's persistent worktree,
-        // so the removal runs and the checkout is gone.
+        // (a) Same basename, DIFFERENT parent — not this repo's persistent worktree, so
+        // no release arm answers it, and not a temp mint either, so the removal gate
+        // refuses it outright: the checkout survives.
         let elsewhere = base.path().join("elsewhere").join(PERSISTENT_REVIEW_DIR);
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         let elsewhere_s = elsewhere.to_string_lossy().into_owned();
         run(&repo, &["worktree", "add", "--detach", &elsewhere_s, &sha2]).await;
         assert!(elsewhere.exists(), "the decoy worktree was created");
-        git_remove_worktree_core(&state, repo.clone(), elsewhere_s)
+        let err = git_remove_worktree_core(&state, repo.clone(), elsewhere_s.clone())
             .await
-            .unwrap();
-        assert!(
-            !elsewhere.exists(),
-            "a same-named checkout elsewhere still takes the removal path"
-        );
+            .expect_err("a same-named checkout elsewhere is refused, not released");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert!(elsewhere.exists(), "the refused checkout is left in place");
+        assert!(is_registered_worktree(&repo, &elsewhere_s).await);
 
         // (b) Another root's persistent path — the release-and-keep arm answers it,
         // but it must not free THIS root's claim.
@@ -2418,5 +2434,87 @@ mod tests {
         assert!(!super::is_review_worktree_temp_path(
             &temp.join("sub").join("gd-review-abc123-42")
         ));
+    }
+
+    /// Past its release arms the command force-removes only its own temp mint shape: a
+    /// registered user worktree with uncommitted work, and a `gd-review-*` dir nested
+    /// a level below temp, are both refused and left exactly as they were.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn removal_refuses_any_worktree_it_did_not_mint() {
+        let (base, repo, sha1, _sha2) = seed_review_repo("review-refuse").await;
+        let _serialized = test_root_lock();
+        let state = AppState::default();
+
+        let user_wt = base.path().join("user-worktree");
+        let user_wt_s = user_wt.to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "--detach", &user_wt_s, &sha1]).await;
+        let dirty = user_wt.join("work-in-progress.txt");
+        std::fs::write(&dirty, "unsaved\n").unwrap();
+
+        let nested = base.path().join("gd-review-nested");
+        let nested_s = nested.to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "--detach", &nested_s, &sha1]).await;
+
+        for (path, path_s) in [(&user_wt, &user_wt_s), (&nested, &nested_s)] {
+            assert!(path.exists(), "fixture worktree {path_s} was created");
+            let err = git_remove_worktree_core(&state, repo.clone(), path_s.clone())
+                .await
+                .expect_err("a path this command never handed out is refused");
+            assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+            assert!(path.exists(), "{path_s} survives the refusal");
+            assert!(is_registered_worktree(&repo, path_s).await);
+        }
+        assert_eq!(std::fs::read_to_string(&dirty).unwrap(), "unsaved\n");
+    }
+
+    /// The mint name is built from the hex digits of `sha` alone, so no ref spelling
+    /// `validate_ref` admits can panic the slice or nest the mint out of the removal
+    /// gate's reach.
+    #[test]
+    fn review_mint_short_is_char_safe_and_keeps_the_removable_shape() {
+        assert_eq!(review_mint_short("0123456789abcdef"), "01234567");
+        assert_eq!(review_mint_short("ABC"), "ABC");
+        for sha in ["日本語ブランチ", "fé-ü", "feat/日本", "a\\b:c", "ブ", ""] {
+            let short = review_mint_short(sha);
+            assert!(
+                short.chars().all(|c| c.is_ascii_hexdigit()),
+                "{sha:?} → {short:?}"
+            );
+            let mint = std::env::temp_dir().join(format!("gd-review-{short}-1"));
+            assert!(is_review_worktree_temp_path(&mint), "{sha:?} → {mint:?}");
+        }
+    }
+
+    /// End to end over a multi-byte ref name that resolves to a real commit: the review
+    /// gets its temp mint, and the release removes it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_worktree_mints_and_releases_for_a_multi_byte_ref() {
+        let (_base, repo, sha1, _sha2) = seed_review_repo("review-mbref").await;
+        let _serialized = test_root_lock();
+        let state = AppState::default();
+        let branch = "日本語ブランチ";
+        run(&repo, &["branch", branch, &sha1]).await;
+        assert_eq!(
+            run(&repo, &["rev-parse", branch]).await.trim(),
+            sha1,
+            "the fixture branch resolves"
+        );
+
+        let path = git_review_worktree_core(&state, repo.clone(), branch.to_string())
+            .await
+            .unwrap()
+            .expect("a resolvable ref gets a review workspace");
+        assert!(
+            is_review_worktree_temp_path(std::path::Path::new(&path)),
+            "no override ⇒ the OS-temp mint: {path}"
+        );
+        assert_eq!(run(&path, &["rev-parse", "HEAD"]).await.trim(), sha1);
+
+        git_remove_worktree_core(&state, repo, path.clone())
+            .await
+            .unwrap();
+        assert!(!std::path::Path::new(&path).exists());
     }
 }

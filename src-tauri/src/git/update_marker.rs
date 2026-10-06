@@ -809,9 +809,11 @@ async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
         .await;
         let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
         // git's own recursive delete mishandles Windows reparse points, and an
-        // unregistered leftover is never its job at all.
+        // unregistered leftover is never its job at all. Blocking I/O over a whole
+        // checkout, so it runs off the async workers.
         if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
         }
     }
     let _ = std::fs::remove_file(root.join(format!("{stem}.lock")));
