@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -105,7 +106,9 @@ fn stored_login_cache() -> &'static StoredLoginCache {
 }
 
 fn stored_login_cache_get(host: &str, ttl: LoginTtl) -> Option<bool> {
-    let guard = stored_login_cache().lock().unwrap();
+    let guard = stored_login_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let entry = guard.get(host)?;
     let window = if entry.failed { ttl.failed } else { ttl.measured };
     (entry.probed_at.elapsed() < window).then_some(entry.stored)
@@ -113,27 +116,33 @@ fn stored_login_cache_get(host: &str, ttl: LoginTtl) -> Option<bool> {
 
 /// Record a MEASURED verdict for `host`, stamped now.
 fn stored_login_cache_put(host: &str, stored: bool) {
-    stored_login_cache().lock().unwrap().insert(
-        host.to_string(),
-        CachedLogin {
-            probed_at: Instant::now(),
-            stored,
-            failed: false,
-        },
-    );
+    stored_login_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            host.to_string(),
+            CachedLogin {
+                probed_at: Instant::now(),
+                stored,
+                failed: false,
+            },
+        );
 }
 
 /// Record that the probe for `host` never answered: `false` (no pin) under the short
 /// window, so a wedged keyring costs bounded time per window instead of per call.
 fn stored_login_cache_put_failure(host: &str) {
-    stored_login_cache().lock().unwrap().insert(
-        host.to_string(),
-        CachedLogin {
-            probed_at: Instant::now(),
-            stored: false,
-            failed: true,
-        },
-    );
+    stored_login_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            host.to_string(),
+            CachedLogin {
+                probed_at: Instant::now(),
+                stored: false,
+                failed: true,
+            },
+        );
 }
 
 /// Whether gh holds a login for `host` STORED in its own config or keyring — the gate on
@@ -206,7 +215,7 @@ fn gh_host_candidates(url: &str) -> Vec<String> {
 /// chain rather than a dead call, and no ambient enterprise token is ever aimed at a host
 /// the user never signed into. Upstream-lens calls ride the origin host: cross-forge
 /// origin/upstream pairs exist, and mis-targeting them is the price of one chokepoint.
-async fn gh_host_for_repo(repo_path: &str) -> Option<String> {
+pub(crate) async fn gh_host_for_repo(repo_path: &str) -> Option<String> {
     let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string())
         .await
         .ok()?;
@@ -244,6 +253,46 @@ fn apply_gh_env<C: crate::agent::ChildEnv>(cmd: &mut C, gh_host: Option<&str>) {
     }
 }
 
+/// Bumped whenever an in-app gh command that can change the signed-in account finishes:
+/// through this runner, or via [`bump_gh_auth_epoch`] from the reconnect driver. Memos
+/// of account-derived values store the epoch they read before fetching and treat any
+/// other epoch as stale; a terminal `gh auth switch` is invisible here, so such memos
+/// also carry a TTL.
+static GH_AUTH_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn gh_auth_epoch() -> u64 {
+    GH_AUTH_EPOCH.load(Ordering::SeqCst)
+}
+
+/// For account changes that spawn gh outside this runner.
+pub(crate) fn bump_gh_auth_epoch() {
+    GH_AUTH_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+fn changes_gh_account(args: &[&str]) -> bool {
+    matches!(
+        args,
+        ["auth", "login" | "logout" | "switch" | "refresh", ..]
+    )
+}
+
+/// Bumps its epoch on drop, so a timed-out or cancelled account change still
+/// invalidates: its outcome is unknown.
+struct AuthEpochBump(&'static AtomicU64);
+
+impl Drop for AuthEpochBump {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The guard `run_gh_raw` holds for `args`; `epoch` is a parameter so tests can watch
+/// a counter no other test touches. Construction must stay lazy: a guard built and
+/// dropped for a read-only command would bump the epoch too.
+fn auth_epoch_guard(epoch: &'static AtomicU64, args: &[&str]) -> Option<AuthEpochBump> {
+    changes_gh_account(args).then(|| AuthEpochBump(epoch))
+}
+
 /// Runs the GitHub CLI and returns raw output regardless of exit code. Only a
 /// missing `gh` binary or a timeout is an error here.
 pub async fn run_gh_raw(
@@ -251,6 +300,7 @@ pub async fn run_gh_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GhOutput> {
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
     let gh = gh_bin().await?;
     let gh_host = match repo_path {
         Some(repo) => gh_host_for_repo(repo).await,
@@ -303,6 +353,24 @@ pub async fn run_gh(
         }));
     }
     Ok(out)
+}
+
+/// The scope every Projects v2 read needs; a default `gh auth login` lacks it.
+pub(crate) const PROJECT_READ_SCOPE: &str = "read:project";
+
+/// Turn a missing-scope gh failure into `hint`, an actionable sentence. GraphQL's
+/// INSUFFICIENT_SCOPES wording says "required scopes" while gh's own CLI error names
+/// the scope, so either marks the gap; `scope` must be lowercase. Anything else,
+/// including every non-`Gh` error, passes through untouched.
+pub(crate) fn map_scope_error(e: AppError, scope: &str, hint: &str) -> AppError {
+    debug_assert_eq!(scope, scope.to_lowercase(), "scope must be lowercase");
+    if let AppError::Gh(ref msg) = e {
+        let lower = msg.to_lowercase();
+        if lower.contains("required scopes") || lower.contains(scope) {
+            return AppError::Gh(hint.to_string());
+        }
+    }
+    e
 }
 
 /// Like `run_gh`, but pipes `input` to gh's stdin — for `gh api --input -` with
@@ -558,6 +626,73 @@ mod tests {
             stored_login_cache_get(host, past_the_failure_window),
             Some(true)
         );
+    }
+
+    #[test]
+    fn account_changing_commands_bump_the_auth_epoch() {
+        // Owned by this test alone, so exact counts hold under parallel tests.
+        static EPOCH: AtomicU64 = AtomicU64::new(0);
+        let read = || EPOCH.load(Ordering::SeqCst);
+        for args in [
+            &["auth", "status", "--json", "hosts"][..],
+            &["auth", "token", "--hostname", "github.com"][..],
+            &["api", "user", "-q", ".login"][..],
+            &["auth"][..],
+            &[][..],
+        ] {
+            assert!(!changes_gh_account(args), "{args:?}");
+            drop(auth_epoch_guard(&EPOCH, args));
+            assert_eq!(read(), 0, "a read-only {args:?} must leave the epoch alone");
+        }
+        for (n, args) in [
+            &["auth", "switch", "--user", "octocat"][..],
+            &["auth", "login", "--web"][..],
+            &["auth", "logout"][..],
+            &["auth", "refresh", "-s", "project"][..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(changes_gh_account(args), "{args:?}");
+            let guard = auth_epoch_guard(&EPOCH, args);
+            assert_eq!(read(), n as u64, "the bump lands when the command ends");
+            drop(guard);
+            assert_eq!(read(), n as u64 + 1, "{args:?}");
+        }
+        let before = gh_auth_epoch();
+        bump_gh_auth_epoch();
+        assert!(gh_auth_epoch() > before);
+    }
+
+    #[test]
+    fn scope_errors_match_either_marker_and_only_the_named_scope() {
+        for raw in [
+            "GraphQL: Your token has not been granted the REQUIRED SCOPES.",
+            "missing scope Read:Project",
+        ] {
+            assert_eq!(
+                map_scope_error(AppError::Gh(raw.into()), PROJECT_READ_SCOPE, "hint").to_string(),
+                "hint"
+            );
+        }
+        // Another family's scope name is not this family's gap.
+        assert_eq!(
+            map_scope_error(
+                AppError::Gh("missing write:discussion".into()),
+                PROJECT_READ_SCOPE,
+                "hint"
+            )
+            .to_string(),
+            "missing write:discussion"
+        );
+        assert!(matches!(
+            map_scope_error(
+                AppError::InvalidArgument("required scopes".into()),
+                "x",
+                "hint"
+            ),
+            AppError::InvalidArgument(_)
+        ));
     }
 
     #[test]

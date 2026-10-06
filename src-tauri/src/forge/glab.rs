@@ -5,9 +5,8 @@
 //! and carries auth + self-managed hosts for free. So the GitLab `Forge` impl
 //! shells out to `glab` exactly the way the GitHub impl uses `gh`.
 //!
-//! NOTE: the exact `glab` flags/output here are a first cut and need live
-//! validation against a real `glab` (the `--version` / `auth status` contracts);
-//! treated as runtime-validate, like the agent-CLI integrations.
+//! Each glab contract probed against a real binary names its version inline (glab
+//! 1.105); one stated without a measured version or a glab-source citation is unprobed.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -1083,14 +1082,7 @@ pub async fn run_glab_ex(
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
     }
-    cmd.env("GLAB_PAGER", "")
-        .env("PAGER", "")
-        .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0")
-        .env("GLAB_CHECK_UPDATE", "false"); // see run_glab_raw for the polarity
-    for var in strip {
-        cmd.env_remove(var);
-    }
+    configure_child_env(&mut cmd, strip);
     apply_explicit_env(&mut cmd, host.as_ref(), envs);
     cmd.stdin(if input.is_some() {
         Stdio::piped()

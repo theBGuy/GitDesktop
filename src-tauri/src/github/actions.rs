@@ -365,7 +365,9 @@ fn workflow_name_cache() -> &'static WorkflowNameCache {
 /// The cached index for `(repo_path, slug)`, only if an entry exists AND is still inside
 /// its own direction's window. The lock is held just long enough to clone the map.
 fn workflow_names_get(repo_path: &str, slug: &str, ttl: NameTtl) -> Option<HashMap<u64, String>> {
-    let guard = workflow_name_cache().lock().unwrap();
+    let guard = workflow_name_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let entry = guard.get(&(repo_path.to_string(), slug.to_string()))?;
     let window = if entry.errored { ttl.error } else { ttl.ok };
     (entry.fetched_at.elapsed() < window).then(|| entry.names.clone())
@@ -373,27 +375,33 @@ fn workflow_names_get(repo_path: &str, slug: &str, ttl: NameTtl) -> Option<HashM
 
 /// Record a fetched `names` index for `(repo_path, slug)`, stamped now.
 fn workflow_names_put(repo_path: &str, slug: &str, names: HashMap<u64, String>) {
-    workflow_name_cache().lock().unwrap().insert(
-        (repo_path.to_string(), slug.to_string()),
-        CachedNames {
-            fetched_at: Instant::now(),
-            names,
-            errored: false,
-        },
-    );
+    workflow_name_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            (repo_path.to_string(), slug.to_string()),
+            CachedNames {
+                fetched_at: Instant::now(),
+                names,
+                errored: false,
+            },
+        );
 }
 
 /// Record that the fetch for `(repo_path, slug)` FAILED: an empty index under the short
 /// window, so a persistent failure costs one spawn per window instead of one per fetch.
 fn workflow_names_put_failure(repo_path: &str, slug: &str) {
-    workflow_name_cache().lock().unwrap().insert(
-        (repo_path.to_string(), slug.to_string()),
-        CachedNames {
-            fetched_at: Instant::now(),
-            names: HashMap::new(),
-            errored: true,
-        },
-    );
+    workflow_name_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            (repo_path.to_string(), slug.to_string()),
+            CachedNames {
+                fetched_at: Instant::now(),
+                names: HashMap::new(),
+                errored: true,
+            },
+        );
 }
 
 /// The `workflow_id` → name index backing every run row's `workflowName`, served from
@@ -622,15 +630,21 @@ pub async fn gh_run_failed_logs(repo_path: String, run_id: u64) -> AppResult<Str
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let mut text = log_output_verdict(out.code, out.stdout_lossy(), &out.stderr)?;
-    if text.len() > RUN_LOG_CAP {
-        let mut start = text.len() - RUN_LOG_CAP;
-        while !text.is_char_boundary(start) {
-            start += 1;
-        }
-        text = format!("…(earlier output truncated)\n{}", &text[start..]);
+    let text = log_output_verdict(out.code, out.stdout_lossy(), &out.stderr)?;
+    Ok(tail_capped(text, RUN_LOG_CAP))
+}
+
+/// `text` whole when it fits in `cap` bytes; otherwise its tail behind a truncation
+/// marker, the cut moved forward to a char boundary so the tail never exceeds `cap`.
+fn tail_capped(text: String, cap: usize) -> String {
+    if text.len() <= cap {
+        return text;
     }
-    Ok(text)
+    let mut start = text.len() - cap;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…(earlier output truncated)\n{}", &text[start..])
 }
 
 /// Logs for one job, for AI debugging. Prefers the failed-step logs (highest
@@ -652,7 +666,7 @@ pub async fn gh_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
     let failed_text = failed.stdout_lossy();
     // Fall back to the full log only on a SUCCESSFUL empty answer: a refusal or
     // failure would only repeat on the second read.
-    let mut text = if failed.code == 0 && failed_text.trim().is_empty() {
+    let text = if failed.code == 0 && failed_text.trim().is_empty() {
         let full = run_gh_raw(
             Some(&repo_path),
             &["run", "view", "-R", &slug, "--job", &id, "--log"],
@@ -663,14 +677,7 @@ pub async fn gh_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
     } else {
         log_output_verdict(failed.code, failed_text, &failed.stderr)?
     };
-    if text.len() > JOB_LOG_CAP {
-        let mut start = text.len() - JOB_LOG_CAP;
-        while !text.is_char_boundary(start) {
-            start += 1;
-        }
-        text = format!("…(earlier output truncated)\n{}", &text[start..]);
-    }
-    Ok(text)
+    Ok(tail_capped(text, JOB_LOG_CAP))
 }
 
 /// `-L 100` because gh's own default stops at 50 (measured, gh 2.94), and this list is
@@ -818,7 +825,9 @@ fn probe_cache_get(
     git_ref: &str,
     ttl: ProbeTtl,
 ) -> Option<bool> {
-    let guard = dispatch_probe_cache().lock().unwrap();
+    let guard = dispatch_probe_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let (probed_at, verdict) = guard.get(&(
         repo_path.to_string(),
         slug.to_string(),
@@ -836,15 +845,18 @@ fn probe_cache_get(
 /// Record `verdict` as the current answer for `(repo_path, slug, path, git_ref)`,
 /// stamped now.
 fn probe_cache_put(repo_path: &str, slug: &str, path: &str, git_ref: &str, verdict: bool) {
-    dispatch_probe_cache().lock().unwrap().insert(
-        (
-            repo_path.to_string(),
-            slug.to_string(),
-            path.to_string(),
-            git_ref.to_string(),
-        ),
-        (Instant::now(), verdict),
-    );
+    dispatch_probe_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            (
+                repo_path.to_string(),
+                slug.to_string(),
+                path.to_string(),
+                git_ref.to_string(),
+            ),
+            (Instant::now(), verdict),
+        );
 }
 
 /// Split the active workflows into verdicts already decided and the files that still
@@ -996,6 +1008,23 @@ pub async fn gh_workflow_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tail_capped_keeps_whole_chars_within_the_cap() {
+        const MARK: &str = "…(earlier output truncated)\n";
+        // `€` is 3 bytes at offsets 2..5 of this 7-byte string.
+        let text = "ab€cd";
+        assert_eq!(text.len(), 7);
+        assert_eq!(tail_capped(text.to_string(), 7), text);
+        assert_eq!(tail_capped(text.to_string(), 100), text);
+        assert_eq!(tail_capped(text.to_string(), 6), format!("{MARK}b€cd"));
+        assert_eq!(tail_capped(text.to_string(), 5), format!("{MARK}€cd"));
+        // A cut landing inside `€` moves forward past it, never back over the cap.
+        assert_eq!(tail_capped(text.to_string(), 4), format!("{MARK}cd"));
+        assert_eq!(tail_capped(text.to_string(), 3), format!("{MARK}cd"));
+        assert_eq!(tail_capped(text.to_string(), 0), MARK);
+        assert_eq!(tail_capped(String::new(), 0), "");
+    }
 
     /// The TS mirror at the top of `src/lib/github/actions.ts` is hand-maintained, so
     /// nothing but this test stops a casing or id-type drift from reaching the UI as

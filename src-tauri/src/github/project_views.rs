@@ -8,7 +8,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::project::{create_outcome_unknown, project_write, required_text};
 use crate::github::project_item_edits::graphql_input;
-use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{map_scope_error, run_gh, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,14 +41,9 @@ const VIEWS_SCOPE_HINT: &str =
     "GitHub project views need the read:project (or project) scope. Run:  gh auth refresh -s project";
 const VIEWS_POINTER: &str = "/data/node/views";
 
-fn map_scope_error(e: AppError) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(VIEWS_SCOPE_HINT.to_string());
-        }
-    }
-    e
+/// A views read without `read:project` maps to [`VIEWS_SCOPE_HINT`].
+fn views_scope_error(e: AppError) -> AppError {
+    map_scope_error(e, PROJECT_READ_SCOPE, VIEWS_SCOPE_HINT)
 }
 
 /// One view's selection, shared by the read and every write that answers with a
@@ -158,7 +153,7 @@ pub async fn gh_project_views(repo_path: String, project_id: String) -> AppResul
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
         .await
-        .map_err(map_scope_error)?;
+        .map_err(views_scope_error)?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the project views",
@@ -613,17 +608,17 @@ mod tests {
             "GraphQL: Your token has not been granted the required scopes to execute this query.",
             "missing scope read:project",
         ] {
-            let AppError::Gh(message) = map_scope_error(AppError::Gh(raw.into())) else {
+            let AppError::Gh(message) = views_scope_error(AppError::Gh(raw.into())) else {
                 panic!("expected Gh error");
             };
             assert_eq!(message, VIEWS_SCOPE_HINT);
         }
         assert_eq!(
-            map_scope_error(AppError::Gh("connection reset".into())).to_string(),
+            views_scope_error(AppError::Gh("connection reset".into())).to_string(),
             "connection reset"
         );
         assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("required scopes".into())),
+            views_scope_error(AppError::InvalidArgument("required scopes".into())),
             AppError::InvalidArgument(_)
         ));
     }

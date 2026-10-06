@@ -207,12 +207,12 @@ struct GhJsonAccount {
 /// it's either an old gh that doesn't know `--json` (→ text fallback) or a fatal/
 /// environmental gh error (→ inconclusive, don't misclassify as an auth state).
 enum GhJsonProbe {
-    /// Exit 0: the parsed hosts map (`{"hosts":{}}` = logged out everywhere).
+    /// Exit 0 with a readable body: the hosts map (`{"hosts":{}}` = logged out everywhere).
     Parsed(HashMap<String, Vec<GhJsonAccount>>),
     /// Non-zero because `--json` is an unknown flag (old gh) → use the text fallback.
     UnknownFlag,
-    /// Any other non-zero exit (fatal/environmental) → Offline, with its stderr as a
-    /// `sanitize_detail` detail.
+    /// Any other non-zero exit (fatal/environmental), or an exit-0 body that doesn't
+    /// parse → Offline, with a `sanitize_detail` stderr or a fixed note as the detail.
     Inconclusive(Option<String>),
 }
 
@@ -241,17 +241,23 @@ async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
     if out.code != 0 {
         return Ok(classify_gh_json_nonzero(out.code, &out.stderr));
     }
+    Ok(classify_gh_json_ok(&out.stdout_lossy()))
+}
+
+/// Classify an exit-0 `gh auth status --json hosts` body. `{"hosts":{}}` is logged out
+/// everywhere; a body that doesn't parse is Inconclusive, since no credential verdict
+/// can be read from it. `hosts` is required: a body without the key is not a report.
+fn classify_gh_json_ok(stdout: &str) -> GhJsonProbe {
     #[derive(serde::Deserialize)]
     struct HostsWrapper {
-        #[serde(default)]
         hosts: HashMap<String, Vec<GhJsonAccount>>,
     }
-    // `{"hosts":{}}` = logged out everywhere; a parse failure degrades to the same
-    // empty map rather than erroring (tolerant of untrusted JSON).
-    let parsed: HostsWrapper = serde_json::from_str(&out.stdout_lossy()).unwrap_or(HostsWrapper {
-        hosts: HashMap::new(),
-    });
-    Ok(GhJsonProbe::Parsed(parsed.hosts))
+    match serde_json::from_str::<HostsWrapper>(stdout) {
+        Ok(parsed) => GhJsonProbe::Parsed(parsed.hosts),
+        Err(_) => GhJsonProbe::Inconclusive(Some(
+            "gh auth status returned output that couldn't be read".to_string(),
+        )),
+    }
 }
 
 /// Whether gh error text (an account's `error`, or a failed command's stderr)
@@ -1537,15 +1543,29 @@ pub async fn forge_reconnect(
 
     // The driver waits on the guard's `Notify` (which may already carry a cancel
     // permit). The guard lives across this await and unregisters on return.
-    run_reconnect_child(
-        guard.notify.clone(),
-        &binary,
-        &args,
+    bump_gh_epoch_after(
         is_github,
-        &host,
-        &on_event,
+        run_reconnect_child(
+            guard.notify.clone(),
+            &binary,
+            &args,
+            is_github,
+            &host,
+            &on_event,
+        ),
     )
     .await
+}
+
+/// A GitHub reconnect spawns gh outside its runner and may change the active account on
+/// any outcome (a cancel or timeout leaves it unknown), so every return invalidates
+/// memos keyed on the gh auth epoch.
+async fn bump_gh_epoch_after<T>(is_github: bool, run: impl std::future::Future<Output = T>) -> T {
+    let out = run.await;
+    if is_github {
+        crate::github::runner::bump_gh_auth_epoch();
+    }
+    out
 }
 
 /// Cancel an in-flight reconnect by its frontend-generated `session_id`. Fires the
@@ -1723,6 +1743,15 @@ async fn run_reconnect_child(
     // Registry cleanup is owned by `ReconnectGuard` in `forge_reconnect` (it drops on
     // every return path, including this one).
 
+    let mut status = None;
+    if !(cancelled || timed_out || send_failed) {
+        match await_reconnect_exit(child.wait(), &cancel, deadline.as_mut()).await {
+            ReconnectExit::Exited(s) => status = Some(s),
+            ReconnectExit::Cancelled => cancelled = true,
+            ReconnectExit::TimedOut => timed_out = true,
+        }
+    }
+
     if cancelled || timed_out || send_failed {
         // Ensure the child is gone (kill_on_drop is a backstop; be explicit).
         let _ = child.kill().await;
@@ -1739,8 +1768,7 @@ async fn run_reconnect_child(
         return Ok(());
     }
 
-    let status = child.wait().await;
-    let ok = status.map(|s| s.success()).unwrap_or(false);
+    let ok = matches!(status, Some(Ok(s)) if s.success());
     if ok {
         let login = parse_reconnect_login(&collected);
         let _ = on_event.send(ReconnectEvent::Finished {
@@ -1762,6 +1790,31 @@ async fn run_reconnect_child(
         });
     }
     Ok(())
+}
+
+/// How the reconnect child's post-stream wait ended.
+enum ReconnectExit {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    Cancelled,
+    TimedOut,
+}
+
+/// Wait for the child once both streams closed. A CLI can close stdio and stay alive,
+/// and `kill_on_drop` can't fire while this future lives, so cancel and the deadline
+/// stay armed here exactly as in the stream loop.
+async fn await_reconnect_exit(
+    wait: impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
+    cancel: &Notify,
+    deadline: std::pin::Pin<&mut tokio::time::Sleep>,
+) -> ReconnectExit {
+    // Biased toward the exit: a child that exited in the same poll a cancel or the
+    // deadline fired must report its real outcome.
+    tokio::select! {
+        biased;
+        status = wait => ReconnectExit::Exited(status),
+        _ = cancel.notified() => ReconnectExit::Cancelled,
+        _ = deadline => ReconnectExit::TimedOut,
+    }
 }
 
 /// What one reconnect flow has parsed out of its output so far, and what it has
@@ -2305,12 +2358,10 @@ mod tests {
 
     // ── gh JSON parse fixtures ──
     fn parse_hosts(json: &str) -> HashMap<String, Vec<GhJsonAccount>> {
-        #[derive(serde::Deserialize)]
-        struct W {
-            #[serde(default)]
-            hosts: HashMap<String, Vec<GhJsonAccount>>,
-        }
-        serde_json::from_str::<W>(json).unwrap().hosts
+        let GhJsonProbe::Parsed(map) = classify_gh_json_ok(json) else {
+            panic!("fixture must be a readable report: {json}");
+        };
+        map
     }
 
     #[test]
@@ -4252,6 +4303,117 @@ check your internet connection or https://githubstatus.com";
             classify_gh_json_nonzero(1, "   "),
             GhJsonProbe::Inconclusive(None)
         ));
+    }
+
+    #[test]
+    fn gh_json_ok_unreadable_body_is_inconclusive_never_a_verdict() {
+        for body in [
+            "",
+            "not json",
+            "{\"hosts\":",
+            "{\"hosts\":[1,2]}",
+            "<html>502</html>",
+            "{}",
+            "{\"hosts\":null}",
+        ] {
+            let probe = classify_gh_json_ok(body);
+            assert!(
+                matches!(probe, GhJsonProbe::Inconclusive(Some(_))),
+                "body {body:?} must not mint a credential verdict"
+            );
+            // Downstream it reads Unknown / no per-host answer, never signed out.
+            assert_eq!(
+                gh_cli_auth_from_probe(Ok(classify_gh_json_ok(body))),
+                Some(AuthStatus::Unknown)
+            );
+            assert!(gh_host_auth(&probe, "github.com").unwrap().is_none());
+        }
+        // A readable empty report is still the logged-out-everywhere verdict.
+        assert!(matches!(
+            classify_gh_json_ok(r#"{"hosts":{}}"#),
+            GhJsonProbe::Parsed(map) if map.is_empty()
+        ));
+        assert!(matches!(
+            classify_gh_json_ok(r#"{"hosts":{"github.com":[{"state":"success","active":true,"login":"a"}]}}"#),
+            GhJsonProbe::Parsed(map) if map.contains_key("github.com")
+        ));
+    }
+
+    // ── post-EOF reconnect wait ──
+    fn pending_exit() -> std::future::Pending<std::io::Result<std::process::ExitStatus>> {
+        std::future::pending()
+    }
+
+    #[tokio::test]
+    async fn reconnect_exit_wait_honors_cancel() {
+        let cancel = Notify::new();
+        cancel.notify_one();
+        let deadline = tokio::time::sleep(RECONNECT_TIMEOUT);
+        tokio::pin!(deadline);
+        let exit = tokio::time::timeout(
+            Duration::from_secs(5),
+            await_reconnect_exit(pending_exit(), &cancel, deadline.as_mut()),
+        )
+        .await
+        .expect("a cancel must end a wait on a child that never exits");
+        assert!(matches!(exit, ReconnectExit::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn reconnect_exit_wait_honors_the_deadline() {
+        let cancel = Notify::new();
+        let deadline = tokio::time::sleep(Duration::from_millis(1));
+        tokio::pin!(deadline);
+        let exit = tokio::time::timeout(
+            Duration::from_secs(5),
+            await_reconnect_exit(pending_exit(), &cancel, deadline.as_mut()),
+        )
+        .await
+        .expect("the deadline must end a wait on a child that never exits");
+        assert!(matches!(exit, ReconnectExit::TimedOut));
+    }
+
+    /// Repeated because an unbiased select picks a ready arm at random.
+    #[tokio::test]
+    async fn a_real_exit_outranks_a_simultaneous_cancel_and_deadline() {
+        for _ in 0..32 {
+            let cancel = Notify::new();
+            cancel.notify_one();
+            let deadline = tokio::time::sleep(Duration::ZERO);
+            tokio::pin!(deadline);
+            (&mut deadline).await;
+            let exit = await_reconnect_exit(
+                std::future::ready(Err(std::io::Error::other("exited"))),
+                &cancel,
+                deadline.as_mut(),
+            )
+            .await;
+            assert!(matches!(exit, ReconnectExit::Exited(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_github_reconnect_bumps_the_gh_auth_epoch_on_every_outcome() {
+        use crate::github::runner::gh_auth_epoch;
+        for outcome in [Ok(()), Err(AppError::InvalidArgument("cancelled".into()))] {
+            let before = gh_auth_epoch();
+            let out = bump_gh_epoch_after(true, std::future::ready(outcome)).await;
+            assert!(gh_auth_epoch() > before, "{:?}", out.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_exit_wait_returns_the_childs_exit() {
+        let cancel = Notify::new();
+        let deadline = tokio::time::sleep(RECONNECT_TIMEOUT);
+        tokio::pin!(deadline);
+        let exit = await_reconnect_exit(
+            std::future::ready(Err(std::io::Error::other("wait failed"))),
+            &cancel,
+            deadline.as_mut(),
+        )
+        .await;
+        assert!(matches!(exit, ReconnectExit::Exited(Err(_))));
     }
 
     // ── sanitize_detail bound ──

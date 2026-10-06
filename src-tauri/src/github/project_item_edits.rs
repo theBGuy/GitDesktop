@@ -11,7 +11,10 @@ use crate::github::project_items::{
     board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
     DRAFT_CONTENT_SELECTION,
 };
-use crate::github::runner::{run_gh_input, run_gh_input_raw, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{
+    map_scope_error, run_gh_input, run_gh_input_raw, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT,
+    PROJECT_READ_SCOPE,
+};
 
 pub(super) const BULK_ALIAS_CAP: usize = 25;
 
@@ -334,7 +337,7 @@ fn build_bulk_item_documents(
 }
 
 fn map_bulk_item_error(error: AppError) -> AppError {
-    map_scope_error(strip_gh_prefix(error))
+    item_edits_scope_error(strip_gh_prefix(error))
 }
 
 pub(super) fn strip_gh_prefix(error: AppError) -> AppError {
@@ -352,14 +355,8 @@ pub(super) fn strip_gh_prefix(error: AppError) -> AppError {
     }
 }
 
-fn map_scope_error(e: AppError) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(ITEM_EDITS_SCOPE_HINT.to_string());
-        }
-    }
-    e
+fn item_edits_scope_error(e: AppError) -> AppError {
+    map_scope_error(e, PROJECT_READ_SCOPE, ITEM_EDITS_SCOPE_HINT)
 }
 
 pub(super) const GRAPHQL_INPUT_ARGS: [&str; 6] = ["api", "graphql", "--method", "POST", "--input", "-"];
@@ -691,7 +688,7 @@ pub async fn gh_add_draft_item(
         "the new project draft",
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(item_edits_scope_error)?;
     response_item(&value, DRAFT_POINTER, "the new project draft")
 }
 
@@ -707,7 +704,7 @@ pub async fn gh_add_board_item(
     );
     let value = request(&repo_path, &input, "the added project item")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     response_item(&value, ADD_ITEM_POINTER, "the added project item")
 }
 
@@ -733,7 +730,7 @@ pub async fn gh_update_draft_item(
     let input = update_draft_input(&draft_id, &title, &body, assignee_ids.as_deref());
     let value = request(&repo_path, &input, "the updated draft")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     parse_updated_draft(&value)
 }
 
@@ -758,7 +755,7 @@ pub async fn gh_convert_draft_item(
     );
     let value = request(&repo_path, &input, "the converted draft")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     parse_converted(&value)
 }
 
@@ -774,7 +771,7 @@ pub async fn gh_archive_board_item(
     );
     let value = request(&repo_path, &input, "the archived project item")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     require_payload(&value, ARCHIVE_POINTER, "the archived project item")
 }
 
@@ -802,7 +799,7 @@ pub async fn gh_unarchive_board_item(
     );
     let value = request(&repo_path, &input, "the unarchived project item")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     require_payload(&value, UNARCHIVE_POINTER, "the unarchived project item")
 }
 
@@ -830,7 +827,7 @@ pub async fn gh_remove_board_item(
     );
     let value = request(&repo_path, &input, "the removed project item")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     require_payload(&value, REMOVE_POINTER, "the removed project item")
 }
 
@@ -856,7 +853,7 @@ pub async fn gh_set_item_position(
     let input = position_input(&project_id, &item_id, after_id.as_deref());
     let value = request(&repo_path, &input, "the board's new order")
         .await
-        .map_err(map_scope_error)?;
+        .map_err(item_edits_scope_error)?;
     parse_board_order(&value)
 }
 
@@ -884,7 +881,7 @@ pub async fn gh_add_issue_to_projects(
         "the added project memberships",
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(item_edits_scope_error)?;
     Ok(())
 }
 
@@ -1778,16 +1775,16 @@ mod tests {
         }
         for message in ["gh: required scopes: project", "Missing READ:PROJECT"] {
             assert_eq!(
-                map_scope_error(AppError::Gh(message.into())).to_string(),
+                item_edits_scope_error(AppError::Gh(message.into())).to_string(),
                 ITEM_EDITS_SCOPE_HINT
             );
         }
         assert_eq!(
-            map_scope_error(AppError::Gh("connection reset".into())).to_string(),
+            item_edits_scope_error(AppError::Gh("connection reset".into())).to_string(),
             "connection reset"
         );
         assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("read:project".into())),
+            item_edits_scope_error(AppError::InvalidArgument("read:project".into())),
             AppError::InvalidArgument(_)
         ));
     }

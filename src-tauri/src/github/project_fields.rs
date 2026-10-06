@@ -13,7 +13,9 @@ use crate::github::project_item_edits::{
     BulkDocument, BulkItemOutcomes, BULK_ALIAS_CAP, GRAPHQL_INPUT_ARGS,
 };
 use crate::github::project_items::AssigneeRef;
-use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{
+    map_scope_error, run_gh, run_gh_input, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -806,7 +808,7 @@ fn build_bulk_field_write_documents(
 }
 
 fn map_field_write_error(error: AppError) -> AppError {
-    map_scope_error(strip_gh_prefix(error))
+    field_scope_error(strip_gh_prefix(error))
 }
 
 fn parse_field_write_response(stdout: &str) -> AppResult<()> {
@@ -827,7 +829,7 @@ fn parse_field_write_response(stdout: &str) -> AppResult<()> {
         return Err(if error["path"][0] == ISSUE_ALIAS {
             message
         } else {
-            map_scope_error(message)
+            field_scope_error(message)
         });
     }
     Ok(())
@@ -892,7 +894,7 @@ const FIELDS_SCOPE_HINT: &str =
 const ISSUE_FIELD_PATH_HINT: &str =
     "This field belongs to the issue itself, so it saves through the issue. Reload the board's fields and try again.";
 
-fn map_scope_error(e: AppError) -> AppError {
+fn field_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
         let lower = msg.to_lowercase();
         if lower.contains(
@@ -905,11 +907,8 @@ fn map_scope_error(e: AppError) -> AppError {
         if lower.contains("setissuefieldvalue") {
             return e;
         }
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(FIELDS_SCOPE_HINT.to_string());
-        }
     }
-    e
+    map_scope_error(e, PROJECT_READ_SCOPE, FIELDS_SCOPE_HINT)
 }
 
 const FIELD_COMMON: &str = "... on ProjectV2FieldCommon { id name dataType isIssueField }";
@@ -1357,7 +1356,7 @@ pub async fn gh_item_field_values(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(field_scope_error)?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the project field values",
@@ -1386,7 +1385,7 @@ pub async fn gh_project_fields(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(field_scope_error)?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the project fields",
@@ -2623,17 +2622,18 @@ mod tests {
             "GraphQL: Your token has not been granted the required scopes to execute this query.",
             "missing scope read:project",
         ] {
-            let AppError::Gh(message) = map_scope_error(AppError::Gh(raw.into())) else {
+            let AppError::Gh(message) = field_scope_error(AppError::Gh(raw.into())) else {
                 panic!("expected Gh error");
             };
             assert_eq!(message, FIELDS_SCOPE_HINT);
         }
-        let AppError::Gh(message) = map_scope_error(AppError::Gh("connection reset".into())) else {
+        let AppError::Gh(message) = field_scope_error(AppError::Gh("connection reset".into()))
+        else {
             panic!("expected Gh error");
         };
         assert_eq!(message, "connection reset");
         assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("required scopes".into())),
+            field_scope_error(AppError::InvalidArgument("required scopes".into())),
             AppError::InvalidArgument(_)
         ));
     }
@@ -3277,7 +3277,7 @@ mod tests {
             "Your token has not been granted the required scopes to execute this query. The 'setIssueFieldValue' field requires one of the following scopes: ['admin:org']",
         ] {
             assert_eq!(map_field_write_error(AppError::Gh(format!("gh: {message}"))).to_string(), message);
-            assert_eq!(map_scope_error(AppError::Gh(message.into())).to_string(), message);
+            assert_eq!(field_scope_error(AppError::Gh(message.into())).to_string(), message);
         }
         let wrong_path = "Issue field values cannot be updated using the updateProjectV2ItemFieldValue mutation, they must be updated using the updateIssueFieldValue mutation";
         assert_eq!(

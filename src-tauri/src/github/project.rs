@@ -9,7 +9,10 @@ use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
-use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{
+    map_scope_error, run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT,
+    PROJECT_READ_SCOPE,
+};
 
 /// A project the signed-in user can see. `viewer_can_update` decides whether the
 /// picker may offer it as a link target; closed projects are returned too so the
@@ -94,17 +97,10 @@ pub struct ProjectItemRemove {
 const PROJECT_SCOPE_HINT: &str =
     "GitHub Projects need the project scope. Run:  gh auth refresh -s project";
 
-/// Projects v2 needs the `read:project` scope to read and `project` to write,
-/// neither of which a default `gh auth login` grants — turn both the GraphQL
-/// `INSUFFICIENT_SCOPES` wording and gh's own CLI scope error into one hint.
-fn map_scope_error(e: AppError) -> AppError {
-    if let AppError::Gh(ref msg) = e {
-        let lower = msg.to_lowercase();
-        if lower.contains("required scopes") || lower.contains("read:project") {
-            return AppError::Gh(PROJECT_SCOPE_HINT.to_string());
-        }
-    }
-    e
+/// Projects v2 needs `read:project` to read and `project` to write, neither of which
+/// a default `gh auth login` grants, so both gaps map to this one hint.
+fn project_scope_error(e: AppError) -> AppError {
+    map_scope_error(e, PROJECT_READ_SCOPE, PROJECT_SCOPE_HINT)
 }
 
 /// A `ProjectV2` node, skipped entirely when it carries no id (the one field
@@ -256,7 +252,7 @@ fn available_from_output(out: &GhOutput) -> AppResult<AvailableProjects> {
     let parsed: Option<Value> = serde_json::from_str(&out.stdout_lossy()).ok();
     match parsed {
         Some(ref v) if any_arm_present(v) => Ok(merge_available(v)),
-        _ if out.code != 0 => Err(map_scope_error(gh_failure(out))),
+        _ if out.code != 0 => Err(project_scope_error(gh_failure(out))),
         // A clean exit is an answer even with both arms absent (owner not found).
         Some(ref v) => Ok(merge_available(v)),
         None => Err(AppError::Gh(
@@ -373,7 +369,7 @@ pub async fn gh_item_projects(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(project_scope_error)?;
     let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the assigned projects",
@@ -431,7 +427,7 @@ pub async fn gh_edit_item_projects(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(project_scope_error)?;
     Ok(())
 }
 
@@ -449,7 +445,7 @@ pub(super) async fn project_write(repo_path: &str, input: &str, surface: &str) -
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_scope_error)?;
+    .map_err(project_scope_error)?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
@@ -725,7 +721,7 @@ mod tests {
              The 'id' field requires one of the following scopes: ['read:project'] (repository.projectsV2)",
             "error: your authentication token is missing required scopes [read:project]",
         ] {
-            let AppError::Gh(msg) = map_scope_error(AppError::Gh(raw.into())) else {
+            let AppError::Gh(msg) = project_scope_error(AppError::Gh(raw.into())) else {
                 panic!("expected the Gh variant");
             };
             assert_eq!(msg, PROJECT_SCOPE_HINT);
@@ -734,7 +730,7 @@ mod tests {
 
     #[test]
     fn unrelated_failures_pass_through_untouched() {
-        let AppError::Gh(msg) = map_scope_error(AppError::Gh(
+        let AppError::Gh(msg) = project_scope_error(AppError::Gh(
             "GraphQL: Could not resolve to an Issue with the number 999.".into(),
         )) else {
             panic!("expected the Gh variant");
@@ -744,7 +740,7 @@ mod tests {
             "GraphQL: Could not resolve to an Issue with the number 999."
         );
         assert!(matches!(
-            map_scope_error(AppError::InvalidArgument("required scopes".into())),
+            project_scope_error(AppError::InvalidArgument("required scopes".into())),
             AppError::InvalidArgument(_)
         ));
     }
