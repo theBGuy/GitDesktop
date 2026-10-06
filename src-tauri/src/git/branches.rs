@@ -2,9 +2,10 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    acquire_repo_lock, acquire_repo_lock_unbounded, run_git, run_git_mutating, run_git_raw,
-    run_git_worktree_admin, try_acquire_repo_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
-    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
+    run_git_config_write, run_git_mutating, run_git_raw, run_git_worktree_admin,
+    try_acquire_repo_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -206,31 +207,54 @@ pub async fn git_set_branch_archived(
     name: String,
     archived: bool,
 ) -> AppResult<()> {
-    validate_ref_name(&name)?;
+    set_branch_archived_core(&repo_path, &name, archived).await
+}
+
+/// The body of `git_set_branch_archived`.
+///
+/// Deliberately lock-free: the worktree-admin domain is held for a whole removal
+/// (minutes on a large tree), so queueing there would turn a second worktree delete
+/// into a failed archive for the first. Config writers hold `.git/config.lock` for
+/// milliseconds, in this process or another, which the one retry covers.
+pub(crate) async fn set_branch_archived_core(
+    repo_path: &str,
+    name: &str,
+    archived: bool,
+) -> AppResult<()> {
+    validate_ref_name(name)?;
     // No current/default-branch refusal here by design: the frontend owns the
     // guard (the current-branch arm is total; the default arm is best-effort,
     // dropping out while defaultName resolves), no MCP tool mutates the flag,
     // and it is fully reversible — a backend default-branch check would also
     // ride the multi-spawn, fallible remote-HEAD resolution per call.
     let key = format!("branch.{name}.gitdesktopArchived");
-    if archived {
-        run_git(Some(&repo_path), &["config", &key, "true"], DEFAULT_TIMEOUT).await?;
+    let args = if archived {
+        ["config", key.as_str(), "true"]
     } else {
-        let out = run_git_raw(
-            Some(&repo_path),
-            &["config", "--unset", &key],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        // exit 5 = "key not found" — already unarchived, which is fine.
-        if out.code != 0 && out.code != 5 {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
+        ["config", "--unset", key.as_str()]
+    };
+    let out = run_git_config_write(repo_path, &args, DEFAULT_TIMEOUT).await?;
+    // exit 5 = "key not found" on --unset — already unarchived, which is fine.
+    if out.code == 0 || (!archived && out.code == 5) {
+        return Ok(());
     }
-    Ok(())
+    if is_config_lock_contention(&out.stderr) {
+        return Err(archive_config_busy(name, archived));
+    }
+    Err(AppError::Git {
+        code: out.code,
+        stderr: out.stderr,
+    })
+}
+
+/// The refusal once the retry ALSO lost the config lock: what happened and what to
+/// do, never git's lock-file path.
+fn archive_config_busy(name: &str, archived: bool) -> AppError {
+    let verb = if archived { "archived" } else { "unarchived" };
+    AppError::Command(format!(
+        "Another Git process was saving this repository's settings, so {name} wasn't \
+         {verb} — try again."
+    ))
 }
 
 #[tauri::command]
@@ -1584,6 +1608,7 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{archive_config_busy, set_branch_archived_core};
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
         divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
@@ -3645,5 +3670,93 @@ mod tests {
                 .is_empty(),
             "and the branch it was holding is gone"
         );
+    }
+
+    async fn archived_flag(repo: &str, branch: &str) -> Option<String> {
+        let key = format!("branch.{branch}.gitdesktopArchived");
+        let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
+    }
+
+    /// A config lock another writer releases within the retry delay is ridden out end
+    /// to end. The lock exists before the call, so the first attempt always loses it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_briefly_held_config_lock_is_ridden_out() {
+        let (_base, base) = temp_base("archive-transient-lock");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+
+        let lock = repo.join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::remove_file(&lock).unwrap();
+        });
+        set_branch_archived_core(&repo_s, "feature", true)
+            .await
+            .expect("the retry lands after the other writer lets go");
+        release.await.unwrap();
+        assert_eq!(
+            archived_flag(&repo_s, "feature").await.as_deref(),
+            Some("true")
+        );
+    }
+
+    /// A config lock held through the retry surfaces the user-register refusal, never
+    /// git's lock-file error; released, the same call succeeds, and an unarchive of an
+    /// unset flag stays a success.
+    #[tokio::test]
+    async fn a_held_config_lock_reads_as_try_again_not_a_raw_git_error() {
+        let (_base, base) = temp_base("archive-config-lock");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+
+        let lock = repo.join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        for archived in [true, false] {
+            let err = set_branch_archived_core(&repo_s, "feature", archived)
+                .await
+                .expect_err("a lock held through the retry refuses");
+            assert_eq!(
+                err.to_string(),
+                archive_config_busy("feature", archived).to_string()
+            );
+            assert!(!err.to_string().contains("config.lock"), "{err}");
+        }
+
+        std::fs::remove_file(&lock).unwrap();
+        set_branch_archived_core(&repo_s, "feature", true)
+            .await
+            .expect("the lock released, the archive lands");
+        assert_eq!(
+            archived_flag(&repo_s, "feature").await.as_deref(),
+            Some("true")
+        );
+        for _ in 0..2 {
+            set_branch_archived_core(&repo_s, "feature", false)
+                .await
+                .expect("unarchiving, twice, succeeds");
+        }
+        assert_eq!(archived_flag(&repo_s, "feature").await, None);
+    }
+
+    #[test]
+    fn the_config_busy_refusal_names_the_branch_and_the_retry() {
+        assert_eq!(
+            archive_config_busy("feat/x", true).to_string(),
+            "Another Git process was saving this repository's settings, so feat/x wasn't \
+             archived — try again."
+        );
+        assert!(archive_config_busy("feat/x", false)
+            .to_string()
+            .contains("feat/x wasn't unarchived — try again."));
     }
 }

@@ -15,7 +15,13 @@ import {
   repoKeys,
   worktreeKey,
 } from "@/lib/git/queries";
-import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
+import {
+  beginPromoteWindow,
+  endPromoteWindow,
+  pruneWorktrees,
+  removeWorktree,
+  touchPromoteWindow,
+} from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useUiStore } from "./ui";
@@ -483,11 +489,16 @@ async function runPromote(
   let stashed = false;
   // The key the removal entry was marked under, or null once it has settled.
   let markedKey: string | null = null;
+  // The cross-process promote window this run holds, closed in `finally`.
+  let windowToken: string | null = null;
   try {
     // Verify the main workspace is reachable BEFORE any mutation: a
     // moved/unmounted main path would otherwise let the app stay on the
     // worktree while we go on to delete it. Throwing here aborts cleanly.
     const info = await validateRepo(mainPath);
+    // Before the first mutation, so a refusal (another promote, or an MCP
+    // branch change still running) also aborts cleanly.
+    windowToken = await beginPromoteWindow(mainPath, branch);
     // The spelling every consumer keys by (see `byRepo`), including the
     // invalidations below, which have to hit the mounted query keys. The git
     // calls keep taking `mainPath`; either spelling works for git.
@@ -515,6 +526,10 @@ async function runPromote(
     // check it out in main next. force=false: the clean-tree guard already ran.
     await removeWorktreeFreeingBranch(mainPath, worktreePath);
     removed = true;
+    // The removal can run for minutes; restart the window's expiry so the
+    // stash and checkout legs still hold MCP branch changes off.
+    if (windowToken)
+      await touchPromoteWindow(windowToken).catch(() => undefined);
     await pruneWorktrees(mainPath).catch(() => undefined);
     // The removed row leaves the manager's list now; the entry stays on, so the
     // line can go on reporting the tail.
@@ -568,6 +583,8 @@ async function runPromote(
     // Same expressions `startPromote` claimed under, or a latch never releases.
     promotingMains.delete(normPath(mainPath));
     promotingWorktrees.delete(normPath(worktreePath));
+    // Best-effort: a close that fails leaves a marker its age gate expires.
+    if (windowToken) await endPromoteWindow(windowToken).catch(() => undefined);
   }
 }
 

@@ -625,6 +625,44 @@ pub async fn run_git_mutating_input(
     }
 }
 
+/// How long a config write waits before its one retry. git never waits on
+/// `.git/config.lock` itself, and the writers it collides with hold it for milliseconds.
+pub(crate) const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Whether a failed git run lost `.git/config.lock` to another writer — any config
+/// set, `branch -m`/`-D` (both rewrite `branch.*` sections), or a tracking checkout,
+/// in this process or another. Matched on git's own text, which the runner pins to
+/// the C locale.
+pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
+    stderr.contains("could not lock config file")
+}
+
+/// Runs `attempt` once more after [`CONFIG_LOCK_RETRY_DELAY`] when its first run lost
+/// the config lock; any other outcome, the retry's included, comes back as-is. Generic
+/// over the run so the policy is testable without timing a real collision.
+pub(crate) async fn retry_on_config_lock<F, Fut>(mut attempt: F) -> AppResult<GitOutput>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<GitOutput>>,
+{
+    let out = attempt().await?;
+    if out.code != 0 && is_config_lock_contention(&out.stderr) {
+        tokio::time::sleep(CONFIG_LOCK_RETRY_DELAY).await;
+        return attempt().await;
+    }
+    Ok(out)
+}
+
+/// A lock-free `git config` write with the one config-lock retry; raw output, so the
+/// caller maps exit codes (`--unset`'s 5) and a second lost race itself.
+pub(crate) async fn run_git_config_write(
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    retry_on_config_lock(|| run_git_raw(Some(repo_path), args, timeout)).await
+}
+
 /// Runs a `git worktree …` admin command under the repo's WORKTREE-ADMIN lock —
 /// the domain that keeps a multi-minute removal from stalling staging, commits and
 /// the worktree list. Same bounded wait and [`AppError::Busy`] contract as
@@ -748,6 +786,60 @@ mod lock_tests {
                 .is_ok(),
             "another repo path must be an independent mutex"
         );
+    }
+
+    /// The classifier keys on git's own config-lock wording and nothing nearby:
+    /// index.lock has its own retry, and a different failure must surface unretried.
+    #[test]
+    fn config_lock_contention_matches_only_the_config_lock_failure() {
+        assert!(is_config_lock_contention(
+            "error: could not lock config file .git/config: File exists"
+        ));
+        assert!(is_config_lock_contention(
+            "warning: could not lock config file C:/r/.git/config: Permission denied\n"
+        ));
+        for other in [
+            "",
+            "fatal: Unable to create 'C:/r/.git/index.lock': File exists.",
+            "error: key does not contain a section: gitdesktopArchived",
+            "fatal: not a git repository (or any of the parent directories): .git",
+        ] {
+            assert!(!is_config_lock_contention(other), "{other:?}");
+        }
+    }
+
+    fn output(code: i32, stderr: &str) -> GitOutput {
+        GitOutput {
+            stdout: Vec::new(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    /// A lost config lock gets exactly one more attempt; success, an unrelated
+    /// failure, and a second lost race all stop there.
+    #[tokio::test]
+    async fn the_config_write_retries_once_and_only_on_the_config_lock() {
+        const LOST: &str = "error: could not lock config file .git/config: File exists";
+        for (script, want_calls, want_code) in [
+            (vec![output(255, LOST), output(0, "")], 2, 0),
+            (vec![output(255, LOST), output(255, LOST)], 2, 255),
+            (vec![output(0, "")], 1, 0),
+            (vec![output(5, "")], 1, 5),
+            (vec![output(128, "fatal: other")], 1, 128),
+        ] {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let script = std::sync::Mutex::new(std::collections::VecDeque::from(script));
+            let out = retry_on_config_lock(|| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let next = script.lock().unwrap().pop_front().expect("a scripted run");
+                async move { Ok(next) }
+            })
+            .await
+            .expect("the scripted runs never error");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), want_calls);
+            assert_eq!(out.code, want_code);
+        }
     }
 
     /// The label a waiter reads comes from the argv, and a leading `-c` pair must

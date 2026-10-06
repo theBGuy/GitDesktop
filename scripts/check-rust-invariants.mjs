@@ -227,7 +227,7 @@ const STDERR_ONLY_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
-    fn: "git_set_branch_archived",
+    fn: "set_branch_archived_core",
     rationale: "`config` write — no working-tree operation to half-finish",
   },
   {
