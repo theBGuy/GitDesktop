@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { ProviderIcon } from "@/components/provider-icon";
 import { RelativeTime } from "@/components/relative-time";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -1425,6 +1426,11 @@ function MyWorkRow({
       >
         {item.title}
       </span>
+      {item.isDraft && (
+        <Badge variant="secondary" className="h-4">
+          Draft
+        </Badge>
+      )}
       {/* The glyph is decorative, so the forge rides the row's ACCESSIBLE text,
           announced after the name (rows are scanned by repo): one name can live
           on several forges, and a shape says nothing to a screen reader.

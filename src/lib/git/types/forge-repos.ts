@@ -104,6 +104,8 @@ export interface MyWorkItem {
   number: number;
   title: string;
   isPullRequest: boolean;
+  /** False for issues. */
+  isDraft: boolean;
   repoFullName: string;
   repoOwner: string;
   repoName: string;

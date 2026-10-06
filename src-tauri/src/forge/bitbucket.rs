@@ -726,6 +726,7 @@ fn my_work_item_from_value(raw: &serde_json::Value) -> Option<MyWorkItem> {
         // Bitbucket Cloud's native issue tracker is deleted platform-wide, so
         // every item this arm can produce is a pull request.
         is_pull_request: true,
+        is_draft: raw.get("draft").and_then(Value::as_bool).unwrap_or(false),
         repo_full_name,
         repo_owner,
         repo_name,
@@ -6135,7 +6136,7 @@ mod my_work_tests {
     /// fields this surface reads.
     #[test]
     fn maps_a_pull_request_payload() {
-        let raw = json!({
+        let mut raw = json!({
             "id": 17,
             "title": "fix(diff): raw preview toggle",
             "state": "OPEN",
@@ -6152,6 +6153,7 @@ mod my_work_tests {
         assert_eq!(item.provider, Provider::Bitbucket);
         assert_eq!(item.number, 17);
         assert!(item.is_pull_request, "Cloud has no native issues left");
+        assert!(!item.is_draft);
         // The DESTINATION repo, not the fork the branch lives on.
         assert_eq!(item.repo_full_name, "acme/tools");
         assert_eq!(item.repo_owner, "acme");
@@ -6165,6 +6167,9 @@ mod my_work_tests {
         // merge's fixed millisecond width (never round into the next second).
         assert_eq!(item.updated_at, "2026-09-05T23:21:02.482Z");
         assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
+
+        raw["draft"] = json!(true);
+        assert!(my_work_item_from_value(&raw).expect("maps draft").is_draft);
     }
 
     #[test]
