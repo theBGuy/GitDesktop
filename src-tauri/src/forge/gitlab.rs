@@ -28,7 +28,7 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
-use crate::forge::session::{classify_glab_failure_for_host, GlabFailure};
+use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
     FORK_POLL_DELAY, README_CANDIDATES,
@@ -10159,6 +10159,8 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
 /// (`404 Not Found`); some builds echo the JSON body (`{"message":"404 ... Not
 /// Found"}`) too, so scan both. Pure, so it's unit-testable.
 pub(crate) fn glab_output_is_404(stderr: &str, stdout: &str) -> bool {
+    let stderr = mask_host_tokens(stderr);
+    let stdout = mask_host_tokens(stdout);
     let hay = format!("{stderr}\n{stdout}").to_ascii_lowercase();
     hay.contains("404") || hay.contains("not found")
 }
@@ -12229,6 +12231,19 @@ mod tests {
         // "best" deliberately avoids `similarity` (member-scoped → empty public
         // searches); star_count is the relevance proxy.
         assert_eq!(gitlab_order_by("best"), "star_count");
+    }
+
+    #[test]
+    fn glab_output_404_masks_transport_identifiers_in_both_streams() {
+        for transport in [
+            "Get \"https://gitlab.example/api/v4/projects/1/jobs/11404123456/artifacts\": connection refused",
+            "dial tcp proxy-404.example:443: connect: connection refused",
+        ] {
+            assert!(!glab_output_is_404(transport, ""), "{transport}");
+            assert!(!glab_output_is_404("", transport), "{transport}");
+        }
+        assert!(glab_output_is_404("404 Not Found", ""));
+        assert!(glab_output_is_404("", r#"{"message":"404 File Not Found"}"#));
     }
 
     #[test]

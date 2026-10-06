@@ -346,7 +346,8 @@ export function PrReviewPanel({
     // (so it counts a drained queued run and skips a dismissed one), not here.
     generate(effective, mode, context, {
       ignorePrior: ignoredModes.has(mode),
-      ignoreExternal,
+      // Only suppress external reviews while their toggle is on screen.
+      ignoreExternal: ignoreExternal && externalCount > 0,
       // Only suppress the notes while the toggle is actually ON SCREEN: the row
       // hides when the query refetches into an error/empty result, and a stale
       // `ignoreNotes` would then keep skipping them with no affordance to undo.

@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit};
+use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit, mask_host_tokens};
 use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh_raw, GH_NETWORK_TIMEOUT};
 
@@ -905,9 +905,10 @@ fn classify_or_reject(
     stderr: &str,
 ) -> AppResult<(FindingAvailability, Option<String>)> {
     let (availability, detail) = classify_failure(stdout_body, stderr);
+    let transport_residue = mask_host_tokens(stderr);
     if availability == FindingAvailability::Indeterminate
         && !gh_error_is_rate_limit(Some(stderr))
-        && gh_error_is_network(Some(stderr))
+        && gh_error_is_network(Some(&transport_residue))
     {
         return Err(AppError::Gh(detail.unwrap_or_else(|| {
             "Couldn't reach GitHub to load the security findings.".to_string()
@@ -1332,6 +1333,19 @@ mod tests {
         // The literal word "Forbidden" classifies the same way.
         let (availability, _) = classify_failure(r#"{"message":"Forbidden"}"#, "");
         assert_eq!(availability, FindingAvailability::Forbidden);
+    }
+
+    #[test]
+    fn transport_vote_masks_host_digits_and_url_paths() {
+        let stderr = "dial tcp proxy-401.example:443: connect: connection refused";
+        assert!(matches!(
+            classify_or_reject("", stderr),
+            Err(AppError::Gh(detail)) if detail == stderr
+        ));
+        let stderr = "HTTP 501: Not Implemented (https://example.com/acme/network-tools)";
+        let (availability, detail) = classify_or_reject("", stderr).expect("an HTTP answer");
+        assert_eq!(availability, FindingAvailability::Indeterminate);
+        assert_eq!(detail.as_deref(), Some(stderr));
     }
 
     #[test]

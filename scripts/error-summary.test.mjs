@@ -1028,13 +1028,50 @@ test("lookup undotted 429, dial undotted 401 and IPv6 401 hosts allow the rewrit
   }
 });
 
+test("connecting and whitespace-separated transport hosts allow both network consumers", () => {
+  for (const [kind, message] of [
+    ["gh", "error connecting to ghe-401: connection refused"],
+    ["glab", "lookup\n    gitlab-429.internal: no such host"],
+    ["glab", "lookup\n    gitlab-429: no such host"],
+    ["glab", "lookup    gitlab-429: no such host"],
+    ["glab", "dial\n  tcp\n    proxy-401:443: connection refused"],
+    ["glab", "dial tcp    proxy-401:443: connection refused"],
+  ]) {
+    const error = appError(kind, message);
+    assert.equal(
+      presentError(error).summary,
+      reach(HOST_BY_KIND[kind]),
+      message,
+    );
+    assert.equal(isTransportError(error), true, message);
+  }
+});
+
+test("transport host positions cannot supply the masked hint scan's evidence", () => {
+  for (const message of [
+    "error connecting to proxyconnect",
+    "lookup\n    proxyconnect",
+    "dial\n  tcp\n    proxyconnect",
+  ]) {
+    assert.equal(
+      isTransportError(appError("command", message)),
+      false,
+      message,
+    );
+  }
+});
+
 test("real 401 and 429 beside masked undotted and IPv6 hosts still suppress the rewrite", () => {
   for (const message of [
     "lookup gitlab-429: no such host; HTTP 401 unauthorized",
     "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
     "dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401",
   ]) {
-    assert.equal(presentError(appError("glab", message)).summary, message, message);
+    assert.equal(
+      presentError(appError("glab", message)).summary,
+      message,
+      message,
+    );
   }
 });
 
@@ -1058,26 +1095,14 @@ test("transport hint gate recognizes gh DNS/502/proxy, Rust prefix and both Rust
 });
 
 for (const [name, kind, message] of [
-  [
-    "bare EOF suffix",
-    "gh",
-    'Get "https://api.github.com/user": EOF',
-  ],
-  [
-    "unexpected EOF",
-    "gh",
-    'Get "https://api.github.com/user": unexpected EOF',
-  ],
+  ["bare EOF suffix", "gh", 'Get "https://api.github.com/user": EOF'],
+  ["unexpected EOF", "gh", 'Get "https://api.github.com/user": unexpected EOF'],
   [
     "Client.Timeout",
     "gh",
     'Get "https://api.github.com/user": net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
   ],
-  [
-    "proxyconnect",
-    "gh",
-    'Get "https://api.github.com/user": proxyconnect',
-  ],
+  ["proxyconnect", "gh", 'Get "https://api.github.com/user": proxyconnect'],
   [
     "bad gateway",
     "bitbucket",
