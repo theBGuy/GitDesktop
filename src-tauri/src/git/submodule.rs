@@ -5,8 +5,9 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
-    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, is_config_lock_contention, run_git, run_git_config_write,
+    run_git_config_write_held, run_git_mutating_raw, run_git_raw, with_config_write_lock,
+    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
 use crate::state::AppState;
@@ -228,7 +229,13 @@ pub(crate) async fn git_submodule_update_core(
         if let Some(spec) = spec.as_deref() {
             args.extend_from_slice(&["--", spec]);
         }
-        run_git_mutating(state, &repo_path, &args, NETWORK_TIMEOUT).await?;
+        let out = run_git_mutating_raw(state, &repo_path, &args, NETWORK_TIMEOUT).await?;
+        let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
+            run_git_mutating_raw(state, &repo_path, &args, NETWORK_TIMEOUT).await?
+        } else {
+            out
+        };
+        out.exit_verdict()?;
         return Ok(());
     }
 
@@ -248,8 +255,16 @@ pub(crate) async fn git_submodule_update_core(
     if let Some(spec) = spec.as_deref() {
         args.extend_from_slice(&["--", spec]);
     }
-    run_git(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
+    let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
+    let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
+        run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?
+    } else {
+        out
+    };
+    out.exit_verdict()?;
 
+    // The settling legs register NESTED submodules in each child's own config, which
+    // this repository's config-write mutex doesn't key and its repair doesn't cover.
     match path.as_deref() {
         // Recursing from inside the bumped child resolves its gitlinks against its
         // NEW HEAD; the parent's own `--recursive` would re-walk the other siblings.
@@ -278,6 +293,46 @@ pub(crate) async fn git_submodule_update_core(
         }
     }
     Ok(())
+}
+
+/// `submodule update --init` registers every uninitialized target in this repository's
+/// `.git/config` before it clones any, and dies on a lost config lock there having
+/// cloned nothing (measured, git 2.51.1). Redoes that registration under the
+/// config-write mutex and reports whether it registered anything new: only then did
+/// the loss happen here, before any clone, so the caller may re-run the update
+/// unprotected with nothing left for it to write. A loss in a CHILD's config (a
+/// cloned module's own, or `--recursive` registrations) matches the same lock text
+/// after clones landed and registers nothing here (measured), so git's error stands.
+async fn register_after_lost_init(
+    repo_path: &str,
+    spec: Option<&str>,
+    out: &GitOutput,
+) -> AppResult<bool> {
+    if out.code == 0 || !is_config_lock_contention(&out.stderr) {
+        return Ok(false);
+    }
+    let mut args = vec!["submodule", "init"];
+    if let Some(spec) = spec {
+        args.extend_from_slice(&["--", spec]);
+    }
+    with_config_write_lock(repo_path, |held| async move {
+        let before = submodule_registrations(repo_path).await?;
+        let init = run_git_config_write_held(&held, repo_path, &args, DEFAULT_TIMEOUT).await?;
+        let after = submodule_registrations(repo_path).await?;
+        Ok(init.code == 0 && after != before)
+    })
+    .await
+}
+
+/// This repository's own `submodule.*` keys, empty when there are none.
+async fn submodule_registrations(repo_path: &str) -> AppResult<String> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["config", "--local", "--get-regexp", r"^submodule\."],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(out.stdout_lossy())
 }
 
 /// Adds `url` as a submodule at `path` (inferred from the URL when `None`),
@@ -331,7 +386,43 @@ pub(crate) async fn git_submodule_add_core(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule change").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "add a submodule").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
-    run_git(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
+    // An inferred path is named afterwards by the `.gitmodules` entry the add created.
+    let before = match path {
+        Some(_) => None,
+        None => Some(gitmodules_entries(&repo_path).await),
+    };
+    let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT)
+        .await?
+        .exit_verdict()?;
+    // The clone runs without the config-write mutex, and git ignores a lost lock on
+    // its `submodule.<name>.url`/`.active` writes: it exits 0, cloned and staged, with
+    // the module unregistered (measured, git 2.51.1). `submodule init` writes exactly
+    // those keys, so it is the repair, under the mutex.
+    if is_config_lock_contention(&out.stderr) {
+        let added = match (path, before) {
+            (Some(path), _) => Some(path),
+            (None, Some(before)) => {
+                let mut fresh = gitmodules_entries(&repo_path)
+                    .await
+                    .into_keys()
+                    .filter(|p| !before.contains_key(p));
+                fresh.next().filter(|_| fresh.next().is_none())
+            }
+            (None, None) => None,
+        };
+        let Some(added) = added else {
+            return Err(AppError::Command(
+                "The submodule was cloned and staged, but its registration in this \
+                 repository couldn't be confirmed — update it to finish setting it up."
+                    .into(),
+            ));
+        };
+        let spec = crate::git::pathspec::literal(&added);
+        let args = ["submodule", "init", "--", &spec];
+        run_git_config_write(&repo_path, &args, DEFAULT_TIMEOUT)
+            .await?
+            .exit_verdict()?;
+    }
     Ok(())
 }
 
@@ -420,7 +511,25 @@ pub(crate) async fn git_submodule_remove_core(
         args.push("-f");
     }
     args.extend_from_slice(&["--", spec.as_str()]);
-    run_git(Some(&repo_path), &args, WORKTREE_OP_TIMEOUT).await?;
+    let deinit = run_git_raw(Some(&repo_path), &args, WORKTREE_OP_TIMEOUT)
+        .await?
+        .exit_verdict()?;
+    // A deinit that loses the config lock still exits 0 and reports the module
+    // unregistered, having cleared the worktree but kept `submodule.<name>` (measured,
+    // git 2.51.1): exactly the orphan above. The clear ran without the config-write
+    // mutex, so only the section removal takes it.
+    if is_config_lock_contention(&deinit.stderr) {
+        let section = format!("submodule.{}", sub.name);
+        let removed = run_git_config_write(
+            &repo_path,
+            &["config", "--remove-section", &section],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if removed.code != 0 && !removed.stderr.contains("no such section") {
+            removed.exit_verdict()?;
+        }
+    }
 
     let mut args = vec!["rm"];
     if force {
@@ -510,14 +619,37 @@ pub(crate) async fn git_submodule_set_url_core(
     refuse_unsettled_gitmodules(&repo_path).await?;
 
     // A plain path, not a pathspec: `set-url` matches the `.gitmodules` entry by
-    // its literal `path` value, which `:(literal)` magic would never equal.
-    run_git(
-        Some(&repo_path),
-        &["submodule", "set-url", "--", &path, &url],
-        DEFAULT_TIMEOUT,
-    )
+    // its literal `path` value, which `:(literal)` magic would never equal. It writes
+    // `.gitmodules`, then syncs `submodule.<name>.url` here and dies when that sync
+    // loses the config lock (measured, git 2.51.1), so the repair re-syncs, the one leg
+    // that lost. A lost `.gitmodules.lock` matches the same lock text but skips both
+    // writes (exit 1, measured), so the repair first checks `.gitmodules` holds the new
+    // URL. Short enough to hold the config-write mutex throughout, as a leaf below the
+    // working-tree domain.
+    let spec = crate::git::pathspec::literal(&path);
+    let (repo, path, url, spec) = (
+        repo_path.as_str(),
+        path.as_str(),
+        url.as_str(),
+        spec.as_str(),
+    );
+    let out = with_config_write_lock(repo, |held| async move {
+        let args = ["submodule", "set-url", "--", path, url];
+        let out = run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await?;
+        if out.code == 0 || !is_config_lock_contention(&out.stderr) {
+            return Ok(out);
+        }
+        let entries = gitmodules_entries(repo).await;
+        if entries.get(path).is_none_or(|entry| entry.url != url) {
+            return Ok(out);
+        }
+        let sync = ["submodule", "sync", "--", spec];
+        let synced = run_git_config_write_held(&held, repo, &sync, DEFAULT_TIMEOUT).await?;
+        AppResult::Ok(if synced.code == 0 { synced } else { out })
+    })
     .await?;
-    stage_gitmodules(&repo_path).await
+    out.exit_verdict()?;
+    stage_gitmodules(repo).await
 }
 
 /// Sets `submodule.<name>.branch` for the submodule at `path`; `None` restores
@@ -1451,6 +1583,447 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list_submodules(&host).await.unwrap()[0].branch, None);
+    }
+
+    fn hold_config_lock(repo: &str) -> PathBuf {
+        let lock = Path::new(repo).join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        lock
+    }
+
+    async fn submodule_config(repo: &str) -> String {
+        submodule_registrations(repo).await.unwrap()
+    }
+
+    type LockLog = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, bool)>>>;
+
+    /// A `CONFIG_WRITE_LOCK_EVENTS` hook logging each mutex event with `probe()`'s
+    /// verdict at that moment, so a test can place a long command against the hold.
+    fn lock_events(
+        probe: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> (std::sync::Arc<dyn Fn(&'static str) + Send + Sync>, LockLog) {
+        let log = LockLog::default();
+        let sink = std::sync::Arc::clone(&log);
+        let hook = move |event| sink.lock().unwrap().push((event, probe()));
+        (std::sync::Arc::new(hook), log)
+    }
+
+    /// The canary the submodule repairs rest on (git 2.51.1): `update --init` dies at
+    /// registration having cloned nothing, and once registered writes nothing here;
+    /// `set-url` dies at its sync with `.gitmodules` already rewritten, while a lost
+    /// `.gitmodules.lock` matches the same lock text with nothing written; `deinit` and
+    /// `add` exit 0, having cleared or cloned, with the config write silently lost.
+    #[tokio::test]
+    async fn git_loses_each_submodule_config_write_at_a_measured_point() {
+        let (dir, host, _dep) = host_with_submodule("cfg-shapes").await;
+        let root = dir.path().to_string_lossy().into_owned();
+        let clone = clone_repo_core(&host, &root, Some("c".into()), false, &[])
+            .await
+            .unwrap();
+        let raw = |repo: &str, args: &[&str]| {
+            let (repo, args) = (repo.to_string(), args.iter().map(|a| a.to_string()));
+            let args: Vec<String> = args.collect();
+            async move {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_git_raw(Some(&repo), &args, NETWORK_TIMEOUT)
+                    .await
+                    .unwrap()
+            }
+        };
+        let spec = crate::git::pathspec::literal("libs/dep");
+
+        let lock = hold_config_lock(&clone);
+        let out = raw(&clone, &["submodule", "update", "--init", "--", &spec]).await;
+        assert_eq!(out.code, 128, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert!(!exists(&clone, "libs/dep/dep.txt"), "nothing cloned");
+        assert_eq!(submodule_config(&clone).await, "", "nothing registered");
+        std::fs::remove_file(&lock).unwrap();
+        raw(&clone, &["submodule", "init", "--", &spec]).await;
+        let lock = hold_config_lock(&clone);
+        let out = raw(&clone, &["submodule", "update", "--init", "--", &spec]).await;
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(
+            out.code, 0,
+            "registered, it writes nothing here: {}",
+            out.stderr
+        );
+        assert!(exists(&clone, "libs/dep/dep.txt"));
+
+        let registered = submodule_config(&host).await;
+        let lock = hold_config_lock(&host);
+        let out = raw(
+            &host,
+            &["submodule", "set-url", "--", "libs/dep", "../dep-moved"],
+        )
+        .await;
+        assert_eq!(out.code, 128, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert_eq!(
+            gitmodules_entries(&host).await["libs/dep"].url,
+            "../dep-moved"
+        );
+        assert_eq!(submodule_config(&host).await, registered, "not synced");
+        std::fs::remove_file(&lock).unwrap();
+        git(&host, &["checkout", "--", ".gitmodules"]).await;
+        // A lost `.gitmodules.lock` reads as the same lock text but writes nothing.
+        let gitmodules_lock = Path::new(&host).join(".gitmodules.lock");
+        std::fs::write(&gitmodules_lock, b"").unwrap();
+        let out = raw(
+            &host,
+            &["submodule", "set-url", "--", "libs/dep", "../dep-moved"],
+        )
+        .await;
+        std::fs::remove_file(&gitmodules_lock).unwrap();
+        assert_eq!(out.code, 1, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert_eq!(gitmodules_entries(&host).await["libs/dep"].url, "../dep");
+        assert_eq!(submodule_config(&host).await, registered, "not synced");
+
+        let lock = hold_config_lock(&host);
+        let out = raw(&host, &["submodule", "deinit", "--", &spec]).await;
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert!(
+            !exists(&host, "libs/dep/dep.txt"),
+            "the worktree was cleared"
+        );
+        assert_eq!(
+            submodule_config(&host).await,
+            registered,
+            "the section stays"
+        );
+
+        seed_repo(dir.path(), "dep2").await;
+        let out = raw(&host, &["submodule", "add", "--", "../dep2", "libs/dep2"]).await;
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert!(exists(&host, "libs/dep2/dep2.txt"), "cloned");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("A  libs/dep2"), "staged: {status}");
+        assert!(
+            !submodule_config(&host).await.contains("libs/dep2"),
+            "but unregistered"
+        );
+    }
+
+    /// An update that loses the registration, in both arms, still clones and registers
+    /// what an uncontended twin does, and the clone runs only after the mutex is
+    /// freed; the twin never takes the mutex at all.
+    #[tokio::test]
+    async fn an_update_that_loses_the_config_lock_still_clones() {
+        use crate::git::runner::{
+            release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS,
+        };
+        let (dir, host, _dep) = host_with_submodule("cfg-update").await;
+        let root = dir.path().to_string_lossy().into_owned();
+        let state = AppState::default();
+        let mut registered = Vec::new();
+        for (name, contended, remote) in [
+            ("twin", false, false),
+            ("lost", true, false),
+            ("lost-remote", true, true),
+        ] {
+            let clone = clone_repo_core(&host, &root, Some(name.into()), false, &[])
+                .await
+                .unwrap();
+            let lock = Path::new(&clone).join(".git").join("config.lock");
+            let (hook, attempts) = if contended {
+                release_config_lock_before_attempt(hold_config_lock(&clone), 2)
+            } else {
+                release_config_lock_before_attempt(lock, usize::MAX)
+            };
+            let probe = Path::new(&clone).join("libs/dep/dep.txt");
+            let (events, log) = lock_events(move || probe.exists());
+            let update =
+                git_submodule_update_core(&state, clone.clone(), Some("libs/dep".into()), remote);
+            CONFIG_WRITE_LOCK_EVENTS
+                .scope(events, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, update))
+                .await
+                .expect("the update succeeds");
+            assert!(exists(&clone, "libs/dep/dep.txt"), "{name}: cloned");
+            registered.push(submodule_config(&clone).await);
+            let attempts = attempts.load(std::sync::atomic::Ordering::SeqCst);
+            if contended {
+                assert_eq!(attempts, 2);
+                assert_eq!(
+                    *log.lock().unwrap(),
+                    [("waiting", false), ("acquired", false), ("freed", false)],
+                    "the clone came after the hold"
+                );
+            } else {
+                assert_eq!(attempts, 0);
+                assert!(log.lock().unwrap().is_empty(), "no mutex uncontended");
+            }
+        }
+        assert!(
+            registered[0].contains("submodule.libs/dep.url "),
+            "{registered:?}"
+        );
+        assert_eq!(registered[0], registered[1], "what git itself registers");
+        assert_eq!(registered[0], registered[2], "what git itself registers");
+    }
+
+    /// An add whose registration is lost ends registered like an uncontended twin
+    /// add, the inferred path included; the clone ran before the mutex was requested.
+    #[tokio::test]
+    async fn an_add_that_loses_the_config_lock_still_registers() {
+        use crate::git::runner::{
+            release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS,
+        };
+        let (dir, host, _dep) = host_with_submodule("cfg-add").await;
+        seed_repo(dir.path(), "dep2").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../dep2".into(),
+            Some("libs/twin".into()),
+            None,
+        )
+        .await
+        .expect("the twin add succeeds");
+
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&host), 2);
+        let probe = Path::new(&host).join("dep2/dep2.txt");
+        let (events, log) = lock_events(move || probe.exists());
+        let add = git_submodule_add_core(&state, host.clone(), "../dep2".into(), None, None);
+        CONFIG_WRITE_LOCK_EVENTS
+            .scope(events, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, add))
+            .await
+            .expect("the add succeeds");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [("waiting", true), ("acquired", true), ("freed", true)],
+            "the clone came before the hold"
+        );
+        let get = |key: &'static str| {
+            let host = host.clone();
+            async move {
+                git(&host, &["config", "--get", key])
+                    .await
+                    .trim()
+                    .to_string()
+            }
+        };
+        assert_eq!(
+            get("submodule.dep2.url").await,
+            get("submodule.libs/twin.url").await
+        );
+        assert_eq!(get("submodule.dep2.active").await, "true");
+        assert_eq!(get("submodule.libs/twin.active").await, "true");
+        let subs = list_submodules(&host).await.unwrap();
+        let added = subs.iter().find(|s| s.path == "dep2").expect("listed");
+        assert_eq!(added.status, "ok", "initialized, not '-'");
+    }
+
+    /// A removal whose deinit loses the section removal still leaves no
+    /// `submodule.<name>` behind; the worktree was cleared before the mutex was
+    /// requested. A set-url whose sync loses still syncs both configs.
+    #[tokio::test]
+    async fn a_remove_or_set_url_that_loses_the_config_lock_still_lands() {
+        use crate::git::runner::{
+            release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS,
+        };
+        use std::sync::atomic::Ordering;
+        let state = AppState::default();
+
+        let (_dir, host, _dep) = host_with_submodule("cfg-seturl").await;
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&host), 2);
+        let set = git_submodule_set_url_core(
+            &state,
+            host.clone(),
+            "libs/dep".into(),
+            "../dep-moved".into(),
+        );
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(hook, set)
+            .await
+            .expect("the set-url succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let synced = git(&host, &["config", "--get", "submodule.libs/dep.url"]).await;
+        assert!(synced.trim().ends_with("dep-moved"), "{synced}");
+        let child = Path::new(&host)
+            .join("libs/dep")
+            .to_string_lossy()
+            .into_owned();
+        let remote = git(&child, &["config", "--get", "remote.origin.url"]).await;
+        assert!(remote.trim().ends_with("dep-moved"), "{remote}");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("M  .gitmodules"), "staged: {status}");
+
+        let (_dir, host, _dep) = host_with_submodule("cfg-remove").await;
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&host), 2);
+        let probe = Path::new(&host).join("libs/dep/dep.txt");
+        let (events, log) = lock_events(move || probe.exists());
+        let remove =
+            git_submodule_remove_core(&state, host.clone(), "libs/dep".into(), false, false);
+        let outcome = CONFIG_WRITE_LOCK_EVENTS
+            .scope(events, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, remove))
+            .await
+            .expect("the removal succeeds");
+        assert!(!outcome.refused_dirty);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [("waiting", false), ("acquired", false), ("freed", false)],
+            "the clear came before the hold"
+        );
+        assert_eq!(submodule_config(&host).await, "", "no orphaned section");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("D  libs/dep"), "status: {status}");
+    }
+
+    /// A set-url that loses `.gitmodules.lock` changed nothing, so it never reaches the
+    /// sync repair, which would re-sync the old URL and report success.
+    #[tokio::test]
+    async fn a_set_url_that_loses_the_gitmodules_lock_reports_it() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        let (_dir, host, _dep) = host_with_submodule("gitmodules-lock").await;
+        let registered = submodule_config(&host).await;
+        let lock = Path::new(&host).join(".gitmodules.lock");
+        std::fs::write(&lock, b"").unwrap();
+        // Counts held attempts without deleting anything.
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), usize::MAX);
+        let state = AppState::default();
+        let set = git_submodule_set_url_core(
+            &state,
+            host.clone(),
+            "libs/dep".into(),
+            "../dep-moved".into(),
+        );
+        let result = CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, set).await;
+        std::fs::remove_file(&lock).unwrap();
+        assert!(
+            matches!(&result, Err(AppError::Git { stderr, .. }) if stderr.contains(".gitmodules")),
+            "{result:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no sync"
+        );
+        assert_eq!(gitmodules_entries(&host).await["libs/dep"].url, "../dep");
+        assert_eq!(submodule_config(&host).await, registered);
+    }
+
+    /// A lost lock in a CHILD's config matches the same lock text after the module was
+    /// cloned, and registers nothing in the parent, so git's error stands and the
+    /// update is not re-run: released after the parent's registration attempt, the
+    /// child lock would otherwise let that re-run succeed.
+    #[tokio::test]
+    async fn an_update_that_loses_a_childs_config_lock_keeps_gits_error() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        allow_file_submodules();
+        let dir = temp("child-lock");
+        let root = dir.path();
+        seed_repo(root, "leaf").await;
+        let mid = seed_repo(root, "mid").await;
+        let host = seed_repo(root, "host").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            mid.clone(),
+            "../leaf".into(),
+            Some("deep/leaf".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&mid, &["commit", "-qm", "add leaf"]).await;
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../mid".into(),
+            Some("libs/mid".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add mid"]).await;
+        let clone = clone_repo_core(&host, &root.to_string_lossy(), Some("c".into()), false, &[])
+            .await
+            .unwrap();
+        git(&clone, &["submodule", "update", "--init", "--", "libs/mid"]).await;
+        let registered = submodule_config(&clone).await;
+
+        let child_lock = Path::new(&clone).join(".git/modules/libs/mid/config.lock");
+        std::fs::write(&child_lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(child_lock.clone(), 1);
+        let update = git_submodule_update_core(&state, clone.clone(), None, false);
+        let result = CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, update).await;
+        let _ = std::fs::remove_file(&child_lock);
+        assert!(
+            matches!(&result, Err(AppError::Git { stderr, .. }) if is_config_lock_contention(stderr)),
+            "{result:?}"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(submodule_config(&clone).await, registered);
+        assert!(!exists(&clone, "libs/mid/deep/leaf/leaf.txt"), "not re-run");
+    }
+
+    /// A lock held through every retry surfaces git's error from each writer — never
+    /// a success over the partial state git itself left.
+    #[tokio::test]
+    async fn submodule_writers_whose_repair_also_loses_keep_gits_error() {
+        let (dir, host, _dep) = host_with_submodule("cfg-held").await;
+        let root = dir.path().to_string_lossy().into_owned();
+        let clone = clone_repo_core(&host, &root, Some("c".into()), false, &[])
+            .await
+            .unwrap();
+        seed_repo(dir.path(), "dep2").await;
+        let state = AppState::default();
+        let lost = |result: AppResult<()>| match result {
+            Err(AppError::Git { stderr, .. }) if is_config_lock_contention(&stderr) => {}
+            other => panic!("expected git's lock error, got {other:?}"),
+        };
+
+        let lock = hold_config_lock(&clone);
+        lost(git_submodule_update_core(&state, clone.clone(), None, false).await);
+        assert!(!exists(&clone, "libs/dep/dep.txt"));
+        std::fs::remove_file(&lock).unwrap();
+
+        let lock = hold_config_lock(&host);
+        lost(
+            git_submodule_add_core(
+                &state,
+                host.clone(),
+                "../dep2".into(),
+                Some("libs/dep2".into()),
+                None,
+            )
+            .await,
+        );
+        assert!(!submodule_config(&host).await.contains("libs/dep2"));
+        lost(
+            git_submodule_set_url_core(
+                &state,
+                host.clone(),
+                "libs/dep".into(),
+                "../dep-moved".into(),
+            )
+            .await,
+        );
+        std::fs::remove_file(&lock).unwrap();
+        git(&host, &["reset", "-q", "--hard"]).await;
+
+        let lock = hold_config_lock(&host);
+        let removed =
+            git_submodule_remove_core(&state, host.clone(), "libs/dep".into(), false, false)
+                .await
+                .map(drop);
+        lost(removed);
+        std::fs::remove_file(&lock).unwrap();
+        assert!(submodule_config(&host)
+            .await
+            .contains("submodule.libs/dep."));
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(
+            !status.contains("D  libs/dep"),
+            "never reached `git rm`: {status}"
+        );
     }
 
     #[tokio::test]

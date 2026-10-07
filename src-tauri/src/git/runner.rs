@@ -163,6 +163,18 @@ impl GitOutput {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
 
+    /// [`run_git`]'s verdict over a raw run: a non-zero exit is [`AppError::Git`]
+    /// carrying stderr alone.
+    pub(crate) fn exit_verdict(self) -> AppResult<Self> {
+        if self.code != 0 {
+            return Err(AppError::Git {
+                code: self.code,
+                stderr: self.stderr,
+            });
+        }
+        Ok(self)
+    }
+
     /// The text describing a non-zero exit: stderr, or stdout when stderr is
     /// EMPTY. Correct only for the families that report on stdout ALONE — a
     /// conflicted merge or `stash pop` (measured, git 2.51.1) — where an error
@@ -517,14 +529,9 @@ pub async fn run_git_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let out = run_git_raw_input(repo_path, args, input, timeout).await?;
-    if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.stderr,
-        });
-    }
-    Ok(out)
+    run_git_raw_input(repo_path, args, input, timeout)
+        .await?
+        .exit_verdict()
 }
 
 /// The working tree's toplevel for `repo_path`, which may be any directory
@@ -674,20 +681,23 @@ pub(crate) async fn run_git_config_write(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    with_config_write_lock(repo_path, |held| {
-        run_git_config_write_held(held, repo_path, args, timeout)
+    with_config_write_lock(repo_path, |held| async move {
+        run_git_config_write_held(&held, repo_path, args, timeout).await
     })
     .await
 }
 
 type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-/// One mutex per repository, held across the git spawn by the branch-config writers:
-/// rename, delete (worktree removal's too), tracking setups and their repairs, the
-/// archive flag, and the push upstream repair. Those never lose `.git/config.lock` to
-/// each other; other processes still can, which the one retry covers. The remote and
-/// origin writers (`remote add/remove/set-url`, the forges' origin rewrites) run
-/// outside it, unretried. A LEAF lock: taken after any domain lock, never before one.
+/// One mutex per repository, held by this process's `.git/config` writers: across the
+/// spawn for short writes (branch and remote edits, the archive flag, the identity
+/// override), and only across the repair leg for commands too long to hold it through
+/// (submodule clones and updates, `worktree add`). Those never lose `.git/config.lock`
+/// to each other; other processes still can, which the retry and repairs cover. Some
+/// writers still run outside it, for example the gh-run ones (`gh repo create --push`,
+/// `gh repo fork --remote`, `gh repo set-default`), whose git is gh's own, and the
+/// `--global` writers, which lock another file. A LEAF lock: taken after any domain
+/// lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
 
 /// The config-write mutex for `repo_path`, keyed by the common git dir because every
@@ -707,14 +717,17 @@ async fn config_write_lock(repo_path: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 /// Proof that the holder is inside [`with_config_write_lock`], so the held runner
 /// below is never reached without the mutex (re-taking it inside would deadlock).
-/// Neither `Copy` nor `Clone`: each one is consumed by the leg it authorizes.
+/// Only that function mints one, and a body may make any number of writes with a
+/// borrow of it. Callers must keep those writes inside the body: nothing in the type
+/// stops the token escaping through the body's return value, past the hold.
 pub(crate) struct ConfigWriteHeld(());
 
 /// Runs `body` holding `repo_path`'s config-write mutex. The wait is unbounded and a
-/// hold lasts as long as its git work: a tracking switch keeps it across the whole
-/// checkout (smudge filters, post-checkout hooks) plus its repairs, up to
-/// `DEFAULT_TIMEOUT` per spawn, and a linked worktree's rename or delete queued behind
-/// it keeps ITS working-tree domain meanwhile, so staging there can report Busy.
+/// hold lasts as long as its git work: a tracking switch, or any checked-out create
+/// without --no-track, keeps it across the whole checkout (smudge filters,
+/// post-checkout hooks) plus its repairs, up to `DEFAULT_TIMEOUT` per spawn, and a
+/// linked worktree's rename or delete queued behind it keeps ITS working-tree domain
+/// meanwhile, so staging there can report Busy.
 pub(crate) async fn with_config_write_lock<F, Fut, T>(repo_path: &str, body: F) -> T
 where
     F: FnOnce(ConfigWriteHeld) -> Fut,
@@ -723,10 +736,14 @@ where
     let lock = config_write_lock(repo_path).await;
     #[cfg(test)]
     let _ = CONFIG_WRITE_LOCK_EVENTS.try_with(|event| event("waiting"));
-    let _held = lock.lock().await;
+    let held = lock.lock().await;
     #[cfg(test)]
     let _ = CONFIG_WRITE_LOCK_EVENTS.try_with(|event| event("acquired"));
-    body(ConfigWriteHeld(())).await
+    let out = body(ConfigWriteHeld(())).await;
+    drop(held);
+    #[cfg(test)]
+    let _ = CONFIG_WRITE_LOCK_EVENTS.try_with(|event| event("freed"));
+    out
 }
 
 #[cfg(test)]
@@ -735,8 +752,9 @@ tokio::task_local! {
     /// `.git/config.lock` between a first attempt and its retry without timing either.
     pub(crate) static CONFIG_WRITE_ATTEMPT_HOOK: Arc<dyn Fn() + Send + Sync>;
 
-    /// Told "waiting" just before the config-write mutex is requested and "acquired"
-    /// once it is held, so a test can order a parked writer against its own release.
+    /// Told "waiting" just before the config-write mutex is requested, "acquired" once
+    /// it is held and "freed" once released, so a test can order a parked writer
+    /// against its own release, and a long command against the hold.
     pub(crate) static CONFIG_WRITE_LOCK_EVENTS: Arc<dyn Fn(&'static str) + Send + Sync>;
 }
 
@@ -762,7 +780,7 @@ pub(crate) fn release_config_lock_before_attempt(
 
 /// [`run_git_config_write`] for a caller already holding the config-write mutex.
 pub(crate) async fn run_git_config_write_held(
-    _held: ConfigWriteHeld,
+    _held: &ConfigWriteHeld,
     repo_path: &str,
     args: &[&str],
     timeout: Duration,
@@ -776,13 +794,14 @@ pub(crate) async fn run_git_config_write_held(
 }
 
 /// A working-tree mutation that also rewrites `.git/config` (`branch -m`/`-D`, a
-/// tracking switch): the working-tree domain, then the config-write mutex, each taken
-/// ONCE. git writes the config LAST, after the ref change landed (measured, git
-/// 2.51.1), so re-running the command after a lost config lock is never right;
-/// instead `repair` gets the first run's raw output and the held mutex, redoes only
-/// the config leg through [`run_git_config_write_held`], and returns the output to
-/// report. Same Busy contract as [`run_git_mutating`]; a non-zero exit maps to
-/// [`AppError::Git`] carrying [`GitOutput::full_failure_text`] (stderr, then stdout).
+/// tracking switch, the `remote` verbs): the working-tree domain, then the config-write
+/// mutex, each taken ONCE. On a lost config lock `repair` gets the first run's raw
+/// output and the held mutex, redoes through [`run_git_config_write_held`] only what
+/// the measured loss left undone, and returns the output to report — for the branch
+/// commands only the config leg, since git writes it LAST, after the ref change landed
+/// (measured, git 2.51.1). Same Busy contract as [`run_git_mutating`]; a non-zero exit
+/// maps to [`AppError::Git`] carrying [`GitOutput::full_failure_text`] (stderr, then
+/// stdout).
 pub(crate) async fn run_git_mutating_config_write<F, Fut>(
     state: &AppState,
     repo_path: &str,
@@ -1280,7 +1299,7 @@ mod config_write_lock_tests {
             assert_eq!(out.code, 0, "{}", out.stderr);
             assert_eq!(
                 *log.lock().unwrap(),
-                ["waiting", "released", "acquired"],
+                ["waiting", "released", "acquired", "freed"],
                 "mutating writer: {mutating}"
             );
         }

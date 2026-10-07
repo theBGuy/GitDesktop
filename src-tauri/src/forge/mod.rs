@@ -4010,14 +4010,7 @@ pub async fn forge_repo_delete(
     // Drop the local `origin` so the repo reads as unpublished. An already-absent
     // origin counts as success; any other failure AFTER the remote is gone discloses
     // the partial state rather than masking it.
-    if let Err(e) = crate::git::runner::run_git_mutating(
-        &state,
-        &repo_path,
-        &["remote", "remove", "origin"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    {
+    if let Err(e) = crate::git::remote::remove_remote(&state, &repo_path, "origin").await {
         let already_absent = matches!(
             &e,
             AppError::Git { stderr, .. } if stderr.contains("No such remote")

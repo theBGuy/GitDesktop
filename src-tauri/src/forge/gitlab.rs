@@ -6640,13 +6640,8 @@ pub async fn publish_repo(
         )
     })?;
 
-    if let Err(e) = crate::git::runner::run_git_mutating(
-        state,
-        repo_path,
-        &["remote", "add", "origin", &project.http_url_to_repo],
-        crate::git::runner::NETWORK_TIMEOUT,
-    )
-    .await
+    if let Err(e) =
+        crate::git::remote::add_remote(state, repo_path, "origin", &project.http_url_to_repo).await
     {
         return Err(gl_created_project_error(&created_hint, e));
     }
@@ -8583,15 +8578,17 @@ async fn rewrite_origin_after(
     }
     // set-url matches expanded URLs; an anchored, escaped config value-pattern
     // targets the stored primary, leaving secondaries alone without requiring
-    // Git 2.30's --fixed-value flag.
+    // Git 2.30's --fixed-value flag. The config-write mutex is a leaf below the held
+    // domain; a lost config lock writes nothing, so its one retry re-runs the set.
     let old_pattern = exact_value_pattern(&origin.stored_url);
-    if let Err(e) = crate::git::runner::run_git(
-        Some(repo_path),
+    let written = crate::git::runner::run_git_config_write(
+        repo_path,
         &["config", "remote.origin.url", &new_url, &old_pattern],
         crate::git::runner::DEFAULT_TIMEOUT,
     )
     .await
-    {
+    .and_then(crate::git::runner::GitOutput::exit_verdict);
+    if let Err(e) = written {
         let display_url = displayed_origin_url(&new_url);
         let e = e
             .to_string()
@@ -10902,6 +10899,52 @@ mod tests {
         assert!(error.contains("set it to https://host/other/renamed.git manually"));
         assert!(!error.contains("TEST_TOKEN"));
         assert_eq!(std::fs::read(dir.path().join(".git/config")).unwrap(), before);
+    }
+
+    /// The compare-and-set write rides the config-write retry: a first-attempt loss
+    /// still rewrites origin, and a lock held through the retry keeps the framed
+    /// GitLab error with origin untouched.
+    #[tokio::test]
+    async fn origin_rewrite_rides_out_a_lost_config_lock() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        let (dir, repo) = origin_test_repo("https://host/g/p.git").await;
+        let lock = dir.path().join(".git").join("config.lock");
+        let state = AppState::default();
+        let origin = project_origin_before_move(&repo).await.unwrap();
+
+        std::fs::write(&lock, b"").unwrap();
+        let error = rewrite_origin_after(&state, &repo, &origin, "g/held", OriginMove::Rename)
+            .await
+            .unwrap_err()
+            .to_string();
+        std::fs::remove_file(&lock).unwrap();
+        assert!(
+            error.contains("Renamed on GitLab, but the local 'origin' remote couldn't be updated"),
+            "{error}"
+        );
+        assert!(
+            crate::git::runner::is_config_lock_contention(&error),
+            "{error}"
+        );
+        assert_eq!(
+            stored_origin_url(&repo).await.unwrap(),
+            "https://host/g/p.git"
+        );
+
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                rewrite_origin_after(&state, &repo, &origin, "g/renamed", OriginMove::Rename),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            stored_origin_url(&repo).await.unwrap(),
+            "https://host/g/renamed.git"
+        );
     }
 
     #[tokio::test]

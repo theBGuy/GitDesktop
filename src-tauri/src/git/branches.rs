@@ -464,7 +464,7 @@ pub(crate) const UPSTREAM_WRITE_FAILED: &str = "unable to write upstream branch 
 /// "no such section" as done: the branch had no settings, or another writer already
 /// handled them. `false` (logged) leaves the caller's own verdict to speak.
 async fn repair_branch_section(held: ConfigWriteHeld, repo_path: &str, args: &[&str]) -> bool {
-    match run_git_config_write_held(held, repo_path, args, DEFAULT_TIMEOUT).await {
+    match run_git_config_write_held(&held, repo_path, args, DEFAULT_TIMEOUT).await {
         Ok(out) if out.code == 0 || out.stderr.contains("no such section") => true,
         Ok(out) => {
             eprintln!(
@@ -503,7 +503,7 @@ pub(crate) async fn restore_upstream(
 ) -> bool {
     let flag = format!("--set-upstream-to={upstream}");
     match run_git_config_write_held(
-        held,
+        &held,
         repo_path,
         &["branch", &flag, "--", branch],
         DEFAULT_TIMEOUT,
@@ -594,7 +594,7 @@ pub(crate) async fn finish_tracking_setup(
 /// every `branch.autoSetupMerge` value that sets tracking up at all except `inherit`,
 /// which copies the START's own upstream (possibly several merge entries) instead
 /// (measured, git 2.51.1). The start resolves the way git's create resolved it.
-async fn direct_tracking_target(
+pub(crate) async fn direct_tracking_target(
     repo_path: &str,
     start: &str,
     tracked_by: TrackedBy,
@@ -881,8 +881,8 @@ pub(crate) async fn git_create_branch_core(
     let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Any create but `--no-track` can set tracking up, the one leg that writes the
-    // config: with no start point git starts from HEAD, and `always`/`inherit` track
-    // that local branch too (measured, git 2.51.1).
+    // config: with no start point git starts from HEAD, where `always` tracks that
+    // local branch and `inherit` copies its upstream (measured, git 2.51.1).
     if no_track {
         run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
         return Ok(());
