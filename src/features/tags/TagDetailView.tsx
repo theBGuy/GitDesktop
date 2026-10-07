@@ -148,8 +148,10 @@ export function TagDetailView({
     switch (true) {
       case probe !== null:
         return forgeProbeReason(probe, "manage this release");
-      case !ghReady && isGitLab:
+      case !ghReady && isGitLab && Boolean(gh.data?.installed):
         return "Sign in with the GitLab CLI (glab) to manage this release.";
+      case !ghReady && isGitLab:
+        return "Install the GitLab CLI (glab) to manage this release.";
       case !ghReady:
         return "Connect this repository to GitHub or GitLab to manage this release.";
       case relStale:
@@ -165,8 +167,10 @@ export function TagDetailView({
     switch (true) {
       case probe !== null:
         return forgeProbeReason(probe, "publish a release for this tag");
-      case isGitLab:
+      case isGitLab && Boolean(gh.data?.installed):
         return "Sign in with the GitLab CLI (glab) to publish a release for this tag.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to publish a release for this tag.";
       default:
         return "Connect this repository to GitHub or GitLab to publish a release for this tag.";
     }

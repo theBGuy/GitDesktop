@@ -67,9 +67,11 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
       case canCreateRelease:
         return undefined;
       case probe !== null:
-        return forgeProbeReason(probe, "publish a release") ?? undefined;
-      case gh.data?.provider === "gitlab":
+        return forgeProbeReason(probe, "publish a release");
+      case gh.data?.provider === "gitlab" && Boolean(gh.data?.installed):
         return "Sign in with the GitLab CLI (glab) to publish a release.";
+      case gh.data?.provider === "gitlab":
+        return "Install the GitLab CLI (glab) to publish a release.";
       default:
         return "Connect this repository to GitHub or GitLab to publish a release.";
     }

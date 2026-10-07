@@ -2196,7 +2196,7 @@ export function FindingsPanel({
       case enabled:
         return "Refresh findings";
       case probe !== null:
-        return forgeProbeReason(probe, "load security findings") ?? undefined;
+        return forgeProbeReason(probe, "load security findings");
       case !supported && ready:
         return "Security findings aren't available on this repository's host.";
       // Names the host the remote actually points at; a repo with no recognized

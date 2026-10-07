@@ -204,7 +204,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       case canOpenGhCreate:
         return undefined;
       case probe !== null:
-        return forgeProbeReason(probe, "open an issue") ?? undefined;
+        return forgeProbeReason(probe, "open an issue");
       case isBitbucket:
         return "Bitbucket has retired its native issue tracker — link a Jira project to track issues.";
       case isGitLab && Boolean(gh.data?.installed):

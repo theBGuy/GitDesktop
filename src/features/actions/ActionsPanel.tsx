@@ -138,7 +138,7 @@ export function ActionsPanel({
       case writeReason !== undefined:
         return writeReason;
       case probe !== null:
-        return forgeProbeReason(probe, "run CI") ?? undefined;
+        return forgeProbeReason(probe, "run CI");
       case ghReady:
         return `Run a ${runNoun}`;
       case isGitLab:
@@ -167,7 +167,7 @@ export function ActionsPanel({
   const refreshReason = (() => {
     switch (true) {
       case probe !== null:
-        return forgeProbeReason(probe, "load runs") ?? undefined;
+        return forgeProbeReason(probe, "load runs");
       case !ghReady:
         return "Connect this repo to load runs";
       case runs.isFetching:

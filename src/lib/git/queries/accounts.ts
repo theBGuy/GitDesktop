@@ -315,6 +315,8 @@ export function forgeFeatureReady(
   return forgeReady(status) && Boolean(status?.implemented[feature]);
 }
 
+export type ForgeProbe = "unreachable" | "checking";
+
 /** What a `useForgeStatus` read that holds no status says about the host, for
  *  disabled-reason derivations: "unreachable" (rejected with nothing cached),
  *  "checking" (no answer yet), or null once a status is in hand. A non-null
@@ -330,21 +332,16 @@ export function forgeProbeState(q: {
   return null;
 }
 
-export type ForgeProbe = "unreachable" | "checking";
-
 const FORGE_PROBE_REASONS: Record<ForgeProbe, (action: string) => string> = {
   unreachable: (action) =>
     `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`,
   checking: () => "Checking this repository's host…",
 };
 
-/** The held-control reason for a {@link forgeProbeState} answer, or null once a
- *  status is in hand. `action` completes "you can't … right now" and must stay
- *  provider-neutral: with no status, the provider is unknown. A caller checks
- *  this ahead of its setup and connect arms, which would misdirect here. */
-export function forgeProbeReason(
-  probe: ForgeProbe | null,
-  action: string,
-): string | null {
-  return probe === null ? null : FORGE_PROBE_REASONS[probe](action);
+/** The held-control reason for a {@link forgeProbeState} answer. `action`
+ *  completes "you can't … right now" and must stay provider-neutral: with no
+ *  status, the provider is unknown. A caller checks this ahead of its setup and
+ *  connect arms, which would misdirect here. */
+export function forgeProbeReason(probe: ForgeProbe, action: string): string {
+  return FORGE_PROBE_REASONS[probe](action);
 }
