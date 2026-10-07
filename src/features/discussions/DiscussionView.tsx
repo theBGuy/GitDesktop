@@ -57,6 +57,7 @@ import type {
   MinimizeReason,
 } from "@/lib/git/api";
 import {
+  repoKeys,
   useAddDiscussionComment,
   useCloseDiscussion,
   useDeleteDiscussion,
@@ -66,6 +67,7 @@ import {
   useLockDiscussion,
   useMarkDiscussionAnswer,
   useMinimizeComment,
+  usePendingDiscussionUpvote,
   useReopenDiscussion,
   useToggleDiscussionUpvote,
   useToggleReaction,
@@ -225,7 +227,10 @@ export function DiscussionView({
   const deleteComment = useDeleteDiscussionComment(repoPath);
   const minimizeComment = useMinimizeComment(repoPath);
   const unminimizeComment = useUnminimizeComment(repoPath);
-  const toggleUpvoteMutation = useToggleDiscussionUpvote(repoPath, number);
+  const toggleUpvoteMutation = useToggleDiscussionUpvote(repoPath);
+  // Read from the mutation cache by discussion, so a toggle still pending on the
+  // one the viewer returns to keeps holding it.
+  const upvotePending = usePendingDiscussionUpvote(repoPath, number);
   const toggleReactionMutation = useToggleReaction(repoPath, "discussion");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
@@ -330,16 +335,16 @@ export function DiscussionView({
         return undefined;
     }
   })();
-  const upvoteHeld = toggleUpvoteMutation.isPending || detailsStale;
+  const upvoteHeld = upvotePending.pending || detailsStale;
   // Ranked like `busyReason`: the switch window outranks the write the viewer
   // started, being the hold they can't have caused themselves.
   const upvoteReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
-      case toggleUpvoteMutation.isPending:
+      case upvotePending.pending:
         return pendingWriteReason(
-          toggleUpvoteMutation.isPaused,
+          upvotePending.paused,
           "Recording your upvote…",
         );
       default:
@@ -457,7 +462,7 @@ export function DiscussionView({
   function toggleUpvote(subjectId: string, upvoted: boolean) {
     if (detailsStale) return;
     void toggleUpvoteMutation
-      .mutateAsync({ subjectId, up: !upvoted })
+      .mutateAsync({ number, subjectId, up: !upvoted })
       .catch(onError);
   }
 
@@ -465,7 +470,7 @@ export function DiscussionView({
     if (detailsStale) return;
     void toggleReactionMutation
       .mutateAsync({
-        reactionsKey: ["repo", repoPath, "discussion", number, "reactions"],
+        reactionsKey: repoKeys.reactions(repoPath, ["discussion", number]),
         // GitHub-only surface: the forge keys on node ids and ignores the number.
         number: 0,
         bodyId: details.data?.id ?? "",

@@ -64,6 +64,7 @@ import type { LockReason, MinimizeReason } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
+  repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useCloseIssue,
@@ -588,7 +589,7 @@ export function RemoteIssueView({
     if (detailsStale) return;
     void toggleReactionMutation
       .mutateAsync({
-        reactionsKey: ["repo", repoPath, "issue", lens, number, "reactions"],
+        reactionsKey: repoKeys.reactions(repoPath, ["issue", lens, number]),
         number,
         bodyId: details.data?.id ?? "",
         subjectId,
