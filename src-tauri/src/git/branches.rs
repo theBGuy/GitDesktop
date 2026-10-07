@@ -662,14 +662,23 @@ pub(crate) async fn git_delete_remote_branch_core(
     // Best-effort guard: if the remote's symbolic HEAD resolves (only set on
     // clone, so absence is fine — skip then) to this branch, it's the remote's
     // default and can't be deleted. The server refuses anyway, but cryptically;
-    // check locally first. Probe with a non-propagating raw run.
+    // check locally first. Probe with a non-propagating raw run. Read in FULL
+    // and stripped of exactly `refs/remotes/`: `--short` disambiguates, so a
+    // tag or local branch named `<remote>/<name>` turns the answer into
+    // `remotes/<remote>/<name>` (measured, git 2.51.1).
     let head = run_git_raw(
         Some(&repo_path),
-        &["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")],
+        &["symbolic-ref", &format!("refs/remotes/{remote}/HEAD")],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if head.code == 0 && head.stdout_lossy().trim() == format!("{remote}/{name}") {
+    let head_ref = head.stdout_lossy();
+    if head.code == 0
+        && head_ref
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("refs/remotes/")
+            == Some(format!("{remote}/{name}").as_str())
+    {
         return Err(AppError::InvalidArgument(format!(
             "\"{name}\" is the default branch on {remote} and can't be deleted from here."
         )));
@@ -1366,13 +1375,22 @@ pub(crate) async fn branch_reset_to_upstream(
             )));
         }
     }
+    // Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so
+    // a branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
+    // 2.51.1) and would slip past this comparison.
     let current = run_git_raw(
         Some(repo_path),
-        &["symbolic-ref", "--short", "-q", "HEAD"],
+        &["symbolic-ref", "-q", "HEAD"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if current.code == 0 && current.stdout_lossy().trim() == branch {
+    let current_ref = current.stdout_lossy();
+    if current.code == 0
+        && current_ref
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("refs/heads/")
+            == Some(branch)
+    {
         return Err(AppError::Command(format!(
             "{branch} is checked out here — use Reset to {branch}'s upstream from the \
              sync controls, which moves your working tree with it."
@@ -1852,6 +1870,7 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::git_delete_remote_branch_core;
     use super::{archive_config_busy, set_branch_archived_core};
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
@@ -2873,6 +2892,72 @@ mod tests {
             run(&local_s, &["rev-parse", "feature"]).await.trim(),
             before,
             "and the branch must not have moved"
+        );
+    }
+
+    /// A tag sharing the current branch's name must not cost the worded refusal:
+    /// the guard still recognizes `feature` as the branch checked out here.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_the_current_branch_shadowed_by_a_tag() {
+        let (_base, base) = temp_base("reset-upstream-tag-shadow");
+        let local_s = server_rebase_fixture(&base).await;
+        run(&local_s, &["tag", "feature"]).await;
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+            .await
+            .expect_err("the current branch can't take a ref-only reset");
+        let AppError::Command(msg) = &err else {
+            panic!("expected the actionable Command refusal, not git's own, got {err:?}");
+        };
+        assert!(msg.contains("sync controls"), "{msg}");
+    }
+
+    /// The remote's default branch stays undeletable when a tag or local branch named
+    /// `<remote>/<branch>` makes `symbolic-ref --short` answer `remotes/origin/main`.
+    /// Refused before any push, so the bare remote is never contacted.
+    #[tokio::test]
+    async fn delete_remote_branch_refuses_the_default_shadowed_by_a_tag() {
+        let (_base, base) = temp_base("delete-remote-default-tag-shadow");
+        let remote_s = base.join("remote").to_string_lossy().into_owned();
+        run_git(None, &["init", "-q", "--bare", &remote_s], DEFAULT_TIMEOUT)
+            .await
+            .expect("init bare remote");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["remote", "add", "origin", &remote_s]).await;
+        // The local symref layout is written by hand as a clone leaves it; the
+        // bare remote stays empty on purpose, so the local guard is what refuses.
+        run(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        run(
+            &repo_s,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await;
+        run(&repo_s, &["tag", "origin/main"]).await;
+
+        let state = AppState::default();
+        let err = git_delete_remote_branch_core(
+            &state,
+            repo_s.clone(),
+            "origin".to_string(),
+            "main".to_string(),
+        )
+        .await
+        .expect_err("the remote's default branch can't be deleted from here");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("default branch")),
+            "{err:?}"
         );
     }
 
