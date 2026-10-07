@@ -20,6 +20,16 @@
 //! publishing one breaks session Resume, and creating or renaming INTO that namespace
 //! yields an invisible (UI-filtered) branch. (merge_branch / rebase_branch take a branch
 //! name but only READ it, so they carry no such guard.)
+//!
+//! The tools that move HEAD, a branch, or the stash list also take the promote gate
+//! (`git::promote_marker`), mirroring the set the GUI's `promotionBlocksCheckout`
+//! refuses: checkout_branch, create_branch's checkout arm, rename_branch,
+//! delete_branch, pull, merge_branch, rebase_branch, revert_commit, cherry_pick,
+//! undo_last_commit, reset_to_commit and the stash tools. A GitDesktop worktree promote
+//! frees a branch, may stash the main workspace, and checks the branch out across
+//! several GUI calls; one of these landing inside that window would move the branch out
+//! from under it or shift the stash its "Pop latest stash" recovery points at. commit,
+//! push, discard and the tag tools stay ungated, as they are in the GUI.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -43,6 +53,21 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
         ));
     }
     Ok(())
+}
+
+impl GitDesktopMcp {
+    /// The promote gate for a tool that moves HEAD, a branch, or the stash list (the
+    /// module doc lists them): refuses while a GitDesktop worktree promote is
+    /// mid-window, and otherwise returns a shared hold the tool keeps until its git work
+    /// is done, so a promote cannot open between the check and the act. Taken after
+    /// argument checks, which never touch the repo.
+    async fn promote_gate(
+        &self,
+    ) -> Result<Option<crate::git::promote_marker::PromoteGateShared>, McpError> {
+        crate::git::promote_marker::hold_unless_promoting(&self.repo)
+            .await
+            .map_err(app_err)
+    }
 }
 
 /// Emits a plain-text success result for the (many) core commands that return `()`.
@@ -557,6 +582,7 @@ impl GitDesktopMcp {
     )]
     async fn undo_last_commit(&self) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        let _promote = self.promote_gate().await?;
         crate::git::commit::git_undo_commit_core(&self.state, self.repo.clone())
             .await
             .map_err(app_err)?;
@@ -581,6 +607,13 @@ impl GitDesktopMcp {
         if let Some(from) = &args.from {
             ensure_not_flag(from, "start point")?;
         }
+        // Only the checkout arm moves HEAD; a plain create touches no branch a promote
+        // is using.
+        let _promote = if args.checkout {
+            self.promote_gate().await?
+        } else {
+            None
+        };
         crate::git::branches::git_create_branch_core(
             &self.state,
             self.repo.clone(),
@@ -607,6 +640,7 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         ensure_not_flag(&args.name, "branch name")?;
         ensure_not_session_branch(&args.name)?;
+        let _promote = self.promote_gate().await?;
         crate::git::branches::git_checkout_branch_core(
             &self.state,
             self.repo.clone(),
@@ -632,6 +666,7 @@ impl GitDesktopMcp {
         ensure_not_flag(&args.to, "branch name")?;
         ensure_not_session_branch(&args.from)?;
         ensure_not_session_branch(&args.to)?;
+        let _promote = self.promote_gate().await?;
         crate::git::branches::git_rename_branch_core(
             &self.state,
             self.repo.clone(),
@@ -716,6 +751,7 @@ impl GitDesktopMcp {
             }
             None => None,
         };
+        let _promote = self.promote_gate().await?;
         let mode = args.mode.unwrap_or_default();
         // Only a rebase-mode pull runs the guard at all, so only it can report that
         // the guard found nothing — the other modes never asked.
@@ -794,15 +830,16 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<StashPushArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        for p in &args.paths {
+            ensure_not_flag(p, "path")?;
+        }
+        let _promote = self.promote_gate().await?;
         if args.paths.is_empty() {
             crate::git::ops::git_stash_all_core(&self.state, self.repo.clone())
                 .await
                 .map_err(app_err)?;
             ok_text("stashed all changes")
         } else {
-            for p in &args.paths {
-                ensure_not_flag(p, "path")?;
-            }
             let paths = literal_pathspecs(args.paths, args.literal);
             let stashed = crate::git::ops::git_stash_paths_core(
                 &self.state,
@@ -826,6 +863,7 @@ impl GitDesktopMcp {
     )]
     async fn stash_pop(&self) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_stash_pop_core(&self.state, self.repo.clone())
             .await
             .map_err(app_err)?;
@@ -842,6 +880,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<StashApplyArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_stash_apply_core(&self.state, self.repo.clone(), args.index, false)
             .await
             .map_err(app_err)?;
@@ -862,6 +901,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.branch, "branch")?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_merge_core(
             &self.state,
             self.repo.clone(),
@@ -887,6 +927,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.onto, "branch")?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_rebase_core(&self.state, self.repo.clone(), args.onto.clone())
             .await
             .map_err(app_err)?;
@@ -905,6 +946,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.sha, "sha")?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_revert_core(&self.state, self.repo.clone(), args.sha.clone())
             .await
             .map_err(app_err)?;
@@ -923,6 +965,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.sha, "sha")?;
+        let _promote = self.promote_gate().await?;
         let created =
             crate::git::ops::git_cherry_pick_core(&self.state, self.repo.clone(), args.sha.clone())
                 .await
@@ -1017,6 +1060,7 @@ impl GitDesktopMcp {
         self.ensure_destructive()?;
         ensure_not_flag(&args.name, "branch name")?;
         ensure_not_session_branch(&args.name)?;
+        let _promote = self.promote_gate().await?;
         crate::git::branches::git_delete_branch_core(
             &self.state,
             self.repo.clone(),
@@ -1082,6 +1126,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
         ensure_not_flag(&args.sha, "sha")?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_reset_core(&self.state, self.repo.clone(), args.sha.clone(), None)
             .await
             .map_err(app_err)?;
@@ -1165,6 +1210,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<StashIndexArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
+        let _promote = self.promote_gate().await?;
         crate::git::ops::git_stash_drop_core(&self.state, self.repo.clone(), args.index)
             .await
             .map_err(app_err)?;
@@ -2192,6 +2238,192 @@ mod tests {
         assert!(
             err.to_string().contains("agent-session branch"),
             "got: {err}"
+        );
+    }
+
+    /// While a GitDesktop promote holds its window, the branch, stash and history tools
+    /// refuse with the promote named and the repo untouched; once it ends, they run.
+    #[tokio::test]
+    async fn branch_stash_and_history_tools_refuse_during_a_worktree_promote() {
+        use crate::git::promote_marker::{self as promote, TestRootOverride};
+
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-promote-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q", "-b", "main"]).await;
+        configure(&repo_s).await;
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+        git(&repo_s, &["branch", "feature"]).await;
+        std::fs::write(repo.join("a.txt"), "a\nwip\n").unwrap();
+        let head = git(&repo_s, &["rev-parse", "HEAD"]).await;
+
+        let _root = TestRootOverride::set(&repo_s, &dir.path().join("markers"));
+        let token = promote::begin(&repo_s, "feature")
+            .await
+            .expect("the gate is free")
+            .expect("and the promote is marked");
+
+        let h = GitDesktopMcp::with_options(repo_s.clone(), false, false, true, true);
+        let refusals = [
+            h.checkout_branch(Parameters(BranchNameArgs {
+                name: "feature".into(),
+            }))
+            .await
+            .expect_err("checkout refuses mid-promote"),
+            h.create_branch(Parameters(CreateBranchArgs {
+                name: "fresh".into(),
+                checkout: true,
+                from: None,
+                no_track: false,
+            }))
+            .await
+            .expect_err("create-and-checkout refuses mid-promote"),
+            h.rename_branch(Parameters(RenameBranchArgs {
+                from: "feature".into(),
+                to: "renamed".into(),
+            }))
+            .await
+            .expect_err("rename refuses mid-promote"),
+            h.delete_branch(Parameters(BranchNameArgs {
+                name: "feature".into(),
+            }))
+            .await
+            .expect_err("delete refuses mid-promote"),
+            h.stash_push(Parameters(StashPushArgs {
+                paths: Vec::new(),
+                literal: true,
+            }))
+            .await
+            .expect_err("stash refuses mid-promote"),
+            h.stash_pop()
+                .await
+                .expect_err("stash pop refuses mid-promote"),
+            h.undo_last_commit()
+                .await
+                .expect_err("undo refuses mid-promote"),
+            h.reset_to_commit(Parameters(ShaArgs {
+                sha: head.trim().to_string(),
+            }))
+            .await
+            .expect_err("reset refuses mid-promote"),
+            h.pull(Parameters(PullArgs {
+                mode: None,
+                decision: None,
+                expected_drop_shas: None,
+            }))
+            .await
+            .expect_err("pull refuses mid-promote"),
+            h.stash_apply(Parameters(StashApplyArgs { index: 0 }))
+                .await
+                .expect_err("stash apply refuses mid-promote"),
+            h.drop_stash(Parameters(StashIndexArgs { index: 0 }))
+                .await
+                .expect_err("stash drop refuses mid-promote"),
+            h.merge_branch(Parameters(MergeBranchArgs {
+                branch: "feature".into(),
+                squash: false,
+                no_ff: false,
+                strategy: None,
+            }))
+            .await
+            .expect_err("merge refuses mid-promote"),
+            h.rebase_branch(Parameters(RebaseBranchArgs {
+                onto: "feature".into(),
+            }))
+            .await
+            .expect_err("rebase refuses mid-promote"),
+            h.revert_commit(Parameters(ShaArgs {
+                sha: head.trim().to_string(),
+            }))
+            .await
+            .expect_err("revert refuses mid-promote"),
+            h.cherry_pick(Parameters(ShaArgs {
+                sha: head.trim().to_string(),
+            }))
+            .await
+            .expect_err("cherry-pick refuses mid-promote"),
+        ];
+        assert_eq!(refusals.len(), 15, "every gated tool is exercised");
+        for err in refusals {
+            assert!(
+                err.to_string().contains(
+                    "A GitDesktop worktree promote is checking out feature in the main \
+                     workspace — retry in a few seconds."
+                ),
+                "got: {err}"
+            );
+        }
+        assert_eq!(
+            git(&repo_s, &["branch", "--show-current"]).await.trim(),
+            "main"
+        );
+        assert_eq!(
+            git(
+                &repo_s,
+                &["branch", "--list", "feature", "fresh", "renamed"]
+            )
+            .await
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+            vec!["feature"],
+            "nothing was created, renamed, or deleted"
+        );
+        assert_eq!(
+            git(&repo_s, &["rev-parse", "HEAD"]).await,
+            head,
+            "HEAD never moved"
+        );
+        assert!(
+            git(&repo_s, &["stash", "list"]).await.trim().is_empty(),
+            "nothing was stashed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "a\nwip\n",
+            "and the working tree kept its change"
+        );
+
+        // A plain create moves no HEAD, so it runs through the window.
+        h.create_branch(Parameters(CreateBranchArgs {
+            name: "side".into(),
+            checkout: false,
+            from: None,
+            no_track: false,
+        }))
+        .await
+        .expect("a create without checkout is not gated");
+
+        promote::end(token);
+        // Polled: on Linux a released flock can read held for a moment while a
+        // concurrently spawned child still carries it into its exec.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match h
+                .checkout_branch(Parameters(BranchNameArgs {
+                    name: "feature".into(),
+                }))
+                .await
+            {
+                Ok(_) => break,
+                Err(err) => {
+                    assert!(
+                        err.to_string().contains("worktree promote")
+                            && std::time::Instant::now() < deadline,
+                        "the checkout runs once the promote ends: {err}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+        assert_eq!(
+            git(&repo_s, &["branch", "--show-current"]).await.trim(),
+            "feature"
         );
     }
 }

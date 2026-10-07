@@ -107,6 +107,23 @@ export const removeWorktree = (
 export const pruneWorktrees = (repoPath: string) =>
   invoke<void>("git_worktree_prune", { repoPath });
 
+/** Opens a promote's window: until {@link endPromoteWindow}, GitDesktop's MCP
+ *  server refuses branch, stash and history changes in this repository.
+ *  Resolves to the token to close it with, or null when no marker could be
+ *  placed (the promote then runs unmarked); rejects when another promote or an
+ *  MCP branch change holds the repository. */
+export const beginPromoteWindow = (repoPath: string, branch: string) =>
+  invoke<string | null>("git_promote_begin", { repoPath, branch });
+
+/** Re-stamps an open promote window's age, so a long removal leg can't run it
+ *  past the expiry that bounds a stranded one. */
+export const touchPromoteWindow = (token: string) =>
+  invoke<void>("git_promote_touch", { token });
+
+/** Closes the window {@link beginPromoteWindow} opened. */
+export const endPromoteWindow = (token: string) =>
+  invoke<void>("git_promote_end", { token });
+
 /** Re-creates a kept session's worktree, checking out its EXISTING branch at
  *  `path` so the user can resume work (the branch already holds the kept work). */
 export const resumeWorktree = (
