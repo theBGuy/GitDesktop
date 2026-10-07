@@ -299,17 +299,22 @@ fn fold_submodule_failure(
 }
 
 /// The current branch's short name, or `None` on a detached HEAD.
+///
+/// Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so a
+/// branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
+/// 2.51.1), and `branch.<name>.remote` is looked up from the result.
 async fn current_branch(repo: &str) -> Option<String> {
-    let out = run_git_raw(
-        Some(repo),
-        &["symbolic-ref", "--short", "-q", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()?;
-    (out.code == 0)
-        .then(|| out.stdout_lossy().trim().to_string())
+    let out = run_git_raw(Some(repo), &["symbolic-ref", "-q", "HEAD"], DEFAULT_TIMEOUT)
+        .await
+        .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    let full = out.stdout_lossy();
+    full.trim_end_matches(['\r', '\n'])
+        .strip_prefix("refs/heads/")
         .filter(|b| !b.is_empty())
+        .map(str::to_string)
 }
 
 /// The current branch's upstream, spelled the way git itself resolves it.
@@ -2391,6 +2396,31 @@ mod tests {
         git(&work, &["push", "-q"]).await;
         let tip = rev(&work, "HEAD").await;
         (dir, clone, work, tip)
+    }
+
+    /// A tag sharing the checked-out branch's name must not make the guard stand
+    /// down: the branch is still `main`, so the upstream it tracks still resolves.
+    #[tokio::test]
+    async fn a_tag_shadowing_the_current_branch_still_resolves_its_target() {
+        let (_dir, clone, _work, _tip) = behind_fixture("tag-shadow").await;
+        git(&clone, &["tag", "main"]).await;
+
+        assert_eq!(current_branch(&clone).await.as_deref(), Some("main"));
+        let target = resolve(&clone)
+            .await
+            .unwrap()
+            .expect("a shadowed branch still tracks origin/main");
+        assert_eq!(target.branch, "main");
+        assert_eq!(target.upstream_ref, "refs/remotes/origin/main");
+        assert_eq!(target.upstream, "origin/main");
+        assert_eq!(target.remote, "origin");
+
+        git(&clone, &["switch", "-q", "--detach"]).await;
+        assert_eq!(
+            current_branch(&clone).await,
+            None,
+            "a detached HEAD names no branch"
+        );
     }
 
     /// The transfer holds the NETWORK domain alone, so the user can stage or commit
