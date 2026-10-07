@@ -526,7 +526,8 @@ async function runTurn(
     endTurn();
   } catch (e) {
     // Keep the raw text: commitWorktreeAll surfaces git's whole commit report
-    // (hook refusals land on stdout) and the turn status renders it untruncated.
+    // (a refusing commit reports on stdout; both streams ride the error) and
+    // the turn status renders it untruncated.
     patchTurn({ status: "error", error: errorMessage(e), statusText: "" });
     setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();

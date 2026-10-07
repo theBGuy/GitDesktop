@@ -1339,9 +1339,10 @@ test("inline surfaces' measured invalid-argument refusals read as sentences", ()
 
 test("a partial-post review failure with a transport tail summarizes as the network line", () => {
   // The reason SubmitReviewDialog renders its error verbatim: the summary would
-  // drop the "do NOT resubmit" warning (forge/bitbucket.rs submit_review).
+  // drop the "do NOT resubmit" warning (forge/bitbucket.rs submit_review; the
+  // GitLab twin carries the same disclosure).
   const message =
-    "The review was posted, but the approve step failed: the 3 review comment(s) were already posted successfully — do NOT resubmit them; only re-run the approve action on Bitbucket. (Bitbucket request to https://api.bitbucket.org/2.0/repositories/acme/app/pullrequests/7/approve: connection failed)";
+    "The review was posted, but the approve step failed: the 3 review comment(s) were already posted successfully — do NOT resubmit them; only re-run the approve action on Bitbucket. (Bitbucket request failed: error sending request: connection failed)";
   const p = presentError(appError("bitbucket", message));
   assert.equal(p.summary, reach("Bitbucket"));
   assert.doesNotMatch(p.summary, /resubmit/);
