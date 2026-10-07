@@ -13,9 +13,21 @@ export function usePushTag(repo: string) {
   return useRepoMutation(repo, (name: string) => api.gitPushTag(repo, name));
 }
 
-export function useDeleteTag(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; onRemote: boolean }) =>
-    api.gitDeleteTag(repo, args.name, args.onRemote),
+export function useDeleteLocalTag(repo: string) {
+  return useRepoMutation(
+    repo,
+    (name: string) => api.gitDeleteLocalTag(repo, name),
+    {
+      // Local tag write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
+
+/** Pushes the deletion to origin, so it keeps the default and pauses offline. */
+export function useDeleteTagOnOrigin(repo: string) {
+  return useRepoMutation(repo, (name: string) =>
+    api.gitDeleteTagOnOrigin(repo, name),
   );
 }
 

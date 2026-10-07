@@ -72,6 +72,7 @@ export function PendingReviewStrip({
       body: "Your unfinished review and any draft comments in it are permanently deleted on GitHub.",
       confirmLabel: `Discard on ${remoteLabel}`,
       confirmVariant: "destructive",
+      holdOffline: true,
     });
     if (!ok || refuseWhileOffline()) return;
     // The optimistic patch drops the review — and this strip with it — before the

@@ -62,6 +62,11 @@ import type {
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  OFFLINE_ITEM_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -110,6 +115,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const createBranch = useCreateBranch(repoPath);
   const createTag = useCreateTag(repoPath);
   const pushTag = usePushTag(repoPath);
+  // A tag push holds offline rather than park: a parked one lands on origin
+  // whenever the connection returns.
+  const offlineHold = useOfflineHold();
+  const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
   const branches = useBranches(repoPath);
 
   const [resetHash, setResetHash] = useState<string | null>(null);
@@ -332,6 +341,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   async function pushTagToOrigin(tag: string) {
+    if (refuseWhileOffline()) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
@@ -768,9 +778,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         {commit.tags.map((tag) => (
           <ContextMenuItem
             key={`push:${tag}`}
+            disabled={!!offlineHold}
             onClick={() => void pushTagToOrigin(tag)}
           >
             Push tag {tag} to origin
+            {offlineSuffix}
           </ContextMenuItem>
         ))}
         {commit.tags.map((tag) => (

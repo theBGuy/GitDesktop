@@ -145,6 +145,7 @@ import {
   useMergeRemotePr,
   useMinimizeComment,
   usePendingPrWrites,
+  usePendingThreadWrites,
   usePrApprovals,
   usePrBaseDivergence,
   usePrDetails,
@@ -194,6 +195,7 @@ import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import {
   ACT_PENDING_REASON,
+  COMMENT_DELETE_PENDING_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -555,6 +557,7 @@ export function RemotePrView({
   const reviewThreads = usePrReviewThreads(repoPath, number, lens);
   const threadReply = useThreadReply(repoPath);
   const threadResolve = useThreadResolve(repoPath);
+  const pendingThreadWrites = usePendingThreadWrites(repoPath, number, lens);
   // The reactions fetch is gated on `canReact` (see usePrCapabilities) so it never
   // fires for a provider whose reactions aren't wired (Bitbucket).
   const reactions = usePrReactions(repoPath, canReact ? number : null, lens);
@@ -1035,6 +1038,7 @@ export function RemotePrView({
       body: `Its ${count} pull requests stay open on their branches — they just stop merging together as a stack.`,
       confirmLabel: "Dissolve stack",
       confirmVariant: "destructive",
+      holdOffline: true,
     });
     if (!ok || refuseWhileOffline()) return;
     try {
@@ -1425,6 +1429,7 @@ export function RemotePrView({
         title: `Rebase onto ${base}?`,
         body: "Rebasing rewrites the pull request branch's history and force-pushes it. On a fork pull request, that branch belongs to the contributor.",
         confirmLabel: "Rebase and update",
+        holdOffline: true,
       });
       if (!ok) return;
     }
@@ -1741,6 +1746,7 @@ export function RemotePrView({
         withComment ? " Your draft posts as a comment first." : ""
       }`,
       confirmLabel: withComment ? "Close with comment" : `Close ${prNoun}`,
+      holdOffline: true,
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
@@ -3354,6 +3360,7 @@ export function RemotePrView({
                     resolved,
                   })
                 }
+                pendingThreadWrites={pendingThreadWrites}
                 // All four pair a rendered comment id with `number`, so they're
                 // withheld through a switch; `editHeld` covers an editor already
                 // open when it began.
@@ -3419,6 +3426,7 @@ export function RemotePrView({
                         })
                     : undefined
                 }
+                pendingWrites={pendingThreadWrites}
                 onEditComment={
                   canEditOwnThreadComments && !detailsStale
                     ? saveThreadCommentEdit
@@ -3749,6 +3757,7 @@ export function RemotePrView({
                       })
                   : undefined
               }
+              pendingWrites={pendingThreadWrites}
               provider={providerKey}
               apply={suggestionApply}
               fileDiffLookup={fileDiffLookup}
@@ -4058,6 +4067,10 @@ export function RemotePrView({
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
+        reason={pendingWriteReason(
+          deleteComment.isPaused,
+          COMMENT_DELETE_PENDING_REASON,
+        )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void deleteConversationComment(commentId)}
       />
@@ -4066,6 +4079,10 @@ export function RemotePrView({
         commentId={deletingThreadCommentId}
         onClose={() => setDeletingThreadCommentId(null)}
         pending={deleteReviewComment.isPending}
+        reason={pendingWriteReason(
+          deleteReviewComment.isPaused,
+          COMMENT_DELETE_PENDING_REASON,
+        )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void deleteThreadComment(commentId)}
       />

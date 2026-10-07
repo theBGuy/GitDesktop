@@ -12,6 +12,7 @@ import type { MentionSource } from "@/features/conversations/useMentionCandidate
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { useActiveForgeGhHost } from "@/lib/git/host";
+import type { PendingThreadWrites } from "@/lib/git/queries";
 import type {
   ForgeProvider,
   ForgeTimelineEvent,
@@ -226,6 +227,7 @@ export function PrActivityFeed({
   onQuote,
   onThreadReply,
   onThreadResolve,
+  pendingThreadWrites,
   onEditThreadComment,
   onDeleteThreadComment,
   onEditComment,
@@ -274,6 +276,8 @@ export function PrActivityFeed({
   onQuote?: (body: string) => void;
   onThreadReply: (threadId: string, body: string) => Promise<void>;
   onThreadResolve: (threadId: string, resolved: boolean) => Promise<void>;
+  /** Replies and resolves in flight per thread, from the mutation cache. */
+  pendingThreadWrites?: PendingThreadWrites;
   /** Absent hides the thread-comment edit affordance — the caller withholds it
    *  while the PR on screen isn't the one the write would address. */
   onEditThreadComment?: (commentId: string, body: string) => void;
@@ -439,6 +443,7 @@ export function PrActivityFeed({
                 onQuote={onQuote}
                 onReply={canThreadReply ? onThreadReply : undefined}
                 onResolve={canThreadResolve ? onThreadResolve : undefined}
+                pendingWrites={pendingThreadWrites}
                 onEditComment={
                   canEditOwnThreadComments ? onEditThreadComment : undefined
                 }

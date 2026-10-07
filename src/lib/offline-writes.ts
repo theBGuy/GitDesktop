@@ -18,6 +18,10 @@ export const ACT_PENDING_REASON = "Applying this change…";
  *  form it would send. */
 export const AI_DRAFT_PENDING_REASON = "Wait for the AI draft to finish";
 
+/** The in-flight copy for a forge comment delete, shared by every conversation
+ *  surface's composer hold and Delete comment dialog. */
+export const COMMENT_DELETE_PENDING_REASON = "Deleting a comment…";
+
 /** The compact form of {@link OFFLINE_WRITE_REASON} appended to a disabled MENU
  *  ITEM's label, which can show no tooltip. */
 export const OFFLINE_ITEM_REASON = "you're offline";

@@ -1,11 +1,19 @@
 import {
+  notifyManager,
   type QueryKey,
   queryOptions,
+  replaceEqualDeep,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import type {
@@ -918,6 +926,66 @@ export function useThreadResolve(repo: string) {
         queryKey: prReviewThreadsKey(repo, args.number, args.lens),
       }),
   });
+}
+
+/** One thread's in-flight write of a kind; an entry exists only while one is
+ *  pending, and `paused` says whether any of it is parked offline. */
+export interface ThreadWriteState {
+  paused: boolean;
+}
+
+/** In-flight thread replies and resolves on one PR, keyed by thread id. */
+export interface PendingThreadWrites {
+  reply: Record<string, ThreadWriteState>;
+  resolve: Record<string, ThreadWriteState>;
+}
+
+const NO_PENDING_THREAD_WRITES: PendingThreadWrites = {
+  reply: {},
+  resolve: {},
+};
+
+/**
+ * The thread replies and resolves on PR `number` (in `lens`) that are in flight.
+ * Read from the mutation cache because a card's own pending flag dies with a
+ * remount, and a second press would then queue a duplicate write; never through
+ * `useMutationState`, for the `<Activity>` blind spot projects.ts records.
+ */
+export function usePendingThreadWrites(
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+): PendingThreadWrites {
+  const cache = useQueryClient().getMutationCache();
+  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
+  // keeps one identity, as `useSyncExternalStore` requires.
+  const snapshot = useRef(NO_PENDING_THREAD_WRITES);
+  const getSnapshot = useCallback(() => {
+    const next: PendingThreadWrites = { reply: {}, resolve: {} };
+    for (const kind of ["reply", "resolve"] as const) {
+      for (const m of cache.findAll({
+        mutationKey: [`thread-${kind}`, repo],
+        status: "pending",
+      })) {
+        const vars = m.state.variables as
+          | { number: number; lens: RemoteLens; threadId: string }
+          | undefined;
+        if (vars?.number !== number || vars.lens !== lens) continue;
+        const prev = next[kind][vars.threadId];
+        next[kind][vars.threadId] = {
+          paused: (prev?.paused ?? false) || m.state.isPaused,
+        };
+      }
+    }
+    snapshot.current = replaceEqualDeep(snapshot.current, next);
+    return snapshot.current;
+  }, [cache, repo, number, lens]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** Warms a remote PR's view (metadata + diff) on row hover and adjacent rows — PR data

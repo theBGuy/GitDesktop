@@ -7,6 +7,10 @@ interface ConfirmOptions {
   body: ReactNode;
   confirmLabel: ReactNode;
   confirmVariant?: "default" | "destructive";
+  /** Holds the confirm button while offline, for a write that refuses rather
+   *  than parks. A flag, not a reason: the host reads connectivity live, so the
+   *  hold lifts on reconnect while the prompt sits open. */
+  holdOffline?: boolean;
 }
 
 interface CheckedConfirmOptions extends ConfirmOptions {
@@ -31,6 +35,7 @@ export interface ConfirmRequest {
   confirmVariant: "default" | "destructive";
   checkboxLabel: ReactNode | undefined;
   checkboxInitial?: boolean;
+  holdOffline?: boolean;
   /** Settles the `ask`/`askChecked` promise: `ok` = confirmed, else cancelled. */
   resolve: (ok: boolean, checked: boolean) => void;
 }

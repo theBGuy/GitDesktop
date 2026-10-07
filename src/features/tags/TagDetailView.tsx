@@ -43,9 +43,10 @@ import {
   forgeProbeReason,
   forgeProbeState,
   useCheckoutCommit,
+  useDeleteLocalTag,
   useDeleteRelease,
   useDeleteReleaseAsset,
-  useDeleteTag,
+  useDeleteTagOnOrigin,
   useDownloadReleaseAsset,
   useEditRelease,
   useForgeStatus,
@@ -101,7 +102,7 @@ export function TagDetailView({
   const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // Release and tag writes hold offline rather than park — a parked publish,
+  // Remote release and tag writes hold offline rather than park — a parked publish,
   // delete or push lands whenever the connection returns, and a parked two-phase
   // save would latch the edit dialog open until then. Openers stay live.
   const offlineHold = useOfflineHold();
@@ -120,7 +121,10 @@ export function TagDetailView({
   const deleteAsset = useDeleteReleaseAsset(repoPath);
   const downloadAsset = useDownloadReleaseAsset(repoPath);
   const pushTag = usePushTag(repoPath);
-  const deleteTag = useDeleteTag(repoPath);
+  const deleteLocalTag = useDeleteLocalTag(repoPath);
+  const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
+  const deleteTagPending =
+    deleteLocalTag.isPending || deleteTagOnOrigin.isPending;
   const checkout = useCheckoutCommit(repoPath);
   const selectTag = useUiStore((s) => s.selectTag);
 
@@ -254,6 +258,7 @@ export function TagDetailView({
           : "Removes this link from the release.",
       confirmLabel: "Delete",
       confirmVariant: "destructive",
+      holdOffline: true,
     });
     if (!ok || refuseWhileOffline()) return;
     try {
@@ -310,11 +315,12 @@ export function TagDetailView({
   }
 
   async function onDeleteTag() {
-    // Only the remote arm is held. A local-only delete still parks offline:
-    // `useDeleteTag` keeps the default network mode for its remote arm.
+    // Only the remote arm is held: the local-only delete runs offline.
     if (deleteTagRemote && refuseWhileOffline()) return;
     try {
-      await deleteTag.mutateAsync({ name: tag, onRemote: deleteTagRemote });
+      await (deleteTagRemote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(
+        tag,
+      );
     } catch (e) {
       onError(e);
       setDeleteTagOpen(false);
@@ -945,16 +951,14 @@ export function TagDetailView({
             <Button variant="outline" onClick={() => setDeleteTagOpen(false)}>
               Cancel
             </Button>
-            {/* Held only while the remote arm is ticked. Unticked, the local
-                delete is pressable but parks until reconnect (see onDeleteTag). */}
+            {/* Held offline only while the remote arm is ticked; unticked, the
+                local delete runs offline. */}
             <DisabledReasonButton
               variant="destructive"
-              disabled={
-                deleteTag.isPending || (deleteTagRemote && !!offlineHold)
-              }
+              disabled={deleteTagPending || (deleteTagRemote && !!offlineHold)}
               reason={(() => {
                 switch (true) {
-                  case deleteTag.isPending:
+                  case deleteTagPending:
                     return ACT_PENDING_REASON;
                   case deleteTagRemote:
                     return offlineHold;
@@ -964,7 +968,7 @@ export function TagDetailView({
               })()}
               onClick={() => void onDeleteTag()}
             >
-              {deleteTag.isPending && <Spinner data-icon="inline-start" />}
+              {deleteTagPending && <Spinner data-icon="inline-start" />}
               Delete
             </DisabledReasonButton>
           </DialogFooter>

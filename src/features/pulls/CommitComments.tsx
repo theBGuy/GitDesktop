@@ -28,6 +28,10 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import {
+  COMMENT_DELETE_PENDING_REASON,
+  pendingWriteReason,
+} from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 
@@ -347,16 +351,28 @@ export function CommitComments({
     stale;
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
+  // A write pressed offline is parked, not running, until the connection returns.
+  // The delete's arm is also the Delete comment dialog's own reason.
+  const deleteCommentReason = pendingWriteReason(
+    deleteComment.isPaused,
+    COMMENT_DELETE_PENDING_REASON,
+  );
   const composerReason = (() => {
     switch (true) {
       case stale:
         return "Loading this commit…";
       case createComment.isPending:
-        return "Posting your comment…";
+        return pendingWriteReason(
+          createComment.isPaused,
+          "Posting your comment…",
+        );
       case editComment.isPending:
-        return "Saving a comment edit…";
+        return pendingWriteReason(
+          editComment.isPaused,
+          "Saving a comment edit…",
+        );
       case deleteComment.isPending:
-        return "Deleting a comment…";
+        return deleteCommentReason;
       default:
         return undefined;
     }
@@ -555,6 +571,7 @@ export function CommitComments({
         commentId={deletingId}
         onClose={() => setDeletingId(null)}
         pending={deleteComment.isPending}
+        reason={deleteCommentReason}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void confirmDelete(commentId)}
       />

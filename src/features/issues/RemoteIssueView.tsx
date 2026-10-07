@@ -94,6 +94,7 @@ import {
 import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
+  COMMENT_DELETE_PENDING_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -500,6 +501,7 @@ export function RemoteIssueView({
         withComment ? " Your draft posts as a comment first." : ""
       }`,
       confirmLabel: withComment ? "Close with comment" : "Close issue",
+      holdOffline: true,
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
@@ -1327,6 +1329,10 @@ export function RemoteIssueView({
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
+        reason={pendingWriteReason(
+          deleteComment.isPaused,
+          COMMENT_DELETE_PENDING_REASON,
+        )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void removeComment(commentId)}
       />

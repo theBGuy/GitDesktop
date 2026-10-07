@@ -80,6 +80,7 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
+  COMMENT_DELETE_PENDING_REASON,
   OFFLINE_ITEM_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
@@ -318,6 +319,11 @@ export function DiscussionView({
   // Which term of `busy` a control disabled on it names, ranked: the switch window
   // outranks a write the viewer started, being the hold they can't have caused.
   // A write pressed offline is parked, not running, until the connection returns.
+  // The delete's arm is also the Delete comment dialog's own reason.
+  const deleteCommentReason = pendingWriteReason(
+    deleteComment.isPaused,
+    COMMENT_DELETE_PENDING_REASON,
+  );
   const busyReason = (() => {
     switch (true) {
       case detailsStale:
@@ -327,10 +333,7 @@ export function DiscussionView({
       case markAnswer.isPending:
         return pendingWriteReason(markAnswer.isPaused, "Updating the answer…");
       case deleteComment.isPending:
-        return pendingWriteReason(
-          deleteComment.isPaused,
-          "Deleting a comment…",
-        );
+        return deleteCommentReason;
       default:
         return undefined;
     }
@@ -552,6 +555,7 @@ export function DiscussionView({
         withComment ? " Your draft posts as a comment first." : ""
       }`,
       confirmLabel: withComment ? "Close with comment" : "Close discussion",
+      holdOffline: true,
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
@@ -1082,6 +1086,7 @@ export function DiscussionView({
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
+        reason={deleteCommentReason}
         onConfirm={(commentId) => void doDeleteComment(commentId)}
       />
 

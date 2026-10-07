@@ -2486,8 +2486,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           {/* The Remote section dedupes a name across remotes to one row, so
               this targets THIS row's remote; after invalidation a same-name row
               from another remote may reappear. That's expected. */}
-          {/* Held here rather than at the confirm: the shared ConfirmDialog has
-              no hold arm, so the handler re-checks if it sat open offline. */}
+          {/* Held here and at the confirm; the handler still re-checks, since
+              the connection can drop between render and press. */}
           <ContextMenuItem
             disabled={deletionBlocked || !!offlineHold}
             onClick={() => {
@@ -2942,6 +2942,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         confirmLabel="Delete"
         confirmVariant="destructive"
         pending={deleteRemoteBranch.isPending}
+        heldReason={offlineHold}
         onConfirm={doDeleteRemoteBranch}
       />
 

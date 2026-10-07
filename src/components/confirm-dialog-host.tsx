@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
+import { useOfflineHold } from "@/lib/offline-writes";
 import type { ConfirmRequest } from "@/lib/stores/confirm";
 import { useConfirm } from "@/lib/stores/confirm";
 
@@ -28,6 +29,9 @@ export function ConfirmDialogHost() {
   }
 
   const checkboxLabel = request?.checkboxLabel;
+  // Read here rather than at ask() time, so a reconnect lifts the hold on a
+  // prompt that is already open.
+  const offlineHold = useOfflineHold();
 
   return (
     <ConfirmDialog
@@ -53,6 +57,7 @@ export function ConfirmDialogHost() {
       }
       confirmLabel={request?.confirmLabel ?? ""}
       confirmVariant={request?.confirmVariant ?? "default"}
+      heldReason={request?.holdOffline ? offlineHold : undefined}
     />
   );
 }

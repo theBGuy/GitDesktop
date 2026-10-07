@@ -8,5 +8,5 @@
   releases, and publishing a branch or repository. Pushing, pulling,
   fetching, deleting a remote branch, and editing, publishing, or deleting a
   release (assets included) are held too, as are pushing a tag or deleting it
-  from origin in the tag's own view. Comments and other quick edits still
-  queue and send when you reconnect.
+  from origin. Comments and other quick edits still queue and send when you
+  reconnect, as long as GitDesktop stays open until then.

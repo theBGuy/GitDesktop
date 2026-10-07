@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ACT_PENDING_REASON, pendingWriteReason } from "@/lib/offline-writes";
 
 /**
  * A title/body confirmation dialog with a Cancel and a single confirm button —
@@ -26,6 +28,8 @@ export function ConfirmDialog({
   confirmLabel,
   confirmVariant = "default",
   pending = false,
+  paused = false,
+  heldReason,
   onConfirm,
 }: {
   open: boolean;
@@ -35,6 +39,12 @@ export function ConfirmDialog({
   confirmLabel: ReactNode;
   confirmVariant?: "default" | "destructive";
   pending?: boolean;
+  /** The pending write is parked offline — the `isPaused` of the same mutation
+   *  that feeds `pending`, so its reason says it is waiting, not running. */
+  paused?: boolean;
+  /** Holds the confirm button with this reason (e.g. offline); a running
+   *  `pending` write outranks it. */
+  heldReason?: string;
   onConfirm: () => void;
 }) {
   return (
@@ -53,13 +63,18 @@ export function ConfirmDialog({
           <Button variant="outline" onClick={onCancel}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             variant={confirmVariant}
-            disabled={pending}
+            disabled={pending || !!heldReason}
+            reason={
+              pending
+                ? pendingWriteReason(paused, ACT_PENDING_REASON)
+                : heldReason
+            }
             onClick={onConfirm}
           >
             {confirmLabel}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

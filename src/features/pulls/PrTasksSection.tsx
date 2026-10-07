@@ -30,6 +30,7 @@ import {
 } from "@/lib/git/queries";
 import type { PrTask } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -495,6 +496,7 @@ export function PrTasksSection({
         commentId={deletingId}
         onClose={() => setDeletingId(null)}
         pending={deleteTask.isPending}
+        reason={pendingWriteReason(deleteTask.isPaused, "Deleting a task…")}
         title="Delete task?"
         description="This permanently deletes the task on Bitbucket. This cannot be undone."
         onConfirm={(taskId) => void confirmDelete(taskId)}
