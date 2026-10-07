@@ -52,8 +52,8 @@ export function stripJsxModes(root: Mode): number {
   return removed;
 }
 
-/** The stock typescript minus JSX, and minus its `tsx` alias (which
- *  {@link typescriptWithJsx} keeps). A failed strip falls back to stock. */
+/** The stock typescript minus JSX, and minus its `tsx` alias: that id belongs
+ *  to {@link typescriptWithJsx}. A failed strip falls back to stock. */
 export const typescriptNoJsx: LanguageFn = (hljs) => {
   try {
     const lang = typescript(hljs);
@@ -69,7 +69,7 @@ export const typescriptNoJsx: LanguageFn = (hljs) => {
  *  still on highlight.js (before its Shiki grammar loads) keep JSX.
  *  `disableAutodetect` holds only on the hljs core instance — lowlight's
  *  highlightAuto ignores it and may pick `tsx`, which renders identically. */
-export const typescriptWithJsx: LanguageFn = (hljs) => ({
+const typescriptWithJsx: LanguageFn = (hljs) => ({
   ...typescript(hljs),
   aliases: [],
   disableAutodetect: true,
@@ -78,7 +78,7 @@ export const typescriptWithJsx: LanguageFn = (hljs) => ({
 type Register = (name: string, language: LanguageFn) => void;
 
 /** Register both grammars through `register`. A throw leaves stock in place. */
-export function registerTsNoJsx(register: Register): void {
+function registerTsNoJsx(register: Register): void {
   try {
     register("tsx", typescriptWithJsx);
     register("typescript", typescriptNoJsx);
