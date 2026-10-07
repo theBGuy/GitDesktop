@@ -45,7 +45,7 @@ import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
 function usePendingWritesUnder<W>(
   prefix: readonly string[],
   repo: string,
-  read: (kind: string, vars: unknown) => W,
+  read: (kind: string, vars: unknown, paused: boolean) => W,
 ): W[] {
   const cache = useQueryClient().getMutationCache();
   // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
@@ -53,9 +53,11 @@ function usePendingWritesUnder<W>(
   const snapshot = useRef<W[]>([]);
   const getSnapshot = useCallback(() => {
     const next = pendingWritesFor(
-      cache
-        .findAll({ mutationKey: prefix, status: "pending" })
-        .map((m) => ({ key: m.options.mutationKey, vars: m.state.variables })),
+      cache.findAll({ mutationKey: prefix, status: "pending" }).map((m) => ({
+        key: m.options.mutationKey,
+        vars: m.state.variables,
+        paused: m.state.isPaused,
+      })),
       repo,
       read,
     );

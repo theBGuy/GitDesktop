@@ -53,6 +53,12 @@ import {
   formatBinding,
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  ACT_PENDING_REASON,
+  OFFLINE_ITEM_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -181,11 +187,18 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     recovery.pending ||
     pullDropGuard.pending;
   const onError = (e: unknown) => toastError(e);
+  // Every network arm here (fetch, pull, push, update from upstream) holds
+  // offline rather than park: a parked push or force push would land whenever
+  // the connection returns. Reset to upstream is local and stays live.
+  const offlineHold = useOfflineHold();
+  const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
   // (a failed background fetch just retries next tick).
   async function doFetch(silent: boolean) {
+    // Auto-fetch carries its own connectivity gate (auto-fetch.ts).
+    if (!silent && refuseWhileOffline()) return;
     try {
       await fetchRemote.mutateAsync(undefined);
       markFetched(repoPath);
@@ -329,6 +342,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // error keeps its normal toast. Both are triggered by the refusal, never
   // pre-flighted.
   async function doPull(mode: PullMode) {
+    if (refuseWhileOffline()) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -359,6 +373,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // outcome; a conflicting merge rejects and the conflict banner takes over
   // (its error still toasts). No auto-push — Push lights up on its own.
   async function doUpdateFromUpstream() {
+    if (refuseWhileOffline()) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -432,6 +447,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   }
 
   async function doPush(force: boolean) {
+    // The force confirm and the fork-PR guard can both sit open across a
+    // disconnect, and each lands here.
+    if (refuseWhileOffline()) return;
     try {
       const guard = await push.mutateAsync({
         setUpstream: !hasUpstream,
@@ -457,6 +475,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // publishes. Pushes to a tracked upstream (and force pushes, which need one)
   // are correct as they stand and never ask.
   async function beginPush(force: boolean) {
+    if (refuseWhileOffline()) return;
     const branch = head?.name;
     if (force || hasUpstream || !branch) {
       void doPush(force);
@@ -476,7 +495,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   }
 
   // Hotkeys mirror the buttons' disabled states exactly.
-  useHotkeyAction("fetch", () => void doFetch(false), !noOrigin && !busy);
+  useHotkeyAction(
+    "fetch",
+    () => void doFetch(false),
+    !noOrigin && !busy && !offlineHold,
+  );
   // Pull needs no explicit `!detached` term: `hasUpstream` is already false on a
   // detached HEAD (the backend leaves `head.upstream` null, mirroring git's "no
   // upstream for a detached HEAD"), so this hotkey and the Pull button below are
@@ -484,7 +507,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "pull",
     () => void doPull("ffOnly"),
-    !noOrigin && !busy && hasUpstream && !diverged,
+    !noOrigin && !busy && hasUpstream && !diverged && !offlineHold,
   );
   useHotkeyAction(
     "push",
@@ -492,7 +515,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       if (diverged) setForceConfirmOpen(true);
       else void beginPush(false);
     },
-    !noOrigin && !busy && !detached,
+    !noOrigin && !busy && !detached && !offlineHold,
   );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
@@ -500,7 +523,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-from-upstream",
     () => void doUpdateFromUpstream(),
-    canUpdateUpstream && !busy,
+    canUpdateUpstream && !busy && !offlineHold,
   );
 
   if (noOrigin) {
@@ -531,7 +554,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={busy || !!offlineHold}
+          // Every hold carries a reason, so none of the flips between them
+          // drops focus by turning the button natively disabled.
+          reason={offlineHold ?? ACT_PENDING_REASON}
           title={fetchHintTitle}
           aria-label="Fetch"
           aria-keyshortcuts={fetchKeyshortcuts}
@@ -553,10 +579,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy || !hasUpstream || diverged}
-          // No `reason` on Pull or Push: `aria-label` already announces the
-          // description, so a describedby copy would read it twice; the wrapper
-          // still hovers `pullTitle`, shortcut included.
+          disabled={busy || !hasUpstream || diverged || !!offlineHold}
+          // Every hold carries a reason so no flip between them drops focus to
+          // a native disable: offline, a running sync, else the description
+          // `aria-label` already holds (read twice by AT, the price of the
+          // mechanism). The wrapper hovers the reason, else `pullTitle`.
+          reason={offlineHold ?? (busy ? ACT_PENDING_REASON : pullDescription)}
           title={pullTitle}
           aria-label={pullDescription ?? "Pull"}
           aria-keyshortcuts={pullKeyshortcuts}
@@ -601,20 +629,23 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             <DropdownMenuContent align="end" className="min-w-48">
               {hasUpstream && (
                 <>
-                  <DropdownMenuItem onClick={() => void doPull("rebase")}>
-                    Pull with rebase
+                  <DropdownMenuItem
+                    disabled={!!offlineHold}
+                    onClick={() => void doPull("rebase")}
+                  >
+                    Pull with rebase{offlineSuffix}
                   </DropdownMenuItem>
                   {/* Disabled with the reason IN the label: a disabled menu item
                       surfaces no tooltip, and the branch menu states the same
                       refusal the same way. */}
                   <DropdownMenuItem
-                    disabled={mixedRewrite}
+                    disabled={mixedRewrite || !!offlineHold}
                     title={mixedRewrite ? mergeDuplicatesReason : undefined}
                     onClick={() => void doPull("merge")}
                   >
                     {mixedRewrite
                       ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
-                      : "Pull with merge"}
+                      : `Pull with merge${offlineSuffix}`}
                   </DropdownMenuItem>
                   {/* Offered only once the probe has measured an upstream that
                       carries every one of these commits, with no unique local
@@ -631,8 +662,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                 <>
                   {hasUpstream && <DropdownMenuSeparator />}
                   {/* Base UI menu items fire on onClick, NOT onSelect. */}
-                  <DropdownMenuItem onClick={() => void doUpdateFromUpstream()}>
-                    Update from upstream
+                  <DropdownMenuItem
+                    disabled={!!offlineHold}
+                    onClick={() => void doUpdateFromUpstream()}
+                  >
+                    Update from upstream{offlineSuffix}
                   </DropdownMenuItem>
                 </>
               )}
@@ -642,7 +676,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy || detached}
+          disabled={busy || detached || !!offlineHold}
+          // Same ranking as Pull's.
+          reason={offlineHold ?? (busy ? ACT_PENDING_REASON : pushDescription)}
           title={pushTitle}
           aria-label={pushDescription ?? pushLabel}
           aria-keyshortcuts={pushKeyshortcuts}
@@ -722,14 +758,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             >
               Cancel
             </Button>
-            <Button
+            <DisabledReasonButton
               variant="destructive"
-              disabled={push.isPending}
+              disabled={push.isPending || !!offlineHold}
+              reason={offlineHold}
               onClick={() => void doPush(true)}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}
               Force push
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

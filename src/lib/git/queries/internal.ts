@@ -333,6 +333,8 @@ export function invalidateProjectBoards(
  * (each key is prefix-matched). Reserve the whole-subtree default for ops that touch
  * history or branch topology (checkout/pull/reset/merge); a hot history op (commit)
  * splits instead — narrow awaited `invalidate` plus deferred `opts.invalidateAfter`.
+ * Offline, a forge write here parks until reconnect (see `networkMode`); the offline
+ * policy for which of them may park lives in `@/lib/offline-writes`.
  */
 export function useRepoMutation<TArgs, TData>(
   repo: string,
@@ -370,7 +372,11 @@ export function useRepoMutation<TArgs, TData>(
     identity?: readonly unknown[];
     /** Opt-in per site, for a mutationFn that writes only local state: the default
      *  "online" mode parks a write while the OS reports no connection. Never a
-     *  default here: the forge writes this wrapper also carries are meant to pause. */
+     *  default here: the lightweight forge writes this wrapper carries (comments,
+     *  reactions, metadata) are meant to park, and their busy reasons say so via
+     *  `pendingWriteReason`. A write whose controls gate on `useOfflineHold` (and
+     *  whose handler calls `refuseWhileOffline`) is refused at the press instead;
+     *  any route that skips that gate still parks. */
     networkMode?: "always";
   } = {},
 ) {

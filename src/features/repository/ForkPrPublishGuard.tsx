@@ -2,6 +2,7 @@ import { WarningIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,6 +16,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { forgeEnsureForkRemote } from "@/lib/git/api";
 import { usePush } from "@/lib/git/queries";
 import type { ForkPrMatch } from "@/lib/git/types";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 
 /**
@@ -50,6 +56,9 @@ export function ForkPrPublishGuard({
 
   const open = match !== null;
   const pending = ensuring || push.isPending;
+  // Both routes push, so both hold while offline; the dialog can be open when
+  // the connection drops.
+  const offlineHold = useOfflineHold();
   // Unknown degrades to false by contract, so a denied-or-unknown flag offers
   // the honest fallback rather than a push GitHub would reject.
   const canPushToFork = match?.maintainerCanModify === true;
@@ -69,7 +78,7 @@ export function ForkPrPublishGuard({
   // normal push error. The push mutation invalidates the whole repo subtree,
   // which is where the PR list and details live.
   async function pushToFork() {
-    if (!match) return;
+    if (!match || refuseWhileOffline()) return;
     setEnsuring(true);
     let remote: string;
     try {
@@ -162,22 +171,35 @@ export function ForkPrPublishGuard({
           <Button ref={cancelRef} variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             variant="outline"
-            disabled={pending}
+            disabled={pending || !!offlineHold}
+            reason={pending ? ACT_PENDING_REASON : offlineHold}
             onClick={onPublishAnyway}
           >
             Publish to {destination} anyway
-          </Button>
+          </DisabledReasonButton>
           {showPushToFork ? (
-            <Button
-              disabled={!canPushToFork || pending}
+            <DisabledReasonButton
+              disabled={!canPushToFork || pending || !!offlineHold}
+              // The permission note already describes its own hold (a plain
+              // disable that offline never flips); a running push outranks offline.
+              reason={(() => {
+                switch (true) {
+                  case !canPushToFork:
+                    return undefined;
+                  case pending:
+                    return ACT_PENDING_REASON;
+                  default:
+                    return offlineHold;
+                }
+              })()}
               aria-describedby={noteId}
               onClick={() => void pushToFork()}
             >
               {pending ? <Spinner data-icon="inline-start" /> : null}
               Push to {slug}
-            </Button>
+            </DisabledReasonButton>
           ) : null}
         </DialogFooter>
       </DialogContent>

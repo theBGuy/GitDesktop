@@ -17,6 +17,11 @@ import type { ReviewVerdict } from "@/lib/git/api";
 import { useSubmitReview } from "@/lib/git/queries";
 import type { DraftCommentIn, RemoteLens } from "@/lib/git/types";
 import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
+import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
@@ -130,6 +135,9 @@ export function SubmitReviewDialog({
   const summaryRequired = effectiveVerdict === "request_changes";
   const summaryMissing = summaryRequired && summary.trim() === "";
   const pending = submitReview.isPending || clearDrafts.isPending;
+  // Submit holds offline rather than park: a parked post keeps `pending` set,
+  // which locks this dialog open until the connection returns.
+  const offlineHold = useOfflineHold();
   // Both verdicts are gated on the same thing (`usePrCapabilities`): the host's
   // approve / request-changes wiring, which reads as unavailable until the forge
   // connection resolves. One reason serves both, and "connects" holds in every
@@ -152,7 +160,7 @@ export function SubmitReviewDialog({
   }
 
   async function submit() {
-    if (summaryMissing || pending) return;
+    if (summaryMissing || pending || refuseWhileOffline()) return;
     setError(null);
     const comments: DraftCommentIn[] = draftList.map((d) => ({
       path: d.path,
@@ -266,12 +274,19 @@ export function SubmitReviewDialog({
             Cancel
           </Button>
           <DisabledReasonButton
-            disabled={summaryMissing || pending}
-            reason={
-              summaryMissing
-                ? "A summary is required to request changes."
-                : undefined
-            }
+            disabled={summaryMissing || pending || !!offlineHold}
+            // The running submit outranks the offline hold; giving it a reason
+            // keeps the button aria-disabled through either flip.
+            reason={(() => {
+              switch (true) {
+                case summaryMissing:
+                  return "A summary is required to request changes.";
+                case pending:
+                  return ACT_PENDING_REASON;
+                default:
+                  return offlineHold;
+              }
+            })()}
             onClick={submit}
           >
             Submit review

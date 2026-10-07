@@ -92,6 +92,11 @@ import {
 } from "@/lib/git/queries";
 import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { lensKey, useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
@@ -168,6 +173,9 @@ export function RemoteIssueView({
   // label; each suffix is empty whenever its axis allows the action.
   const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
   const writeItemReason = writeReason ? WRITE_ACCESS_ITEM_REASON : undefined;
+  // Set while offline. Close and the transfer/delete confirms hold on it at the
+  // press; the composer's writes are left to park, and `composerReason` says so.
+  const offlineHold = useOfflineHold();
   const itemSuffix = writeItemReason ? ` — ${writeItemReason}` : "";
   const triageSuffix = triageItemReason ? ` — ${triageItemReason}` : "";
   // GitLab WRITES land per-action. Each shared control is
@@ -397,21 +405,27 @@ export function RemoteIssueView({
   // Which term of `busy` to name, ranked: the switch window outranks a write the
   // viewer started, being the hold they can't have caused themselves. Shared by
   // the composer and the close/reopen controls below — every one of them holds
-  // for exactly these same terms.
+  // for exactly these same terms. A write pressed offline is parked, not running.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
       case comment.isPending:
-        return "Posting your comment…";
+        return pendingWriteReason(comment.isPaused, "Posting your comment…");
       case closeIssue.isPending:
-        return "Closing this issue…";
+        return pendingWriteReason(closeIssue.isPaused, "Closing this issue…");
       case reopenIssue.isPending:
-        return "Reopening this issue…";
+        return pendingWriteReason(
+          reopenIssue.isPaused,
+          "Reopening this issue…",
+        );
       default:
         return undefined;
     }
   })();
+  // Close's own hold: the shared terms, then offline.
+  const closeBlocked = busy || triageBlocked || !!offlineHold;
+  const closeReason = triageReason ?? composerReason ?? offlineHold;
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
@@ -485,7 +499,8 @@ export function RemoteIssueView({
       }`,
       confirmLabel: withComment ? "Close with comment" : "Close issue",
     });
-    if (!ok) return;
+    // Ahead of the riding draft too: a close refused offline posts nothing.
+    if (!ok || refuseWhileOffline()) return;
     if (!(await postRidingDraft())) return;
     try {
       await closeIssue.mutateAsync({ number, reason });
@@ -632,7 +647,8 @@ export function RemoteIssueView({
 
   async function submitTransfer() {
     const destination = transferDest.trim();
-    if (!destination) return;
+    // The dialog's Enter submit reaches here past its held button.
+    if (!destination || refuseWhileOffline()) return;
     const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     let url: string;
     try {
@@ -656,6 +672,7 @@ export function RemoteIssueView({
   }
 
   async function confirmDelete() {
+    if (refuseWhileOffline()) return;
     const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     try {
       await deleteIssue.mutateAsync(number);
@@ -826,8 +843,8 @@ export function RemoteIssueView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy || triageBlocked}
-              reason={triageReason ?? composerReason}
+              disabled={closeBlocked}
+              reason={closeReason}
               onClick={() => doClose("completed")}
               title={
                 draftRidesStateChange
@@ -846,8 +863,8 @@ export function RemoteIssueView({
                       variant="outline"
                       size="icon-sm"
                       aria-label="Other close options"
-                      disabled={busy || triageBlocked}
-                      reason={triageReason ?? composerReason}
+                      disabled={closeBlocked}
+                      reason={closeReason}
                     />
                   }
                 >
@@ -1316,6 +1333,7 @@ export function RemoteIssueView({
         onDestChange={setTransferDest}
         suggestions={repoSuggestions}
         pending={transferIssue.isPending}
+        heldReason={offlineHold}
         onSubmit={() => void submitTransfer()}
         move={isGitLab}
       />
@@ -1326,6 +1344,7 @@ export function RemoteIssueView({
         number={number}
         title={issue.title}
         pending={deleteIssue.isPending}
+        heldReason={offlineHold}
         onConfirm={() => void confirmDelete()}
         remoteLabel={remoteLabel}
         roleHint={

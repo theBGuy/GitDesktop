@@ -42,6 +42,7 @@ import type {
   IssueDetails,
   RemoteLens,
 } from "@/lib/git/types";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { IssueDevelopment } from "./IssueDevelopment";
@@ -971,6 +972,7 @@ export function TransferIssueDialog({
   onDestChange,
   suggestions,
   pending,
+  heldReason,
   onSubmit,
   move = false,
 }: {
@@ -981,6 +983,9 @@ export function TransferIssueDialog({
   onDestChange: (v: string) => void;
   suggestions: string[];
   pending: boolean;
+  /** Holds the submit with this reason (offline); the parent's handler refuses
+   *  the form's Enter submit on the same verdict. */
+  heldReason?: string;
   onSubmit: () => void;
   move?: boolean;
 }) {
@@ -1037,10 +1042,16 @@ export function TransferIssueDialog({
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={!dest.trim() || pending}>
+            {/* The running write outranks the hold. An empty destination stays a
+                plain disable: no copy names it. */}
+            <DisabledReasonButton
+              type="submit"
+              disabled={!dest.trim() || pending || heldReason !== undefined}
+              reason={pending ? ACT_PENDING_REASON : heldReason}
+            >
               {pending && <Spinner data-icon="inline-start" />}
               {verb}
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1056,6 +1067,7 @@ export function DeleteIssueDialog({
   number,
   title,
   pending,
+  heldReason,
   onConfirm,
   remoteLabel,
   roleHint,
@@ -1065,6 +1077,8 @@ export function DeleteIssueDialog({
   number: number;
   title: string;
   pending: boolean;
+  /** Holds the delete with this reason (offline) while the dialog stays open. */
+  heldReason?: string;
   onConfirm: () => void;
   /** "GitHub" / "GitLab" — where the delete lands. */
   remoteLabel: string;
@@ -1090,10 +1104,15 @@ export function DeleteIssueDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+          <DisabledReasonButton
+            variant="destructive"
+            disabled={pending || heldReason !== undefined}
+            reason={pending ? ACT_PENDING_REASON : heldReason}
+            onClick={onConfirm}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             Delete issue
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

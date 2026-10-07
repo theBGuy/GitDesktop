@@ -42,13 +42,16 @@ export const prWriteKey = (kind: PrWriteKind, repo: string) =>
  *  stack number for "stack-dissolve"); `lens` is null where they carry none;
  *  `stack` is the native stack a merge cascades through or a stack add appends to
  *  (GitHub numbers stacks apart from PRs), null for any other; `members` is the PR
- *  list a stack create or add writes, null where the variables carry none. */
+ *  list a stack create or add writes, null where the variables carry none.
+ *  `paused` is the cache entry's own `isPaused` — parked offline, not running — read
+ *  here so a view's busy flag and its reason come from the same entry. */
 export interface PendingPrWrite {
   kind: PrWriteKind;
   target: number | null;
   lens: RemoteLens | null;
   stack: number | null;
   members: number[] | null;
+  paused: boolean;
 }
 
 /** A value that is a number, or null. */
@@ -69,7 +72,7 @@ function numberList(value: unknown): number[] {
  *  any other type reads as null, so the write holds nothing by it. */
 export function pendingPrWriteTarget(
   vars: unknown,
-): Omit<PendingPrWrite, "kind"> {
+): Omit<PendingPrWrite, "kind" | "paused"> {
   if (typeof vars === "number")
     return { target: vars, lens: null, stack: null, members: null };
   if (Array.isArray(vars)) {
@@ -96,19 +99,22 @@ export function pendingPrWriteTarget(
   };
 }
 
-/** A cache entry's kind and variables as a {@link PendingPrWrite}. */
+/** A cache entry's kind, variables and paused state as a {@link PendingPrWrite}. */
 export const readPendingPrWrite = (
   kind: string,
   vars: unknown,
+  paused = false,
 ): PendingPrWrite => ({
   kind: kind as PrWriteKind,
   ...pendingPrWriteTarget(vars),
+  paused,
 });
 
-/** One pending mutation as the cache holds it. */
+/** One pending mutation as the cache holds it. An absent `paused` reads as running. */
 export interface PendingMutationEntry {
   key: readonly unknown[] | undefined;
   vars: unknown;
+  paused?: boolean;
 }
 
 /** The writes among `entries` filed against `repo` (keyed `[prefix, kind, repo]`),
@@ -117,12 +123,12 @@ export interface PendingMutationEntry {
 export function pendingWritesFor<W>(
   entries: readonly PendingMutationEntry[],
   repo: string,
-  read: (kind: string, vars: unknown) => W,
+  read: (kind: string, vars: unknown, paused: boolean) => W,
 ): W[] {
   return entries.flatMap((e) => {
     const [, kind, keyRepo] = e.key ?? [];
     return keyRepo === repo && typeof kind === "string"
-      ? [read(kind, e.vars)]
+      ? [read(kind, e.vars, e.paused ?? false)]
       : [];
   });
 }

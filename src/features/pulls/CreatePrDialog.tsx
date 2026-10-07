@@ -62,6 +62,7 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
+import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import {
   applyRepoLens,
   useLensGate,
@@ -92,6 +93,10 @@ import {
   toastError,
   toastErrorWithNote,
 } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -286,6 +291,8 @@ export function CreatePrDialog({
   const jiraLink = useJiraLink(repoPath);
   const canJiraMention =
     !canLinkIssues && forge.data?.provider === "bitbucket" && !!jiraLink.data;
+  // Create pushes the head and opens the PR, so it holds offline rather than park.
+  const offlineHold = useOfflineHold();
   // Group-label ids: these fields wrap trigger-style widgets (segmented buttons
   // and popover triggers) that carry their own aria-label, so the visible field
   // label names the surrounding group via aria-labelledby rather than htmlFor.
@@ -410,6 +417,9 @@ export function CreatePrDialog({
           : undefined,
     },
     onSubmit: async ({ value }) => {
+      // The push and create would park offline; the button holds on the same
+      // verdict, and this refuses a submit that lands before it repaints.
+      if (refuseWhileOffline()) return;
       // This submit belongs to the repo it fired in: the form's options are
       // re-applied every render, so `repoPath` here is pinned to that repo while
       // the retained dialog goes on serving whichever one is on screen. Every
@@ -881,7 +891,16 @@ export function CreatePrDialog({
     baseLoading ||
     isSubmitting ||
     creatingElsewhere ||
-    Boolean(existingPr);
+    Boolean(existingPr) ||
+    !!offlineHold;
+  // Only the offline arm takes a reason: every other hold already explains
+  // itself in the dialog (the lane hint, the duplicate notice, the spinner).
+  const offlineSubmit = useDisabledReason({
+    disabled: submitBlocked,
+    reason: offlineHold,
+    title: SUBMIT_HINT,
+    describedBy: laneHint ? creatingHintId : undefined,
+  });
 
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
   // the chip mutations live in the shared hook. Gated on a usable tracker AND the
@@ -1491,13 +1510,28 @@ export function CreatePrDialog({
             <form.AppForm>
               <form.Subscribe selector={(s) => s.values.draft}>
                 {(draft) => (
-                  <form.SubmitButton
-                    disabled={submitBlocked}
-                    aria-describedby={laneHint ? creatingHintId : undefined}
-                    title={SUBMIT_HINT}
+                  <span
+                    className={cn(
+                      "inline-flex",
+                      offlineSubmit.blockedReason && "cursor-not-allowed",
+                    )}
+                    title={offlineSubmit.wrapperTitle}
                   >
-                    {draft ? "Create draft" : `Create ${prNoun}`}
-                  </form.SubmitButton>
+                    <form.SubmitButton
+                      focusableWhenDisabled={!!offlineSubmit.blockedReason}
+                      disabled={submitBlocked}
+                      aria-describedby={offlineSubmit.describedBy}
+                      title={SUBMIT_HINT}
+                      className={ARIA_DISABLED_CLASS}
+                    >
+                      {draft ? "Create draft" : `Create ${prNoun}`}
+                    </form.SubmitButton>
+                    {offlineSubmit.blockedReason ? (
+                      <span id={offlineSubmit.reasonId} className="sr-only">
+                        {offlineSubmit.blockedReason}
+                      </span>
+                    ) : null}
+                  </span>
                 )}
               </form.Subscribe>
             </form.AppForm>

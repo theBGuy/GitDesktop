@@ -334,6 +334,21 @@ test("only writes keyed to this repo are read; a foreign repo's never match", ()
   assert.equal(isPendingFor(writes, "checkout", 10, "origin"), false);
 });
 
+test("a write's paused state comes through from its cache entry", () => {
+  const entries = [
+    {
+      key: prWriteKey("comment", "C:/a"),
+      vars: { number: 7, body: "hi" },
+      paused: true,
+    },
+    { key: prWriteKey("merge", "C:/a"), vars: { number: 7, lens: "origin" } },
+  ];
+  const writes = pendingWritesFor(entries, "C:/a", readPendingPrWrite);
+  assert.equal(pendingWriteOfKind(writes, "comment")?.paused, true);
+  // An entry without the field reads as running, never as parked.
+  assert.equal(pendingWriteOfKind(writes, "merge")?.paused, false);
+});
+
 test("a foreign repo's local merge never holds this repo's view", () => {
   const entries = [
     {

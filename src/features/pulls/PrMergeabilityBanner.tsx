@@ -318,6 +318,7 @@ export function PrMergeabilityBanner({
   forkBlocked,
   hasResolveWorktree,
   busy,
+  resolveHeldReason,
   conflictFiles,
   predictedClean,
   forgeUnreachable,
@@ -352,6 +353,10 @@ export function PrMergeabilityBanner({
   forkBlocked: boolean;
   hasResolveWorktree: boolean;
   busy: boolean;
+  /** Why both Resolve actions hold, ranked by the caller: every `busy` term, then
+   *  offline (a resolve with no conflicts left pushes straight to the head). One
+   *  reason for each term keeps the buttons aria-disabled across every flip. */
+  resolveHeldReason?: string;
   /** Predicted conflicting paths; empty when the prediction is clean or unavailable. */
   conflictFiles: string[];
   /** The local prediction came back CLEAN — false also covers unknown and not-run, so
@@ -515,8 +520,8 @@ export function PrMergeabilityBanner({
             <DisabledReasonButton
               variant="ghost"
               size="xs"
-              disabled={busy || forkBlocked}
-              reason={forkBlocked ? FORK_BLOCKED_REASON : undefined}
+              disabled={busy || forkBlocked || resolveHeldReason !== undefined}
+              reason={forkBlocked ? FORK_BLOCKED_REASON : resolveHeldReason}
               onClick={onResolveWithAi}
             >
               <SparkleIcon data-icon="inline-start" />
@@ -526,8 +531,8 @@ export function PrMergeabilityBanner({
           <DisabledReasonButton
             variant="ghost"
             size="xs"
-            disabled={busy || forkBlocked}
-            reason={forkBlocked ? FORK_BLOCKED_REASON : undefined}
+            disabled={busy || forkBlocked || resolveHeldReason !== undefined}
+            reason={forkBlocked ? FORK_BLOCKED_REASON : resolveHeldReason}
             onClick={onResolve}
           >
             {resolveLabel}

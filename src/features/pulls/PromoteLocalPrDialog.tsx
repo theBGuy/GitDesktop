@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -18,6 +19,7 @@ import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
+import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
@@ -87,11 +89,15 @@ export function PromoteLocalPrDialog({
     ? LANE_BLOCKED_HINT[lanePhase](prNoun)
     : null;
   const creatingHintId = useId();
+  // Publish pushes and opens a PR, so it holds offline rather than park — a
+  // parked create would keep `pending` set, locking Cancel until reconnect.
+  const offlineHold = useOfflineHold();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
 
   async function promote() {
+    if (refuseWhileOffline()) return;
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
@@ -270,14 +276,17 @@ export function PromoteLocalPrDialog({
           >
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             onClick={promote}
-            disabled={pending || creatingElsewhere}
+            disabled={pending || creatingElsewhere || !!offlineHold}
+            // The lane hint already describes its own hold, so only the offline
+            // arm takes a reason.
+            reason={pending || creatingElsewhere ? undefined : offlineHold}
             aria-describedby={laneHint ? creatingHintId : undefined}
           >
             {pending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>
