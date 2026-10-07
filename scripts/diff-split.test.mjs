@@ -5,7 +5,7 @@
 //
 // INSTALLLESS-CI CONTRACT: .github/workflows/quality.yml's guards job, step
 // "Guard self-tests", runs node --test "scripts/*.test.mjs" with NO install.
-// Any npm import in this chain causes MODULE_NOT_FOUND there even when local
+// Any npm import in this chain causes ERR_MODULE_NOT_FOUND there even when local
 // node_modules masks it. Keep only the two built-ins and static import below;
 // this suite rides that glob, not frontend.yml's node_modules-required roster.
 //
@@ -93,7 +93,7 @@ const shapes = [
       "@@ -0,0 +1 @@\n+created\n",
   },
   {
-    name: "a deletion whose quoted path only the diff header carries",
+    name: "a deletion keyed only by its quoted diff-header path",
     path: "src/café.txt",
     section:
       'diff --git "a/src/caf\\303\\251.txt" "b/src/caf\\303\\251.txt"\n' +
