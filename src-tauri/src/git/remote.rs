@@ -2819,6 +2819,7 @@ mod tests {
             }
         };
         let state = AppState::default();
+        cache_put(&work_s, "origin", "https://stale.example/old.git");
         let err = CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 Arc::new(hook),
@@ -2826,6 +2827,11 @@ mod tests {
             )
             .await
             .expect_err("the push-default leg is lost");
+        assert_eq!(
+            cache_get(&work_s, "origin", BIG),
+            None,
+            "the removed remote's URL is not served"
+        );
         std::fs::remove_file(&lock).unwrap();
         assert_eq!(
             attempts.load(Ordering::SeqCst),
