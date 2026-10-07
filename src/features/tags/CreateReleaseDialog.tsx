@@ -68,10 +68,20 @@ import {
 import type { CommitSummary, GeneratedNotes } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateReleaseNotes } from "./useGenerateReleaseNotes";
@@ -86,6 +96,9 @@ const RELEASE_DEFAULTS = {
   latest: false,
   draft: false,
 };
+
+/** The submit's hold while GitHub's own (non-AI) notes generator runs. */
+const GENERATED_NOTES_PENDING_REASON = "Wait for the generated notes to finish";
 
 /**
  * Creates a GitHub release. The tag is a combobox — pick an existing tag, or
@@ -110,6 +123,7 @@ export function CreateReleaseDialog({
   initialTag?: string;
 }) {
   const createRelease = useCreateRelease(repoPath);
+  const offlineHold = useOfflineHold();
   const githubNotes = useGithubReleaseNotes(repoPath);
   const aiNotes = useGenerateReleaseNotes(repoPath);
   const busyGenerating = githubNotes.isPending || aiNotes.generating;
@@ -210,7 +224,7 @@ export function CreateReleaseDialog({
     onSubmit: async ({ value }) => {
       const submitGen = seedGenRef.current;
       const tag = value.tag.trim();
-      if (!tag) return;
+      if (!tag || refuseWhileOffline()) return;
       const hasTarget = !initialTag && createdTags.includes(tag);
       try {
         const url = await createRelease.mutateAsync({
@@ -427,8 +441,30 @@ export function CreateReleaseDialog({
     : "Enable AI in Settings first.";
 
   // The one submit gate, shared by the button and the form's native submit:
-  // Enter must submit exactly when the button would.
-  const submitBlocked = !tagTrimmed || busyGenerating;
+  // Enter must submit exactly when the button would. Publishing holds offline
+  // rather than park: a parked release would land after the dialog was left.
+  const submitBlocked = !tagTrimmed || busyGenerating || !!offlineHold;
+  // Each running notes draft, the running create, and offline carry a reason,
+  // ranked running-first, so a flip between them never drops focus to a native
+  // disable. The GitHub generator isn't AI (it stays offered with Hide AI on),
+  // so it gets its own non-AI line. An empty tag stays a plain disable: no copy
+  // names it.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const offlineSubmit = useDisabledReason({
+    disabled: submitBlocked || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case aiNotes.generating:
+          return AI_DRAFT_PENDING_REASON;
+        case githubNotes.isPending:
+          return GENERATED_NOTES_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -694,9 +730,27 @@ export function CreateReleaseDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={submitBlocked}>
-                {draft ? "Save draft" : "Publish release"}
-              </form.SubmitButton>
+              <span
+                className={cn(
+                  "inline-flex",
+                  offlineSubmit.blockedReason && "cursor-not-allowed",
+                )}
+                title={offlineSubmit.wrapperTitle}
+              >
+                <form.SubmitButton
+                  focusableWhenDisabled={!!offlineSubmit.blockedReason}
+                  disabled={submitBlocked}
+                  aria-describedby={offlineSubmit.describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  {draft ? "Save draft" : "Publish release"}
+                </form.SubmitButton>
+                {offlineSubmit.blockedReason ? (
+                  <span id={offlineSubmit.reasonId} className="sr-only">
+                    {offlineSubmit.blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>

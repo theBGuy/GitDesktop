@@ -54,6 +54,12 @@ import type {
 } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
@@ -245,6 +251,7 @@ export function CreateIssueDialog({
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
     onSubmit: async ({ value }) => {
+      if (refuseWhileOffline()) return;
       const submitGen = seedGenRef.current;
       let created: { number: number; url: string };
       try {
@@ -529,8 +536,26 @@ export function CreateIssueDialog({
     run: runGenerate,
   });
   // The one submit gate, shared by the button and the form's native submit:
-  // Enter must submit exactly when the button would.
-  const submitBlocked = generating;
+  // Enter must submit exactly when the button would. A create holds offline
+  // rather than park: a parked one would land after the dialog was left behind.
+  const offlineHold = useOfflineHold();
+  const submitBlocked = generating || !!offlineHold;
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  // The running draft, the running create, and offline carry a reason, ranked
+  // running-first, so a flip between them never drops focus to a native disable.
+  const offlineSubmit = useDisabledReason({
+    disabled: submitBlocked || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case generating:
+          return AI_DRAFT_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -755,13 +780,31 @@ export function CreateIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={submitBlocked}>
-                {subIssueParentId
-                  ? "Create sub-issue"
-                  : isUpstream
-                    ? `Create in ${targetLabel}`
-                    : "Create issue"}
-              </form.SubmitButton>
+              <span
+                className={cn(
+                  "inline-flex",
+                  offlineSubmit.blockedReason && "cursor-not-allowed",
+                )}
+                title={offlineSubmit.wrapperTitle}
+              >
+                <form.SubmitButton
+                  focusableWhenDisabled={!!offlineSubmit.blockedReason}
+                  disabled={submitBlocked}
+                  aria-describedby={offlineSubmit.describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  {subIssueParentId
+                    ? "Create sub-issue"
+                    : isUpstream
+                      ? `Create in ${targetLabel}`
+                      : "Create issue"}
+                </form.SubmitButton>
+                {offlineSubmit.blockedReason ? (
+                  <span id={offlineSubmit.reasonId} className="sr-only">
+                    {offlineSubmit.blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>

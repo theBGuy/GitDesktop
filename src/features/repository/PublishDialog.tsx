@@ -22,9 +22,19 @@ import {
   usePublishRepo,
 } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
+import {
+  ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
@@ -221,6 +231,7 @@ export function PublishDialog({
       isPrivate: true,
     },
     onSubmit: async ({ value }) => {
+      if (refuseWhileOffline()) return;
       const submitGen = seedGenRef.current;
       const name = value.name.trim();
       // The publish backend takes `owner/repo` in `name`; compose it only for an
@@ -371,8 +382,28 @@ export function PublishDialog({
   });
 
   // The one submit gate, shared by the button and the form's native submit:
-  // Enter must submit exactly when the button would.
-  const submitBlocked = descGen.generating || bbBlocked || ghBlocked;
+  // Enter must submit exactly when the button would. Publishing holds offline
+  // rather than park: a parked create would land after the dialog was left.
+  const offlineHold = useOfflineHold();
+  const submitBlocked =
+    descGen.generating || bbBlocked || ghBlocked || !!offlineHold;
+  // The running description draft, the running publish, and offline carry a
+  // reason, ranked running-first, so a flip between them never drops focus to a
+  // native disable; the name refusals keep their field hints and a plain disable.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const offlineSubmit = useDisabledReason({
+    disabled: submitBlocked || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case descGen.generating:
+          return AI_DRAFT_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
+  });
 
   const githubScope = ghPickerActive ? (
     <>
@@ -578,9 +609,27 @@ export function PublishDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={submitBlocked}>
-                Publish
-              </form.SubmitButton>
+              <span
+                className={cn(
+                  "inline-flex",
+                  offlineSubmit.blockedReason && "cursor-not-allowed",
+                )}
+                title={offlineSubmit.wrapperTitle}
+              >
+                <form.SubmitButton
+                  focusableWhenDisabled={!!offlineSubmit.blockedReason}
+                  disabled={submitBlocked}
+                  aria-describedby={offlineSubmit.describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  Publish
+                </form.SubmitButton>
+                {offlineSubmit.blockedReason ? (
+                  <span id={offlineSubmit.reasonId} className="sr-only">
+                    {offlineSubmit.blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>

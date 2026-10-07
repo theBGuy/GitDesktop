@@ -76,6 +76,14 @@ import {
 import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  ACT_PENDING_REASON,
+  OFFLINE_ITEM_REASON,
+  pendingWriteReason,
+  RIDING_COMMENT_CLOSE_HELD,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
@@ -228,6 +236,9 @@ export function DiscussionView({
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
+  // Set while offline. Close and delete hold on it at the press; the composer,
+  // answer and upvote writes are left to park, and their reasons say so.
+  const offlineHold = useOfflineHold();
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
@@ -301,16 +312,20 @@ export function DiscussionView({
     detailsStale;
   // Which term of `busy` a control disabled on it names, ranked: the switch window
   // outranks a write the viewer started, being the hold they can't have caused.
+  // A write pressed offline is parked, not running, until the connection returns.
   const busyReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
       case addComment.isPending:
-        return "Posting your comment…";
+        return pendingWriteReason(addComment.isPaused, "Posting your comment…");
       case markAnswer.isPending:
-        return "Updating the answer…";
+        return pendingWriteReason(markAnswer.isPaused, "Updating the answer…");
       case deleteComment.isPending:
-        return "Deleting a comment…";
+        return pendingWriteReason(
+          deleteComment.isPaused,
+          "Deleting a comment…",
+        );
       default:
         return undefined;
     }
@@ -323,7 +338,10 @@ export function DiscussionView({
       case detailsStale:
         return staleReason;
       case toggleUpvoteMutation.isPending:
-        return "Recording your upvote…";
+        return pendingWriteReason(
+          toggleUpvoteMutation.isPaused,
+          "Recording your upvote…",
+        );
       default:
         return undefined;
     }
@@ -335,6 +353,11 @@ export function DiscussionView({
   // above — but a hold outranks it: a held item posts nothing.
   const draftSuffix =
     staleSuffix || (draftRidesStateChange ? " — posts your draft" : "");
+  // Close also holds offline, which outranks the draft promise the same way.
+  const closeSuffix =
+    staleSuffix ||
+    (offlineHold ? ` — ${OFFLINE_ITEM_REASON}` : "") ||
+    draftSuffix;
 
   // Every write below awaits `mutateAsync` (or detaches with a `.catch`):
   // react-query drops per-call callbacks once the observer loses its listeners,
@@ -525,8 +548,13 @@ export function DiscussionView({
       }`,
       confirmLabel: withComment ? "Close with comment" : "Close discussion",
     });
-    if (!ok) return;
+    // Ahead of the riding draft too: a close refused offline posts nothing.
+    if (!ok || refuseWhileOffline()) return;
+    // Again below the riding post: the connection can drop while it runs, and a
+    // comment that went out is named in the refusal.
     if (!(await postRidingDraft(d.id))) return;
+    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
     try {
       await closeDiscussion.mutateAsync({ discussionId: d.id, reason });
     } catch (e) {
@@ -560,7 +588,7 @@ export function DiscussionView({
   }
 
   async function doDelete() {
-    if (!d || detailsStale) return;
+    if (!d || detailsStale || refuseWhileOffline()) return;
     try {
       await deleteDiscussion.mutateAsync(d.id);
     } catch (e) {
@@ -654,16 +682,22 @@ export function DiscussionView({
                   {/* The vendored sub-trigger carries no disabled styling of its
                       own (unlike menu items), so the dim rides a call-site class. */}
                   <DropdownMenuSubTrigger
-                    disabled={closeDiscussion.isPending || detailsStale}
+                    disabled={
+                      closeDiscussion.isPending || detailsStale || !!offlineHold
+                    }
                     className="data-disabled:opacity-50"
                   >
-                    Close discussion…{draftSuffix}
+                    Close discussion…{closeSuffix}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     {CLOSE_REASONS.map(([label, reason]) => (
                       <DropdownMenuItem
                         key={reason}
-                        disabled={closeDiscussion.isPending || detailsStale}
+                        disabled={
+                          closeDiscussion.isPending ||
+                          detailsStale ||
+                          !!offlineHold
+                        }
                         onClick={() => void doClose(reason)}
                       >
                         {label}
@@ -1064,8 +1098,19 @@ export function DiscussionView({
             </Button>
             <DisabledReasonButton
               variant="destructive"
-              disabled={deleteDiscussion.isPending || detailsStale}
-              reason={staleReason}
+              disabled={
+                deleteDiscussion.isPending || detailsStale || !!offlineHold
+              }
+              reason={(() => {
+                switch (true) {
+                  case deleteDiscussion.isPending:
+                    return ACT_PENDING_REASON;
+                  case staleReason !== undefined:
+                    return staleReason;
+                  default:
+                    return offlineHold;
+                }
+              })()}
               onClick={() => void doDelete()}
             >
               {deleteDiscussion.isPending && (

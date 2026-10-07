@@ -2,6 +2,7 @@ import { ClockIcon } from "@phosphor-icons/react";
 import { type ComponentProps, useMemo, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +42,7 @@ import type {
   ReviewThreadOut,
 } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { cn } from "@/lib/utils";
 import { DraftCommentCard } from "./PendingReviewBar";
@@ -347,6 +349,7 @@ export function MergePrDialog({
   headIsDefault,
   deletionBlocked,
   pending,
+  heldReason,
   onConfirm,
   auto = false,
   stackNotice,
@@ -370,6 +373,8 @@ export function MergePrDialog({
   /** A branch rule blocks deleting the head — the option shows but is disabled. */
   deletionBlocked: boolean;
   pending: boolean;
+  /** Holds the confirm with this reason (offline) while the dialog stays open. */
+  heldReason?: string;
   onConfirm: () => void;
   /** Arms merge-when-pipeline-succeeds instead of merging now (GitLab-only) —
    *  reframes the copy + confirm button; the delete-branch checkbox rides the arm. */
@@ -452,10 +457,16 @@ export function MergePrDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button disabled={pending} onClick={onConfirm}>
+          {/* The running write outranks the hold, and having its own reason keeps
+              the button aria-disabled through either flip. */}
+          <DisabledReasonButton
+            disabled={pending || heldReason !== undefined}
+            reason={pending ? ACT_PENDING_REASON : heldReason}
+            onClick={onConfirm}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             {auto ? "Enable auto-merge" : (confirmLabel ?? strategyLabel)}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

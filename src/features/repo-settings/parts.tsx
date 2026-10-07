@@ -38,6 +38,11 @@ import {
   useActiveGhHost,
 } from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
+import {
+  ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  OFFLINE_WRITE_REASON,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import {
   ARIA_DISABLED_CLASS,
@@ -105,27 +110,18 @@ export function AsyncErrorCard({
   );
 }
 
-/** The one reason every remote-write control in repo settings gives while
- *  offline: a mutation pressed then parks silently and fires on reconnect. */
-export const OFFLINE_WRITE_REASON =
-  "You're offline — this will be available once you're back online.";
+// Re-exported so the settings sections keep importing their whole hold
+// vocabulary from one place.
+export { ACT_PENDING_REASON, AI_DRAFT_PENDING_REASON, OFFLINE_WRITE_REASON };
 
 /** The hold reason while a row's last change is still saving. */
 export const SAVING_REASON = "Saving your last change…";
-
-/** The hold reason on a write's own trigger (a confirm's act button, a
- *  create/save/enable submit) while that write is in flight. */
-export const ACT_PENDING_REASON = "Applying this change…";
 
 /** The hold reason on a save or update whose form matches what's saved. */
 export const NO_CHANGES_REASON = "No changes to save";
 
 /** The hold reason on a Discard whose form matches what's saved. */
 export const NO_CHANGES_TO_DISCARD_REASON = "No changes to discard";
-
-/** The hold reason on a save while an AI description draft is still streaming
- *  into the form it would send. */
-export const AI_DRAFT_PENDING_REASON = "Wait for the AI draft to finish";
 
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
 function formNoticeMessage(noun: string, failed: boolean): string {

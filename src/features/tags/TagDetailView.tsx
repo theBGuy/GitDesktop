@@ -59,6 +59,12 @@ import {
   writeAccessReason,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
+import {
+  ACT_PENDING_REASON,
+  isOfflineNow,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -66,6 +72,10 @@ import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
+
+/** Every asset row's Delete holds while one row's delete runs (one shared
+ *  mutation), so the line names the operation, not the pressed row's write. */
+const ASSET_DELETE_PENDING_REASON = "Deleting an asset…";
 
 export function TagDetailView({
   repoPath,
@@ -91,6 +101,10 @@ export function TagDetailView({
   const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
+  // Release and tag writes hold offline rather than park — a parked publish,
+  // delete or push lands whenever the connection returns, and a parked two-phase
+  // save would latch the edit dialog open until then. Openers stay live.
+  const offlineHold = useOfflineHold();
   const remoteLabel = providerLabel(provider);
   // Release notes autolink the same `@`/`#`/`!` references a comment does.
   // Releases are repo-wide, so the candidate lists come off origin.
@@ -163,6 +177,14 @@ export function TagDetailView({
   // Writes take the read-only viewer's reason ahead of those: theirs never lifts
   // either, and it's the one that still applies once the release is current.
   const blockReason = writeBlocked ? writeReason : readReason;
+  // What a write's own trigger says: the block first, then offline.
+  const writeHoldReason = blockReason ?? offlineHold;
+  // A trigger whose own write is running names that first: the write is real,
+  // and fails live rather than parks if the connection drops under it. A hook
+  // shared by several triggers (the asset rows' one delete) passes copy that
+  // doesn't claim the write as each button's own.
+  const triggerReason = (pending: boolean, running = ACT_PENDING_REASON) =>
+    pending ? running : writeHoldReason;
   const publishNote = (() => {
     switch (true) {
       case probe !== null:
@@ -190,8 +212,10 @@ export function TagDetailView({
   // callbacks once the observer loses listeners, and this whole view hides with
   // its <Activity> tab while a write is still in flight.
   async function onUpload() {
+    if (refuseWhileOffline()) return;
     const file = await openDialog({ multiple: false });
-    if (typeof file !== "string") return;
+    // Again below the picker: the connection can drop while it is open.
+    if (typeof file !== "string" || refuseWhileOffline()) return;
     try {
       await uploadAsset.mutateAsync({ tag, filePath: file });
     } catch (e) {
@@ -231,7 +255,7 @@ export function TagDetailView({
       confirmLabel: "Delete",
       confirmVariant: "destructive",
     });
-    if (!ok) return;
+    if (!ok || refuseWhileOffline()) return;
     try {
       await deleteAsset.mutateAsync({ tag, assetName });
     } catch (e) {
@@ -267,6 +291,7 @@ export function TagDetailView({
   }
 
   async function onPushTag() {
+    if (refuseWhileOffline()) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
@@ -285,6 +310,9 @@ export function TagDetailView({
   }
 
   async function onDeleteTag() {
+    // Only the remote arm is held. A local-only delete still parks offline:
+    // `useDeleteTag` keeps the default network mode for its remote arm.
+    if (deleteTagRemote && refuseWhileOffline()) return;
     try {
       await deleteTag.mutateAsync({ name: tag, onRemote: deleteTagRemote });
     } catch (e) {
@@ -316,7 +344,7 @@ export function TagDetailView({
     const onPublish = async () => {
       // `prerelease` rides the rendered release's flag, so a stale one would
       // really flip the new release's state on the forge.
-      if (relStale) return;
+      if (relStale || refuseWhileOffline()) return;
       try {
         await editRelease.mutateAsync({
           tag,
@@ -340,7 +368,7 @@ export function TagDetailView({
     const saveEdit = async () => {
       // `draft`/`latest` below are read off the rendered release at submit
       // time, so a switch behind the open dialog holds the save.
-      if (relStale) return;
+      if (relStale || refuseWhileOffline()) return;
       // Empty notes leave the body untouched (the edit skips `--notes`), so
       // there's nothing to carry into the manifest either.
       const syncManifest =
@@ -375,6 +403,13 @@ export function TagDetailView({
       // state, not a failed save: close and disclose it — re-submitting would
       // only repeat the edit.
       try {
+        // The connection can drop during phase 1; a manifest upload sent then
+        // would park, so it takes the partial-state path below instead. Nothing
+        // retries it, so the line says how to.
+        if (isOfflineNow())
+          throw new Error(
+            "You were offline, so the manifest wasn't uploaded. Save the release again once you're back online to update it.",
+          );
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {
         setSyncArmed(false);
@@ -395,6 +430,7 @@ export function TagDetailView({
     };
 
     const onDeleteRelease = async () => {
+      if (refuseWhileOffline()) return;
       try {
         await deleteRelease.mutateAsync({ tag, cleanupTag });
       } catch (e) {
@@ -424,8 +460,13 @@ export function TagDetailView({
                   <DisabledReasonButton
                     variant="outline"
                     size="xs"
-                    disabled={editRelease.isPending || writeBlocked || relStale}
-                    reason={blockReason}
+                    disabled={
+                      editRelease.isPending ||
+                      writeBlocked ||
+                      relStale ||
+                      !!offlineHold
+                    }
+                    reason={triggerReason(editRelease.isPending)}
                     onClick={() => void onPublish()}
                   >
                     Publish
@@ -519,8 +560,13 @@ export function TagDetailView({
                   <DisabledReasonButton
                     variant="ghost"
                     size="xs"
-                    disabled={uploadAsset.isPending || writeBlocked || relStale}
-                    reason={blockReason}
+                    disabled={
+                      uploadAsset.isPending ||
+                      writeBlocked ||
+                      relStale ||
+                      !!offlineHold
+                    }
+                    reason={triggerReason(uploadAsset.isPending)}
                     onClick={onUpload}
                   >
                     {uploadAsset.isPending ? (
@@ -565,9 +611,15 @@ export function TagDetailView({
                           size="icon-xs"
                           aria-label={`Delete ${a.name}`}
                           disabled={
-                            deleteAsset.isPending || writeBlocked || relStale
+                            deleteAsset.isPending ||
+                            writeBlocked ||
+                            relStale ||
+                            !!offlineHold
                           }
-                          reason={blockReason}
+                          reason={triggerReason(
+                            deleteAsset.isPending,
+                            ASSET_DELETE_PENDING_REASON,
+                          )}
                           className="text-muted-foreground"
                           onClick={() => onDeleteAsset(a.name, "asset")}
                         >
@@ -596,9 +648,15 @@ export function TagDetailView({
                             size="icon-xs"
                             aria-label={`Delete ${a.name}`}
                             disabled={
-                              deleteAsset.isPending || writeBlocked || relStale
+                              deleteAsset.isPending ||
+                              writeBlocked ||
+                              relStale ||
+                              !!offlineHold
                             }
-                            reason={blockReason}
+                            reason={triggerReason(
+                              deleteAsset.isPending,
+                              ASSET_DELETE_PENDING_REASON,
+                            )}
                             className="text-muted-foreground"
                             onClick={() => onDeleteAsset(a.name, "link")}
                           >
@@ -737,8 +795,8 @@ export function TagDetailView({
                     held arms carry a reason. */}
                 <DisabledReasonButton
                   type="submit"
-                  disabled={savePending || relStale}
-                  reason={savePending ? null : blockReason}
+                  disabled={savePending || relStale || !!offlineHold}
+                  reason={savePending ? null : writeHoldReason}
                 >
                   {savePending && <Spinner data-icon="inline-start" />}
                   Save
@@ -771,8 +829,8 @@ export function TagDetailView({
               </Button>
               <DisabledReasonButton
                 variant="destructive"
-                disabled={deleteRelease.isPending || relStale}
-                reason={blockReason}
+                disabled={deleteRelease.isPending || relStale || !!offlineHold}
+                reason={triggerReason(deleteRelease.isPending)}
                 onClick={() => void onDeleteRelease()}
               >
                 {deleteRelease.isPending && (
@@ -839,14 +897,15 @@ export function TagDetailView({
         >
           Checkout
         </Button>
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={pushTag.isPending}
+          disabled={pushTag.isPending || !!offlineHold}
+          reason={pushTag.isPending ? ACT_PENDING_REASON : offlineHold}
           onClick={() => void onPushTag()}
         >
           Push tag
-        </Button>
+        </DisabledReasonButton>
         <span className="flex-1" />
         <Button
           variant="outline"
@@ -886,14 +945,28 @@ export function TagDetailView({
             <Button variant="outline" onClick={() => setDeleteTagOpen(false)}>
               Cancel
             </Button>
-            <Button
+            {/* Held only while the remote arm is ticked. Unticked, the local
+                delete is pressable but parks until reconnect (see onDeleteTag). */}
+            <DisabledReasonButton
               variant="destructive"
-              disabled={deleteTag.isPending}
+              disabled={
+                deleteTag.isPending || (deleteTagRemote && !!offlineHold)
+              }
+              reason={(() => {
+                switch (true) {
+                  case deleteTag.isPending:
+                    return ACT_PENDING_REASON;
+                  case deleteTagRemote:
+                    return offlineHold;
+                  default:
+                    return undefined;
+                }
+              })()}
               onClick={() => void onDeleteTag()}
             >
               {deleteTag.isPending && <Spinner data-icon="inline-start" />}
               Delete
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

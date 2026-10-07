@@ -191,6 +191,13 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  RIDING_COMMENT_CLOSE_HELD,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import {
   useClearReviewDrafts,
@@ -383,6 +390,10 @@ export function RemotePrView({
   // Menu items can't show a tooltip once disabled — they carry the compact
   // reason in their label instead.
   const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
+  // Set while offline. Merge, close, dissolve, update-branch and the merge
+  // dialog's confirm hold on it at the press; comment-class writes are left to
+  // park, and their busy reason says so through `pendingWriteReason`.
+  const offlineHold = useOfflineHold();
   // Per-action write-capability flags from forge status + provider (gating
   // convention: usePrCapabilities).
   const {
@@ -701,6 +712,12 @@ export function RemotePrView({
   // lens is always origin, so the bare number is the whole identity.
   const writePending = (kind: PrWriteKind) =>
     isPendingFor(pendingWrites, kind, number, lens);
+  // The same match over the entries parked offline, so `composerReason` reads the
+  // cache entry that set the hold — a hook's own observer resets on unmount or a
+  // key change and would name a parked write as running.
+  const pausedWrites = pendingWrites.filter((w) => w.paused);
+  const writePaused = (kind: PrWriteKind) =>
+    isPendingFor(pausedWrites, kind, number, lens);
   // The native stack this PR sits in, parsed once — the number a dissolve writes
   // and a cascading merge names. A native stack's id is a numeric string by
   // contract, so a value that won't parse means the contract broke: null then
@@ -1018,7 +1035,7 @@ export function RemotePrView({
       confirmLabel: "Dissolve stack",
       confirmVariant: "destructive",
     });
-    if (!ok) return;
+    if (!ok || refuseWhileOffline()) return;
     try {
       await stackDissolve.mutateAsync(nativeStackNumber);
       toast.success(`Dissolved stack #${info.id}`);
@@ -1050,7 +1067,8 @@ export function RemotePrView({
       !details.isPlaceholderData &&
       canDissolveStack &&
       !writeBlocked &&
-      !dissolvePending,
+      !dissolvePending &&
+      !offlineHold,
   );
 
   // Server truth first; the local preview only fills the gap where the forge has none.
@@ -1276,6 +1294,7 @@ export function RemotePrView({
     !defaultBranchSettling &&
     !rulesSettling &&
     updateBlockedReason === undefined &&
+    !offlineHold &&
     !updateBranchPending;
 
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
@@ -1291,6 +1310,9 @@ export function RemotePrView({
       abortResolvePending
     )
       return;
+    // A resolve with no conflicts left pushes straight to the head, so it holds
+    // offline with the merge-class writes.
+    if (refuseWhileOffline()) return;
     const info = details.data;
     if (!info) return;
     const startedFor = entityKey;
@@ -1367,7 +1389,8 @@ export function RemotePrView({
       (canResolveConflicts || resolveWorktree !== null) &&
       !resolve &&
       !resolveMergePending &&
-      !abortResolvePending,
+      !abortResolvePending &&
+      !offlineHold,
   );
 
   /** Bring the head up to date with its base, on the remote. The rebase variant
@@ -1404,6 +1427,9 @@ export function RemotePrView({
       });
       if (!ok) return;
     }
+    // A parked update would push onto the head whenever the connection returns.
+    // Checked here, below the rebase confirm, for both variants.
+    if (refuseWhileOffline()) return;
     try {
       await updateBranch.mutateAsync({ number, rebase, lens });
       // GitHub only ACCEPTED the job here, so the word goes to the poll: the strip
@@ -1715,8 +1741,13 @@ export function RemotePrView({
       }`,
       confirmLabel: withComment ? "Close with comment" : `Close ${prNoun}`,
     });
-    if (!ok) return;
+    // Ahead of the riding draft too: a close refused offline posts nothing.
+    if (!ok || refuseWhileOffline()) return;
+    // Again below the riding post: the connection can drop while it runs, and a
+    // comment that went out is named in the refusal.
     if (!(await postRidingDraft())) return;
+    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
     try {
       await closePr.mutateAsync({ number, lens });
       // The riding comment posts without the "Comment added" toast the ordinary
@@ -1758,6 +1789,9 @@ export function RemotePrView({
   }
 
   async function confirmMerge() {
+    // The dialog can sit open across a disconnect; its confirm holds on the same
+    // verdict, and this refuses a press that lands before the hold repaints.
+    if (refuseWhileOffline()) return;
     // GitLab stale-view guard: the head sha the user is looking at (the same oid
     // the AI-review path uses). GitLab 409s if the head moved; GitHub ignores it.
     const sha = pr ? prHeadSha(pr) : undefined;
@@ -1993,34 +2027,72 @@ export function RemotePrView({
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
   // Same scoped terms as `busy`, so it only ever names a write that touches this PR.
+  // Each term reads its paused state off the same cache entries `busy` does: a
+  // write pressed offline is parked, not running, until the connection returns.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
       case commentPending:
-        return "Posting your comment…";
+        return pendingWriteReason(
+          writePaused("comment"),
+          "Posting your comment…",
+        );
       case mergePending:
-        return `Merging this ${prNoun}…`;
+        return pendingWriteReason(
+          writePaused("merge"),
+          `Merging this ${prNoun}…`,
+        );
       case stackMergePending:
-        return `Merging stack #${nativeStackNumber}…`;
+        return pendingWriteReason(
+          isStackMergePendingFor(pausedWrites, nativeStackNumber, lens),
+          `Merging stack #${nativeStackNumber}…`,
+        );
       case closePending:
-        return `Closing this ${prNoun}…`;
+        return pendingWriteReason(
+          writePaused("close"),
+          `Closing this ${prNoun}…`,
+        );
       case reopenPending:
-        return `Reopening this ${prNoun}…`;
+        return pendingWriteReason(
+          writePaused("reopen"),
+          `Reopening this ${prNoun}…`,
+        );
       case approvePending:
-        return "Submitting your approval…";
+        return pendingWriteReason(
+          writePaused("approve"),
+          "Submitting your approval…",
+        );
       case unapprovePending:
-        return "Revoking your approval…";
+        return pendingWriteReason(
+          writePaused("unapprove"),
+          "Revoking your approval…",
+        );
       case requestChangesPending:
-        return "Requesting changes…";
+        return pendingWriteReason(
+          writePaused("request-changes"),
+          "Requesting changes…",
+        );
       case unrequestChangesPending:
-        return "Revoking your change request…";
+        return pendingWriteReason(
+          writePaused("unrequest-changes"),
+          "Revoking your change request…",
+        );
       case armAutoMergePending:
-        return "Enabling auto-merge…";
+        return pendingWriteReason(
+          writePaused("gl-arm-auto-merge"),
+          "Enabling auto-merge…",
+        );
       case cancelAutoMergePending:
-        return "Canceling auto-merge…";
+        return pendingWriteReason(
+          writePaused("gl-cancel-auto-merge"),
+          "Canceling auto-merge…",
+        );
       case setDraftPending:
-        return "Updating draft status…";
+        return pendingWriteReason(
+          writePaused("set-draft"),
+          "Updating draft status…",
+        );
       default:
         return undefined;
     }
@@ -2545,6 +2617,7 @@ export function RemotePrView({
   const mergeBlocked =
     busy ||
     writeBlocked ||
+    !!offlineHold ||
     pr.isDraft ||
     mergeGuardMissing ||
     allMergeMethodsBlocked;
@@ -2553,7 +2626,8 @@ export function RemotePrView({
   // the RENDERED pr, which through a switch is the previous one. `busy` also
   // outranks the static hints: `pr.isDraft` and the rest can stay true while a
   // term of `busy` is in flight for this same PR, and `composerReason` names
-  // it — this same string doubles as the hover title while nothing blocks.
+  // it — this same string doubles as the hover title while nothing blocks. Offline
+  // ranks with the waits, above the hints.
   const mergeReason = (() => {
     switch (true) {
       case writeReason !== undefined:
@@ -2562,6 +2636,8 @@ export function RemotePrView({
         return staleReason;
       case busy:
         return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
+      case offlineHold !== undefined:
+        return offlineHold;
       case pr.isDraft:
         return `Mark the ${prNoun} ready before merging`;
       case mergeGuardMissing:
@@ -2952,8 +3028,8 @@ export function RemotePrView({
           // `dissolveStack` refuses without push or while the rendered stack is
           // the previous PR's, so hold its control — without the spinner a real
           // write would show. Permission outranks the switch, as on Merge.
-          disabled={detailsStale || writeBlocked}
-          reason={writeReason ?? staleReason}
+          disabled={detailsStale || writeBlocked || !!offlineHold}
+          reason={writeReason ?? staleReason ?? offlineHold}
         />
         {stackOffer && (
           <StackOffer
@@ -3022,6 +3098,20 @@ export function RemotePrView({
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
         busy={resolveMergePending || abortResolvePending || detailsStale}
+        // Ranked like `busy` above it, then offline; the running write outranks it.
+        resolveHeldReason={(() => {
+          switch (true) {
+            case detailsStale:
+              return staleReason;
+            case resolveMergePending:
+              return ACT_PENDING_REASON;
+            // A Discard holds Resolve too, but isn't Resolve's own write.
+            case abortResolvePending:
+              return "Discarding the resolution…";
+            default:
+              return offlineHold;
+          }
+        })()}
         conflictFiles={predictedFiles}
         predictedClean={predictedClean}
         forgeUnreachable={forgeUnreachable}
@@ -3030,6 +3120,7 @@ export function RemotePrView({
         blockedApprovals={blockedApprovals}
         blockedReason={gitlabBlockedNote}
         updateBlockedReason={updateBlockedReason}
+        updateHeldReason={offlineHold}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.
         updateBusy={
@@ -3753,8 +3844,8 @@ export function RemotePrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={busy || triageBlocked}
-              reason={triageReason ?? composerReason}
+              disabled={busy || triageBlocked || !!offlineHold}
+              reason={triageReason ?? composerReason ?? offlineHold}
               onClick={doClose}
               title={
                 draftRidesStateChange
@@ -3882,6 +3973,7 @@ export function RemotePrView({
         headIsDefault={headIsDefault}
         deletionBlocked={headDeletionBlocked}
         pending={mergeAuto ? armAutoMergePending : mergePending}
+        heldReason={offlineHold}
         onConfirm={confirmMerge}
         auto={mergeAuto}
         stackNotice={stackMerge?.notice}

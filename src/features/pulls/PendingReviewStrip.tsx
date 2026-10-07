@@ -1,10 +1,16 @@
 import { ArrowSquareOutIcon, NotePencilIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { useDiscardPendingReview } from "@/lib/git/queries";
 import type { PrThreadOut, RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 
@@ -50,6 +56,9 @@ export function PendingReviewStrip({
   // do what the disabled control refuses. An absent id is spelled "" here, the way
   // the backend spells a review whose source supplied none.
   const ready = !!reviewId && !stale && !discard.isPending;
+  // Discard deletes the review on the forge, so it holds offline rather than
+  // park; Finish only opens the browser and stays live.
+  const offlineHold = useOfflineHold();
 
   function finishReview() {
     if (!ready) return;
@@ -64,7 +73,7 @@ export function PendingReviewStrip({
       confirmLabel: `Discard on ${remoteLabel}`,
       confirmVariant: "destructive",
     });
-    if (!ok) return;
+    if (!ok || refuseWhileOffline()) return;
     // The optimistic patch drops the review — and this strip with it — before the
     // call settles, so the outcome rides the awaited continuation; per-call mutate
     // callbacks would go with the unmounted observer.
@@ -92,7 +101,7 @@ export function PendingReviewStrip({
     () => {
       if (selected) void discardReview();
     },
-    ready && selected,
+    ready && selected && !offlineHold,
   );
 
   if (!review?.id || stale) return null;
@@ -107,15 +116,17 @@ export function PendingReviewStrip({
         </span>
       </span>
       <div className="flex items-center gap-1.5">
-        <Button
+        <DisabledReasonButton
           variant="ghost"
           size="xs"
-          className="text-destructive"
-          disabled={discard.isPending}
+          // Live arm only: a held button regains full opacity under focus.
+          className={offlineHold ? undefined : "text-destructive"}
+          disabled={discard.isPending || !!offlineHold}
+          reason={discard.isPending ? ACT_PENDING_REASON : offlineHold}
           onClick={() => void discardReview()}
         >
           {`Discard on ${remoteLabel}…`}
-        </Button>
+        </DisabledReasonButton>
         <Button
           variant="outline"
           size="xs"

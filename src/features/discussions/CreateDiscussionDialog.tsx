@@ -15,8 +15,17 @@ import {
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +47,7 @@ export function CreateDiscussionDialog({
   const form = useAppForm({
     defaultValues: { title: "", body: "", categoryId: "" },
     onSubmit: async ({ value }) => {
+      if (refuseWhileOffline()) return;
       try {
         const { number, url } = await createDiscussion.mutateAsync({
           repoId,
@@ -61,6 +71,27 @@ export function CreateDiscussionDialog({
   });
 
   const categoryId = useSelector(form.store, (s) => s.values.categoryId);
+  // Starting a discussion holds offline rather than park: a parked create
+  // would land after the dialog was left behind. The running create, offline,
+  // and a missing category each carry a reason, ranked running-first, so a flip
+  // between them never drops focus to a native disable.
+  const offlineHold = useOfflineHold();
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const offlineSubmit = useDisabledReason({
+    disabled: !categoryId || !!offlineHold || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        case offlineHold !== undefined:
+          return offlineHold;
+        case !categoryId:
+          return "Choose a category first";
+        default:
+          return undefined;
+      }
+    })(),
+  });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
@@ -146,12 +177,27 @@ export function CreateDiscussionDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton
-                disabled={!categoryId}
-                title={categoryId ? undefined : "Choose a category first"}
+              <span
+                className={cn(
+                  "inline-flex",
+                  offlineSubmit.blockedReason && "cursor-not-allowed",
+                )}
+                title={offlineSubmit.wrapperTitle}
               >
-                Start discussion
-              </form.SubmitButton>
+                <form.SubmitButton
+                  focusableWhenDisabled={!!offlineSubmit.blockedReason}
+                  disabled={!categoryId || !!offlineHold}
+                  aria-describedby={offlineSubmit.describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  Start discussion
+                </form.SubmitButton>
+                {offlineSubmit.blockedReason ? (
+                  <span id={offlineSubmit.reasonId} className="sr-only">
+                    {offlineSubmit.blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>

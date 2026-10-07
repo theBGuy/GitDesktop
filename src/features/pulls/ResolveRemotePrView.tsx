@@ -17,6 +17,7 @@ import {
 } from "@/lib/git/queries";
 import type { FileEntry, RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
@@ -133,6 +134,9 @@ export function ResolveRemotePrView({
   const done = status.isSuccess && remaining === 0;
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finish.isPending || abort.isPending;
+  // Finish pushes, so it holds offline rather than park — a parked push would
+  // keep `busy` set, holding Discard too, until the connection returns.
+  const offlineHold = useOfflineHold();
 
   // Both continuations ride the awaited promise, never per-call mutate callbacks:
   // finishing or discarding leaves this takeover, and an `<Activity>` tab hide tears
@@ -140,6 +144,7 @@ export function ResolveRemotePrView({
   // observer has no listeners, so `onDone()` would never fire and the surface would
   // sit over a worktree the backend had already consumed.
   async function onFinish() {
+    if (refuseWhileOffline()) return;
     try {
       const outcome = await finish.mutateAsync({
         head,
@@ -216,8 +221,18 @@ export function ResolveRemotePrView({
           </Button>
           <DisabledReasonButton
             size="xs"
-            disabled={busy || remaining > 0}
-            reason={remaining > 0 ? "Resolve every conflict first" : undefined}
+            disabled={busy || remaining > 0 || !!offlineHold}
+            // The spinner speaks for a running write; the reasons cover the rest.
+            reason={(() => {
+              switch (true) {
+                case remaining > 0:
+                  return "Resolve every conflict first";
+                case busy:
+                  return undefined;
+                default:
+                  return offlineHold;
+              }
+            })()}
             onClick={() => void onFinish()}
           >
             {finish.isPending && <Spinner data-icon="inline-start" />}

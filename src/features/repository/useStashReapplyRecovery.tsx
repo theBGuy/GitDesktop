@@ -13,6 +13,7 @@ import {
   useRebaseAutostash,
   useRebaseOntoAutostash,
 } from "@/lib/git/queries";
+import { refuseWhileOffline } from "@/lib/offline-writes";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
@@ -196,6 +197,10 @@ export function useStashReapplyRecovery(repoPath: string) {
       setRequest(null);
       return;
     }
+    // The one network compound: a pull holds offline like the sync controls'
+    // own, and an open prompt stays up to confirm again once reconnected. The
+    // others replay local refs and run offline.
+    if (req.run.op === "pull" && refuseWhileOffline()) return;
     const copy: AutostashCopy = {
       operation: capitalize(req.operationLabel),
       reapplied: req.reappliedMessage,

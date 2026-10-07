@@ -2,6 +2,7 @@ import { KanbanIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,6 +29,7 @@ import {
   useJiraLink,
   useJiraPermissions,
 } from "@/lib/jira/queries";
+import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -118,6 +120,10 @@ export function PromoteLocalIssueDialog({
   }, [canPublishForge, canPublishJira]);
 
   const [pending, setPending] = useState(false);
+  // The forge publish holds offline rather than park: a parked create keeps
+  // `pending` set, locking Cancel until reconnect. The Jira arm is left as is.
+  const offlineHold = useOfflineHold();
+  const forgeHold = destination === "forge" ? offlineHold : undefined;
 
   const carried = issue.comments.filter((c) => c.body.trim());
 
@@ -293,6 +299,7 @@ export function PromoteLocalIssueDialog({
   }
 
   async function promote() {
+    if (destination === "forge" && refuseWhileOffline()) return;
     setPending(true);
     try {
       if (destination === "jira") await promoteJira();
@@ -397,10 +404,14 @@ export function PromoteLocalIssueDialog({
           >
             Cancel
           </Button>
-          <Button onClick={promote} disabled={pending || !jiraReady}>
+          <DisabledReasonButton
+            onClick={promote}
+            disabled={pending || !jiraReady || !!forgeHold}
+            reason={pending ? undefined : forgeHold}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             Publish to {targetLabel}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -81,6 +81,11 @@ import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
+  OFFLINE_ITEM_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
+import {
   LOCAL_AUDIT_STATE,
   PR_AUDIT_TONE,
   PR_RANK,
@@ -246,6 +251,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const resetToUpstream = useBranchResetToUpstream(repoPath);
   const hardReset = useHardResetToCommit(repoPath);
   const push = usePush(repoPath);
+  // Push, publish and delete-on-remote hold offline rather than park: a parked
+  // one lands on the remote whenever the connection returns.
+  const offlineHold = useOfflineHold();
+  const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
   const remotes = useRemotes(repoPath);
   const setBranchArchived = useSetBranchArchived(repoPath);
   const openWorktree = useOpenWorktree();
@@ -1083,6 +1092,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDeleteRemoteBranch() {
     if (!remoteDeleteTarget) return;
+    // The confirm can sit open across a disconnect; refusing keeps it open.
+    if (refuseWhileOffline()) return;
     const target = remoteDeleteTarget;
     try {
       await deleteRemoteBranch.mutateAsync(target);
@@ -1402,6 +1413,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // the backend resolves to the branch's own upstream remote.
   function doPushBranch(branch: Branch, remote?: string) {
     setOpen(false);
+    if (refuseWhileOffline()) return;
     if (branch.upstream && !branch.upstreamGone)
       void runPushBranch(branch, remote);
     else void beginPublishBranch(branch, remote);
@@ -1422,6 +1434,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
 
   async function runPushBranch(branch: Branch, remote?: string) {
+    // The fork-PR guard's "Publish anyway" lands here after its own dialog.
+    if (refuseWhileOffline()) return;
     const publishing = !branch.upstream || branch.upstreamGone;
     try {
       await push.mutateAsync({
@@ -1662,7 +1676,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         );
       }
     },
-    !busy && remoteNames.includes("origin") && (open || !!currentBranch),
+    !busy &&
+      !offlineHold &&
+      remoteNames.includes("origin") &&
+      (open || !!currentBranch),
   );
 
   useHotkeyAction("new-branch", openCreate);
@@ -2255,12 +2272,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   item above is their remedy. */}
               {pushable && (
                 <ContextMenuItem
-                  disabled={busy || branch.upstreamBehind > 0}
+                  disabled={busy || branch.upstreamBehind > 0 || !!offlineHold}
                   onClick={() => doPushBranch(branch)}
                 >
                   {branch.upstreamBehind > 0
                     ? `Push to ${branch.upstream} (diverged)`
-                    : `Push to ${branch.upstream}${busySuffix}`}
+                    : `Push to ${branch.upstream}${busySuffix || offlineSuffix}`}
                 </ContextMenuItem>
               )}
               {/* Publish an unpushed / upstream-deleted branch: one remote → a
@@ -2269,22 +2286,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   destination. */}
               {publishRemotes.length === 1 ? (
                 <ContextMenuItem
-                  disabled={busy}
+                  disabled={busy || !!offlineHold}
                   onClick={() => doPushBranch(branch, publishRemotes[0])}
                 >
                   {publishRemotes[0] === "origin"
-                    ? `Publish branch${busySuffix}`
-                    : `Publish to ${publishRemotes[0]}${busySuffix}`}
+                    ? `Publish branch${busySuffix || offlineSuffix}`
+                    : `Publish to ${publishRemotes[0]}${busySuffix || offlineSuffix}`}
                 </ContextMenuItem>
               ) : (
                 publishRemotes.map((r) => (
                   <ContextMenuItem
                     key={r}
-                    disabled={busy}
+                    disabled={busy || !!offlineHold}
                     onClick={() => doPushBranch(branch, r)}
                   >
                     Publish to {r}
-                    {busySuffix}
+                    {busySuffix || offlineSuffix}
                   </ContextMenuItem>
                 ))
               )}
@@ -2469,8 +2486,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           {/* The Remote section dedupes a name across remotes to one row, so
               this targets THIS row's remote; after invalidation a same-name row
               from another remote may reappear. That's expected. */}
+          {/* Held here rather than at the confirm: the shared ConfirmDialog has
+              no hold arm, so the handler re-checks if it sat open offline. */}
           <ContextMenuItem
-            disabled={deletionBlocked}
+            disabled={deletionBlocked || !!offlineHold}
             onClick={() => {
               setOpen(false);
               setRemoteDeleteTarget({
@@ -2481,7 +2500,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           >
             {deletionBlocked
               ? `Delete on ${branch.remote}… (protected)`
-              : `Delete on ${branch.remote}…`}
+              : `Delete on ${branch.remote}…${offlineSuffix}`}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
