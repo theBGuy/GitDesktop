@@ -102,7 +102,7 @@ export function TagDetailView({
   const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  // Release and tag writes hold offline rather than park — a parked publish,
+  // Remote release and tag writes hold offline rather than park — a parked publish,
   // delete or push lands whenever the connection returns, and a parked two-phase
   // save would latch the edit dialog open until then. Openers stay live.
   const offlineHold = useOfflineHold();
