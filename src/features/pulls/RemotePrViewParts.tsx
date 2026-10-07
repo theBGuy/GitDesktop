@@ -31,6 +31,7 @@ import {
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
 import {
+  type PendingThreadWrites,
   useAddMrSpentTime,
   useGlMrTimeStats,
   useObjectsPresent,
@@ -56,6 +57,8 @@ interface DiffThreadWiring {
   onQuote?: (body: string) => void;
   onReply?: (threadId: string, body: string) => Promise<void>;
   onResolve?: (threadId: string, resolved: boolean) => Promise<void>;
+  /** Replies and resolves in flight per thread, from the mutation cache. */
+  pendingWrites?: PendingThreadWrites;
   /** The forge the threads came from — disambiguates bare-fence Apply scope for
    *  suggestions (GitHub = whole range, GitLab = anchored line only). Defaults to
    *  "github" in the card so an unwired caller is byte-identical. */
@@ -82,6 +85,7 @@ function DiffThreadAnchor({
   onQuote,
   onReply,
   onResolve,
+  pendingWrites,
   provider,
   apply,
   fileDiffLookup,
@@ -106,6 +110,7 @@ function DiffThreadAnchor({
           onQuote={onQuote}
           onReply={onReply}
           onResolve={onResolve}
+          pendingWrites={pendingWrites}
           provider={provider}
           apply={apply}
           fileDiffLookup={fileDiffLookup}
@@ -139,6 +144,7 @@ export function PrFilesPane({
   onQuote,
   onReply,
   onResolve,
+  pendingWrites,
   provider,
   apply,
   fileDiffLookup,
@@ -234,6 +240,7 @@ export function PrFilesPane({
                 onQuote={onQuote}
                 onReply={onReply}
                 onResolve={onResolve}
+                pendingWrites={pendingWrites}
                 provider={provider}
                 apply={apply}
                 fileDiffLookup={fileDiffLookup}
@@ -266,6 +273,7 @@ export function PrFilesPane({
     onQuote,
     onReply,
     onResolve,
+    pendingWrites,
     provider,
     apply,
     fileDiffLookup,

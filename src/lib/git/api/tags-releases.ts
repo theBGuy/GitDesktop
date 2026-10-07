@@ -12,11 +12,13 @@ export const gitTag = (repoPath: string, name: string, hash: string) =>
 export const gitPushTag = (repoPath: string, name: string) =>
   invoke<void>("git_push_tag", { repoPath, name });
 
-export const gitDeleteTag = (
-  repoPath: string,
-  name: string,
-  onRemote: boolean,
-) => invoke<void>("git_delete_tag", { repoPath, name, onRemote });
+/** Deletes the tag from this clone only. */
+export const gitDeleteLocalTag = (repoPath: string, name: string) =>
+  invoke<void>("git_delete_tag", { repoPath, name, onRemote: false });
+
+/** Deletes the tag locally and from origin, which pushes the deletion. */
+export const gitDeleteTagOnOrigin = (repoPath: string, name: string) =>
+  invoke<void>("git_delete_tag", { repoPath, name, onRemote: true });
 
 /** Every tag in the repo, newest first (for the Tags list). */
 export const gitListTags = (repoPath: string) =>

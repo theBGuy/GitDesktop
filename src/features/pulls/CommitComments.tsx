@@ -28,6 +28,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 
@@ -555,6 +556,10 @@ export function CommitComments({
         commentId={deletingId}
         onClose={() => setDeletingId(null)}
         pending={deleteComment.isPending}
+        reason={pendingWriteReason(
+          deleteComment.isPaused,
+          "Deleting a comment…",
+        )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void confirmDelete(commentId)}
       />

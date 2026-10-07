@@ -500,6 +500,7 @@ export function RemoteIssueView({
         withComment ? " Your draft posts as a comment first." : ""
       }`,
       confirmLabel: withComment ? "Close with comment" : "Close issue",
+      holdOffline: true,
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
@@ -1327,6 +1328,10 @@ export function RemoteIssueView({
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
+        reason={pendingWriteReason(
+          deleteComment.isPaused,
+          "Deleting a comment…",
+        )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void removeComment(commentId)}
       />

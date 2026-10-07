@@ -1,6 +1,7 @@
 import { formOptions } from "@tanstack/react-form";
 import { type ReactNode, useId } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,10 +28,16 @@ import { required, withForm } from "@/lib/form";
 import type { CherryPickRangeResult } from "@/lib/git/api";
 import {
   useCherryPickOnto,
-  useDeleteTag,
+  useDeleteLocalTag,
+  useDeleteTagOnOrigin,
   useResetToCommit,
 } from "@/lib/git/queries";
 import { refNameWarning } from "@/lib/git/ref-name";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -53,12 +60,17 @@ export function DeleteTagDialog({
   onRemoteChange: (v: boolean) => void;
   onClose: () => void;
 }) {
-  const deleteTag = useDeleteTag(repoPath);
+  const deleteLocalTag = useDeleteLocalTag(repoPath);
+  const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
+  const pending = deleteLocalTag.isPending || deleteTagOnOrigin.isPending;
+  // Offline holds only the origin arm; the local-only delete runs offline.
+  const offlineHold = useOfflineHold();
   const shownName = useRetained(name);
   async function run() {
     if (!name) return;
+    if (remote && refuseWhileOffline()) return;
     try {
-      await deleteTag.mutateAsync({ name, onRemote: remote });
+      await (remote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(name);
     } catch (e) {
       onError(e);
       onClose();
@@ -93,14 +105,24 @@ export function DeleteTagDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             variant="destructive"
-            disabled={deleteTag.isPending}
+            disabled={pending || (remote && !!offlineHold)}
+            reason={(() => {
+              switch (true) {
+                case pending:
+                  return ACT_PENDING_REASON;
+                case remote:
+                  return offlineHold;
+                default:
+                  return undefined;
+              }
+            })()}
             onClick={() => void run()}
           >
-            {deleteTag.isPending && <Spinner data-icon="inline-start" />}
+            {pending && <Spinner data-icon="inline-start" />}
             Delete tag
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

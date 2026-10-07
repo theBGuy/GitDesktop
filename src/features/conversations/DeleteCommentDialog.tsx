@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,7 +16,9 @@ import {
  * confirm — `onConfirm(id)` runs the caller's delete and the caller closes
  * (synchronously for local comments; for remote ones in BOTH arms of the
  * awaited continuation — close-on-error is deliberate). `pending` disables
- * Delete during a remote mutation; local callers omit it.
+ * Delete during a remote mutation, explained by `reason` (the caller's
+ * `pendingWriteReason`, so a delete queued offline says it is waiting); local
+ * callers omit both.
  */
 export function DeleteCommentDialog({
   commentId,
@@ -24,6 +27,7 @@ export function DeleteCommentDialog({
   title = "Delete comment?",
   description = "This permanently deletes the comment on GitHub. This cannot be undone.",
   pending,
+  reason,
 }: {
   commentId: string | null;
   onClose: () => void;
@@ -31,6 +35,7 @@ export function DeleteCommentDialog({
   title?: ReactNode;
   description?: ReactNode;
   pending?: boolean;
+  reason?: string;
 }) {
   return (
     <Dialog
@@ -48,15 +53,16 @@ export function DeleteCommentDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
+          <DisabledReasonButton
             variant="destructive"
             disabled={pending}
+            reason={reason}
             onClick={() => {
               if (commentId) onConfirm(commentId);
             }}
           >
             Delete
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

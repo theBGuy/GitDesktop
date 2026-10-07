@@ -20,6 +20,7 @@ import { DegradedListNotice } from "@/features/conversations/ConversationListPan
 import { reviewCommentsNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
+import type { PendingThreadWrites } from "@/lib/git/queries";
 import type {
   ApplyLinesResult,
   ForgeProvider,
@@ -27,6 +28,7 @@ import type {
 } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { synthesizeThreadHunk } from "./suggestion-utils";
@@ -56,6 +58,10 @@ interface ThreadCallbacks {
    *  only drops the menu entry, so a caller whose threads went stale sets this
    *  too. Threaded straight through to every card's Thread. */
   editHeld?: boolean;
+  /** Replies and resolves in flight per thread, from the mutation cache, so a
+   *  remounted card still holds its controls. Absent = only this card's own
+   *  presses hold them. */
+  pendingWrites?: PendingThreadWrites;
 }
 
 /** The anchor label: "Lines a–b" for a range, "Line b" for a single line, "" at
@@ -508,6 +514,7 @@ export function ReviewThreadCard({
   onEditComment,
   editHeld,
   onDeleteComment,
+  pendingWrites,
   compact = false,
   onRowFocus,
   provider = "github",
@@ -548,6 +555,19 @@ export function ReviewThreadCard({
   const [replyBody, setReplyBody] = useState("");
   const [replyPending, setReplyPending] = useState(false);
   const [resolvePending, setResolvePending] = useState(false);
+  // A write this card started OR one still in the cache from an earlier mount.
+  // Only the cache can see a write parked offline, so its `paused` alone picks
+  // the reason.
+  const replyWrite = pendingWrites?.reply[thread.id];
+  const resolveWrite = pendingWrites?.resolve[thread.id];
+  const replyBusy = replyPending || replyWrite !== undefined;
+  const resolveBusy = resolvePending || resolveWrite !== undefined;
+  const replyPaused = replyWrite?.paused ?? false;
+  const resolvePaused = resolveWrite?.paused ?? false;
+  const replyBusyReason = pendingWriteReason(
+    replyPaused,
+    "Posting your reply…",
+  );
   // Mount-driven reveal: a layout effect keyed on `revealTarget` fires after the DOM
   // commit, so `rootRef` is live even for a card that mounted on this same click (its
   // resolved-group expander just opened) — no frame racing. Cleared via `onRevealed`
@@ -586,7 +606,7 @@ export function ReviewThreadCard({
   const showExcerpt = !compact && effectiveHunk !== "";
 
   async function submitReply() {
-    if (!onReply || !replyBody.trim() || replyPending) return;
+    if (!onReply || !replyBody.trim() || replyBusy) return;
     setReplyPending(true);
     try {
       await onReply(thread.id, replyBody.trim());
@@ -602,7 +622,7 @@ export function ReviewThreadCard({
   }
 
   async function toggleResolve() {
-    if (!onResolve || resolvePending) return;
+    if (!onResolve || resolveBusy) return;
     setResolvePending(true);
     try {
       await onResolve(thread.id, !thread.isResolved);
@@ -659,16 +679,17 @@ export function ReviewThreadCard({
           toast="Markdown copied"
         />
         {onResolve && (
-          <Button
+          <DisabledReasonButton
             variant="ghost"
             size="xs"
             className="shrink-0 text-muted-foreground"
-            disabled={resolvePending}
+            disabled={resolveBusy}
+            reason={pendingWriteReason(resolvePaused, "Updating this thread…")}
             onClick={toggleResolve}
           >
-            {resolvePending && <Spinner className="size-3" />}
+            {resolveBusy && !resolvePaused && <Spinner className="size-3" />}
             {thread.isResolved ? "Unresolve" : "Resolve"}
-          </Button>
+          </DisabledReasonButton>
         )}
       </div>
 
@@ -750,7 +771,7 @@ export function ReviewThreadCard({
                       // this handler declines to submit would otherwise reach
                       // the global action.
                       e.preventDefault();
-                      if (replyBody.trim() && !replyPending) submitReply();
+                      if (replyBody.trim() && !replyBusy) submitReply();
                     }
                   }}
                   rows={2}
@@ -761,25 +782,37 @@ export function ReviewThreadCard({
                   <DisabledReasonButton
                     variant="outline"
                     size="sm"
-                    disabled={!replyBody.trim() || replyPending}
-                    reason={!replyBody.trim() ? "Write a reply first" : null}
+                    disabled={!replyBody.trim() || replyBusy}
+                    reason={(() => {
+                      switch (true) {
+                        case replyBusy:
+                          return replyBusyReason;
+                        case !replyBody.trim():
+                          return "Write a reply first";
+                        default:
+                          return null;
+                      }
+                    })()}
                     title={SUBMIT_HINT}
                     onClick={submitReply}
                   >
-                    {replyPending && <Spinner className="size-3" />}
+                    {replyBusy && !replyPaused && (
+                      <Spinner className="size-3" />
+                    )}
                     Reply
                   </DisabledReasonButton>
-                  <Button
+                  <DisabledReasonButton
                     variant="ghost"
                     size="sm"
-                    disabled={replyPending}
+                    disabled={replyBusy}
+                    reason={replyBusyReason}
                     onClick={() => {
                       setReplying(false);
                       setReplyBody("");
                     }}
                   >
                     Cancel
-                  </Button>
+                  </DisabledReasonButton>
                 </div>
               </div>
             ) : (
@@ -852,6 +885,7 @@ export function ReviewThreadList({
   onEditComment,
   onDeleteComment,
   editHeld,
+  pendingWrites,
   provider = "github",
   apply,
   fileDiffLookup,
@@ -1022,6 +1056,7 @@ export function ReviewThreadList({
                   onEditComment={onEditComment}
                   onDeleteComment={onDeleteComment}
                   editHeld={editHeld}
+                  pendingWrites={pendingWrites}
                   provider={provider}
                   apply={apply}
                   fileDiffLookup={fileDiffLookup}
@@ -1055,6 +1090,7 @@ export function ReviewThreadList({
                         onEditComment={onEditComment}
                         onDeleteComment={onDeleteComment}
                         editHeld={editHeld}
+                        pendingWrites={pendingWrites}
                         provider={provider}
                         apply={apply}
                         fileDiffLookup={fileDiffLookup}
@@ -1098,6 +1134,7 @@ export function ReviewThreadsBlock({
   onEditComment,
   onDeleteComment,
   editHeld,
+  pendingWrites,
   provider = "github",
   apply,
   fileDiffLookup,
@@ -1182,6 +1219,7 @@ export function ReviewThreadsBlock({
           onEditComment={onEditComment}
           onDeleteComment={onDeleteComment}
           editHeld={editHeld}
+          pendingWrites={pendingWrites}
           provider={provider}
           apply={apply}
           fileDiffLookup={fileDiffLookup}

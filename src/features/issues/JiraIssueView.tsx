@@ -927,6 +927,7 @@ function JiraCommentItem({
         confirmLabel="Delete comment"
         confirmVariant="destructive"
         pending={del.isPending}
+        paused={del.isPaused}
         onConfirm={() => void doDelete()}
       />
     </div>
@@ -1172,6 +1173,7 @@ function JiraWorklogItem({
         confirmLabel="Delete worklog"
         confirmVariant="destructive"
         pending={del.isPending}
+        paused={del.isPaused}
         onConfirm={() => void doDelete()}
       />
     </div>
