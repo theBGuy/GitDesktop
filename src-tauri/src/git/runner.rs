@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -593,6 +595,16 @@ pub async fn run_git_mutating_raw(
         holder_label(subcommand_of(args)),
     )
     .await?;
+    run_git_raw_index_retry(repo_path, args, timeout).await
+}
+
+/// The mutating runners' one-shot index.lock retry over a raw run, lock-free — the
+/// caller already holds the working-tree domain.
+async fn run_git_raw_index_retry(
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
     let out = run_git_raw(Some(repo_path), args, timeout).await?;
     if out.code != 0 && out.stderr.contains("index.lock") {
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -654,14 +666,154 @@ where
     Ok(out)
 }
 
-/// A lock-free `git config` write with the one config-lock retry; raw output, so the
-/// caller maps exit codes (`--unset`'s 5) and a second lost race itself.
+/// A `git config` write under the repo's config-write mutex alone (no domain lock),
+/// with the one config-lock retry; raw output, so the caller maps exit codes
+/// (`--unset`'s 5) and a second lost race itself.
 pub(crate) async fn run_git_config_write(
     repo_path: &str,
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    retry_on_config_lock(|| run_git_raw(Some(repo_path), args, timeout)).await
+    with_config_write_lock(repo_path, |held| {
+        run_git_config_write_held(held, repo_path, args, timeout)
+    })
+    .await
+}
+
+type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One mutex per repository that every in-process `.git/config` writer holds across
+/// its git spawn, so the app never loses that lock to itself; other processes still
+/// can, which the one retry covers. A LEAF lock: taken after any domain lock and never
+/// before one, so a config-only writer takes it alone.
+static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
+
+/// The config-write mutex for `repo_path`, keyed by the common git dir because every
+/// checkout of a repository writes the same `.git/config`. An unresolvable identity
+/// falls back to the raw spelling, which can only under-serialize onto the retry.
+async fn config_write_lock(repo_path: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let identity = crate::git::repo::repo_identity(repo_path)
+        .await
+        .unwrap_or_else(|_| repo_path.to_string());
+    let key = crate::git::worktree::normalize_wt_path(&identity);
+    let mut locks = CONFIG_WRITE_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    Arc::clone(locks.entry(key).or_default())
+}
+
+/// Proof that the holder is inside [`with_config_write_lock`], so the held runner
+/// below is never reached without the mutex (re-taking it inside would deadlock).
+/// Neither `Copy` nor `Clone`: each one is consumed by the leg it authorizes.
+pub(crate) struct ConfigWriteHeld(());
+
+/// Runs `body` holding `repo_path`'s config-write mutex. The wait is unbounded and a
+/// hold lasts as long as its git work: a tracking switch keeps it across the whole
+/// checkout (smudge filters, post-checkout hooks) plus its repairs, up to
+/// `DEFAULT_TIMEOUT` per spawn, and a linked worktree's rename or delete queued behind
+/// it keeps ITS working-tree domain meanwhile, so staging there can report Busy.
+pub(crate) async fn with_config_write_lock<F, Fut, T>(repo_path: &str, body: F) -> T
+where
+    F: FnOnce(ConfigWriteHeld) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let lock = config_write_lock(repo_path).await;
+    #[cfg(test)]
+    let _ = CONFIG_WRITE_LOCK_EVENTS.try_with(|event| event("waiting"));
+    let _held = lock.lock().await;
+    #[cfg(test)]
+    let _ = CONFIG_WRITE_LOCK_EVENTS.try_with(|event| event("acquired"));
+    body(ConfigWriteHeld(())).await
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs before each held config-write attempt, so a test can release a held
+    /// `.git/config.lock` between a first attempt and its retry without timing either.
+    pub(crate) static CONFIG_WRITE_ATTEMPT_HOOK: Arc<dyn Fn() + Send + Sync>;
+
+    /// Told "waiting" just before the config-write mutex is requested and "acquired"
+    /// once it is held, so a test can order a parked writer against its own release.
+    pub(crate) static CONFIG_WRITE_LOCK_EVENTS: Arc<dyn Fn(&'static str) + Send + Sync>;
+}
+
+/// A [`CONFIG_WRITE_ATTEMPT_HOOK`] that deletes `lock` just before held attempt
+/// number `release_at` (1-based), plus the attempt counter it bumps.
+#[cfg(test)]
+pub(crate) fn release_config_lock_before_attempt(
+    lock: PathBuf,
+    release_at: usize,
+) -> (
+    Arc<dyn Fn() + Send + Sync>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let hook = move || {
+        if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == release_at {
+            std::fs::remove_file(&lock).expect("the held config.lock is released");
+        }
+    };
+    (Arc::new(hook), calls)
+}
+
+/// [`run_git_config_write`] for a caller already holding the config-write mutex.
+pub(crate) async fn run_git_config_write_held(
+    _held: ConfigWriteHeld,
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    retry_on_config_lock(|| {
+        #[cfg(test)]
+        let _ = CONFIG_WRITE_ATTEMPT_HOOK.try_with(|hook| hook());
+        run_git_raw(Some(repo_path), args, timeout)
+    })
+    .await
+}
+
+/// A working-tree mutation that also rewrites `.git/config` (`branch -m`/`-D`, a
+/// tracking switch): the working-tree domain, then the config-write mutex, each taken
+/// ONCE. git writes the config LAST, after the ref change landed (measured, git
+/// 2.51.1), so re-running the command after a lost config lock is never right;
+/// instead `repair` gets the first run's raw output and the held mutex, redoes only
+/// the config leg through [`run_git_config_write_held`], and returns the output to
+/// report. Same Busy contract as [`run_git_mutating`]; a non-zero exit maps to
+/// [`AppError::Git`] carrying [`GitOutput::full_failure_text`] (stderr, then stdout).
+pub(crate) async fn run_git_mutating_config_write<F, Fut>(
+    state: &AppState,
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+    repair: F,
+) -> AppResult<GitOutput>
+where
+    F: FnOnce(GitOutput, ConfigWriteHeld) -> Fut,
+    Fut: std::future::Future<Output = AppResult<GitOutput>>,
+{
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(args)),
+    )
+    .await?;
+    let out = with_config_write_lock(repo_path, |held| async move {
+        let out = run_git_raw_index_retry(repo_path, args, timeout).await?;
+        if is_config_lock_contention(&out.stderr) {
+            return repair(out, held).await;
+        }
+        Ok(out)
+    })
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    Ok(out)
 }
 
 /// Runs a `git worktree …` admin command under the repo's WORKTREE-ADMIN lock —
@@ -1003,6 +1155,191 @@ mod config_tests {
                 .unwrap_or_else(|e| panic!("read {key}: {e}"));
             assert_eq!(out.stdout_lossy().trim(), want, "{key}");
         }
+    }
+}
+
+#[cfg(test)]
+mod config_write_lock_tests {
+    use super::*;
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+            .stdout_lossy()
+    }
+
+    async fn seeded_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-runner-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.to_string_lossy().into_owned();
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        (dir, repo)
+    }
+
+    async fn config_value(repo: &str, key: &str) -> String {
+        git(repo, &["config", "--get", key])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// Every checkout of one repository writes the same `.git/config`, so a linked
+    /// worktree lands on the main checkout's mutex and another repository on its own.
+    #[tokio::test]
+    async fn config_writers_share_one_mutex_per_repository() {
+        let (dir, repo) = seeded_repo("cfg-mutex-key").await;
+        let wt = dir.path().join("wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "-b", "side", &wt, "HEAD"]).await;
+        let (_other_dir, other) = seeded_repo("cfg-mutex-other").await;
+
+        let main = config_write_lock(&repo).await;
+        assert!(Arc::ptr_eq(&main, &config_write_lock(&wt).await));
+        assert!(!Arc::ptr_eq(&main, &config_write_lock(&other).await));
+    }
+
+    /// A config-only writer takes the mutex alone: a held working-tree domain never
+    /// delays it. The bound only turns a regression's hang into a failure.
+    #[tokio::test]
+    async fn a_config_only_write_never_waits_on_the_working_tree_domain() {
+        let state = AppState::default();
+        let (_dir, repo) = seeded_repo("cfg-no-domain").await;
+        let domain = state.working_tree_lock(&repo).await;
+        let _held = acquire_repo_lock(&domain, Duration::ZERO, "a commit")
+            .await
+            .expect("the domain is free");
+
+        let out = tokio::time::timeout(
+            Duration::from_secs(60),
+            run_git_config_write(&repo, &["config", "gd.probe", "1"], DEFAULT_TIMEOUT),
+        )
+        .await
+        .expect("a config-only write is not queued behind the domain")
+        .expect("the write runs");
+        assert_eq!(out.code, 0, "{}", out.stderr);
+    }
+
+    /// Mutual exclusion, pinned by event order rather than timing. On a current-thread
+    /// runtime a writer runs uninterrupted from its "waiting" event to its next await,
+    /// so it could log "acquired" ahead of the test's "released" only if the mutex
+    /// never parked it. Both writer kinds, the domain-holding one included.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_config_mutex_parks_every_writer_until_released() {
+        let state = Arc::new(AppState::default());
+        let (_dir, repo) = seeded_repo("cfg-mutex-exclusion").await;
+        for mutating in [false, true] {
+            let blocker = config_write_lock(&repo).await.lock_owned().await;
+            let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let tx = std::sync::Mutex::new(Some(tx));
+            let events: Arc<dyn Fn(&'static str) + Send + Sync> = {
+                let log = Arc::clone(&log);
+                Arc::new(move |event| {
+                    log.lock().unwrap().push(event);
+                    if event == "waiting" {
+                        if let Some(tx) = tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                })
+            };
+            let (state_w, repo_w) = (Arc::clone(&state), repo.clone());
+            let writer = tokio::spawn(CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                let args = ["config", "gd.exclusive", "1"];
+                if mutating {
+                    run_git_mutating_config_write(
+                        &state_w,
+                        &repo_w,
+                        &args,
+                        DEFAULT_TIMEOUT,
+                        |out, _| async move { Ok(out) },
+                    )
+                    .await
+                } else {
+                    run_git_config_write(&repo_w, &args, DEFAULT_TIMEOUT).await
+                }
+            }));
+
+            rx.await.expect("the writer reached the mutex");
+            log.lock().unwrap().push("released");
+            drop(blocker);
+            let out = tokio::time::timeout(Duration::from_secs(60), writer)
+                .await
+                .expect("the writer finishes once released")
+                .unwrap()
+                .expect("the write runs");
+            assert_eq!(out.code, 0, "{}", out.stderr);
+            assert_eq!(
+                *log.lock().unwrap(),
+                ["waiting", "released", "acquired"],
+                "mutating writer: {mutating}"
+            );
+        }
+    }
+
+    /// Lock order is domain, then mutex. A mutating config write parked on the
+    /// mutex WHILE holding the domain, and a config-only write queued on the same
+    /// mutex, both finish once it frees: the wait graph has no cycle. Exclusion
+    /// itself is pinned by the event-order test above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mutating_and_a_plain_config_write_overlap_without_deadlock() {
+        let state = Arc::new(AppState::default());
+        let (_dir, repo) = seeded_repo("cfg-lock-order").await;
+        let blocker = config_write_lock(&repo).await.lock_owned().await;
+
+        let mutating = tokio::spawn({
+            let (state, repo) = (Arc::clone(&state), repo.clone());
+            async move {
+                run_git_mutating_config_write(
+                    &state,
+                    &repo,
+                    &["config", "gd.mutating", "1"],
+                    DEFAULT_TIMEOUT,
+                    |out, _| async move { Ok(out) },
+                )
+                .await
+            }
+        });
+        // Parked holding the domain: its holder label is published only while held.
+        let domain = state.working_tree_lock(&repo).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while domain.holder_label().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mutating write never took the domain"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let plain = tokio::spawn({
+            let repo = repo.clone();
+            async move {
+                run_git_config_write(&repo, &["config", "gd.plain", "1"], DEFAULT_TIMEOUT).await
+            }
+        });
+
+        drop(blocker);
+        let bound = Duration::from_secs(60);
+        tokio::time::timeout(bound, mutating)
+            .await
+            .expect("no deadlock")
+            .unwrap()
+            .expect("the mutating write lands");
+        let out = tokio::time::timeout(bound, plain)
+            .await
+            .expect("no deadlock")
+            .unwrap()
+            .expect("the plain write runs");
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(config_value(&repo, "gd.mutating").await, "1");
+        assert_eq!(config_value(&repo, "gd.plain").await, "1");
+        assert_eq!(domain.holder_label(), None, "and the domain is released");
     }
 }
 

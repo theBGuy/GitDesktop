@@ -8,9 +8,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
+use crate::git::branches::remove_deleted_branch_section;
 use crate::git::runner::{
-    acquire_repo_lock_unbounded, run_git, run_git_raw, run_git_worktree_admin,
-    try_acquire_repo_lock, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock_unbounded, is_config_lock_contention, run_git, run_git_raw,
+    run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock, DEFAULT_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -627,7 +629,18 @@ async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &
     if validated_branch_tip(repo_path, branch).await.as_deref() != Some(expected_tip) {
         return;
     }
-    let _ = run_git(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
+    // `-D` rewrites `branch.*`, so it runs under the config-write mutex (a leaf below
+    // the held admin domain), and a lost config lock is repaired before the result goes.
+    with_config_write_lock(repo_path, |held| async move {
+        let deleted =
+            run_git_raw(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
+        if let Ok(out) = deleted {
+            if out.code == 0 && is_config_lock_contention(&out.stderr) {
+                remove_deleted_branch_section(held, repo_path, branch).await;
+            }
+        }
+    })
+    .await;
 }
 
 /// Prunes stale worktree admin entries (a worktree whose directory was deleted
@@ -1788,6 +1801,52 @@ prunable gitdir file points to non-existent location
 
         // A branch that never existed is a no-op, not a panic.
         delete_branch_if_unmoved(&repo_s, "never-existed", &unmoved_tip).await;
+    }
+
+    /// `branch -D` exits 0 when it loses `.git/config.lock`, so the best-effort delete
+    /// still has to repair: the branch's `branch.<name>` section goes with it, through
+    /// the repair's retry when the lock outlives its first attempt.
+    #[tokio::test]
+    async fn delete_branch_if_unmoved_drops_the_section_a_lost_config_lock_left() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        let (base, repo_s) = setup_repo("tip-gate-config-lock").await;
+        let branch = "gd/session/cfg-lock";
+        run(&repo_s, &["branch", branch]).await;
+        run(
+            &repo_s,
+            &[
+                "config",
+                &format!("branch.{branch}.gitdesktopArchived"),
+                "true",
+            ],
+        )
+        .await;
+        let tip = validated_branch_tip(&repo_s, branch).await.unwrap();
+        let lock = base.path().join("repo").join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
+
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(hook, delete_branch_if_unmoved(&repo_s, branch, &tip))
+            .await;
+        assert!(
+            validated_branch_tip(&repo_s, branch).await.is_none(),
+            "deleted"
+        );
+        let section = run_git_raw(
+            Some(&repo_s),
+            &["config", "--get-regexp", r"^branch\.gd/session/cfg-lock\."],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            section.code,
+            1,
+            "no stale section: {}",
+            section.stdout_lossy()
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// git's own refusal is the third guard: a branch still checked out in a

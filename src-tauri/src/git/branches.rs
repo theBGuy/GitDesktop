@@ -3,8 +3,9 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
     acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
-    run_git_config_write, run_git_mutating, run_git_raw, run_git_worktree_admin,
-    try_acquire_repo_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    run_git_config_write, run_git_config_write_held, run_git_mutating,
+    run_git_mutating_config_write, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock,
+    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
     WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
@@ -280,11 +281,23 @@ pub(crate) async fn git_rename_branch_core(
     // worktree's HEAD silently, which under a running update means renaming the branch
     // out from under it.
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &old_name).await?;
-    run_git_mutating(
+    let repo = repo_path.as_str();
+    let (old_section, new_section) = (format!("branch.{old_name}"), format!("branch.{new_name}"));
+    run_git_mutating_config_write(
         state,
-        &repo_path,
+        repo,
         &["branch", "-m", "--", &old_name, &new_name],
         DEFAULT_TIMEOUT,
+        |out, held| async move {
+            if out.code == 0 || !out.stderr.contains(RENAMED_CONFIG_LEFT_BEHIND) {
+                return Ok(out);
+            }
+            let moved = ["config", "--rename-section", &old_section, &new_section];
+            if repair_branch_section(held, repo, &moved).await {
+                return Ok(GitOutput { code: 0, ..out });
+            }
+            Ok(out)
+        },
     )
     .await?;
     // Carry the branch's reviewer note over to the new name, keyed by the same identity
@@ -420,14 +433,121 @@ pub(crate) async fn git_delete_branch_core(
             )));
         }
     }
-    run_git_mutating(
+    let repo = repo_path.as_str();
+    let local = name.as_str();
+    run_git_mutating_config_write(
         state,
-        &repo_path,
+        repo,
         &["branch", "-D", "--", &name],
         DEFAULT_TIMEOUT,
+        |out, held| async move {
+            if out.code == 0 {
+                remove_deleted_branch_section(held, repo, local).await;
+            }
+            Ok(out)
+        },
     )
     .await?;
     Ok(())
+}
+
+/// git's text when `branch -m` moved the ref but lost `.git/config.lock`: exit 128,
+/// `branch.<old>.*` left under the old name (measured, git 2.51.1, C locale).
+const RENAMED_CONFIG_LEFT_BEHIND: &str = "branch is renamed, but update of config-file failed";
+
+/// git's text when a tracking setup (`switch --track`, a tracked `switch -c`/`branch`,
+/// `push -u`) lost the config lock after its ref work landed.
+pub(crate) const UPSTREAM_WRITE_FAILED: &str = "unable to write upstream branch configuration";
+
+/// Redoes one `branch.<name>` section edit whose ref change already landed, counting
+/// "no such section" as done: the branch had no settings, or another writer already
+/// handled them. `false` (logged) leaves the caller's own verdict to speak.
+async fn repair_branch_section(held: ConfigWriteHeld, repo_path: &str, args: &[&str]) -> bool {
+    match run_git_config_write_held(held, repo_path, args, DEFAULT_TIMEOUT).await {
+        Ok(out) if out.code == 0 || out.stderr.contains("no such section") => true,
+        Ok(out) => {
+            eprintln!(
+                "gitdesktop: branch config repair failed: {}",
+                out.stderr.trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("gitdesktop: branch config repair failed: {e}");
+            false
+        }
+    }
+}
+
+/// `branch -D` exits 0 when it loses `.git/config.lock` (measured, git 2.51.1): the
+/// ref is gone but `branch.<name>.*` survives, to resurface on the next branch of that
+/// name. Best-effort, since the delete itself succeeded.
+pub(crate) async fn remove_deleted_branch_section(
+    held: ConfigWriteHeld,
+    repo_path: &str,
+    name: &str,
+) {
+    let section = format!("branch.{name}");
+    repair_branch_section(held, repo_path, &["config", "--remove-section", &section]).await;
+}
+
+/// Re-establishes `branch` → `upstream` tracking after a tracking setup lost the config
+/// lock, never re-running the command that set it up. `upstream` is spelled the way
+/// the original command named it, so git resolves it the same way.
+pub(crate) async fn restore_upstream(
+    held: ConfigWriteHeld,
+    repo_path: &str,
+    branch: &str,
+    upstream: &str,
+) -> bool {
+    let upstream = format!("--set-upstream-to={upstream}");
+    match run_git_config_write_held(
+        held,
+        repo_path,
+        &["branch", &upstream, "--", branch],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) if out.code == 0 => true,
+        Ok(out) => {
+            eprintln!("gitdesktop: upstream repair failed: {}", out.stderr.trim());
+            false
+        }
+        Err(e) => {
+            eprintln!("gitdesktop: upstream repair failed: {e}");
+            false
+        }
+    }
+}
+
+/// A tracking setup (`switch --track`, or `switch -c`/`branch` from a tracked start
+/// point) that loses the config lock has CREATED `branch` and, for a switch, moved the
+/// index and working tree to it, yet left HEAD on the old branch and the upstream
+/// unwritten (measured, git 2.51.1: exit 1). Finishes both legs, the switch first and
+/// whatever the upstream does: the moved tree under the old HEAD reads as staged
+/// changes a commit would land on the old branch. A second upstream loss keeps `out`.
+pub(crate) async fn finish_tracking_setup(
+    held: ConfigWriteHeld,
+    repo_path: &str,
+    out: GitOutput,
+    branch: &str,
+    upstream: &str,
+    switch: bool,
+) -> AppResult<GitOutput> {
+    if out.code == 0 || !out.stderr.contains(UPSTREAM_WRITE_FAILED) {
+        return Ok(out);
+    }
+    if switch {
+        let switched = run_git_raw(Some(repo_path), &["switch", branch], DEFAULT_TIMEOUT).await?;
+        if switched.code != 0 {
+            return Ok(switched);
+        }
+    }
+    if restore_upstream(held, repo_path, branch, upstream).await {
+        return Ok(GitOutput { code: 0, ..out });
+    }
+    Ok(out)
 }
 
 /// Deletes a branch on a remote via `git push <remote> --delete`, authenticating
@@ -578,16 +698,32 @@ pub async fn git_checkout_remote_branch(
     remote: String,
     name: String,
 ) -> AppResult<()> {
+    git_checkout_remote_branch_core(&state, repo_path, remote, name).await
+}
+
+pub(crate) async fn git_checkout_remote_branch_core(
+    state: &AppState,
+    repo_path: String,
+    remote: String,
+    name: String,
+) -> AppResult<()> {
     validate_ref_name(&remote)?;
     validate_ref_name(&name)?;
     // A live update means a LOCAL `name` already exists and is held, so this switch
     // collides on it rather than creating anything.
-    crate::git::update_marker::refuse_if_branch_updating(&state, &repo_path, &name).await?;
-    run_git_mutating(
-        &state,
-        &repo_path,
+    crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
+    let (repo, local) = (repo_path.as_str(), name.as_str());
+    // Fully qualified for the repair, so a local branch literally named
+    // `<remote>/<name>` can't be tracked instead of the remote one the row promised.
+    let upstream = format!("refs/remotes/{remote}/{name}");
+    run_git_mutating_config_write(
+        state,
+        repo,
         &["switch", "--track", &format!("{remote}/{name}")],
         DEFAULT_TIMEOUT,
+        |out, held| async move {
+            finish_tracking_setup(held, repo, out, local, &upstream, true).await
+        },
     )
     .await?;
     Ok(())
@@ -658,7 +794,23 @@ pub(crate) async fn git_create_branch_core(
     }
     let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
+    // Only a start point can set up tracking, the one leg of a create that writes the
+    // config; any other create keeps the plain runner.
+    let Some(start) = start_point.as_deref().filter(|_| !no_track) else {
+        run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
+        return Ok(());
+    };
+    let (repo, local) = (repo_path.as_str(), name.as_str());
+    run_git_mutating_config_write(
+        state,
+        repo,
+        &arg_refs,
+        DEFAULT_TIMEOUT,
+        |out, held| async move {
+            finish_tracking_setup(held, repo, out, local, start, checkout).await
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -1612,14 +1764,18 @@ mod tests {
     use super::{archive_config_busy, set_branch_archived_core};
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
-        divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
-        git_default_branch, git_delete_branch_core, git_rename_branch_core,
-        merge_diverged_in_worktree,
-        parse_cherry_counts, parse_upstream_track, update_branch_from, update_worktree_path,
-        validate_branch_name, validate_ref_name, BranchRewriteStatus, MergePair, UpdatePins,
+        divergence_out_of_range, git_branch_merge_states, git_branches,
+        git_checkout_remote_branch_core, git_create_branch_core, git_default_branch,
+        git_delete_branch_core, git_rename_branch_core, is_config_lock_contention,
+        merge_diverged_in_worktree, parse_cherry_counts, parse_upstream_track, update_branch_from,
+        update_worktree_path, validate_branch_name, validate_ref_name, BranchRewriteStatus,
+        MergePair, UpdatePins, RENAMED_CONFIG_LEFT_BEHIND, UPSTREAM_WRITE_FAILED,
     };
     use crate::error::AppError;
-    use crate::git::runner::{acquire_repo_lock, run_git, run_git_raw, DEFAULT_TIMEOUT};
+    use crate::git::runner::{
+        acquire_repo_lock, release_config_lock_before_attempt, run_git, run_git_raw,
+        CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
+    };
     use crate::state::AppState;
     use std::time::Duration;
 
@@ -3787,6 +3943,365 @@ mod tests {
             .unwrap()
             .iter()
             .any(|b| b.name == "feature" && !b.archived));
+    }
+
+    /// A repo whose `branch` carries BOTH an upstream and the archived flag, so a stale
+    /// `branch.<name>` section has something to show, plus a remote-tracking ref
+    /// `origin/<tracked>` (synthesized, never fetched) at a commit whose tree DIFFERS
+    /// from HEAD's, so a test can tell a moved working tree from an untouched one.
+    async fn repo_with_branch_settings(
+        tag: &str,
+        branch: &str,
+        tracked: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let (guard, base) = temp_base(tag);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+        run(&repo_s, &["branch", branch]).await;
+        run(
+            &repo_s,
+            &["branch", "--set-upstream-to", main.trim(), branch],
+        )
+        .await;
+        let flag = format!("branch.{branch}.gitdesktopArchived");
+        run(&repo_s, &["config", &flag, "true"]).await;
+        let nowhere = base.join("nowhere.git").to_string_lossy().into_owned();
+        run(&repo_s, &["remote", "add", "origin", &nowhere]).await;
+        run(&repo_s, &["switch", "-q", "-c", "remote-side"]).await;
+        std::fs::write(repo.join("a.txt"), "remote\n").unwrap();
+        std::fs::write(repo.join("remote.txt"), "remote\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "remote side"]).await;
+        let tracking = format!("refs/remotes/origin/{tracked}");
+        run(&repo_s, &["update-ref", &tracking, "HEAD"]).await;
+        run(&repo_s, &["switch", "-q", main.trim()]).await;
+        run(&repo_s, &["branch", "-q", "-D", "remote-side"]).await;
+        (guard, repo, repo_s)
+    }
+
+    /// `git status --porcelain`, so a test can tell staged leftovers from a clean switch.
+    async fn porcelain(repo: &str) -> String {
+        run(repo, &["status", "--porcelain"]).await
+    }
+
+    /// `a.txt` as the working tree holds it, line endings aside.
+    fn seed_file(repo: &std::path::Path) -> String {
+        std::fs::read_to_string(repo.join("a.txt"))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// Every `branch.<name>.*` entry, empty when the section is gone.
+    async fn branch_section(repo: &str, branch: &str) -> String {
+        let pattern = format!(r"^branch\.{branch}\.");
+        run_git_raw(
+            Some(repo),
+            &["config", "--get-regexp", &pattern],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy()
+    }
+
+    async fn branch_exists(repo: &str, name: &str) -> bool {
+        !run(repo, &["branch", "--list", name])
+            .await
+            .trim()
+            .is_empty()
+    }
+
+    fn hold_config_lock(repo: &std::path::Path) -> std::path::PathBuf {
+        let lock = repo.join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        lock
+    }
+
+    /// The premise every repair below rests on (git 2.51.1): each command finishes
+    /// its ref change BEFORE losing `.git/config.lock`, so re-running it is never the
+    /// fix. `branch -D` even exits 0. A git that changes any shape fails here first.
+    #[tokio::test]
+    async fn git_lands_the_ref_change_before_losing_the_config_lock() {
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-shapes", "shape", "shape-remote").await;
+        run(&repo_s, &["branch", "shape-gone"]).await;
+        run(
+            &repo_s,
+            &["config", "branch.shape-gone.gitdesktopArchived", "true"],
+        )
+        .await;
+        let lock = hold_config_lock(&repo);
+        let raw = |args: &'static [&'static str]| {
+            let repo_s = repo_s.clone();
+            async move {
+                run_git_raw(Some(&repo_s), args, DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let deleted = raw(&["branch", "-D", "--", "shape-gone"]).await;
+        assert_eq!(deleted.code, 0, "{}", deleted.stderr);
+        assert!(
+            is_config_lock_contention(&deleted.stderr),
+            "{}",
+            deleted.stderr
+        );
+        assert!(!branch_exists(&repo_s, "shape-gone").await);
+        assert!(!branch_section(&repo_s, "shape-gone").await.is_empty());
+
+        let renamed = raw(&["branch", "-m", "--", "shape", "shape-moved"]).await;
+        assert_eq!(renamed.code, 128);
+        assert!(
+            renamed.stderr.contains(RENAMED_CONFIG_LEFT_BEHIND),
+            "{}",
+            renamed.stderr
+        );
+        assert!(branch_exists(&repo_s, "shape-moved").await);
+        assert!(!branch_section(&repo_s, "shape").await.is_empty());
+
+        // Both switch forms: the branch is created AND the index and working tree move
+        // to its tip, but HEAD stays put, so the move reads as staged changes on the
+        // old branch. A plain `branch` from the same start point leaves the tree alone.
+        let head = run(&repo_s, &["symbolic-ref", "HEAD"]).await;
+        let cases: [(&'static [&'static str], &str); 3] = [
+            (
+                &["switch", "--track", "origin/shape-remote"],
+                "shape-remote",
+            ),
+            (
+                &["switch", "-c", "shape-create", "origin/shape-remote"],
+                "shape-create",
+            ),
+            (
+                &["branch", "shape-plain", "origin/shape-remote"],
+                "shape-plain",
+            ),
+        ];
+        for (args, created) in cases {
+            let out = raw(args).await;
+            assert_eq!(out.code, 1, "{args:?}: {}", out.stderr);
+            assert!(out.stderr.contains(UPSTREAM_WRITE_FAILED), "{}", out.stderr);
+            assert!(branch_exists(&repo_s, created).await, "{args:?} created");
+            assert_eq!(
+                run(&repo_s, &["symbolic-ref", "HEAD"]).await,
+                head,
+                "{args:?}"
+            );
+            if args[0] == "switch" {
+                assert_eq!(seed_file(&repo), "remote", "{args:?} moved the tree");
+                let staged = porcelain(&repo_s).await;
+                assert!(
+                    staged.contains("M  a.txt") && staged.contains("A  remote.txt"),
+                    "{args:?} left the move staged on the old branch: {staged}"
+                );
+                run(&repo_s, &["reset", "-q", "--hard"]).await;
+            } else {
+                assert_eq!(seed_file(&repo), "hello", "{args:?} left the tree alone");
+                assert_eq!(porcelain(&repo_s).await, "", "{args:?}");
+            }
+        }
+        std::fs::remove_file(&lock).unwrap();
+    }
+
+    /// The exit-0 loss is repaired: the ref AND its `branch.<name>` section are gone,
+    /// with the repair's one retry riding out a lock still held on its first attempt.
+    #[tokio::test]
+    async fn a_delete_that_loses_the_config_lock_still_drops_the_branch_settings() {
+        let branch = "cfg-lock-delete";
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-delete", branch, "unused").await;
+        assert!(!branch_section(&repo_s, branch).await.is_empty());
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&repo), 2);
+
+        let state = AppState::default();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_delete_branch_core(&state, repo_s.clone(), branch.into()),
+            )
+            .await
+            .expect("the delete succeeds");
+        assert!(!branch_exists(&repo_s, branch).await);
+        assert_eq!(
+            branch_section(&repo_s, branch).await,
+            "",
+            "no stale section"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A rename that loses the config lock still carries the branch's settings to the
+    /// new name, through the repair's retry.
+    #[tokio::test]
+    async fn a_rename_that_loses_the_config_lock_still_moves_the_branch_settings() {
+        let (old, new) = ("cfg-lock-rename", "cfg-lock-renamed");
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-rename", old, "unused").await;
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&repo), 2);
+
+        let state = AppState::default();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_rename_branch_core(&state, repo_s.clone(), old.into(), new.into()),
+            )
+            .await
+            .expect("the rename succeeds");
+        assert!(branch_exists(&repo_s, new).await);
+        assert_eq!(
+            branch_section(&repo_s, old).await,
+            "",
+            "nothing left behind"
+        );
+        let moved = branch_section(&repo_s, new).await;
+        assert!(moved.contains("gitdesktoparchived true"), "{moved}");
+        assert!(moved.contains(".merge "), "the upstream moved too: {moved}");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A lock held through the repair's retry surfaces git's own half-done error, so a
+    /// rename whose settings stayed behind is never reported as a success.
+    #[tokio::test]
+    async fn a_rename_whose_repair_also_loses_keeps_gits_error() {
+        let (old, new) = ("cfg-lock-rename-held", "cfg-lock-rename-held2");
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-rename-held", old, "unused").await;
+        let lock = hold_config_lock(&repo);
+
+        let state = AppState::default();
+        let err = git_rename_branch_core(&state, repo_s.clone(), old.into(), new.into())
+            .await
+            .expect_err("a second lost race surfaces");
+        let AppError::Git { code, stderr } = &err else {
+            panic!("expected git's error, got {err:?}")
+        };
+        assert_eq!(*code, 128);
+        assert!(stderr.contains(RENAMED_CONFIG_LEFT_BEHIND), "{stderr}");
+        std::fs::remove_file(&lock).unwrap();
+    }
+
+    /// A tracking switch that loses the config lock ends where an uncontended one
+    /// does: on the new branch, tracking the remote one.
+    #[tokio::test]
+    async fn a_tracking_switch_that_loses_the_config_lock_still_tracks_and_switches() {
+        let remote_branch = "cfg-lock-track";
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-track", "unrelated", remote_branch).await;
+        let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&repo), 2);
+
+        let state = AppState::default();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_checkout_remote_branch_core(
+                    &state,
+                    repo_s.clone(),
+                    "origin".into(),
+                    remote_branch.into(),
+                ),
+            )
+            .await
+            .expect("the switch succeeds");
+        assert_cleanly_on(&repo, &repo_s, remote_branch).await;
+        assert_eq!(
+            upstream_of(&repo_s, remote_branch).await.as_deref(),
+            Some(format!("origin/{remote_branch}").as_str())
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// HEAD on `branch` with the working tree at its tip and nothing staged — where an
+    /// uncontended switch ends, and never the moved-tree-under-old-HEAD half state.
+    async fn assert_cleanly_on(repo: &std::path::Path, repo_s: &str, branch: &str) {
+        assert_eq!(
+            run(repo_s, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim(),
+            branch
+        );
+        assert_eq!(seed_file(repo), "remote");
+        assert_eq!(porcelain(repo_s).await, "", "nothing left staged");
+    }
+
+    async fn upstream_of(repo: &str, branch: &str) -> Option<String> {
+        let spec = format!("{branch}@{{upstream}}");
+        run_git(
+            Some(repo),
+            &["rev-parse", "--abbrev-ref", &spec],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .ok()
+        .map(|out| out.stdout_lossy().trim().to_string())
+    }
+
+    /// The switch leg runs even when the upstream repair loses again: the branch is
+    /// checked out cleanly and git's upstream error is what the caller hears.
+    #[tokio::test]
+    async fn a_tracking_switch_whose_upstream_repair_also_loses_still_switches() {
+        let remote_branch = "cfg-lock-track-held";
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-track-held", "unrelated", remote_branch).await;
+        let lock = hold_config_lock(&repo);
+
+        let state = AppState::default();
+        let err = git_checkout_remote_branch_core(
+            &state,
+            repo_s.clone(),
+            "origin".into(),
+            remote_branch.into(),
+        )
+        .await
+        .expect_err("the lost upstream is reported");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's error, got {err:?}")
+        };
+        assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
+        std::fs::remove_file(&lock).unwrap();
+        assert_cleanly_on(&repo, &repo_s, remote_branch).await;
+        assert_eq!(upstream_of(&repo_s, remote_branch).await, None);
+    }
+
+    /// A create from a tracked start point that loses the config lock ends where an
+    /// uncontended one does, in both modes: switched (or not) and tracking.
+    #[tokio::test]
+    async fn a_tracked_create_that_loses_the_config_lock_still_tracks() {
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-create", "unrelated", "cfg-lock-start").await;
+        let state = AppState::default();
+        for (name, checkout) in [("cfg-lock-made", false), ("cfg-lock-made-co", true)] {
+            let (hook, attempts) = release_config_lock_before_attempt(hold_config_lock(&repo), 2);
+            CONFIG_WRITE_ATTEMPT_HOOK
+                .scope(
+                    hook,
+                    git_create_branch_core(
+                        &state,
+                        repo_s.clone(),
+                        name.into(),
+                        checkout,
+                        Some("origin/cfg-lock-start".into()),
+                        false,
+                    ),
+                )
+                .await
+                .expect("the create succeeds");
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(
+                upstream_of(&repo_s, name).await.as_deref(),
+                Some("origin/cfg-lock-start")
+            );
+            if checkout {
+                assert_cleanly_on(&repo, &repo_s, name).await;
+            } else {
+                assert_eq!(seed_file(&repo), "hello", "a plain create leaves the tree");
+                assert_eq!(porcelain(&repo_s).await, "");
+            }
+        }
     }
 
     #[test]

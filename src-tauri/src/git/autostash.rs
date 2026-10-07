@@ -14,11 +14,11 @@
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::git::branches::validate_ref_name;
+use crate::git::branches::{finish_tracking_setup, validate_ref_name};
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
-    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_raw, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -378,11 +378,20 @@ pub(crate) async fn git_switch_autostash_core(
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
 
     let stashed = autostash_push(&repo_path).await?;
-    let args: Vec<&str> = match &tracking {
-        Some(tracking) => vec!["switch", "--track", tracking],
-        None => vec!["switch", &name],
+    let op = match &tracking {
+        // A tracking switch writes the config, so it holds the config-write mutex and
+        // finishes a lost tracking setup BEFORE `settle` pops onto the half-switched tree.
+        Some(tracking) => {
+            let upstream = format!("refs/remotes/{tracking}");
+            with_config_write_lock(&repo_path, |held| async {
+                let args = ["switch", "--track", tracking.as_str()];
+                let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+                finish_tracking_setup(held, &repo_path, out, &name, &upstream, true).await
+            })
+            .await
+        }
+        None => run_git_raw(Some(&repo_path), &["switch", &name], DEFAULT_TIMEOUT).await,
     };
-    let op = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await;
     // Unreachable as a label: a refused `git switch` leaves nothing unmerged, so
     // `classify_failure` always answers with a plain git error here. "merge" is the
     // closed set's spelling for the only way a checkout could ever pause one.
@@ -1878,5 +1887,65 @@ mod tests {
         assert!(stash_list(&repo).await.is_empty());
 
         std::fs::remove_file(&nul).expect("verbatim unlink");
+    }
+
+    /// A tracking switch that loses the config lock is finished BEFORE the stash pops:
+    /// the user's change lands on the new branch, which is checked out and tracking,
+    /// never on a moved tree under the old HEAD.
+    #[tokio::test]
+    async fn a_tracking_switch_that_loses_the_config_lock_reapplies_onto_the_new_branch() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        let (dir, repo) = setup_repo("switch-config-lock").await;
+        git(&repo, &["switch", "-q", "-c", "remote-side"]).await;
+        write(dir.path(), "b.txt", "remote\n");
+        commit_all(&repo, "remote side").await;
+        git(&repo, &["update-ref", "refs/remotes/origin/feat", "HEAD"]).await;
+        git(&repo, &["switch", "-q", "main"]).await;
+        git(&repo, &["branch", "-q", "-D", "remote-side"]).await;
+        let nowhere = dir
+            .path()
+            .join("nowhere.git")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["remote", "add", "origin", &nowhere]).await;
+        write(dir.path(), "a.txt", "dirty\n");
+        let lock = dir.path().join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
+
+        let state = AppState::default();
+        let outcome = CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_switch_autostash_core(
+                    &state,
+                    repo.clone(),
+                    "feat".into(),
+                    Some("origin".into()),
+                    true,
+                ),
+            )
+            .await
+            .expect("the switch succeeds");
+        assert!(
+            matches!(outcome, AutostashOutcome::Reapplied),
+            "{outcome:?}"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim(),
+            "feat"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "feat@{upstream}"])
+                .await
+                .trim(),
+            "origin/feat"
+        );
+        assert_eq!(read(dir.path(), "b.txt"), "remote\n");
+        assert_eq!(read(dir.path(), "a.txt"), "dirty\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, " M a.txt\n");
     }
 }
