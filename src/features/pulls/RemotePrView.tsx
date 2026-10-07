@@ -195,6 +195,7 @@ import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import {
   ACT_PENDING_REASON,
+  COMMENT_DELETE_PENDING_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -4068,7 +4069,7 @@ export function RemotePrView({
         pending={deleteComment.isPending}
         reason={pendingWriteReason(
           deleteComment.isPaused,
-          "Deleting a comment…",
+          COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void deleteConversationComment(commentId)}
@@ -4080,7 +4081,7 @@ export function RemotePrView({
         pending={deleteReviewComment.isPending}
         reason={pendingWriteReason(
           deleteReviewComment.isPaused,
-          "Deleting a comment…",
+          COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void deleteThreadComment(commentId)}

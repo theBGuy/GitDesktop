@@ -91,6 +91,7 @@ import {
   type JiraTransitionResult,
   type JiraWorklog,
 } from "@/lib/jira/types";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -1030,18 +1031,18 @@ function JiraWorklogItem({
 
   async function doDelete() {
     if (stale) return;
-    // The confirm dialog closes on the same tick as the request rather than on
-    // its outcome — its pre-conversion timing; the delete hook is
-    // non-optimistic, so the row leaves on the refetch, not an optimistic patch.
-    const deleted = del.mutateAsync({ issueKey, worklogId: worklog.id });
-    setConfirmDelete(false);
+    // Unlike the optimistic comment delete, which closes its confirm at once,
+    // this hook is non-optimistic: the row stays until the refetch, so the open
+    // confirm is the only sign the delete is running or queued offline.
     try {
-      await deleted;
+      await del.mutateAsync({ issueKey, worklogId: worklog.id });
     } catch (e) {
       toastError(e);
+      setConfirmDelete(false);
       return;
     }
     toast.success("Worklog deleted");
+    setConfirmDelete(false);
   }
 
   return (
@@ -1656,13 +1657,14 @@ export function JiraIssueView({
     stale: detailsStale,
   });
   // Which hold the composer names, ranked: the switch window outranks a write the
-  // viewer started, being the hold they can't have caused themselves.
+  // viewer started, being the hold they can't have caused themselves. A comment
+  // pressed offline is parked, not running, until the connection returns.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
         return "Loading this issue…";
       case comment.isPending:
-        return "Posting your comment…";
+        return pendingWriteReason(comment.isPaused, "Posting your comment…");
       default:
         return undefined;
     }

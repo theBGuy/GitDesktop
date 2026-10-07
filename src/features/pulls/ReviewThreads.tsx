@@ -801,10 +801,12 @@ export function ReviewThreadCard({
                     )}
                     Reply
                   </DisabledReasonButton>
+                  {/* Cancel discards only this editor's draft, so it holds for
+                      this card's own send, never for a reply queued elsewhere. */}
                   <DisabledReasonButton
                     variant="ghost"
                     size="sm"
-                    disabled={replyBusy}
+                    disabled={replyPending}
                     reason={replyBusyReason}
                     onClick={() => {
                       setReplying(false);

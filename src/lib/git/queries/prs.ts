@@ -928,9 +928,9 @@ export function useThreadResolve(repo: string) {
   });
 }
 
-/** One thread's in-flight write of a kind, and whether any of it is parked offline. */
+/** One thread's in-flight write of a kind; an entry exists only while one is
+ *  pending, and `paused` says whether any of it is parked offline. */
 export interface ThreadWriteState {
-  pending: boolean;
   paused: boolean;
 }
 
@@ -973,7 +973,6 @@ export function usePendingThreadWrites(
         if (vars?.number !== number || vars.lens !== lens) continue;
         const prev = next[kind][vars.threadId];
         next[kind][vars.threadId] = {
-          pending: true,
           paused: (prev?.paused ?? false) || m.state.isPaused,
         };
       }

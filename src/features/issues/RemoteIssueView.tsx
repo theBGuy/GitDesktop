@@ -94,6 +94,7 @@ import {
 import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
+  COMMENT_DELETE_PENDING_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -1330,7 +1331,7 @@ export function RemoteIssueView({
         pending={deleteComment.isPending}
         reason={pendingWriteReason(
           deleteComment.isPaused,
-          "Deleting a comment…",
+          COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void removeComment(commentId)}

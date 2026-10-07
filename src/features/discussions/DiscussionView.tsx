@@ -80,6 +80,7 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
+  COMMENT_DELETE_PENDING_REASON,
   OFFLINE_ITEM_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
@@ -321,7 +322,7 @@ export function DiscussionView({
   // The delete's arm is also the Delete comment dialog's own reason.
   const deleteCommentReason = pendingWriteReason(
     deleteComment.isPaused,
-    "Deleting a comment…",
+    COMMENT_DELETE_PENDING_REASON,
   );
   const busyReason = (() => {
     switch (true) {
