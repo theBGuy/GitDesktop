@@ -70,12 +70,12 @@ import {
 } from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
+import { presentError } from "@/lib/error-summary";
 import { required, useAppForm, withForm } from "@/lib/form";
 import { deleteSecret, setSecret } from "@/lib/git/api";
 import type { DEFAULT_AGENT_IDS } from "@/lib/settings/api";
 import { settingsKeys, useSecretPreview } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { AgentSandboxField } from "./AgentSandboxField";
@@ -851,7 +851,7 @@ export const AiProviderSection = withForm({
         );
       } catch (e) {
         if (run !== testRun.current) return;
-        setTestResult({ ok: false, message: errorMessage(e), config });
+        setTestResult({ ok: false, message: presentError(e).summary, config });
       } finally {
         // Always released: the button is disabled while testing, so no newer run
         // can own this flag — a superseded run still has to hand it back.

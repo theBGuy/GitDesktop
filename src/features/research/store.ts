@@ -19,12 +19,13 @@ import {
   extractResearchReport,
 } from "@/lib/ai/prompt";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
+import { presentError } from "@/lib/error-summary";
 import { readRepoInstructions } from "@/lib/git/api";
 import { emitNotification } from "@/lib/notifications/emit";
 import { norm } from "@/lib/repo-key";
 import { loadSettings } from "@/lib/settings/api";
 import { repoNameFromPath } from "@/lib/stores/notifications";
-import { errorMessage, invoke } from "@/lib/tauri/invoke";
+import { invoke } from "@/lib/tauri/invoke";
 import { loadPersistedResearch, savePersistedResearch } from "./persistence";
 
 /** Where a saved Research report is written, relative to the repo root: the app's committed
@@ -419,7 +420,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
       });
     } catch (e) {
       if (superseded()) return;
-      patch(id, { generating: false, error: errorMessage(e) });
+      patch(id, { generating: false, error: presentError(e).summary });
       notifyDone(true);
       return;
     }

@@ -26,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
+import { presentError } from "@/lib/error-summary";
 import { forgeBbAccount } from "@/lib/git/api";
 import { jiraSetAccount, jiraSetAccountFromBitbucket } from "@/lib/jira/api";
 import {
@@ -36,7 +37,6 @@ import {
 } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import type { JiraAccountInfo, JiraProject } from "@/lib/jira/types";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -161,7 +161,7 @@ export function RepoJiraDialog({
       // Re-check the stored-account query so the summary reflects the new save.
       stored.refetch();
     } catch (e) {
-      setConnectError(errorMessage(e));
+      setConnectError(presentError(e).summary);
     } finally {
       setValidating(false);
     }
@@ -180,7 +180,7 @@ export function RepoJiraDialog({
       setAccount(info);
       stored.refetch();
     } catch (e) {
-      setConnectError(errorMessage(e));
+      setConnectError(presentError(e).summary);
       setEmail(bbAccount.data?.email ?? "");
       setToken("");
       setShowCredentialForm(true);

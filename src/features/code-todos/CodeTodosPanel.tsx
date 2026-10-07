@@ -17,11 +17,11 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { presentError } from "@/lib/error-summary";
 import { useTodoScan } from "@/lib/git/queries";
 import type { TodoScanItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { DEFAULT_MARKERS, TODO_SCAN_CAP } from "./markers";
@@ -267,7 +267,7 @@ export function CodeTodosPanel({
             Couldn't scan for TODOs.
           </p>
           <p className="mt-1 text-muted-foreground">
-            {errorMessage(scan.error)}
+            {presentError(scan.error).summary}
           </p>
           <Button
             variant="outline"

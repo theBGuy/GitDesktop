@@ -22,6 +22,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { presentError } from "@/lib/error-summary";
 import {
   EMPTY_NAMESPACES,
   useForgeProviderFeatures,
@@ -32,7 +33,7 @@ import type { ForgeProvider, ForgeSearchRepo } from "@/lib/git/types";
 import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage, isAppError } from "@/lib/tauri/invoke";
+import { isAppError } from "@/lib/tauri/invoke";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ExploreCloneDialog,
@@ -607,7 +608,7 @@ function ResultsError({
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
       <p className="text-xs font-medium">Couldn't load repositories</p>
       <p className="max-w-xs text-xs text-muted-foreground">
-        {errorMessage(error)}
+        {presentError(error).summary}
       </p>
     </div>
   );
