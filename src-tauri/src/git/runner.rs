@@ -571,7 +571,8 @@ pub(crate) async fn worktree_toplevel(repo_path: &str) -> AppResult<String> {
 /// lock themselves, so their guards, anchors and rollback see one unbroken view,
 /// and must NOT call a mutating runner of THAT domain from inside the hold: use the
 /// lock-free runners (`run_git`, `run_git_raw`, the `_input` pair,
-/// `remote::run_git_with_creds_once`), accepting the loss of the retry above.
+/// `remote::run_git_with_creds_once`), which lose the retry above, or
+/// `run_git_raw_index_retry`, which keeps it for a raw run.
 /// Crossing domains is allowed in ONE direction: a working-tree hold may take the
 /// network lock (a pull is a transfer plus a merge), never the reverse, which is
 /// what keeps the wait graph acyclic. Either way the locks serialize callers in

@@ -327,12 +327,12 @@ pub(crate) async fn git_worktree_add_user_core(
     Ok(())
 }
 
-/// Finishes a `worktree add -b` whose child `git branch` lost the config lock, leaving
-/// the branch created with no upstream and no worktree, as `finish_tracking_setup`
-/// does: the worktree whatever the upstream does, then only an upstream git's own choice
-/// pins (`inherit` is never guessed; its loss keeps git's error). The checkout runs
-/// unprotected under the held admin domain; the mutex, a leaf below it, covers only the
-/// upstream write.
+/// The worktree manager's `worktree add -b`, run under the held admin domain without the
+/// config-write mutex. If its child `git branch` loses the config lock (branch created,
+/// no upstream, no worktree), it finishes as `finish_tracking_setup` does: the worktree
+/// leg runs first, whatever the upstream's fate, then only an upstream git itself would
+/// have pinned is restored, under the mutex as a leaf (`inherit` is never guessed); one
+/// that can't be pinned or is lost again leaves git's error, with the worktree added.
 async fn add_worktree_on_new_branch(
     state: &AppState,
     repo_path: &str,
