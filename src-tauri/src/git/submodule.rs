@@ -2010,7 +2010,10 @@ mod tests {
         let busy = |result: AppResult<()>, tail: &str| match result {
             Err(err @ AppError::Command(_)) => {
                 assert_eq!(err.to_string(), config_lock_busy(tail).to_string());
-                assert!(!err.to_string().contains("config.lock"), "{err}");
+                assert!(
+                    !err.to_string().contains("could not lock config file"),
+                    "{err}"
+                );
             }
             other => panic!("expected the busy refusal, got {other:?}"),
         };

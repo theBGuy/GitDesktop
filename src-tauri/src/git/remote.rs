@@ -338,13 +338,9 @@ pub(crate) async fn set_remote_url(
 }
 
 /// `git remote add <name> <url>`, recovered from a lost config lock. It neither
-/// validates its arguments nor invalidates the URL cache; callers own both.
-pub(crate) async fn add_remote(
-    state: &AppState,
-    repo_path: &str,
-    name: &str,
-    url: &str,
-) -> AppResult<()> {
+/// validates its arguments nor invalidates the URL cache; [`git_remote_add_core`], its
+/// only caller, owns both.
+async fn add_remote(state: &AppState, repo_path: &str, name: &str, url: &str) -> AppResult<()> {
     run_remote_config_verb(state, repo_path, &["remote", "add", name, url])
         .await
         .map_err(|e| busy_if_lost_again(e, |_| REMOTE_UNCHANGED))?;
@@ -380,13 +376,15 @@ pub(crate) fn with_busy_tail(e: AppError, tail: &str) -> AppError {
     }
 }
 
-/// The busy tail for a `remote remove` that lost the config lock again. A loss at the
-/// push-default unset came after the section went, so a retry would refuse the remote
-/// as missing and could never clear the leftover.
+/// The busy tail once a removal's section went but its push-default unset lost: a retry
+/// would refuse the remote as missing and could never clear the leftover.
+const REMOTE_PUSH_DEFAULT_LEFT: &str = "the remote was removed but is still recorded as the \
+                                        push default — clear remote.pushDefault to finish.";
+
+/// The busy tail for a `remote remove` whose own run lost the config lock again.
 fn remove_busy_tail(stderr: &str) -> &'static str {
     if stderr.contains(REMOTE_PUSH_DEFAULT_LOST) && !stderr.contains(REMOTE_SECTION_LOST) {
-        "the remote was removed but is still recorded as the push default — clear \
-         remote.pushDefault to finish."
+        REMOTE_PUSH_DEFAULT_LEFT
     } else {
         "the remote wasn't fully removed — try again."
     }
@@ -423,8 +421,15 @@ pub(crate) async fn remove_remote(state: &AppState, repo_path: &str, name: &str)
             };
             let refs_gone = out.stderr.contains(REMOTE_SECTION_LOST)
                 || out.stderr.contains(REMOTE_PUSH_DEFAULT_LOST);
-            if out.code != 0 && refs_gone && finish_remote_removal(&held, repo_path, name).await {
-                return Ok(GitOutput { code: 0, ..out });
+            if out.code != 0 && refs_gone {
+                match finish_remote_removal(&held, repo_path, name).await {
+                    RemovalFinish::Done => return Ok(GitOutput { code: 0, ..out }),
+                    // git's own text still names the section it lost, which is now gone.
+                    RemovalFinish::PushDefaultLost => {
+                        return Err(config_lock_busy(REMOTE_PUSH_DEFAULT_LEFT))
+                    }
+                    RemovalFinish::Failed => {}
+                }
             }
             Ok(out)
         },
@@ -437,8 +442,11 @@ pub(crate) async fn remove_remote(state: &AppState, repo_path: &str, name: &str)
 /// The config legs a `remote remove` left after deleting the refs: the `remote.<name>`
 /// section (already gone counts as done), then a local `remote.pushDefault` naming the
 /// remote, which git unsets the same way, a multi-valued one included (exit 5, kept).
-/// `false` (logged) leaves git's own error to speak.
-async fn finish_remote_removal(held: &ConfigWriteHeld, repo_path: &str, name: &str) -> bool {
+async fn finish_remote_removal(
+    held: &ConfigWriteHeld,
+    repo_path: &str,
+    name: &str,
+) -> RemovalFinish {
     let section = format!("remote.{name}");
     let removed = run_git_config_write_held(
         held,
@@ -454,11 +462,11 @@ async fn finish_remote_removal(held: &ConfigWriteHeld, repo_path: &str, name: &s
                 "gitdesktop: remote removal repair failed: {}",
                 out.stderr.trim()
             );
-            return false;
+            return RemovalFinish::Failed;
         }
         Err(e) => {
             eprintln!("gitdesktop: remote removal repair failed: {e}");
-            return false;
+            return RemovalFinish::Failed;
         }
     }
     let push_default = run_git_raw(
@@ -471,11 +479,11 @@ async fn finish_remote_removal(held: &ConfigWriteHeld, repo_path: &str, name: &s
         Ok(out) => out.code == 0 && out.stdout_lossy().lines().any(|v| v.trim() == name),
         Err(e) => {
             eprintln!("gitdesktop: remote removal repair failed: {e}");
-            return false;
+            return RemovalFinish::Failed;
         }
     };
     if !names_it {
-        return true;
+        return RemovalFinish::Done;
     }
     let unset = run_git_config_write_held(
         held,
@@ -485,19 +493,30 @@ async fn finish_remote_removal(held: &ConfigWriteHeld, repo_path: &str, name: &s
     )
     .await;
     match unset {
-        Ok(out) if out.code == 0 || out.code == 5 => true,
+        Ok(out) if out.code == 0 || out.code == 5 => RemovalFinish::Done,
+        Ok(out) if is_config_lock_contention(&out.stderr) => RemovalFinish::PushDefaultLost,
         Ok(out) => {
             eprintln!(
                 "gitdesktop: remote removal repair failed: {}",
                 out.stderr.trim()
             );
-            false
+            RemovalFinish::Failed
         }
         Err(e) => {
             eprintln!("gitdesktop: remote removal repair failed: {e}");
-            false
+            RemovalFinish::Failed
         }
     }
+}
+
+/// How [`finish_remote_removal`] ended.
+enum RemovalFinish {
+    /// Both legs landed, or had nothing to do.
+    Done,
+    /// A leg failed for another reason (logged), so git's own error speaks.
+    Failed,
+    /// The section went, but the push-default unset lost the config lock again.
+    PushDefaultLost,
 }
 
 #[tauri::command]
@@ -1223,8 +1242,8 @@ mod tests {
         push_upstream_branch, push_upstream_target, remove_busy_tail, remove_remote,
         resolve_push_target, run_git_mutating_with_creds, with_busy_tail,
         without_force_if_includes, PushGuard, FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION,
-        NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LOST,
-        REMOTE_SECTION_LOST,
+        NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LEFT,
+        REMOTE_PUSH_DEFAULT_LOST, REMOTE_SECTION_LOST,
     };
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
@@ -2727,7 +2746,10 @@ mod tests {
         let busy = |err: AppError, tail: &str| {
             assert!(matches!(err, AppError::Command(_)), "{err:?}");
             assert_eq!(err.to_string(), config_lock_busy(tail).to_string());
-            assert!(!err.to_string().contains("config.lock"), "{err}");
+            assert!(
+                !err.to_string().contains("could not lock config file"),
+                "{err}"
+            );
         };
         busy(
             git_remote_set_url_core(&state, work_s.clone(), "origin".into(), "../x".into())
@@ -2759,6 +2781,59 @@ mod tests {
             .await
             .expect("trying again removes it");
         assert!(!remote_config(&work_s).await.contains("remote."));
+    }
+
+    /// A removal whose repair lands the section but loses both push-default unsets says
+    /// so, never git's "try again" over the section it lost first: that section is gone,
+    /// and a retry would refuse the remote as missing.
+    #[tokio::test]
+    async fn a_removal_whose_push_default_repair_loses_says_what_is_left() {
+        use crate::git::runner::CONFIG_WRITE_ATTEMPT_HOOK;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let (_guard, base, _origin_s, _url) = seeded_origin("remote-push-default-held").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        run(&work_s, &["branch", "--unset-upstream", "main"]).await;
+        run(&work_s, &["config", "remote.pushDefault", "origin"]).await;
+        let lock = hold_config_lock(&work);
+        // Held attempts: the section and its retry (released before 2, so it lands),
+        // then the push-default unset and its retry (re-held before 3, so both lose).
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let (attempts, lock) = (Arc::clone(&attempts), lock.clone());
+            move || match attempts.fetch_add(1, Ordering::SeqCst) + 1 {
+                2 => std::fs::remove_file(&lock).expect("the held config.lock is released"),
+                3 => std::fs::write(&lock, b"").expect("the config.lock is held again"),
+                _ => {}
+            }
+        };
+        let state = AppState::default();
+        let err = CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                Arc::new(hook),
+                git_remote_remove_core(&state, work_s.clone(), "origin".into()),
+            )
+            .await
+            .expect_err("the push-default leg is lost");
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            4,
+            "section, retry, unset, retry"
+        );
+        assert!(matches!(err, AppError::Command(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            config_lock_busy(REMOTE_PUSH_DEFAULT_LEFT).to_string()
+        );
+        assert!(
+            !err.to_string().contains("could not lock config file"),
+            "{err}"
+        );
+        let left = remote_config(&work_s).await;
+        assert!(!left.contains("remote.origin."), "the section went: {left}");
+        assert!(left.contains("remote.pushdefault origin"), "{left}");
     }
 
     /// A removal lost at the push-default unset already dropped the section, so its

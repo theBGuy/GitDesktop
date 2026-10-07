@@ -650,16 +650,11 @@ pub async fn run_git_mutating_input(
 /// `.git/config.lock` itself, and the writers it collides with hold it for milliseconds.
 pub(crate) const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(250);
 
-/// Whether a failed git run lost `.git/config.lock` to another writer — any config
-/// set, `branch -m`/`-D` (both rewrite `branch.*` sections), or a tracking checkout,
-/// in this process or another. Matched per line on git's own text, which the runner
-/// pins to the C locale: after "could not lock config file", either no `": "` at all
-/// or a last `": "` reason of exactly `File exists`. Any other reason (permissions, a
-/// read-only or full disk) keeps git's error, since a retry there is futile. The bare
-/// form must count because the section rename/remove paths print no reason (measured,
-/// git 2.51.1), so a read-only disk there still reads as contention. Colon-space, not
-/// colon, keeps a Windows drive-letter path from reading as a reason. An explicit other
-/// reason on any such line outranks bare ones: it proves the cause, which no retry fixes.
+/// Whether a failed git run lost `.git/config.lock` to another writer. Read per line in
+/// git's C-locale text: a lock line counts when bare or ending `: File exists`; bare lines
+/// must count, as section rename/remove print no reason (measured, git 2.51.1), so a
+/// read-only disk there still does. Any other reason on any lock line means no retry
+/// helps. Colon-space delimits the reason, so a drive-letter path never reads as one.
 pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
     let mut lost = false;
     for line in stderr.lines() {

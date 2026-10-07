@@ -2139,7 +2139,10 @@ prunable gitdir file points to non-existent location
             )
             .to_string()
         );
-        assert!(!err.to_string().contains("config.lock"), "{err}");
+        assert!(
+            !err.to_string().contains("could not lock config file"),
+            "{err}"
+        );
         assert!(wt.join("a.txt").exists(), "the worktree was added");
         assert_eq!(tracking_of(&repo_s, "wt-held").await, (None, None));
     }
