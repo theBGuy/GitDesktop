@@ -5,24 +5,67 @@
 // the STOCK grammar still collapses on the same buffer, so an hljs bump that
 // moves the JSX mode out from under the structural predicate fails loudly.
 //
-// The import below reaches straight into `src/` under Node's type stripping,
-// so the module must stay free of aliased and app imports.
+// The imports reach straight into `src/` under Node's type stripping, so the
+// module must stay free of aliased and app imports. Static imports are stdlib
+// plus the import-free diff-lang.ts, so the installless `guards` job can load
+// this file: the highlight.js / @git-diff-view graph loads dynamically and
+// skips only when one of those PACKAGES is unresolved; GD_EXPECT_DEPS turns
+// that skip into a failure on frontend.yml's installed, enforced run.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { highlighter } from "@git-diff-view/core";
-import hljsCore from "highlight.js/lib/core";
-import stockTypescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-
 import { diffLang } from "../src/features/diff/diff-lang.ts";
-import {
-  ensureTsNoJsx,
-  installTsNoJsx,
-  isTsNoJsx,
-  stripJsxModes,
-  typescriptNoJsx,
-} from "../src/features/diff/hljs-ts-no-jsx.ts";
+
+const DEP_PACKAGES =
+  /Cannot find package '(@git-diff-view\/core|highlight\.js)'/;
+
+let highlighter;
+let hljsCore;
+let stockTypescript;
+let xml;
+let ensureTsNoJsx;
+let installTsNoJsx;
+let isTsNoJsx;
+let stripJsxModes;
+let typescriptNoJsx;
+let skip = false;
+// Settled, not raced: EVERY failure must be a missing dep package, so a broken
+// src module can't hide behind an absent package's earlier rejection.
+const loads = await Promise.allSettled([
+  import("@git-diff-view/core"),
+  import("highlight.js/lib/core"),
+  import("highlight.js/lib/languages/typescript"),
+  import("highlight.js/lib/languages/xml"),
+  import("../src/features/diff/hljs-ts-no-jsx.ts"),
+]);
+const failures = loads.filter((l) => l.status === "rejected");
+if (failures.length === 0) {
+  [
+    { highlighter },
+    { default: hljsCore },
+    { default: stockTypescript },
+    { default: xml },
+    {
+      ensureTsNoJsx,
+      installTsNoJsx,
+      isTsNoJsx,
+      stripJsxModes,
+      typescriptNoJsx,
+    },
+  ] = loads.map((l) => l.value);
+} else {
+  for (const { reason } of failures) {
+    if (
+      process.env.GD_EXPECT_DEPS ||
+      reason?.code !== "ERR_MODULE_NOT_FOUND" ||
+      !DEP_PACKAGES.test(String(reason?.message))
+    )
+      throw reason;
+  }
+  skip =
+    "highlight.js / @git-diff-view/core are not installed — the guards job " +
+    "runs with no install step; frontend.yml's installed run enforces this";
+}
 
 const GENERIC = "const o = { f: <T>(x: T) => x };\n";
 const REPRO = `${GENERIC}const s = "<Title>x</Title>";\n`;
@@ -82,13 +125,17 @@ function assertCollapsed(highlight, buffer, label) {
   );
 }
 
-test("the structural predicate removes exactly javascript's JSX mode", () => {
+test("the structural predicate removes exactly javascript's JSX mode", {
+  skip,
+}, () => {
   const hljs = hljsCore.newInstance();
   assert.equal(stripJsxModes(stockTypescript(hljs)), 1);
   assert.equal(stripJsxModes(typescriptNoJsx(hljs)), 0);
 });
 
-test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", () => {
+test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", {
+  skip,
+}, () => {
   const hljs = hljsCore.newInstance();
   hljs.registerLanguage("xml", xml);
   hljs.registerLanguage("typescript", stockTypescript);
@@ -125,7 +172,9 @@ test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", () => {
   assertFixed(run("typescript"), REPRO, CONTROL, "re-applied");
 });
 
-test("diff engine (lowlight): stock collapses, installTsNoJsx fixes", () => {
+test("diff engine (lowlight): stock collapses, installTsNoJsx fixes", {
+  skip,
+}, () => {
   const engine = highlighter.getHighlighterEngine();
   const run = (lang) => (code) => toHtml(engine.highlight(lang, code));
   const lang = diffLang("src/retry.mts");
