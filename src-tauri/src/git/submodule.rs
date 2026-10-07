@@ -6,8 +6,8 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
     acquire_repo_lock, is_config_lock_contention, run_git, run_git_config_write,
-    run_git_config_write_held, run_git_mutating_raw, run_git_raw, with_config_write_lock,
-    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    run_git_config_write_held, run_git_raw, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
 use crate::state::AppState;
@@ -229,9 +229,15 @@ pub(crate) async fn git_submodule_update_core(
         if let Some(spec) = spec.as_deref() {
             args.extend_from_slice(&["--", spec]);
         }
-        let out = run_git_mutating_raw(state, &repo_path, &args, NETWORK_TIMEOUT).await?;
+        // Attempt, registration repair and re-run are one sequence: hold the working-tree
+        // lock across all three so the re-run sees the attempt's `.gitmodules` and index,
+        // with lock-free runners inside. Like `add`, that gives up `run_git_mutating`'s
+        // one-shot index.lock retry.
+        let domain = state.working_tree_lock(&repo_path).await;
+        let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule update").await?;
+        let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
         let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
-            run_git_mutating_raw(state, &repo_path, &args, NETWORK_TIMEOUT).await?
+            run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?
         } else {
             out
         };
@@ -298,9 +304,10 @@ pub(crate) async fn git_submodule_update_core(
 /// `submodule update --init` registers every uninitialized target in this repository's
 /// `.git/config` before it clones any, and dies on a lost config lock there having
 /// cloned nothing (measured, git 2.51.1). Redoes that registration under the
-/// config-write mutex and reports whether it registered anything new: only then did
-/// the loss happen here, before any clone, so the caller may re-run the update
-/// unprotected with nothing left for it to write. A loss in a CHILD's config (a
+/// config-write mutex (a leaf below the caller's held working-tree domain) and reports
+/// whether it registered anything new: only then did the loss happen here, before any
+/// clone, so the caller may re-run the update under that same domain hold, without the
+/// mutex, with nothing left for it to write. A loss in a CHILD's config (a
 /// cloned module's own, or `--recursive` registrations) matches the same lock text
 /// after clones landed and registers nothing here (measured), so git's error stands.
 async fn register_after_lost_init(
@@ -618,14 +625,12 @@ pub(crate) async fn git_submodule_set_url_core(
     crate::git::ops::refuse_mid_op_for(&repo_path, "change the submodule URL").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
 
-    // A plain path, not a pathspec: `set-url` matches the `.gitmodules` entry by
-    // its literal `path` value, which `:(literal)` magic would never equal. It writes
-    // `.gitmodules`, then syncs `submodule.<name>.url` here and dies when that sync
-    // loses the config lock (measured, git 2.51.1), so the repair re-syncs, the one leg
-    // that lost. A lost `.gitmodules.lock` matches the same lock text but skips both
-    // writes (exit 1, measured), so the repair first checks `.gitmodules` holds the new
-    // URL. Short enough to hold the config-write mutex throughout, as a leaf below the
-    // working-tree domain.
+    // set-url writes `.gitmodules`, then syncs `submodule.<name>.url` here and dies when
+    // that sync loses the config lock (measured, git 2.51.1), so the repair re-syncs; a
+    // sync takes a pathspec, hence the literal `spec`. A lost `.gitmodules.lock` gives the
+    // same lock text with neither written (exit 1, measured), so the repair first checks
+    // `.gitmodules` holds the new URL. Short enough to hold the config-write mutex
+    // throughout, as a leaf below the working-tree domain.
     let spec = crate::git::pathspec::literal(&path);
     let (repo, path, url, spec) = (
         repo_path.as_str(),
@@ -634,6 +639,8 @@ pub(crate) async fn git_submodule_set_url_core(
         spec.as_str(),
     );
     let out = with_config_write_lock(repo, |held| async move {
+        // A plain path, not a pathspec: `set-url` matches the `.gitmodules` entry by its
+        // literal `path` value, which `:(literal)` magic would never equal.
         let args = ["submodule", "set-url", "--", path, url];
         let out = run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await?;
         if out.code == 0 || !is_config_lock_contention(&out.stderr) {

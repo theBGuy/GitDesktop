@@ -116,8 +116,8 @@ pub(crate) fn holder_label(subcommand: &str) -> &'static str {
         // which the user knows as staging — never as a standalone patch tool.
         "add" | "apply" => "a staging operation",
         "restore" => "a file restore",
-        // The one `submodule` argv reaching this runner is `submodule update`
-        // (git::submodule's other paths hold the lock themselves and label it).
+        // git::submodule's paths all hold the lock themselves with their own
+        // labels now; the arm stays so a future submodule argv isn't mislabeled.
         "submodule" => "a submodule update",
         "checkout" | "switch" => "a checkout",
         "stash" => "a stash operation",
@@ -691,13 +691,14 @@ type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<
 
 /// One mutex per repository, held by this process's `.git/config` writers: across the
 /// spawn for short writes (branch and remote edits, the archive flag, the identity
-/// override), and only across the repair leg for commands too long to hold it through
-/// (submodule clones and updates, `worktree add`). Those never lose `.git/config.lock`
-/// to each other; other processes still can, which the retry and repairs cover. Some
-/// writers still run outside it, for example the gh-run ones (`gh repo create --push`,
-/// `gh repo fork --remote`, `gh repo set-default`), whose git is gh's own, and the
-/// `--global` writers, which lock another file. A LEAF lock: taken after any domain
-/// lock, never before one.
+/// override, submodule set-url), and only across the repair leg for commands too long
+/// to hold it through (`push -u`, submodule add and update, a submodule removal's
+/// deinit, `worktree add -b`). Held legs never lose `.git/config.lock` to each other;
+/// those long first runs can lose it to a held leg, and any writer to another process,
+/// which the retry and repairs cover. Some writers still run outside it, for example
+/// the gh-run ones (`gh repo create --push`, `gh repo fork --remote`,
+/// `gh repo set-default`), whose git is gh's own, and the `--global` writers, which
+/// lock another file. A LEAF lock: taken after any domain lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
 
 /// The config-write mutex for `repo_path`, keyed by the common git dir because every

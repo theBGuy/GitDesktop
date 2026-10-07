@@ -55,10 +55,11 @@ pub async fn git_local_identity(repo_path: String) -> AppResult<CommitAuthor> {
 /// required, so commits never get a half-set author.
 ///
 /// Both keys are written under ONE hold of the config-write mutex, each with its
-/// lost-lock retry: no writer in this process lands between them, and a lock held
-/// through the retry fails the first key before the second is touched. Another
-/// process taking the lock after `user.name` lands and outlasting `user.email`'s
-/// retry still leaves the new name with the old email, reported as git's error.
+/// lost-lock retry: no other writer holding that mutex lands between them, and a lock
+/// held through the retry fails the first key before the second is touched. A writer
+/// outside the mutex (another process, or a long command's unprotected first run here)
+/// that takes the lock after `user.name` lands and outlasts `user.email`'s retry still
+/// leaves the new name with the old email, reported as git's error.
 #[tauri::command]
 pub async fn git_set_local_identity(
     repo_path: String,
@@ -343,7 +344,7 @@ mod tests {
         .collect()
     }
 
-    /// Neither identity path leaves a half-set author under a lost config lock: a
+    /// Under the held-lock seam, neither identity path leaves a half-set author: a
     /// first-attempt loss lands both keys through the retry (name: two attempts, then
     /// email: one), a lock held throughout fails before either key changes, and
     /// clearing removes every value of a multi-valued key. Clearing what was never set

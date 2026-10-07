@@ -323,8 +323,8 @@ async fn run_remote_config_verb(
     .await
 }
 
-/// `git remote set-url <name> <url>`, recovered from a lost config lock. The caller
-/// validates and invalidates the URL cache.
+/// `git remote set-url <name> <url>`, recovered from a lost config lock. It neither validates
+/// its arguments nor invalidates the URL cache; callers own both.
 pub(crate) async fn set_remote_url(
     state: &AppState,
     repo_path: &str,
@@ -335,8 +335,8 @@ pub(crate) async fn set_remote_url(
     Ok(())
 }
 
-/// `git remote add <name> <url>`, recovered from a lost config lock. The caller
-/// validates and invalidates the URL cache.
+/// `git remote add <name> <url>`, recovered from a lost config lock. It neither validates
+/// its arguments nor invalidates the URL cache; callers own both.
 pub(crate) async fn add_remote(
     state: &AppState,
     repo_path: &str,
