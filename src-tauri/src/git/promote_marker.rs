@@ -245,10 +245,8 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
     }
     let gate_path = root.join(GATE_FILE);
     evict_stale_holds(&gate_path);
-    // A live hold of this process's own (a promote stranded by a webview reload) refuses
-    // BEFORE the manifest write below: overwriting it would re-stamp the stranded hold's
-    // age and name a branch nobody is checking out. Another process's hold can still be
-    // overwritten that way while this one waits, which stays a recorded residual.
+    // This process's own live hold (a promote stranded by a webview reload) refuses at
+    // once rather than waiting out BEGIN_WAIT against a lock that can't come free.
     if held()
         .as_ref()
         .is_some_and(|map| map.values().any(|h| h.gate_path == gate_path))
@@ -258,12 +256,6 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
     let Ok(gate) = open_gate(&gate_path) else {
         return Ok(None);
     };
-    // Written BEFORE the lock, so whenever this promote holds the gate its manifest is
-    // already readable and fresh; a reader never sees a live hold with no age to gate.
-    let started_at_ms = now_ms();
-    if write_manifest(root, branch, started_at_ms).is_err() {
-        return Ok(None);
-    }
     let deadline = std::time::Instant::now() + wait;
     loop {
         match gate.try_lock() {
@@ -276,6 +268,15 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
             }
             Err(std::fs::TryLockError::Error(_)) => return Ok(None),
         }
+    }
+    // The manifest is written ONLY under the exclusive hold, here and in `touch`: a
+    // promote still waiting for the gate must never re-stamp another holder's manifest,
+    // which would re-arm refusals for a hold that had aged out. Readers that meet the
+    // hold before this write lands retry once (`hold_settled_in`). A failed write
+    // releases the gate, since a hold with no manifest refuses nothing.
+    let started_at_ms = now_ms();
+    if write_manifest(root, branch, started_at_ms).is_err() {
+        return Ok(None);
     }
     let token = NEXT_TOKEN.fetch_add(1, Ordering::SeqCst);
     held().get_or_insert_with(HashMap::new).insert(
@@ -291,8 +292,9 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
 }
 
 /// Re-stamps a held promote's age, on disk and in memory, so a window whose removal
-/// leg ran long still refuses for a full [`PROMOTE_MAX_AGE`] after it. Unknown tokens
-/// and a failed write are no-ops: the hold keeps its earlier stamp.
+/// leg ran long still refuses for a full [`PROMOTE_MAX_AGE`] after it. Only a token in
+/// [`HELD`] reaches the write, so it too publishes under the exclusive hold. Unknown
+/// tokens and a failed write are no-ops: the hold keeps its earlier stamp.
 pub(crate) fn touch(token: u64) {
     let mut guard = held();
     let Some(hold) = guard.as_mut().and_then(|map| map.get_mut(&token)) else {
@@ -320,7 +322,7 @@ fn held() -> std::sync::MutexGuard<'static, Option<HashMap<u64, HeldPromote>>> {
 
 /// Releases this process's holds on `gate_path` that outlived [`PROMOTE_MAX_AGE`]:
 /// readers already ignore them, and only a promote whose webview is gone leaves one,
-/// so the next promote must not queue behind it.
+/// so the next promote isn't refused by it.
 fn evict_stale_holds(gate_path: &Path) {
     let now = now_ms();
     let max = PROMOTE_MAX_AGE.as_millis() as u64;
@@ -353,24 +355,68 @@ pub(crate) async fn hold_unless_promoting(repo_path: &str) -> AppResult<Option<P
     let Ok(root) = root_for(repo_path).await else {
         return Ok(None);
     };
-    hold_unless_promoting_in(&root)
+    hold_settled_in(&root).await
 }
 
-fn hold_unless_promoting_in(root: &Path) -> AppResult<Option<PromoteGateShared>> {
+/// How long a reader waits before re-reading a held gate whose manifest proves
+/// nothing. A promote publishes its manifest right after taking the gate, so this
+/// covers that gap; a hold still unproven after it is stale or foreign, and fails open.
+const MANIFEST_SETTLE: Duration = Duration::from_millis(50);
+
+/// [`hold_unless_promoting`] over an explicit root: one probe, and a second after
+/// [`MANIFEST_SETTLE`] when the gate is held but its manifest names no live promote.
+async fn hold_settled_in(root: &Path) -> AppResult<Option<PromoteGateShared>> {
+    match probe_gate(root) {
+        GateProbe::HeldUnproven => {
+            tokio::time::sleep(MANIFEST_SETTLE).await;
+            resolve(probe_gate(root))
+        }
+        probe => resolve(probe),
+    }
+}
+
+/// What one look at the gate established.
+enum GateProbe {
+    /// The gate was free; the shared hold is the caller's to keep.
+    Shared(PromoteGateShared),
+    /// Held exclusively by a promote whose fresh manifest names this branch.
+    Live(String),
+    /// Held exclusively, but no readable, fresh manifest backs it.
+    HeldUnproven,
+    /// Nothing could be established.
+    Unknown,
+}
+
+fn probe_gate(root: &Path) -> GateProbe {
     if std::fs::create_dir_all(root).is_err() {
-        return Ok(None);
+        return GateProbe::Unknown;
     }
     let Ok(gate) = open_gate(&root.join(GATE_FILE)) else {
-        return Ok(None);
+        return GateProbe::Unknown;
     };
     match gate.try_lock_shared() {
-        Ok(()) => Ok(Some(PromoteGateShared { _gate: gate })),
+        Ok(()) => GateProbe::Shared(PromoteGateShared { _gate: gate }),
         Err(std::fs::TryLockError::WouldBlock) => match live_promote_branch(root) {
-            Some(branch) => Err(promote_in_progress_refusal(&branch)),
-            None => Ok(None),
+            Some(branch) => GateProbe::Live(branch),
+            None => GateProbe::HeldUnproven,
         },
-        Err(std::fs::TryLockError::Error(_)) => Ok(None),
+        Err(std::fs::TryLockError::Error(_)) => GateProbe::Unknown,
     }
+}
+
+/// Only a live promote refuses; an unproven hold and an unreadable gate fail open.
+fn resolve(probe: GateProbe) -> AppResult<Option<PromoteGateShared>> {
+    match probe {
+        GateProbe::Shared(hold) => Ok(Some(hold)),
+        GateProbe::Live(branch) => Err(promote_in_progress_refusal(&branch)),
+        GateProbe::HeldUnproven | GateProbe::Unknown => Ok(None),
+    }
+}
+
+/// One probe with no settle retry, for tests asserting a single look's verdict.
+#[cfg(test)]
+fn hold_unless_promoting_in(root: &Path) -> AppResult<Option<PromoteGateShared>> {
+    resolve(probe_gate(root))
 }
 
 /// The branch a held gate's promote is checking out, or `None` when its manifest is
@@ -527,7 +573,8 @@ mod tests {
     }
 
     /// A hold stranded past the age gate (a webview reloaded mid-promote, the process
-    /// alive) stops refusing, and the next promote evicts it rather than queueing.
+    /// alive) stops refusing, and the next promote evicts it rather than being refused
+    /// by it.
     #[tokio::test]
     async fn an_aged_out_hold_stops_refusing_and_is_evicted() {
         let (_guard, root) = temp_root("stale");
@@ -581,6 +628,77 @@ mod tests {
             .to_string()
             .contains("checking out feature"));
         end(token);
+    }
+
+    /// Writes `branch`'s manifest stamped `age` ago, as another process would have.
+    fn write_foreign_manifest(root: &Path, branch: &str, age: Duration) {
+        std::fs::write(
+            root.join(MANIFEST_FILE),
+            serde_json::to_vec(&PromoteManifest {
+                branch: branch.into(),
+                pid: 4242,
+                started_at_ms: now_ms() - age.as_millis() as u64,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Another process's stranded hold (its own handle, not in HELD) whose manifest
+    /// aged out fails open; a promote here that can't get the gate refuses WITHOUT
+    /// writing a manifest, so it never re-arms refusals for that dead hold.
+    #[tokio::test]
+    async fn a_busy_begin_writes_no_manifest() {
+        let (_guard, root) = temp_root("busy-no-write");
+        std::fs::create_dir_all(&root).unwrap();
+        let foreign = open_gate(&root.join(GATE_FILE)).unwrap();
+        foreign.try_lock().expect("the foreign hold takes the gate");
+        write_foreign_manifest(&root, "stranded", PROMOTE_MAX_AGE + Duration::from_secs(1));
+        let before = std::fs::read(root.join(MANIFEST_FILE)).unwrap();
+
+        let err = begin_in(&root, "other", Duration::ZERO)
+            .await
+            .expect_err("the gate is held elsewhere");
+        assert_eq!(err.to_string(), begin_busy().to_string());
+        assert_eq!(std::fs::read(root.join(MANIFEST_FILE)).unwrap(), before);
+        assert!(
+            hold_settled_in(&root)
+                .await
+                .expect("the aged-out hold still refuses nothing")
+                .is_none(),
+            "fails open: the foreign exclusive hold blocks a shared one"
+        );
+        drop(foreign);
+    }
+
+    /// A reader that meets a held gate before its manifest lands re-reads once, so the
+    /// gap between a promote taking the gate and publishing does not fail open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reader_waits_out_the_publish_gap_once() {
+        let (_guard, root) = temp_root("settle");
+        std::fs::create_dir_all(&root).unwrap();
+        let foreign = open_gate(&root.join(GATE_FILE)).unwrap();
+        foreign.try_lock().expect("the foreign hold takes the gate");
+        assert!(matches!(probe_gate(&root), GateProbe::HeldUnproven));
+
+        let publish = {
+            let root = root.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                write_manifest(&root, "feature", now_ms()).unwrap();
+            })
+        };
+        let err = hold_settled_in(&root)
+            .await
+            .err()
+            .expect("the manifest landed inside the settle window");
+        assert!(err.to_string().contains("checking out feature"), "{err}");
+        publish.await.unwrap();
+
+        // No manifest arrives: still unproven after the retry, so the reader fails open.
+        std::fs::remove_file(root.join(MANIFEST_FILE)).unwrap();
+        assert!(hold_settled_in(&root).await.expect("fails open").is_none());
+        drop(foreign);
     }
 
     /// A promote whose removal leg outlived the age gate re-stamps itself and refuses

@@ -231,10 +231,11 @@ pub(crate) async fn set_branch_archived_core(
     let args = if archived {
         ["config", key.as_str(), "true"]
     } else {
-        ["config", "--unset", key.as_str()]
+        ["config", "--unset-all", key.as_str()]
     };
     let out = run_git_config_write(repo_path, &args, DEFAULT_TIMEOUT).await?;
-    // exit 5 = "key not found" on --unset — already unarchived, which is fine.
+    // exit 5 = "key not found" — already unarchived, which is fine. `--unset-all`
+    // because plain `--unset` ALSO exits 5 on a multi-valued key and removes nothing.
     if out.code == 0 || (!archived && out.code == 5) {
         return Ok(());
     }
@@ -3747,6 +3748,45 @@ mod tests {
                 .expect("unarchiving, twice, succeeds");
         }
         assert_eq!(archived_flag(&repo_s, "feature").await, None);
+    }
+
+    /// A flag that somehow carries two values (a hand edit, another tool) is fully
+    /// cleared: plain `--unset` exits 5 on it, the same code as "not set", and removes
+    /// nothing.
+    #[tokio::test]
+    async fn unarchiving_clears_a_multi_valued_flag() {
+        let (_base, base) = temp_base("archive-multi-value");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+        for _ in 0..2 {
+            run(
+                &repo_s,
+                &[
+                    "config",
+                    "--add",
+                    "branch.feature.gitdesktopArchived",
+                    "true",
+                ],
+            )
+            .await;
+        }
+        assert!(git_branches(repo_s.clone())
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.name == "feature" && b.archived));
+
+        set_branch_archived_core(&repo_s, "feature", false)
+            .await
+            .expect("unarchiving a multi-valued flag succeeds");
+        assert!(git_branches(repo_s.clone())
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.name == "feature" && !b.archived));
     }
 
     #[test]

@@ -632,9 +632,10 @@ pub(crate) const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Whether a failed git run lost `.git/config.lock` to another writer — any config
 /// set, `branch -m`/`-D` (both rewrite `branch.*` sections), or a tracking checkout,
 /// in this process or another. Matched on git's own text, which the runner pins to
-/// the C locale.
+/// the C locale. A `Permission denied` lock failure is excluded: it is no writer's
+/// transient hold, so a retry is futile and "try again" would mislead.
 pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
-    stderr.contains("could not lock config file")
+    stderr.contains("could not lock config file") && !stderr.contains(": Permission denied")
 }
 
 /// Runs `attempt` once more after [`CONFIG_LOCK_RETRY_DELAY`] when its first run lost
@@ -789,17 +790,19 @@ mod lock_tests {
     }
 
     /// The classifier keys on git's own config-lock wording and nothing nearby:
-    /// index.lock has its own retry, and a different failure must surface unretried.
+    /// index.lock has its own retry, a permissions failure is no transient hold, and a
+    /// different failure must surface unretried.
     #[test]
     fn config_lock_contention_matches_only_the_config_lock_failure() {
         assert!(is_config_lock_contention(
             "error: could not lock config file .git/config: File exists"
         ));
         assert!(is_config_lock_contention(
-            "warning: could not lock config file C:/r/.git/config: Permission denied\n"
+            "warning: could not lock config file C:/r/.git/config: File exists\n"
         ));
         for other in [
             "",
+            "error: could not lock config file .git/config: Permission denied",
             "fatal: Unable to create 'C:/r/.git/index.lock': File exists.",
             "error: key does not contain a section: gitdesktopArchived",
             "fatal: not a git repository (or any of the parent directories): .git",
