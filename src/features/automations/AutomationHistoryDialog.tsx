@@ -54,6 +54,7 @@ import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useReviewTasks } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
@@ -586,7 +587,7 @@ function AutomationHistoryBody({
     openPr({
       kind,
       repoPath,
-      repoName: repoPath.split(/[/\\]/).pop() ?? repoPath,
+      repoName: repoNameFromPath(repoPath),
       ref: asText(entry.ref),
       section: null,
       reviewId: null,

@@ -636,7 +636,7 @@ export function useIssueReactions(
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "issue", lens, number ?? 0, "reactions"] as const,
+    queryKey: repoKeys.reactions(repo, ["issue", lens, number ?? 0]),
     queryFn: () => api.forgeIssueReactions(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,

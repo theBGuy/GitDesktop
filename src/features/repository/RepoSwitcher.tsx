@@ -14,12 +14,11 @@ import { useUserWorktrees } from "@/lib/git/queries";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useRepoAlias, useSettings } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
 import { RepoList } from "./RepoList";
-
-const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
 
 /** A repository action row in the switcher footer (open / clone / create). */
 function ActionRow({
@@ -85,12 +84,14 @@ export function RepoSwitcher() {
   const repoLabel =
     alias ??
     (inLinkedWorktree && mainWt
-      ? baseName(mainWt.path)
+      ? repoNameFromPath(mainWt.path)
       : (repoName ?? "Repository"));
   // Both sides must resolve — line 1 names the repo from `mainWt` — so a still
   // loading or failed worktree query renders the plain single line.
   const worktreeName =
-    inLinkedWorktree && currentWt && mainWt ? baseName(currentWt.path) : null;
+    inLinkedWorktree && currentWt && mainWt
+      ? repoNameFromPath(currentWt.path)
+      : null;
 
   return (
     <>

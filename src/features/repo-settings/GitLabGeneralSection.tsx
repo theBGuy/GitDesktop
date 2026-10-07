@@ -28,6 +28,7 @@ import type {
 } from "@/lib/git/types";
 import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   cancelRepoDescGeneration,
   claimRepoDescGeneration,
@@ -183,8 +184,7 @@ function GitLabGeneralForm({
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
   const openSettings = useUiStore((s) => s.openSettings);
-  const repoName =
-    useUiStore((s) => s.repoName) ?? repoPath.split(/[/\\]/).pop() ?? repoPath;
+  const repoName = useUiStore((s) => s.repoName) ?? repoNameFromPath(repoPath);
   const descGen = useGenerateRepoDescription(repoPath);
   // A run started here outlives this form (the dialog and the rail both unmount
   // their section immediately), so the store owns it: `generating` covers the

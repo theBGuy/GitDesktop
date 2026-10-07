@@ -1,14 +1,9 @@
-import {
-  queryOptions,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import * as api from "../api";
 import type { DiscussionDetails } from "../types";
-import { keepPreviousDataForRepo } from "./core";
-import { useRepoMutation } from "./internal";
+import { keepPreviousDataForRepo, repoKeys } from "./core";
+import { useOptimisticCacheMutation, useRepoMutation } from "./internal";
 
 export function useDiscussionMeta(repo: string, enabled: boolean) {
   return useQuery({
@@ -128,50 +123,50 @@ export function useDeleteDiscussionComment(repo: string) {
 
 /** Optimistic upvote toggle on a discussion or its comments, with rollback. */
 export function useToggleDiscussionUpvote(repo: string, number: number) {
-  const queryClient = useQueryClient();
-  const key = ["repo", repo, "discussion", number] as const;
-  return useMutation({
-    mutationFn: (args: { subjectId: string; up: boolean }) =>
-      api.ghDiscussionSetUpvote(repo, args.subjectId, args.up),
-    onMutate: async (args) => {
-      await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<DiscussionDetails>(key);
+  // Pinned on the discussion: its host stays mounted across a discussion switch, and
+  // a changed key detaches the pending toggle with its options frozen, so a late
+  // settle rolls back and refetches the discussion it was fired on.
+  return useOptimisticCacheMutation<
+    { subjectId: string; up: boolean },
+    void,
+    DiscussionDetails
+  >(
+    (args) => api.ghDiscussionSetUpvote(repo, args.subjectId, args.up),
+    () => discussionDetailsOptions(repo, number).queryKey,
+    (d, args) => {
+      // Never creates the entry: the helper rolls back only a defined snapshot.
+      if (d === undefined) return undefined;
       const delta = args.up ? 1 : -1;
-      queryClient.setQueryData<DiscussionDetails>(key, (d) =>
-        !d
-          ? d
-          : args.subjectId === d.id
-            ? {
-                ...d,
-                upvoteCount: d.upvoteCount + delta,
-                viewerHasUpvoted: args.up,
-              }
-            : {
-                ...d,
-                comments: d.comments.map((c) =>
-                  c.id === args.subjectId
-                    ? {
-                        ...c,
-                        upvoteCount: c.upvoteCount + delta,
-                        viewerHasUpvoted: args.up,
-                      }
-                    : c,
-                ),
-              },
-      );
-      return { prev };
+      return args.subjectId === d.id
+        ? {
+            ...d,
+            upvoteCount: d.upvoteCount + delta,
+            viewerHasUpvoted: args.up,
+          }
+        : {
+            ...d,
+            comments: d.comments.map((c) =>
+              c.id === args.subjectId
+                ? {
+                    ...c,
+                    upvoteCount: c.upvoteCount + delta,
+                    viewerHasUpvoted: args.up,
+                  }
+                : c,
+            ),
+          };
     },
-    onError: (_e, _args, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(key, ctx.prev);
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: key });
+    (queryClient) => {
       // The discussion list shows upvote counts too.
-      queryClient.invalidateQueries({
+      void queryClient.invalidateQueries({
         queryKey: ["repo", repo, "discussion-list"],
       });
+      return queryClient.invalidateQueries({
+        queryKey: discussionDetailsOptions(repo, number).queryKey,
+      });
     },
-  });
+    ["toggle-discussion-upvote", repo, number],
+  );
 }
 
 export function useLockDiscussion(repo: string) {
@@ -210,7 +205,7 @@ export function useDeleteDiscussion(repo: string) {
 
 export function useDiscussionReactions(repo: string, number: number | null) {
   return useQuery({
-    queryKey: ["repo", repo, "discussion", number ?? 0, "reactions"] as const,
+    queryKey: repoKeys.reactions(repo, ["discussion", number ?? 0]),
     queryFn: () => api.ghDiscussionReactions(repo, number ?? 0),
     enabled: number !== null,
     staleTime: 30_000,
