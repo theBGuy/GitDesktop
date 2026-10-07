@@ -98,7 +98,7 @@ jobs:
             libssl-dev \
             file
 
-      - name: Pin newer linuxdeploy for AppImage bundling
+      - name: Pin the bundler's AppImage tools (hash-verified)
         if: runner.os == 'Linux'
         uses: ./.github/actions/pin-linuxdeploy
 

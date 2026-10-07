@@ -2,8 +2,8 @@ name: appimage-check
 
 # Builds an unsigned AppImage the way release.yml does, then proves it actually
 # runs on a modern-Mesa distro. Dispatch it by hand when touching the Linux
-# bundling path; the PR trigger is paths-limited to that path's own files, so
-# it never becomes a required check on unrelated work.
+# bundling path; the PR trigger is paths-limited to that path and its toolchain
+# inputs, so it never becomes a required check on unrelated work.
 
 on:
   workflow_dispatch:
@@ -14,9 +14,11 @@ on:
       - ".github/actions/pin-linuxdeploy/**"
       - ".github/scripts/appimage-guard.sh"
       - ".github/scripts/appimage-smoke.sh"
-      # A Tauri CLI or bundle-config change can silently no-op the pin.
+      # The Tauri CLI (resolved in the lockfile) embeds the GTK hook and names
+      # the AppRun and linuxdeploy builds; bundle config picks which hooks run.
       - "src-tauri/tauri.conf.json"
       - "package.json"
+      - "pnpm-lock.yaml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -65,7 +67,7 @@ jobs:
             libssl-dev \
             file
 
-      - name: Pin newer linuxdeploy for AppImage bundling
+      - name: Pin the bundler's AppImage tools (hash-verified)
         uses: ./.github/actions/pin-linuxdeploy
 
       - name: Install frontend dependencies

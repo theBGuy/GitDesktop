@@ -245,12 +245,12 @@ impl EventSink for Channel<ReviewEvent> {
 // --- child environment -----------------------------------------------------
 //
 // Inside the Linux AppImage, AppRun and its GTK hook point loader/toolkit vars
-// into the bundle, so any spawned HOST binary loads the bundle's Ubuntu 22.04
-// libraries and dies. Subtract per child only: never clear (SSH_AUTH_SOCK
-// inherits), never touch our own env (WebKit helpers, the dlopen'd tray). The
-// list/scalar split tracks linuxdeploy-plugin-gtk (appends to the lists,
-// overwrites the scalars) — the build fetches that script rolling, so new
-// exports can appear in any build; appimage-guard.sh is the tripwire.
+// into the bundle, so any spawned HOST binary loads the bundle's libraries
+// instead of the host's and dies. Subtract per child only: never clear
+// (SSH_AUTH_SOCK inherits), never touch our own env (WebKit helpers, the
+// dlopen'd tray). The tables track the bundle's startup exports (the GTK hook
+// the Tauri CLI embeds, and the AppRun binary it downloads); appimage-guard.sh
+// is the tripwire.
 
 /// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
 /// dropped and the variable is unset when nothing survives — except `PATH`,
@@ -267,9 +267,9 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 ];
 
 /// Single-path variables the bundle owns outright — unset when they point into
-/// `$APPDIR`. Deliberately left alone: `GDK_BACKEND` and `GTK_THEME` (set by the
-/// hook but not `$APPDIR`-derived, and a child may legitimately want them), and
-/// `LD_PRELOAD` (the AppImage never sets it, so any value is the user's).
+/// `$APPDIR`. Deliberately left alone: `GTK_THEME` (hook-set, but not
+/// `$APPDIR`-derived), and `GDK_BACKEND` and `LD_PRELOAD` (the AppImage never
+/// sets them, so any value is the user's).
 /// Twin of the `export` allowlist in `.github/scripts/appimage-guard.sh`.
 const APPDIR_SCALAR_VARS: &[&str] = &[
     "GSETTINGS_SCHEMA_DIR",
@@ -278,6 +278,7 @@ const APPDIR_SCALAR_VARS: &[&str] = &[
     "GTK_IM_MODULE_FILE",
     "GDK_PIXBUF_MODULE_FILE",
     "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
 ];
 
 /// Where a child's `PATH` lands when every entry it inherited was bundle-derived.
