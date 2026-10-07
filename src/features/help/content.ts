@@ -342,9 +342,9 @@ CLI (\`glab\`), and Bitbucket the Atlassian API token you saved. Set them up in
 **Settings → Accounts**, and see *Getting started* for the sign-in options. With none
 of them connected the screen says so and points you at the sign-in. When every
 connected forge fails with nothing to show, the screen reports it with a
-**Retry**, naming each forge that failed when more than one did. If your only
-connected forge failed for a missing CLI or token, the screen points you at
-that setup instead of the error behind it.`,
+**Retry**, naming each forge that failed when more than one did, and **Details**
+opens the full error text. If your only connected forge failed for a missing
+CLI or token, the screen points you at that setup instead of the error behind it.`,
   },
   {
     id: "repo-settings",

@@ -68,9 +68,9 @@ export function PromoteLocalIssueDialog({
   const forge = useForgeStatus(repoPath);
   const remoteLabel = forge.data?.provider === "gitlab" ? "GitLab" : "GitHub";
   const canPublishForge = forgeFeatureReady(forge.data, "issueCreate");
-  // Both forge toasts' View: `canPublishForge` gates the run on a resolved
-  // status, so the label names the real provider.
-  const forgeViewLabel = `View on ${remoteLabel}`;
+  // Both forge toasts' View, named only once the forge status has answered:
+  // `remoteLabel` defaults to GitHub, and submit isn't gated on the status.
+  const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
 
   const link = useJiraLink(repoPath).data;
   const jiraPerms = useJiraPermissions(repoPath, link);
@@ -168,7 +168,10 @@ export function PromoteLocalIssueDialog({
       const { live, away } = landedIn(repoPath);
       toast.success(`Opened issue #${number}${away}`, {
         description: url,
-        action: { label: forgeViewLabel, onClick: () => openUrl(url) },
+        action: {
+          label: forgeViewLabel ?? "View",
+          onClick: () => openUrl(url),
+        },
       });
       // The promoted issue lives on the fork (origin) — force the origin lens so
       // the Issues tab shows it (and any stale remote selection is cleared) before

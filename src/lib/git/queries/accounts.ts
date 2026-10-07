@@ -314,3 +314,18 @@ export function forgeFeatureReady(
 ): boolean {
   return forgeReady(status) && Boolean(status?.implemented[feature]);
 }
+
+/** What a `useForgeStatus` read that holds no status says about the host, for
+ *  disabled-reason derivations: "unreachable" (rejected with nothing cached),
+ *  "checking" (no answer yet), or null once a status is in hand. A non-null
+ *  state outranks every setup or connect reason, since with no status the
+ *  provider (and so which setup is missing) is unknown. */
+export function forgeProbeState(q: {
+  data: ForgeStatus | undefined;
+  isError: boolean;
+  isPending: boolean;
+}): "unreachable" | "checking" | null {
+  if (q.isError && q.data === undefined) return "unreachable";
+  if (q.isPending) return "checking";
+  return null;
+}

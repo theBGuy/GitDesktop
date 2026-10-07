@@ -49,6 +49,7 @@ import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
   forgeFeatureReady,
+  forgeProbeState,
   keepPreviousDataForKeyAxes,
   prDetailsOptions,
   repoKeys,
@@ -175,6 +176,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // there is nothing for the forge to filter by — the pick runs client-side there.
   const canFilterLabel = forgeFeatureReady(gh.data, "mrLabels");
   const canGroupByReview = forgeFeatureReady(gh.data, "reviewGrouping");
+  // With no status in hand the provider is unknown, so a held control says the
+  // host is unreachable or still being checked rather than naming a setup step.
+  const probe = forgeProbeState(gh);
+  const probeReason = (action: string) => {
+    if (probe === "unreachable")
+      return `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`;
+    if (probe === "checking") return "Checking this repository's host…";
+    return null;
+  };
   // "closed" matches the Closed tab: closed and merged alike.
   const [stateFilter, setStateFilter] = useState<PrStateFilter>("open");
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
@@ -355,14 +365,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     switch (true) {
       case canCreateGhPr:
         return null;
-      // A status probe that rejected with nothing cached knows no provider, so
-      // every setup arm below would misdirect; ForgeNotReady says the same.
-      case gh.isError && gh.data === undefined:
-        return "GitDesktop couldn't reach this repository's host, so pull requests can't be opened right now. Check your network connection.";
-      // No answer yet (a cold start, or a Retry resetting the probe): nothing
-      // below is known to be the blocker.
-      case gh.isPending:
-        return "Checking this repository's host…";
+      case probe !== null:
+        return probeReason("open a pull request");
       case isGitLab && Boolean(gh.data?.installed):
         return "Sign in to GitLab (glab auth login) to work with merge requests here.";
       case isGitLab:
@@ -919,11 +923,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (target) => `${target.kind}:${target.id}`,
   });
 
-  // Held filter rows say which of the two reasons holds them: the provider can't
-  // express the axis, or this repo isn't connected yet. Never both, never a
-  // provider claim while `implemented` is still unknown.
+  // Held filter rows say which reason holds them: no status yet (`probeReason`),
+  // the provider can't express the axis, or this repo isn't connected yet. Never
+  // a provider claim while `implemented` is still unknown.
   const mineReason = (() => {
     if (canFilterMine) return null;
+    if (probe !== null) return probeReason("filter by assignee or reviewer");
     if (implemented && !implemented.listFilterMine)
       return `${providerName} pull requests have no assignees or review requests to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee or reviewer`;
@@ -937,6 +942,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   })();
   const reviewReason = (() => {
     if (canGroupByReview) return null;
+    if (probe !== null) return probeReason("group by your review");
     if (implemented && !implemented.reviewGrouping)
       return `${providerName} doesn't report your last review on this list`;
     return `Connect this repository to ${providerName} to group by your review`;
@@ -947,14 +953,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       return "Your GitHub token lacks read:org — run gh auth refresh -s read:org";
     return null;
   })();
-  // Same two-reason shape as mineReason above, and the order matters: the provider
-  // claim is only made where `implemented` actually refutes the axis, so a forge
-  // status that hasn't loaded — or one whose provider DOES support authors but
-  // isn't connected yet — falls to the connect line instead. Left null, the rows
-  // would stay live while the axis was dropped from the query, and a pick would
-  // silently empty the local section under a zero badge.
+  // Same shape as mineReason above, and the order matters: the provider claim is
+  // only made where `implemented` actually refutes the axis, so a status that
+  // hasn't answered takes `probeReason`, and a provider that DOES support authors
+  // but isn't connected yet takes the connect line. Left null, the rows would stay
+  // live while the axis was dropped from the query, and a pick would silently
+  // empty the local section under a zero badge.
   const authorReason = (() => {
     if (canFilterAuthor) return null;
+    if (probe !== null) return probeReason("filter by author");
     if (implemented && !implemented.listFilterAuthor)
       return `${providerName} can't filter pull requests by author here`;
     return `Connect this repository to ${providerName} to filter by author`;

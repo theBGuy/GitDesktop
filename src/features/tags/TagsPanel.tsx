@@ -24,6 +24,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import {
   forgeFeatureReady,
+  forgeProbeState,
   useCreateTag,
   useForgeStatus,
   useHoverPrefetch,
@@ -59,6 +60,23 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
   // create flag (GitHub + GitLab — the dialog hides the GitHub-only toggles there).
   const ghReady = forgeFeatureReady(gh.data, "releases");
   const canCreateRelease = forgeFeatureReady(gh.data, "releaseCreate");
+  // With no status in hand the provider is unknown, so the probe's own state
+  // outranks the sign-in and connect lines.
+  const releaseReason = (() => {
+    const probe = forgeProbeState(gh);
+    switch (true) {
+      case canCreateRelease:
+        return undefined;
+      case probe === "unreachable":
+        return "GitDesktop couldn't reach this repository's host, so you can't publish a release right now. Check your network connection.";
+      case probe === "checking":
+        return "Checking this repository's host…";
+      case gh.data?.provider === "gitlab":
+        return "Sign in with the GitLab CLI (glab) to publish a release.";
+      default:
+        return "Connect this repository to GitHub or GitLab to publish a release.";
+    }
+  })();
   const tagList = useTagList(repoPath);
   const releaseList = useReleaseList(repoPath, ghReady);
   const status = useRepoStatus(repoPath);
@@ -158,13 +176,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
           <DropdownMenuContent align="end" className="min-w-52">
             <DropdownMenuItem
               disabled={!canCreateRelease}
-              title={
-                canCreateRelease
-                  ? undefined
-                  : gh.data?.provider === "gitlab"
-                    ? "Sign in with the GitLab CLI (glab) to publish a release."
-                    : "Connect this repository to GitHub or GitLab to publish a release."
-              }
+              title={releaseReason}
               onClick={() => setCreateReleaseOpen(true)}
             >
               New release…

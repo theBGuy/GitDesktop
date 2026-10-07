@@ -41,7 +41,7 @@ import {
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
-import { presentError } from "@/lib/error-summary";
+import { composedErrorPresentation, presentError } from "@/lib/error-summary";
 import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
@@ -58,6 +58,7 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
+import { useErrorDialog } from "@/lib/stores/error-dialog";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { parseableDate } from "@/lib/time";
@@ -1526,6 +1527,16 @@ function MyWorkError({
   const soleKind = isAppError(soleError) ? soleError.kind : "";
   const signIn =
     soleProvider !== null && SIGN_IN_KINDS.has(soleKind) ? soleProvider : null;
+  // The lines above show summaries only, so Details is the one route to the raw
+  // forge text (an outage's host and OS reason ride only there).
+  const details =
+    errors.length === 1
+      ? presentError(errors[0].error)
+      : composedErrorPresentation(
+          "Couldn't load your work",
+          errors.map((e) => e.error),
+          errors.map((e) => providerLabel(e.provider)),
+        );
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
       <p className="text-xs font-medium">
@@ -1536,9 +1547,19 @@ function MyWorkError({
           <p key={line}>{line}</p>
         ))}
       </div>
-      <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-        Retry
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          Retry
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => useErrorDialog.getState().open(details)}
+        >
+          Details
+        </Button>
+      </div>
     </div>
   );
 }
