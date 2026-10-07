@@ -6649,6 +6649,8 @@ pub async fn publish_repo(
     )
     .await
     {
+        // Line 1 already names the manual next step; a retry would re-create the project.
+        let e = crate::git::remote::with_busy_tail(e, "the 'origin' remote wasn't added.");
         return Err(gl_created_project_error(&created_hint, e));
     }
 
@@ -10930,8 +10932,9 @@ mod tests {
             error.contains("Renamed on GitLab, but the local 'origin' remote couldn't be updated"),
             "{error}"
         );
+        // The predicate reads raw stderr lines; here git's line sits inside the framing.
         assert!(
-            crate::git::runner::is_config_lock_contention(&error),
+            error.contains("(error: could not lock config file .git/config: File exists)"),
             "{error}"
         );
         assert_eq!(

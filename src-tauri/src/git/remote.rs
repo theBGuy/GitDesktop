@@ -9,8 +9,8 @@ use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
 use crate::git::runner::{
     acquire_repo_lock, config_lock_busy, holder_label, is_config_lock_contention, run_git,
     run_git_config_write_held, run_git_mutating_config_write, run_git_raw, subcommand_of,
-    with_config_write_lock, ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
-    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    with_config_write_lock, ConfigWriteHeld, GitOutput, CONFIG_LOCK_BUSY_LEAD, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -333,7 +333,7 @@ pub(crate) async fn set_remote_url(
 ) -> AppResult<()> {
     run_remote_config_verb(state, repo_path, &["remote", "set-url", name, url])
         .await
-        .map_err(|e| busy_if_lost_again(e, REMOTE_UNCHANGED))?;
+        .map_err(|e| busy_if_lost_again(e, |_| REMOTE_UNCHANGED))?;
     Ok(())
 }
 
@@ -347,21 +347,48 @@ pub(crate) async fn add_remote(
 ) -> AppResult<()> {
     run_remote_config_verb(state, repo_path, &["remote", "add", name, url])
         .await
-        .map_err(|e| busy_if_lost_again(e, REMOTE_UNCHANGED))?;
+        .map_err(|e| busy_if_lost_again(e, |_| REMOTE_UNCHANGED))?;
     Ok(())
 }
 
-/// Both verbs lose at their first write, so a second loss changed nothing.
+/// Under a held lock both verbs lose at their first write, so a second loss changed
+/// nothing; a real race splitting `add`'s two writes is the residual, whose retry git
+/// refuses as "already exists".
 const REMOTE_UNCHANGED: &str = "the remote wasn't changed — try again.";
 
 /// A `remote` verb whose repair also lost the config lock, as [`config_lock_busy`]'s
-/// refusal; every other failure keeps git's own error, which callers match on.
-fn busy_if_lost_again(e: AppError, tail: &str) -> AppError {
+/// refusal with the tail `tail` picks from git's text; every other failure keeps git's
+/// own error, which callers match on.
+fn busy_if_lost_again(e: AppError, tail: impl FnOnce(&str) -> &'static str) -> AppError {
     match e {
         AppError::Git { ref stderr, .. } if is_config_lock_contention(stderr) => {
+            config_lock_busy(tail(stderr))
+        }
+        e => e,
+    }
+}
+
+/// A busy refusal from these chokepoints re-tailed with `tail`, for a caller whose own
+/// message names the next step and must not be undercut by a bare "try again"; any
+/// other error passes through untouched.
+pub(crate) fn with_busy_tail(e: AppError, tail: &str) -> AppError {
+    match e {
+        AppError::Command(ref message) if message.starts_with(CONFIG_LOCK_BUSY_LEAD) => {
             config_lock_busy(tail)
         }
         e => e,
+    }
+}
+
+/// The busy tail for a `remote remove` that lost the config lock again. A loss at the
+/// push-default unset came after the section went, so a retry would refuse the remote
+/// as missing and could never clear the leftover.
+fn remove_busy_tail(stderr: &str) -> &'static str {
+    if stderr.contains(REMOTE_PUSH_DEFAULT_LOST) && !stderr.contains(REMOTE_SECTION_LOST) {
+        "the remote was removed but is still recorded as the push default — clear \
+         remote.pushDefault to finish."
+    } else {
+        "the remote wasn't fully removed — try again."
     }
 }
 
@@ -403,7 +430,7 @@ pub(crate) async fn remove_remote(state: &AppState, repo_path: &str, name: &str)
         },
     )
     .await
-    .map_err(|e| busy_if_lost_again(e, "the remote wasn't fully removed — try again."))?;
+    .map_err(|e| busy_if_lost_again(e, remove_busy_tail))?;
     Ok(())
 }
 
@@ -1193,9 +1220,10 @@ mod tests {
         build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
         git_push_core, git_remote_add_core, git_remote_remove_core, git_remote_set_url_core,
         is_auth_class_failure, is_unknown_push_option, parse_upstream_tracking, publish_refspec,
-        push_upstream_branch, push_upstream_target, remove_remote, resolve_push_target,
-        run_git_mutating_with_creds, without_force_if_includes, PushGuard, FORCE_IF_INCLUDES,
-        IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST,
+        push_upstream_branch, push_upstream_target, remove_busy_tail, remove_remote,
+        resolve_push_target, run_git_mutating_with_creds, with_busy_tail,
+        without_force_if_includes, PushGuard, FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION,
+        NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LOST,
         REMOTE_SECTION_LOST,
     };
     use crate::error::AppError;
@@ -2731,6 +2759,69 @@ mod tests {
             .await
             .expect("trying again removes it");
         assert!(!remote_config(&work_s).await.contains("remote."));
+    }
+
+    /// A removal lost at the push-default unset already dropped the section, so its
+    /// refusal never offers the retry that would now fail as "No such remote"; every
+    /// other second loss keeps it. Synthetic: that race is beyond the held-lock seam.
+    #[test]
+    fn a_lost_removal_offers_try_again_only_while_the_section_remains() {
+        let lock = "error: could not lock config file .git/config: File exists";
+        let retry = "the remote wasn't fully removed — try again.";
+        for (marker, want) in [
+            (
+                format!("fatal: {REMOTE_PUSH_DEFAULT_LOST}"),
+                "the remote was removed but is still recorded as the push default — clear \
+                 remote.pushDefault to finish.",
+            ),
+            (
+                format!("error: {REMOTE_SECTION_LOST} 'remote.origin'"),
+                retry,
+            ),
+            (
+                format!("fatal: {REMOTE_BRANCH_UNSET_LOST}main.remote'"),
+                retry,
+            ),
+            (
+                format!(
+                    "error: {REMOTE_SECTION_LOST} 'remote.origin'\n\
+                     fatal: {REMOTE_PUSH_DEFAULT_LOST}"
+                ),
+                retry,
+            ),
+        ] {
+            assert_eq!(
+                remove_busy_tail(&format!("{lock}\n{marker}")),
+                want,
+                "{marker}"
+            );
+        }
+    }
+
+    /// Only the busy refusal is re-tailed for a wrapping forge caller; git's own error,
+    /// whose text callers match on, and any other message pass through unchanged.
+    #[test]
+    fn only_the_busy_refusal_takes_a_callers_tail() {
+        let tail = "it wasn't updated.";
+        let busy = with_busy_tail(
+            config_lock_busy("the remote wasn't changed — try again."),
+            tail,
+        );
+        assert_eq!(busy.to_string(), config_lock_busy(tail).to_string());
+        assert!(!busy.to_string().contains("try again"), "{busy}");
+        let git = with_busy_tail(
+            AppError::Git {
+                code: 2,
+                stderr: "error: No such remote: 'origin'".into(),
+            },
+            tail,
+        );
+        assert!(
+            matches!(&git, AppError::Git { stderr, .. } if stderr.contains("No such remote")),
+            "{git:?}"
+        );
+        let other = with_busy_tail(AppError::Command("something else".into()), tail);
+        assert_eq!(other.to_string(), "something else");
     }
 
     /// The publish paths' add: option-shaped and empty URLs are refused before git

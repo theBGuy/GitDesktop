@@ -4659,6 +4659,7 @@ pub async fn rename_repo(state: &crate::state::AppState, repo_path: &str, new_na
         if let Err(e) =
             crate::git::remote::set_remote_url(state, repo_path, "origin", &new_url).await
         {
+            let e = crate::git::remote::with_busy_tail(e, "it wasn't updated.");
             return Err(AppError::Bitbucket(format!(
                 "Renamed on Bitbucket, but the local 'origin' remote couldn't be updated — \
                  set it to {new_url} manually. ({e})"
@@ -5621,10 +5622,16 @@ pub async fn publish_repo(
         state,
         repo_path.to_string(),
         "origin".into(),
-        remote_url,
+        remote_url.clone(),
     )
     .await
     {
+        // Re-publishing would re-create the repository, so the busy refusal's next step
+        // is the manual one.
+        let e = crate::git::remote::with_busy_tail(
+            e,
+            &format!("it wasn't added — add {remote_url} as 'origin' and push manually."),
+        );
         return Err(AppError::Bitbucket(format!("{created_hint}adding the 'origin' remote failed: {e}")));
     }
 

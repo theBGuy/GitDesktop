@@ -4016,6 +4016,7 @@ pub async fn forge_repo_delete(
             AppError::Git { stderr, .. } if stderr.contains("No such remote")
         );
         if !already_absent {
+            let e = crate::git::remote::with_busy_tail(e, "it wasn't fully removed.");
             return Err(AppError::Command(format!(
                 "The repository was deleted on the host, but the local 'origin' \
                  remote couldn't be removed — remove it manually. ({e})"
