@@ -117,8 +117,8 @@ pub(crate) async fn run_git_with_creds_once(
 /// set-head — holds nothing but the network domain this takes.
 ///
 /// A `push -u` whose upstream write lost `.git/config.lock` still exits 0 (measured,
-/// git 2.51.1), so every such push gets its upstream re-set here, once the network
-/// hold is released; the push itself is never re-run.
+/// git 2.51.1), so every same-name publish gets its upstream re-set here, once the
+/// network hold is released; the push itself is never re-run.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,

@@ -386,7 +386,22 @@ pub(crate) async fn git_switch_autostash_core(
                 let args = ["switch", "--track", tracking.as_str()];
                 let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
                 let by = TrackedBy::ExplicitTrack;
-                finish_tracking_setup(held, &repo_path, out, &name, tracking, by, true).await
+                let finished =
+                    finish_tracking_setup(held, &repo_path, out, &name, tracking, by, true).await?;
+                // `settle` reads a failure as "HEAD never moved" and pops onto whatever
+                // is checked out, so a landed switch whose upstream lost again reports
+                // as the switch it is; the miss is logged, not surfaced.
+                if finished.switched && finished.out.code != 0 {
+                    eprintln!(
+                        "gitdesktop: switched to {name}, but its upstream was not written: {}",
+                        finished.out.stderr.trim()
+                    );
+                    return Ok(GitOutput {
+                        code: 0,
+                        ..finished.out
+                    });
+                }
+                Ok(finished.out)
             })
             .await
         }
@@ -1947,5 +1962,61 @@ mod tests {
         assert_eq!(read(dir.path(), "b.txt"), "remote\n");
         assert_eq!(read(dir.path(), "a.txt"), "dirty\n");
         assert_eq!(git(&repo, &["status", "--porcelain"]).await, " M a.txt\n");
+    }
+
+    /// The upstream repair losing again must not read as a failed switch: the switch
+    /// leg landed, so `settle` keeps its reapply semantics on the NEW branch. With
+    /// reapply off the stash stays put, never popped onto a branch the user left.
+    #[tokio::test]
+    async fn a_landed_switch_whose_upstream_loses_again_keeps_reapply_semantics() {
+        let (dir, repo) = setup_repo("switch-config-lock-held").await;
+        git(&repo, &["switch", "-q", "-c", "remote-side"]).await;
+        write(dir.path(), "b.txt", "remote\n");
+        commit_all(&repo, "remote side").await;
+        git(&repo, &["update-ref", "refs/remotes/origin/feat", "HEAD"]).await;
+        git(&repo, &["switch", "-q", "main"]).await;
+        git(&repo, &["branch", "-q", "-D", "remote-side"]).await;
+        let nowhere = dir
+            .path()
+            .join("nowhere.git")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["remote", "add", "origin", &nowhere]).await;
+        write(dir.path(), "a.txt", "dirty\n");
+        let lock = dir.path().join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+
+        let state = AppState::default();
+        let outcome = git_switch_autostash_core(
+            &state,
+            repo.clone(),
+            "feat".into(),
+            Some("origin".into()),
+            false,
+        )
+        .await
+        .expect("the landed switch is reported as one");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::StashedOnly),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim(),
+            "feat"
+        );
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+        assert_eq!(read(dir.path(), "a.txt"), "v0\n", "nothing popped");
+        assert_eq!(git(&repo, &["stash", "list"]).await.lines().count(), 1);
+        let upstream = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--abbrev-ref", "feat@{upstream}"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(upstream.code, 0, "the upstream miss stays a miss");
     }
 }

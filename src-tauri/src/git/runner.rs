@@ -682,10 +682,12 @@ pub(crate) async fn run_git_config_write(
 
 type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-/// One mutex per repository that every in-process `.git/config` writer holds across
-/// its git spawn, so the app never loses that lock to itself; other processes still
-/// can, which the one retry covers. A LEAF lock: taken after any domain lock and never
-/// before one, so a config-only writer takes it alone.
+/// One mutex per repository, held across the git spawn by the branch-config writers:
+/// rename, delete (worktree removal's too), tracking setups and their repairs, the
+/// archive flag, and the push upstream repair. Those never lose `.git/config.lock` to
+/// each other; other processes still can, which the one retry covers. The remote and
+/// origin writers (`remote add/remove/set-url`, the forges' origin rewrites) run
+/// outside it, unretried. A LEAF lock: taken after any domain lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
 
 /// The config-write mutex for `repo_path`, keyed by the common git dir because every
