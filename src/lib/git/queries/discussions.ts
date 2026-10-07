@@ -133,7 +133,8 @@ const UPVOTE_KEY = "toggle-discussion-upvote";
  *  `number` is the containing discussion and `subjectId` its body or a comment. */
 export function useToggleDiscussionUpvote(repo: string) {
   // The discussion rides the variables, never the hook: its host stays mounted across
-  // a discussion switch, and a changed key would detach a pending or paused toggle.
+  // a discussion switch, and a pending or paused toggle takes each render's options,
+  // so a closed-over one would send its settle refetch to the wrong discussion.
   return useOptimisticCacheMutation<
     { number: number; subjectId: string; up: boolean },
     void,
@@ -180,10 +181,11 @@ export function useToggleDiscussionUpvote(repo: string) {
 const NO_PENDING_UPVOTE = { pending: false, paused: false };
 
 /**
- * Whether an upvote toggle on discussion `number` is in flight, and whether it is
- * parked offline. Read from the mutation cache, never the observer, which tracks only
- * its latest call (a toggle fired on another discussion would release this one's
- * hold), nor `useMutationState`, for the `<Activity>` blind spot projects.ts records.
+ * Whether an upvote toggle on discussion `number` is in flight, and whether any such
+ * toggle is parked offline. Read from the mutation cache, never the observer, which
+ * tracks only its latest call (a toggle fired on another discussion would release
+ * this one's hold), nor `useMutationState`, for the `<Activity>` blind spot
+ * projects.ts records.
  */
 export function usePendingDiscussionUpvote(
   repo: string,

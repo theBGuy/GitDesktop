@@ -1,4 +1,4 @@
-// Guard: the forge query-key families are declared once, as builders on
+// Guard: the query-key families in FAMILIES below are declared once, as builders on
 // `repoKeys` in src/lib/git/queries/core.ts. A hand-spelled array literal elsewhere is
 // what this refuses — a typo in an invalidation's spelling throws no error, it just
 // leaves the surface stale, which is invisible until a user notices stale rows.
