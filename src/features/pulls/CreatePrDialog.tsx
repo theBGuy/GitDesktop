@@ -549,8 +549,9 @@ export function CreatePrDialog({
                 false,
                 createLens,
               );
-              // Mirror runner.ts's post-comment invalidation: narrow to this
-              // PR's own key family under the lens it landed on.
+              // Narrow to this PR's own key family under its lens: the
+              // create's whole-repo settle refreshes the list, and a new PR
+              // has no review of the viewer's for its review state to move.
               await queryClient.invalidateQueries({
                 queryKey: ["repo", repoPath, "pr", createLens, number],
               });

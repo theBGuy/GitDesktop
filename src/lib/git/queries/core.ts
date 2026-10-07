@@ -9,6 +9,7 @@ import type { FindingsLimits } from "@/lib/stores/ui";
 import { COLD_START_NO_GIT } from "@/lib/test-mode";
 import * as api from "../api";
 import { repoIdentityQueryOptions } from "../repo-identity-query";
+import type { RemoteLens } from "../types";
 import { projectItemsRepoKey } from "./board-writes";
 import { createStraddleHealer, readStraddlesSettle } from "./write-settle";
 
@@ -109,6 +110,14 @@ export const repoKeys = {
     ["repo", repo, "findings", section] as const,
   findingsPage: (repo: string, section: keyof FindingsLimits, limit: number) =>
     ["repo", repo, "findings", section, limit] as const,
+  // An entity's reactions read, a child of its detail key so the entity's prefix
+  // invalidation reaches it. Discussions are GitHub-only and carry no lens segment.
+  reactions: (
+    repo: string,
+    entity:
+      | readonly ["issue" | "pr", RemoteLens, number]
+      | readonly ["discussion", number],
+  ) => ["repo", repo, ...entity, "reactions"] as const,
 };
 
 /** The one healer every whole-repo settle shares, so its already-watched set spans

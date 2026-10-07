@@ -554,10 +554,18 @@ export const PIPELINE_IN_FLIGHT = [
  *  enabled" footer. Pass `null` when auto-merge isn't shown so the read doesn't fire.
  *  Polls because the merge fires SERVER-side once the pipeline passes and neither the
  *  pipeline completing nor the auto-merge emits a client event: fast while armed or a
- *  pipeline is in flight, slow otherwise. */
+ *  pipeline is in flight, slow otherwise. GitLab-only, so the key sits under the
+ *  "origin" lens segment. */
 export function useGlMrMergeState(repo: string, number: number | null) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", number ?? 0, "gl-merge-state"] as const,
+    queryKey: [
+      "repo",
+      repo,
+      "pr",
+      "origin",
+      number ?? 0,
+      "gl-merge-state",
+    ] as const,
     queryFn: () => api.forgeGlMrMergeState(repo, number ?? 0),
     enabled: number !== null,
     staleTime: 5_000,

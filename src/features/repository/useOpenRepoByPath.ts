@@ -16,6 +16,7 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -72,10 +73,7 @@ export function useOpenRepoByPath() {
         // (alias or name), else the moved folder's basename.
         const oldRow = recentRepos?.find((r) => r.path === oldPath);
         const oldName =
-          oldRow?.alias?.trim() ||
-          oldRow?.name ||
-          oldPath.split(/[/\\]/).pop() ||
-          oldPath;
+          oldRow?.alias?.trim() || oldRow?.name || repoNameFromPath(oldPath);
         const confirmed = await useConfirm.getState().ask({
           title: `Relocate "${oldName}"?`,
           body: `GitDesktop will point this entry at ${info.root} — its alias, local PRs, issues, review history, and settings will follow the folder. If this is a different repository, that data is merged in and can't be undone.`,

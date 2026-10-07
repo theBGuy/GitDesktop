@@ -32,10 +32,11 @@ import {
   validateMcpServer,
 } from "@/lib/settings/mcp";
 import { useRepoKeys } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 import { HostAllowNote } from "../HostAllowNote";
 import { EntryEditor } from "./EntryEditor";
-import { type EntryRow, repoBasename } from "./shared";
+import type { EntryRow } from "./shared";
 
 function toRows(server: McpServer): EntryRow[] {
   const secretKeys = new Set(server.secretKeys);
@@ -118,14 +119,14 @@ export function McpServerDialog({
   if (repoPath && thisRepoKey)
     scopeOptions.push({
       value: thisRepoKey,
-      label: `This repo — ${repoName ?? repoBasename(repoPath)}`,
+      label: `This repo — ${repoName ?? repoNameFromPath(repoPath)}`,
     });
   if (curScope !== MCP_SCOPE_GLOBAL && !scopedToThisRepo)
     scopeOptions.push({
       value: curScope,
       // The stored scope is a worktree-stable identity key (`…/.git`); show the
       // containing repo folder, never a bare ".git".
-      label: `${repoBasename(scopeRepoPath(curScope))} — other repo`,
+      label: `${repoNameFromPath(scopeRepoPath(curScope))} — other repo`,
     });
   // The Select's value must equal an option value. A draft scoped to the current
   // repo under a legacy raw path (curScope) won't equal the canonical "This repo"

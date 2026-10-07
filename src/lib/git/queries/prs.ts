@@ -941,7 +941,7 @@ export function usePrReactions(
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", lens, number ?? 0, "reactions"] as const,
+    queryKey: repoKeys.reactions(repo, ["pr", lens, number ?? 0]),
     queryFn: () => api.forgePrReactions(repo, number ?? 0, lens),
     enabled: number !== null,
     staleTime: 30_000,

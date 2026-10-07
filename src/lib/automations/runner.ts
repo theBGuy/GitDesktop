@@ -38,6 +38,7 @@ import {
   readRepoInstructions,
 } from "@/lib/git/api";
 import { diffSectionStats } from "@/lib/git/diff-split";
+import { repoKeys } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { type DiffStatEntry, prHeadSha } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
@@ -52,7 +53,10 @@ import {
 import { queryClient } from "@/lib/query-client";
 import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
 import { useConfirm } from "@/lib/stores/confirm";
-import type { NotificationTarget } from "@/lib/stores/notifications";
+import {
+  type NotificationTarget,
+  repoNameFromPath,
+} from "@/lib/stores/notifications";
 import {
   hasLiveAutomationRun,
   type ReviewTarget,
@@ -213,7 +217,7 @@ function looksLikeProviderError(text: string): boolean {
  * repo directory's basename — the automation event carries no repo name.
  */
 function automationTarget(event: AutomationEvent): ReviewTarget {
-  const repoName = event.repoPath.split(/[/\\]/).pop() ?? event.repoPath;
+  const repoName = repoNameFromPath(event.repoPath);
   // Origin-pinned like every other store touch on this path — the poller is
   // origin-scoped, so an automation row always belongs to the fork's own PR.
   if (event.kind === "commit") {
@@ -938,7 +942,7 @@ async function run(
           subtitle,
           detail,
           repoPath: event.repoPath,
-          repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+          repoName: repoNameFromPath(event.repoPath),
           target,
           // This run's stopped dock row; passing a dismissed key is safe (resetReview
           // no-ops on a gone key).
@@ -1711,7 +1715,7 @@ async function deliver(
         title: `AI ${label} of ${event.hash.slice(0, 7)} ready`,
         subtitle: event.title,
         repoPath: event.repoPath,
-        repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+        repoName: repoNameFromPath(event.repoPath),
         target: { type: "automation-result", id: result.id },
         dedupeKey: `automation-review:${event.repoPath}:commit:${event.hash}:${mode}`,
       },
@@ -1735,8 +1739,15 @@ async function deliver(
       "origin",
     );
     // Narrow to this PR's own key family (detail/reactions/timeline/review-threads) rather
-    // than the whole-repo subtree — a posted conversation comment touches only this PR.
-    // Scoped to the origin lens.
+    // than the whole-repo subtree, scoped to the origin lens. The list rows and their
+    // review-state map ride along per usePrReviewState's co-invalidation contract
+    // (prs.ts), unawaited so the multi-page review-state walk never delays the toast.
+    for (const queryKey of [
+      [...repoKeys.prList(event.repoPath), "origin"],
+      [...repoKeys.prReviewState(event.repoPath), "origin"],
+    ]) {
+      void queryClient.invalidateQueries({ queryKey });
+    }
     await queryClient.invalidateQueries({
       queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
@@ -1750,7 +1761,7 @@ async function deliver(
         title: `AI ${label} posted on #${prNumber}`,
         subtitle: `"${event.title}"`,
         repoPath: event.repoPath,
-        repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+        repoName: repoNameFromPath(event.repoPath),
         // The lens rides both the target and the dedupe key: a fork's origin and
         // upstream PRs share a number, and automations are origin-pinned.
         target: {
@@ -1801,7 +1812,7 @@ async function deliver(
       tone: "success",
       title: `AI ${label} added to "${pr.title}"`,
       repoPath: event.repoPath,
-      repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+      repoName: repoNameFromPath(event.repoPath),
       target: { type: "pr", kind: "local", ref: targetId, lens: "origin" },
       dedupeKey: `automation-review:${event.repoPath}:local:origin:${targetId}:${mode}`,
     },

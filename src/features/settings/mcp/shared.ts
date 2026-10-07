@@ -9,13 +9,3 @@ export interface EntryRow {
   secret: boolean;
   secretInput: string;
 }
-
-/** Last path segment of a repo root, for labelling a repo scope. */
-export function repoBasename(path: string): string {
-  return (
-    path
-      .replace(/[/\\]+$/, "")
-      .split(/[/\\]/)
-      .pop() || path
-  );
-}
