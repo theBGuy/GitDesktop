@@ -15,7 +15,8 @@
 //! that lives on after its webview reloaded mid-promote would hold it with nobody left
 //! to call [`end`], so every reader also age-gates on the manifest: a hold older than
 //! [`PROMOTE_MAX_AGE`] is stale and refuses nothing. Anything a probe cannot
-//! establish fails OPEN — the MCP tool runs exactly as it did before markers existed.
+//! establish fails OPEN and the MCP tool runs unguarded; a gate held with no fresh
+//! manifest is first re-probed for up to `UNPROVEN_DEADLINE`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -386,7 +387,8 @@ async fn hold_settled_in(root: &Path) -> AppResult<Option<PromoteGateShared>> {
 /// Re-probes, shared acquisition included, while the gate is held but unproven, so a
 /// reader never proceeds unguarded past a live hold whose manifest is still landing:
 /// it ends on a fresh manifest (refuse), a freed gate (the shared hold), or `deadline`
-/// (fail open). `settle` runs between probes, the seam tests drive deterministically.
+/// (fail open), and an unreadable gate fails open on the first probe. `settle` runs
+/// between probes, the seam tests drive deterministically.
 async fn hold_settled_with<F, Fut>(
     root: &Path,
     deadline: Duration,
@@ -709,10 +711,10 @@ mod tests {
         (guard, root, foreign)
     }
 
-    /// A publish that lands several steps in (a descheduled promote, well past the old
-    /// single settle step) is still caught: the reader keeps re-probing a held,
-    /// unproven gate instead of failing open after a fixed number of looks. The publish
-    /// happens INSIDE the injected step, so no timer race decides the outcome.
+    /// A publish landing several steps in (a descheduled promote) is still caught,
+    /// because the reader keeps re-probing a held, unproven gate until the deadline.
+    /// The publish happens INSIDE the injected step, so no timer race decides the
+    /// outcome.
     #[tokio::test]
     async fn a_late_publish_is_still_caught() {
         let (_guard, root, foreign) = held_unproven_gate("late-publish");
