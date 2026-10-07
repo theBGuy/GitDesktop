@@ -3680,8 +3680,9 @@ mod tests {
         (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
     }
 
-    /// A config lock another writer releases within the retry delay is ridden out end
-    /// to end. The lock exists before the call, so the first attempt always loses it.
+    /// A config lock another writer releases within the retry delay is ridden out on
+    /// the real path. Whether the first attempt lands inside the hold depends on spawn
+    /// timing; the scripted retry-policy test in `runner` is what pins the policy.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_briefly_held_config_lock_is_ridden_out() {
         let (_base, base) = temp_base("archive-transient-lock");
@@ -3694,7 +3695,7 @@ mod tests {
         let lock = repo.join(".git").join("config.lock");
         std::fs::write(&lock, b"").unwrap();
         let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             std::fs::remove_file(&lock).unwrap();
         });
         set_branch_archived_core(&repo_s, "feature", true)

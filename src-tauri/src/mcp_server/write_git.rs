@@ -2312,7 +2312,44 @@ mod tests {
             }))
             .await
             .expect_err("reset refuses mid-promote"),
+            h.pull(Parameters(PullArgs {
+                mode: None,
+                decision: None,
+                expected_drop_shas: None,
+            }))
+            .await
+            .expect_err("pull refuses mid-promote"),
+            h.stash_apply(Parameters(StashApplyArgs { index: 0 }))
+                .await
+                .expect_err("stash apply refuses mid-promote"),
+            h.drop_stash(Parameters(StashIndexArgs { index: 0 }))
+                .await
+                .expect_err("stash drop refuses mid-promote"),
+            h.merge_branch(Parameters(MergeBranchArgs {
+                branch: "feature".into(),
+                squash: false,
+                no_ff: false,
+                strategy: None,
+            }))
+            .await
+            .expect_err("merge refuses mid-promote"),
+            h.rebase_branch(Parameters(RebaseBranchArgs {
+                onto: "feature".into(),
+            }))
+            .await
+            .expect_err("rebase refuses mid-promote"),
+            h.revert_commit(Parameters(ShaArgs {
+                sha: head.trim().to_string(),
+            }))
+            .await
+            .expect_err("revert refuses mid-promote"),
+            h.cherry_pick(Parameters(ShaArgs {
+                sha: head.trim().to_string(),
+            }))
+            .await
+            .expect_err("cherry-pick refuses mid-promote"),
         ];
+        assert_eq!(refusals.len(), 15, "every gated tool is exercised");
         for err in refusals {
             assert!(
                 err.to_string().contains(

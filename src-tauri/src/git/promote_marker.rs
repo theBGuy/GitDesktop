@@ -36,9 +36,9 @@ const MANIFEST_FILE: &str = "gd-promote.json";
 /// longer than it.
 pub(crate) const PROMOTE_MAX_AGE: Duration = Duration::from_secs(300);
 
-/// How long a promote waits for in-flight MCP branch tools to release the gate before
-/// refusing. Their holds span one git command, so this is the working-tree lock's
-/// bound.
+/// How long a promote waits for in-flight MCP tools to release the gate before
+/// refusing. Their holds span one MCP tool call, a pull's fetch included, so a promote
+/// that can't get in within the bound refuses rather than queuing.
 const BEGIN_WAIT: Duration = crate::git::runner::LOCK_WAIT_TIMEOUT;
 const BEGIN_POLL: Duration = Duration::from_millis(50);
 
@@ -209,7 +209,8 @@ fn sweep_stale_manifest_temps(root: &Path) {
     }
 }
 
-/// The refusal a promote raises when the gate stays held past [`BEGIN_WAIT`].
+/// The refusal a promote raises when this process already holds the gate, or another
+/// holder keeps it past [`BEGIN_WAIT`].
 fn begin_busy() -> AppError {
     AppError::Command(
         "Another promote or branch change is still running in this repository — try again \
@@ -244,6 +245,16 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
     }
     let gate_path = root.join(GATE_FILE);
     evict_stale_holds(&gate_path);
+    // A live hold of this process's own (a promote stranded by a webview reload) refuses
+    // BEFORE the manifest write below: overwriting it would re-stamp the stranded hold's
+    // age and name a branch nobody is checking out. Another process's hold can still be
+    // overwritten that way while this one waits, which stays a recorded residual.
+    if held()
+        .as_ref()
+        .is_some_and(|map| map.values().any(|h| h.gate_path == gate_path))
+    {
+        return Err(begin_busy());
+    }
     let Ok(gate) = open_gate(&gate_path) else {
         return Ok(None);
     };
@@ -545,6 +556,31 @@ mod tests {
             .to_string()
             .contains("checking out other"));
         end(next);
+    }
+
+    /// A second promote against a gate this process still holds refuses at once and
+    /// leaves the live holder's manifest alone, so a stranded hold's age and branch
+    /// are never re-stamped by a retry.
+    #[tokio::test]
+    async fn a_same_process_conflict_refuses_without_touching_the_live_manifest() {
+        let (_guard, root) = temp_root("same-process");
+        let token = begin_in(&root, "feature", Duration::ZERO)
+            .await
+            .unwrap()
+            .expect("marked");
+        let before = std::fs::read(root.join(MANIFEST_FILE)).unwrap();
+
+        let err = begin_in(&root, "other", Duration::ZERO)
+            .await
+            .expect_err("the gate is this process's own live hold");
+        assert_eq!(err.to_string(), begin_busy().to_string());
+        assert_eq!(std::fs::read(root.join(MANIFEST_FILE)).unwrap(), before);
+        assert!(hold_unless_promoting_in(&root)
+            .err()
+            .expect("the live promote still refuses")
+            .to_string()
+            .contains("checking out feature"));
+        end(token);
     }
 
     /// A promote whose removal leg outlived the age gate re-stamps itself and refuses
