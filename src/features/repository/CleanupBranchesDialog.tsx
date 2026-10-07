@@ -14,12 +14,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
 import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { cn } from "@/lib/utils";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 
@@ -520,7 +520,7 @@ export function CleanupBranchesDialog({
           await api.gitDeleteBranch(repoPath, name);
         }
       } catch (e) {
-        fails.set(name, errorMessage(e));
+        fails.set(name, presentError(e).summary);
       }
       setProgress({ done: i + 1, total: names.length });
     }

@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { calendarDaysUntil } from "@/features/accounts/expiry";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import { forgeBbClearAccount, forgeBbSetAccount } from "@/lib/git/api";
 import {
@@ -41,7 +42,6 @@ import {
 import { setBitbucketTokenExpiresAt } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /** The GitLab CLI install docs — where the "install glab" affordance points. */
@@ -523,7 +523,7 @@ function GitLabAccount() {
         form.reset({ token: "" });
         toast.success(`AI reviews now post as @${login}`);
       } catch (e) {
-        setError(errorMessage(e));
+        setError(presentError(e).summary);
       }
     },
   });
@@ -747,7 +747,7 @@ function BitbucketAccount() {
           `Connected to Bitbucket as ${info.username ?? info.email}`,
         );
       } catch (e) {
-        setError(errorMessage(e));
+        setError(presentError(e).summary);
       }
     },
   });

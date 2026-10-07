@@ -17,12 +17,12 @@ import {
   validatePlanPaths,
 } from "@/lib/ai/prompt";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
+import { presentError } from "@/lib/error-summary";
 import { gitListTracked, readRepoInstructions } from "@/lib/git/api";
 import { emitNotification } from "@/lib/notifications/emit";
 import { norm } from "@/lib/repo-key";
 import { loadSettings } from "@/lib/settings/api";
 import { repoNameFromPath } from "@/lib/stores/notifications";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { loadPersistedPlans, savePersistedPlans } from "./persistence";
 
 export interface PlanDraft {
@@ -338,7 +338,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
       });
     } catch (e) {
       if (superseded()) return;
-      patch(id, { generating: false, error: errorMessage(e) });
+      patch(id, { generating: false, error: presentError(e).summary });
       notifyDone(true);
       return;
     }

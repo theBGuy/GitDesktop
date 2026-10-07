@@ -35,6 +35,7 @@ import {
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
@@ -42,7 +43,6 @@ import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastErrorWithNote } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
@@ -149,7 +149,7 @@ export function CreateJiraIssueDialog({
         if (stillHere) selectIssue({ kind: "jira", id: key });
       } catch (e) {
         // Keep the dialog open so the draft survives; surface the reason inline.
-        setCreateError({ repo: repoPath, message: errorMessage(e) });
+        setCreateError({ repo: repoPath, message: presentError(e).summary });
         // The inline message renders only in the repo this fired in, so a
         // failure landing after a switch would be silent — the toast is the one
         // surface that still reaches the user, and it names that repo.

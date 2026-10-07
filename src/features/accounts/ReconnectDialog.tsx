@@ -13,6 +13,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import {
   forgeReconnect,
   forgeReconnectCancel,
@@ -23,7 +24,6 @@ import { useInvalidateAfterReconnect } from "@/lib/git/queries";
 import { providerLabel, type ReconnectEvent } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
 import { type ReconnectTarget, useUiStore } from "@/lib/stores/ui";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /** The distinct phases the reconnect flow drives through, from the streamed
@@ -233,7 +233,7 @@ function ReconnectFlow({
           kind: "finished",
           ok: false,
           login: null,
-          message: errorMessage(e),
+          message: presentError(e).summary,
         });
       }
     });

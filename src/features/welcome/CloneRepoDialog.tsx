@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { groupByOwnerNamespace } from "@/features/explore/explore-utils";
+import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import { cloneRepo, forgeClone, validateRepo } from "@/lib/git/api";
 import { useForgeRepos } from "@/lib/git/queries";
@@ -39,7 +40,7 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { repoStateLabel } from "@/lib/repo-labels";
 import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage, isAppError } from "@/lib/tauri/invoke";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
@@ -499,7 +500,7 @@ function RepoBrowser({
         <p className="max-w-xs text-xs text-muted-foreground">
           {cliMissing
             ? `Install the ${cli} and run ${authCmd} to browse your repositories, or clone from a URL instead.`
-            : errorMessage(repos.error)}
+            : presentError(repos.error).summary}
         </p>
         <Button type="button" variant="outline" size="sm" onClick={onUseUrl}>
           Clone from a URL

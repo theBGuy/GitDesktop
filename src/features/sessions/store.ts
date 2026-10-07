@@ -9,6 +9,7 @@ import {
 } from "@/lib/ai/agent";
 import { cleanupContainerSandbox, stopTestContainer } from "@/lib/ai/sandbox";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
+import { presentError } from "@/lib/error-summary";
 import { normPath } from "@/lib/git/path";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
@@ -483,7 +484,11 @@ async function runTurn(
       },
     });
   } catch (e) {
-    patchTurn({ status: "error", error: errorMessage(e), statusText: "" });
+    patchTurn({
+      status: "error",
+      error: presentError(e).summary,
+      statusText: "",
+    });
     setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();
     return;
@@ -520,6 +525,8 @@ async function runTurn(
     });
     endTurn();
   } catch (e) {
+    // Keep the raw text: commitWorktreeAll surfaces git's whole commit report
+    // (hook refusals land on stdout) and the turn status renders it untruncated.
     patchTurn({ status: "error", error: errorMessage(e), statusText: "" });
     setSession((s) => (ownsLastTurn(s) ? { ...s, running: false } : s));
     endTurn();
