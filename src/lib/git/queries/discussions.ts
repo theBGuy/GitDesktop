@@ -129,6 +129,10 @@ export function useDeleteDiscussionComment(repo: string) {
 
 const UPVOTE_KEY = "toggle-discussion-upvote";
 
+// One type for the mutation's generic AND the pending-scan's cast: a drifted
+// `number` then fails to compile instead of silently matching nothing.
+type DiscussionUpvoteVars = { number: number; subjectId: string; up: boolean };
+
 /** Optimistic upvote toggle on a discussion or its comments, with rollback. Per call,
  *  `number` is the containing discussion and `subjectId` its body or a comment. */
 export function useToggleDiscussionUpvote(repo: string) {
@@ -136,7 +140,7 @@ export function useToggleDiscussionUpvote(repo: string) {
   // a discussion switch, and a pending or paused toggle takes each render's options,
   // so a closed-over one would send its settle refetch to the wrong discussion.
   return useOptimisticCacheMutation<
-    { number: number; subjectId: string; up: boolean },
+    DiscussionUpvoteVars,
     void,
     DiscussionDetails
   >(
@@ -200,7 +204,7 @@ export function usePendingDiscussionUpvote(
       .findAll({ mutationKey: [UPVOTE_KEY, repo], status: "pending" })
       .filter(
         (m) =>
-          (m.state.variables as { number?: unknown } | undefined)?.number ===
+          (m.state.variables as DiscussionUpvoteVars | undefined)?.number ===
           number,
       );
     snapshot.current = replaceEqualDeep(snapshot.current, {
