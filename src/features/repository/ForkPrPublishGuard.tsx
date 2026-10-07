@@ -176,7 +176,8 @@ export function ForkPrPublishGuard({
           <DisabledReasonButton
             variant="outline"
             disabled={pending || !!offlineHold}
-            reason={pending ? ACT_PENDING_REASON : offlineHold}
+            // `pending` is the fork route's push, never this button's own.
+            reason={pending ? "Pushing to the fork…" : offlineHold}
             onClick={onPublishAnyway}
           >
             Publish to {destination} anyway

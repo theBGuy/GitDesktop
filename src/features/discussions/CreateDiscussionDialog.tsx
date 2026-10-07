@@ -15,7 +15,11 @@ import {
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import {
@@ -68,12 +72,25 @@ export function CreateDiscussionDialog({
 
   const categoryId = useSelector(form.store, (s) => s.values.categoryId);
   // Starting a discussion holds offline rather than park: a parked create
-  // would land after the dialog was left behind. Both holds carry a reason, so a
-  // flip between them never drops focus to a native disable.
+  // would land after the dialog was left behind. The running create, offline,
+  // and a missing category each carry a reason, ranked running-first, so a flip
+  // between them never drops focus to a native disable.
   const offlineHold = useOfflineHold();
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const offlineSubmit = useDisabledReason({
-    disabled: !categoryId || !!offlineHold,
-    reason: offlineHold ?? (categoryId ? undefined : "Choose a category first"),
+    disabled: !categoryId || !!offlineHold || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        case offlineHold !== undefined:
+          return offlineHold;
+        case !categoryId:
+          return "Choose a category first";
+        default:
+          return undefined;
+      }
+    })(),
   });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the

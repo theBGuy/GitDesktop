@@ -55,6 +55,7 @@ import type {
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
+  ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
   refuseWhileOffline,
   useOfflineHold,
@@ -539,11 +540,21 @@ export function CreateIssueDialog({
   // rather than park: a parked one would land after the dialog was left behind.
   const offlineHold = useOfflineHold();
   const submitBlocked = generating || !!offlineHold;
-  // Both holds carry a reason, so a flip between them never drops focus to a
-  // native disable; the running draft outranks offline.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  // The running draft, the running create, and offline carry a reason, ranked
+  // running-first, so a flip between them never drops focus to a native disable.
   const offlineSubmit = useDisabledReason({
-    disabled: submitBlocked,
-    reason: generating ? AI_DRAFT_PENDING_REASON : offlineHold,
+    disabled: submitBlocked || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case generating:
+          return AI_DRAFT_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
   });
 
   return (

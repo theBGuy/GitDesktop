@@ -194,6 +194,7 @@ import { useJiraLink } from "@/lib/jira/queries";
 import {
   ACT_PENDING_REASON,
   pendingWriteReason,
+  RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -1742,8 +1743,11 @@ export function RemotePrView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    // Again below the riding post: the connection can drop while it runs.
-    if (!(await postRidingDraft()) || refuseWhileOffline()) return;
+    // Again below the riding post: the connection can drop while it runs, and a
+    // comment that went out is named in the refusal.
+    if (!(await postRidingDraft())) return;
+    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
     try {
       await closePr.mutateAsync({ number, lens });
       // The riding comment posts without the "Comment added" toast the ordinary
@@ -3099,8 +3103,11 @@ export function RemotePrView({
           switch (true) {
             case detailsStale:
               return staleReason;
-            case resolveMergePending || abortResolvePending:
+            case resolveMergePending:
               return ACT_PENDING_REASON;
+            // A Discard holds Resolve too, but isn't Resolve's own write.
+            case abortResolvePending:
+              return "Discarding the resolution…";
             default:
               return offlineHold;
           }

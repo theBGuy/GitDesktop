@@ -23,6 +23,7 @@ import {
 } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
+  ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
   refuseWhileOffline,
   useOfflineHold,
@@ -386,12 +387,22 @@ export function PublishDialog({
   const offlineHold = useOfflineHold();
   const submitBlocked =
     descGen.generating || bbBlocked || ghBlocked || !!offlineHold;
-  // The running description draft and offline both carry a reason, so a flip
-  // between them never drops focus to a native disable; the name refusals keep
-  // their field hints and a plain disable.
+  // The running description draft, the running publish, and offline carry a
+  // reason, ranked running-first, so a flip between them never drops focus to a
+  // native disable; the name refusals keep their field hints and a plain disable.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const offlineSubmit = useDisabledReason({
-    disabled: submitBlocked,
-    reason: descGen.generating ? AI_DRAFT_PENDING_REASON : offlineHold,
+    disabled: submitBlocked || isSubmitting,
+    reason: (() => {
+      switch (true) {
+        case descGen.generating:
+          return AI_DRAFT_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
   });
 
   const githubScope = ghPickerActive ? (

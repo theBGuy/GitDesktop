@@ -62,7 +62,6 @@ import { providerLabel } from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
   isOfflineNow,
-  OFFLINE_WRITE_REASON,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -73,6 +72,10 @@ import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
+
+/** Every asset row's Delete holds while one row's delete runs (one shared
+ *  mutation), so the line names the operation, not the pressed row's write. */
+const ASSET_DELETE_PENDING_REASON = "Deleting an asset…";
 
 export function TagDetailView({
   repoPath,
@@ -177,9 +180,11 @@ export function TagDetailView({
   // What a write's own trigger says: the block first, then offline.
   const writeHoldReason = blockReason ?? offlineHold;
   // A trigger whose own write is running names that first: the write is real,
-  // and fails live rather than parks if the connection drops under it.
-  const triggerReason = (pending: boolean) =>
-    pending ? ACT_PENDING_REASON : writeHoldReason;
+  // and fails live rather than parks if the connection drops under it. A hook
+  // shared by several triggers (the asset rows' one delete) passes copy that
+  // doesn't claim the write as each button's own.
+  const triggerReason = (pending: boolean, running = ACT_PENDING_REASON) =>
+    pending ? running : writeHoldReason;
   const publishNote = (() => {
     switch (true) {
       case probe !== null:
@@ -399,8 +404,12 @@ export function TagDetailView({
       // only repeat the edit.
       try {
         // The connection can drop during phase 1; a manifest upload sent then
-        // would park, so it takes the partial-state path below instead.
-        if (isOfflineNow()) throw new Error(OFFLINE_WRITE_REASON);
+        // would park, so it takes the partial-state path below instead. Nothing
+        // retries it, so the line says how to.
+        if (isOfflineNow())
+          throw new Error(
+            "You were offline, so the manifest wasn't uploaded. Save the release again once you're back online to update it.",
+          );
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {
         setSyncArmed(false);
@@ -607,7 +616,10 @@ export function TagDetailView({
                             relStale ||
                             !!offlineHold
                           }
-                          reason={triggerReason(deleteAsset.isPending)}
+                          reason={triggerReason(
+                            deleteAsset.isPending,
+                            ASSET_DELETE_PENDING_REASON,
+                          )}
                           className="text-muted-foreground"
                           onClick={() => onDeleteAsset(a.name, "asset")}
                         >
@@ -641,7 +653,10 @@ export function TagDetailView({
                               relStale ||
                               !!offlineHold
                             }
-                            reason={triggerReason(deleteAsset.isPending)}
+                            reason={triggerReason(
+                              deleteAsset.isPending,
+                              ASSET_DELETE_PENDING_REASON,
+                            )}
                             className="text-muted-foreground"
                             onClick={() => onDeleteAsset(a.name, "link")}
                           >

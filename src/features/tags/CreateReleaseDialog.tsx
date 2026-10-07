@@ -69,6 +69,7 @@ import type { CommitSummary, GeneratedNotes } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
+  ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
   refuseWhileOffline,
   useOfflineHold,
@@ -443,18 +444,22 @@ export function CreateReleaseDialog({
   // Enter must submit exactly when the button would. Publishing holds offline
   // rather than park: a parked release would land after the dialog was left.
   const submitBlocked = !tagTrimmed || busyGenerating || !!offlineHold;
-  // Each running notes draft and offline carry a reason, so a flip between them
-  // never drops focus to a native disable. The GitHub generator isn't AI (it
-  // stays offered with Hide AI on), so it gets its own non-AI line. An empty tag
-  // stays a plain disable: no copy names it.
+  // Each running notes draft, the running create, and offline carry a reason,
+  // ranked running-first, so a flip between them never drops focus to a native
+  // disable. The GitHub generator isn't AI (it stays offered with Hide AI on),
+  // so it gets its own non-AI line. An empty tag stays a plain disable: no copy
+  // names it.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const offlineSubmit = useDisabledReason({
-    disabled: submitBlocked,
+    disabled: submitBlocked || isSubmitting,
     reason: (() => {
       switch (true) {
         case aiNotes.generating:
           return AI_DRAFT_PENDING_REASON;
         case githubNotes.isPending:
           return GENERATED_NOTES_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
         default:
           return offlineHold;
       }

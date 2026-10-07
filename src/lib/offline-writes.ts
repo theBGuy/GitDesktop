@@ -39,11 +39,17 @@ export function isOfflineNow(): boolean {
  *  write): the connection can drop during any of them, and a write sent then
  *  would park. Says why it refused, since a just-confirmed action going silent
  *  reads as success. */
-export function refuseWhileOffline(): boolean {
+export function refuseWhileOffline(message = OFFLINE_WRITE_REASON): boolean {
   if (!isOfflineNow()) return false;
-  toast.info(OFFLINE_WRITE_REASON);
+  toast.info(message);
   return true;
 }
+
+/** The refusal for a close whose riding comment already posted before the
+ *  connection dropped: the thread shows the comment, so the line accounts for
+ *  both writes. Shared by the PR, issue and discussion views. */
+export const RIDING_COMMENT_CLOSE_HELD =
+  "Your comment was posted, but you're offline, so nothing was closed — try Close again once you're back online.";
 
 /** The reason a pending write holds its controls with: while it is parked
  *  offline it is waiting, not running, so the in-flight copy would claim work that

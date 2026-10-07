@@ -94,6 +94,7 @@ import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   pendingWriteReason,
+  RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -501,8 +502,11 @@ export function RemoteIssueView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    // Again below the riding post: the connection can drop while it runs.
-    if (!(await postRidingDraft()) || refuseWhileOffline()) return;
+    // Again below the riding post: the connection can drop while it runs, and a
+    // comment that went out is named in the refusal.
+    if (!(await postRidingDraft())) return;
+    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
     try {
       await closeIssue.mutateAsync({ number, reason });
     } catch (e) {

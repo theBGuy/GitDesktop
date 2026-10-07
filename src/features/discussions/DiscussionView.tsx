@@ -80,6 +80,7 @@ import {
   ACT_PENDING_REASON,
   OFFLINE_ITEM_REASON,
   pendingWriteReason,
+  RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -549,8 +550,11 @@ export function DiscussionView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    // Again below the riding post: the connection can drop while it runs.
-    if (!(await postRidingDraft(d.id)) || refuseWhileOffline()) return;
+    // Again below the riding post: the connection can drop while it runs, and a
+    // comment that went out is named in the refusal.
+    if (!(await postRidingDraft(d.id))) return;
+    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
     try {
       await closeDiscussion.mutateAsync({ discussionId: d.id, reason });
     } catch (e) {
