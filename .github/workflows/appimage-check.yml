@@ -11,10 +11,9 @@ on:
     paths:
       - ".github/workflows/appimage-check.yml"
       - ".github/workflows/release.yml"
-      - ".github/actions/pin-linuxdeploy/**"
       - ".github/scripts/appimage-guard.sh"
       - ".github/scripts/appimage-smoke.sh"
-      # A Tauri CLI or bundle-config change can silently no-op the pin.
+      # A Tauri CLI bump swaps the bundler's linuxdeploy build and GTK hook.
       - "src-tauri/tauri.conf.json"
       - "package.json"
 
@@ -64,9 +63,6 @@ jobs:
             build-essential \
             libssl-dev \
             file
-
-      - name: Pin newer linuxdeploy for AppImage bundling
-        uses: ./.github/actions/pin-linuxdeploy
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile

@@ -267,8 +267,8 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 ];
 
 /// Single-path variables the bundle owns outright — unset when they point into
-/// `$APPDIR`. Deliberately left alone: `GDK_BACKEND` and `GTK_THEME` (set by the
-/// hook but not `$APPDIR`-derived, and a child may legitimately want them), and
+/// `$APPDIR`. Deliberately left alone: `GDK_BACKEND` and `GTK_THEME` (not
+/// `$APPDIR`-derived, and a child may legitimately want them), and
 /// `LD_PRELOAD` (the AppImage never sets it, so any value is the user's).
 /// Twin of the `export` allowlist in `.github/scripts/appimage-guard.sh`.
 const APPDIR_SCALAR_VARS: &[&str] = &[
@@ -278,6 +278,7 @@ const APPDIR_SCALAR_VARS: &[&str] = &[
     "GTK_IM_MODULE_FILE",
     "GDK_PIXBUF_MODULE_FILE",
     "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
 ];
 
 /// Where a child's `PATH` lands when every entry it inherited was bundle-derived.
