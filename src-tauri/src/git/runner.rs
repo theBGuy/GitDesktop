@@ -658,17 +658,22 @@ pub(crate) const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// read-only or full disk) keeps git's error, since a retry there is futile. The bare
 /// form must count because the section rename/remove paths print no reason (measured,
 /// git 2.51.1), so a read-only disk there still reads as contention. Colon-space, not
-/// colon, keeps a Windows drive-letter path from reading as a reason.
+/// colon, keeps a Windows drive-letter path from reading as a reason. An explicit other
+/// reason on any such line outranks bare ones: it proves the cause, which no retry fixes.
 pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
-    stderr.lines().any(|line| {
+    let mut lost = false;
+    for line in stderr.lines() {
         let Some((_, rest)) = line.split_once("could not lock config file") else {
-            return false;
+            continue;
         };
-        match rest.rsplit_once(": ") {
-            None => true,
-            Some((_, reason)) => reason.trim_end() == "File exists",
+        if let Some((_, reason)) = rest.rsplit_once(": ") {
+            if reason.trim_end() != "File exists" {
+                return false;
+            }
         }
-    })
+        lost = true;
+    }
+    lost
 }
 
 /// The lead every [`config_lock_busy`] refusal opens with, so a wrapping caller can
@@ -1043,10 +1048,16 @@ mod lock_tests {
              error: Could not remove config section 'remote.origin'",
             "error: could not lock config file .git/config: File exists",
             "error: could not lock config file C:/Users/me/repo/.git/config: File exists\r\n",
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config: File exists",
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config",
         ] {
             assert!(is_config_lock_contention(held), "{held:?}");
         }
         for other in [
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config: Permission denied",
             "error: could not lock config file C:/r/.git/config: Permission denied",
             "error: could not lock config file .git/config: Read-only file system",
             "error: could not lock config file .git/config: No space left on device",
