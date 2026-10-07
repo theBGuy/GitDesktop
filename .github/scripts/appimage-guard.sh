@@ -26,13 +26,14 @@ echo "OK: $(basename "$appimage") does not bundle libwayland-client"
 # Every variable a startup script points into the bundle must also be stripped
 # from the environment of the tools we spawn. Twin of `APPDIR_PATHLIST_VARS` +
 # `APPDIR_SCALAR_VARS` in src-tauri/src/agent.rs — extend both together.
-# Scans the generated AppRun wrapper and the hooks it sources; AppRun.wrapped is
-# skipped as a binary that sets LD_LIBRARY_PATH programmatically.
-# Shape limit: only single-line `export NAME=…` is matched — `NAME=…; export
-# NAME` and `declare -x` are out of scope (linuxdeploy emits single-line exports).
+# Scans the generated AppRun wrapper, its hooks, and the NAME=%s environment
+# strings in the AppRun.wrapped binary. Script shape limit: only single-line
+# `export NAME=…` is matched — `NAME=…; export NAME` and `declare -x` are out
+# of scope (linuxdeploy emits single-line exports).
 allowed=" LD_LIBRARY_PATH PATH XDG_DATA_DIRS GTK_PATH"
 allowed="$allowed GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0"
 allowed="$allowed GI_TYPELIB_PATH"
+allowed="$allowed PYTHONHOME PYTHONPATH PERLLIB QT_PLUGIN_PATH"
 allowed="$allowed GSETTINGS_SCHEMA_DIR GTK_EXE_PREFIX GTK_DATA_PREFIX"
 allowed="$allowed GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE GIO_EXTRA_MODULES"
 allowed="$allowed APPDIR " # the hook's own re-export
@@ -51,9 +52,44 @@ for script in "$workdir"/squashfs-root/AppRun "$workdir"/squashfs-root/apprun-ho
     esac
   done
 done
+launcher_vars=0
+for launcher in "$workdir"/squashfs-root/AppRun "$workdir"/squashfs-root/AppRun.wrapped; do
+  [ -e "$launcher" ] || continue
+  if [ ! -r "$launcher" ]; then
+    echo "FAIL: cannot read $launcher"
+    exit 1
+  fi
+  if grep -Iq . "$launcher"; then
+    continue
+  elif [ $? -ne 1 ]; then
+    echo "FAIL: cannot read $launcher"
+    exit 1
+  fi
+  if ! exported=$( { grep -aoE '[A-Za-z_][A-Za-z0-9_]*=%s' "$launcher" || [ $? -eq 1 ]; } \
+    | sed 's/=%s$//' | sort -u); then
+    echo "FAIL: cannot read $launcher"
+    exit 1
+  fi
+  if [ -z "$exported" ]; then
+    if grep -aq LD_LIBRARY_PATH "$launcher"; then
+      echo "FAIL: $(basename "$launcher") sets variables in a format this guard cannot parse"
+      exit 1
+    elif [ $? -ne 1 ]; then
+      echo "FAIL: cannot read $launcher"
+      exit 1
+    fi
+  fi
+  for name in $exported; do
+    launcher_vars=$((launcher_vars + 1))
+    case "$allowed" in
+      *" $name "*) ;;
+      *) unknown="$unknown $name" ;;
+    esac
+  done
+done
 if [ -n "$unknown" ]; then
-  echo "FAIL: startup script exports \$APPDIR-derived var(s) the app does not strip:$unknown"
+  echo "FAIL: the bundle sets \$APPDIR-derived var(s) the app does not strip:$unknown"
   echo "      add them to APPDIR_PATHLIST_VARS / APPDIR_SCALAR_VARS in src-tauri/src/agent.rs"
   exit 1
 fi
-echo "OK: every \$APPDIR-derived export in $scripts startup script(s) is stripped from child processes"
+echo "OK: every \$APPDIR-derived export in $scripts startup script(s) and $launcher_vars launcher binary variable(s) is stripped from child processes"

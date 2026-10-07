@@ -264,6 +264,10 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
     "GST_PLUGIN_SYSTEM_PATH",
     "GST_PLUGIN_SYSTEM_PATH_1_0",
     "GI_TYPELIB_PATH",
+    // Only the bundle's AppRun.wrapped launcher sets these three.
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
 ];
 
 /// Single-path variables the bundle owns outright — unset when they point into
@@ -272,6 +276,8 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 /// `LD_PRELOAD` (the AppImage never sets it, so any value is the user's).
 /// Twin of the `export` allowlist in `.github/scripts/appimage-guard.sh`.
 const APPDIR_SCALAR_VARS: &[&str] = &[
+    // Only the bundle's AppRun.wrapped launcher sets PYTHONHOME.
+    "PYTHONHOME",
     "GSETTINGS_SCHEMA_DIR",
     "GTK_EXE_PREFIX",
     "GTK_DATA_PREFIX",
@@ -3342,6 +3348,79 @@ mod child_env_tests {
             lookup(&[("GTK_DATA_PREFIX", "/tmp/.mount_gdAbcX")])
         )
         .is_empty());
+    }
+
+    #[test]
+    fn bundle_pythonhome_is_unset_and_host_pythonhome_is_untouched() {
+        assert_eq!(
+            compute_child_env_overrides(
+                APPDIR,
+                lookup(&[("PYTHONHOME", "/tmp/.mount_gdAbc/usr/")])
+            ),
+            vec![("PYTHONHOME", None)]
+        );
+        assert!(
+            compute_child_env_overrides(APPDIR, lookup(&[("PYTHONHOME", "/opt/python3.12")]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bundle_pythonpath_is_unset_or_keeps_the_host_path() {
+        assert_eq!(
+            compute_child_env_overrides(
+                APPDIR,
+                lookup(&[("PYTHONPATH", "/tmp/.mount_gdAbc/usr/share/pyshared/:")])
+            ),
+            vec![("PYTHONPATH", None)]
+        );
+        assert_eq!(
+            compute_child_env_overrides(
+                APPDIR,
+                lookup(&[(
+                    "PYTHONPATH",
+                    "/tmp/.mount_gdAbc/usr/share/pyshared/:/home/me/lib",
+                )])
+            ),
+            vec![("PYTHONPATH", Some("/home/me/lib".to_string()))]
+        );
+    }
+
+    #[test]
+    fn bundle_perllib_is_unset_or_keeps_the_host_path() {
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[(
+                "PERLLIB",
+                "/tmp/.mount_gdAbc/usr/share/perl5/:/tmp/.mount_gdAbc/usr/lib/perl5/:",
+            )]),
+        );
+        assert_eq!(plan, vec![("PERLLIB", None)]);
+        assert_eq!(
+            compute_child_env_overrides(
+                APPDIR,
+                lookup(&[(
+                    "PERLLIB",
+                    "/tmp/.mount_gdAbc/usr/share/perl5/:/home/me/perl5",
+                )])
+            ),
+            vec![("PERLLIB", Some("/home/me/perl5".to_string()))]
+        );
+    }
+
+    #[test]
+    fn qt_plugin_path_keeps_only_host_plugins() {
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[(
+                "QT_PLUGIN_PATH",
+                "/tmp/.mount_gdAbc/usr/lib/qt4/plugins/:/tmp/.mount_gdAbc/usr/lib/qt5/plugins/:/usr/lib64/qt5/plugins",
+            )]),
+        );
+        assert_eq!(
+            plan,
+            vec![("QT_PLUGIN_PATH", Some("/usr/lib64/qt5/plugins".to_string()))]
+        );
     }
 
     #[test]
