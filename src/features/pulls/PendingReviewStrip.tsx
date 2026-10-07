@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 import { useDiscardPendingReview } from "@/lib/git/queries";
 import type { PrThreadOut, RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 
@@ -118,7 +122,7 @@ export function PendingReviewStrip({
           // Live arm only: a held button regains full opacity under focus.
           className={offlineHold ? undefined : "text-destructive"}
           disabled={discard.isPending || !!offlineHold}
-          reason={offlineHold}
+          reason={discard.isPending ? ACT_PENDING_REASON : offlineHold}
           onClick={() => void discardReview()}
         >
           {`Discard on ${remoteLabel}…`}

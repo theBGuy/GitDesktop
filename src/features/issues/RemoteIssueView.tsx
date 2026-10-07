@@ -501,7 +501,8 @@ export function RemoteIssueView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    if (!(await postRidingDraft())) return;
+    // Again below the riding post: the connection can drop while it runs.
+    if (!(await postRidingDraft()) || refuseWhileOffline()) return;
     try {
       await closeIssue.mutateAsync({ number, reason });
     } catch (e) {

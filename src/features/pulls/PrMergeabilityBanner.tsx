@@ -327,6 +327,7 @@ export function PrMergeabilityBanner({
   blockedApprovals,
   blockedReason,
   updateBlockedReason,
+  updateHeldReason,
   updateBusy,
   updateAwaitingDefault,
   updateAwaitingRules,
@@ -381,6 +382,9 @@ export function PrMergeabilityBanner({
   blockedReason: string | null;
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
+  /** A transient hold (offline), ranked below the refusal AND below every
+   *  `updateBusy` cause: a running update outranks it, like the Resolve chain. */
+  updateHeldReason?: string;
   updateBusy: boolean;
   /** The slice of `updateBusy` spent waiting on the default-branch read the
    *  promotion demotion depends on — it gets its own wording, since the generic
@@ -433,7 +437,10 @@ export function PrMergeabilityBanner({
     </ul>
   );
   const Icon = ARM_ICON[arm];
-  const updateDisabled = updateBusy || updateBlockedReason !== undefined;
+  const updateDisabled =
+    updateBusy ||
+    updateBlockedReason !== undefined ||
+    updateHeldReason !== undefined;
   // The busy hold now spans the forge's whole queued update, so a silent disabled
   // control would leave the user waiting on nothing they can read. Each cause gets its
   // own words: the queued job, the call that hasn't been accepted yet, the two reads
@@ -453,7 +460,7 @@ export function PrMergeabilityBanner({
     }
   })();
   const updateDisabledReason =
-    updateBlockedReason ?? (updateBusy ? updateBusyReason : undefined);
+    updateBlockedReason ?? (updateBusy ? updateBusyReason : updateHeldReason);
   // "Update branch" doesn't say which way the commits travel; the tooltip does.
   // The caret gets its own wording rather than this one — its menu holds the
   // REBASE variant, which rewrites rather than merges (and names that in its own

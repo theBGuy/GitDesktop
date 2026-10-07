@@ -29,12 +29,18 @@ export function useOfflineHold(): string | undefined {
   return useOnline() ? undefined : OFFLINE_WRITE_REASON;
 }
 
-/** Fire-time twin of {@link useOfflineHold} for handlers that await a confirm
- *  first: the connection can drop while the prompt is open, and a write sent then
+/** The fire-time verdict, read at the moment a write is about to start. */
+export function isOfflineNow(): boolean {
+  return !onlineManager.isOnline();
+}
+
+/** Fire-time twin of {@link useOfflineHold}. It belongs immediately before the
+ *  write, after every await in the handler (a confirm, a picker, an earlier
+ *  write): the connection can drop during any of them, and a write sent then
  *  would park. Says why it refused, since a just-confirmed action going silent
  *  reads as success. */
 export function refuseWhileOffline(): boolean {
-  if (onlineManager.isOnline()) return false;
+  if (!isOfflineNow()) return false;
   toast.info(OFFLINE_WRITE_REASON);
   return true;
 }

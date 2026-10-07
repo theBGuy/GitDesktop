@@ -77,6 +77,7 @@ import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
+  ACT_PENDING_REASON,
   OFFLINE_ITEM_REASON,
   pendingWriteReason,
   refuseWhileOffline,
@@ -548,7 +549,8 @@ export function DiscussionView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    if (!(await postRidingDraft(d.id))) return;
+    // Again below the riding post: the connection can drop while it runs.
+    if (!(await postRidingDraft(d.id)) || refuseWhileOffline()) return;
     try {
       await closeDiscussion.mutateAsync({ discussionId: d.id, reason });
     } catch (e) {
@@ -1095,7 +1097,16 @@ export function DiscussionView({
               disabled={
                 deleteDiscussion.isPending || detailsStale || !!offlineHold
               }
-              reason={staleReason ?? offlineHold}
+              reason={(() => {
+                switch (true) {
+                  case deleteDiscussion.isPending:
+                    return ACT_PENDING_REASON;
+                  case staleReason !== undefined:
+                    return staleReason;
+                  default:
+                    return offlineHold;
+                }
+              })()}
               onClick={() => void doDelete()}
             >
               {deleteDiscussion.isPending && (

@@ -93,6 +93,8 @@ export function ForkPrPublishGuard({
       return;
     }
     setEnsuring(false);
+    // Again below the remote setup, an await the connection can drop during.
+    if (refuseWhileOffline()) return;
     try {
       await push.mutateAsync({
         setUpstream: false,

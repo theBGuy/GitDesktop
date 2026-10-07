@@ -68,12 +68,12 @@ export function CreateDiscussionDialog({
 
   const categoryId = useSelector(form.store, (s) => s.values.categoryId);
   // Starting a discussion holds offline rather than park: a parked create
-  // would land after the dialog was left behind. The missing-category hold keeps
-  // its own hover hint; only the offline arm takes a reason.
+  // would land after the dialog was left behind. Both holds carry a reason, so a
+  // flip between them never drops focus to a native disable.
   const offlineHold = useOfflineHold();
   const offlineSubmit = useDisabledReason({
     disabled: !categoryId || !!offlineHold,
-    reason: offlineHold,
+    reason: offlineHold ?? (categoryId ? undefined : "Choose a category first"),
   });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the
@@ -170,7 +170,6 @@ export function CreateDiscussionDialog({
                 <form.SubmitButton
                   focusableWhenDisabled={!!offlineSubmit.blockedReason}
                   disabled={!categoryId || !!offlineHold}
-                  title={categoryId ? undefined : "Choose a category first"}
                   aria-describedby={offlineSubmit.describedBy}
                   className={ARIA_DISABLED_CLASS}
                 >

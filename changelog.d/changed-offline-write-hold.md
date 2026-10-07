@@ -1,9 +1,12 @@
-- **Offline-safe remote actions.** While you're offline, actions that change the
-  remote for good are paused, with the reason shown on the control, and come
-  back the moment you reconnect. That covers merging, closing, and updating a
-  pull request's branch, and submitting or discarding a review. It covers
-  closing, transferring, and deleting issues and discussions, and creating pull
-  requests, issues, discussions, and releases. Pushing, pulling, fetching, and
-  publishing a branch, repository, or release are paused too, as is deleting a
-  remote branch, tag, or release. Comments and other quick edits still queue
-  up, and show that they're waiting for the connection.
+- **Offline-safe remote actions.** While you're offline, actions that change
+  the remote for good are unavailable, with the reason shown on the control,
+  and work again as soon as you reconnect. Held actions are never queued for
+  later. That covers merging or closing a pull request, updating its branch,
+  resolving its conflicts, and submitting or discarding a review. It covers
+  closing, transferring, or deleting an issue, and closing or deleting a
+  discussion. It covers creating pull requests, issues, discussions, and
+  releases, and publishing a branch or repository. Pushing, pulling,
+  fetching, deleting a remote branch, and editing, publishing, or deleting a
+  release (assets included) are held too, as are pushing a tag or deleting it
+  from origin in the tag's own view. Comments and other quick edits still
+  queue and send when you reconnect.

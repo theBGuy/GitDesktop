@@ -122,8 +122,8 @@ export function PromoteLocalIssueDialog({
   const [pending, setPending] = useState(false);
   // The forge publish holds offline rather than park: a parked create keeps
   // `pending` set, locking Cancel until reconnect. The Jira arm is left as is.
-  const offline = useOfflineHold();
-  const forgeHold = destination === "forge" ? offline : undefined;
+  const offlineHold = useOfflineHold();
+  const forgeHold = destination === "forge" ? offlineHold : undefined;
 
   const carried = issue.comments.filter((c) => c.body.trim());
 

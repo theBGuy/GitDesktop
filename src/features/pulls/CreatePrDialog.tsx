@@ -62,7 +62,12 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  AI_DRAFT_PENDING_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import {
   applyRepoLens,
   useLensGate,
@@ -463,6 +468,9 @@ export function CreatePrDialog({
           return;
         }
       }
+      // Again below the duplicate re-check, which is an await the connection can
+      // drop during; ahead of the lane claim, so a refusal owns nothing.
+      if (refuseWhileOffline()) return;
       // Fire-time admission, claimed before the create's first await: the push
       // plus the forge call runs for minutes and the user can dismiss the dialog
       // the moment it starts, so a second attempt on the same head would queue
@@ -893,11 +901,22 @@ export function CreatePrDialog({
     creatingElsewhere ||
     Boolean(existingPr) ||
     !!offlineHold;
-  // Only the offline arm takes a reason: every other hold already explains
-  // itself in the dialog (the lane hint, the duplicate notice, the spinner).
+  // The running draft, the running create, and offline carry a reason, ranked
+  // running-first, so a flip between them never drops focus. The lane hint, the
+  // duplicate notice, nothing-to-merge and the base-branch load stay plain
+  // disables: each explains itself in the dialog.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked,
-    reason: offlineHold,
+    reason: (() => {
+      switch (true) {
+        case generating:
+          return AI_DRAFT_PENDING_REASON;
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
     title: SUBMIT_HINT,
     describedBy: laneHint ? creatingHintId : undefined,
   });

@@ -96,6 +96,9 @@ const RELEASE_DEFAULTS = {
   draft: false,
 };
 
+/** The submit's hold while GitHub's own (non-AI) notes generator runs. */
+const GENERATED_NOTES_PENDING_REASON = "Wait for the generated notes to finish";
+
 /**
  * Creates a GitHub release. The tag is a combobox — pick an existing tag, or
  * type a new one and click "Create new tag" to persist it (a Base UI combobox
@@ -440,12 +443,22 @@ export function CreateReleaseDialog({
   // Enter must submit exactly when the button would. Publishing holds offline
   // rather than park: a parked release would land after the dialog was left.
   const submitBlocked = !tagTrimmed || busyGenerating || !!offlineHold;
-  // The running notes draft and offline both carry a reason, so a flip between
-  // them never drops focus to a native disable. An empty tag stays a plain
-  // disable: no copy names it.
+  // Each running notes draft and offline carry a reason, so a flip between them
+  // never drops focus to a native disable. The GitHub generator isn't AI (it
+  // stays offered with Hide AI on), so it gets its own non-AI line. An empty tag
+  // stays a plain disable: no copy names it.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked,
-    reason: busyGenerating ? AI_DRAFT_PENDING_REASON : offlineHold,
+    reason: (() => {
+      switch (true) {
+        case aiNotes.generating:
+          return AI_DRAFT_PENDING_REASON;
+        case githubNotes.isPending:
+          return GENERATED_NOTES_PENDING_REASON;
+        default:
+          return offlineHold;
+      }
+    })(),
   });
 
   return (

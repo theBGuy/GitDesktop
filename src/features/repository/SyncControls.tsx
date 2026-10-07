@@ -85,6 +85,10 @@ const FORCE_PUSH_DEGRADED: Record<PushGuard, string | undefined> = {
     "Protected by the lease alone: the branch has no reflog for --force-if-includes to check.",
 };
 
+/** The sync buttons' hold while any fetch, pull, push or recovery runs — none of
+ *  them is necessarily the pressed button's own write. */
+const SYNC_BUSY_REASON = "A sync is still running…";
+
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
   const remotes = useRemotes(repoPath);
@@ -556,8 +560,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           size="sm"
           disabled={busy || !!offlineHold}
           // Every hold carries a reason, so none of the flips between them
-          // drops focus by turning the button natively disabled.
-          reason={offlineHold ?? ACT_PENDING_REASON}
+          // drops focus by turning the button natively disabled. A running sync
+          // outranks offline: it is real, and fails live if the connection drops.
+          reason={busy ? SYNC_BUSY_REASON : offlineHold}
           title={fetchHintTitle}
           aria-label="Fetch"
           aria-keyshortcuts={fetchKeyshortcuts}
@@ -581,10 +586,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           size="sm"
           disabled={busy || !hasUpstream || diverged || !!offlineHold}
           // Every hold carries a reason so no flip between them drops focus to
-          // a native disable: offline, a running sync, else the description
+          // a native disable: a running sync, offline, else the description
           // `aria-label` already holds (read twice by AT, the price of the
           // mechanism). The wrapper hovers the reason, else `pullTitle`.
-          reason={offlineHold ?? (busy ? ACT_PENDING_REASON : pullDescription)}
+          reason={busy ? SYNC_BUSY_REASON : (offlineHold ?? pullDescription)}
           title={pullTitle}
           aria-label={pullDescription ?? "Pull"}
           aria-keyshortcuts={pullKeyshortcuts}
@@ -678,7 +683,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           size="sm"
           disabled={busy || detached || !!offlineHold}
           // Same ranking as Pull's.
-          reason={offlineHold ?? (busy ? ACT_PENDING_REASON : pushDescription)}
+          reason={busy ? SYNC_BUSY_REASON : (offlineHold ?? pushDescription)}
           title={pushTitle}
           aria-label={pushDescription ?? pushLabel}
           aria-keyshortcuts={pushKeyshortcuts}
@@ -761,7 +766,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             <DisabledReasonButton
               variant="destructive"
               disabled={push.isPending || !!offlineHold}
-              reason={offlineHold}
+              reason={push.isPending ? ACT_PENDING_REASON : offlineHold}
               onClick={() => void doPush(true)}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}

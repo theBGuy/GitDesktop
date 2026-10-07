@@ -59,7 +59,13 @@ import {
   writeAccessReason,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  isOfflineNow,
+  OFFLINE_WRITE_REASON,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -170,6 +176,10 @@ export function TagDetailView({
   const blockReason = writeBlocked ? writeReason : readReason;
   // What a write's own trigger says: the block first, then offline.
   const writeHoldReason = blockReason ?? offlineHold;
+  // A trigger whose own write is running names that first: the write is real,
+  // and fails live rather than parks if the connection drops under it.
+  const triggerReason = (pending: boolean) =>
+    pending ? ACT_PENDING_REASON : writeHoldReason;
   const publishNote = (() => {
     switch (true) {
       case probe !== null:
@@ -199,7 +209,8 @@ export function TagDetailView({
   async function onUpload() {
     if (refuseWhileOffline()) return;
     const file = await openDialog({ multiple: false });
-    if (typeof file !== "string") return;
+    // Again below the picker: the connection can drop while it is open.
+    if (typeof file !== "string" || refuseWhileOffline()) return;
     try {
       await uploadAsset.mutateAsync({ tag, filePath: file });
     } catch (e) {
@@ -387,6 +398,9 @@ export function TagDetailView({
       // state, not a failed save: close and disclose it — re-submitting would
       // only repeat the edit.
       try {
+        // The connection can drop during phase 1; a manifest upload sent then
+        // would park, so it takes the partial-state path below instead.
+        if (isOfflineNow()) throw new Error(OFFLINE_WRITE_REASON);
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {
         setSyncArmed(false);
@@ -443,7 +457,7 @@ export function TagDetailView({
                       relStale ||
                       !!offlineHold
                     }
-                    reason={writeHoldReason}
+                    reason={triggerReason(editRelease.isPending)}
                     onClick={() => void onPublish()}
                   >
                     Publish
@@ -543,7 +557,7 @@ export function TagDetailView({
                       relStale ||
                       !!offlineHold
                     }
-                    reason={writeHoldReason}
+                    reason={triggerReason(uploadAsset.isPending)}
                     onClick={onUpload}
                   >
                     {uploadAsset.isPending ? (
@@ -593,7 +607,7 @@ export function TagDetailView({
                             relStale ||
                             !!offlineHold
                           }
-                          reason={writeHoldReason}
+                          reason={triggerReason(deleteAsset.isPending)}
                           className="text-muted-foreground"
                           onClick={() => onDeleteAsset(a.name, "asset")}
                         >
@@ -627,7 +641,7 @@ export function TagDetailView({
                               relStale ||
                               !!offlineHold
                             }
-                            reason={writeHoldReason}
+                            reason={triggerReason(deleteAsset.isPending)}
                             className="text-muted-foreground"
                             onClick={() => onDeleteAsset(a.name, "link")}
                           >
@@ -801,7 +815,7 @@ export function TagDetailView({
               <DisabledReasonButton
                 variant="destructive"
                 disabled={deleteRelease.isPending || relStale || !!offlineHold}
-                reason={writeHoldReason}
+                reason={triggerReason(deleteRelease.isPending)}
                 onClick={() => void onDeleteRelease()}
               >
                 {deleteRelease.isPending && (
@@ -872,7 +886,7 @@ export function TagDetailView({
           variant="outline"
           size="sm"
           disabled={pushTag.isPending || !!offlineHold}
-          reason={offlineHold}
+          reason={pushTag.isPending ? ACT_PENDING_REASON : offlineHold}
           onClick={() => void onPushTag()}
         >
           Push tag
@@ -923,7 +937,16 @@ export function TagDetailView({
               disabled={
                 deleteTag.isPending || (deleteTagRemote && !!offlineHold)
               }
-              reason={deleteTagRemote ? offlineHold : undefined}
+              reason={(() => {
+                switch (true) {
+                  case deleteTag.isPending:
+                    return ACT_PENDING_REASON;
+                  case deleteTagRemote:
+                    return offlineHold;
+                  default:
+                    return undefined;
+                }
+              })()}
               onClick={() => void onDeleteTag()}
             >
               {deleteTag.isPending && <Spinner data-icon="inline-start" />}

@@ -1164,13 +1164,12 @@ export function RemotePrView({
   }, [updatingBranch, divergenceEnabled]);
   // Updating the branch pushes the base onto the head, so it takes push permission —
   // and on a fork the contributor's "allow edits by maintainers" too. Only an
-  // explicit denial blocks; unknown must never read as one. Offline holds it last:
-  // a parked update would push onto the head whenever the connection returns.
+  // explicit denial blocks; unknown must never read as one.
   const updateBlockedReason =
     writeReason ??
     (details.data?.crossRepository && details.data.maintainerCanModify === false
       ? "The contributor hasn't allowed edits from maintainers."
-      : offlineHold);
+      : undefined);
 
   // A promotion pull request: the head carries work onward (main → staging), so it is
   // permanently behind its base by design and "Update branch" would merge the base
@@ -1294,6 +1293,7 @@ export function RemotePrView({
     !defaultBranchSettling &&
     !rulesSettling &&
     updateBlockedReason === undefined &&
+    !offlineHold &&
     !updateBranchPending;
 
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
@@ -1424,8 +1424,11 @@ export function RemotePrView({
         body: "Rebasing rewrites the pull request branch's history and force-pushes it. On a fork pull request, that branch belongs to the contributor.",
         confirmLabel: "Rebase and update",
       });
-      if (!ok || refuseWhileOffline()) return;
+      if (!ok) return;
     }
+    // A parked update would push onto the head whenever the connection returns.
+    // Checked here, below the rebase confirm, for both variants.
+    if (refuseWhileOffline()) return;
     try {
       await updateBranch.mutateAsync({ number, rebase, lens });
       // GitHub only ACCEPTED the job here, so the word goes to the poll: the strip
@@ -1739,7 +1742,8 @@ export function RemotePrView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
-    if (!(await postRidingDraft())) return;
+    // Again below the riding post: the connection can drop while it runs.
+    if (!(await postRidingDraft()) || refuseWhileOffline()) return;
     try {
       await closePr.mutateAsync({ number, lens });
       // The riding comment posts without the "Comment added" toast the ordinary
@@ -3109,6 +3113,7 @@ export function RemotePrView({
         blockedApprovals={blockedApprovals}
         blockedReason={gitlabBlockedNote}
         updateBlockedReason={updateBlockedReason}
+        updateHeldReason={offlineHold}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.
         updateBusy={
