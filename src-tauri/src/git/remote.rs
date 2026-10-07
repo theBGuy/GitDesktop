@@ -840,20 +840,29 @@ const IF_INCLUDES_REJECTION: &str = "remote ref updated since checkout";
 /// no reflog to reason about, so callers must not retry. Git itself walks the
 /// local ref named after the DESTINATION when one exists (measured); the source
 /// name probed here covers the app's same-name default — see the arm's comment.
+///
+/// Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so a
+/// branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
+/// 2.51.1), and every consumer here rebuilds `refs/heads/<name>` from the result.
 async fn pushed_branch(repo_path: &str, branch: Option<&str>) -> Option<String> {
     if let Some(b) = branch {
         return Some(b.to_string());
     }
     let out = run_git_raw(
         Some(repo_path),
-        &["symbolic-ref", "--short", "-q", "HEAD"],
+        &["symbolic-ref", "-q", "HEAD"],
         DEFAULT_TIMEOUT,
     )
     .await
     .ok()?;
-    (out.code == 0)
-        .then(|| out.stdout_lossy().trim().to_string())
+    if out.code != 0 {
+        return None;
+    }
+    let full = out.stdout_lossy();
+    full.trim_end_matches(['\r', '\n'])
+        .strip_prefix("refs/heads/")
         .filter(|b| !b.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether `refs/heads/<branch>` has a reflog (`git reflog exists`, exit 0/1). An
@@ -2203,6 +2212,43 @@ mod tests {
             Some("origin/current")
         );
         run(&origin_s, &["rev-parse", "--verify", "refs/heads/current"]).await;
+
+        // A branch shadowed by a same-named tag, with a real `heads/shadowed` branch
+        // beside it: the HEAD publish and its repair still name `refs/heads/shadowed`,
+        // never the `heads/shadowed` that `symbolic-ref --short` would answer.
+        run(&work_s, &["switch", "-q", "-c", "shadowed"]).await;
+        run(&work_s, &["tag", "shadowed"]).await;
+        run(
+            &work_s,
+            &["update-ref", "refs/heads/heads/shadowed", "refs/heads/main"],
+        )
+        .await;
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_push_core(&state, work_s.clone(), true, false, None, None, None),
+            )
+            .await
+            .expect("the push succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let published = run(
+            &origin_s,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        assert!(
+            published.lines().any(|r| r == "refs/heads/shadowed"),
+            "{published}"
+        );
+        assert!(!published.contains("refs/heads/heads/"), "{published}");
+        assert_eq!(
+            run(&work_s, &["config", "--get", "branch.shadowed.merge"])
+                .await
+                .trim(),
+            "refs/heads/shadowed"
+        );
 
         // The forge publishes' shape: `-c` entries ahead of the subcommand, empty `cred`,
         // straight into the runner.
