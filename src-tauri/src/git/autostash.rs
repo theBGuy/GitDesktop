@@ -14,7 +14,7 @@
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::git::branches::{finish_tracking_setup, validate_ref_name};
+use crate::git::branches::{finish_tracking_setup, validate_ref_name, TrackedBy};
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{
     acquire_repo_lock, run_git, run_git_raw, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
@@ -382,11 +382,11 @@ pub(crate) async fn git_switch_autostash_core(
         // A tracking switch writes the config, so it holds the config-write mutex and
         // finishes a lost tracking setup BEFORE `settle` pops onto the half-switched tree.
         Some(tracking) => {
-            let upstream = format!("refs/remotes/{tracking}");
             with_config_write_lock(&repo_path, |held| async {
                 let args = ["switch", "--track", tracking.as_str()];
                 let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
-                finish_tracking_setup(held, &repo_path, out, &name, &upstream, true).await
+                let by = TrackedBy::ExplicitTrack;
+                finish_tracking_setup(held, &repo_path, out, &name, tracking, by, true).await
             })
             .await
         }

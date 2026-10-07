@@ -492,8 +492,8 @@ pub(crate) async fn remove_deleted_branch_section(
 }
 
 /// Re-establishes `branch` → `upstream` tracking after a tracking setup lost the config
-/// lock, never re-running the command that set it up. `upstream` is spelled the way
-/// the original command named it, so git resolves it the same way.
+/// lock, never re-running the command that set it up. `upstream` is the fully
+/// qualified ref git itself would have tracked; callers that can't pin it don't call.
 pub(crate) async fn restore_upstream(
     held: ConfigWriteHeld,
     repo_path: &str,
@@ -521,18 +521,29 @@ pub(crate) async fn restore_upstream(
     }
 }
 
+/// What decided a tracking setup's upstream, and so what a repair may re-set.
+#[derive(Clone, Copy)]
+pub(crate) enum TrackedBy {
+    /// An explicit `--track`: always the start ref itself.
+    ExplicitTrack,
+    /// `branch.autoSetupMerge`, whose mode decides (see [`direct_tracking_target`]).
+    AutoSetupMerge,
+}
+
 /// A tracking setup (`switch --track`, or `switch -c`/`branch` from a tracked start
 /// point) that loses the config lock has CREATED `branch` and, for a switch, moved the
 /// index and working tree to it, yet left HEAD on the old branch and the upstream
 /// unwritten (measured, git 2.51.1: exit 1). Finishes both legs, the switch first and
 /// whatever the upstream does: the moved tree under the old HEAD reads as staged
-/// changes a commit would land on the old branch. A second upstream loss keeps `out`.
+/// changes a commit would land on the old branch. An upstream git's own choice can't be
+/// pinned for, or that loses again, keeps `out` — never a guessed upstream.
 pub(crate) async fn finish_tracking_setup(
     held: ConfigWriteHeld,
     repo_path: &str,
     out: GitOutput,
     branch: &str,
-    upstream: &str,
+    start: &str,
+    tracked_by: TrackedBy,
     switch: bool,
 ) -> AppResult<GitOutput> {
     if out.code == 0 || !out.stderr.contains(UPSTREAM_WRITE_FAILED) {
@@ -544,10 +555,60 @@ pub(crate) async fn finish_tracking_setup(
             return Ok(switched);
         }
     }
-    if restore_upstream(held, repo_path, branch, upstream).await {
+    let Some(upstream) = direct_tracking_target(repo_path, start, tracked_by).await else {
+        return Ok(out);
+    };
+    if restore_upstream(held, repo_path, branch, &upstream).await {
         return Ok(GitOutput { code: 0, ..out });
     }
     Ok(out)
+}
+
+/// The ref git itself tracked from `start`, fully qualified, or `None` when that can't
+/// be pinned. git tracks the start ref directly under an explicit `--track` and under
+/// every `branch.autoSetupMerge` value that sets tracking up at all except `inherit`,
+/// which copies the START's own upstream (possibly several merge entries) instead
+/// (measured, git 2.51.1). The start resolves the way git's create resolved it.
+async fn direct_tracking_target(
+    repo_path: &str,
+    start: &str,
+    tracked_by: TrackedBy,
+) -> Option<String> {
+    if let TrackedBy::AutoSetupMerge = tracked_by {
+        let mode = run_git_raw(
+            Some(repo_path),
+            &["config", "--get", "branch.autoSetupMerge"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .ok()?;
+        // Exit 1 is unset, git's default `true`. `inherit` is matched as git does,
+        // case-sensitively; the last value wins in both readers.
+        let direct = match mode.code {
+            0 => mode.stdout_lossy().trim() != "inherit",
+            1 => true,
+            _ => false,
+        };
+        if !direct {
+            return None;
+        }
+    }
+    let resolved = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--symbolic-full-name",
+            start,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let full = resolved.stdout_lossy().trim().to_string();
+    (resolved.code == 0 && (full.starts_with("refs/remotes/") || full.starts_with("refs/heads/")))
+        .then_some(full)
 }
 
 /// Deletes a branch on a remote via `git push <remote> --delete`, authenticating
@@ -712,17 +773,16 @@ pub(crate) async fn git_checkout_remote_branch_core(
     // A live update means a LOCAL `name` already exists and is held, so this switch
     // collides on it rather than creating anything.
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
-    let (repo, local) = (repo_path.as_str(), name.as_str());
-    // Fully qualified for the repair, so a local branch literally named
-    // `<remote>/<name>` can't be tracked instead of the remote one the row promised.
-    let upstream = format!("refs/remotes/{remote}/{name}");
+    let start = format!("{remote}/{name}");
+    let (repo, local, start_s) = (repo_path.as_str(), name.as_str(), start.as_str());
     run_git_mutating_config_write(
         state,
         repo,
-        &["switch", "--track", &format!("{remote}/{name}")],
+        &["switch", "--track", start_s],
         DEFAULT_TIMEOUT,
         |out, held| async move {
-            finish_tracking_setup(held, repo, out, local, &upstream, true).await
+            let by = TrackedBy::ExplicitTrack;
+            finish_tracking_setup(held, repo, out, local, start_s, by, true).await
         },
     )
     .await?;
@@ -807,7 +867,8 @@ pub(crate) async fn git_create_branch_core(
         &arg_refs,
         DEFAULT_TIMEOUT,
         |out, held| async move {
-            finish_tracking_setup(held, repo, out, local, start, checkout).await
+            let by = TrackedBy::AutoSetupMerge;
+            finish_tracking_setup(held, repo, out, local, start, by, checkout).await
         },
     )
     .await?;
@@ -4265,6 +4326,122 @@ mod tests {
         std::fs::remove_file(&lock).unwrap();
         assert_cleanly_on(&repo, &repo_s, remote_branch).await;
         assert_eq!(upstream_of(&repo_s, remote_branch).await, None);
+    }
+
+    /// `branch.<name>.remote` and `.merge`, or `None` for each that is unset.
+    async fn tracking_of(repo: &str, branch: &str) -> (Option<String>, Option<String>) {
+        let get = |key: &'static str| {
+            let key = format!("branch.{branch}.{key}");
+            async move {
+                let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap();
+                (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
+            }
+        };
+        (get("remote").await, get("merge").await)
+    }
+
+    /// Every `branch.autoSetupMerge` mode × start kind in which git attempts tracking
+    /// (measured, git 2.51.1). Repaired exactly where git's own choice is the start ref
+    /// itself, to what an uncontended twin create writes; `inherit` copies the START's
+    /// upstream instead, which the repair can't pin, so it surfaces git's error with no
+    /// upstream rather than a wrong one, and the switch leg still runs.
+    #[tokio::test]
+    async fn a_tracked_create_repairs_only_what_git_itself_would_write() {
+        let (_base, repo, repo_s) =
+            repo_with_branch_settings("cfg-lock-modes", "local-start", "same-name").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+        let state = AppState::default();
+        // (mode, start, new branch, checkout, repaired). `simple` tracks only a
+        // same-named remote branch, so its row creates `same-name` itself.
+        let cases = [
+            (None, "origin/same-name", "mode-default", false, true),
+            (
+                Some("always"),
+                "local-start",
+                "mode-always-local",
+                false,
+                true,
+            ),
+            (Some("simple"), "origin/same-name", "same-name", false, true),
+            (
+                Some("inherit"),
+                "local-start",
+                "mode-inherit-local",
+                false,
+                false,
+            ),
+            (
+                Some("inherit"),
+                "local-start",
+                "mode-inherit-co",
+                true,
+                false,
+            ),
+        ];
+        for (mode, start, name, checkout, repaired) in cases {
+            run(&repo_s, &["switch", "-q", main.trim()]).await;
+            let _ = run_git_raw(
+                Some(&repo_s),
+                &["config", "--unset-all", "branch.autoSetupMerge"],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+            if let Some(mode) = mode {
+                run(&repo_s, &["config", "branch.autoSetupMerge", mode]).await;
+            }
+            // What git itself writes in this mode, uncontended. `simple` gets the
+            // measured literal: its twin can't share the name tracking requires.
+            let want = if mode == Some("simple") {
+                (Some("origin".into()), Some("refs/heads/same-name".into()))
+            } else {
+                let twin = format!("{name}-twin");
+                run(&repo_s, &["branch", &twin, start]).await;
+                tracking_of(&repo_s, &twin).await
+            };
+            assert!(want.0.is_some(), "{mode:?} × {start}: git tracks here");
+
+            let lock = hold_config_lock(&repo);
+            let (hook, _) = release_config_lock_before_attempt(lock.clone(), 2);
+            let created = CONFIG_WRITE_ATTEMPT_HOOK
+                .scope(
+                    hook,
+                    git_create_branch_core(
+                        &state,
+                        repo_s.clone(),
+                        name.into(),
+                        checkout,
+                        Some(start.into()),
+                        false,
+                    ),
+                )
+                .await;
+            let _ = std::fs::remove_file(&lock);
+            let got = tracking_of(&repo_s, name).await;
+            if repaired {
+                created.unwrap_or_else(|e| panic!("{mode:?} × {start}: {e}"));
+                assert_eq!(got, want, "{mode:?} × {start}: what git would have written");
+            } else {
+                let err = created.expect_err("an unpinnable upstream surfaces git's error");
+                let AppError::Git { stderr, .. } = &err else {
+                    panic!("expected git's error, got {err:?}")
+                };
+                assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
+                assert_eq!(got, (None, None), "{mode:?} × {start}: no guessed upstream");
+                assert_ne!(want.1.as_deref(), Some("refs/heads/local-start"));
+            }
+            assert!(branch_exists(&repo_s, name).await);
+            if checkout {
+                assert_eq!(
+                    run(&repo_s, &["symbolic-ref", "--short", "HEAD"])
+                        .await
+                        .trim(),
+                    name
+                );
+                assert_eq!(porcelain(&repo_s).await, "", "the switch leg still ran");
+            }
+        }
     }
 
     /// A create from a tracked start point that loses the config lock ends where an
