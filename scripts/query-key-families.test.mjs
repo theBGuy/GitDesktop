@@ -1,4 +1,4 @@
-// Guard: the forge LIST query-key families are declared once, as builders on
+// Guard: the query-key families in FAMILIES below are declared once, as builders on
 // `repoKeys` in src/lib/git/queries/core.ts. A hand-spelled array literal elsewhere is
 // what this refuses — a typo in an invalidation's spelling throws no error, it just
 // leaves the surface stale, which is invisible until a user notices stale rows.
@@ -23,6 +23,7 @@ const FAMILIES = [
   { name: "pr-review-state", builder: "repoKeys.prReviewState" },
   { name: "issue-list", builder: "repoKeys.issueList" },
   { name: "findings", builder: "repoKeys.findings" },
+  { name: "reactions", builder: "repoKeys.reactions" },
 ];
 
 // Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
@@ -96,6 +97,15 @@ test("every hand-spelled shape is matched (negative control)", () => {
     ),
     "a hand-spelled findings category key went unmatched",
   );
+  const reactions = FAMILIES.find((f) => f.builder === "repoKeys.reactions");
+  assert.ok(reactions, "FAMILIES no longer guards the reactions family");
+  assert.ok(
+    spellsFamily(
+      '  reactionsKey: ["repo", repoPath, "issue", lens, number, "reactions"],',
+      reactions.name,
+    ),
+    "a hand-spelled entity reactions key went unmatched",
+  );
   assert.equal(
     spellsFamily('[...repoKeys.all(repo, "pr-ci"', "pr-ci"),
     false,
@@ -113,7 +123,7 @@ test("core.ts still declares every family string", () => {
   }
 });
 
-test("no file outside core.ts spells a list family", () => {
+test("no file outside core.ts spells a family", () => {
   const offenders = [];
   let scanned = 0;
   for (const file of sourceFiles(SRC)) {

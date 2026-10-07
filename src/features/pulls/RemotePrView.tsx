@@ -120,6 +120,7 @@ import {
   pendingWriteOfKind,
   prDiffOptions,
   prUpdateBranchKeys,
+  repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useAbortRemotePrResolve,
@@ -2459,7 +2460,7 @@ export function RemotePrView({
     if (detailsStale) return;
     try {
       await toggleReactionMutation.mutateAsync({
-        reactionsKey: ["repo", repoPath, "pr", lens, number, "reactions"],
+        reactionsKey: repoKeys.reactions(repoPath, ["pr", lens, number]),
         number,
         bodyId: details.data?.id ?? "",
         subjectId,

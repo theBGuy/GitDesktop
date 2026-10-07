@@ -1,5 +1,11 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import {
+  notifyManager,
+  queryOptions,
+  replaceEqualDeep,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import * as api from "../api";
 import type { DiscussionDetails } from "../types";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
@@ -121,18 +127,25 @@ export function useDeleteDiscussionComment(repo: string) {
   );
 }
 
-/** Optimistic upvote toggle on a discussion or its comments, with rollback. */
-export function useToggleDiscussionUpvote(repo: string, number: number) {
-  // Pinned on the discussion: its host stays mounted across a discussion switch, and
-  // a changed key detaches the pending toggle with its options frozen, so a late
-  // settle rolls back and refetches the discussion it was fired on.
+const UPVOTE_KEY = "toggle-discussion-upvote";
+
+// One type for the mutation's generic AND the pending-scan's cast: a drifted
+// `number` then fails to compile instead of silently matching nothing.
+type DiscussionUpvoteVars = { number: number; subjectId: string; up: boolean };
+
+/** Optimistic upvote toggle on a discussion or its comments, with rollback. Per call,
+ *  `number` is the containing discussion and `subjectId` its body or a comment. */
+export function useToggleDiscussionUpvote(repo: string) {
+  // The discussion rides the variables, never the hook: its host stays mounted across
+  // a discussion switch, and a pending or paused toggle takes each render's options,
+  // so a closed-over one would send its settle refetch to the wrong discussion.
   return useOptimisticCacheMutation<
-    { subjectId: string; up: boolean },
+    DiscussionUpvoteVars,
     void,
     DiscussionDetails
   >(
     (args) => api.ghDiscussionSetUpvote(repo, args.subjectId, args.up),
-    () => discussionDetailsOptions(repo, number).queryKey,
+    (args) => discussionDetailsOptions(repo, args.number).queryKey,
     (d, args) => {
       // Never creates the entry: the helper rolls back only a defined snapshot.
       if (d === undefined) return undefined;
@@ -156,17 +169,56 @@ export function useToggleDiscussionUpvote(repo: string, number: number) {
             ),
           };
     },
-    (queryClient) => {
+    (queryClient, args) => {
       // The discussion list shows upvote counts too.
       void queryClient.invalidateQueries({
         queryKey: ["repo", repo, "discussion-list"],
       });
       return queryClient.invalidateQueries({
-        queryKey: discussionDetailsOptions(repo, number).queryKey,
+        queryKey: discussionDetailsOptions(repo, args.number).queryKey,
       });
     },
-    ["toggle-discussion-upvote", repo, number],
+    [UPVOTE_KEY, repo],
   );
+}
+
+const NO_PENDING_UPVOTE = { pending: false, paused: false };
+
+/**
+ * Whether an upvote toggle on discussion `number` is in flight, and whether any such
+ * toggle is parked offline. Read from the mutation cache, never the observer, which
+ * tracks only its latest call (a toggle fired on another discussion would release
+ * this one's hold), nor `useMutationState`, for the `<Activity>` blind spot
+ * projects.ts records.
+ */
+export function usePendingDiscussionUpvote(
+  repo: string,
+  number: number,
+): { pending: boolean; paused: boolean } {
+  const cache = useQueryClient().getMutationCache();
+  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
+  // keeps one identity, as `useSyncExternalStore` requires.
+  const snapshot = useRef(NO_PENDING_UPVOTE);
+  const getSnapshot = useCallback(() => {
+    const matching = cache
+      .findAll({ mutationKey: [UPVOTE_KEY, repo], status: "pending" })
+      .filter(
+        (m) =>
+          (m.state.variables as DiscussionUpvoteVars | undefined)?.number ===
+          number,
+      );
+    snapshot.current = replaceEqualDeep(snapshot.current, {
+      pending: matching.length > 0,
+      paused: matching.some((m) => m.state.isPaused),
+    });
+    return snapshot.current;
+  }, [cache, repo, number]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 export function useLockDiscussion(repo: string) {
