@@ -2263,8 +2263,7 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "a\nwip\n").unwrap();
         let head = git(&repo_s, &["rev-parse", "HEAD"]).await;
 
-        let _serialized = promote::test_root_lock();
-        let _root = TestRootOverride::set(&dir.path().join("markers"));
+        let _root = TestRootOverride::set(&repo_s, &dir.path().join("markers"));
         let token = promote::begin(&repo_s, "feature")
             .await
             .expect("the gate is free")

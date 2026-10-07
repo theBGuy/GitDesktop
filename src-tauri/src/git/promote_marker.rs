@@ -46,45 +46,50 @@ const BEGIN_POLL: Duration = Duration::from_millis(50);
 static HELD: Mutex<Option<HashMap<u64, HeldPromote>>> = Mutex::new(None);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-/// In-process test override for [`root_for`], mirroring `update_marker`'s seam: under
-/// `cfg(test)` an installed override is the ONLY resolution, so a test that installed
-/// none fails open instead of touching the developer's real app data.
+/// In-process test overrides for [`root_for`], keyed by the exact repo path a test
+/// drives: under `cfg(test)` an override is the ONLY resolution, so a test that
+/// installed none fails open instead of touching the developer's real app data, and a
+/// concurrently running test on another repo never sees this one's live marker.
 #[cfg(test)]
-static TEST_ROOT_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static TEST_ROOTS: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 
 #[cfg(test)]
-static TEST_ROOT_LOCK: Mutex<()> = Mutex::new(());
-
-/// Serializes the tests that install the process-wide root override. Test-only.
-#[cfg(test)]
-pub(crate) fn test_root_lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_ROOT_LOCK
+fn test_roots() -> std::sync::MutexGuard<'static, Option<HashMap<String, PathBuf>>> {
+    TEST_ROOTS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Points [`root_for`] at a directory while held, restoring the prior override on
-/// drop. Test-only.
+/// Points [`root_for`] at `dir` for `repo_path` alone while held, restoring that key's
+/// prior override on drop. Test-only.
 #[cfg(test)]
-pub(crate) struct TestRootOverride(Option<PathBuf>);
+pub(crate) struct TestRootOverride {
+    repo_path: String,
+    prior: Option<PathBuf>,
+}
 
 #[cfg(test)]
 impl TestRootOverride {
-    pub(crate) fn set(dir: &Path) -> Self {
-        let mut slot = TEST_ROOT_DIR
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Self(std::mem::replace(&mut *slot, Some(dir.to_path_buf())))
+    pub(crate) fn set(repo_path: &str, dir: &Path) -> Self {
+        let prior = test_roots()
+            .get_or_insert_with(HashMap::new)
+            .insert(repo_path.to_string(), dir.to_path_buf());
+        Self {
+            repo_path: repo_path.to_string(),
+            prior,
+        }
     }
 }
 
 #[cfg(test)]
 impl Drop for TestRootOverride {
     fn drop(&mut self) {
-        let mut slot = TEST_ROOT_DIR
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *slot = self.0.take();
+        let mut roots = test_roots();
+        let map = roots.get_or_insert_with(HashMap::new);
+        match self.prior.take() {
+            Some(prior) => map.insert(self.repo_path.clone(), prior),
+            None => map.remove(&self.repo_path),
+        };
     }
 }
 
@@ -94,11 +99,9 @@ impl Drop for TestRootOverride {
 async fn root_for(repo_path: &str) -> AppResult<PathBuf> {
     #[cfg(test)]
     {
-        let _ = repo_path;
-        TEST_ROOT_DIR
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        test_roots()
+            .as_ref()
+            .and_then(|map| map.get(repo_path).cloned())
             .ok_or_else(|| {
                 AppError::Command("no promote-marker root override is installed".to_string())
             })
@@ -147,7 +150,11 @@ struct HeldPromote {
     _gate: std::fs::File,
 }
 
-/// Writes the manifest readers age-gate on.
+/// Publishes the manifest readers age-gate on, ATOMICALLY: a reader racing a plain
+/// truncating write would parse a partial file, fail open, and let an MCP tool run
+/// inside the live window. Written to a sibling temp file, then renamed over the
+/// manifest, which `std::fs::rename` replaces in one step (`rename(2)` on Unix,
+/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows).
 fn write_manifest(root: &Path, branch: &str, started_at_ms: u64) -> std::io::Result<()> {
     let manifest = serde_json::to_vec(&PromoteManifest {
         branch: branch.to_string(),
@@ -155,7 +162,51 @@ fn write_manifest(root: &Path, branch: &str, started_at_ms: u64) -> std::io::Res
         started_at_ms,
     })
     .map_err(std::io::Error::other)?;
-    std::fs::write(root.join(MANIFEST_FILE), manifest)
+    sweep_stale_manifest_temps(root);
+    // Unique per process and per write, so two writers never share a temp file.
+    let tmp = root.join(format!(
+        "{MANIFEST_FILE}.{}-{}{MANIFEST_TMP_SUFFIX}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::SeqCst)
+    ));
+    let published = std::fs::write(&tmp, manifest)
+        .and_then(|()| std::fs::rename(&tmp, root.join(MANIFEST_FILE)));
+    if published.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    published
+}
+
+const MANIFEST_TMP_SUFFIX: &str = ".tmp";
+static NEXT_TMP: AtomicU64 = AtomicU64::new(1);
+
+/// How old a manifest temp file must be before a writer deletes it. Only a write that
+/// crashed between its write and its rename leaves one; the age keeps a sweep from
+/// deleting another process's temp mid-publish.
+const MANIFEST_TMP_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// Best-effort removal of temp files a crashed publish left behind.
+fn sweep_stale_manifest_temps(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with(MANIFEST_FILE) && name.ends_with(MANIFEST_TMP_SUFFIX)) {
+            continue;
+        }
+        let aged = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= MANIFEST_TMP_MIN_AGE);
+        if aged {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The refusal a promote raises when the gate stays held past [`BEGIN_WAIT`].
@@ -520,6 +571,52 @@ mod tests {
         end(token);
     }
 
+    /// Every publish leaves exactly a parseable manifest and no temp sibling, and a
+    /// crashed publish's aged temp is swept while a fresh one (another writer, mid
+    /// publish) is left alone. A reader landing mid-write is not deterministically
+    /// reachable from a test; the rename construction is what rules it out.
+    #[tokio::test]
+    async fn the_manifest_is_published_whole_and_leaves_no_temps() {
+        let (_guard, root) = temp_root("publish");
+        std::fs::create_dir_all(&root).unwrap();
+        let stale = root.join(format!("{MANIFEST_FILE}.1-1{MANIFEST_TMP_SUFFIX}"));
+        let fresh = root.join(format!("{MANIFEST_FILE}.2-2{MANIFEST_TMP_SUFFIX}"));
+        for tmp in [&stale, &fresh] {
+            std::fs::write(tmp, b"{\"bra").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - MANIFEST_TMP_MIN_AGE - Duration::from_secs(1))
+            .unwrap();
+
+        let token = begin_in(&root, "feature", Duration::ZERO)
+            .await
+            .unwrap()
+            .expect("marked");
+        for _ in 0..20 {
+            touch(token);
+            let bytes = std::fs::read(root.join(MANIFEST_FILE)).unwrap();
+            let manifest: PromoteManifest =
+                serde_json::from_slice(&bytes).expect("the manifest always parses");
+            assert_eq!(manifest.branch, "feature");
+        }
+        let mut temps: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.ends_with(MANIFEST_TMP_SUFFIX))
+            .collect();
+        temps.sort();
+        assert_eq!(
+            temps,
+            vec![fresh.file_name().unwrap().to_str().unwrap().to_string()],
+            "the aged temp is swept, the fresh one spared, and no publish leaves its own"
+        );
+        end(token);
+    }
+
     /// Unreadable manifests never decide a refusal, and a fresh hold under the age gate
     /// still does.
     #[tokio::test]
@@ -549,14 +646,19 @@ mod tests {
     /// The IPC pair carries the token as a string and tolerates garbage on the way back.
     #[tokio::test]
     async fn the_ipc_pair_round_trips_a_string_token() {
-        let _lock = test_root_lock();
         let (_guard, root) = temp_root("ipc");
-        let _root = TestRootOverride::set(&root);
+        let _root = TestRootOverride::set("C:/repo", &root);
         let token = git_promote_begin("C:/repo".into(), "feature".into())
             .await
             .unwrap()
             .expect("marked");
         assert!(hold_unless_promoting("C:/repo").await.is_err());
+        // Overrides are per repository, so a concurrent test on another repo never
+        // meets this live marker.
+        assert!(hold_unless_promoting("C:/other-repo")
+            .await
+            .expect("no override for this repo fails open")
+            .is_none());
         git_promote_end("not-a-token".into()).await.unwrap();
         assert!(
             hold_unless_promoting("C:/repo").await.is_err(),
