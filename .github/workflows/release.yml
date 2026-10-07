@@ -98,6 +98,10 @@ jobs:
             libssl-dev \
             file
 
+      - name: Pin the bundler's AppImage tools (hash-verified)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/pin-linuxdeploy
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 

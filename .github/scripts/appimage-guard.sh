@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fails the build when the AppImage bundles libwayland-client (a bundled copy
-# shadows the host's and breaks EGL on Mesa 25+ systems), or when a startup
-# script exports a $APPDIR-derived variable the app doesn't strip from spawned
-# children. Run from the repo root — the bundle path is relative to it.
+# Run from the repo root. Reject bundled libwayland-client and startup exports
+# of $APPDIR-derived variables the app does not strip from spawned children.
+# When the pin action exports them, require that the bundler ran the hash-pinned
+# linuxdeploy and bundled the pinned AppRun; CI requires both pin exports.
 set -euo pipefail
 
 appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)
@@ -22,6 +22,52 @@ if [ -n "$found" ]; then
   exit 1
 fi
 echo "OK: $(basename "$appimage") does not bundle libwayland-client"
+# A CLI bump that renames a cached tool, or a moved tool directory, silently
+# bypasses the seed. The pins must match the executed tool and bundled launcher.
+if [ -n "${GD_LINUXDEPLOY_PIN:-}" ]; then
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+  linuxdeploy_files=()
+  for tool in "$cache_dir"/linuxdeploy-*.AppImage; do
+    [ -f "$tool" ] || continue
+    case "${tool##*/}" in linuxdeploy-plugin-*) continue ;; esac
+    linuxdeploy_files+=("${tool##*/}")
+  done
+  if [ "${#linuxdeploy_files[@]}" -ne 1 ] || [ "${linuxdeploy_files[0]}" != "$GD_LINUXDEPLOY_PIN" ]; then
+    echo "FAIL: the bundler used a linuxdeploy other than the pinned $GD_LINUXDEPLOY_PIN:"
+    if [ "${#linuxdeploy_files[@]}" -eq 0 ]; then
+      echo "none"
+    else
+      printf '%s\n' "${linuxdeploy_files[@]}"
+    fi
+    exit 1
+  fi
+  if ! linuxdeploy_marker=$(od -An -tx1 -j8 -N3 "$cache_dir/$GD_LINUXDEPLOY_PIN" | awk '{$1=$1; print}') \
+    || [ "$linuxdeploy_marker" != "00 00 00" ]; then
+    echo "FAIL: the bundler did not run the pinned $GD_LINUXDEPLOY_PIN"
+    exit 1
+  fi
+  echo "OK: the bundler ran the pinned $GD_LINUXDEPLOY_PIN"
+elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "FAIL: the pin-linuxdeploy action did not export GD_LINUXDEPLOY_PIN"
+  exit 1
+fi
+if [ -n "${GD_APPRUN_SHA256:-}" ]; then
+  launcher="$workdir/squashfs-root/AppRun.wrapped"
+  if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+    launcher="$workdir/squashfs-root/AppRun"
+  fi
+  launcher_hash=$(sha256sum "$launcher" 2>/dev/null) || launcher_hash=none
+  launcher_hash="${launcher_hash%% *}"
+  if [ "$launcher_hash" != "$GD_APPRUN_SHA256" ]; then
+    echo "FAIL: the bundled AppRun launcher is not the pinned build"
+    echo "$launcher_hash"
+    exit 1
+  fi
+  echo "OK: the bundled AppRun launcher is the pinned build"
+elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "FAIL: the pin-linuxdeploy action did not export GD_APPRUN_SHA256"
+  exit 1
+fi
 
 # Every variable a startup script points into the bundle must also be stripped
 # from the environment of the tools we spawn. Twin of `APPDIR_PATHLIST_VARS` +
