@@ -18,7 +18,19 @@
  * src/lib/hotkeys/hotkeys.tsx). When the full build lands we bump the version and
  * notify; subscribed Markdown components re-render, marked re-parses, and fences
  * that rendered plain now highlight.
+ *
+ * The singleton's `typescript` is swapped for the JSX-less grammar (see
+ * hljs-ts-no-jsx.ts) here at module scope and again once the full build lands,
+ * since that build re-registers the stock grammar. The `lib/common` import is
+ * the one markdown.tsx already makes statically, not the full build.
+ * BlameDialog, CodeTodoDetailView and HighlightedCode share the same core
+ * singleton and get the swap only because this module sits in the startup
+ * import graph ahead of them — keep it statically imported.
  */
+import hljs from "highlight.js/lib/common";
+import { ensureTsNoJsx } from "@/features/diff/hljs-ts-no-jsx";
+
+ensureTsNoJsx(hljs);
 
 const subscribers = new Set<() => void>();
 
@@ -63,6 +75,7 @@ export function upgradeToFullHljs(): void {
       // non-common grammar (the lazy chunk builds empty and dockerfile &c. never
       // highlight). Reading the default export keeps the whole build live.
       registeredCount = mod.default.listLanguages().length;
+      ensureTsNoJsx(mod.default);
       fullLoaded = true;
       notify();
     })
