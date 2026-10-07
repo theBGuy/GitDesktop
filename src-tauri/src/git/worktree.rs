@@ -13,8 +13,8 @@ use crate::git::branches::{
     UPSTREAM_WRITE_FAILED,
 };
 use crate::git::runner::{
-    acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
-    run_git_raw, run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock,
+    acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, is_config_lock_contention,
+    run_git, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock,
     DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
@@ -331,8 +331,9 @@ pub(crate) async fn git_worktree_add_user_core(
 /// config-write mutex. If its child `git branch` loses the config lock (branch created,
 /// no upstream, no worktree), it finishes as `finish_tracking_setup` does: the worktree
 /// leg runs first, whatever the upstream's fate, then only an upstream git itself would
-/// have pinned is restored, under the mutex as a leaf (`inherit` is never guessed); one
-/// that can't be pinned or is lost again leaves git's error, with the worktree added.
+/// have pinned is restored, under the mutex as a leaf (`inherit` is never guessed). One
+/// that can't be pinned leaves git's error, and one whose repair fails says what landed;
+/// either way the worktree was added.
 async fn add_worktree_on_new_branch(
     state: &AppState,
     repo_path: &str,
@@ -354,20 +355,21 @@ async fn add_worktree_on_new_branch(
     run_git_raw(Some(repo_path), &args, WORKTREE_OP_TIMEOUT)
         .await?
         .exit_verdict()?;
-    let restored = match upstream {
-        Some(upstream) => {
-            with_config_write_lock(repo_path, |held| async move {
-                restore_upstream(&held, repo_path, branch, &upstream).await
-            })
-            .await
-        }
-        None => false,
+    let Some(upstream) = upstream else {
+        return out.exit_verdict().map(drop);
     };
+    let restored = with_config_write_lock(repo_path, |held| async move {
+        restore_upstream(&held, repo_path, branch, &upstream).await
+    })
+    .await;
     if restored {
-        Ok(())
-    } else {
-        out.exit_verdict().map(drop)
+        return Ok(());
     }
+    // Re-adding fails on the existing path and branch; setting the upstream finishes.
+    Err(config_lock_busy(&format!(
+        "the worktree and branch {branch} were created without upstream tracking — set \
+         the upstream on {branch} to finish."
+    )))
 }
 
 /// Renames (moves) a user worktree from `from_path` to `to_path`
@@ -2107,11 +2109,11 @@ prunable gitdir file points to non-existent location
         }
     }
 
-    /// A lock held through the upstream repair's retry still adds the worktree, and
-    /// git's upstream error is what the caller hears.
+    /// A lock held through the upstream repair's retry still adds the worktree, and the
+    /// caller hears that it landed without tracking, never git's lock-file text.
     #[tokio::test]
     async fn a_new_branch_worktree_whose_upstream_repair_also_loses_is_still_added() {
-        use crate::git::branches::UPSTREAM_WRITE_FAILED;
+        use crate::git::runner::config_lock_busy;
         let (base, repo_s) = repo_with_tracking_refs("wt-cfg-held").await;
         let wt = base.path().join("wt-held");
         let wt_s = wt.to_string_lossy().into_owned();
@@ -2128,10 +2130,19 @@ prunable gitdir file points to non-existent location
         .await
         .expect_err("the lost upstream is reported");
         std::fs::remove_file(&lock).unwrap();
-        let AppError::Git { stderr, .. } = &err else {
-            panic!("expected git's error, got {err:?}")
-        };
-        assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
+        assert!(matches!(err, AppError::Command(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            config_lock_busy(
+                "the worktree and branch wt-held were created without upstream tracking — \
+                 set the upstream on wt-held to finish."
+            )
+            .to_string()
+        );
+        assert!(
+            !err.to_string().contains("could not lock config file"),
+            "{err}"
+        );
         assert!(wt.join("a.txt").exists(), "the worktree was added");
         assert_eq!(tracking_of(&repo_s, "wt-held").await, (None, None));
     }

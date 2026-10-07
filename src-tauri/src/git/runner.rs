@@ -650,13 +650,37 @@ pub async fn run_git_mutating_input(
 /// `.git/config.lock` itself, and the writers it collides with hold it for milliseconds.
 pub(crate) const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(250);
 
-/// Whether a failed git run lost `.git/config.lock` to another writer — any config
-/// set, `branch -m`/`-D` (both rewrite `branch.*` sections), or a tracking checkout,
-/// in this process or another. Matched on git's own text, which the runner pins to
-/// the C locale. A `Permission denied` lock failure is excluded: it is no writer's
-/// transient hold, so a retry is futile and "try again" would mislead.
+/// Whether a failed git run lost `.git/config.lock` to another writer. Read per line in
+/// git's C-locale text: a lock line counts when bare or ending `: File exists`; bare lines
+/// must count, as section rename/remove print no reason (measured, git 2.51.1), so a
+/// read-only disk there still does. Any other reason on any lock line means no retry
+/// helps. Colon-space delimits the reason, so a drive-letter path never reads as one.
 pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
-    stderr.contains("could not lock config file") && !stderr.contains(": Permission denied")
+    let mut lost = false;
+    for line in stderr.lines() {
+        let Some((_, rest)) = line.split_once("could not lock config file") else {
+            continue;
+        };
+        if let Some((_, reason)) = rest.rsplit_once(": ") {
+            if reason.trim_end() != "File exists" {
+                return false;
+            }
+        }
+        lost = true;
+    }
+    lost
+}
+
+/// The lead every [`config_lock_busy`] refusal opens with, so a wrapping caller can
+/// recognize one and re-tail it.
+pub(crate) const CONFIG_LOCK_BUSY_LEAD: &str =
+    "Another Git process was saving this repository's settings, so ";
+
+/// The refusal once a writer's repair failed after a lost config lock: `tail` says what
+/// landed and the next step. The text never carries git's lock-file path, and line 1
+/// is the toast title.
+pub(crate) fn config_lock_busy(tail: &str) -> AppError {
+    AppError::Command(format!("{CONFIG_LOCK_BUSY_LEAD}{tail}"))
 }
 
 /// Runs `attempt` once more after [`CONFIG_LOCK_RETRY_DELAY`] when its first run lost
@@ -1002,6 +1026,37 @@ mod lock_tests {
             "fatal: Unable to create 'C:/r/.git/index.lock': File exists.",
             "error: key does not contain a section: gitdesktopArchived",
             "fatal: not a git repository (or any of the parent directories): .git",
+        ] {
+            assert!(!is_config_lock_contention(other), "{other:?}");
+        }
+    }
+
+    /// The per-line reason rule: git's bare form (no reason, as the section rename and
+    /// remove paths print it) and `File exists` count, a drive-letter path never reads
+    /// as a reason, and any other reason is no transient hold.
+    #[test]
+    fn config_lock_contention_reads_only_the_lines_reason() {
+        for held in [
+            "error: could not lock config file .git/config\nwarning: update of config-file failed",
+            "error: could not lock config file .git/config",
+            "error: could not lock config file .git/config\n\
+             error: Could not remove config section 'remote.origin'",
+            "error: could not lock config file .git/config: File exists",
+            "error: could not lock config file C:/Users/me/repo/.git/config: File exists\r\n",
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config: File exists",
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config",
+        ] {
+            assert!(is_config_lock_contention(held), "{held:?}");
+        }
+        for other in [
+            "error: could not lock config file .git/config\n\
+             error: could not lock config file .git/config: Permission denied",
+            "error: could not lock config file C:/r/.git/config: Permission denied",
+            "error: could not lock config file .git/config: Read-only file system",
+            "error: could not lock config file .git/config: No space left on device",
+            "fatal: could not unset 'remote.pushDefault'",
         ] {
             assert!(!is_config_lock_contention(other), "{other:?}");
         }

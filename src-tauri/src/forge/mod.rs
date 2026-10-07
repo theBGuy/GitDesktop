@@ -4015,7 +4015,16 @@ pub async fn forge_repo_delete(
             &e,
             AppError::Git { stderr, .. } if stderr.contains("No such remote")
         );
+        // origin is gone here; `e` carries the remote.pushDefault leftover and its fix.
+        if crate::git::remote::is_push_default_left(&e) {
+            crate::git::remote::invalidate_remote_url_cache(&repo_path, "origin");
+            return Err(AppError::Command(format!(
+                "The repository was deleted on the host and its local 'origin' remote \
+                 removed. ({e})"
+            )));
+        }
         if !already_absent {
+            let e = crate::git::remote::with_busy_tail(e, "it wasn't fully removed.");
             return Err(AppError::Command(format!(
                 "The repository was deleted on the host, but the local 'origin' \
                  remote couldn't be removed — remove it manually. ({e})"

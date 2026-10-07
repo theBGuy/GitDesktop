@@ -6640,9 +6640,17 @@ pub async fn publish_repo(
         )
     })?;
 
-    if let Err(e) =
-        crate::git::remote::add_remote(state, repo_path, "origin", &project.http_url_to_repo).await
+    // The URL is API JSON, so it takes the validated add like any user-typed one.
+    if let Err(e) = crate::git::remote::git_remote_add_core(
+        state,
+        repo_path.to_string(),
+        "origin".into(),
+        project.http_url_to_repo.clone(),
+    )
+    .await
     {
+        // Line 1 already names the manual next step; a retry would re-create the project.
+        let e = crate::git::remote::with_busy_tail(e, "the 'origin' remote wasn't added.");
         return Err(gl_created_project_error(&created_hint, e));
     }
 
@@ -10924,8 +10932,9 @@ mod tests {
             error.contains("Renamed on GitLab, but the local 'origin' remote couldn't be updated"),
             "{error}"
         );
+        // The predicate reads raw stderr lines; here git's line sits inside the framing.
         assert!(
-            crate::git::runner::is_config_lock_contention(&error),
+            error.contains("(error: could not lock config file .git/config: File exists)"),
             "{error}"
         );
         assert_eq!(
