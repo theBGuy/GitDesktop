@@ -1,16 +1,8 @@
-// Pins the shared section keys used by the AI-ignore privacy boundary and PR
-// file views, together with section preservation and per-file hunk counts.
-// The static .ts import is legal under Node >= 23.6 type stripping: diff-split.ts
-// has only a relative import type, which is erased without resolving its target.
-//
-// INSTALLLESS-CI CONTRACT: .github/workflows/quality.yml's guards job, step
-// "Guard self-tests", runs node --test "scripts/*.test.mjs" with NO install.
-// Any npm import in this chain causes ERR_MODULE_NOT_FOUND there even when local
-// node_modules masks it. Keep only the two built-ins and static import below;
-// this suite rides that glob, not frontend.yml's node_modules-required roster.
-//
-// Deliberately excludes live PR fetching, UI rendering, AI-ignore glob matching,
-// and budget/truncation behavior; these are deterministic parser fixtures only.
+// Pins the section keys the AI-ignore filter and PR file views share.
+// The import reaches straight into src/ under Node's type stripping in the
+// installless guards job, so diff-split.ts must stay free of runtime and
+// aliased imports — and this dep-free suite never joins frontend.yml's
+// node_modules-required roster.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
