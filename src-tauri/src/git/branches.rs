@@ -664,7 +664,7 @@ pub(crate) async fn git_delete_remote_branch_core(
     // default and can't be deleted. The server refuses anyway, but cryptically;
     // check locally first. Probe with a non-propagating raw run. Read in FULL
     // and stripped of exactly `refs/remotes/`: `--short` disambiguates, so a
-    // tag named `<remote>/<name>` turns the answer into
+    // tag or local branch named `<remote>/<name>` turns the answer into
     // `remotes/<remote>/<name>` (measured, git 2.51.1).
     let head = run_git_raw(
         Some(&repo_path),
@@ -2917,7 +2917,7 @@ mod tests {
         assert!(msg.contains("sync controls"), "{msg}");
     }
 
-    /// The remote's default branch stays undeletable when a tag named
+    /// The remote's default branch stays undeletable when a tag or local branch named
     /// `<remote>/<branch>` makes `symbolic-ref --short` answer `remotes/origin/main`.
     /// Refused before any push, so the bare remote is never contacted.
     #[tokio::test]
