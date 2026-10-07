@@ -659,6 +659,15 @@ pub(crate) fn is_config_lock_contention(stderr: &str) -> bool {
     stderr.contains("could not lock config file") && !stderr.contains(": Permission denied")
 }
 
+/// The refusal once a writer's repair ALSO lost the config lock: `tail` says what
+/// landed and the next step. The text never carries git's lock-file path, and line 1
+/// is the toast title.
+pub(crate) fn config_lock_busy(tail: &str) -> AppError {
+    AppError::Command(format!(
+        "Another Git process was saving this repository's settings, so {tail}"
+    ))
+}
+
 /// Runs `attempt` once more after [`CONFIG_LOCK_RETRY_DELAY`] when its first run lost
 /// the config lock; any other outcome, the retry's included, comes back as-is. Generic
 /// over the run so the policy is testable without timing a real collision.

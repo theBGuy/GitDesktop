@@ -5617,7 +5617,14 @@ pub async fn publish_repo(
 
     // ── Add origin, then push the current branch. ──
     let remote_url = format!("https://bitbucket.org/{workspace}/{created_slug}.git");
-    if let Err(e) = crate::git::remote::add_remote(state, repo_path, "origin", &remote_url).await {
+    if let Err(e) = crate::git::remote::git_remote_add_core(
+        state,
+        repo_path.to_string(),
+        "origin".into(),
+        remote_url,
+    )
+    .await
+    {
         return Err(AppError::Bitbucket(format!("{created_hint}adding the 'origin' remote failed: {e}")));
     }
 

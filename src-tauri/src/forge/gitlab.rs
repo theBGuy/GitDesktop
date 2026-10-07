@@ -6640,8 +6640,14 @@ pub async fn publish_repo(
         )
     })?;
 
-    if let Err(e) =
-        crate::git::remote::add_remote(state, repo_path, "origin", &project.http_url_to_repo).await
+    // The URL is API JSON, so it takes the validated add like any user-typed one.
+    if let Err(e) = crate::git::remote::git_remote_add_core(
+        state,
+        repo_path.to_string(),
+        "origin".into(),
+        project.http_url_to_repo.clone(),
+    )
+    .await
     {
         return Err(gl_created_project_error(&created_hint, e));
     }

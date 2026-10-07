@@ -7,10 +7,10 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
 use crate::git::runner::{
-    acquire_repo_lock, holder_label, is_config_lock_contention, run_git, run_git_config_write_held,
-    run_git_mutating_config_write, run_git_raw, subcommand_of, with_config_write_lock,
-    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT,
-    NETWORK_TIMEOUT,
+    acquire_repo_lock, config_lock_busy, holder_label, is_config_lock_contention, run_git,
+    run_git_config_write_held, run_git_mutating_config_write, run_git_raw, subcommand_of,
+    with_config_write_lock, ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -331,7 +331,9 @@ pub(crate) async fn set_remote_url(
     name: &str,
     url: &str,
 ) -> AppResult<()> {
-    run_remote_config_verb(state, repo_path, &["remote", "set-url", name, url]).await?;
+    run_remote_config_verb(state, repo_path, &["remote", "set-url", name, url])
+        .await
+        .map_err(|e| busy_if_lost_again(e, REMOTE_UNCHANGED))?;
     Ok(())
 }
 
@@ -343,8 +345,24 @@ pub(crate) async fn add_remote(
     name: &str,
     url: &str,
 ) -> AppResult<()> {
-    run_remote_config_verb(state, repo_path, &["remote", "add", name, url]).await?;
+    run_remote_config_verb(state, repo_path, &["remote", "add", name, url])
+        .await
+        .map_err(|e| busy_if_lost_again(e, REMOTE_UNCHANGED))?;
     Ok(())
+}
+
+/// Both verbs lose at their first write, so a second loss changed nothing.
+const REMOTE_UNCHANGED: &str = "the remote wasn't changed — try again.";
+
+/// A `remote` verb whose repair also lost the config lock, as [`config_lock_busy`]'s
+/// refusal; every other failure keeps git's own error, which callers match on.
+fn busy_if_lost_again(e: AppError, tail: &str) -> AppError {
+    match e {
+        AppError::Git { ref stderr, .. } if is_config_lock_contention(stderr) => {
+            config_lock_busy(tail)
+        }
+        e => e,
+    }
 }
 
 /// How `remote remove` reports a lost `.git/config.lock` (measured, git 2.51.1). It
@@ -384,7 +402,8 @@ pub(crate) async fn remove_remote(state: &AppState, repo_path: &str, name: &str)
             Ok(out)
         },
     )
-    .await?;
+    .await
+    .map_err(|e| busy_if_lost_again(e, "the remote wasn't fully removed — try again."))?;
     Ok(())
 }
 
@@ -1182,8 +1201,8 @@ mod tests {
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
     use crate::git::runner::{
-        hold_config_lock, is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT,
-        NETWORK_TIMEOUT,
+        config_lock_busy, hold_config_lock, is_config_lock_contention, run_git, run_git_raw,
+        DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -2664,10 +2683,11 @@ mod tests {
         );
     }
 
-    /// A lock held through every retry surfaces git's error, never a success over
-    /// partial state; each verb changed nothing beyond what git itself did.
+    /// A lock held through every retry fails each verb with what happened and the next
+    /// step, never git's lock-file text nor a success over partial state; each verb
+    /// changed nothing beyond what git itself did, and trying again finishes.
     #[tokio::test]
-    async fn remote_verbs_whose_repair_also_loses_keep_gits_error() {
+    async fn remote_verbs_whose_repair_also_loses_say_try_again() {
         let (_guard, base, _origin_s, url) = seeded_origin("remote-verb-held").await;
         let work = base.join("work");
         let work_s = work.to_string_lossy().into_owned();
@@ -2676,29 +2696,80 @@ mod tests {
         let lock = hold_config_lock(&work);
         let state = AppState::default();
 
-        let lost = |err: AppError| match err {
-            AppError::Git { stderr, .. } if is_config_lock_contention(&stderr) => stderr,
-            other => panic!("expected git's lock error, got {other:?}"),
+        let busy = |err: AppError, tail: &str| {
+            assert!(matches!(err, AppError::Command(_)), "{err:?}");
+            assert_eq!(err.to_string(), config_lock_busy(tail).to_string());
+            assert!(!err.to_string().contains("config.lock"), "{err}");
         };
-        lost(
+        busy(
             git_remote_set_url_core(&state, work_s.clone(), "origin".into(), "../x".into())
                 .await
                 .expect_err("set-url fails"),
+            "the remote wasn't changed — try again.",
         );
-        lost(
+        busy(
             git_remote_add_core(&state, work_s.clone(), "extra".into(), url)
                 .await
                 .expect_err("add fails"),
+            "the remote wasn't changed — try again.",
         );
         assert_eq!(remote_config(&work_s).await, before);
-        let stderr = lost(
+        busy(
             git_remote_remove_core(&state, work_s.clone(), "origin".into())
                 .await
                 .expect_err("remove fails"),
+            "the remote wasn't fully removed — try again.",
         );
-        assert!(stderr.contains(REMOTE_SECTION_LOST), "{stderr}");
         std::fs::remove_file(&lock).unwrap();
+        assert_eq!(
+            run(&work_s, &["for-each-ref", "refs/remotes/origin/"]).await,
+            "",
+            "lost after the refs went"
+        );
         assert!(remote_config(&work_s).await.contains("remote.origin.url "));
+        git_remote_remove_core(&state, work_s.clone(), "origin".into())
+            .await
+            .expect("trying again removes it");
+        assert!(!remote_config(&work_s).await.contains("remote."));
+    }
+
+    /// The publish paths' add: option-shaped and empty URLs are refused before git
+    /// runs, and a stale cached URL for the name never outlives the add.
+    #[tokio::test]
+    async fn remote_add_validates_the_url_and_drops_a_stale_cached_one() {
+        let (_guard, base) = temp_base("remote-add-core");
+        let work_s = base.to_string_lossy().into_owned();
+        init_repo(&work_s, "a.txt").await;
+        let state = AppState::default();
+        for url in ["-x", "", "  "] {
+            let err = git_remote_add_core(&state, work_s.clone(), "origin".into(), url.into())
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "{url:?}: {err:?}"
+            );
+        }
+        assert_eq!(run(&work_s, &["remote"]).await, "", "nothing added");
+
+        cache_put(&work_s, "origin", "https://stale.example/old.git");
+        git_remote_add_core(
+            &state,
+            work_s.clone(),
+            "origin".into(),
+            " https://example.com/new.git ".into(),
+        )
+        .await
+        .expect("the add lands");
+        assert_eq!(
+            cache_get(&work_s, "origin", BIG),
+            None,
+            "the stale entry is gone"
+        );
+        assert_eq!(
+            run(&work_s, &["remote", "get-url", "origin"]).await.trim(),
+            "https://example.com/new.git"
+        );
     }
 
     /// Only a `push -u` with one refspec names an upstream to repair, read past any

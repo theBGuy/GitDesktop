@@ -60,6 +60,10 @@ pub async fn git_local_identity(repo_path: String) -> AppResult<CommitAuthor> {
 /// outside the mutex (another process, or a long command's unprotected first run here)
 /// that takes the lock after `user.name` lands and outlasts `user.email`'s retry still
 /// leaves the new name with the old email, reported as git's error.
+///
+/// Each key is set with `--replace-all`: a plain set exits 5 on a multi-valued key
+/// having written nothing (measured, git 2.51.1), so a duplicated entry would block
+/// every save.
 #[tauri::command]
 pub async fn git_set_local_identity(
     repo_path: String,
@@ -94,7 +98,7 @@ pub async fn git_set_local_identity(
     }
     with_config_write_lock(repo, |held| async move {
         for (key, value) in [("user.name", name), ("user.email", email)] {
-            let args = ["config", "--local", key, value];
+            let args = ["config", "--local", "--replace-all", key, value];
             run_git_config_write_held(&held, repo, &args, DEFAULT_TIMEOUT)
                 .await?
                 .exit_verdict()?;
@@ -122,7 +126,8 @@ pub async fn git_global_identity() -> AppResult<CommitAuthor> {
 }
 
 /// Writes the global git identity — the author for new commits in every
-/// repo without a local override.
+/// repo without a local override. `--replace-all` for the same multi-valued-key
+/// reason as [`git_set_local_identity`].
 #[tauri::command]
 pub async fn git_set_global_identity(name: String, email: String) -> AppResult<()> {
     let name = name.trim();
@@ -134,10 +139,15 @@ pub async fn git_set_global_identity(name: String, email: String) -> AppResult<(
             )));
         }
     }
-    run_git(None, &["config", "--global", "user.name", name], DEFAULT_TIMEOUT).await?;
     run_git(
         None,
-        &["config", "--global", "user.email", email],
+        &["config", "--global", "--replace-all", "user.name", name],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    run_git(
+        None,
+        &["config", "--global", "--replace-all", "user.email", email],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -346,9 +356,9 @@ mod tests {
 
     /// Under the held-lock seam, neither identity path leaves a half-set author: a
     /// first-attempt loss lands both keys through the retry (name: two attempts, then
-    /// email: one), a lock held throughout fails before either key changes, and
-    /// clearing removes every value of a multi-valued key. Clearing what was never set
-    /// is git's exit 5, a success.
+    /// email: one), a lock held throughout fails before either key changes, and setting
+    /// or clearing replaces or removes every value of a multi-valued key. Clearing what
+    /// was never set is git's exit 5, a success.
     #[tokio::test]
     async fn the_identity_override_never_lands_half_set() {
         use crate::git::runner::{
@@ -390,10 +400,11 @@ mod tests {
         hold_config_lock(dir.path());
         // The canary: a set or unset that loses the lock exits 255 with nothing changed.
         for args in [
-            ["config", "--local", "user.name", "Bob"],
-            ["config", "--local", "--unset-all", "user.name"],
+            &["config", "--local", "user.name", "Bob"][..],
+            &["config", "--local", "--replace-all", "user.name", "Bob"],
+            &["config", "--local", "--unset-all", "user.name"],
         ] {
-            let raw = run_git_raw(Some(&repo), &args, DEFAULT_TIMEOUT)
+            let raw = run_git_raw(Some(&repo), args, DEFAULT_TIMEOUT)
                 .await
                 .unwrap();
             assert_eq!(raw.code, 255, "{args:?}: {}", raw.stderr);
@@ -421,6 +432,25 @@ mod tests {
         .unwrap();
         assert_eq!(plain.code, 5, "{}", plain.stderr);
         assert_eq!(local_values(&repo, "user.name").await, ["Ann", "Extra"]);
+        // Why the set is `--replace-all`: a plain set exits 5 there too, writing nothing.
+        let plain = run_git_raw(
+            Some(&repo),
+            &["config", "--local", "user.name", "Bob"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.code, 5, "{}", plain.stderr);
+        assert_eq!(local_values(&repo, "user.name").await, ["Ann", "Extra"]);
+        set("Cara", "cara@t.local")
+            .await
+            .expect("the set replaces every value");
+        assert_eq!(
+            identity().await,
+            (vec!["Cara".to_string()], vec!["cara@t.local".to_string()])
+        );
+
+        run(&repo, &["config", "--local", "--add", "user.name", "Extra"]).await;
         hold_config_lock(dir.path());
         let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
         CONFIG_WRITE_ATTEMPT_HOOK

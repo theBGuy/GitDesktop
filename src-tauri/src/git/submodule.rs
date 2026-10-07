@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    acquire_repo_lock, is_config_lock_contention, run_git, run_git_config_write,
+    acquire_repo_lock, config_lock_busy, is_config_lock_contention, run_git, run_git_config_write,
     run_git_config_write_held, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
     GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
@@ -234,14 +234,7 @@ pub(crate) async fn git_submodule_update_core(
         // with the lock-free index.lock-retrying runner inside.
         let domain = state.working_tree_lock(&repo_path).await;
         let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule update").await?;
-        let out = run_git_raw_index_retry(&repo_path, &args, NETWORK_TIMEOUT).await?;
-        let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
-            run_git_raw_index_retry(&repo_path, &args, NETWORK_TIMEOUT).await?
-        } else {
-            out
-        };
-        out.exit_verdict()?;
-        return Ok(());
+        return update_registering_lost_init(&repo_path, spec.as_deref(), &args).await;
     }
 
     // `--remote --recursive` applies --remote at EVERY depth, silently advancing
@@ -260,13 +253,7 @@ pub(crate) async fn git_submodule_update_core(
     if let Some(spec) = spec.as_deref() {
         args.extend_from_slice(&["--", spec]);
     }
-    let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
-    let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
-        run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?
-    } else {
-        out
-    };
-    out.exit_verdict()?;
+    update_registering_lost_init(&repo_path, spec.as_deref(), &args).await?;
 
     // The settling legs register NESTED submodules in each child's own config, which
     // this repository's config-write mutex doesn't key and its repair doesn't cover.
@@ -300,18 +287,51 @@ pub(crate) async fn git_submodule_update_core(
     Ok(())
 }
 
+/// Runs a `submodule update --init` (`args`) under the caller's working-tree hold, and
+/// re-runs it once [`register_after_lost_init`] lands the registration it lost.
+async fn update_registering_lost_init(
+    repo_path: &str,
+    spec: Option<&str>,
+    args: &[&str],
+) -> AppResult<()> {
+    let out = run_git_raw_index_retry(repo_path, args, NETWORK_TIMEOUT).await?;
+    let out = match register_after_lost_init(repo_path, spec, &out).await? {
+        InitRepair::Untouched => out,
+        InitRepair::Registered => run_git_raw_index_retry(repo_path, args, NETWORK_TIMEOUT).await?,
+        InitRepair::LostAgain => {
+            return Err(config_lock_busy(if spec.is_some() {
+                "the submodule wasn't set up — try again."
+            } else {
+                "the submodules weren't set up — try again."
+            }))
+        }
+    };
+    out.exit_verdict()?;
+    Ok(())
+}
+
+/// What [`register_after_lost_init`] found.
+enum InitRepair {
+    /// No registration was lost here, so the attempt's own result stands.
+    Untouched,
+    /// The lost registration landed, so the update may re-run.
+    Registered,
+    /// The repair lost the config lock too, before anything was cloned.
+    LostAgain,
+}
+
 /// Redoes the registration a `submodule update --init` lost to the config lock, under
-/// the config-write mutex (a leaf below the caller's working-tree hold), and reports
-/// whether it registered anything new. Only then was the loss here, before any clone,
-/// so the caller may re-run the update under the same hold with nothing left to write;
-/// a CHILD-config loss (after clones landed) registers nothing, so git's error stands.
+/// the config-write mutex (a leaf below the caller's working-tree hold). Only a repair
+/// that registers something new proves the loss was here, before any clone, so the
+/// caller may re-run the update under the same hold with nothing left to write; a
+/// CHILD-config loss (after clones landed) registers nothing, so git's error stands.
 async fn register_after_lost_init(
     repo_path: &str,
     spec: Option<&str>,
     out: &GitOutput,
-) -> AppResult<bool> {
+) -> AppResult<InitRepair> {
     if out.code == 0 || !is_config_lock_contention(&out.stderr) {
-        return Ok(false);
+        return Ok(InitRepair::Untouched);
     }
     let mut args = vec!["submodule", "init"];
     if let Some(spec) = spec {
@@ -321,7 +341,16 @@ async fn register_after_lost_init(
         let before = submodule_registrations(repo_path).await?;
         let init = run_git_config_write_held(&held, repo_path, &args, DEFAULT_TIMEOUT).await?;
         let after = submodule_registrations(repo_path).await?;
-        Ok(init.code == 0 && after != before)
+        // Init only registers and the update's run clones, so an init lost to the lock left
+        // the rest un-set-up even when some names registered first.
+        let repair = if init.code != 0 && is_config_lock_contention(&init.stderr) {
+            InitRepair::LostAgain
+        } else if init.code == 0 && after != before {
+            InitRepair::Registered
+        } else {
+            InitRepair::Untouched
+        };
+        Ok(repair)
     })
     .await
 }
@@ -421,9 +450,15 @@ pub(crate) async fn git_submodule_add_core(
         };
         let spec = crate::git::pathspec::literal(&added);
         let args = ["submodule", "init", "--", &spec];
-        run_git_config_write(&repo_path, &args, DEFAULT_TIMEOUT)
-            .await?
-            .exit_verdict()?;
+        let init = run_git_config_write(&repo_path, &args, DEFAULT_TIMEOUT).await?;
+        // Re-adding fails on the now-indexed path; an update registers the clone.
+        if init.code != 0 && is_config_lock_contention(&init.stderr) {
+            return Err(config_lock_busy(
+                "the submodule was cloned and staged but couldn't be registered in this \
+                 repository — update it to finish setting it up.",
+            ));
+        }
+        init.exit_verdict()?;
     }
     Ok(())
 }
@@ -528,6 +563,11 @@ pub(crate) async fn git_submodule_remove_core(
             DEFAULT_TIMEOUT,
         )
         .await?;
+        if removed.code != 0 && is_config_lock_contention(&removed.stderr) {
+            return Err(config_lock_busy(
+                "the submodule's files were cleared but it wasn't removed — try again.",
+            ));
+        }
         if removed.code != 0 && !removed.stderr.contains("no such section") {
             removed.exit_verdict()?;
         }
@@ -647,6 +687,13 @@ pub(crate) async fn git_submodule_set_url_core(
         }
         let sync = ["submodule", "sync", "--", spec];
         let synced = run_git_config_write_held(&held, repo, &sync, DEFAULT_TIMEOUT).await?;
+        // A plain retry would be refused over the unstaged `.gitmodules` this leaves.
+        if synced.code != 0 && is_config_lock_contention(&synced.stderr) {
+            return Err(config_lock_busy(
+                "the new URL was written to .gitmodules but not staged or synced — stage \
+                 .gitmodules (or discard it) and set the URL again.",
+            ));
+        }
         AppResult::Ok(if synced.code == 0 { synced } else { out })
     })
     .await?;
@@ -1948,10 +1995,11 @@ mod tests {
         assert!(!exists(&clone, "libs/mid/deep/leaf/leaf.txt"), "not re-run");
     }
 
-    /// A lock held through every retry surfaces git's error from each writer — never
-    /// a success over the partial state git itself left.
+    /// A lock held through every retry fails each writer with what landed and the next
+    /// step, never git's lock-file text nor a success over the partial state git left;
+    /// the add's and the removal's advised next steps then finish cleanly.
     #[tokio::test]
-    async fn submodule_writers_whose_repair_also_loses_keep_gits_error() {
+    async fn submodule_writers_whose_repair_also_loses_say_what_landed() {
         let (dir, host, _dep) = host_with_submodule("cfg-held").await;
         let root = dir.path().to_string_lossy().into_owned();
         let clone = clone_repo_core(&host, &root, Some("c".into()), false, &[])
@@ -1959,18 +2007,61 @@ mod tests {
             .unwrap();
         seed_repo(dir.path(), "dep2").await;
         let state = AppState::default();
-        let lost = |result: AppResult<()>| match result {
-            Err(AppError::Git { stderr, .. }) if is_config_lock_contention(&stderr) => {}
-            other => panic!("expected git's lock error, got {other:?}"),
+        let busy = |result: AppResult<()>, tail: &str| match result {
+            Err(err @ AppError::Command(_)) => {
+                assert_eq!(err.to_string(), config_lock_busy(tail).to_string());
+                assert!(!err.to_string().contains("config.lock"), "{err}");
+            }
+            other => panic!("expected the busy refusal, got {other:?}"),
         };
 
         let lock = hold_config_lock(&clone);
-        lost(git_submodule_update_core(&state, clone.clone(), None, false).await);
+        busy(
+            git_submodule_update_core(&state, clone.clone(), None, false).await,
+            "the submodules weren't set up — try again.",
+        );
+        busy(
+            git_submodule_update_core(&state, clone.clone(), Some("libs/dep".into()), true).await,
+            "the submodule wasn't set up — try again.",
+        );
         assert!(!exists(&clone, "libs/dep/dep.txt"));
+        assert_eq!(submodule_config(&clone).await, "", "nothing registered");
         std::fs::remove_file(&lock).unwrap();
 
+        let registered = submodule_config(&host).await;
         let lock = hold_config_lock(&host);
-        lost(
+        let set = || {
+            git_submodule_set_url_core(
+                &state,
+                host.clone(),
+                "libs/dep".into(),
+                "../dep-moved".into(),
+            )
+        };
+        busy(
+            set().await,
+            "the new URL was written to .gitmodules but not staged or synced — stage \
+             .gitmodules (or discard it) and set the URL again.",
+        );
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(
+            gitmodules_entries(&host).await["libs/dep"].url,
+            "../dep-moved"
+        );
+        assert_eq!(submodule_config(&host).await, registered, "not synced");
+        let retried = set().await;
+        assert!(
+            matches!(&retried, Err(AppError::InvalidArgument(m)) if m.contains("Unstaged changes to .gitmodules")),
+            "a plain retry is refused: {retried:?}"
+        );
+        git(&host, &["add", "--", ".gitmodules"]).await;
+        set().await.expect("staged, setting the URL again finishes");
+        let synced = git(&host, &["config", "--get", "submodule.libs/dep.url"]).await;
+        assert!(synced.trim().ends_with("dep-moved"), "{synced}");
+        git(&host, &["reset", "-q", "--hard"]).await;
+
+        let lock = hold_config_lock(&host);
+        let add = || {
             git_submodule_add_core(
                 &state,
                 host.clone(),
@@ -1978,28 +2069,38 @@ mod tests {
                 Some("libs/dep2".into()),
                 None,
             )
-            .await,
-        );
-        assert!(!submodule_config(&host).await.contains("libs/dep2"));
-        lost(
-            git_submodule_set_url_core(
-                &state,
-                host.clone(),
-                "libs/dep".into(),
-                "../dep-moved".into(),
-            )
-            .await,
+        };
+        busy(
+            add().await,
+            "the submodule was cloned and staged but couldn't be registered in this \
+             repository — update it to finish setting it up.",
         );
         std::fs::remove_file(&lock).unwrap();
-        git(&host, &["reset", "-q", "--hard"]).await;
+        assert!(exists(&host, "libs/dep2/dep2.txt"), "cloned");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("A  libs/dep2"), "staged: {status}");
+        assert!(!submodule_config(&host).await.contains("libs/dep2"));
+        assert!(add().await.is_err(), "re-adding is no way out");
+        git_submodule_update_core(&state, host.clone(), Some("libs/dep2".into()), false)
+            .await
+            .expect("the advised update finishes the setup");
+        assert!(submodule_config(&host)
+            .await
+            .contains("submodule.libs/dep2.url "));
+        let subs = list_submodules(&host).await.unwrap();
+        let added = subs.iter().find(|s| s.path == "libs/dep2").expect("listed");
+        assert_eq!(added.status, "ok", "initialized, not '-'");
+        git(&host, &["commit", "-qm", "add dep2"]).await;
 
         let lock = hold_config_lock(&host);
-        let removed =
-            git_submodule_remove_core(&state, host.clone(), "libs/dep".into(), false, false)
-                .await
-                .map(drop);
-        lost(removed);
+        let remove =
+            || git_submodule_remove_core(&state, host.clone(), "libs/dep".into(), false, false);
+        busy(
+            remove().await.map(drop),
+            "the submodule's files were cleared but it wasn't removed — try again.",
+        );
         std::fs::remove_file(&lock).unwrap();
+        assert!(!exists(&host, "libs/dep/dep.txt"), "the files were cleared");
         assert!(submodule_config(&host)
             .await
             .contains("submodule.libs/dep."));
@@ -2008,6 +2109,13 @@ mod tests {
             !status.contains("D  libs/dep"),
             "never reached `git rm`: {status}"
         );
+        let outcome = remove().await.expect("trying again removes it");
+        assert!(!outcome.refused_dirty);
+        assert!(!submodule_config(&host)
+            .await
+            .contains("submodule.libs/dep."));
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("D  libs/dep\n"), "status: {status}");
     }
 
     #[tokio::test]
