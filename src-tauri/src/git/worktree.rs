@@ -327,13 +327,12 @@ pub(crate) async fn git_worktree_add_user_core(
     Ok(())
 }
 
-/// `worktree add -b` sets tracking up through a child `git branch`, which on a lost
-/// config lock leaves the branch created with no upstream and no worktree (measured,
-/// git 2.51.1: exit 255). Finishes both legs as `finish_tracking_setup` does: the
-/// worktree whatever the upstream does, then only an upstream git's own choice can
-/// pin (`inherit` is never guessed; its loss keeps git's error). The checkout runs
-/// unprotected under the held admin domain; the config-write mutex, a leaf below it,
-/// covers the upstream write alone.
+/// Finishes a `worktree add -b` whose child `git branch` lost the config lock, leaving
+/// the branch created with no upstream and no worktree, as `finish_tracking_setup`
+/// does: the worktree whatever the upstream does, then only an upstream git's own choice
+/// pins (`inherit` is never guessed; its loss keeps git's error). The checkout runs
+/// unprotected under the held admin domain; the mutex, a leaf below it, covers only the
+/// upstream write.
 async fn add_worktree_on_new_branch(
     state: &AppState,
     repo_path: &str,
@@ -357,8 +356,8 @@ async fn add_worktree_on_new_branch(
         .exit_verdict()?;
     let restored = match upstream {
         Some(upstream) => {
-            with_config_write_lock(repo_path, |held| {
-                restore_upstream(held, repo_path, branch, &upstream)
+            with_config_write_lock(repo_path, |held| async move {
+                restore_upstream(&held, repo_path, branch, &upstream).await
             })
             .await
         }
@@ -699,7 +698,7 @@ async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &
             run_git_raw(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
         if let Ok(out) = deleted {
             if out.code == 0 && is_config_lock_contention(&out.stderr) {
-                remove_deleted_branch_section(held, repo_path, branch).await;
+                remove_deleted_branch_section(&held, repo_path, branch).await;
             }
         }
     })
@@ -989,7 +988,7 @@ mod tests {
     // The module itself no longer calls the working-tree runner — the interleave
     // tests below drive it as an ordinary caller would.
     use crate::git::ops::parse_gitdir_pointer;
-    use crate::git::runner::run_git_mutating;
+    use crate::git::runner::{hold_config_lock, lock_events, run_git_mutating};
 
     #[test]
     fn repo_hash_is_stable_and_case_insensitive() {
@@ -1948,12 +1947,6 @@ prunable gitdir file points to non-existent location
         (got.pop().unwrap(), merge)
     }
 
-    fn hold_config_lock(repo: &str) -> PathBuf {
-        let lock = std::path::Path::new(repo).join(".git").join("config.lock");
-        std::fs::write(&lock, b"").unwrap();
-        lock
-    }
-
     /// The canary the add repair rests on (git 2.51.1): `worktree add -b` whose child
     /// `git branch` loses the config lock exits 255 with the branch created, untracked,
     /// and no worktree; adding that existing branch writes no config at all.
@@ -2070,11 +2063,7 @@ prunable gitdir file points to non-existent location
                 release_config_lock_before_attempt(lock.clone().into(), usize::MAX)
             };
             let probe = wt.join("a.txt");
-            let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let events: std::sync::Arc<dyn Fn(&'static str) + Send + Sync> = {
-                let log = std::sync::Arc::clone(&log);
-                std::sync::Arc::new(move |event| log.lock().unwrap().push((event, probe.exists())))
-            };
+            let (events, log) = lock_events(move || probe.exists());
             let add = git_worktree_add_user_core(&state, &repo_s, &wt_s, name, true, start);
             let added = CONFIG_WRITE_LOCK_EVENTS
                 .scope(events, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, add))

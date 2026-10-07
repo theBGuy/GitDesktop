@@ -217,8 +217,8 @@ async fn repair_lost_upstream(repo_path: &str, remote: &str, branch: &str, out: 
         return;
     }
     let upstream = format!("refs/remotes/{remote}/{branch}");
-    with_config_write_lock(repo_path, |held| {
-        restore_upstream(held, repo_path, branch, &upstream)
+    with_config_write_lock(repo_path, |held| async move {
+        restore_upstream(&held, repo_path, branch, &upstream).await
     })
     .await;
 }
@@ -323,8 +323,8 @@ async fn run_remote_config_verb(
     .await
 }
 
-/// `git remote set-url <name> <url>`, recovered from a lost config lock. It neither validates
-/// its arguments nor invalidates the URL cache; callers own both.
+/// `git remote set-url <name> <url>`, recovered from a lost config lock. It neither
+/// validates its arguments nor invalidates the URL cache; callers own both.
 pub(crate) async fn set_remote_url(
     state: &AppState,
     repo_path: &str,
@@ -335,8 +335,8 @@ pub(crate) async fn set_remote_url(
     Ok(())
 }
 
-/// `git remote add <name> <url>`, recovered from a lost config lock. It neither validates
-/// its arguments nor invalidates the URL cache; callers own both.
+/// `git remote add <name> <url>`, recovered from a lost config lock. It neither
+/// validates its arguments nor invalidates the URL cache; callers own both.
 pub(crate) async fn add_remote(
     state: &AppState,
     repo_path: &str,
@@ -1182,7 +1182,8 @@ mod tests {
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
     use crate::git::runner::{
-        is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+        hold_config_lock, is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT,
+        NETWORK_TIMEOUT,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -2463,7 +2464,7 @@ mod tests {
 
         let before = remote_config(&work_s).await;
         assert!(before.contains("branch.main.remote origin"), "{before}");
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(&work);
         for args in [
             vec!["remote", "set-url", "origin", "../elsewhere"],
             vec!["remote", "add", "extra", &url],
@@ -2497,7 +2498,7 @@ mod tests {
 
         run(&work_s, &["branch", "--unset-upstream", "main"]).await;
         run(&work_s, &["config", "remote.pushDefault", "origin"]).await;
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(&work);
         let out = raw(vec!["remote", "remove", "origin"]).await;
         std::fs::remove_file(&lock).unwrap();
         assert_eq!(out.code, 1, "{}", out.stderr);
@@ -2523,7 +2524,7 @@ mod tests {
         let lock = work.join(".git").join("config.lock");
         let state = AppState::default();
         let contended = || {
-            std::fs::write(&lock, b"").unwrap();
+            hold_config_lock(&work);
             release_config_lock_before_attempt(lock.clone(), 2)
         };
         // Counts attempts without ever deleting anything.
@@ -2672,8 +2673,7 @@ mod tests {
         let work_s = work.to_string_lossy().into_owned();
         run(&work_s, &["branch", "--unset-upstream", "main"]).await;
         let before = remote_config(&work_s).await;
-        let lock = work.join(".git").join("config.lock");
-        std::fs::write(&lock, b"").unwrap();
+        let lock = hold_config_lock(&work);
         let state = AppState::default();
 
         let lost = |err: AppError| match err {

@@ -6,8 +6,8 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
     acquire_repo_lock, is_config_lock_contention, run_git, run_git_config_write,
-    run_git_config_write_held, run_git_raw, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    run_git_config_write_held, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
+    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
 use crate::state::AppState;
@@ -231,13 +231,12 @@ pub(crate) async fn git_submodule_update_core(
         }
         // Attempt, registration repair and re-run are one sequence: hold the working-tree
         // lock across all three so the re-run sees the attempt's `.gitmodules` and index,
-        // with lock-free runners inside. Like `add`, that gives up `run_git_mutating`'s
-        // one-shot index.lock retry.
+        // with the lock-free index.lock-retrying runner inside.
         let domain = state.working_tree_lock(&repo_path).await;
         let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule update").await?;
-        let out = run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
+        let out = run_git_raw_index_retry(&repo_path, &args, NETWORK_TIMEOUT).await?;
         let out = if register_after_lost_init(&repo_path, spec.as_deref(), &out).await? {
-            run_git_raw(Some(&repo_path), &args, NETWORK_TIMEOUT).await?
+            run_git_raw_index_retry(&repo_path, &args, NETWORK_TIMEOUT).await?
         } else {
             out
         };
@@ -301,15 +300,11 @@ pub(crate) async fn git_submodule_update_core(
     Ok(())
 }
 
-/// `submodule update --init` registers every uninitialized target in this repository's
-/// `.git/config` before it clones any, and dies on a lost config lock there having
-/// cloned nothing (measured, git 2.51.1). Redoes that registration under the
-/// config-write mutex (a leaf below the caller's held working-tree domain) and reports
-/// whether it registered anything new: only then did the loss happen here, before any
-/// clone, so the caller may re-run the update under that same domain hold, without the
-/// mutex, with nothing left for it to write. A loss in a CHILD's config (a
-/// cloned module's own, or `--recursive` registrations) matches the same lock text
-/// after clones landed and registers nothing here (measured), so git's error stands.
+/// Redoes the registration a `submodule update --init` lost to the config lock, under
+/// the config-write mutex (a leaf below the caller's working-tree hold), and reports
+/// whether it registered anything new. Only then was the loss here, before any clone,
+/// so the caller may re-run the update under the same hold with nothing left to write;
+/// a CHILD-config loss (after clones landed) registers nothing, so git's error stands.
 async fn register_after_lost_init(
     repo_path: &str,
     spec: Option<&str>,
@@ -772,6 +767,7 @@ async fn stage_gitmodules(repo_path: &str) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::git::repo::clone_repo_core;
+    use crate::git::runner::{hold_config_lock, lock_events};
 
     /// git refuses `file` transport for submodule clones by default
     /// (`fatal: transport 'file' not allowed`), and the block lives in the CHILD
@@ -1592,27 +1588,8 @@ mod tests {
         assert_eq!(list_submodules(&host).await.unwrap()[0].branch, None);
     }
 
-    fn hold_config_lock(repo: &str) -> PathBuf {
-        let lock = Path::new(repo).join(".git").join("config.lock");
-        std::fs::write(&lock, b"").unwrap();
-        lock
-    }
-
     async fn submodule_config(repo: &str) -> String {
         submodule_registrations(repo).await.unwrap()
-    }
-
-    type LockLog = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, bool)>>>;
-
-    /// A `CONFIG_WRITE_LOCK_EVENTS` hook logging each mutex event with `probe()`'s
-    /// verdict at that moment, so a test can place a long command against the hold.
-    fn lock_events(
-        probe: impl Fn() -> bool + Send + Sync + 'static,
-    ) -> (std::sync::Arc<dyn Fn(&'static str) + Send + Sync>, LockLog) {
-        let log = LockLog::default();
-        let sink = std::sync::Arc::clone(&log);
-        let hook = move |event| sink.lock().unwrap().push((event, probe()));
-        (std::sync::Arc::new(hook), log)
     }
 
     /// The canary the submodule repairs rest on (git 2.51.1): `update --init` dies at

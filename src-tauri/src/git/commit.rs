@@ -352,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn the_identity_override_never_lands_half_set() {
         use crate::git::runner::{
-            is_config_lock_contention, release_config_lock_before_attempt,
+            hold_config_lock, is_config_lock_contention, release_config_lock_before_attempt,
             CONFIG_WRITE_ATTEMPT_HOOK,
         };
         use std::sync::atomic::Ordering;
@@ -377,7 +377,7 @@ mod tests {
             .await
             .expect("clearing a never-set override succeeds");
 
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(dir.path());
         let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(hook, set("Ann", "ann@t.local"))
@@ -387,7 +387,7 @@ mod tests {
         let ann = (vec!["Ann".to_string()], vec!["ann@t.local".to_string()]);
         assert_eq!(identity().await, ann);
 
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(dir.path());
         // The canary: a set or unset that loses the lock exits 255 with nothing changed.
         for args in [
             ["config", "--local", "user.name", "Bob"],
@@ -421,7 +421,7 @@ mod tests {
         .unwrap();
         assert_eq!(plain.code, 5, "{}", plain.stderr);
         assert_eq!(local_values(&repo, "user.name").await, ["Ann", "Extra"]);
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(dir.path());
         let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(hook, set("", ""))

@@ -265,9 +265,9 @@ const STDERR_ONLY_ALLOWLIST = [
   },
   {
     file: "git/runner.rs",
-    fn: "run_git_input",
+    fn: "exit_verdict",
     rationale:
-      "THE stderr-only contract itself — callers whose failure rides stdout take run_git_raw and shape it with full_failure_text()",
+      "THE stderr-only contract itself (run_git_input's old inline check, extracted) — callers whose failure rides stdout take run_git_raw and shape it with full_failure_text()",
   },
   {
     file: "git/todos.rs",

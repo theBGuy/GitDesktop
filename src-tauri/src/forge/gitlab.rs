@@ -10906,13 +10906,15 @@ mod tests {
     /// GitLab error with origin untouched.
     #[tokio::test]
     async fn origin_rewrite_rides_out_a_lost_config_lock() {
-        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        use crate::git::runner::{
+            hold_config_lock, release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK,
+        };
         let (dir, repo) = origin_test_repo("https://host/g/p.git").await;
         let lock = dir.path().join(".git").join("config.lock");
         let state = AppState::default();
         let origin = project_origin_before_move(&repo).await.unwrap();
 
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(dir.path());
         let error = rewrite_origin_after(&state, &repo, &origin, "g/held", OriginMove::Rename)
             .await
             .unwrap_err()
@@ -10931,7 +10933,7 @@ mod tests {
             "https://host/g/p.git"
         );
 
-        std::fs::write(&lock, b"").unwrap();
+        hold_config_lock(dir.path());
         let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
