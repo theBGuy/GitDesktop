@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
 use crate::git::runner::{
-    acquire_repo_lock, holder_label, run_git, run_git_mutating, run_git_raw, subcommand_of,
-    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    acquire_repo_lock, holder_label, is_config_lock_contention, run_git, run_git_mutating,
+    run_git_raw, subcommand_of, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -113,6 +115,10 @@ pub(crate) async fn run_git_with_creds_once(
 /// tree: it holds the working-tree lock across this call, which is the only sanctioned
 /// nesting direction (see `run_git_mutating`). Every other caller here — fetch, push,
 /// set-head — holds nothing but the network domain this takes.
+///
+/// A `push -u` whose upstream write lost `.git/config.lock` still exits 0 (measured,
+/// git 2.51.1), so every same-name publish gets its upstream re-set here, once the
+/// network hold is released; the push itself is never re-run.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -120,8 +126,11 @@ pub(crate) async fn run_git_mutating_with_creds(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    let tracked = push_upstream_branch(sub);
     let domain = state.network_lock(repo_path).await;
-    let _guard = acquire_repo_lock(
+    #[cfg(test)]
+    let _ = NETWORK_LOCK_WAIT_HOOK.try_with(|hook| hook());
+    let guard = acquire_repo_lock(
         &domain,
         NETWORK_LOCK_WAIT_TIMEOUT,
         holder_label(subcommand_of(sub)),
@@ -136,6 +145,7 @@ pub(crate) async fn run_git_mutating_with_creds(
         tokio::time::sleep(Duration::from_millis(300)).await;
         out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
     }
+    drop(guard);
     if out.code != 0 {
         // Both streams: a merge-mode `pull` that conflicts puts the fetch summary
         // on stderr and the whole merge verdict (`CONFLICT (…`, `Automatic merge
@@ -147,7 +157,69 @@ pub(crate) async fn run_git_mutating_with_creds(
             stderr: out.full_failure_text(),
         });
     }
+    if let Some((remote, branch)) = tracked {
+        repair_lost_upstream(repo_path, &remote, &branch, &out).await;
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs just before a network-domain acquire, so a test can act while a command
+    /// is provably queued on the domain it holds.
+    pub(crate) static NETWORK_LOCK_WAIT_HOOK: std::sync::Arc<dyn Fn() + Send + Sync>;
+}
+
+/// The `(remote, refspec)` a `push -u` argv publishes, read past any leading `-c`
+/// pairs; `None` for every other argv, a `push -u` without exactly one refspec included.
+fn push_upstream_target<'a>(sub: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    let mut rest = sub.iter().copied();
+    loop {
+        match rest.next()? {
+            "-c" => {
+                rest.next()?;
+            }
+            "push" => break,
+            _ => return None,
+        }
+    }
+    let mut set_upstream = false;
+    let mut positional = Vec::new();
+    for arg in rest {
+        match arg {
+            "-u" | "--set-upstream" => set_upstream = true,
+            flag if flag.starts_with('-') => {}
+            other => positional.push(other),
+        }
+    }
+    match (set_upstream, positional.as_slice()) {
+        (true, [remote, refspec]) => Some((*remote, *refspec)),
+        _ => None,
+    }
+}
+
+/// The `(remote, local branch)` a `push -u` will track, read from the argv alone and
+/// only for `publish_refspec`'s same-name pair. A literal `HEAD` gets no repair: git
+/// resolves it at spawn, so no earlier reading can be proven to name the branch that
+/// was pushed (`git_push_core` pins its HEAD publishes to the explicit pair instead).
+fn push_upstream_branch(sub: &[&str]) -> Option<(String, String)> {
+    let (remote, refspec) = push_upstream_target(sub)?;
+    let (src, dst) = refspec.split_once(':')?;
+    let branch = src.strip_prefix("refs/heads/")?;
+    (dst.strip_prefix("refs/heads/")? == branch).then(|| (remote.to_string(), branch.to_string()))
+}
+
+/// Re-sets the upstream a successful `push -u` failed to write, under the config-write
+/// mutex alone; its verdict never changes the push's.
+async fn repair_lost_upstream(repo_path: &str, remote: &str, branch: &str, out: &GitOutput) {
+    if !is_config_lock_contention(&out.stderr) || !out.stderr.contains(UPSTREAM_WRITE_FAILED) {
+        return;
+    }
+    let upstream = format!("refs/remotes/{remote}/{branch}");
+    with_config_write_lock(repo_path, |held| {
+        restore_upstream(held, repo_path, branch, &upstream)
+    })
+    .await;
 }
 
 /// How long a resolved remote URL stays trusted before re-shelling to `git`. A few
@@ -614,12 +686,14 @@ pub(crate) async fn git_push_core(
     // The credential config is scoped to the remote we actually push to, resolved
     // below. Defaults to origin (the HEAD path and the origin-tracked cases).
     let mut cred_remote = "origin".to_string();
+    // The HEAD path's `-u` publish names its branch explicitly (see that arm).
+    let mut head_branch: Option<String> = None;
     // Owned Strings: a named-branch push interpolates the branch into a refspec,
     // which can't borrow from a temporary.
     let args: Vec<String> = match &branch {
         None => {
             // A remote can only be chosen for an explicit branch — the HEAD path
-            // pushes to HEAD's own upstream and stays byte-identical.
+            // pushes to HEAD's own upstream, or publishes it to origin.
             if remote.is_some() {
                 return Err(AppError::InvalidArgument(
                     "remote requires an explicit branch".to_string(),
@@ -634,7 +708,17 @@ pub(crate) async fn git_push_core(
                 a.push(FORCE_IF_INCLUDES.to_string());
             }
             if set_upstream {
-                a.extend(["-u", "origin", "HEAD"].map(str::to_string));
+                // Pinned to the branch checked out NOW, the one the press named, as the
+                // explicit same-name pair: a literal `HEAD` resolves only at spawn,
+                // after the network-lock wait, so the push and its upstream repair could
+                // name different branches. Detached (or unpinnable) keeps `HEAD`.
+                head_branch = pushed_branch(&repo_path, None)
+                    .await
+                    .filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
+                let target = head_branch
+                    .as_deref()
+                    .map_or("HEAD".to_string(), publish_refspec);
+                a.extend(["-u".to_string(), "origin".to_string(), target]);
             }
             a
         }
@@ -727,7 +811,8 @@ pub(crate) async fn git_push_core(
             // (gc.reflogExpire), and a cross-name push colliding with a stale
             // local branch named like the destination (git walks THAT branch's
             // reflog — measured); neither can prove inclusion, so both reject.
-            let Some(b) = pushed_branch(&repo_path, branch.as_deref()).await else {
+            let pinned = branch.as_deref().or(head_branch.as_deref());
+            let Some(b) = pushed_branch(&repo_path, pinned).await else {
                 return Err(AppError::Git { code, stderr });
             };
             if branch_has_reflog(&repo_path, &b).await {
@@ -755,20 +840,29 @@ const IF_INCLUDES_REJECTION: &str = "remote ref updated since checkout";
 /// no reflog to reason about, so callers must not retry. Git itself walks the
 /// local ref named after the DESTINATION when one exists (measured); the source
 /// name probed here covers the app's same-name default — see the arm's comment.
+///
+/// Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so a
+/// branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
+/// 2.51.1), and every consumer here rebuilds `refs/heads/<name>` from the result.
 async fn pushed_branch(repo_path: &str, branch: Option<&str>) -> Option<String> {
     if let Some(b) = branch {
         return Some(b.to_string());
     }
     let out = run_git_raw(
         Some(repo_path),
-        &["symbolic-ref", "--short", "-q", "HEAD"],
+        &["symbolic-ref", "-q", "HEAD"],
         DEFAULT_TIMEOUT,
     )
     .await
     .ok()?;
-    (out.code == 0)
-        .then(|| out.stdout_lossy().trim().to_string())
+    if out.code != 0 {
+        return None;
+    }
+    let full = out.stdout_lossy();
+    full.trim_end_matches(['\r', '\n'])
+        .strip_prefix("refs/heads/")
         .filter(|b| !b.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether `refs/heads/<branch>` has a reflog (`git reflog exists`, exit 0/1). An
@@ -934,11 +1028,15 @@ mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
         git_push_core, git_remote_remove_core, is_auth_class_failure, is_unknown_push_option,
-        parse_upstream_tracking, publish_refspec, resolve_push_target, run_git_mutating_with_creds,
-        without_force_if_includes, IF_INCLUDES_REJECTION, PushGuard,
+        parse_upstream_tracking, publish_refspec, push_upstream_branch, push_upstream_target,
+        resolve_push_target, run_git_mutating_with_creds, without_force_if_includes, PushGuard,
+        FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK,
     };
     use crate::error::AppError;
-    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::git::branches::UPSTREAM_WRITE_FAILED;
+    use crate::git::runner::{
+        is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+    };
     use crate::state::AppState;
     use std::time::Duration;
 
@@ -2026,6 +2124,281 @@ mod tests {
         run(&work_s, &["remote", "add", "origin", &url]).await;
         run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
         (guard, base, origin.to_string_lossy().into_owned(), url)
+    }
+
+    /// `push -u` that loses `.git/config.lock` exits 0 with the push landed and the
+    /// upstream unwritten (measured, git 2.51.1) — the canary half. Through
+    /// `git_push_core`'s two `-u` arms (named branch, HEAD) and a forge-shaped argv
+    /// straight into the runner, every publish still ends tracking.
+    #[tokio::test]
+    async fn a_publish_that_loses_the_config_lock_still_sets_the_upstream() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        use std::sync::atomic::Ordering;
+        let (_guard, base, origin_s, _url) = seeded_origin("push-config-lock").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        let lock = work.join(".git").join("config.lock");
+        let upstream_of = |b: &str| {
+            let (work_s, spec) = (work_s.clone(), format!("{b}@{{upstream}}"));
+            async move {
+                run_git(
+                    Some(&work_s),
+                    &["rev-parse", "--abbrev-ref", &spec],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .map(|o| o.stdout_lossy().trim().to_string())
+                .ok()
+            }
+        };
+        for b in ["canary", "named", "current", "forge"] {
+            run(&work_s, &["branch", b]).await;
+        }
+
+        std::fs::write(&lock, b"").unwrap();
+        let raw = run_git_raw(
+            Some(&work_s),
+            &[
+                "push",
+                "-u",
+                "origin",
+                "refs/heads/canary:refs/heads/canary",
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(raw.code, 0, "{}", raw.stderr);
+        assert!(raw.stderr.contains(UPSTREAM_WRITE_FAILED), "{}", raw.stderr);
+        assert!(is_config_lock_contention(&raw.stderr));
+        run(&origin_s, &["rev-parse", "--verify", "refs/heads/canary"]).await;
+        assert_eq!(upstream_of("canary").await, None, "git left it untracked");
+
+        let state = AppState::default();
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_push_core(
+                    &state,
+                    work_s.clone(),
+                    false,
+                    false,
+                    Some("named".into()),
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("the push succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(upstream_of("named").await.as_deref(), Some("origin/named"));
+
+        run(&work_s, &["switch", "-q", "current"]).await;
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 1);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_push_core(&state, work_s.clone(), true, false, None, None, None),
+            )
+            .await
+            .expect("the push succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            upstream_of("current").await.as_deref(),
+            Some("origin/current")
+        );
+        run(&origin_s, &["rev-parse", "--verify", "refs/heads/current"]).await;
+
+        // A branch shadowed by a same-named tag, with a real `heads/shadowed` branch
+        // beside it: the HEAD publish and its repair still name `refs/heads/shadowed`,
+        // never the `heads/shadowed` that `symbolic-ref --short` would answer.
+        run(&work_s, &["switch", "-q", "-c", "shadowed"]).await;
+        run(&work_s, &["tag", "shadowed"]).await;
+        run(
+            &work_s,
+            &["update-ref", "refs/heads/heads/shadowed", "refs/heads/main"],
+        )
+        .await;
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_push_core(&state, work_s.clone(), true, false, None, None, None),
+            )
+            .await
+            .expect("the push succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let published = run(
+            &origin_s,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        assert!(
+            published.lines().any(|r| r == "refs/heads/shadowed"),
+            "{published}"
+        );
+        assert!(!published.contains("refs/heads/heads/"), "{published}");
+        assert_eq!(
+            run(&work_s, &["config", "--get", "branch.shadowed.merge"])
+                .await
+                .trim(),
+            "refs/heads/shadowed"
+        );
+
+        // The forge publishes' shape: `-c` entries ahead of the subcommand, empty `cred`,
+        // straight into the runner.
+        let spec = publish_refspec("forge");
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                run_git_mutating_with_creds(
+                    &state,
+                    &work_s,
+                    &[],
+                    &[
+                        "-c",
+                        "credential.interactive=false",
+                        "push",
+                        "-u",
+                        "origin",
+                        &spec,
+                    ],
+                    NETWORK_TIMEOUT,
+                ),
+            )
+            .await
+            .expect("the push succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(upstream_of("forge").await.as_deref(), Some("origin/forge"));
+    }
+
+    /// Only a `push -u` with one refspec names an upstream to repair, read past any
+    /// leading `-c` pairs and the force flags.
+    #[test]
+    fn the_upstream_repair_reads_only_a_single_refspec_push_u() {
+        let spec = "refs/heads/b:refs/heads/b";
+        for (argv, want) in [
+            (
+                vec!["push", "-u", "origin", "HEAD"],
+                Some(("origin", "HEAD")),
+            ),
+            (
+                vec!["-c", "a=b", "push", "-u", "fork", spec],
+                Some(("fork", spec)),
+            ),
+            (
+                vec![
+                    "push",
+                    "--force-with-lease",
+                    FORCE_IF_INCLUDES,
+                    "-u",
+                    "origin",
+                    spec,
+                ],
+                Some(("origin", spec)),
+            ),
+            (vec!["push", "origin", spec], None),
+            (vec!["push", "-u", "origin"], None),
+            (
+                vec!["push", "-u", "origin", spec, "refs/heads/c:refs/heads/c"],
+                None,
+            ),
+            (vec!["fetch", "-u", "origin", spec], None),
+            (vec!["-c", "x=-u", "pull", "--ff-only"], None),
+        ] {
+            assert_eq!(push_upstream_target(&argv), want, "{argv:?}");
+        }
+        // Of those, only the explicit same-name pair names a branch to repair; a literal
+        // HEAD resolves at spawn, so it never does.
+        let pair = |r: &str, b: &str| Some((r.to_string(), b.to_string()));
+        for (argv, want) in [
+            (
+                vec!["-c", "a=b", "push", "-u", "fork", spec],
+                pair("fork", "b"),
+            ),
+            (vec!["push", "-u", "origin", "HEAD"], None),
+            (
+                vec!["push", "-u", "origin", "refs/heads/b:refs/heads/c"],
+                None,
+            ),
+            (vec!["push", "-u", "origin", "b"], None),
+        ] {
+            assert_eq!(push_upstream_branch(&argv), want, "{argv:?}");
+        }
+    }
+
+    /// A HEAD-path publish names the branch checked out when it was asked for, in the
+    /// argv AND the repair: switched away while the push queues behind the network
+    /// lock, it still publishes and tracks that branch, never the one checked out at
+    /// spawn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_head_publish_queued_behind_the_network_lock_keeps_its_branch() {
+        use crate::git::runner::{
+            acquire_repo_lock, release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK,
+        };
+        let (_guard, base, origin_s, _url) = seeded_origin("push-head-pin").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        for b in ["pressed", "later"] {
+            run(&work_s, &["branch", b]).await;
+        }
+        run(&work_s, &["switch", "-q", "pressed"]).await;
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.network_lock(&work_s).await;
+        let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+            .await
+            .expect("the network domain is free");
+
+        let lock = work.join(".git").join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+        let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+        let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+            if let Some(tx) = queued_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let push = tokio::spawn({
+            let (state, work_s) = (std::sync::Arc::clone(&state), work_s.clone());
+            let run =
+                async move { git_push_core(&state, work_s, true, false, None, None, None).await };
+            NETWORK_LOCK_WAIT_HOOK.scope(queued, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, run))
+        });
+        // The push is about to wait on the domain the test holds; only now does the
+        // user switch away.
+        queued_rx.await.expect("the push reached the network lock");
+        run(&work_s, &["switch", "-q", "later"]).await;
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(60), push)
+            .await
+            .expect("the push finishes once the domain frees")
+            .unwrap()
+            .expect("the push succeeds");
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let pushed = run(
+            &origin_s,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        )
+        .await;
+        assert!(pushed.lines().any(|l| l == "pressed"), "{pushed}");
+        assert!(!pushed.lines().any(|l| l == "later"), "{pushed}");
+        let upstream = run_git(
+            Some(&work_s),
+            &["rev-parse", "--abbrev-ref", "pressed@{upstream}"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("the pressed branch tracks");
+        assert_eq!(upstream.stdout_lossy().trim(), "origin/pressed");
     }
 
     /// git's per-ref reason when `--force-with-lease` finds the remote-tracking ref
