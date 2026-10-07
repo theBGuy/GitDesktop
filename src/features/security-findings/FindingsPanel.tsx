@@ -65,6 +65,8 @@ import {
 } from "@/lib/bitbucket/security-findings";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
+  forgeProbeState,
   forgeReady,
   forgeSupports,
   repoKeys,
@@ -2188,16 +2190,24 @@ export function FindingsPanel({
     advisories.isFetching ||
     gl.isFetching ||
     bb.isFetching;
-  const refreshReason = enabled
-    ? "Refresh findings"
-    : !supported && ready
-      ? "Security findings aren't available on this repository's host."
-      : // Names the host the remote actually points at; a repo with no
-        // recognized remote gets the neutral wording rather than a guess
-        // (`providerLabel` alone would name GitHub for an unknown provider).
-        provider
-        ? `Connect this repo to ${providerLabel(provider)} to load findings`
-        : "Connect this repo to a supported host to load findings";
+  const probe = forgeProbeState(forge);
+  const refreshReason = (() => {
+    switch (true) {
+      case enabled:
+        return "Refresh findings";
+      case probe !== null:
+        return forgeProbeReason(probe, "load security findings");
+      case !supported && ready:
+        return "Security findings aren't available on this repository's host.";
+      // Names the host the remote actually points at; a repo with no recognized
+      // remote gets the neutral wording rather than a guess (`providerLabel`
+      // alone would name GitHub for an unknown provider).
+      case Boolean(provider):
+        return `Connect this repo to ${providerLabel(provider)} to load findings`;
+      default:
+        return "Connect this repo to a supported host to load findings";
+    }
+  })();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

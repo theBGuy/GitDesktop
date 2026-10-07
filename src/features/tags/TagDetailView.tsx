@@ -40,6 +40,8 @@ import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
+  forgeProbeState,
   useCheckoutCommit,
   useDeleteRelease,
   useDeleteReleaseAsset,
@@ -140,13 +142,18 @@ export function TagDetailView({
   // which a read-only viewer is otherwise free to use. Not-ready outranks stale
   // and never resolves on its own: a not-ready forge disables the query, which
   // goes on serving placeholder data, so "loading" would be a wait with no end.
-  // Wording mirrors TagsPanel's release affordance.
+  // Wording mirrors TagsPanel's release affordance, probe arm first.
+  const probe = forgeProbeState(gh);
   const readReason = (() => {
     switch (true) {
+      case probe !== null:
+        return forgeProbeReason(probe, "manage this release");
+      case !ghReady && isGitLab && Boolean(gh.data?.installed):
+        return "Sign in with the GitLab CLI (glab) to manage this release.";
+      case !ghReady && isGitLab:
+        return "Install the GitLab CLI (glab) to manage this release.";
       case !ghReady:
-        return isGitLab
-          ? "Sign in with the GitLab CLI (glab) to manage this release."
-          : "Connect this repository to GitHub or GitLab to manage this release.";
+        return "Connect this repository to GitHub or GitLab to manage this release.";
       case relStale:
         return "Loading this tag's release…";
       default:
@@ -156,6 +163,18 @@ export function TagDetailView({
   // Writes take the read-only viewer's reason ahead of those: theirs never lifts
   // either, and it's the one that still applies once the release is current.
   const blockReason = writeBlocked ? writeReason : readReason;
+  const publishNote = (() => {
+    switch (true) {
+      case probe !== null:
+        return forgeProbeReason(probe, "publish a release for this tag");
+      case isGitLab && Boolean(gh.data?.installed):
+        return "Sign in with the GitLab CLI (glab) to publish a release for this tag.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to publish a release for this tag.";
+      default:
+        return "Connect this repository to GitHub or GitLab to publish a release for this tag.";
+    }
+  })();
 
   if (release.isLoading) {
     return (
@@ -808,10 +827,7 @@ export function TagDetailView({
           </p>
         )}
         {!ghReady && (
-          <p className="text-[11px] text-muted-foreground">
-            Connect this repository to GitHub or GitLab to publish a release for
-            this tag.
-          </p>
+          <p className="text-[11px] text-muted-foreground">{publishNote}</p>
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t p-3">

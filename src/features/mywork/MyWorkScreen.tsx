@@ -41,6 +41,7 @@ import {
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import { composedErrorPresentation, presentError } from "@/lib/error-summary";
 import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
@@ -57,8 +58,9 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
+import { useErrorDialog } from "@/lib/stores/error-dialog";
 import { useUiStore } from "@/lib/stores/ui";
-import { errorMessage, isAppError } from "@/lib/tauri/invoke";
+import { isAppError } from "@/lib/tauri/invoke";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -1491,17 +1493,24 @@ function QuietLine({ children }: { children: React.ReactNode }) {
 }
 
 /** The lines under the error title: a lone provider whose sign-in is the fixable
- *  thing gets that remedy, a lone provider otherwise gets its own message, and
- *  several failing at once each get a labelled one. */
+ *  thing gets that remedy, a lone provider otherwise gets its own summary, and
+ *  several failing at once each get a labelled one. Summaries, never raw text:
+ *  forge CLI output is multi-line, and an outage reads as the shared
+ *  "Couldn't reach …" line. */
 function errorLines(
   errors: LegError[],
   signIn: ForgeProvider | null,
 ): string[] {
   if (signIn !== null) return [SIGN_IN_BODY[signIn]];
-  if (errors.length === 1) return [errorMessage(errors[0].error)];
-  return errors.map(
-    (e) => `${providerLabel(e.provider)}: ${errorMessage(e.error)}`,
-  );
+  if (errors.length === 1) return [presentError(errors[0].error).summary];
+  return errors.map((e) => {
+    const label = providerLabel(e.provider);
+    const summary = presentError(e.error).summary;
+    // The outage line already names its forge.
+    return summary.startsWith(`Couldn't reach ${label}`)
+      ? summary
+      : `${label}: ${summary}`;
+  });
 }
 
 /** Shown only when every configured forge failed, so it never hides rows another
@@ -1518,6 +1527,16 @@ function MyWorkError({
   const soleKind = isAppError(soleError) ? soleError.kind : "";
   const signIn =
     soleProvider !== null && SIGN_IN_KINDS.has(soleKind) ? soleProvider : null;
+  // The lines above show summaries only, so Details is the one route to the raw
+  // forge text (an outage's host and OS reason ride only there).
+  const details =
+    errors.length === 1
+      ? presentError(errors[0].error)
+      : composedErrorPresentation(
+          "Couldn't load your work",
+          errors.map((e) => e.error),
+          errors.map((e) => providerLabel(e.provider)),
+        );
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
       <p className="text-xs font-medium">
@@ -1528,9 +1547,19 @@ function MyWorkError({
           <p key={line}>{line}</p>
         ))}
       </div>
-      <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-        Retry
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          Retry
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => useErrorDialog.getState().open(details)}
+        >
+          Details
+        </Button>
+      </div>
     </div>
   );
 }

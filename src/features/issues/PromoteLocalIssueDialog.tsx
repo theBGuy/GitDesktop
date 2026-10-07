@@ -36,6 +36,9 @@ import { cn } from "@/lib/utils";
 
 type Destination = "forge" | "jira";
 
+/** The Jira toasts' View, success and partial failure alike. */
+const JIRA_VIEW_LABEL = "View in Jira";
+
 /**
  * Publishes a local issue to a real tracker — the repo's forge (GitHub or
  * GitLab) or the linked Jira project — opening a real issue with the same
@@ -65,6 +68,9 @@ export function PromoteLocalIssueDialog({
   const forge = useForgeStatus(repoPath);
   const remoteLabel = forge.data?.provider === "gitlab" ? "GitLab" : "GitHub";
   const canPublishForge = forgeFeatureReady(forge.data, "issueCreate");
+  // Both forge toasts' View, named only once the forge status has answered:
+  // `remoteLabel` defaults to GitHub, and submit isn't gated on the status.
+  const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
 
   const link = useJiraLink(repoPath).data;
   const jiraPerms = useJiraPermissions(repoPath, link);
@@ -162,7 +168,10 @@ export function PromoteLocalIssueDialog({
       const { live, away } = landedIn(repoPath);
       toast.success(`Opened issue #${number}${away}`, {
         description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
+        action: {
+          label: forgeViewLabel ?? "View",
+          onClick: () => openUrl(url),
+        },
       });
       // The promoted issue lives on the fork (origin) — force the origin lens so
       // the Issues tab shows it (and any stale remote selection is cleared) before
@@ -198,9 +207,7 @@ export function PromoteLocalIssueDialog({
       toastComposedError({
         title: `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        // `canPublishForge` gated this run on a resolved forge status, so the
-        // label names the real provider.
-        view: { url, label: `View on ${remoteLabel}` },
+        view: { url, label: forgeViewLabel },
         duration: 10000,
       });
     }
@@ -233,7 +240,7 @@ export function PromoteLocalIssueDialog({
       const { live, away } = landedIn(repoPath);
       toast.success(`Created ${key}${away}`, {
         description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
+        action: { label: JIRA_VIEW_LABEL, onClick: () => openUrl(url) },
       });
       if (live) {
         onOpenChange(false);
@@ -258,7 +265,7 @@ export function PromoteLocalIssueDialog({
       toastComposedError({
         title: `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
-        view: { url, label: "View in Jira" },
+        view: { url, label: JIRA_VIEW_LABEL },
         duration: 10000,
       });
     }

@@ -38,6 +38,8 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
+  forgeProbeState,
   useForgeStatus,
   useRepoStatus,
   useRepoWriteAccess,
@@ -127,13 +129,24 @@ export function ActionsPanel({
   const writeBlocked = writeAccess.data?.canPush === false;
   const runNoun = isPipelines ? "pipeline" : "workflow";
   const ciFeature = isPipelines ? "pipelines" : "workflow runs";
-  const runHint =
-    writeReason ??
-    (ghReady
-      ? `Run a ${runNoun}`
-      : isGitLab
-        ? "Sign in with the GitLab CLI (glab) to run pipelines"
-        : "Sign in with GitHub CLI to run workflows");
+  // `canWrite` keeps the Run button up while the status is unknown, so the
+  // probe arm says so in words that fit either provider ("workflow" is only
+  // the unknown provider's default noun).
+  const probe = forgeProbeState(forge);
+  const runHint = (() => {
+    switch (true) {
+      case writeReason !== undefined:
+        return writeReason;
+      case probe !== null:
+        return forgeProbeReason(probe, "run CI");
+      case ghReady:
+        return `Run a ${runNoun}`;
+      case isGitLab:
+        return "Sign in with the GitLab CLI (glab) to run pipelines";
+      default:
+        return "Sign in with GitHub CLI to run workflows";
+    }
+  })();
   const status = useRepoStatus(repoPath);
   const currentBranch = status.data?.branch.name ?? null;
 
@@ -151,6 +164,18 @@ export function ActionsPanel({
 
   const branchFilter = branchOnly && currentBranch ? currentBranch : undefined;
   const runs = useWorkflowRunPages(repoPath, ghReady, active, branchFilter);
+  const refreshReason = (() => {
+    switch (true) {
+      case probe !== null:
+        return forgeProbeReason(probe, "load runs");
+      case !ghReady:
+        return "Connect this repo to load runs";
+      case runs.isFetching:
+        return `Loading ${runNoun} runs…`;
+      default:
+        return undefined;
+    }
+  })();
   // ForgeNotReady's Retry resets the never-loaded probe to pending, which swaps
   // the card for skeletons below. Keyed on the card being mounted, a superset of
   // its Retry being mounted: the edge still rescues only a Retry that held focus.
@@ -290,13 +315,7 @@ export function ActionsPanel({
             size="icon-sm"
             aria-label="Refresh runs"
             disabled={!ghReady || runs.isFetching}
-            reason={
-              !ghReady
-                ? "Connect this repo to load runs"
-                : runs.isFetching
-                  ? `Loading ${runNoun} runs…`
-                  : undefined
-            }
+            reason={refreshReason}
             title="Refresh runs"
             // The whole Actions subtree, as the run-detail repair pass does: the
             // open run's detail is its own read, and a refresh that skipped it

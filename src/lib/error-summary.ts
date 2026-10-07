@@ -41,6 +41,99 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   timeout: "Timed out",
 };
 
+/** The lowercase lead a kind's Rust `#[error]` attribute writes ahead of its
+ *  detail (pinned by `display_leads_match_the_frontend_mirror` in
+ *  src-tauri/src/error.rs; keep the two in step), with what the summary
+ *  shows instead. An empty replacement drops a lead the kind label already says,
+ *  leaving detail that reads on its own; a non-empty one keeps a lead its detail
+ *  can't stand without (a bare path or duration). Start-anchored and
+ *  case-sensitive, and keyed by kind, so prose quoting a lead elsewhere is kept. */
+const DISPLAY_LEADS: Partial<
+  Record<AppError["kind"], readonly [lead: string, shown: string]>
+> = {
+  invalidArgument: ["invalid argument: ", ""],
+  keyring: ["keychain error: ", ""],
+  io: ["io error: ", ""],
+  notARepo: ["not a git repository: ", "Not a Git repository: "],
+  gitNotFound: ["git executable not found", "Git executable not found"],
+  timeout: ["git operation timed out", "Git operation timed out"],
+};
+
+/** The words app-written detail opens with — the only leads a stripped summary
+ *  capitalizes. Some producers open with an interpolated branch name, SHA or path
+ *  (`main has no upstream…`), whose case is part of the name, so an unlisted lead
+ *  stays exactly as written. Accepted residual: a name spelled like a listed
+ *  word (a branch called `remote`) is capitalized too. */
+const PROSE_LEADS = new Set([
+  "a",
+  "access",
+  "agent",
+  "an",
+  "binary",
+  "both",
+  "can't",
+  "cancelled",
+  "cannot",
+  "check",
+  "choose",
+  "could",
+  "couldn't",
+  "due",
+  "empty",
+  "enable",
+  "environment",
+  "expected",
+  "field",
+  "file",
+  "invalid",
+  "issue",
+  "link",
+  "make",
+  "names",
+  "no",
+  "not",
+  "nothing",
+  "page",
+  "path",
+  "paths",
+  "project",
+  "remote",
+  "report",
+  "repository",
+  "required",
+  "resetting",
+  "scopes",
+  "select",
+  "terminal",
+  "the",
+  "this",
+  "too",
+  "topics",
+  "unbalanced",
+  "unexpected",
+  "unknown",
+  "unrecognized",
+  "unserializable",
+  "unsupported",
+  "unusable",
+  "variable",
+  "worktree",
+]);
+
+/** `message` in the summary's register: a known Rust lead swapped for its
+ *  display form, and a dropped lead's prose remainder sentence-cased. */
+function displayRegister(kind: AppError["kind"], message: string): string {
+  const entry = DISPLAY_LEADS[kind];
+  if (entry === undefined || !message.startsWith(entry[0])) return message;
+  const [lead, shown] = entry;
+  const rest = message.slice(lead.length);
+  if (shown !== "") return shown + rest;
+  const word = /^[a-z']+(?=[\s,.:;]|$)/.exec(rest)?.[0];
+  return word !== undefined && PROSE_LEADS.has(word)
+    ? rest.charAt(0).toUpperCase() + rest.slice(1)
+    : rest;
+}
+
 /** git's transfer headers (git 2.51.1.windows.1): `To <remote>` opens a push
  *  report, `From <remote>` a fetch's or pull's (sideband `remote:` lines may
  *  precede either); the reason follows below. One END-anchored token (scheme
@@ -760,7 +853,7 @@ export function presentError(e: unknown): ErrorPresentation {
         : (pushRejectionSummary(combined) ??
           remoteAccessSummary(combined) ??
           network ??
-          (firstMeaningfulLine(message) || label)));
+          (firstMeaningfulLine(displayRegister(e.kind, message)) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
     // A network rewrite replaces even a one-line message, so the raw text is

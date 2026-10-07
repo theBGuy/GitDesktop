@@ -121,6 +121,9 @@ export function CreateIssueDialog({
   const forge = useForgeStatus(repoPath);
   const isGitLab = forge.data?.provider === "gitlab";
   const remoteLabel = isGitLab ? "GitLab" : "GitHub";
+  // Every toast's View, named only once the forge status has answered; a bare
+  // "View" beats the GitHub default `remoteLabel` falls back to.
+  const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
   // The create target's display name: the parent slug under the upstream lens
   // (falling back to "the upstream repository" while it loads), else the forge.
   const targetLabel = isUpstream
@@ -265,7 +268,10 @@ export function CreateIssueDialog({
         return;
       }
       const { number, url } = created;
-      const action = { label: "View", onClick: () => openUrl(url) };
+      const action = {
+        label: forgeViewLabel ?? "View",
+        onClick: () => openUrl(url),
+      };
       /** Open the new issue — but only if the app is still where it was created.
        *  Every path below sits after at least one await, and this dialog doesn't
        *  register the modal gate, so a chord can switch repos inside that window.
@@ -340,9 +346,7 @@ export function CreateIssueDialog({
             (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
           ),
           description: originNote,
-          // Named only once the forge status has answered; a bare "View" beats
-          // the GitHub default `remoteLabel` falls back to.
-          view: { url, label: forge.data && `View on ${remoteLabel}` },
+          view: { url, label: forgeViewLabel },
           duration: 10000,
         });
         // The issue EXISTS whatever the links did, so it still opens — the same

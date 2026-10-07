@@ -33,6 +33,8 @@ import { presentError } from "@/lib/error-summary";
 import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
+  forgeProbeState,
   repoKeys,
   useForgeStatus,
   useHoverPrefetch,
@@ -139,6 +141,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // not-yet-connected repo never gets told its PROVIDER lacks assignee filtering.
   const implemented = gh.data?.implemented;
   const canFilterMine = forgeFeatureReady(gh.data, "listFilterMine");
+  const probe = forgeProbeState(gh);
   const canFilterAuthor = forgeFeatureReady(gh.data, "listFilterAuthor");
   // Borrowed from the label-editing flag: a provider with no issue labels has
   // nothing for the forge to filter by — the pick runs client-side there.
@@ -196,6 +199,24 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // Creation is possible only when the forge allows it AND the repo hasn't turned
   // issues off — gates every path that opens the GitHub create dialog.
   const canOpenGhCreate = canCreateGh && !issuesDisabled;
+  const ghCreateReason = (() => {
+    switch (true) {
+      case canOpenGhCreate:
+        return undefined;
+      case probe !== null:
+        return forgeProbeReason(probe, "open an issue");
+      case isBitbucket:
+        return "Bitbucket has retired its native issue tracker — link a Jira project to track issues.";
+      case isGitLab && Boolean(gh.data?.installed):
+        return "Sign in to GitLab (glab auth login) to open issues here.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to open issues here.";
+      case issuesDisabled:
+        return "Issues are disabled on this repository — enable them in the repository settings on GitHub.";
+      default:
+        return "Connect this repository to GitHub to open an issue.";
+    }
+  })();
   const onStateFilter = (s: IssueStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
@@ -395,22 +416,25 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
 
   const RowIcon = stateFilter === "open" ? CircleDashedIcon : CheckCircleIcon;
 
-  // Held "Mine" rows say which of the two reasons holds them: the provider can't
-  // express the axis, or this repo isn't connected yet.
+  // Held "Mine" rows say which reason holds them: no status yet
+  // (`forgeProbeReason`), the provider can't express the axis, or this repo isn't
+  // connected yet.
   const mineReason = (() => {
     if (canFilterMine) return null;
+    if (probe !== null) return forgeProbeReason(probe, "filter by assignee");
     if (implemented && !implemented.listFilterMine)
       return `${providerName} issues have no assignees to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee`;
   })();
-  // Same two-reason shape as mineReason above, and the order matters: the provider
-  // claim is only made where `implemented` actually refutes the axis, so a forge
-  // status that hasn't loaded — or one whose provider DOES support authors but
-  // isn't connected yet — falls to the connect line instead. Left null, the rows
+  // Same shape as mineReason above, and the order matters: the provider claim is
+  // only made where `implemented` actually refutes the axis, so a status that
+  // hasn't answered takes `forgeProbeReason`, and a provider that DOES support
+  // authors but isn't connected yet takes the connect line. Left null, the rows
   // would stay live while the axis was dropped from the query, and a pick would
   // silently empty the local section under a zero badge.
   const authorReason = (() => {
     if (canFilterAuthor) return null;
+    if (probe !== null) return forgeProbeReason(probe, "filter by author");
     if (implemented && !implemented.listFilterAuthor)
       return `${providerName} can't filter issues by author here`;
     return `Connect this repository to ${providerName} to filter by author`;
@@ -458,18 +482,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           // when the forge is otherwise ready — gate it with the reason so "New" isn't
           // a button that can only fail.
           ghDisabled: !canCreateGh || issuesDisabled,
-          ghReason:
-            canCreateGh && !issuesDisabled
-              ? undefined
-              : isBitbucket
-                ? "Bitbucket has retired its native issue tracker — link a Jira project to track issues."
-                : isGitLab
-                  ? gh.data?.installed
-                    ? "Sign in to GitLab (glab auth login) to open issues here."
-                    : "Install the GitLab CLI (glab) to open issues here."
-                  : issuesDisabled
-                    ? "Issues are disabled on this repository — enable them in the repository settings on GitHub."
-                    : "Connect this repository to GitHub to open an issue.",
+          ghReason: ghCreateReason,
           onGh: () => setCreateOpen(true),
           localLabel: "Local issue…",
           onLocal: () => setCreateLocalOpen(true),

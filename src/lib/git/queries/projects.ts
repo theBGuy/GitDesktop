@@ -15,7 +15,12 @@ import {
 import { useCallback, useRef, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { presentError } from "@/lib/error-summary";
-import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  errorToastAction,
+  toastComposedError,
+  toastError,
+  toastErrorWithNote,
+} from "@/lib/toast";
 import * as api from "../api";
 import {
   hasIssueFieldWrites,
@@ -1545,6 +1550,21 @@ function deferRepositionToast(
   // the move carries that start rather than losing it.
   const fetchStarts = new Map<string, number>();
   let query = findLens();
+  // Names the card so back-to-back failures on different cards read apart.
+  // Best-effort: a card no lens still holds, redacted or untitled, toasts bare.
+  const cardTitle = () => {
+    for (const lens of cache.findAll({ queryKey: family })) {
+      const data = lens.state.data as
+        | InfiniteData<BoardItems, string | null>
+        | undefined;
+      const content = data?.pages
+        .flatMap((page) => page.items)
+        .find((item) => item.itemId === ctx.itemId)?.content;
+      if (content !== undefined && content.kind !== "redacted" && content.title)
+        return content.title;
+    }
+    return undefined;
+  };
   const report = (restore: boolean) => {
     if (restore) {
       const target = repositionRestoreTarget(failure.landedAfterId, ctx.before);
@@ -1565,7 +1585,14 @@ function deferRepositionToast(
         invalidateProjectBoards(queryClient, ctx.repo);
       else markProjectBoardsStale(queryClient, ctx.repo);
     }
-    toastError(failure.error);
+    const title = cardTitle();
+    if (title === undefined) toastError(failure.error);
+    else
+      toastComposedError({
+        title: `Couldn't move ${title} — ${presentError(failure.error).summary}`,
+        errors: [failure.error],
+        headings: [title],
+      });
   };
   if (query === undefined) {
     report(true);

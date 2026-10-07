@@ -49,6 +49,8 @@ import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
+  forgeProbeState,
   keepPreviousDataForKeyAxes,
   prDetailsOptions,
   repoKeys,
@@ -175,6 +177,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // there is nothing for the forge to filter by — the pick runs client-side there.
   const canFilterLabel = forgeFeatureReady(gh.data, "mrLabels");
   const canGroupByReview = forgeFeatureReady(gh.data, "reviewGrouping");
+  const probe = forgeProbeState(gh);
   // "closed" matches the Closed tab: closed and merged alike.
   const [stateFilter, setStateFilter] = useState<PrStateFilter>("open");
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
@@ -351,15 +354,22 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // GitLab repos both get the create dialog (provider-aware copy; the head branch
   // is pushed first either way). The dialog picks the head/base branches itself.
   const canCreateGhPr = forgeFeatureReady(gh.data, "mrCreate");
-  const ghCreateReason = canCreateGhPr
-    ? null
-    : isGitLab
-      ? gh.data?.installed
-        ? "Sign in to GitLab (glab auth login) to work with merge requests here."
-        : "Install the GitLab CLI (glab) to work with merge requests here."
-      : provider === "bitbucket"
-        ? "Connect your Bitbucket account in Settings → Accounts to create pull requests here."
-        : "Connect this repository to GitHub to open a pull request here.";
+  const ghCreateReason = (() => {
+    switch (true) {
+      case canCreateGhPr:
+        return null;
+      case probe !== null:
+        return forgeProbeReason(probe, "open a pull request");
+      case isGitLab && Boolean(gh.data?.installed):
+        return "Sign in to GitLab (glab auth login) to work with merge requests here.";
+      case isGitLab:
+        return "Install the GitLab CLI (glab) to work with merge requests here.";
+      case provider === "bitbucket":
+        return "Connect your Bitbucket account in Settings → Accounts to create pull requests here.";
+      default:
+        return "Connect this repository to GitHub to open a pull request here.";
+    }
+  })();
   const pendingCreate = useUiStore((s) => s.pendingCreate);
   const clearPendingCreate = useUiStore((s) => s.clearPendingCreate);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
@@ -906,11 +916,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (target) => `${target.kind}:${target.id}`,
   });
 
-  // Held filter rows say which of the two reasons holds them: the provider can't
-  // express the axis, or this repo isn't connected yet. Never both, never a
-  // provider claim while `implemented` is still unknown.
+  // Held filter rows say which reason holds them: no status yet
+  // (`forgeProbeReason`), the provider can't express the axis, or this repo isn't
+  // connected yet. Never a provider claim while `implemented` is still unknown.
   const mineReason = (() => {
     if (canFilterMine) return null;
+    if (probe !== null)
+      return forgeProbeReason(probe, "filter by assignee or reviewer");
     if (implemented && !implemented.listFilterMine)
       return `${providerName} pull requests have no assignees or review requests to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee or reviewer`;
@@ -924,6 +936,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   })();
   const reviewReason = (() => {
     if (canGroupByReview) return null;
+    if (probe !== null) return forgeProbeReason(probe, "group by your review");
     if (implemented && !implemented.reviewGrouping)
       return `${providerName} doesn't report your last review on this list`;
     return `Connect this repository to ${providerName} to group by your review`;
@@ -934,14 +947,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       return "Your GitHub token lacks read:org — run gh auth refresh -s read:org";
     return null;
   })();
-  // Same two-reason shape as mineReason above, and the order matters: the provider
-  // claim is only made where `implemented` actually refutes the axis, so a forge
-  // status that hasn't loaded — or one whose provider DOES support authors but
-  // isn't connected yet — falls to the connect line instead. Left null, the rows
+  // Same shape as mineReason above, and the order matters: the provider claim is
+  // only made where `implemented` actually refutes the axis, so a status that
+  // hasn't answered takes `forgeProbeReason`, and a provider that DOES support
+  // authors but isn't connected yet takes the connect line. Left null, the rows
   // would stay live while the axis was dropped from the query, and a pick would
   // silently empty the local section under a zero badge.
   const authorReason = (() => {
     if (canFilterAuthor) return null;
+    if (probe !== null) return forgeProbeReason(probe, "filter by author");
     if (implemented && !implemented.listFilterAuthor)
       return `${providerName} can't filter pull requests by author here`;
     return `Connect this repository to ${providerName} to filter by author`;
