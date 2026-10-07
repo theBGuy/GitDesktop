@@ -3,7 +3,8 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_mutating_raw, run_git_raw, DEFAULT_TIMEOUT,
+    run_git, run_git_config_write_held, run_git_mutating, run_git_mutating_raw, run_git_raw,
+    with_config_write_lock, DEFAULT_TIMEOUT,
 };
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
@@ -52,26 +53,37 @@ pub async fn git_local_identity(repo_path: String) -> AppResult<CommitAuthor> {
 /// Sets or clears the repo-local identity override. A blank name and email
 /// clears it (the repo falls back to the global identity); otherwise both are
 /// required, so commits never get a half-set author.
+///
+/// Both keys are written under ONE hold of the config-write mutex, each with its
+/// lost-lock retry: no other writer holding that mutex lands between them, and a lock
+/// held through the retry fails the first key before the second is touched. A writer
+/// outside the mutex (another process, or a long command's unprotected first run here)
+/// that takes the lock after `user.name` lands and outlasts `user.email`'s retry still
+/// leaves the new name with the old email, reported as git's error.
 #[tauri::command]
 pub async fn git_set_local_identity(
     repo_path: String,
     name: String,
     email: String,
 ) -> AppResult<()> {
+    let repo = repo_path.as_str();
     let name = name.trim();
     let email = email.trim();
     if name.is_empty() && email.is_empty() {
-        // `--unset` exits 5 when the key isn't set; ignore so clearing is idempotent.
-        for key in ["user.name", "user.email"] {
-            run_git_raw(
-                Some(&repo_path),
-                &["config", "--local", "--unset", key],
-                DEFAULT_TIMEOUT,
-            )
-            .await
-            .ok();
-        }
-        return Ok(());
+        return with_config_write_lock(repo, |held| async move {
+            for key in ["user.name", "user.email"] {
+                // `--unset-all`: a plain `--unset` exits 5 on a multi-valued key having
+                // removed nothing, which would read as already clear (measured, git
+                // 2.51.1). Exit 5 here is a key that was never set.
+                let args = ["config", "--local", "--unset-all", key];
+                let out = run_git_config_write_held(&held, repo, &args, DEFAULT_TIMEOUT).await?;
+                if out.code != 5 {
+                    out.exit_verdict()?;
+                }
+            }
+            Ok(())
+        })
+        .await;
     }
     for (value, what) in [(name, "name"), (email, "email")] {
         if value.is_empty() || value.starts_with('-') {
@@ -80,19 +92,16 @@ pub async fn git_set_local_identity(
             )));
         }
     }
-    run_git(
-        Some(&repo_path),
-        &["config", "--local", "user.name", name],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    run_git(
-        Some(&repo_path),
-        &["config", "--local", "user.email", email],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    Ok(())
+    with_config_write_lock(repo, |held| async move {
+        for (key, value) in [("user.name", name), ("user.email", email)] {
+            let args = ["config", "--local", key, value];
+            run_git_config_write_held(&held, repo, &args, DEFAULT_TIMEOUT)
+                .await?
+                .exit_verdict()?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// The global git identity (`git config --global`), empty strings when unset.
@@ -318,6 +327,108 @@ mod tests {
             .await
             .unwrap()
             .stdout_lossy()
+    }
+
+    /// Every local value of `key`, empty when unset.
+    async fn local_values(repo: &str, key: &str) -> Vec<String> {
+        run_git_raw(
+            Some(repo),
+            &["config", "--local", "--get-all", key],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy()
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// Under the held-lock seam, neither identity path leaves a half-set author: a
+    /// first-attempt loss lands both keys through the retry (name: two attempts, then
+    /// email: one), a lock held throughout fails before either key changes, and
+    /// clearing removes every value of a multi-valued key. Clearing what was never set
+    /// is git's exit 5, a success.
+    #[tokio::test]
+    async fn the_identity_override_never_lands_half_set() {
+        use crate::git::runner::{
+            hold_config_lock, is_config_lock_contention, release_config_lock_before_attempt,
+            CONFIG_WRITE_ATTEMPT_HOOK,
+        };
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::Builder::new()
+            .prefix("gd-identity-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run(&repo, &["init", "-q"]).await;
+        let lock = dir.path().join(".git").join("config.lock");
+        let identity = || async {
+            (
+                local_values(&repo, "user.name").await,
+                local_values(&repo, "user.email").await,
+            )
+        };
+        let set = |name: &str, email: &str| {
+            git_set_local_identity(repo.clone(), name.into(), email.into())
+        };
+
+        git_set_local_identity(repo.clone(), String::new(), String::new())
+            .await
+            .expect("clearing a never-set override succeeds");
+
+        hold_config_lock(dir.path());
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(hook, set("Ann", "ann@t.local"))
+            .await
+            .expect("the set lands through the retry");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let ann = (vec!["Ann".to_string()], vec!["ann@t.local".to_string()]);
+        assert_eq!(identity().await, ann);
+
+        hold_config_lock(dir.path());
+        // The canary: a set or unset that loses the lock exits 255 with nothing changed.
+        for args in [
+            ["config", "--local", "user.name", "Bob"],
+            ["config", "--local", "--unset-all", "user.name"],
+        ] {
+            let raw = run_git_raw(Some(&repo), &args, DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert_eq!(raw.code, 255, "{args:?}: {}", raw.stderr);
+            assert!(is_config_lock_contention(&raw.stderr), "{}", raw.stderr);
+        }
+        for result in [set("Bob", "bob@t.local").await, set("", "").await] {
+            let err = result.expect_err("a lock held through the retry fails");
+            assert!(
+                matches!(&err, AppError::Git { stderr, .. } if is_config_lock_contention(stderr)),
+                "{err:?}"
+            );
+            assert_eq!(identity().await, ann, "neither key changed");
+        }
+        std::fs::remove_file(&lock).unwrap();
+
+        run(&repo, &["config", "--local", "--add", "user.name", "Extra"]).await;
+        // Why the clear is `--unset-all`: plain `--unset` exits 5, the never-set code,
+        // on a multi-valued key while removing nothing.
+        let plain = run_git_raw(
+            Some(&repo),
+            &["config", "--local", "--unset", "user.name"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.code, 5, "{}", plain.stderr);
+        assert_eq!(local_values(&repo, "user.name").await, ["Ann", "Extra"]);
+        hold_config_lock(dir.path());
+        let (hook, attempts) = release_config_lock_before_attempt(lock.clone(), 2);
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(hook, set("", ""))
+            .await
+            .expect("the clear lands through the retry");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(identity().await, (vec![], vec![]), "no value survives");
     }
 
     /// The recent-commits list shares History's log format + parser, so its rows

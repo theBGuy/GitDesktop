@@ -4656,13 +4656,8 @@ pub async fn rename_repo(state: &crate::state::AppState, repo_path: &str, new_na
     // effort on reading the current URL — if we can't read or recognize it, leave it.
     let old_url = origin_remote_url(repo_path).await.unwrap_or_default();
     if let Some(new_url) = rewritten_origin_url(&old_url, &ws, &new_slug) {
-        if let Err(e) = crate::git::runner::run_git_mutating(
-            state,
-            repo_path,
-            &["remote", "set-url", "origin", &new_url],
-            crate::git::runner::NETWORK_TIMEOUT,
-        )
-        .await
+        if let Err(e) =
+            crate::git::remote::set_remote_url(state, repo_path, "origin", &new_url).await
         {
             return Err(AppError::Bitbucket(format!(
                 "Renamed on Bitbucket, but the local 'origin' remote couldn't be updated — \
@@ -5622,14 +5617,7 @@ pub async fn publish_repo(
 
     // ── Add origin, then push the current branch. ──
     let remote_url = format!("https://bitbucket.org/{workspace}/{created_slug}.git");
-    if let Err(e) = crate::git::runner::run_git_mutating(
-        state,
-        repo_path,
-        &["remote", "add", "origin", &remote_url],
-        crate::git::runner::NETWORK_TIMEOUT,
-    )
-    .await
-    {
+    if let Err(e) = crate::git::remote::add_remote(state, repo_path, "origin", &remote_url).await {
         return Err(AppError::Bitbucket(format!("{created_hint}adding the 'origin' remote failed: {e}")));
     }
 

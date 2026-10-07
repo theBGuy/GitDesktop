@@ -8,11 +8,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
-use crate::git::branches::remove_deleted_branch_section;
+use crate::git::branches::{
+    direct_tracking_target, remove_deleted_branch_section, restore_upstream, TrackedBy,
+    UPSTREAM_WRITE_FAILED,
+};
 use crate::git::runner::{
-    acquire_repo_lock_unbounded, is_config_lock_contention, run_git, run_git_raw,
-    run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock, DEFAULT_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
+    run_git_raw, run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock,
+    DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -264,6 +267,25 @@ pub async fn git_worktree_add_user(
     new_branch: bool,
     base_ref: Option<String>,
 ) -> AppResult<()> {
+    git_worktree_add_user_core(
+        &state,
+        &repo_path,
+        &path,
+        &branch,
+        new_branch,
+        base_ref.as_deref(),
+    )
+    .await
+}
+
+pub(crate) async fn git_worktree_add_user_core(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    branch: &str,
+    new_branch: bool,
+    base_ref: Option<&str>,
+) -> AppResult<()> {
     let branch = branch.trim();
     let path = path.trim();
     if branch.is_empty() {
@@ -290,22 +312,62 @@ pub async fn git_worktree_add_user(
             "{path} already exists — choose a new folder"
         )));
     }
-    let base = worktree_base_ref(base_ref.as_deref())?;
-    let mut args: Vec<&str> = vec!["worktree", "add"];
+    let base = worktree_base_ref(base_ref)?;
     if new_branch {
-        args.extend_from_slice(&["-b", branch, path, base]);
-    } else {
-        // Existing-branch arm only: `-b` creates the name, so a collision there is
-        // already git's clear "already exists". Here the branch may be held by an
-        // update's hidden checkout, which git names by an app-data path. Heal-free:
-        // the `worktree add` below takes the admin domain, and a sweep fired here
-        // would win it first and turn a would-succeed add into a `Busy`.
-        crate::git::update_marker::refuse_if_branch_updating_no_heal(&state, &repo_path, branch)
-            .await?;
-        args.extend_from_slice(&[path, branch]);
+        return add_worktree_on_new_branch(state, repo_path, path, branch, base).await;
     }
-    run_git_worktree_admin(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
+    // Existing-branch arm only: `-b` creates the name, so a collision there is
+    // already git's clear "already exists". Here the branch may be held by an
+    // update's hidden checkout, which git names by an app-data path. Heal-free:
+    // the `worktree add` below takes the admin domain, and a sweep fired here
+    // would win it first and turn a would-succeed add into a `Busy`.
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, branch).await?;
+    let args = ["worktree", "add", path, branch];
+    run_git_worktree_admin(state, repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
     Ok(())
+}
+
+/// The worktree manager's `worktree add -b`, run under the held admin domain without the
+/// config-write mutex. If its child `git branch` loses the config lock (branch created,
+/// no upstream, no worktree), it finishes as `finish_tracking_setup` does: the worktree
+/// leg runs first, whatever the upstream's fate, then only an upstream git itself would
+/// have pinned is restored, under the mutex as a leaf (`inherit` is never guessed); one
+/// that can't be pinned or is lost again leaves git's error, with the worktree added.
+async fn add_worktree_on_new_branch(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    branch: &str,
+    base: &str,
+) -> AppResult<()> {
+    let domain = state.worktree_admin_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a worktree operation").await?;
+    let args = ["worktree", "add", "-b", branch, path, base];
+    let out = run_git_raw(Some(repo_path), &args, WORKTREE_OP_TIMEOUT).await?;
+    let lost_upstream =
+        is_config_lock_contention(&out.stderr) && out.stderr.contains(UPSTREAM_WRITE_FAILED);
+    if out.code == 0 || !lost_upstream {
+        return out.exit_verdict().map(drop);
+    }
+    let upstream = direct_tracking_target(repo_path, base, TrackedBy::AutoSetupMerge).await;
+    let args = ["worktree", "add", path, branch];
+    run_git_raw(Some(repo_path), &args, WORKTREE_OP_TIMEOUT)
+        .await?
+        .exit_verdict()?;
+    let restored = match upstream {
+        Some(upstream) => {
+            with_config_write_lock(repo_path, |held| async move {
+                restore_upstream(&held, repo_path, branch, &upstream).await
+            })
+            .await
+        }
+        None => false,
+    };
+    if restored {
+        Ok(())
+    } else {
+        out.exit_verdict().map(drop)
+    }
 }
 
 /// Renames (moves) a user worktree from `from_path` to `to_path`
@@ -636,7 +698,7 @@ async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &
             run_git_raw(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
         if let Ok(out) = deleted {
             if out.code == 0 && is_config_lock_contention(&out.stderr) {
-                remove_deleted_branch_section(held, repo_path, branch).await;
+                remove_deleted_branch_section(&held, repo_path, branch).await;
             }
         }
     })
@@ -926,7 +988,7 @@ mod tests {
     // The module itself no longer calls the working-tree runner — the interleave
     // tests below drive it as an ordinary caller would.
     use crate::git::ops::parse_gitdir_pointer;
-    use crate::git::runner::run_git_mutating;
+    use crate::git::runner::{hold_config_lock, lock_events, run_git_mutating};
 
     #[test]
     fn repo_hash_is_stable_and_case_insensitive() {
@@ -1847,6 +1909,231 @@ prunable gitdir file points to non-existent location
             section.stdout_lossy()
         );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// `setup_repo` plus an `origin` whose `feat` and `same-name` tracking refs sit at
+    /// HEAD, and a `local-start` branch that tracks `origin/feat`.
+    async fn repo_with_tracking_refs(marker: &str) -> (tempfile::TempDir, String) {
+        let (base, repo_s) = setup_repo(marker).await;
+        let nowhere = base.path().join("nowhere.git");
+        run(
+            &repo_s,
+            &["remote", "add", "origin", &nowhere.to_string_lossy()],
+        )
+        .await;
+        for name in ["feat", "same-name"] {
+            let tracking = format!("refs/remotes/origin/{name}");
+            run(&repo_s, &["update-ref", &tracking, "HEAD"]).await;
+        }
+        run(
+            &repo_s,
+            &["branch", "--track", "local-start", "origin/feat"],
+        )
+        .await;
+        (base, repo_s)
+    }
+
+    /// `branch.<name>.remote` and `.merge`, or `None` for each that is unset.
+    async fn tracking_of(repo: &str, branch: &str) -> (Option<String>, Option<String>) {
+        let mut got = Vec::new();
+        for key in ["remote", "merge"] {
+            let key = format!("branch.{branch}.{key}");
+            let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            got.push((out.code == 0).then(|| out.stdout_lossy().trim().to_string()));
+        }
+        let merge = got.pop().unwrap();
+        (got.pop().unwrap(), merge)
+    }
+
+    /// The canary the add repair rests on (git 2.51.1): `worktree add -b` whose child
+    /// `git branch` loses the config lock exits 255 with the branch created, untracked,
+    /// and no worktree; adding that existing branch writes no config at all.
+    #[tokio::test]
+    async fn git_creates_the_branch_but_no_worktree_when_tracking_loses_the_config_lock() {
+        use crate::git::branches::UPSTREAM_WRITE_FAILED;
+        let (base, repo_s) = repo_with_tracking_refs("wt-cfg-shape").await;
+        let wt = base.path().join("wt-shape").to_string_lossy().into_owned();
+        let lock = hold_config_lock(&repo_s);
+        let added = run_git_raw(
+            Some(&repo_s),
+            &["worktree", "add", "-b", "shape", &wt, "origin/feat"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(added.code, 255, "{}", added.stderr);
+        assert!(is_config_lock_contention(&added.stderr), "{}", added.stderr);
+        assert!(
+            added.stderr.contains(UPSTREAM_WRITE_FAILED),
+            "{}",
+            added.stderr
+        );
+        assert!(
+            validated_branch_tip(&repo_s, "shape").await.is_some(),
+            "created"
+        );
+        assert_eq!(tracking_of(&repo_s, "shape").await, (None, None));
+        assert!(!std::path::Path::new(&wt).exists(), "no worktree");
+
+        let existing = run_git_raw(
+            Some(&repo_s),
+            &["worktree", "add", &wt, "shape"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(existing.code, 0, "{}", existing.stderr);
+        assert!(std::path::Path::new(&wt).join("a.txt").exists());
+    }
+
+    /// Every `branch.autoSetupMerge` mode × start in which `worktree add -b` tracks
+    /// (the create table's, measured, git 2.51.1). A lost upstream ends where an
+    /// uncontended twin does, with the worktree checked out before the config-write
+    /// mutex is ever requested; `inherit`, whose upstream can't be pinned, keeps
+    /// git's error with no upstream, the worktree still added.
+    #[tokio::test]
+    async fn a_new_branch_worktree_repairs_only_what_git_itself_would_write() {
+        use crate::git::branches::UPSTREAM_WRITE_FAILED;
+        use crate::git::runner::{
+            release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS,
+        };
+        use std::sync::atomic::Ordering;
+        let (base, repo_s) = repo_with_tracking_refs("wt-cfg-modes").await;
+        let state = AppState::default();
+        // (mode, start, new branch, contended, repaired)
+        type Case = (
+            Option<&'static str>,
+            Option<&'static str>,
+            &'static str,
+            bool,
+            bool,
+        );
+        let cases: [Case; 6] = [
+            (None, Some("origin/feat"), "wt-twin", false, true),
+            (None, Some("origin/feat"), "wt-default", true, true),
+            (Some("always"), Some("local-start"), "wt-always", true, true),
+            (Some("always"), None, "wt-always-head", true, true),
+            (
+                Some("simple"),
+                Some("origin/same-name"),
+                "same-name",
+                true,
+                true,
+            ),
+            (
+                Some("inherit"),
+                Some("local-start"),
+                "wt-inherit",
+                true,
+                false,
+            ),
+        ];
+        for (mode, start, name, contended, repaired) in cases {
+            let _ = run_git_raw(
+                Some(&repo_s),
+                &["config", "--unset-all", "branch.autoSetupMerge"],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+            if let Some(mode) = mode {
+                run(&repo_s, &["config", "branch.autoSetupMerge", mode]).await;
+            }
+            // What git itself writes in this mode, uncontended. `simple` gets the
+            // measured literal: its twin can't share the name tracking requires.
+            let want = if mode == Some("simple") {
+                (Some("origin".into()), Some("refs/heads/same-name".into()))
+            } else {
+                let twin = format!("{name}-twin");
+                let mut twin_args = vec!["branch", twin.as_str()];
+                twin_args.extend(start);
+                run(&repo_s, &twin_args).await;
+                tracking_of(&repo_s, &twin).await
+            };
+            assert!(want.0.is_some(), "{mode:?} × {start:?}: git tracks here");
+
+            let wt = base.path().join(name);
+            let wt_s = wt.to_string_lossy().into_owned();
+            let lock = repo_s.clone() + "/.git/config.lock";
+            let (hook, attempts) = if contended {
+                release_config_lock_before_attempt(hold_config_lock(&repo_s), 2)
+            } else {
+                release_config_lock_before_attempt(lock.clone().into(), usize::MAX)
+            };
+            let probe = wt.join("a.txt");
+            let (events, log) = lock_events(move || probe.exists());
+            let add = git_worktree_add_user_core(&state, &repo_s, &wt_s, name, true, start);
+            let added = CONFIG_WRITE_LOCK_EVENTS
+                .scope(events, CONFIG_WRITE_ATTEMPT_HOOK.scope(hook, add))
+                .await;
+            let _ = std::fs::remove_file(&lock);
+
+            let case = format!("{mode:?} × {start:?}");
+            assert!(wt.join("a.txt").exists(), "{case}: the worktree was added");
+            assert_eq!(
+                run(&wt_s, &["symbolic-ref", "--short", "HEAD"])
+                    .await
+                    .trim(),
+                name,
+                "{case}"
+            );
+            let got = tracking_of(&repo_s, name).await;
+            let log = log.lock().unwrap().clone();
+            if !contended {
+                added.unwrap_or_else(|e| panic!("{case}: {e}"));
+                assert_eq!(got, want, "{case}");
+                assert_eq!(attempts.load(Ordering::SeqCst), 0, "{case}: no repair");
+                assert!(log.is_empty(), "{case}: no mutex uncontended");
+            } else if repaired {
+                added.unwrap_or_else(|e| panic!("{case}: {e}"));
+                assert_eq!(got, want, "{case}: what git would have written");
+                assert_eq!(attempts.load(Ordering::SeqCst), 2, "{case}");
+                assert_eq!(
+                    log,
+                    [("waiting", true), ("acquired", true), ("freed", true)],
+                    "{case}: the checkout came before the hold"
+                );
+            } else {
+                let err = added.expect_err("an unpinnable upstream surfaces git's error");
+                let AppError::Git { stderr, .. } = &err else {
+                    panic!("expected git's error, got {err:?}")
+                };
+                assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
+                assert_eq!(got, (None, None), "{case}: no guessed upstream");
+                assert!(log.is_empty(), "{case}: nothing to write");
+            }
+        }
+    }
+
+    /// A lock held through the upstream repair's retry still adds the worktree, and
+    /// git's upstream error is what the caller hears.
+    #[tokio::test]
+    async fn a_new_branch_worktree_whose_upstream_repair_also_loses_is_still_added() {
+        use crate::git::branches::UPSTREAM_WRITE_FAILED;
+        let (base, repo_s) = repo_with_tracking_refs("wt-cfg-held").await;
+        let wt = base.path().join("wt-held");
+        let wt_s = wt.to_string_lossy().into_owned();
+        let lock = hold_config_lock(&repo_s);
+        let state = AppState::default();
+        let err = git_worktree_add_user_core(
+            &state,
+            &repo_s,
+            &wt_s,
+            "wt-held",
+            true,
+            Some("origin/feat"),
+        )
+        .await
+        .expect_err("the lost upstream is reported");
+        std::fs::remove_file(&lock).unwrap();
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's error, got {err:?}")
+        };
+        assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
+        assert!(wt.join("a.txt").exists(), "the worktree was added");
+        assert_eq!(tracking_of(&repo_s, "wt-held").await, (None, None));
     }
 
     /// git's own refusal is the third guard: a branch still checked out in a

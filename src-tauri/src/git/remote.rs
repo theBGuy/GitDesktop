@@ -7,9 +7,10 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
 use crate::git::runner::{
-    acquire_repo_lock, holder_label, is_config_lock_contention, run_git, run_git_mutating,
-    run_git_raw, subcommand_of, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    acquire_repo_lock, holder_label, is_config_lock_contention, run_git, run_git_config_write_held,
+    run_git_mutating_config_write, run_git_raw, subcommand_of, with_config_write_lock,
+    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT,
+    NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -216,8 +217,8 @@ async fn repair_lost_upstream(repo_path: &str, remote: &str, branch: &str, out: 
         return;
     }
     let upstream = format!("refs/remotes/{remote}/{branch}");
-    with_config_write_lock(repo_path, |held| {
-        restore_upstream(held, repo_path, branch, &upstream)
+    with_config_write_lock(repo_path, |held| async move {
+        restore_upstream(&held, repo_path, branch, &upstream).await
     })
     .await;
 }
@@ -300,6 +301,159 @@ pub async fn git_remote_url(repo_path: String, name: String) -> AppResult<String
     Ok(url)
 }
 
+/// A `remote` verb whose lost config lock leaves nothing changed — `set-url` and
+/// `add` both lose at their FIRST write (measured, git 2.51.1) — so the repair re-runs
+/// it whole under the held mutex. `add` writes `.url` then `.fetch`, and a loss
+/// between the two (a real race, never the held-lock seam) fails the re-run as
+/// "already exists", which git's error then reports.
+async fn run_remote_config_verb(
+    state: &AppState,
+    repo_path: &str,
+    args: &[&str],
+) -> AppResult<GitOutput> {
+    run_git_mutating_config_write(
+        state,
+        repo_path,
+        args,
+        DEFAULT_TIMEOUT,
+        |_, held| async move {
+            run_git_config_write_held(&held, repo_path, args, DEFAULT_TIMEOUT).await
+        },
+    )
+    .await
+}
+
+/// `git remote set-url <name> <url>`, recovered from a lost config lock. It neither
+/// validates its arguments nor invalidates the URL cache; callers own both.
+pub(crate) async fn set_remote_url(
+    state: &AppState,
+    repo_path: &str,
+    name: &str,
+    url: &str,
+) -> AppResult<()> {
+    run_remote_config_verb(state, repo_path, &["remote", "set-url", name, url]).await?;
+    Ok(())
+}
+
+/// `git remote add <name> <url>`, recovered from a lost config lock. It neither
+/// validates its arguments nor invalidates the URL cache; callers own both.
+pub(crate) async fn add_remote(
+    state: &AppState,
+    repo_path: &str,
+    name: &str,
+    url: &str,
+) -> AppResult<()> {
+    run_remote_config_verb(state, repo_path, &["remote", "add", name, url]).await?;
+    Ok(())
+}
+
+/// How `remote remove` reports a lost `.git/config.lock` (measured, git 2.51.1). It
+/// unsets the tracking branches' keys first and dies on a lost one before deleting any
+/// ref, so it re-runs cleanly; once the refs are gone, it fails removing the
+/// `remote.<name>` section (exit 1) and leaves that and `remote.pushDefault` behind.
+const REMOTE_BRANCH_UNSET_LOST: &str = "could not unset 'branch.";
+const REMOTE_SECTION_LOST: &str = "Could not remove config section";
+/// git's die when the section went but the `remote.pushDefault` unset lost, read from
+/// git's source: the held-lock seam always loses the section first.
+const REMOTE_PUSH_DEFAULT_LOST: &str = "could not unset 'remote.pushDefault'";
+
+/// `git remote remove <name>`, recovered from a lost config lock: a loss before any
+/// ref was deleted re-runs the command, a loss after finishes only its config legs.
+/// No existence check; callers map git's "No such remote" themselves. A real race
+/// losing a branch's `.merge` unset after its `.remote` one landed is beyond the
+/// held-lock seam: the re-run, like a manual one, no longer sees that branch as
+/// tracking and leaves its `branch.<b>.merge` orphaned.
+pub(crate) async fn remove_remote(state: &AppState, repo_path: &str, name: &str) -> AppResult<()> {
+    let args = ["remote", "remove", name];
+    run_git_mutating_config_write(
+        state,
+        repo_path,
+        &args,
+        DEFAULT_TIMEOUT,
+        |out, held| async move {
+            let out = if out.stderr.contains(REMOTE_BRANCH_UNSET_LOST) {
+                run_git_config_write_held(&held, repo_path, &args, DEFAULT_TIMEOUT).await?
+            } else {
+                out
+            };
+            let refs_gone = out.stderr.contains(REMOTE_SECTION_LOST)
+                || out.stderr.contains(REMOTE_PUSH_DEFAULT_LOST);
+            if out.code != 0 && refs_gone && finish_remote_removal(&held, repo_path, name).await {
+                return Ok(GitOutput { code: 0, ..out });
+            }
+            Ok(out)
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// The config legs a `remote remove` left after deleting the refs: the `remote.<name>`
+/// section (already gone counts as done), then a local `remote.pushDefault` naming the
+/// remote, which git unsets the same way, a multi-valued one included (exit 5, kept).
+/// `false` (logged) leaves git's own error to speak.
+async fn finish_remote_removal(held: &ConfigWriteHeld, repo_path: &str, name: &str) -> bool {
+    let section = format!("remote.{name}");
+    let removed = run_git_config_write_held(
+        held,
+        repo_path,
+        &["config", "--remove-section", &section],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    match &removed {
+        Ok(out) if out.code == 0 || out.stderr.contains("no such section") => {}
+        Ok(out) => {
+            eprintln!(
+                "gitdesktop: remote removal repair failed: {}",
+                out.stderr.trim()
+            );
+            return false;
+        }
+        Err(e) => {
+            eprintln!("gitdesktop: remote removal repair failed: {e}");
+            return false;
+        }
+    }
+    let push_default = run_git_raw(
+        Some(repo_path),
+        &["config", "--local", "--get-all", "remote.pushDefault"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    let names_it = match &push_default {
+        Ok(out) => out.code == 0 && out.stdout_lossy().lines().any(|v| v.trim() == name),
+        Err(e) => {
+            eprintln!("gitdesktop: remote removal repair failed: {e}");
+            return false;
+        }
+    };
+    if !names_it {
+        return true;
+    }
+    let unset = run_git_config_write_held(
+        held,
+        repo_path,
+        &["config", "--local", "--unset", "remote.pushDefault"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    match unset {
+        Ok(out) if out.code == 0 || out.code == 5 => true,
+        Ok(out) => {
+            eprintln!(
+                "gitdesktop: remote removal repair failed: {}",
+                out.stderr.trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("gitdesktop: remote removal repair failed: {e}");
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn git_remote_set_url(
     state: State<'_, AppState>,
@@ -307,15 +461,18 @@ pub async fn git_remote_set_url(
     name: String,
     url: String,
 ) -> AppResult<()> {
+    git_remote_set_url_core(&state, repo_path, name, url).await
+}
+
+pub(crate) async fn git_remote_set_url_core(
+    state: &AppState,
+    repo_path: String,
+    name: String,
+    url: String,
+) -> AppResult<()> {
     validate_remote_arg(&name, "remote name")?;
     validate_remote_arg(url.trim(), "remote URL")?;
-    run_git_mutating(
-        &state,
-        &repo_path,
-        &["remote", "set-url", &name, url.trim()],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    set_remote_url(state, &repo_path, &name, url.trim()).await?;
     // The URL changed under us — drop the cached entry so the next read re-resolves
     // immediately instead of waiting out the TTL.
     cache_invalidate(&repo_path, &name);
@@ -345,13 +502,7 @@ pub(crate) async fn git_remote_add_core(
 ) -> AppResult<()> {
     validate_remote_arg(&name, "remote name")?;
     validate_remote_arg(url.trim(), "remote URL")?;
-    run_git_mutating(
-        state,
-        &repo_path,
-        &["remote", "add", &name, url.trim()],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    add_remote(state, &repo_path, &name, url.trim()).await?;
     // Drop any cached URL for this name: an out-of-band `git remote remove` (in a
     // terminal, bypassing git_remote_remove_core's invalidate) can leave a stale
     // POSITIVE entry that would be served for the re-added remote until the TTL.
@@ -383,13 +534,7 @@ pub(crate) async fn git_remote_remove_core(
     name: String,
 ) -> AppResult<()> {
     ensure_remote_exists(&repo_path, &name).await?;
-    run_git_mutating(
-        state,
-        &repo_path,
-        &["remote", "remove", &name],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    remove_remote(state, &repo_path, &name).await?;
     // The remote (and its URL) no longer exists — drop any cached URL so a forge
     // query firing within the TTL doesn't serve the removed remote's stale value.
     cache_invalidate(&repo_path, &name);
@@ -1027,15 +1172,18 @@ pub(crate) fn publish_refspec(branch: &str) -> String {
 mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
-        git_push_core, git_remote_remove_core, is_auth_class_failure, is_unknown_push_option,
-        parse_upstream_tracking, publish_refspec, push_upstream_branch, push_upstream_target,
-        resolve_push_target, run_git_mutating_with_creds, without_force_if_includes, PushGuard,
-        FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK,
+        git_push_core, git_remote_add_core, git_remote_remove_core, git_remote_set_url_core,
+        is_auth_class_failure, is_unknown_push_option, parse_upstream_tracking, publish_refspec,
+        push_upstream_branch, push_upstream_target, remove_remote, resolve_push_target,
+        run_git_mutating_with_creds, without_force_if_includes, PushGuard, FORCE_IF_INCLUDES,
+        IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST,
+        REMOTE_SECTION_LOST,
     };
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
     use crate::git::runner::{
-        is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+        hold_config_lock, is_config_lock_contention, run_git, run_git_raw, DEFAULT_TIMEOUT,
+        NETWORK_TIMEOUT,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -2277,6 +2425,280 @@ mod tests {
             .expect("the push succeeds");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(upstream_of("forge").await.as_deref(), Some("origin/forge"));
+    }
+
+    /// This repo's `remote.*` and `branch.*` keys, so a test can tell what a run wrote.
+    async fn remote_config(repo: &str) -> String {
+        run_git_raw(
+            Some(repo),
+            &["config", "--local", "--get-regexp", r"^(remote|branch)\."],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy()
+    }
+
+    /// The canary the remote repairs rest on (git 2.51.1): `set-url` and `add` lose
+    /// their FIRST write with nothing changed, so a re-run is the fix; `remove` loses
+    /// either before any ref (a tracking branch's unset) or after the refs are gone
+    /// (the section, leaving it and `remote.pushDefault`). A loss between `add`'s two
+    /// writes is beyond the held-lock seam; its url-only state fails a re-run.
+    #[tokio::test]
+    async fn git_loses_each_remote_verbs_config_write_at_a_measured_point() {
+        let (_guard, base, _origin_s, url) = seeded_origin("remote-verb-shapes").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        let lock = work.join(".git").join("config.lock");
+        let raw = |args: Vec<&str>| {
+            let work_s = work_s.clone();
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            async move {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_git_raw(Some(&work_s), &args, DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+            }
+        };
+        let tracking_refs = || run(&work_s, &["for-each-ref", "refs/remotes/origin/"]);
+
+        let before = remote_config(&work_s).await;
+        assert!(before.contains("branch.main.remote origin"), "{before}");
+        hold_config_lock(&work);
+        for args in [
+            vec!["remote", "set-url", "origin", "../elsewhere"],
+            vec!["remote", "add", "extra", &url],
+            vec!["remote", "remove", "origin"],
+        ] {
+            let out = raw(args.clone()).await;
+            assert_eq!(out.code, 128, "{args:?}: {}", out.stderr);
+            assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+            assert_eq!(
+                remote_config(&work_s).await,
+                before,
+                "{args:?} changed nothing"
+            );
+        }
+        let out = raw(vec!["remote", "remove", "origin"]).await;
+        assert!(
+            out.stderr.contains(REMOTE_BRANCH_UNSET_LOST),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            !tracking_refs().await.trim().is_empty(),
+            "no ref was deleted"
+        );
+        std::fs::remove_file(&lock).unwrap();
+
+        run(&work_s, &["config", "remote.half.url", &url]).await;
+        let out = raw(vec!["remote", "add", "half", &url]).await;
+        assert_eq!(out.code, 3, "{}", out.stderr);
+        assert!(out.stderr.contains("already exists"), "{}", out.stderr);
+
+        run(&work_s, &["branch", "--unset-upstream", "main"]).await;
+        run(&work_s, &["config", "remote.pushDefault", "origin"]).await;
+        hold_config_lock(&work);
+        let out = raw(vec!["remote", "remove", "origin"]).await;
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(out.code, 1, "{}", out.stderr);
+        assert!(is_config_lock_contention(&out.stderr), "{}", out.stderr);
+        assert!(out.stderr.contains(REMOTE_SECTION_LOST), "{}", out.stderr);
+        assert_eq!(tracking_refs().await.trim(), "", "the refs went first");
+        let left = remote_config(&work_s).await;
+        assert!(left.contains("remote.origin.url "), "{left}");
+        assert!(left.contains("remote.pushdefault origin"), "{left}");
+    }
+
+    /// Each `remote` verb that loses the config lock ends where an uncontended one
+    /// does, through the repair's retry; its uncontended twin never reaches a repair.
+    /// `remove` covers both measured losses: before any ref (re-run) and after the refs
+    /// (the section and `remote.pushDefault` finished).
+    #[tokio::test]
+    async fn remote_verbs_that_lose_the_config_lock_still_land() {
+        use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
+        use std::sync::atomic::Ordering;
+        let (_guard, base, origin_s, url) = seeded_origin("remote-verb-repairs").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        let lock = work.join(".git").join("config.lock");
+        let state = AppState::default();
+        let contended = || {
+            hold_config_lock(&work);
+            release_config_lock_before_attempt(lock.clone(), 2)
+        };
+        // Counts attempts without ever deleting anything.
+        let uncontended = || release_config_lock_before_attempt(lock.clone(), usize::MAX);
+
+        let (hook, attempts) = contended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_set_url_core(&state, work_s.clone(), "origin".into(), origin_s.clone()),
+            )
+            .await
+            .expect("the set-url succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            run(&work_s, &["config", "--get", "remote.origin.url"])
+                .await
+                .trim(),
+            origin_s
+        );
+
+        let (hook, attempts) = contended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_add_core(&state, work_s.clone(), "extra".into(), url.clone()),
+            )
+            .await
+            .expect("the add succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let (hook, attempts) = uncontended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_add_core(&state, work_s.clone(), "twin".into(), url.clone()),
+            )
+            .await
+            .expect("the twin add succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no repair uncontended");
+        let config = remote_config(&work_s).await;
+        assert_eq!(
+            config
+                .lines()
+                .filter(|l| l.starts_with("remote.extra."))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            config
+                .lines()
+                .filter(|l| l.starts_with("remote.twin."))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("twin", "extra"),
+            "what git itself writes: {config}"
+        );
+
+        // Loses before any ref: `main` tracks `extra`, so the first unset dies.
+        run(&work_s, &["fetch", "-q", "extra"]).await;
+        run(&work_s, &["branch", "--set-upstream-to=extra/main", "main"]).await;
+        let (hook, attempts) = contended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_remove_core(&state, work_s.clone(), "extra".into()),
+            )
+            .await
+            .expect("the tracked remove succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let config = remote_config(&work_s).await;
+        assert!(!config.contains("remote.extra."), "{config}");
+        assert!(!config.contains("branch.main."), "untracked: {config}");
+        assert_eq!(
+            run(&work_s, &["for-each-ref", "refs/remotes/extra/"]).await,
+            ""
+        );
+
+        // Loses after the refs: nothing tracks `twin`, and it is the push default.
+        run(&work_s, &["fetch", "-q", "twin"]).await;
+        run(&work_s, &["config", "remote.pushDefault", "twin"]).await;
+        let (hook, attempts) = contended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_remove_core(&state, work_s.clone(), "twin".into()),
+            )
+            .await
+            .expect("the untracked remove succeeds");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "section, retry, push default"
+        );
+        let config = remote_config(&work_s).await;
+        assert!(!config.contains("remote.twin."), "{config}");
+        assert!(!config.contains("pushdefault"), "{config}");
+        assert_eq!(
+            run(&work_s, &["for-each-ref", "refs/remotes/twin/"]).await,
+            ""
+        );
+
+        // Uncontended twins of set-url and remove: the repair never fires, and they end
+        // where the contended runs above did.
+        let (hook, attempts) = uncontended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_set_url_core(&state, work_s.clone(), "origin".into(), url.clone()),
+            )
+            .await
+            .expect("the twin set-url succeeds");
+        assert_eq!(
+            run(&work_s, &["config", "--get", "remote.origin.url"])
+                .await
+                .trim(),
+            url
+        );
+        let (hook, removes) = uncontended();
+        CONFIG_WRITE_ATTEMPT_HOOK
+            .scope(
+                hook,
+                git_remote_remove_core(&state, work_s.clone(), "origin".into()),
+            )
+            .await
+            .expect("the twin remove succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no set-url repair");
+        assert_eq!(removes.load(Ordering::SeqCst), 0, "no remove repair");
+        let config = remote_config(&work_s).await;
+        assert!(!config.contains("remote."), "{config}");
+        assert_eq!(run(&work_s, &["for-each-ref", "refs/remotes/"]).await, "");
+
+        // The forge delete's "already absent" mapping still sees git's own text.
+        let err = remove_remote(&state, &work_s, "twin")
+            .await
+            .expect_err("a missing remote fails");
+        assert!(
+            matches!(&err, AppError::Git { stderr, .. } if stderr.contains("No such remote")),
+            "{err:?}"
+        );
+    }
+
+    /// A lock held through every retry surfaces git's error, never a success over
+    /// partial state; each verb changed nothing beyond what git itself did.
+    #[tokio::test]
+    async fn remote_verbs_whose_repair_also_loses_keep_gits_error() {
+        let (_guard, base, _origin_s, url) = seeded_origin("remote-verb-held").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        run(&work_s, &["branch", "--unset-upstream", "main"]).await;
+        let before = remote_config(&work_s).await;
+        let lock = hold_config_lock(&work);
+        let state = AppState::default();
+
+        let lost = |err: AppError| match err {
+            AppError::Git { stderr, .. } if is_config_lock_contention(&stderr) => stderr,
+            other => panic!("expected git's lock error, got {other:?}"),
+        };
+        lost(
+            git_remote_set_url_core(&state, work_s.clone(), "origin".into(), "../x".into())
+                .await
+                .expect_err("set-url fails"),
+        );
+        lost(
+            git_remote_add_core(&state, work_s.clone(), "extra".into(), url)
+                .await
+                .expect_err("add fails"),
+        );
+        assert_eq!(remote_config(&work_s).await, before);
+        let stderr = lost(
+            git_remote_remove_core(&state, work_s.clone(), "origin".into())
+                .await
+                .expect_err("remove fails"),
+        );
+        assert!(stderr.contains(REMOTE_SECTION_LOST), "{stderr}");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(remote_config(&work_s).await.contains("remote.origin.url "));
     }
 
     /// Only a `push -u` with one refspec names an upstream to repair, read past any

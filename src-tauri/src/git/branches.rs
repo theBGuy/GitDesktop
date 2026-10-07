@@ -294,7 +294,7 @@ pub(crate) async fn git_rename_branch_core(
                 return Ok(out);
             }
             let moved = ["config", "--rename-section", &old_section, &new_section];
-            if repair_branch_section(held, repo, &moved).await {
+            if repair_branch_section(&held, repo, &moved).await {
                 return Ok(GitOutput { code: 0, ..out });
             }
             Ok(out)
@@ -443,7 +443,7 @@ pub(crate) async fn git_delete_branch_core(
         DEFAULT_TIMEOUT,
         |out, held| async move {
             if out.code == 0 {
-                remove_deleted_branch_section(held, repo, local).await;
+                remove_deleted_branch_section(&held, repo, local).await;
             }
             Ok(out)
         },
@@ -463,7 +463,7 @@ pub(crate) const UPSTREAM_WRITE_FAILED: &str = "unable to write upstream branch 
 /// Redoes one `branch.<name>` section edit whose ref change already landed, counting
 /// "no such section" as done: the branch had no settings, or another writer already
 /// handled them. `false` (logged) leaves the caller's own verdict to speak.
-async fn repair_branch_section(held: ConfigWriteHeld, repo_path: &str, args: &[&str]) -> bool {
+async fn repair_branch_section(held: &ConfigWriteHeld, repo_path: &str, args: &[&str]) -> bool {
     match run_git_config_write_held(held, repo_path, args, DEFAULT_TIMEOUT).await {
         Ok(out) if out.code == 0 || out.stderr.contains("no such section") => true,
         Ok(out) => {
@@ -484,7 +484,7 @@ async fn repair_branch_section(held: ConfigWriteHeld, repo_path: &str, args: &[&
 /// ref is gone but `branch.<name>.*` survives, to resurface on the next branch of that
 /// name. Best-effort, since the delete itself succeeded.
 pub(crate) async fn remove_deleted_branch_section(
-    held: ConfigWriteHeld,
+    held: &ConfigWriteHeld,
     repo_path: &str,
     name: &str,
 ) {
@@ -496,7 +496,7 @@ pub(crate) async fn remove_deleted_branch_section(
 /// lock, never re-running the command that set it up. `upstream` is the fully
 /// qualified ref git itself would have tracked; callers that can't pin it don't call.
 pub(crate) async fn restore_upstream(
-    held: ConfigWriteHeld,
+    held: &ConfigWriteHeld,
     repo_path: &str,
     branch: &str,
     upstream: &str,
@@ -548,7 +548,7 @@ pub(crate) struct FinishedSetup {
 /// commit would land on the old branch. An upstream git's own choice can't be pinned
 /// for, or that loses again, keeps git's failure in `out`, never a guessed upstream.
 pub(crate) async fn finish_tracking_setup(
-    held: ConfigWriteHeld,
+    held: &ConfigWriteHeld,
     repo_path: &str,
     out: GitOutput,
     branch: &str,
@@ -594,7 +594,7 @@ pub(crate) async fn finish_tracking_setup(
 /// every `branch.autoSetupMerge` value that sets tracking up at all except `inherit`,
 /// which copies the START's own upstream (possibly several merge entries) instead
 /// (measured, git 2.51.1). The start resolves the way git's create resolved it.
-async fn direct_tracking_target(
+pub(crate) async fn direct_tracking_target(
     repo_path: &str,
     start: &str,
     tracked_by: TrackedBy,
@@ -807,7 +807,7 @@ pub(crate) async fn git_checkout_remote_branch_core(
         DEFAULT_TIMEOUT,
         |out, held| async move {
             let by = TrackedBy::ExplicitTrack;
-            let finished = finish_tracking_setup(held, repo, out, local, start_s, by, true).await;
+            let finished = finish_tracking_setup(&held, repo, out, local, start_s, by, true).await;
             finished.map(|finished| finished.out)
         },
     )
@@ -881,8 +881,8 @@ pub(crate) async fn git_create_branch_core(
     let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Any create but `--no-track` can set tracking up, the one leg that writes the
-    // config: with no start point git starts from HEAD, and `always`/`inherit` track
-    // that local branch too (measured, git 2.51.1).
+    // config: with no start point git starts from HEAD, where `always` tracks that
+    // local branch and `inherit` copies its upstream (measured, git 2.51.1).
     if no_track {
         run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
         return Ok(());
@@ -896,7 +896,8 @@ pub(crate) async fn git_create_branch_core(
         DEFAULT_TIMEOUT,
         |out, held| async move {
             let by = TrackedBy::AutoSetupMerge;
-            let finished = finish_tracking_setup(held, repo, out, local, start, by, checkout).await;
+            let finished =
+                finish_tracking_setup(&held, repo, out, local, start, by, checkout).await;
             finished.map(|finished| finished.out)
         },
     )
@@ -1863,8 +1864,8 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{
-        acquire_repo_lock, release_config_lock_before_attempt, run_git, run_git_raw,
-        CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
+        acquire_repo_lock, hold_config_lock, release_config_lock_before_attempt, run_git,
+        run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -4103,12 +4104,6 @@ mod tests {
             .await
             .trim()
             .is_empty()
-    }
-
-    fn hold_config_lock(repo: &std::path::Path) -> std::path::PathBuf {
-        let lock = repo.join(".git").join("config.lock");
-        std::fs::write(&lock, b"").unwrap();
-        lock
     }
 
     /// The premise every repair below rests on (git 2.51.1): each command finishes

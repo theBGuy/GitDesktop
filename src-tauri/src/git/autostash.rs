@@ -382,12 +382,13 @@ pub(crate) async fn git_switch_autostash_core(
         // A tracking switch writes the config, so it holds the config-write mutex and
         // finishes a lost tracking setup BEFORE `settle` pops onto the half-switched tree.
         Some(tracking) => {
-            with_config_write_lock(&repo_path, |held| async {
+            let (repo, name) = (repo_path.as_str(), name.as_str());
+            with_config_write_lock(repo, |held| async move {
                 let args = ["switch", "--track", tracking.as_str()];
-                let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+                let out = run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await?;
                 let by = TrackedBy::ExplicitTrack;
                 let finished =
-                    finish_tracking_setup(held, &repo_path, out, &name, tracking, by, true).await?;
+                    finish_tracking_setup(&held, repo, out, name, tracking, by, true).await?;
                 // `settle` reads a failure as "HEAD never moved" and pops onto whatever
                 // is checked out, so a landed switch whose upstream lost again reports
                 // as the switch it is; the miss is logged, not surfaced.
