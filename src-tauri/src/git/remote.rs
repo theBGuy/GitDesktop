@@ -376,6 +376,16 @@ pub(crate) fn with_busy_tail(e: AppError, tail: &str) -> AppError {
     }
 }
 
+/// Whether `e` is the refusal of a removal that dropped the remote but left
+/// `remote.pushDefault` naming it, so a wrapping caller can say the remote is gone.
+pub(crate) fn is_push_default_left(e: &AppError) -> bool {
+    matches!(
+        e,
+        AppError::Command(message)
+            if message.strip_prefix(CONFIG_LOCK_BUSY_LEAD) == Some(REMOTE_PUSH_DEFAULT_LEFT)
+    )
+}
+
 /// The busy tail once a removal's section went but its push-default unset lost: a retry
 /// would refuse the remote as missing and could never clear the leftover.
 const REMOTE_PUSH_DEFAULT_LEFT: &str = "the remote was removed but is still recorded as the \
@@ -599,11 +609,11 @@ pub(crate) async fn git_remote_remove_core(
     name: String,
 ) -> AppResult<()> {
     ensure_remote_exists(&repo_path, &name).await?;
-    remove_remote(state, &repo_path, &name).await?;
-    // The remote (and its URL) no longer exists — drop any cached URL so a forge
-    // query firing within the TTL doesn't serve the removed remote's stale value.
+    let removed = remove_remote(state, &repo_path, &name).await;
+    // Dropped even on failure: a removal can fail after the remote is gone (a lost
+    // push-default unset), and a stale cached URL would outlive it for the whole TTL.
     cache_invalidate(&repo_path, &name);
-    Ok(())
+    removed
 }
 
 /// Names of the configured remotes (e.g. `["origin"]`), empty for a local repo.
@@ -1238,12 +1248,12 @@ mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
         git_push_core, git_remote_add_core, git_remote_remove_core, git_remote_set_url_core,
-        is_auth_class_failure, is_unknown_push_option, parse_upstream_tracking, publish_refspec,
-        push_upstream_branch, push_upstream_target, remove_busy_tail, remove_remote,
-        resolve_push_target, run_git_mutating_with_creds, with_busy_tail,
-        without_force_if_includes, PushGuard, FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION,
-        NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LEFT,
-        REMOTE_PUSH_DEFAULT_LOST, REMOTE_SECTION_LOST,
+        is_auth_class_failure, is_push_default_left, is_unknown_push_option,
+        parse_upstream_tracking, publish_refspec, push_upstream_branch, push_upstream_target,
+        remove_busy_tail, remove_remote, resolve_push_target, run_git_mutating_with_creds,
+        with_busy_tail, without_force_if_includes, PushGuard, FORCE_IF_INCLUDES,
+        IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST,
+        REMOTE_PUSH_DEFAULT_LEFT, REMOTE_PUSH_DEFAULT_LOST, REMOTE_SECTION_LOST, REMOTE_UNCHANGED,
     };
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
@@ -2897,6 +2907,20 @@ mod tests {
         );
         let other = with_busy_tail(AppError::Command("something else".into()), tail);
         assert_eq!(other.to_string(), "something else");
+    }
+
+    /// Only a removal that dropped the remote but kept `remote.pushDefault` reads as one,
+    /// so the repo delete can say origin is gone; every other refusal or git error doesn't.
+    #[test]
+    fn only_the_push_default_leftover_reads_as_a_removed_remote() {
+        assert!(is_push_default_left(&config_lock_busy(
+            REMOTE_PUSH_DEFAULT_LEFT
+        )));
+        assert!(!is_push_default_left(&config_lock_busy(REMOTE_UNCHANGED)));
+        assert!(!is_push_default_left(&AppError::Git {
+            code: 2,
+            stderr: "error: No such remote: 'origin'".into(),
+        }));
     }
 
     /// The publish paths' add: option-shaped and empty URLs are refused before git
