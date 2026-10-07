@@ -324,8 +324,27 @@ export function forgeProbeState(q: {
   data: ForgeStatus | undefined;
   isError: boolean;
   isPending: boolean;
-}): "unreachable" | "checking" | null {
+}): ForgeProbe | null {
   if (q.isError && q.data === undefined) return "unreachable";
   if (q.isPending) return "checking";
   return null;
+}
+
+export type ForgeProbe = "unreachable" | "checking";
+
+const FORGE_PROBE_REASONS: Record<ForgeProbe, (action: string) => string> = {
+  unreachable: (action) =>
+    `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`,
+  checking: () => "Checking this repository's host…",
+};
+
+/** The held-control reason for a {@link forgeProbeState} answer, or null once a
+ *  status is in hand. `action` completes "you can't … right now" and must stay
+ *  provider-neutral: with no status, the provider is unknown. A caller checks
+ *  this ahead of its setup and connect arms, which would misdirect here. */
+export function forgeProbeReason(
+  probe: ForgeProbe | null,
+  action: string,
+): string | null {
+  return probe === null ? null : FORGE_PROBE_REASONS[probe](action);
 }

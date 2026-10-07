@@ -40,6 +40,7 @@ import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
   forgeProbeState,
   useCheckoutCommit,
   useDeleteRelease,
@@ -141,15 +142,12 @@ export function TagDetailView({
   // which a read-only viewer is otherwise free to use. Not-ready outranks stale
   // and never resolves on its own: a not-ready forge disables the query, which
   // goes on serving placeholder data, so "loading" would be a wait with no end.
-  // Wording mirrors TagsPanel's release affordance, probe arms first: with no
-  // status in hand the provider is unknown, so no setup line can be named yet.
+  // Wording mirrors TagsPanel's release affordance, probe arm first.
   const probe = forgeProbeState(gh);
   const readReason = (() => {
     switch (true) {
-      case probe === "unreachable":
-        return "GitDesktop couldn't reach this repository's host, so you can't manage this release right now. Check your network connection.";
-      case probe === "checking":
-        return "Checking this repository's host…";
+      case probe !== null:
+        return forgeProbeReason(probe, "manage this release");
       case !ghReady && isGitLab:
         return "Sign in with the GitLab CLI (glab) to manage this release.";
       case !ghReady:
@@ -164,11 +162,11 @@ export function TagDetailView({
   // either, and it's the one that still applies once the release is current.
   const blockReason = writeBlocked ? writeReason : readReason;
   const publishNote = (() => {
-    switch (probe) {
-      case "unreachable":
-        return "GitDesktop couldn't reach this repository's host, so you can't publish a release for this tag right now. Check your network connection.";
-      case "checking":
-        return "Checking this repository's host…";
+    switch (true) {
+      case probe !== null:
+        return forgeProbeReason(probe, "publish a release for this tag");
+      case isGitLab:
+        return "Sign in with the GitLab CLI (glab) to publish a release for this tag.";
       default:
         return "Connect this repository to GitHub or GitLab to publish a release for this tag.";
     }

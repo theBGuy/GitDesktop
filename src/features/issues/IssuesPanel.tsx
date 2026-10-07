@@ -33,6 +33,7 @@ import { presentError } from "@/lib/error-summary";
 import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
   forgeProbeState,
   repoKeys,
   useForgeStatus,
@@ -140,15 +141,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // not-yet-connected repo never gets told its PROVIDER lacks assignee filtering.
   const implemented = gh.data?.implemented;
   const canFilterMine = forgeFeatureReady(gh.data, "listFilterMine");
-  // With no status in hand the provider is unknown, so a held control says the
-  // host is unreachable or still being checked rather than naming a setup step.
   const probe = forgeProbeState(gh);
-  const probeReason = (action: string) => {
-    if (probe === "unreachable")
-      return `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`;
-    if (probe === "checking") return "Checking this repository's host…";
-    return null;
-  };
   const canFilterAuthor = forgeFeatureReady(gh.data, "listFilterAuthor");
   // Borrowed from the label-editing flag: a provider with no issue labels has
   // nothing for the forge to filter by — the pick runs client-side there.
@@ -211,7 +204,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       case canOpenGhCreate:
         return undefined;
       case probe !== null:
-        return probeReason("open an issue") ?? undefined;
+        return forgeProbeReason(probe, "open an issue") ?? undefined;
       case isBitbucket:
         return "Bitbucket has retired its native issue tracker — link a Jira project to track issues.";
       case isGitLab && Boolean(gh.data?.installed):
@@ -423,24 +416,25 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
 
   const RowIcon = stateFilter === "open" ? CircleDashedIcon : CheckCircleIcon;
 
-  // Held "Mine" rows say which reason holds them: no status yet (`probeReason`),
-  // the provider can't express the axis, or this repo isn't connected yet.
+  // Held "Mine" rows say which reason holds them: no status yet
+  // (`forgeProbeReason`), the provider can't express the axis, or this repo isn't
+  // connected yet.
   const mineReason = (() => {
     if (canFilterMine) return null;
-    if (probe !== null) return probeReason("filter by assignee");
+    if (probe !== null) return forgeProbeReason(probe, "filter by assignee");
     if (implemented && !implemented.listFilterMine)
       return `${providerName} issues have no assignees to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee`;
   })();
   // Same shape as mineReason above, and the order matters: the provider claim is
   // only made where `implemented` actually refutes the axis, so a status that
-  // hasn't answered takes `probeReason`, and a provider that DOES support authors
-  // but isn't connected yet takes the connect line. Left null, the rows would stay
-  // live while the axis was dropped from the query, and a pick would silently
-  // empty the local section under a zero badge.
+  // hasn't answered takes `forgeProbeReason`, and a provider that DOES support
+  // authors but isn't connected yet takes the connect line. Left null, the rows
+  // would stay live while the axis was dropped from the query, and a pick would
+  // silently empty the local section under a zero badge.
   const authorReason = (() => {
     if (canFilterAuthor) return null;
-    if (probe !== null) return probeReason("filter by author");
+    if (probe !== null) return forgeProbeReason(probe, "filter by author");
     if (implemented && !implemented.listFilterAuthor)
       return `${providerName} can't filter issues by author here`;
     return `Connect this repository to ${providerName} to filter by author`;

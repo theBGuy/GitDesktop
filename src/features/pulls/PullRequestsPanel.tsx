@@ -49,6 +49,7 @@ import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
   forgeFeatureReady,
+  forgeProbeReason,
   forgeProbeState,
   keepPreviousDataForKeyAxes,
   prDetailsOptions,
@@ -176,15 +177,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // there is nothing for the forge to filter by — the pick runs client-side there.
   const canFilterLabel = forgeFeatureReady(gh.data, "mrLabels");
   const canGroupByReview = forgeFeatureReady(gh.data, "reviewGrouping");
-  // With no status in hand the provider is unknown, so a held control says the
-  // host is unreachable or still being checked rather than naming a setup step.
   const probe = forgeProbeState(gh);
-  const probeReason = (action: string) => {
-    if (probe === "unreachable")
-      return `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`;
-    if (probe === "checking") return "Checking this repository's host…";
-    return null;
-  };
   // "closed" matches the Closed tab: closed and merged alike.
   const [stateFilter, setStateFilter] = useState<PrStateFilter>("open");
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
@@ -366,7 +359,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       case canCreateGhPr:
         return null;
       case probe !== null:
-        return probeReason("open a pull request");
+        return forgeProbeReason(probe, "open a pull request");
       case isGitLab && Boolean(gh.data?.installed):
         return "Sign in to GitLab (glab auth login) to work with merge requests here.";
       case isGitLab:
@@ -923,12 +916,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (target) => `${target.kind}:${target.id}`,
   });
 
-  // Held filter rows say which reason holds them: no status yet (`probeReason`),
-  // the provider can't express the axis, or this repo isn't connected yet. Never
-  // a provider claim while `implemented` is still unknown.
+  // Held filter rows say which reason holds them: no status yet
+  // (`forgeProbeReason`), the provider can't express the axis, or this repo isn't
+  // connected yet. Never a provider claim while `implemented` is still unknown.
   const mineReason = (() => {
     if (canFilterMine) return null;
-    if (probe !== null) return probeReason("filter by assignee or reviewer");
+    if (probe !== null)
+      return forgeProbeReason(probe, "filter by assignee or reviewer");
     if (implemented && !implemented.listFilterMine)
       return `${providerName} pull requests have no assignees or review requests to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee or reviewer`;
@@ -942,7 +936,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   })();
   const reviewReason = (() => {
     if (canGroupByReview) return null;
-    if (probe !== null) return probeReason("group by your review");
+    if (probe !== null) return forgeProbeReason(probe, "group by your review");
     if (implemented && !implemented.reviewGrouping)
       return `${providerName} doesn't report your last review on this list`;
     return `Connect this repository to ${providerName} to group by your review`;
@@ -955,13 +949,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   })();
   // Same shape as mineReason above, and the order matters: the provider claim is
   // only made where `implemented` actually refutes the axis, so a status that
-  // hasn't answered takes `probeReason`, and a provider that DOES support authors
-  // but isn't connected yet takes the connect line. Left null, the rows would stay
-  // live while the axis was dropped from the query, and a pick would silently
-  // empty the local section under a zero badge.
+  // hasn't answered takes `forgeProbeReason`, and a provider that DOES support
+  // authors but isn't connected yet takes the connect line. Left null, the rows
+  // would stay live while the axis was dropped from the query, and a pick would
+  // silently empty the local section under a zero badge.
   const authorReason = (() => {
     if (canFilterAuthor) return null;
-    if (probe !== null) return probeReason("filter by author");
+    if (probe !== null) return forgeProbeReason(probe, "filter by author");
     if (implemented && !implemented.listFilterAuthor)
       return `${providerName} can't filter pull requests by author here`;
     return `Connect this repository to ${providerName} to filter by author`;
