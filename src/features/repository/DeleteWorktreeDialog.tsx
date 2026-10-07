@@ -14,6 +14,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { useBranches, useDefaultBranch } from "@/lib/git/queries";
 import type { UserWorktree } from "@/lib/git/worktree";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   registerRemovalListener,
   useIsRemovingWorktree,
@@ -22,13 +23,6 @@ import {
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
-
-/** Last path segment, tolerating both separators — what to call a detached
- *  worktree that has no branch name. */
-function folderName(p: string) {
-  const parts = p.replace(/[/\\]+$/, "").split(/[/\\]/);
-  return parts[parts.length - 1] || p;
-}
 
 /**
  * Confirms removing a worktree's folder while keeping its branch. Escalates to a
@@ -118,7 +112,7 @@ export function DeleteWorktreeDialog({
     const refused = startRemoval({
       repoPath,
       path: worktree.path,
-      name: worktree.branch || folderName(worktree.path),
+      name: worktree.branch || repoNameFromPath(worktree.path),
       branch: worktree.branch || null,
       archiveWhenDone:
         archiveAfter && Boolean(worktree.branch) && !alreadyArchived,

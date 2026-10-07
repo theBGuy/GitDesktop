@@ -159,15 +159,6 @@ interface PlanState {
   relocateRepoPath: (oldPath: string, newPath: string) => void;
 }
 
-function repoName(p: string): string {
-  return (
-    p
-      .replace(/[/\\]+$/, "")
-      .split(/[/\\]/)
-      .pop() ?? p
-  );
-}
-
 /**
  * Read-only planning surface. Each plan run is a **resumable read-only agent
  * conversation** (the `agent_session` backend with `readOnly: true` — read tools
@@ -389,7 +380,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
       goal,
       issueTitle,
       issueBody,
-      repoName: repoName(repoPath),
+      repoName: repoNameFromPath(repoPath),
       repoInstructions,
       globalInstructions: settings?.globalInstructions ?? "",
       contextPack,

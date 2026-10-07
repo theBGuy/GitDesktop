@@ -193,15 +193,6 @@ interface ResearchState {
   relocateRepoPath: (oldPath: string, newPath: string) => void;
 }
 
-function repoName(p: string): string {
-  return (
-    p
-      .replace(/[/\\]+$/, "")
-      .split(/[/\\]/)
-      .pop() ?? p
-  );
-}
-
 /** A filesystem-safe stem from a report title (the Rust side sanitizes again as a
  *  safety net; this just keeps the saved name readable). */
 function slugify(title: string): string {
@@ -465,7 +456,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     const { system, prompt } = buildResearchPrompt({
       depth,
       topic,
-      repoName: repoName(repoPath),
+      repoName: repoNameFromPath(repoPath),
       repoInstructions,
       globalInstructions: settings?.globalInstructions ?? "",
     });

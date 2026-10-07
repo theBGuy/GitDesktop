@@ -28,13 +28,13 @@ import {
   serverScope,
 } from "@/lib/settings/mcp";
 import { useRepoKeys } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { BrowseRegistryDialog } from "./mcp/BrowseRegistryDialog";
 import { GitDesktopAsServer } from "./mcp/GitDesktopAsServer";
 import { ImportMcpDialog } from "./mcp/ImportMcpDialog";
 import { McpServerDialog } from "./mcp/McpServerDialog";
 import { PerRepoStateControl } from "./mcp/PerRepoStateControl";
-import { repoBasename } from "./mcp/shared";
 import { settingsFormOpts } from "./settings-form";
 
 /** The row's small warning chip, restyled from the Badge base it rides. Its
@@ -207,7 +207,7 @@ export const McpServersSection = withForm({
       },
       {
         key: "repo",
-        label: `This repo — ${repoName ?? (repoPath ? repoBasename(repoPath) : "")}`,
+        label: `This repo — ${repoName ?? (repoPath ? repoNameFromPath(repoPath) : "")}`,
         // "This repo" = scoped to any of the open repo's keys (identity or a
         // legacy raw checkout path), so a server scoped from a sibling worktree
         // groups here too.
