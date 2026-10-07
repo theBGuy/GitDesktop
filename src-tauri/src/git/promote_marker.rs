@@ -272,8 +272,9 @@ async fn begin_in(root: &Path, branch: &str, wait: Duration) -> AppResult<Option
     // The manifest is written ONLY under the exclusive hold, here and in `touch`: a
     // promote still waiting for the gate must never re-stamp another holder's manifest,
     // which would re-arm refusals for a hold that had aged out. Readers that meet the
-    // hold before this write lands retry once (`hold_settled_in`). A failed write
-    // releases the gate, since a hold with no manifest refuses nothing.
+    // hold before this write lands keep re-probing until it does, up to a deadline
+    // (`hold_settled_in`). A failed write releases the gate, since a hold with no
+    // manifest refuses nothing.
     let started_at_ms = now_ms();
     if write_manifest(root, branch, started_at_ms).is_err() {
         return Ok(None);
@@ -358,20 +359,49 @@ pub(crate) async fn hold_unless_promoting(repo_path: &str) -> AppResult<Option<P
     hold_settled_in(&root).await
 }
 
-/// How long a reader waits before re-reading a held gate whose manifest proves
-/// nothing. A promote publishes its manifest right after taking the gate, so this
-/// covers that gap; a hold still unproven after it is stale or foreign, and fails open.
+/// The step between re-probes of a held gate whose manifest proves nothing yet.
 const MANIFEST_SETTLE: Duration = Duration::from_millis(50);
 
-/// [`hold_unless_promoting`] over an explicit root: one probe, and a second after
-/// [`MANIFEST_SETTLE`] when the gate is held but its manifest names no live promote.
+/// How long a reader keeps re-probing an exclusively held gate with no fresh manifest
+/// before failing open. A promote publishes right after taking the gate (one small
+/// write and a rename, single-digit ms when healthy), so this outlasts descheduling by
+/// orders of magnitude; still unproven past it means a wedged or dying writer, where
+/// failing open is the module's polarity and a crashed writer's lock releases anyway.
+///
+/// Every held-but-unproven state waits it out: a manifest missing, unreadable, OR aged
+/// out. Aged out has to wait too, because the publish gap shows the PREVIOUS promote's
+/// manifest, usually long expired. The cost: while a hold is stranded past
+/// [`PROMOTE_MAX_AGE`] (live process, webview gone), each gated tool waits this long
+/// before running.
+const UNPROVEN_DEADLINE: Duration = Duration::from_secs(2);
+
+/// [`hold_unless_promoting`] over an explicit root.
 async fn hold_settled_in(root: &Path) -> AppResult<Option<PromoteGateShared>> {
-    match probe_gate(root) {
-        GateProbe::HeldUnproven => {
-            tokio::time::sleep(MANIFEST_SETTLE).await;
-            resolve(probe_gate(root))
+    hold_settled_with(root, UNPROVEN_DEADLINE, || {
+        tokio::time::sleep(MANIFEST_SETTLE)
+    })
+    .await
+}
+
+/// Re-probes, shared acquisition included, while the gate is held but unproven, so a
+/// reader never proceeds unguarded past a live hold whose manifest is still landing:
+/// it ends on a fresh manifest (refuse), a freed gate (the shared hold), or `deadline`
+/// (fail open). `settle` runs between probes, the seam tests drive deterministically.
+async fn hold_settled_with<F, Fut>(
+    root: &Path,
+    deadline: Duration,
+    mut settle: F,
+) -> AppResult<Option<PromoteGateShared>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        match probe_gate(root) {
+            GateProbe::HeldUnproven if std::time::Instant::now() < until => settle().await,
+            probe => return resolve(probe),
         }
-        probe => resolve(probe),
     }
 }
 
@@ -662,42 +692,87 @@ mod tests {
         assert_eq!(err.to_string(), begin_busy().to_string());
         assert_eq!(std::fs::read(root.join(MANIFEST_FILE)).unwrap(), before);
         assert!(
-            hold_settled_in(&root)
-                .await
-                .expect("the aged-out hold still refuses nothing")
-                .is_none(),
-            "fails open: the foreign exclusive hold blocks a shared one"
+            matches!(probe_gate(&root), GateProbe::HeldUnproven),
+            "the aged-out manifest was not re-stamped, so nothing refuses on it"
         );
         drop(foreign);
     }
 
-    /// A reader that meets a held gate before its manifest lands re-reads once, so the
-    /// gap between a promote taking the gate and publishing does not fail open.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_reader_waits_out_the_publish_gap_once() {
-        let (_guard, root) = temp_root("settle");
+    /// A held gate with no manifest, as a promote leaves it between taking the gate and
+    /// publishing.
+    fn held_unproven_gate(tag: &str) -> (tempfile::TempDir, PathBuf, std::fs::File) {
+        let (guard, root) = temp_root(tag);
         std::fs::create_dir_all(&root).unwrap();
         let foreign = open_gate(&root.join(GATE_FILE)).unwrap();
         foreign.try_lock().expect("the foreign hold takes the gate");
         assert!(matches!(probe_gate(&root), GateProbe::HeldUnproven));
+        (guard, root, foreign)
+    }
 
-        let publish = {
-            let root = root.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+    /// A publish that lands several steps in (a descheduled promote, well past the old
+    /// single settle step) is still caught: the reader keeps re-probing a held,
+    /// unproven gate instead of failing open after a fixed number of looks. The publish
+    /// happens INSIDE the injected step, so no timer race decides the outcome.
+    #[tokio::test]
+    async fn a_late_publish_is_still_caught() {
+        let (_guard, root, foreign) = held_unproven_gate("late-publish");
+        let mut steps = 0;
+        let err = hold_settled_with(&root, UNPROVEN_DEADLINE, || {
+            steps += 1;
+            if steps == 4 {
                 write_manifest(&root, "feature", now_ms()).unwrap();
-            })
-        };
-        let err = hold_settled_in(&root)
-            .await
-            .err()
-            .expect("the manifest landed inside the settle window");
+            }
+            std::future::ready(())
+        })
+        .await
+        .err()
+        .expect("the manifest landed before the deadline");
         assert!(err.to_string().contains("checking out feature"), "{err}");
-        publish.await.unwrap();
+        assert_eq!(steps, 4, "one more probe after the publish, then refuse");
+        drop(foreign);
+    }
 
-        // No manifest arrives: still unproven after the retry, so the reader fails open.
-        std::fs::remove_file(root.join(MANIFEST_FILE)).unwrap();
+    /// A gate freed while the reader waits ends the wait with a REAL shared hold, taken
+    /// on the re-probe rather than assumed. Freed inside the injected step; later steps
+    /// yield briefly, since on Linux a released flock can read held for a moment.
+    #[tokio::test]
+    async fn a_gate_freed_mid_wait_yields_the_shared_hold() {
+        let (_guard, root, foreign) = held_unproven_gate("freed");
+        let mut foreign = Some(foreign);
+        let mut steps = 0;
+        let hold = hold_settled_with(&root, UNPROVEN_DEADLINE, || {
+            steps += 1;
+            if steps == 3 {
+                drop(foreign.take());
+            }
+            tokio::time::sleep(Duration::from_millis(1))
+        })
+        .await
+        .expect("no promote proved")
+        .expect("the freed gate is taken shared");
+        assert!(steps >= 3, "the hold was released on step 3");
+        // The shared hold is live: an exclusive try against it must block.
+        let probe = open_gate(&root.join(GATE_FILE)).unwrap();
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(hold);
+    }
+
+    /// A hold that never proves itself (a wedged writer) fails open at the deadline,
+    /// never hanging the tool.
+    #[tokio::test]
+    async fn a_never_proven_hold_fails_open_at_the_deadline() {
+        let (_guard, root, foreign) = held_unproven_gate("deadline");
+        let started = std::time::Instant::now();
         assert!(hold_settled_in(&root).await.expect("fails open").is_none());
+        let waited = started.elapsed();
+        assert!(waited >= UNPROVEN_DEADLINE, "returned early: {waited:?}");
+        assert!(
+            waited < UNPROVEN_DEADLINE + Duration::from_secs(3),
+            "overran: {waited:?}"
+        );
         drop(foreign);
     }
 
