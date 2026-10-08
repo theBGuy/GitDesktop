@@ -1035,10 +1035,10 @@ says so and the button reads **Accept**: it writes the file but leaves it unstag
 moves on. The file stays listed as conflicted: finish it in the conflict editor, or
 remove the markers yourself and **Mark resolved**. When the markers left can't be split
 into regions, **Mark resolved** is offered right away and asks before staging them. The
-banner's **Resolve all with AI** walks every conflict in turn — the walk keeps its place
-while you peek at another tab (switching repositories ends it). It runs on any provider,
-including local Ollama and keyless Claude Code / Codex agents, and skips files matched by
-your AI ignore patterns.{{/ai}}`,
+banner's sparkle button (**Resolve all with AI** on hover) walks every conflict in turn —
+the walk keeps its place while you peek at another tab (switching repositories ends it).
+It runs on any provider, including local Ollama and keyless Claude Code / Codex agents, and
+skips files matched by your AI ignore patterns.{{/ai}}`,
   },
   {
     id: "pull-requests",
