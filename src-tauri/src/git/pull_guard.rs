@@ -328,17 +328,13 @@ const UPSTREAM_REV: &str = "HEAD@{upstream}";
 /// (`refs/heads/feat` also matches `refs/heads/feat/sub`) can't apply. The remote
 /// comes from `branch.<b>.remote`, which is what DEFINES it — a remote name may
 /// contain a slash (`git remote add a/b` is accepted, measured), so the tracking
-/// ref's path cannot be split for it.
+/// ref's path cannot be split for it. The short name is the full ref stripped of
+/// `refs/remotes/` or `refs/heads/`: `--abbrev-ref` disambiguates, so a tag named
+/// `origin/main` turns it into `remotes/origin/main` (measured, git 2.51.1).
 async fn upstream_of(repo: &str, branch: &str) -> AppResult<Option<(String, String, String)>> {
     let out = run_git_raw(
         Some(repo),
-        &[
-            "rev-parse",
-            "--symbolic-full-name",
-            UPSTREAM_REV,
-            "--abbrev-ref",
-            UPSTREAM_REV,
-        ],
+        &["rev-parse", "--symbolic-full-name", UPSTREAM_REV],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -346,10 +342,13 @@ async fn upstream_of(repo: &str, branch: &str) -> AppResult<Option<(String, Stri
         return Ok(None);
     }
     let stdout = out.stdout_lossy();
-    let mut lines = stdout.lines();
-    let (Some(upstream_ref), Some(upstream)) = (lines.next(), lines.next()) else {
+    let Some(upstream_ref) = stdout.lines().next() else {
         return Ok(None);
     };
+    let upstream = upstream_ref
+        .strip_prefix("refs/remotes/")
+        .or_else(|| upstream_ref.strip_prefix("refs/heads/"))
+        .unwrap_or(upstream_ref);
     let remote = run_git_raw(
         Some(repo),
         &["config", &format!("branch.{branch}.remote")],
@@ -2421,6 +2420,22 @@ mod tests {
             None,
             "a detached HEAD names no branch"
         );
+    }
+
+    /// A tag spelled like the upstream itself (`origin/main`) must not leak git's
+    /// disambiguated short form into the label the would-drop prompt shows.
+    #[tokio::test]
+    async fn a_tag_shadowing_the_upstream_keeps_its_plain_label() {
+        let (_dir, clone, _work, _tip) = behind_fixture("upstream-shadow").await;
+        git(&clone, &["tag", "origin/main"]).await;
+
+        let target = resolve(&clone)
+            .await
+            .unwrap()
+            .expect("a shadowed upstream still resolves");
+        assert_eq!(target.upstream_ref, "refs/remotes/origin/main");
+        assert_eq!(target.upstream, "origin/main");
+        assert_eq!(target.remote, "origin");
     }
 
     /// The transfer holds the NETWORK domain alone, so the user can stage or commit

@@ -131,7 +131,7 @@ export function LabelsPopover({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized
             element, and a 16px swap would widen the label column mid-write. */}
-        {editLabels.isPending ? (
+        {editLabels.isPending && !editLabels.isPaused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <TagIcon data-icon="inline-start" />

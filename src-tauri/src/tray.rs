@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State, Window, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, Window, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
-use crate::state::AppState;
+use crate::error::{AppError, AppResult};
+use crate::state::{monotonic_ms, AppState, QuitDecision};
 
 /// What the window-state plugin persists/restores: geometry only. Visibility is
 /// deliberately excluded — the tray owns whether the window is shown, and a saved
@@ -44,10 +45,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "quit" => {
-                // Final flush before exiting — the window may have moved since the
-                // last debounced save.
-                save_geometry_before_exit(app);
-                app.exit(0);
+                request_quit(app);
             }
             _ => {}
         })
@@ -133,11 +131,39 @@ fn save_geometry_before_exit(app: &AppHandle) {
     save_geometry(app);
 }
 
+/// The final flush before exiting — the window may have moved since the last
+/// debounced save.
+fn exit_now(app: &AppHandle) {
+    save_geometry_before_exit(app);
+    app.exit(0);
+}
+
+/// Quits, unless the frontend holds writes parked offline: those live only in
+/// the webview's memory, so the request shows the window and asks there instead
+/// (the rule is [`crate::state::quit_decision`]). Returns whether the app is
+/// exiting.
+fn request_quit(app: &AppHandle) -> bool {
+    match app.state::<AppState>().begin_quit(monotonic_ms()) {
+        QuitDecision::Exit => {
+            exit_now(app);
+            true
+        }
+        QuitDecision::PromptNew => {
+            show_main_window(app);
+            let _ = app.emit("quit-requested", ());
+            false
+        }
+        QuitDecision::Reshow => {
+            show_main_window(app);
+            false
+        }
+    }
+}
+
 /// Move/resize events schedule a debounced geometry save. On window close,
 /// hide to the tray (keeping the app — and any in-flight review — running)
 /// when the user's "close to tray" preference is on. When it's off, the close
-/// proceeds and the app quits (it's the only window). The tray "Quit"
-/// bypasses this entirely via `app.exit`.
+/// quits through the same parked-writes check as the tray "Quit".
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     match event {
         WindowEvent::CloseRequested { api, .. } => {
@@ -147,12 +173,12 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
                 save_geometry(window.app_handle());
                 let _ = window.hide();
                 api.prevent_close();
-            } else {
-                // No tray-resident lifetime wanted — quit explicitly rather than
-                // rely on last-window-closed auto-exit (a tray icon can keep the
-                // event loop alive).
-                save_geometry_before_exit(window.app_handle());
-                window.app_handle().exit(0);
+            } else if !request_quit(window.app_handle()) {
+                // No tray-resident lifetime is wanted, so the quit is explicit
+                // rather than last-window-closed auto-exit (a tray icon can keep
+                // the event loop alive). Deferred to the confirm, the close must be
+                // prevented or it destroys the only window, leaving just the tray.
+                api.prevent_close();
             }
         }
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
@@ -184,4 +210,37 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
 #[tauri::command]
 pub fn set_close_to_tray(state: State<AppState>, enabled: bool) {
     state.set_close_to_tray(enabled);
+}
+
+/// Mirrors whether the frontend holds writes parked offline, which the quit
+/// paths read before exiting.
+#[tauri::command]
+pub async fn set_parked_writes(state: State<'_, AppState>, parked: bool) -> AppResult<()> {
+    state.set_parked_writes(parked);
+    Ok(())
+}
+
+/// The frontend put the quit prompt on screen, so a later quit asks afresh
+/// instead of treating the webview as hung.
+#[tauri::command]
+pub async fn quit_prompt_shown(state: State<'_, AppState>) -> AppResult<()> {
+    state.ack_quit_prompt();
+    Ok(())
+}
+
+/// The frontend's quit prompt was dismissed without quitting, or a reloaded
+/// webview is reporting that none survives, so the next quit asks again.
+#[tauri::command]
+pub async fn quit_prompt_closed(state: State<'_, AppState>) -> AppResult<()> {
+    state.close_quit_prompt();
+    Ok(())
+}
+
+/// A quit the user confirmed over parked writes. Hopped onto the event-loop
+/// thread, which the geometry save requires.
+#[tauri::command]
+pub async fn quit_app(app: AppHandle) -> AppResult<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || exit_now(&handle))
+        .map_err(|e| AppError::Command(e.to_string()))
 }
