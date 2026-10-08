@@ -30,8 +30,8 @@ use crate::forge::my_work::{
 };
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
-    cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
-    FORK_POLL_DELAY, README_CANDIDATES,
+    c_quote_label, cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP,
+    FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
@@ -1882,17 +1882,21 @@ fn reconstruct_file_diff(c: &GlabChange) -> String {
     } else {
         &c.new_path
     };
+    // Names are C-quoted as git writes them, so a control byte in a path can't
+    // break a line and forge a header the splitter would key on.
+    let a_label = c_quote_label("a/", old);
+    let b_label = c_quote_label("b/", new);
     let minus = if c.new_file {
-        "/dev/null".to_string()
+        "/dev/null"
     } else {
-        format!("a/{old}")
+        a_label.as_str()
     };
     let plus = if c.deleted_file {
-        "/dev/null".to_string()
+        "/dev/null"
     } else {
-        format!("b/{new}")
+        b_label.as_str()
     };
-    let mut s = format!("diff --git a/{old} b/{new}\n--- {minus}\n+++ {plus}\n");
+    let mut s = format!("diff --git {a_label} {b_label}\n--- {minus}\n+++ {plus}\n");
     s.push_str(&c.diff);
     if !c.diff.ends_with('\n') {
         s.push('\n');
@@ -14388,6 +14392,82 @@ mod tests {
         let out = reconstruct_file_diff(&c);
         assert!(out.contains("--- a/gone.txt\n"));
         assert!(out.contains("+++ /dev/null\n"));
+    }
+
+    // The three shape tests below assert header/rename/`+++` lines that match
+    // shapes scripts/diff-split.test.mjs decodes; the forged-LF test relies on
+    // diff-split.ts's C_ESCAPES decoding instead.
+
+    #[test]
+    fn quotes_non_ascii_names_as_octal_bytes() {
+        let c = GlabChange {
+            old_path: "src/modified-caf\u{e9}.txt".into(),
+            new_path: "src/modified-caf\u{e9}.txt".into(),
+            new_file: false,
+            deleted_file: false,
+            diff: "@@ -1 +1 @@\n-old\n+new\n".into(),
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git \"a/src/modified-caf\\303\\251.txt\" \"b/src/modified-caf\\303\\251.txt\"\n\
+             --- \"a/src/modified-caf\\303\\251.txt\"\n\
+             +++ \"b/src/modified-caf\\303\\251.txt\"\n\
+             @@ -1 +1 @@\n-old\n+new\n",
+        );
+    }
+
+    #[test]
+    fn quotes_a_non_ascii_deletion_on_both_header_sides() {
+        let c = GlabChange {
+            old_path: "src/caf\u{e9}.txt".into(),
+            new_path: "src/caf\u{e9}.txt".into(),
+            new_file: false,
+            deleted_file: true,
+            diff: "@@ -1 +0,0 @@\n-removed\n".into(),
+        };
+        let out = reconstruct_file_diff(&c);
+        assert!(out.starts_with(
+            "diff --git \"a/src/caf\\303\\251.txt\" \"b/src/caf\\303\\251.txt\"\n\
+             --- \"a/src/caf\\303\\251.txt\"\n+++ /dev/null\n"
+        ));
+    }
+
+    #[test]
+    fn quotes_each_side_of_a_rename_independently() {
+        let c = GlabChange {
+            old_path: "old3.txt".into(),
+            new_path: "\"escaped\".txt".into(),
+            new_file: false,
+            deleted_file: false,
+            diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+        };
+        let out = reconstruct_file_diff(&c);
+        assert!(out.starts_with(
+            "diff --git a/old3.txt \"b/\\\"escaped\\\".txt\"\n\
+             --- a/old3.txt\n+++ \"b/\\\"escaped\\\".txt\"\n"
+        ));
+    }
+
+    #[test]
+    fn a_line_feed_in_a_path_cannot_forge_diff_structure() {
+        let forged = "evil\n+++ b/ok.txt\ndiff --git a/ok.txt b/ok.txt";
+        let c = GlabChange {
+            old_path: forged.into(),
+            new_path: forged.into(),
+            new_file: false,
+            deleted_file: true,
+            diff: "@@ -1 +0,0 @@\n-bye\n".into(),
+        };
+        let out = reconstruct_file_diff(&c);
+        let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
+        assert!(out.starts_with(&format!(
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\n--- \"a/{quoted}\"\n+++ /dev/null\n"
+        )));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("diff --git ")).count(),
+            1
+        );
+        assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 1);
     }
 
     #[test]

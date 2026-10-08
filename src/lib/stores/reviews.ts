@@ -581,11 +581,22 @@ export async function startReview(
       // A no-op run shouldn't linger in the dock; a momentary toast is enough. Drop any
       // queued second mode too — same PR, same empty diff, so it would only load nothing
       // and toast "No changes" a second time. An all-excluded diff lands here too, and
-      // says so rather than claiming a PR with visible changes has none.
+      // says so rather than claiming a PR with visible changes has none; sections
+      // withheld as unreadable must not be blamed on the user's patterns. With no
+      // patterns (or an agentic run) the only drops are unreadable names.
       toast.info(
-        filtered.excludedFiles > 0
-          ? "Every changed file matches your AI ignore patterns — nothing to review."
-          : "No changes to review.",
+        (() => {
+          switch (true) {
+            case filtered.unreadableFiles > 0 && excludePatterns.length === 0:
+              return "Nothing to review — files whose names aren't readable text are always kept from AI.";
+            case filtered.unreadableFiles > 0:
+              return "Nothing to review — changes that couldn't be checked against your AI ignore patterns were withheld, along with any that match them.";
+            case filtered.excludedFiles > 0:
+              return "Every changed file matches your AI ignore patterns — nothing to review.";
+            default:
+              return "No changes to review.";
+          }
+        })(),
       );
       queuedRuns.delete(key);
       useReviewStore.getState().remove(key);

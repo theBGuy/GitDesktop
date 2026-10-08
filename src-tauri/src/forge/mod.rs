@@ -350,6 +350,58 @@ pub(crate) fn encode_query_value(s: &str) -> String {
     out
 }
 
+/// Whether git's `quote_c_style` quotes a name holding this byte under
+/// `core.quotePath=true`: control bytes, `"`, `\`, DEL and all non-ASCII. Space never does.
+fn c_quote_triggers(b: u8) -> bool {
+    b < 0x20 || b == b'"' || b == b'\\' || b >= 0x7f
+}
+
+/// The body git writes between the quotes for `path`, or `None` when git writes
+/// the name bare. Synthesized diff text must quote exactly as git does: the
+/// frontend splitter (src/lib/git/diff-split.ts) decodes these tokens back to
+/// section keys, and a raw TAB, CR or LF in a name truncates a key or forges a line.
+pub(crate) fn c_quote_body(path: &str) -> Option<String> {
+    if !path.bytes().any(c_quote_triggers) {
+        return None;
+    }
+    let mut out = String::with_capacity(path.len() + 8);
+    for b in path.bytes() {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            b'\r' => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b if c_quote_triggers(b) => out.push_str(&format!("\\{b:03o}")),
+            b => out.push(b as char),
+        }
+    }
+    Some(out)
+}
+
+/// A name as git writes it on a `rename`/`copy from`/`to` line: quoted when
+/// [`c_quote_body`] says so, else bare.
+pub(crate) fn c_quote_path(path: &str) -> String {
+    match c_quote_body(path) {
+        Some(body) => format!("\"{body}\""),
+        None => path.to_string(),
+    }
+}
+
+/// A `diff --git`/`---`/`+++` name with its `a/`/`b/` prefix, which git puts
+/// INSIDE the quotes (`"b/caf\303\251.txt"`). Each side quotes independently,
+/// and a side quotes exactly when its [`c_quote_path`] rename line does.
+pub(crate) fn c_quote_label(prefix: &str, path: &str) -> String {
+    match c_quote_body(path) {
+        Some(body) => format!("\"{prefix}{body}\""),
+        None => format!("{prefix}{path}"),
+    }
+}
+
 /// Whether a single repo/owner path *segment* is safe to interpolate into a CLI
 /// arg or URL path. The character set is alphanumerics, dots, underscores, and
 /// hyphens; the FIRST char may be an alphanumeric, a dot, or an underscore (so
@@ -5428,6 +5480,74 @@ mod tests {
         assert_eq!(
             parse_ci_id("run", "9007199254740993").unwrap(),
             9_007_199_254_740_993
+        );
+    }
+
+    #[test]
+    fn c_quote_body_uses_git_letter_escapes() {
+        for (raw, escaped) in [
+            ("\x07", "\\a"),
+            ("\x08", "\\b"),
+            ("\t", "\\t"),
+            ("\n", "\\n"),
+            ("\x0b", "\\v"),
+            ("\x0c", "\\f"),
+            ("\r", "\\r"),
+            ("\"", "\\\""),
+            ("\\", "\\\\"),
+        ] {
+            assert_eq!(
+                c_quote_body(&format!("x{raw}y")).as_deref(),
+                Some(format!("x{escaped}y").as_str()),
+                "escape for byte {:#04x}",
+                raw.as_bytes()[0],
+            );
+        }
+    }
+
+    #[test]
+    fn c_quote_body_octal_escapes_other_bytes_per_utf8_byte() {
+        assert_eq!(
+            c_quote_body("caf\u{e9}.txt").as_deref(),
+            Some("caf\\303\\251.txt")
+        );
+        assert_eq!(c_quote_body("del\x7f").as_deref(), Some("del\\177"));
+        assert_eq!(
+            c_quote_body("nul\x00esc\x1b").as_deref(),
+            Some("nul\\000esc\\033")
+        );
+        // Line/paragraph separators would split a JS `m`-mode line if left raw.
+        assert_eq!(c_quote_body("\u{2028}").as_deref(), Some("\\342\\200\\250"));
+    }
+
+    #[test]
+    fn c_quote_body_leaves_clean_names_bare() {
+        assert_eq!(c_quote_body("src/main.rs"), None);
+        assert_eq!(c_quote_body("docs/space name.txt"), None);
+        assert_eq!(c_quote_body(""), None);
+        // Space never triggers, but rides along inside a quoted name.
+        assert_eq!(c_quote_body("a b\t").as_deref(), Some("a b\\t"));
+        assert_eq!(c_quote_path("docs/space name.txt"), "docs/space name.txt");
+        assert_eq!(
+            c_quote_label("b/", "docs/space name.txt"),
+            "b/docs/space name.txt"
+        );
+    }
+
+    #[test]
+    fn c_quote_label_puts_the_prefix_inside_and_quotes_each_side_alone() {
+        assert_eq!(
+            c_quote_label("b/", "caf\u{e9}.txt"),
+            "\"b/caf\\303\\251.txt\""
+        );
+        assert_eq!(c_quote_path("\"q\".txt"), "\"\\\"q\\\".txt\"");
+        assert_eq!(
+            format!(
+                "{} {}",
+                c_quote_label("a/", "old.txt"),
+                c_quote_label("b/", "\"q\".txt")
+            ),
+            "a/old.txt \"b/\\\"q\\\".txt\"",
         );
     }
 }

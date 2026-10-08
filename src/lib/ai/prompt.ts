@@ -753,6 +753,7 @@ function deltaSection(
   extras: ReviewExtras,
   upstreamTruncated: boolean,
   excludedFiles: number,
+  unreadableFiles: number,
 ): string {
   const header = "## Changes since that review";
   if (state === "rewritten") {
@@ -769,14 +770,27 @@ function deltaSection(
     // dropped to keep the authoritative diff in budget — don't say "no changes".
     return `${header}\n(The delta was omitted to keep the current diff in context — re-review the full diff below.)`;
   }
-  // An empty body with files hidden is NOT "nothing changed" — saying so would
-  // pass a filtered delta off as complete.
+  // An empty body with files hidden or withheld is NOT "nothing changed" —
+  // saying so would pass a filtered delta off as complete. Withheld sections
+  // never met a pattern, so only `excludedFiles` may name the user's rules.
   const body =
     extras.delta.text.trim() ||
-    (excludedFiles > 0
-      ? "(every file changed since that review is hidden by the user's AI ignore rules)"
-      : "(no textual changes)");
+    (() => {
+      switch (true) {
+        case excludedFiles > 0 && unreadableFiles > 0:
+          return "(every file changed since that review is hidden by the user's AI ignore rules or was withheld because it couldn't be checked against them — re-review the full diff below.)";
+        case unreadableFiles > 0:
+          return "(the changes since that review were withheld because they couldn't be checked against the user's AI ignore rules — re-review the full diff below.)";
+        case excludedFiles > 0:
+          return "(every file changed since that review is hidden by the user's AI ignore rules)";
+        default:
+          return "(no textual changes)";
+      }
+    })();
   let section = `${header}\n${body}`;
+  if (extras.delta.text.trim() && unreadableFiles > 0) {
+    section += `\n[${unreadableFiles} section(s) of the delta withheld — the full current diff below is authoritative.]`;
+  }
   if (upstreamTruncated || extras.delta.truncated) {
     section +=
       "\n[delta truncated — the full current diff below is authoritative.]";
@@ -897,6 +911,7 @@ export function buildReviewPrompt(
           extras,
           Boolean(input.deltaTruncated),
           input.deltaExcludedFiles ?? 0,
+          input.deltaUnreadableFiles ?? 0,
         ),
       );
     }

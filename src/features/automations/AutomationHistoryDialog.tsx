@@ -184,8 +184,10 @@ const OUTCOME_REASON: Record<
     text: asText(outcome.detail) || "Skipped — opened more than 14 days ago",
     tone: "muted",
   }),
-  "empty-diff": () => ({
-    text: "Skipped — no changes to review",
+  // The runner attaches a detail whenever filtering emptied the diff, so the
+  // fallback speaks only for a diff that had no changes.
+  "empty-diff": (_entry, outcome) => ({
+    text: asText(outcome.detail) || "Skipped — no changes to review",
     tone: "muted",
   }),
   cancelled: () => ({ text: "Cancelled", tone: "muted" }),

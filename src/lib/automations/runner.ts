@@ -821,11 +821,16 @@ async function runOneAction({
       toast.info(`AI ${label} cancelled.`, { duration: 4000 });
       return;
     }
-    if (result === null) {
+    if (result === null || typeof result === "string") {
+      const copy = EMPTY_DIFF_COPY[result ?? "empty"];
       releaseClaim();
-      settled.push({ action, code: "empty-diff" });
+      settled.push({
+        action,
+        code: "empty-diff",
+        ...(copy.detail ? { detail: copy.detail } : {}),
+      });
       await recordProgress();
-      toast.info(`AI ${label} skipped — no changes to review.`);
+      toast.info(`AI ${label} skipped — ${copy.toast}.`);
       handle.settle(); // no-op run: remove the row as before
       return;
     }
@@ -1444,6 +1449,35 @@ interface ReviewResult {
   thoughts: string;
 }
 
+/** Why filtering emptied a review's diff: `excluded` when the user's patterns hid
+ *  every file; `withheld` when sections couldn't be checked against active
+ *  patterns; `unreadable-names` when, with no patterns, the only drops are names
+ *  that aren't readable text. */
+type EmptyDiffCause = "excluded" | "withheld" | "unreadable-names";
+
+/** The empty-diff outcome's toast tail and history detail, per cause. `empty` is
+ *  a diff with nothing in it. */
+const EMPTY_DIFF_COPY: Record<
+  EmptyDiffCause | "empty",
+  { toast: string; detail?: string }
+> = {
+  empty: { toast: "no changes to review" },
+  excluded: {
+    toast: "every changed file matches your AI ignore patterns",
+    detail: "Skipped — every changed file matches your AI ignore patterns",
+  },
+  withheld: {
+    toast: "changes couldn't be checked against your AI ignore patterns",
+    detail:
+      "Skipped — changes couldn't be checked against your AI ignore patterns",
+  },
+  "unreadable-names": {
+    toast: "files whose names aren't readable text are always kept from AI",
+    detail:
+      "Skipped — files whose names aren't readable text are always kept from AI",
+  },
+};
+
 /** Live progress of one review run, owned by the CALLER so a run that throws can still
  *  read what streamed before it died — {@link generateReviewText}'s return value is
  *  reachable only on the success path. CLI providers only: the HTTP branch has no
@@ -1528,7 +1562,9 @@ async function resolveDiff(
  * Resolves the diff, builds the prompt, and runs the model to completion.
  * `signal` aborts the HTTP stream; `onCliId` reports the CLI run's id so the
  * caller can kill the subprocess (CLI providers don't take an AbortSignal).
- * Returns the final answer plus any agentic narration, or null for no changes.
+ * Returns the final answer plus any agentic narration; an {@link EmptyDiffCause}
+ * when filtering emptied the diff; or null when there is nothing to review or
+ * the run was aborted.
  * `progress` is filled as the run streams, so the caller's catch can keep a
  * timed-out run's output (see {@link RunProgress}).
  */
@@ -1539,7 +1575,7 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
   progress: RunProgress,
-): Promise<ReviewResult | null> {
+): Promise<ReviewResult | EmptyDiffCause | null> {
   // Independent of each other, and the settings are only needed by the filter
   // below (the budget profile reuses the same read) — so they resolve alongside
   // the diff rather than in front of it.
@@ -1568,9 +1604,15 @@ async function generateReviewText(
     files: diff.files,
     exclude: excludePatterns,
   });
-  // Everything the change touched is AI-ignored ⇒ the empty-diff outcome (the
-  // caller reports "skipped — no changes to review").
-  if (!filtered.text.trim()) return null;
+  // Filtering emptied the diff ⇒ the empty-diff outcome, returned with its cause
+  // so the caller never reports hidden or withheld changes as none; with no
+  // patterns, only unreadable names can be withheld.
+  if (!filtered.text.trim()) {
+    if (filtered.unreadableFiles > 0) {
+      return excludePatterns.length > 0 ? "withheld" : "unreadable-names";
+    }
+    return filtered.excludedFiles > 0 ? "excluded" : null;
+  }
   if (signal.aborted) return null;
 
   // Build on a prior review of this PR + mode (no-op when none) so a re-review focuses on

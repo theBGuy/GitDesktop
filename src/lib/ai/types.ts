@@ -191,6 +191,10 @@ export interface ReviewPromptInput {
   /** Files the AI-ignore patterns hid from the delta. Distinguishes an emptied
    *  delta from a genuinely unchanged one. */
   deltaExcludedFiles?: number;
+  /** U+FFFD-named or unkeyable delta sections, neither checked against the
+   *  patterns. Kept apart from `deltaExcludedFiles` so the user's rules aren't
+   *  blamed for them. */
+  deltaUnreadableFiles?: number;
   /** Pre-formatted findings posted on the remote PR by third-party AI reviewers
    *  (GitHub Copilot, CodeRabbit, …) — soft, re-verifiable context like
    *  `priorFindings`. Absent for local PRs and when none were found. */
