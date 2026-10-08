@@ -1268,9 +1268,11 @@ review via its subscription login. The full list is under
   file inside an excluded folder, exclude the folder's *contents*
   (`vendor/*`, not `vendor/`), since git never re-includes below an
   excluded directory. Your global patterns are applied last, so a repo's
-  committed file can never re-expose what you excluded yourself. A model
-  that reads your repository itself isn't limited by them; that's what the
-  PR panel's **Agentic review** toggle turns on.
+  committed file can never re-expose what you excluded yourself. While
+  patterns are set, any part of a diff whose file can't be identified is
+  kept from AI too, so nothing reaches a model without being checked
+  against them. A model that reads your repository itself isn't limited by
+  them; that's what the PR panel's **Agentic review** toggle turns on.
   - **Global**: Settings → Excluded files (one pattern per line).
   - **Per-repo**: `.gitdesktop/aiignore` in the repo. A changed file's
     context menu → **Exclude from AI** (file, folder, or file type, or a

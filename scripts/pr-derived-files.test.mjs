@@ -285,3 +285,53 @@ test("GitHub, Bitbucket and absent-provider unknown file sections stay byte-iden
     assert.equal(bothFilesSections(DIFF, [], true, provider), EXPECTED_SECTION);
   }
 });
+
+const DELTA_HEADER = "## Changes since that review";
+
+/** The delta section of a review prompt built over a prior review whose delta
+ *  computed ("ok"), with `delta` layered on top. */
+function deltaSection(delta) {
+  const { prompt } = buildReviewPrompt(
+    {
+      ...REVIEW_BASE,
+      diffText: DIFF,
+      files: [],
+      priorFindings: "- an earlier finding",
+      deltaState: "ok",
+      ...delta,
+    },
+    "general",
+  );
+  const start = prompt.indexOf(DELTA_HEADER);
+  assert.ok(start >= 0, "prompt has no delta section");
+  const end = prompt.indexOf("\n\n", start);
+  return prompt.slice(start, end < 0 ? undefined : end);
+}
+
+test("a delta emptied only by withheld sections never reads as unchanged", () => {
+  const section = deltaSection({ deltaDiffText: "", deltaUnreadableFiles: 1 });
+  assert.equal(
+    section,
+    `${DELTA_HEADER}\n(the changes since that review were withheld because they couldn't be checked against the user's AI ignore rules — re-review the full diff below.)`,
+  );
+  assert.ok(!section.includes("(no textual changes)"), section);
+});
+
+test("a delta emptied by both causes names each of them", () => {
+  assert.equal(
+    deltaSection({
+      deltaDiffText: "",
+      deltaExcludedFiles: 1,
+      deltaUnreadableFiles: 1,
+    }),
+    `${DELTA_HEADER}\n(every file changed since that review is hidden by the user's AI ignore rules or was withheld because it couldn't be checked against them — re-review the full diff below.)`,
+  );
+});
+
+test("a delta with withheld sections left out says so after what remains", () => {
+  const delta = "diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
+  assert.equal(
+    deltaSection({ deltaDiffText: delta, deltaUnreadableFiles: 1 }),
+    `${DELTA_HEADER}\n${delta.trimEnd()}\n[1 section(s) of the delta withheld — the full current diff below is authoritative.]`,
+  );
+});

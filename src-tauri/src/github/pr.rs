@@ -9512,9 +9512,9 @@ mod tests {
         assert!(!out.contains("--- "));
     }
 
-    // The three shape tests below expect sections scripts/diff-split.test.mjs
-    // already decodes, so the byte match proves the frontend keys those files; the
-    // forged-LF test relies on diff-split.ts's C_ESCAPES decoding instead.
+    // The three shape tests below assert header/rename/`+++` lines that match
+    // shapes scripts/diff-split.test.mjs decodes; the forged-LF test relies on
+    // diff-split.ts's C_ESCAPES decoding instead.
 
     #[test]
     fn quotes_only_the_rename_side_that_needs_it() {

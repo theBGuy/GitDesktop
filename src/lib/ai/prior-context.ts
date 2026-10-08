@@ -17,8 +17,8 @@ export interface PriorContext {
   /** Files the AI-ignore patterns hid from the delta. An emptied delta is
    *  indistinguishable from "nothing changed" without this. */
   deltaExcludedFiles?: number;
-  /** Delta sections withheld because they couldn't be keyed, which no pattern
-   *  ever saw — counted apart so the user's rules aren't blamed. */
+  /** U+FFFD-named or unkeyable delta sections, neither checked against the
+   *  patterns — counted apart so the user's rules aren't blamed. */
   deltaUnreadableFiles?: number;
 }
 

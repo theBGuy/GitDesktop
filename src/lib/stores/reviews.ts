@@ -582,10 +582,13 @@ export async function startReview(
       // queued second mode too — same PR, same empty diff, so it would only load nothing
       // and toast "No changes" a second time. An all-excluded diff lands here too, and
       // says so rather than claiming a PR with visible changes has none; sections
-      // withheld as unreadable must not be blamed on the user's patterns.
+      // withheld as unreadable must not be blamed on the user's patterns. With no
+      // patterns (or an agentic run) the only drops are unreadable names.
       toast.info(
         (() => {
           switch (true) {
+            case filtered.unreadableFiles > 0 && excludePatterns.length === 0:
+              return "Nothing to review — files whose names aren't readable text are always kept from AI.";
             case filtered.unreadableFiles > 0:
               return "Nothing to review — changes that couldn't be checked against your AI ignore patterns were withheld, along with any that match them.";
             case filtered.excludedFiles > 0:
