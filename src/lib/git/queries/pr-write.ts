@@ -118,7 +118,9 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
           ["repo", repo, "discussion-list"],
         ],
       };
-      return void Promise.all(
+      // RETURNED, not voided: react-query holds `isPending` until this settles,
+      // so the label picker's trigger stays held until the refetched labels land.
+      return Promise.all(
         keysByKind[args.kind](args.number).map((queryKey) =>
           queryClient.invalidateQueries({ queryKey }),
         ),

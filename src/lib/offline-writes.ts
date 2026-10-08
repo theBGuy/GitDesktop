@@ -22,6 +22,10 @@ export const AI_DRAFT_PENDING_REASON = "Wait for the AI draft to finish";
  *  surface's composer hold and Delete comment dialog. */
 export const COMMENT_DELETE_PENDING_REASON = "Deleting a comment…";
 
+/** The in-flight copy for a picker that commits its draft on close, shared so
+ *  every such picker words the hold on its trigger alike. */
+export const SAVING_LAST_CHANGE_REASON = "Saving your last change…";
+
 /** The compact form of {@link OFFLINE_WRITE_REASON} appended to a disabled MENU
  *  ITEM's label, which can show no tooltip. */
 export const OFFLINE_ITEM_REASON = "you're offline";
@@ -62,4 +66,10 @@ export const RIDING_COMMENT_CLOSE_HELD =
  *  entry's `state.isPaused` beside a cache-derived hold. */
 export function pendingWriteReason(paused: boolean, inFlight: string): string {
   return paused ? OFFLINE_WRITE_REASON : inFlight;
+}
+
+/** The menu-row twin of {@link pendingWriteReason}, under the same `paused`
+ *  contract: the compact parenthetical a disabled item's label carries. */
+export function pendingItemReason(paused: boolean, inFlight: string): string {
+  return paused ? OFFLINE_ITEM_REASON : inFlight;
 }

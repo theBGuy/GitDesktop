@@ -32,6 +32,12 @@ import {
   type ForgeSearchRepo,
   providerLabel,
 } from "@/lib/git/types";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -118,6 +124,12 @@ function ExploreDetailBody({
   const starred = useRepoStarred(provider, repo.owner, repo.name, canStar);
   const starMutation = useStarRepo();
   const fork = useForkRepoByName();
+  // A fork creates a repository, so it holds offline rather than park: a parked
+  // one lands whenever the connection returns, and a second press mints another.
+  const offlineHold = useOfflineHold();
+  const forkHeldReason = fork.isPending
+    ? pendingWriteReason(fork.isPaused, ACT_PENDING_REASON)
+    : offlineHold;
   const [forked, setForked] = useState<ForgeForkResult | null>(null);
   // The fork card below is the in-pane confirmation, but this pane is keyed per
   // repo and unmounts on a switch — so the toast covers only that case, and the
@@ -161,8 +173,9 @@ function ExploreDetailBody({
       title: `Fork ${repo.fullName}?`,
       body: `Creates a fork on ${label} in the background. You can clone it once it's ready.`,
       confirmLabel: "Fork",
+      holdOffline: true,
     });
-    if (!ok) return;
+    if (!ok || refuseWhileOffline()) return;
     try {
       const result = await fork.mutateAsync({
         provider,
@@ -262,13 +275,14 @@ function ExploreDetailBody({
           Clone
         </Button>
         {canFork && (
-          <Button
+          <DisabledReasonButton
             size="sm"
             variant="outline"
             onClick={onFork}
-            disabled={fork.isPending}
+            disabled={forkHeldReason !== undefined}
+            reason={forkHeldReason}
           >
-            {fork.isPending ? (
+            {fork.isPending && !fork.isPaused ? (
               <>
                 <Spinner />
                 Forking…
@@ -279,7 +293,7 @@ function ExploreDetailBody({
                 Fork
               </>
             )}
-          </Button>
+          </DisabledReasonButton>
         )}
         {canStar && (
           // Disabled until the starred state resolves — toggling on `undefined`

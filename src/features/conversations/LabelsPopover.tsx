@@ -9,6 +9,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
+import {
+  pendingWriteReason,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { cn } from "@/lib/utils";
 import { emptyPickerCopy } from "./remote-section-state";
 import { LabelChip } from "./Thread";
@@ -63,6 +67,24 @@ export function LabelsPopover({
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
   const portalContainer = usePanelPortalContainer();
+  // Ranked: the caller's reason outranks a write the viewer started.
+  const heldReason = (() => {
+    switch (true) {
+      case disabledReason !== undefined:
+        return disabledReason;
+      // No second edit may be drafted while one is in flight: nothing patches
+      // the labels optimistically, so a draft opened now would seed from the
+      // pre-write labels. The hook's `onSettled` returns its invalidation, so
+      // this hold lasts until the invalidated reads have refetched.
+      case editLabels.isPending:
+        return pendingWriteReason(
+          editLabels.isPaused,
+          SAVING_LAST_CHANGE_REASON,
+        );
+      default:
+        return undefined;
+    }
+  })();
 
   const rows = repoLabels.data ?? [];
   // Tab cycles the rows: nothing else in this popup is focusable, so one-handed
@@ -124,8 +146,8 @@ export function LabelsPopover({
             variant="ghost"
             size="xs"
             aria-label="Edit labels"
-            disabled={!!disabledReason}
-            reason={disabledReason}
+            disabled={!!heldReason}
+            reason={heldReason}
           />
         }
       >

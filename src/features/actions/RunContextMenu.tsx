@@ -49,6 +49,7 @@ export function RunContextMenuItems({
   canRunAgain,
   writeBlocked,
   writeReason,
+  cancelHeld,
 }: {
   run: WorkflowRun;
   provider: ForgeProvider | null | undefined;
@@ -59,6 +60,9 @@ export function RunContextMenuItems({
   canRunAgain: boolean;
   writeBlocked: boolean;
   writeReason?: string;
+  /** Set while this run's cancel is pending: holds the Cancel item with this
+   *  compact parenthetical, below a push block's. */
+  cancelHeld?: string;
 }) {
   // Destructured so each callback closes over a const binding rather than a
   // property read off the actions object.
@@ -96,11 +100,12 @@ export function RunContextMenuItems({
         <>
           {offers.length > 0 && <ContextMenuSeparator />}
           <ContextMenuItem
-            disabled={writeBlocked}
+            disabled={writeBlocked || cancelHeld !== undefined}
             onClick={() => cancel(run.id)}
           >
             {cancelLabel(provider)}
-            {blockedHint}
+            {blockedHint ||
+              (cancelHeld === undefined ? "" : ` (${cancelHeld})`)}
           </ContextMenuItem>
         </>
       )}

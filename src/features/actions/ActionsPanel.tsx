@@ -53,6 +53,7 @@ import {
 } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { pendingItemReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -505,6 +506,11 @@ export function ActionsPanel({
                   canRunAgain={canDispatch && ghReady}
                   writeBlocked={writeBlocked}
                   writeReason={writeReason}
+                  cancelHeld={
+                    cancel.isPending && cancel.variables === menuRun.id
+                      ? pendingItemReason(cancel.isPaused, "cancelling…")
+                      : undefined
+                  }
                   actions={{
                     rerun: (runId, failedOnly) =>
                       void doRerun(runId, failedOnly),
