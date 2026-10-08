@@ -1,5 +1,6 @@
 import { hostLabel, isHostAllowed } from "@/lib/ai/allowed-hosts";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { norm } from "@/lib/repo-key";
 import type { MCP_REPO_STATES, McpKeyValue, McpServer } from "./api";
 
 /** Server name = the key in the generated MCP config: letters/digits/`-`/`_`,
@@ -144,6 +145,52 @@ export async function foldServerScopeKeys(
   }
 
   return next;
+}
+
+/** Re-home a relocated repo's `scope` / `repoOverrides` keys on every server onto
+ *  `newKey`, matching `<oldPath>/.git` and `<oldPath>` via {@link norm} exactly as
+ *  repo-data-migration's `matchingOldKeys` does (the vanished folder's identity can't
+ *  be recomputed). Overrides are keep-new on the exact `newKey`, the key `pickForRepo`
+ *  reads; every old-form variant is deleted. Pure: returns the input array when
+ *  nothing matched, and passes junk shapes through so they can't fail the relocate. */
+export function rehomeServerRepoKeys(
+  servers: McpServer[],
+  oldPath: string,
+  newKey: string,
+): { servers: McpServer[]; changed: boolean } {
+  if (!Array.isArray(servers)) return { servers, changed: false };
+  const raw = norm(oldPath);
+  const dotGit = `${raw}/.git`;
+  const newNorm = norm(newKey);
+  const isOld = (key: string) => {
+    const k = norm(key);
+    return k !== newNorm && (k === dotGit || k === raw);
+  };
+  const isMap = (v: unknown) =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+  let changed = false;
+  const next = servers.map((server) => {
+    if (!isMap(server)) return server;
+    let rehomed = server;
+    const scope = typeof server.scope === "string" ? serverScope(server) : "";
+    if (scope && scope !== MCP_SCOPE_GLOBAL && isOld(scope))
+      rehomed = { ...rehomed, scope: newKey };
+    const overrides = server.repoOverrides;
+    const keys = overrides && isMap(overrides) ? Object.keys(overrides) : [];
+    const oldKeys = keys.filter(isOld);
+    if (overrides && oldKeys.length > 0) {
+      const kept = Object.entries(overrides).filter(([k]) => !isOld(k));
+      if (overrides[newKey] === undefined) {
+        // The identity form wins over a raw-path one, as in matchingOldKeys.
+        const from = oldKeys.find((k) => norm(k) === dotGit) ?? oldKeys[0];
+        kept.push([newKey, overrides[from]]);
+      }
+      rehomed = { ...rehomed, repoOverrides: Object.fromEntries(kept) };
+    }
+    if (rehomed !== server) changed = true;
+    return rehomed;
+  });
+  return changed ? { servers: next, changed } : { servers, changed };
 }
 
 /** Whether an (agent, isolation) combination can run MCP servers at all.
