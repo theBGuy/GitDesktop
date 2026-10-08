@@ -220,8 +220,8 @@ pub async fn set_parked_writes(state: State<'_, AppState>, parked: bool) -> AppR
     Ok(())
 }
 
-/// The frontend put the quit prompt on screen, so a later quit asks afresh
-/// instead of treating the webview as hung.
+/// The frontend's quit listener received the request and is about to ask, so a
+/// later quit asks afresh instead of treating the webview as hung.
 #[tauri::command]
 pub async fn quit_prompt_shown(state: State<'_, AppState>) -> AppResult<()> {
     state.ack_quit_prompt();

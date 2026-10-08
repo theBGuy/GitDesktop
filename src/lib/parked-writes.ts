@@ -37,11 +37,14 @@ const DISCARD_COPY: Record<
 
 /** Whether `action` may go ahead: at once with nothing parked, otherwise once
  *  the user confirms discarding the parked writes. Never held offline, since
- *  being offline is exactly when this asks. */
+ *  being offline is exactly when this asks. `onAsk` runs only when it does ask,
+ *  just before the prompt opens. */
 export async function confirmDiscardParkedWrites(
   action: DiscardingAction,
+  onAsk?: () => void,
 ): Promise<boolean> {
   if (!hasParkedWrites()) return true;
+  onAsk?.();
   const copy = DISCARD_COPY[action];
   return useConfirm.getState().ask({
     title: copy.title,
@@ -70,8 +73,8 @@ function mirrorParkedWrites(): () => void {
 }
 
 async function onQuitRequested() {
-  // The ack tells the backend the prompt is on screen, so a later quit asks
-  // again rather than reading the webview as hung and exiting.
+  // The ack, sent before asking, tells the backend this listener ran, so a later
+  // quit asks again rather than reading the webview as hung and exiting.
   if (hasParkedWrites()) {
     await invoke<void>("quit_prompt_shown").catch(() => undefined);
   }

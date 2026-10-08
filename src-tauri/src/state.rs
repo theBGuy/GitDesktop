@@ -131,7 +131,8 @@ pub struct AppState {
     parked_writes: AtomicBool,
     /// When the last quit prompt was emitted, in [`monotonic_ms`]; 0 = none open.
     quit_prompt_emitted_ms: AtomicU64,
-    /// Whether the frontend acknowledged that prompt, i.e. it is on screen.
+    /// Whether the frontend's listener received that prompt. It acks before asking,
+    /// so this proves a live webview, not a painted dialog.
     quit_prompt_acked: AtomicBool,
 }
 

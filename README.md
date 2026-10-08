@@ -1300,8 +1300,9 @@ GitDesktop checks GitHub Releases on launch and about every six hours in the
 background while the app stays open (opt-out in Settings → Updates). A
 pending update shows a dot on the Settings gear and an **Install & restart**
 banner in Settings → Updates, and installs **only on your consent**.
-Updates are cryptographically signed and verified by the app, separately
-from OS code signing.
+If changes made offline are still waiting to send, GitDesktop asks before
+the restart discards them. Updates are cryptographically signed and verified
+by the app, separately from OS code signing.
 
 ## Requirements
 

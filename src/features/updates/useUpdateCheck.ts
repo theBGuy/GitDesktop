@@ -18,7 +18,7 @@ export function useUpdateCheck() {
     refetchIntervalInBackground: true, // the app sits unfocused for days — poll anyway
     staleTime: 60 * 60 * 1000,
     retry: false, // offline / no release yet — stay quiet, next tick retries anyway
-    // LOAD-BEARING: Update is a plugin class instance (downloadAndInstall lives on
+    // LOAD-BEARING: Update is a plugin class instance (download/install live on
     // the prototype). react-query's default structural sharing clones result data
     // into plain objects, which would strip the method and break Install.
     structuralSharing: false,
