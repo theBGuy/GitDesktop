@@ -71,6 +71,14 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
   ["reverting", "revert"],
 ];
 
+/** The AI button drops to its icon below a 505px banner content box: the
+ *  measured full-label cluster with "Continue cherry-pick" (396.8px) plus the
+ *  gap and the status's 96px basis. Both classes carry the one cutoff. */
+const AI_ICON_ONLY =
+  "@max-[505px]/conflict-banner:pr-1.5 @max-[505px]/conflict-banner:*:data-[slot=ai-label]:hidden";
+
+const BUSY_REASON = "An operation is in progress";
+
 /**
  * Guides an in-progress merge/rebase/cherry-pick/revert to its end: shows what's
  * mid-flight and how many conflicts remain, with Continue gated on every
@@ -98,6 +106,8 @@ export function ConflictBanner({
   if (!op && conflictedCount === 0) return null;
 
   const canResolveWithAi = aiEnabled && reviewConfigured && conflictedCount > 0;
+  const aiLabel =
+    conflictedCount === 1 ? "Resolve with AI" : "Resolve all with AI";
 
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
@@ -148,17 +158,18 @@ export function ConflictBanner({
   return (
     // One calm status line — the per-file resolution actions live in the diff
     // pane's conflict view, so this just carries merge state + Continue/Abort
-    // and the batch "Resolve all with AI". The AI cluster is wider than the
-    // sidebar's floor, so only then does the strip wrap; otherwise it stays one row.
+    // and the batch "Resolve all with AI". With AI on, the status keeps a
+    // readable basis and the strip wraps only once that no longer fits.
     <div
       className={cn(
         "flex items-center justify-between gap-x-3 border-b px-3 py-1.5 text-xs",
-        canResolveWithAi && "flex-wrap gap-y-1",
+        canResolveWithAi && "@container/conflict-banner flex-wrap gap-y-1",
       )}
     >
       <span
         className={cn(
           "flex min-w-0 items-center gap-1.5",
+          canResolveWithAi && "grow basis-24",
           editPaused ? "text-info" : "text-warning",
         )}
       >
@@ -183,22 +194,26 @@ export function ConflictBanner({
           <Button
             size="xs"
             variant="ghost"
+            className={AI_ICON_ONLY}
+            title={aiLabel}
+            aria-label={aiLabel}
             onClick={() => startAll(conflictedPaths, repoPath)}
           >
             <SparkleIcon data-icon="inline-start" />
-            {conflictedCount === 1 ? "Resolve with AI" : "Resolve all with AI"}
+            <span data-slot="ai-label">{aiLabel}</span>
           </Button>
         )}
         {op && (
           <>
-            <Button
+            <DisabledReasonButton
               variant="outline"
               size="xs"
               disabled={busy}
+              reason={BUSY_REASON}
               onClick={() => setConfirmAbort(true)}
             >
               Abort
-            </Button>
+            </DisabledReasonButton>
             <DisabledReasonButton
               size="xs"
               disabled={busy || conflictedCount > 0}
