@@ -256,7 +256,13 @@ export function CreateLocalPrDialog({
   const base = useSelector(form.store, (s) => s.values.base);
   // Live notes feed the AI-description prompt and the ReviewerNotesField seeding.
   const notes = useSelector(form.store, (s) => s.values.notes);
-  const comparison = useBranchAhead(repoPath, base || null, head || null);
+  // Both pickers offer local branches only; read them by full ref, as the local-PR
+  // commands do, so a same-named tag can't stand in for either.
+  const comparison = useBranchAhead(
+    repoPath,
+    base ? `refs/heads/${base}` : null,
+    head ? `refs/heads/${head}` : null,
+  );
   const ahead = comparison.data ?? [];
   const sameBranch = base === head;
 

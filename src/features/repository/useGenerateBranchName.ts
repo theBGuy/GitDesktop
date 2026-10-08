@@ -16,10 +16,11 @@ const RAW_DIFF_MAX_BYTES = 200_000;
 
 /** The committed work of the ref being named: its three-dot diff against
  *  `base` plus the subjects of the commits `compare` has that `base` doesn't.
- *  `compare` is the ref being named — the checked-out branch's NAME when
- *  creating (the literal `HEAD` only when HEAD is detached; keying on a name
- *  keeps a branch switch from serving the previous branch's commits), the
- *  target branch when renaming. */
+ *  `compare` is the ref being named — the checked-out branch's full
+ *  `refs/heads/` ref when creating (the literal `HEAD` only when HEAD is
+ *  detached; keying on the ref keeps a branch switch from serving the previous
+ *  branch's commits, and the full form keeps a same-named tag from capturing
+ *  the rev), the target branch when renaming. */
 export interface CommittedNameSource {
   base: string;
   compare: string;

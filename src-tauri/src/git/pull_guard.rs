@@ -298,23 +298,13 @@ fn fold_submodule_failure(
     }
 }
 
-/// The current branch's short name, or `None` on a detached HEAD.
-///
-/// Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so a
-/// branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
-/// 2.51.1), and `branch.<name>.remote` is looked up from the result.
+/// The current branch's name (`branch.<name>.remote` is looked up from it), or `None`
+/// on a detached HEAD — and on a failed read, which every caller treats the same way.
 async fn current_branch(repo: &str) -> Option<String> {
-    let out = run_git_raw(Some(repo), &["symbolic-ref", "-q", "HEAD"], DEFAULT_TIMEOUT)
+    crate::git::branches::current_branch_name(repo)
         .await
-        .ok()?;
-    if out.code != 0 {
-        return None;
-    }
-    let full = out.stdout_lossy();
-    full.trim_end_matches(['\r', '\n'])
-        .strip_prefix("refs/heads/")
-        .filter(|b| !b.is_empty())
-        .map(str::to_string)
+        .ok()
+        .flatten()
 }
 
 /// The current branch's upstream, spelled the way git itself resolves it.

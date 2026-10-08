@@ -855,25 +855,26 @@ export function CreatePrDialog({
     defaultBase,
     form,
   ]);
-  // The base ref to compare against: on the parent target the picked base is a bare
-  // upstream branch name, so qualify it `upstream/<base>` — otherwise
-  // `git log main..head` resolves against a *local* `main`, a stale proxy for the
-  // parent's branch. While the parent fetch is in flight `base` is still the
-  // fork-seeded local name and `upstream/<name>` may not exist yet → yield null so
-  // the compare query stays idle rather than erroring.
-  const compareBaseRef =
-    targetIsParent && parentBranches.isPending
-      ? null
-      : base
-        ? targetIsParent
-          ? `upstream/${base}`
-          : base
-        : null;
-  const comparison = useBranchAhead(repoPath, compareBaseRef, head || null);
+  // The refs to compare, both spelled in full: a bare name resolves to a same-named
+  // tag first. On the parent target the picked base is an upstream branch name, so
+  // it is `refs/remotes/upstream/<base>` — a local `main` would be a stale proxy for
+  // the parent's branch; on the fork target both pickers offer only local branches.
+  // While the parent fetch is in flight `base` is still the fork-seeded local name
+  // and the upstream ref may not exist yet → yield null so the compare query stays
+  // idle rather than erroring.
+  const compareBaseRef = (() => {
+    if (!base || (targetIsParent && parentBranches.isPending)) return null;
+    return targetIsParent
+      ? `refs/remotes/upstream/${base}`
+      : `refs/heads/${base}`;
+  })();
+  const compareHeadRef = head ? `refs/heads/${head}` : null;
+  const comparison = useBranchAhead(repoPath, compareBaseRef, compareHeadRef);
   const ahead = comparison.data ?? [];
-  // A head equal to the parent's base name is still a distinct ref (local branch
-  // vs. `upstream/<name>`), so only treat identical refs as "same branch".
-  const sameBranch = compareBaseRef !== null && compareBaseRef === head;
+  // Full refs on both sides: a head equal to the parent's base name is still a
+  // distinct ref (local branch vs. upstream's), so only identical refs are "same".
+  const sameBranch =
+    compareBaseRef !== null && compareBaseRef === compareHeadRef;
   const nothingToMerge = sameBranch || ahead.length === 0;
 
   // Duplicate probe: an open PR from this head against the chosen target already

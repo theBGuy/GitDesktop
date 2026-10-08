@@ -647,6 +647,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // A detached HEAD has no branch name to key on and keeps the literal.
   const namedRef =
     renameTarget ?? (createOpen ? (currentName ?? "HEAD") : null);
+  // The same ref in rev form: a branch by its full ref (a bare name resolves to a
+  // same-named tag first); the detached literal stays as it is.
+  const namedRev =
+    namedRef === null || namedRef === "HEAD"
+      ? namedRef
+      : `refs/heads/${namedRef}`;
   // Until the remote list settles, a missing `origin/<default>` means "not
   // loaded yet", not "absent" — falling back to the local default there is
   // exactly the stale ref this base resolution exists to avoid.
@@ -658,7 +664,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Base for the fallback. Prefer the remote-tracking ref: a stale local default
   // skews the three-dot diff, and when origin/HEAD resolved the default name the
   // local twin may not even exist. Null (⇒ no fallback) when neither side has it.
-  const committedBase = useMemo(() => {
+  // The rev is the full ref (a bare `origin/<default>` or `<default>` resolves to a
+  // same-named tag first); the label is what the copy shows.
+  const committedBase = useMemo((): { rev: string; label: string } | null => {
     // An errored remote list can't be trusted as a base either: no base ⇒ no
     // fallback ⇒ the error state below renders instead of a silent local default.
     if (
@@ -671,8 +679,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const onOrigin = (remoteBranchesQuery.data ?? []).some(
       (b) => b.remote === "origin" && b.name === defaultName,
     );
-    if (onOrigin) return `origin/${defaultName}`;
-    return localNames.has(defaultName) ? defaultName : null;
+    if (onOrigin)
+      return {
+        rev: `refs/remotes/origin/${defaultName}`,
+        label: `origin/${defaultName}`,
+      };
+    return localNames.has(defaultName)
+      ? { rev: `refs/heads/${defaultName}`, label: defaultName }
+      : null;
   }, [
     branchDialogOpen,
     defaultName,
@@ -683,12 +697,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   ]);
   // Commits the named ref has that the default doesn't. A null base leaves the
   // query disabled (both dialogs closed, or no resolvable default).
-  const committedCompare = useBranchAhead(repoPath, committedBase, namedRef);
+  const committedCompare = useBranchAhead(
+    repoPath,
+    committedBase?.rev ?? null,
+    namedRev,
+  );
   // Mirrors `useBranchAhead`'s own enabled condition — a query that never
   // runs (base === compare: naming the local default with no `origin/<default>`)
   // must not read as "still loading" forever.
   const comparing =
-    committedBase !== null && namedRef !== null && committedBase !== namedRef;
+    committedBase !== null &&
+    namedRev !== null &&
+    committedBase.rev !== namedRev;
   // Never let the affordance claim there's no committed work on evidence it
   // doesn't have: while any input is in flight say so, and say so distinctly
   // when the lookup failed outright.
@@ -705,14 +725,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         : "ready";
   const committedFallback = useMemo(() => {
     const ahead = committedCompare.data ?? [];
-    if (!committedBase || !namedRef || ahead.length === 0) return null;
+    if (!committedBase || !namedRev || ahead.length === 0) return null;
     // `ahead` is newest-first (plain `git log base..<ref>`); cap the subjects.
     return {
-      base: committedBase,
-      compare: namedRef,
+      base: committedBase.label,
+      compare: namedRev,
       subjects: ahead.slice(0, 30).map((c) => c.subject),
     };
-  }, [committedBase, namedRef, committedCompare.data]);
+  }, [committedBase, namedRev, committedCompare.data]);
   // Only label rows with their remote when there's more than one to disambiguate.
   const multipleRemotes = useMemo(
     () =>

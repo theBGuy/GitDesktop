@@ -1123,7 +1123,8 @@ pub async fn git_branch_divergence(
     .await?;
     // (full ref, name): the payload and the base comparison take the name, stripped of
     // exactly `refs/heads/` as `git_branches` strips it, and the range takes the full
-    // ref, which a bare name would lose to a same-named tag.
+    // ref (and the base its branch-first rev), which a bare name would lose to a
+    // same-named tag.
     let refs: Vec<(String, String)> = out
         .stdout_lossy()
         .lines()
@@ -1134,6 +1135,7 @@ pub async fn git_branch_divergence(
         })
         .collect();
 
+    let base_rev = branch_first_rev(&repo_path, &base).await;
     let mut result = Vec::with_capacity(refs.len());
     for (full, name) in refs {
         if name == base {
@@ -1146,7 +1148,7 @@ pub async fn git_branch_divergence(
         }
         // `base...name` left/right: left = on base only (behind), right = on
         // name only (ahead). A bad/unrelated ref just yields 0/0.
-        let range = format!("{base}...{full}");
+        let range = format!("{base_rev}...{full}");
         let counts = run_git_raw(
             Some(&repo_path),
             &["rev-list", "--left-right", "--count", &range],
@@ -1250,23 +1252,36 @@ pub(crate) async fn branch_rewrite_status(
     branch: &str,
 ) -> AppResult<BranchRewriteStatus> {
     validate_branch_name(branch)?;
+    // git looks the name before `@{upstream}` up as a BRANCH, so no same-named tag can
+    // capture it, and the `refs/heads/` spelling is refused ("no such branch").
     let upstream_rev = format!("{branch}@{{upstream}}");
 
     // No upstream at all → nothing to compare against. `rev-parse` exits non-zero
     // and writes its own diagnostic; that is a normal answer here, not a failure.
-    let short = run_git_raw(
+    // Read in FULL and stripped: `--abbrev-ref` disambiguates, so a tag named
+    // `origin/feature` turns the display into `remotes/origin/feature`.
+    let full = run_git_raw(
         Some(repo_path),
-        &["rev-parse", "--abbrev-ref", &upstream_rev],
+        &["rev-parse", "--symbolic-full-name", &upstream_rev],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if short.code != 0 {
+    if full.code != 0 {
         return Ok(BranchRewriteStatus::unknown());
     }
-    let upstream = short.stdout_lossy().trim().to_string();
+    let full = full.stdout_lossy();
+    let full = full.trim();
+    let upstream = full
+        .strip_prefix("refs/remotes/")
+        .or_else(|| full.strip_prefix("refs/heads/"))
+        .unwrap_or(full)
+        .to_string();
     if upstream.is_empty() {
         return Ok(BranchRewriteStatus::unknown());
     }
+    let Some(local_tip) = branch_tip_sha(repo_path, branch).await? else {
+        return Ok(BranchRewriteStatus::unknown());
+    };
 
     let tip_out = run_git_raw(
         Some(repo_path),
@@ -1287,7 +1302,9 @@ pub(crate) async fn branch_rewrite_status(
         return Ok(BranchRewriteStatus::unknown());
     }
 
-    let range = format!("{branch}...{upstream_rev}");
+    // Both ends as measured shas: a bare branch name resolves to a same-named tag
+    // first, and the upstream side is then the exact commit a reset would land on.
+    let range = format!("{local_tip}...{tip}");
 
     // Cheap size gate BEFORE the patch-id walk: `--cherry-mark` computes a patch id
     // for every commit on both sides, which means diffing each one, where a plain
@@ -1344,10 +1361,16 @@ pub(crate) async fn branch_rewrite_status(
     // `--walk-reflogs` lists the commit each of the branch's reflog entries names.
     // A branch with no reflog (core.logAllRefUpdates=false, or an expired one)
     // yields nothing to walk, which cannot distinguish anything — verdict stays
-    // `None` rather than reading absence as a rewrite.
+    // `None` rather than reading absence as a rewrite. The full ref, because a bare
+    // name with no branch reflog falls back to a same-named ref's (a tag's, under
+    // `logAllRefUpdates=always`).
     let reflog = run_git_raw(
         Some(repo_path),
-        &["rev-list", "--walk-reflogs", branch],
+        &[
+            "rev-list",
+            "--walk-reflogs",
+            &format!("refs/heads/{branch}"),
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -1505,22 +1528,14 @@ pub(crate) async fn branch_reset_to_upstream(
             )));
         }
     }
-    // Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so
-    // a branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
-    // 2.51.1) and would slip past this comparison.
-    let current = run_git_raw(
-        Some(repo_path),
-        &["symbolic-ref", "-q", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    let current_ref = current.stdout_lossy();
-    if current.code == 0
-        && current_ref
-            .trim_end_matches(['\r', '\n'])
-            .strip_prefix("refs/heads/")
-            == Some(branch)
-    {
+    // A symbolic-ref that RAN but failed falls through to `branch -f`, which refuses
+    // a checked-out branch itself; only a spawn failure aborts here.
+    let current = match current_branch_name(repo_path).await {
+        Ok(name) => name,
+        Err(AppError::Git { .. }) => None,
+        Err(e) => return Err(e),
+    };
+    if current.as_deref() == Some(branch) {
         return Err(AppError::Command(format!(
             "{branch} is checked out here — use Reset to {branch}'s upstream from the \
              sync controls, which moves your working tree with it."
@@ -1595,6 +1610,9 @@ pub(crate) async fn update_branch_from(
     if current.is_some() && head_is_unborn(repo_path).await? {
         return Err(unborn_head_error());
     }
+    // Every rev position below reads `base` as a branch, never a same-named tag, and
+    // `branch` by its tip sha.
+    let base_rev = branch_first_rev(repo_path, base).await;
 
     // The current branch is already checked out, so just merge in place.
     if current.as_deref() == Some(branch) {
@@ -1604,7 +1622,7 @@ pub(crate) async fn update_branch_from(
         // "git exited with code 1". Lock-free runners only — the hold is ours.
         let out = run_git_raw(
             Some(repo_path),
-            &["merge", "--no-edit", base],
+            &["merge", "--no-edit", &base_rev],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -1621,10 +1639,17 @@ pub(crate) async fn update_branch_from(
         return Ok("merge".to_string());
     }
 
+    // Read under THIS hold: the diverged arm below pins it too.
+    let Some(branch_tip) = branch_tip_sha(repo_path, branch).await? else {
+        return Err(AppError::InvalidArgument(format!(
+            "unknown branch: {branch}"
+        )));
+    };
+
     // base already reachable from branch → nothing to bring in.
     let already = run_git_raw(
         Some(repo_path),
-        &["merge-base", "--is-ancestor", base, branch],
+        &["merge-base", "--is-ancestor", &base_rev, &branch_tip],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -1634,17 +1659,19 @@ pub(crate) async fn update_branch_from(
 
     // branch reachable from base → pure fast-forward; move the ref directly.
     // `fetch .` refuses to touch a checked-out branch, but we've excluded the
-    // current branch above, so this only ever updates an idle branch.
+    // current branch above, so this only ever updates an idle branch. Its SOURCE
+    // resolves tag-first like any rev; the destination is spelled in full so it can
+    // only ever name the branch.
     let ff = run_git_raw(
         Some(repo_path),
-        &["merge-base", "--is-ancestor", branch, base],
+        &["merge-base", "--is-ancestor", &branch_tip, &base_rev],
         DEFAULT_TIMEOUT,
     )
     .await?;
     if ff.code == 0 {
         run_git(
             Some(repo_path),
-            &["fetch", ".", &format!("{base}:{branch}")],
+            &["fetch", ".", &format!("{base_rev}:refs/heads/{branch}")],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -1655,16 +1682,13 @@ pub(crate) async fn update_branch_from(
     // Both ends are pinned under THIS hold, because the worktree steps below run in
     // the worktree-admin domain, which nests with no other: the working-tree lock is
     // released across them, so either ref can move meanwhile.
-    let Some(branch_tip) = branch_tip_sha(repo_path, branch).await? else {
-        return Err(AppError::InvalidArgument(format!("unknown branch: {branch}")));
-    };
     let base_out = run_git_raw(
         Some(repo_path),
         &[
             "rev-parse",
             "--verify",
             "--quiet",
-            &format!("{base}^{{commit}}"),
+            &format!("{base_rev}^{{commit}}"),
         ],
         DEFAULT_TIMEOUT,
     )
@@ -1832,14 +1856,15 @@ async fn remove_tmp_worktree(repo_path: &str, tmp: &str) {
 }
 
 /// Under a fresh working-tree hold: confirm the branch still stands where it was
-/// pinned and the base still descends from its pin, then merge `base` by NAME inside
-/// the throwaway worktree at `tmp`. The merge writes the shared
-/// `refs/heads/<branch>`, which is why it belongs in this domain, and the name is what
-/// gives the merge commit its `Merge branch '<base>'` subject; the pins are what keep
-/// a ref that moved while the worktree materialized from silently changing the
-/// operation. The hold covers writers on THIS checkout only — another worktree of the
-/// same repo takes its own working-tree lock, and a session-worktree removal deletes
-/// refs under the admin hold, so a cross-checkout mover is outside what it promises.
+/// pinned and the base still descends from its pin, then merge `base`'s branch-first
+/// rev inside the throwaway worktree at `tmp`. The merge writes the shared
+/// `refs/heads/<branch>`, which is why it belongs in this domain. The rev keeps the
+/// plain name (and the `Merge branch '<base>'` subject) unless a same-named tag shadows
+/// it, when the full ref words the subject instead; the pins are what keep a ref that
+/// moved while the worktree materialized from silently changing the operation. The
+/// hold covers writers on THIS checkout only — another worktree of the same repo
+/// takes its own working-tree lock, and a session-worktree removal deletes refs under
+/// the admin hold, so a cross-checkout mover is outside what it promises.
 async fn verify_pin_and_merge(
     state: &AppState,
     repo_path: &str,
@@ -1869,13 +1894,15 @@ async fn verify_pin_and_merge(
     // its own wording, since a retry cannot find it either. A rewound or rewritten
     // base, and any OTHER non-zero exit (128 — a vanished or corrupt tmp gitdir,
     // measured git 2.51.1), take the retry wording, which suits a transient state.
+    // Both reads and the merge take the base BRANCH, never a same-named tag.
+    let base_rev = branch_first_rev(tmp, base).await;
     let base_now = run_git_raw(
         Some(tmp),
         &[
             "rev-parse",
             "--verify",
             "--quiet",
-            &format!("{base}^{{commit}}"),
+            &format!("{base_rev}^{{commit}}"),
         ],
         DEFAULT_TIMEOUT,
     )
@@ -1906,7 +1933,12 @@ async fn verify_pin_and_merge(
 
     // The merge keeps the default budget: it rewrites only the differing files, not
     // the whole tree. Lock-free runner — the hold is ours.
-    let merged = run_git_raw(Some(tmp), &["merge", "--no-edit", base], DEFAULT_TIMEOUT).await;
+    let merged = run_git_raw(
+        Some(tmp),
+        &["merge", "--no-edit", &base_rev],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
     if merged.as_ref().is_ok_and(|out| out.code == 0) {
         return Ok("merge".to_string());
     }
@@ -2263,6 +2295,62 @@ mod tests {
             run(&repo_s, &["rev-parse", "origin/x"]).await.trim(),
             "z should start at origin/x"
         );
+
+        // A remote-tracking start point spelled as its full ref keeps the short form's
+        // tip and tracking, and a LOCAL branch literally named `origin/x` can't
+        // capture it.
+        std::fs::write(repo.join("r.txt"), "moved\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "local work"]).await;
+        run(&repo_s, &["branch", "origin/x"]).await;
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "w".into(),
+            false,
+            Some("refs/remotes/origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create w succeeds");
+        assert_eq!(
+            run(
+                &repo_s,
+                &["rev-parse", "--symbolic-full-name", "w@{upstream}"]
+            )
+            .await
+            .trim(),
+            "refs/remotes/origin/x",
+            "w should track origin/x"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/w"]).await,
+            run(&repo_s, &["rev-parse", "refs/remotes/origin/x"]).await,
+            "w should start at the remote-tracking ref, not the local origin/x"
+        );
+
+        // The local twin: `refs/heads/...` reads the branch even where a same-named
+        // tag on another commit captures the short form.
+        run(&repo_s, &["tag", "origin/x", "refs/remotes/origin/x"]).await;
+        git_create_branch_core(
+            &state,
+            repo_s.clone(),
+            "v".into(),
+            false,
+            Some("refs/heads/origin/x".into()),
+            false,
+        )
+        .await
+        .expect("create v succeeds");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/v"]).await,
+            run(&repo_s, &["rev-parse", "refs/heads/origin/x"]).await,
+            "v should start at the local branch, not the tag"
+        );
+        assert_ne!(
+            run(&repo_s, &["rev-parse", "refs/heads/v"]).await,
+            run(&repo_s, &["rev-parse", "refs/tags/origin/x"]).await,
+            "fixture sanity: the tag sits on another commit"
+        );
     }
 
     /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
@@ -2453,9 +2541,9 @@ mod tests {
         );
     }
 
-    /// Rows are named by the real branch and measured through its full ref: a bare
-    /// `feature` would resolve to the same-named tag (gitrevisions checks tags first)
-    /// and report the tag's counts.
+    /// Rows are named by the real branch and measured through its full ref, and the
+    /// base is read as a branch too: a bare `feature` or base name would resolve to the
+    /// same-named tag (gitrevisions checks tags first) and report the tag's counts.
     #[tokio::test]
     async fn branch_divergence_names_and_measures_branches_shadowed_by_tags() {
         let (_base, base) = temp_base("divergence-tag-shadow");
@@ -2467,7 +2555,7 @@ mod tests {
             .await
             .trim()
             .to_string();
-        // A tag on the base's own tip keeps the bare base rev pointing where it did.
+        // Both tags stay on the seed while both branches move past it.
         run(&repo_s, &["tag", &main]).await;
         run(&repo_s, &["switch", "-qc", "feature"]).await;
         run(&repo_s, &["tag", "feature"]).await;
@@ -2475,6 +2563,9 @@ mod tests {
         run(&repo_s, &["add", "-A"]).await;
         run(&repo_s, &["commit", "-qm", "feature work"]).await;
         run(&repo_s, &["switch", "-q", &main]).await;
+        std::fs::write(repo.join("m.txt"), "m\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "base work"]).await;
 
         let rows = super::git_branch_divergence(repo_s.clone(), main.clone())
             .await
@@ -2484,7 +2575,7 @@ mod tests {
             .map(|d| (d.name, d.ahead, d.behind))
             .collect();
         got.sort();
-        let mut want = vec![("feature".to_string(), 1, 0), (main.clone(), 0, 0)];
+        let mut want = vec![("feature".to_string(), 1, 1), (main.clone(), 0, 0)];
         want.sort();
         assert_eq!(got, want);
     }
@@ -2862,6 +2953,74 @@ mod tests {
             "the new commit has no patch-twin upstream — resetting would destroy it"
         );
         assert_eq!(st.remote_rewritten, Some(true));
+    }
+
+    /// Tags named like the branch (sitting on the upstream tip) and like its upstream
+    /// must not stand in for either: a bare `feature` in the range resolves to the tag,
+    /// collapsing the local side to zero, which is half of the reset offer's unlock.
+    #[tokio::test]
+    async fn rewrite_status_reads_the_branch_not_a_same_named_tag() {
+        let (_base, base) = temp_base("rewrite-tag-shadow");
+        let local_s = server_rebase_fixture(&base).await;
+        std::fs::write(std::path::Path::new(&local_s).join("mine.txt"), "unique\n").unwrap();
+        run(&local_s, &["add", "-A"]).await;
+        run(&local_s, &["commit", "-qm", "my own work"]).await;
+        run(&local_s, &["tag", "feature", "origin/feature"]).await;
+        run(&local_s, &["tag", "origin/feature", "main"]).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            (st.local_only, st.remote_only, st.remote_rewritten),
+            (1, 1, Some(true)),
+            "the branch's own unique commit still withholds the reset offer"
+        );
+        assert_eq!(st.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!(
+            st.upstream_tip.as_deref(),
+            Some(
+                run(&local_s, &["rev-parse", "refs/remotes/origin/feature"])
+                    .await
+                    .trim()
+            )
+        );
+    }
+
+    /// The reflog walked is the BRANCH's only. A bare name walks `refs/heads/<name>`'s
+    /// reflog when it has one, but with none it falls back to whichever same-named ref
+    /// does — here a tag created at the upstream tip under tag reflogs, which would
+    /// clear a branch that never saw that tip instead of refusing to guess.
+    #[tokio::test]
+    async fn rewrite_status_walks_the_branch_reflog_not_a_same_named_tags() {
+        let (_base, base) = temp_base("rewrite-tag-reflog");
+        let local_s = server_rebase_fixture(&base).await;
+        std::fs::remove_file(
+            std::path::Path::new(&local_s)
+                .join(".git")
+                .join("logs")
+                .join("refs")
+                .join("heads")
+                .join("feature"),
+        )
+        .expect("drop the branch reflog");
+        run(&local_s, &["config", "core.logAllRefUpdates", "always"]).await;
+        run(&local_s, &["tag", "feature", "refs/remotes/origin/feature"]).await;
+        assert!(
+            !run(&local_s, &["reflog", "show", "refs/tags/feature"])
+                .await
+                .trim()
+                .is_empty(),
+            "fixture sanity: the tag carries a reflog holding the upstream tip"
+        );
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.remote_rewritten, None,
+            "the branch has no reflog to walk, so nothing is provable"
+        );
     }
 
     /// The discriminating positive case: a branch whose reflog DOES hold the
@@ -3722,6 +3881,165 @@ mod tests {
                 .await
                 .expect("an in-place merge needs no worktree"),
             "merge"
+        );
+    }
+
+    // --- Every update arm reads `branch` and `base` as BRANCHES. A same-named tag on
+    // another commit would otherwise win each rev position (gitrevisions checks
+    // refs/tags before refs/heads), and `fetch .` resolves its source the same way.
+
+    /// The in-place arm merges the base BRANCH, never a same-named tag behind it.
+    #[tokio::test]
+    async fn update_in_place_merges_the_base_branch_not_its_tag() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-in-place-base-tag").await;
+        run(&repo_s, &["tag", &main, "HEAD~1"]).await;
+        run(&repo_s, &["switch", "-q", "feature"]).await;
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "feature", &main)
+            .await
+            .expect("the in-place merge succeeds");
+        assert_eq!(outcome, "merge");
+        assert!(
+            repo.join("base.txt").exists(),
+            "the base branch's work is merged in"
+        );
+    }
+
+    /// The up-to-date probe: a base tag that IS an ancestor of the branch must not
+    /// report a branch that lacks the base's work as already up to date.
+    #[tokio::test]
+    async fn update_up_to_date_probe_reads_the_base_branch_not_its_tag() {
+        let (_guard, _repo, repo_s, main) = diverged_repo("update-uptodate-base-tag").await;
+        let main_tip = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["branch", "behind", "HEAD~1"]).await;
+        run(&repo_s, &["tag", &main, "HEAD~1"]).await;
+
+        let state = AppState::default();
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "behind", &main)
+                .await
+                .expect("the update succeeds"),
+            "fast-forward"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/behind"])
+                .await
+                .trim(),
+            main_tip
+        );
+    }
+
+    /// The fast-forward probe: a tag named like the BRANCH, off the base's history,
+    /// must not turn a plain fast-forward into a merge.
+    #[tokio::test]
+    async fn update_fast_forward_probe_reads_the_branch_not_its_tag() {
+        let (_guard, _repo, repo_s, main) = diverged_repo("update-ff-branch-tag").await;
+        let main_tip = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["branch", "behind", "HEAD~1"]).await;
+        run(&repo_s, &["tag", "behind", "refs/heads/feature"]).await;
+
+        let state = AppState::default();
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "behind", &main)
+                .await
+                .expect("the update succeeds"),
+            "fast-forward"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/behind"])
+                .await
+                .trim(),
+            main_tip
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/tags/behind"]).await,
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await,
+            "the tag is never moved"
+        );
+    }
+
+    /// The fast-forward MOVE: `fetch .` resolves its source tag-first too, so a base
+    /// tag between the branch and the base tip would land the branch on the tag.
+    #[tokio::test]
+    async fn update_fast_forward_moves_to_the_base_branch_not_its_tag() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-ff-base-tag").await;
+        run(&repo_s, &["branch", "behind", "HEAD~1"]).await;
+        run(&repo_s, &["tag", &main]).await;
+        std::fs::write(repo.join("more.txt"), "more\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "more base work"]).await;
+        let main_tip = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "behind", &main)
+                .await
+                .expect("the update succeeds"),
+            "fast-forward"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/behind"])
+                .await
+                .trim(),
+            main_tip
+        );
+    }
+
+    /// The diverged arm: the base pin, its re-check and the throwaway merge all read
+    /// the base BRANCH. A same-named tag on an unrelated side commit would otherwise be
+    /// what lands on the branch.
+    // The serializing guard MUST span the awaits — it keeps the process-wide root
+    // override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_diverged_merge_takes_the_base_branch_not_its_tag() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo, repo_s, main) = diverged_repo("update-diverged-base-tag").await;
+        run(&repo_s, &["switch", "-qc", "side", "HEAD~1"]).await;
+        std::fs::write(repo.join("side.txt"), "side\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "side work"]).await;
+        run(&repo_s, &["tag", &main]).await;
+        run(&repo_s, &["switch", "-q", &main]).await;
+        let root = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        // A name no other test uses: the override root is process-wide.
+        run(&repo_s, &["branch", "-m", "feature", "update-base-tag"]).await;
+
+        let state = AppState::default();
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "update-base-tag", &main)
+                .await
+                .expect("the update succeeds"),
+            "merge"
+        );
+        let files = run(
+            &repo_s,
+            &["ls-tree", "--name-only", "refs/heads/update-base-tag"],
+        )
+        .await;
+        assert!(
+            files.contains("base.txt"),
+            "the base branch is merged: {files}"
+        );
+        assert!(
+            !files.contains("side.txt"),
+            "the tag's commit is not: {files}"
         );
     }
 

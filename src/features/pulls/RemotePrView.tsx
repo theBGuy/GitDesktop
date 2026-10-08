@@ -503,10 +503,12 @@ export function RemotePrView({
     (serverState === "unavailable" ||
       serverState === "conflicting" ||
       forgeUnreachable);
+  // Full remote-tracking refs: a short `origin/<x>` resolves to a same-named tag or
+  // local branch first.
   const conflictPreview = useConflictPreview(
     repoPath,
-    `${lensRemote}/${details.data?.baseRefName ?? ""}`,
-    `${lensRemote}/${details.data?.headRefName ?? ""}`,
+    `refs/remotes/${lensRemote}/${details.data?.baseRefName ?? ""}`,
+    `refs/remotes/${lensRemote}/${details.data?.headRefName ?? ""}`,
     previewEnabled,
   );
   // An unfinished resolve worktree for this PR (e.g. left by an earlier session).

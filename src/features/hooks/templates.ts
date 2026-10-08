@@ -18,7 +18,9 @@ export const HOOK_TEMPLATES: HookTemplate[] = [
     body: `#!/bin/sh
 # Block direct commits to protected branches — use a feature branch + PR.
 protected="main master release"
-branch=$(git rev-parse --abbrev-ref HEAD)
+# Empty on a detached HEAD, which matches no protected name.
+head=$(git symbolic-ref --quiet HEAD)
+branch=\${head#refs/heads/}
 for b in $protected; do
   if [ "$branch" = "$b" ]; then
     echo "Direct commits to '$branch' are blocked. Use a feature branch and a pull request." >&2
@@ -72,7 +74,8 @@ fi
     body: `#!/bin/sh
 # Prepend the branch's issue key (e.g. ABC-123) to the commit message.
 case "$2" in merge|squash|commit) exit 0 ;; esac
-branch=$(git rev-parse --abbrev-ref HEAD)
+head=$(git symbolic-ref --quiet HEAD)
+branch=\${head#refs/heads/}
 key=$(printf '%s' "$branch" | grep -oE '[A-Z]+-[0-9]+' | head -n1)
 if [ -n "$key" ] && ! grep -q "$key" "$1"; then
   sed -i.bak "1s/^/$key /" "$1" && rm -f "$1.bak"
@@ -175,7 +178,10 @@ fi
     body: `#!/bin/sh
 # Refuse to rebase shared branches — it rewrites history others rely on.
 branch="$2"
-[ -n "$branch" ] || branch=$(git rev-parse --abbrev-ref HEAD)
+if [ -z "$branch" ]; then
+  head=$(git symbolic-ref --quiet HEAD)
+  branch=\${head#refs/heads/}
+fi
 case "$branch" in
   main|master|release|develop)
     echo "Refusing to rebase '$branch' — rebasing a shared branch rewrites history." >&2
