@@ -125,20 +125,34 @@ export function unreadableNameCount(filtered: {
 }
 
 /** Why filtering emptied a diff: `withheld` when sections couldn't be checked
- *  against active patterns; `unreadable-names` when names that aren't readable
- *  text were dropped; `excluded` when the user's patterns hid the rest. */
-export type EmptyDiffCause = "excluded" | "withheld" | "unreadable-names";
+ *  against active patterns; otherwise by the hidden names' causes —
+ *  `excluded` (the user's patterns), `unreadable-names` (names that aren't
+ *  readable text), or `unreadable-and-excluded` (both). */
+export type EmptyDiffCause =
+  | "excluded"
+  | "withheld"
+  | "unreadable-names"
+  | "unreadable-and-excluded";
+
+const EMPTY_CAUSE_BY_HIDDEN: Record<HiddenCause, EmptyDiffCause> = {
+  patterns: "excluded",
+  unreadable: "unreadable-names",
+  both: "unreadable-and-excluded",
+};
 
 /** The cause to name for a `filterDiffByAiIgnore` result whose text came back
- *  empty, most specific first; null when nothing was hidden at all. */
+ *  empty; null when nothing was hidden at all. */
 export function emptyDiffCause(filtered: {
   excludedFiles: number;
   unreadableFiles: number;
   unkeyableSections: number;
 }): EmptyDiffCause | null {
   if (filtered.unkeyableSections > 0) return "withheld";
-  if (unreadableNameCount(filtered) > 0) return "unreadable-names";
-  return filtered.excludedFiles > 0 ? "excluded" : null;
+  const cause = hiddenCause(
+    filtered.excludedFiles,
+    unreadableNameCount(filtered),
+  );
+  return cause && EMPTY_CAUSE_BY_HIDDEN[cause];
 }
 
 /**

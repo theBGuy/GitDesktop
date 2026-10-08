@@ -1476,6 +1476,12 @@ const EMPTY_DIFF_COPY: Record<
     detail:
       "Skipped — files whose names aren't readable text are always kept from AI",
   },
+  "unreadable-and-excluded": {
+    toast:
+      "files whose names aren't readable text are always kept from AI, and the rest match your AI ignore patterns",
+    detail:
+      "Skipped — files whose names aren't readable text are always kept from AI, and the rest match your AI ignore patterns",
+  },
 };
 
 /** Live progress of one review run, owned by the CALLER so a run that throws can still

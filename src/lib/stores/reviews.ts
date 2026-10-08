@@ -173,6 +173,8 @@ const EMPTY_REVIEW_COPY: Record<EmptyDiffCause, string> = {
     "Nothing to review — changes that couldn't be checked against your AI ignore patterns were withheld, along with any that match them.",
   "unreadable-names":
     "Nothing to review — files whose names aren't readable text are always kept from AI.",
+  "unreadable-and-excluded":
+    "Nothing to review — files whose names aren't readable text are always kept from AI, and the rest match your AI ignore patterns.",
 };
 
 const EMPTY_TARGET: ReviewTarget = {

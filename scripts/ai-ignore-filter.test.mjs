@@ -218,7 +218,7 @@ test("an emptied diff names its true cause", { skip }, async () => {
       "pattern + unreadable",
       SECRET + lossySection(`a${FFFD}.txt`),
       ["secret.txt"],
-      "unreadable-names",
+      "unreadable-and-excluded",
       1,
     ],
     // (iv) an unkeyable section while patterns are active
@@ -325,7 +325,9 @@ const noteOf = (prompt) => {
   return m ? m[0] : "";
 };
 
-test("hidden-file notes match generate.rs byte for byte", { skip }, () => {
+test("hidden-file notes match generate.rs byte for byte", {
+  skip,
+}, async () => {
   const P = 7;
   const U = 3;
   const counts = [
@@ -377,8 +379,9 @@ test("hidden-file notes match generate.rs byte for byte", { skip }, () => {
     assert.deepEqual(ts.toSorted(), rust.toSorted(), fnName);
     assert.equal(noteOf(build(0, 0)), "", `${fnName}: nothing hidden`);
   }
-  // Fed the raw filter pair instead of `unreadableNameCount`, an unkeyable-only
-  // diff (0 hidden names, 1 withheld section) would claim an unreadable name.
+  // A real unkeyable-only filter result (no hidden names, one withheld section):
+  // converted, it discloses nothing; fed raw, it would claim an unreadable name.
+  const out = await run(RAW_LF_DELETION, ["secret.txt"]);
   const review = (unreadableFiles) =>
     noteOf(
       prompts.buildReviewPrompt(
@@ -387,14 +390,43 @@ test("hidden-file notes match generate.rs byte for byte", { skip }, () => {
           title: "",
           body: "",
           commitSubjects: [],
-          excludedFiles: 0,
+          excludedFiles: out.excludedFiles,
           unreadableFiles,
         },
         "general",
       ).prompt,
     );
-  assert.equal(
-    review(unreadableNameCount({ unreadableFiles: 1, unkeyableSections: 1 })),
-    "",
+  assert.equal(review(unreadableNameCount(out)), "");
+  assert.notEqual(review(out.unreadableFiles), "");
+});
+
+// The both-causes empty review names both, in each surface's own Record. Read
+// from source: both modules touch `window` at import, so neither loads here.
+test("both-causes empty-review copy is pinned per surface", { skip }, () => {
+  const src = (rel) =>
+    readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "..", rel),
+      "utf8",
+    )
+      .replaceAll("\r\n", "\n")
+      .replace(/\s+/g, " ");
+  const record = (text, name) => {
+    const at = text.indexOf(`const ${name}`);
+    assert.ok(at >= 0, `${name} not found`);
+    return text.slice(at, text.indexOf(" }; ", at));
+  };
+  const rest =
+    "files whose names aren't readable text are always kept from AI, and the rest match your AI ignore patterns";
+  assert.ok(
+    record(src("src/lib/stores/reviews.ts"), "EMPTY_REVIEW_COPY").includes(
+      `"unreadable-and-excluded": "Nothing to review — ${rest}."`,
+    ),
+    "EMPTY_REVIEW_COPY",
+  );
+  assert.ok(
+    record(src("src/lib/automations/runner.ts"), "EMPTY_DIFF_COPY").includes(
+      `"unreadable-and-excluded": { toast: "${rest}", detail: "Skipped — ${rest}", }`,
+    ),
+    "EMPTY_DIFF_COPY",
   );
 });

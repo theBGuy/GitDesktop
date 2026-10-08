@@ -1981,12 +1981,13 @@ struct CommittedBase {
 }
 
 /// What the AI-ignore filter left of an untracked-name list. The result SHAPE
-/// mirrors the TS `filterPathsByAiIgnore` (src/lib/ai/ignore.ts) — KEEP IN SYNC —
-/// but the two no longer share a RULE: this side judges the real name bytes, so a
-/// name holding a real U+FFFD gets its true verdict and only a genuinely
-/// undecodable name stays hidden, while the TS twin receives lossy-decoded strings
-/// and cannot tell a real U+FFFD from a lost byte, so it fail-closes on both.
-/// Aligning them (backend-carried verdicts) is a recorded follow-up.
+/// mirrors the TS `filterPathsByAiIgnore` (src/lib/ai/ignore.ts) — KEEP IN SYNC.
+/// Both sides judge byte truth (here the raw names, there the listing's
+/// `undecodable` flag), so a real U+FFFD gets its true verdict. Two differences
+/// remain: the branch dialog feeds the TS side string-domain rows through
+/// `lossyListingRows` (its entries carry no flag, so any U+FFFD fails closed), and
+/// a pattern-matched undecodable name counts as a pattern hit here but as
+/// unreadable there, where the undecodable check runs first.
 struct FilteredUntracked {
     /// The names still safe to show a model.
     paths: Vec<String>,
@@ -2160,12 +2161,19 @@ fn committed_fallback_empty_message(
             ),
             tree.unreadable > 0,
         ),
-        // Unreadable names are the only work left to cite; below that, being ON the
-        // default branch and a fully-merged branch.
-        (false, false) if committed.unreadable > 0 => (
+        // Unreadable names are the only work left to cite, each side named for whether
+        // it holds any; below that, being ON the default branch and a fully-merged one.
+        (false, false) if tree.unreadable > 0 && committed.unreadable > 0 => (
             format!(
                 "The only changes, in progress or committed vs {base}, are files whose names \
                  aren't readable text — nothing to name a branch after."
+            ),
+            false,
+        ),
+        (false, false) if committed.unreadable > 0 => (
+            format!(
+                "No in-progress changes, and the only committed changes vs {base} are files \
+                 whose names aren't readable text — nothing to name a branch after."
             ),
             false,
         ),
@@ -2717,6 +2725,24 @@ mod tests {
             msg(counts(0, 0), counts(0, 0)),
             "No in-progress changes, and no committed changes vs main — nothing to name a \
              branch after."
+        );
+
+        // No pattern hit anywhere: each side is named by whether it holds unreadable
+        // names, so a clean side is never claimed to have changes (or the reverse).
+        assert_eq!(
+            msg(counts(1, 1), counts(1, 1)),
+            "The only changes, in progress or committed vs main, are files whose names aren't \
+             readable text — nothing to name a branch after."
+        );
+        assert_eq!(
+            msg(counts(0, 0), counts(1, 1)),
+            "No in-progress changes, and the only committed changes vs main are files whose \
+             names aren't readable text — nothing to name a branch after."
+        );
+        assert_eq!(
+            msg(counts(1, 1), counts(0, 0)),
+            "The only in-progress changes are files whose names aren't readable text, and \
+             there are no committed changes vs main — nothing to name a branch after."
         );
     }
 
