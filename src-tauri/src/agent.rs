@@ -249,13 +249,17 @@ impl EventSink for Channel<ReviewEvent> {
 // instead of the host's and dies. Subtract per child only: never clear
 // (SSH_AUTH_SOCK inherits), never touch our own env (WebKit helpers, the
 // dlopen'd tray). The tables track the bundle's startup exports (the GTK hook
-// the Tauri CLI embeds, and the AppRun binary it downloads); appimage-guard.sh
-// is the tripwire.
+// the Tauri CLI embeds, and the AppRun binary it downloads); together they
+// exactly mirror appimage-guard.sh's allowed list, checked by
+// check-appimage-env-twins.mjs.
 
 /// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
 /// dropped and the variable is unset when nothing survives — except `PATH`,
-/// which is replaced with a minimal host PATH.
-/// Mirrors the `allowed` list in `.github/scripts/appimage-guard.sh`, minus `APPDIR`.
+/// which is replaced with a minimal host PATH, and `XDG_DATA_DIRS`, whose
+/// pre-launch value is restored when the exact launch-chain prefix matches,
+/// also removing the hook's `/usr/share` entry.
+/// Together with `APPDIR_SCALAR_VARS`, exactly mirrors the guard's
+/// `allowed` list.
 const APPDIR_PATHLIST_VARS: &[&str] = &[
     "LD_LIBRARY_PATH",
     "PATH",
@@ -272,10 +276,16 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 
 /// Single-path variables the bundle owns outright — unset when they point into
 /// `$APPDIR`. Deliberately left alone: `GTK_THEME` (hook-set, but not
-/// `$APPDIR`-derived), and `GDK_BACKEND` and `LD_PRELOAD` (the AppImage never
-/// sets them, so any value is the user's).
-/// Mirrors the `allowed` list in `.github/scripts/appimage-guard.sh`, minus `APPDIR`.
+/// `$APPDIR`-derived), `PYTHONDONTWRITEBYTECODE` (the AppRun launcher sets a
+/// harmless constant `1`, preventing `.pyc` writes), and `GDK_BACKEND` and
+/// `LD_PRELOAD` (the AppImage never sets them, so any value is the user's).
+/// Together with `APPDIR_PATHLIST_VARS`, exactly mirrors the guard's
+/// `allowed` list.
 const APPDIR_SCALAR_VARS: &[&str] = &[
+    // An extracted AppImage child would adopt our APPDIR via its GTK hook's
+    // `export APPDIR="${APPDIR:-...}"` (a mounted child's type-2 runtime
+    // overwrites it).
+    "APPDIR",
     // Only the bundle's AppRun.wrapped launcher sets PYTHONHOME.
     "PYTHONHOME",
     "GSETTINGS_SCHEMA_DIR",
@@ -335,6 +345,16 @@ fn compute_child_env_overrides(
     let mut plan = Vec::new();
     for name in APPDIR_PATHLIST_VARS {
         let Some(value) = var(name) else { continue };
+        if *name == "XDG_DATA_DIRS" {
+            // The exact AppRun + GTK prefix preserves the pre-launch value;
+            // generic stripping would lose the trailing-colon unset marker.
+            let a = appdir.trim_end_matches('/');
+            let prefix = format!("{a}/usr/share/:{a}/usr/share:/usr/share:");
+            if let Some(original) = value.strip_prefix(&prefix) {
+                plan.push((*name, (!original.is_empty()).then(|| original.to_string())));
+                continue;
+            }
+        }
         let (kept, dropped) = strip_appdir_pathlist(&value, appdir);
         if !dropped {
             continue;
@@ -3349,6 +3369,89 @@ mod child_env_tests {
             lookup(&[("GTK_DATA_PREFIX", "/tmp/.mount_gdAbcX")])
         )
         .is_empty());
+    }
+
+    #[test]
+    fn appdir_itself_is_unset_and_a_sibling_mount_is_untouched() {
+        assert_eq!(
+            compute_child_env_overrides(APPDIR, lookup(&[("APPDIR", APPDIR)])),
+            vec![("APPDIR", None)]
+        );
+        let sibling_plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[("APPDIR", "/tmp/.mount_gdAbcX")]),
+        );
+        assert!(sibling_plan.is_empty());
+    }
+
+    #[test]
+    fn an_unset_pre_launch_xdg_data_dirs_is_unset_again() {
+        let raw = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:");
+        assert_eq!(
+            compute_child_env_overrides(APPDIR, |name| {
+                (name == "XDG_DATA_DIRS").then(|| raw.clone())
+            }),
+            vec![("XDG_DATA_DIRS", None)]
+        );
+    }
+
+    #[test]
+    fn a_custom_pre_launch_xdg_data_dirs_is_restored_verbatim() {
+        for original in ["/opt/share", ":/opt/share::/usr/share:"] {
+            let raw = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:{original}");
+            assert_eq!(
+                compute_child_env_overrides(APPDIR, |name| {
+                    (name == "XDG_DATA_DIRS").then(|| raw.clone())
+                }),
+                vec![("XDG_DATA_DIRS", Some(original.to_string()))]
+            );
+        }
+    }
+
+    #[test]
+    fn a_pre_launch_system_xdg_data_dirs_is_restored_once() {
+        let raw = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:/usr/share");
+        assert_eq!(
+            compute_child_env_overrides(APPDIR, |name| {
+                (name == "XDG_DATA_DIRS").then(|| raw.clone())
+            }),
+            vec![("XDG_DATA_DIRS", Some("/usr/share".to_string()))]
+        );
+    }
+
+    #[test]
+    fn an_apprun_only_xdg_data_dirs_uses_generic_stripping() {
+        let plan = compute_child_env_overrides(
+            APPDIR,
+            lookup(&[("XDG_DATA_DIRS", "/tmp/.mount_gdAbc/usr/share/:/usr/share")]),
+        );
+        assert_eq!(
+            plan,
+            vec![("XDG_DATA_DIRS", Some("/usr/share".to_string()))]
+        );
+    }
+
+    #[test]
+    fn xdg_data_dirs_restoration_accepts_a_trailing_slash_on_appdir() {
+        for original in ["", "/opt/share"] {
+            let raw = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:{original}");
+            let expected = vec![(
+                "XDG_DATA_DIRS",
+                (!original.is_empty()).then(|| original.to_string()),
+            )];
+            assert_eq!(
+                compute_child_env_overrides(&format!("{APPDIR}/"), |name| {
+                    (name == "XDG_DATA_DIRS").then(|| raw.clone())
+                }),
+                expected
+            );
+            assert_eq!(
+                compute_child_env_overrides(APPDIR, |name| {
+                    (name == "XDG_DATA_DIRS").then(|| raw.clone())
+                }),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run from the repo root. Reject bundled libwayland-client and $APPDIR-derived
 # variables that the startup scripts or the launcher binary set outside the
-# `allowed` list below (what agent.rs strips from children, plus APPDIR).
-# When the pin action exports them, require that the bundler ran the hash-pinned
-# linuxdeploy and bundled the pinned AppRun; CI requires both pin exports.
+# `allowed` list below (exactly the union of agent.rs's child-env tables).
+# Check the pinned linuxdeploy, bundled AppRun, and cached AppImage plugin;
+# CI requires their pin exports.
+# Check the pinned runtime input; CI also requires its pin exports.
 set -euo pipefail
 
 appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)
@@ -70,11 +71,57 @@ elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
   exit 1
 fi
 
+# The plugin is not dd-patched: its cached bytes must still match the seed.
+if [ -n "${GD_PLUGIN_APPIMAGE_SHA256:-}" ]; then
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+  plugin_files=()
+  for tool in "$cache_dir"/linuxdeploy-plugin-appimage*; do
+    [ -e "$tool" ] || [ -L "$tool" ] || continue
+    plugin_files+=("${tool##*/}")
+  done
+  if [ "${#plugin_files[@]}" -ne 1 ] || [ "${plugin_files[0]}" != "linuxdeploy-plugin-appimage.AppImage" ]; then
+    echo "FAIL: expected only the pinned linuxdeploy-plugin-appimage.AppImage; found:"
+    if [ "${#plugin_files[@]}" -eq 0 ]; then
+      echo "none"
+    else
+      printf '%s\n' "${plugin_files[@]}"
+    fi
+    exit 1
+  fi
+  plugin="$cache_dir/linuxdeploy-plugin-appimage.AppImage"
+  plugin_hash=$(sha256sum "$plugin" 2>/dev/null) || plugin_hash=none
+  plugin_hash="${plugin_hash%% *}"
+  if [ "$plugin_hash" != "$GD_PLUGIN_APPIMAGE_SHA256" ]; then
+    echo "FAIL: the cached AppImage plugin is not the pinned build"
+    echo "$plugin_hash"
+    exit 1
+  fi
+  echo "OK: the cached AppImage plugin is the pinned build"
+elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "FAIL: the pin-linuxdeploy action did not export GD_PLUGIN_APPIMAGE_SHA256"
+  exit 1
+fi
+
+# Input-side only: appimagetool writes sections into the embedded runtime,
+# so the bundle's runtime bytes can't be compared against this pin.
+if [ -n "${GD_RUNTIME_SHA256:-}" ]; then
+  runtime_hash=$(sha256sum "${LDAI_RUNTIME_FILE:-}" 2>/dev/null) || runtime_hash=none
+  runtime_hash="${runtime_hash%% *}"
+  if [ "$runtime_hash" != "$GD_RUNTIME_SHA256" ]; then
+    echo "FAIL: LDAI_RUNTIME_FILE is missing or is not the pinned runtime"
+    echo "$runtime_hash"
+    exit 1
+  fi
+  echo "OK: the AppImage runtime input is the pinned build"
+elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "FAIL: the pin-linuxdeploy action did not export GD_RUNTIME_SHA256"
+  exit 1
+fi
+
 # Every variable a startup script or the launcher binary points into the bundle
-# must also be stripped from the environment of the tools we spawn, except
-# `APPDIR` itself (allowed below but left in children's env). The rest mirror
-# `APPDIR_PATHLIST_VARS` + `APPDIR_SCALAR_VARS` in src-tauri/src/agent.rs —
-# extend both together.
+# must also be stripped from the environment of the tools we spawn; this list
+# exactly mirrors the union of APPDIR_PATHLIST_VARS + APPDIR_SCALAR_VARS in
+# src-tauri/src/agent.rs, enforced by check-appimage-env-twins.mjs.
 # Scans the generated AppRun wrapper, its hooks, and the NAME=%s environment
 # strings in the binary launcher (AppRun.wrapped, or AppRun itself when it is
 # a binary); each of those counts as $APPDIR-derived, since the launcher fills
@@ -88,7 +135,7 @@ allowed="$allowed PYTHONHOME PYTHONPATH PERLLIB QT_PLUGIN_PATH"
 allowed="$allowed GSETTINGS_SCHEMA_DIR GTK_EXE_PREFIX GTK_DATA_PREFIX"
 allowed="$allowed GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE"
 allowed="$allowed GIO_EXTRA_MODULES GIO_MODULE_DIR"
-allowed="$allowed APPDIR " # the hook's own re-export
+allowed="$allowed APPDIR " # expected hook re-export, also stripped from children
 scripts=0
 unknown=""
 for script in "$workdir"/squashfs-root/AppRun "$workdir"/squashfs-root/apprun-hooks/*.sh; do
