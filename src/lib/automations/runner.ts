@@ -1449,18 +1449,23 @@ interface ReviewResult {
   thoughts: string;
 }
 
-/** Why a review's filtered diff came out empty while sections were withheld:
- *  under active patterns they couldn't be checked against them; with none, the
- *  only drops are names that aren't readable text. */
-type WithheldDiff = "withheld" | "unreadable-names";
+/** Why filtering emptied a review's diff: `excluded` when the user's patterns hid
+ *  every file; `withheld` when sections couldn't be checked against active
+ *  patterns; `unreadable-names` when, with no patterns, the only drops are names
+ *  that aren't readable text. */
+type EmptyDiffCause = "excluded" | "withheld" | "unreadable-names";
 
 /** The empty-diff outcome's toast tail and history detail, per cause. `empty` is
- *  a diff with nothing in it, or nothing the user's patterns left. */
+ *  a diff with nothing in it. */
 const EMPTY_DIFF_COPY: Record<
-  WithheldDiff | "empty",
+  EmptyDiffCause | "empty",
   { toast: string; detail?: string }
 > = {
   empty: { toast: "no changes to review" },
+  excluded: {
+    toast: "every changed file matches your AI ignore patterns",
+    detail: "Skipped — every changed file matches your AI ignore patterns",
+  },
   withheld: {
     toast: "changes couldn't be checked against your AI ignore patterns",
     detail:
@@ -1557,7 +1562,9 @@ async function resolveDiff(
  * Resolves the diff, builds the prompt, and runs the model to completion.
  * `signal` aborts the HTTP stream; `onCliId` reports the CLI run's id so the
  * caller can kill the subprocess (CLI providers don't take an AbortSignal).
- * Returns the final answer plus any agentic narration, or null for no changes.
+ * Returns the final answer plus any agentic narration; an {@link EmptyDiffCause}
+ * when filtering emptied the diff; or null when there is nothing to review or
+ * the run was aborted.
  * `progress` is filled as the run streams, so the caller's catch can keep a
  * timed-out run's output (see {@link RunProgress}).
  */
@@ -1568,7 +1575,7 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
   progress: RunProgress,
-): Promise<ReviewResult | WithheldDiff | null> {
+): Promise<ReviewResult | EmptyDiffCause | null> {
   // Independent of each other, and the settings are only needed by the filter
   // below (the budget profile reuses the same read) — so they resolve alongside
   // the diff rather than in front of it.
@@ -1597,12 +1604,14 @@ async function generateReviewText(
     files: diff.files,
     exclude: excludePatterns,
   });
-  // Everything the change touched is AI-ignored or withheld ⇒ the empty-diff
-  // outcome. A withheld diff returns its cause so the caller never reports it as
-  // having no changes; with no patterns, only unreadable names can be withheld.
+  // Filtering emptied the diff ⇒ the empty-diff outcome, returned with its cause
+  // so the caller never reports hidden or withheld changes as none; with no
+  // patterns, only unreadable names can be withheld.
   if (!filtered.text.trim()) {
-    if (filtered.unreadableFiles === 0) return null;
-    return excludePatterns.length > 0 ? "withheld" : "unreadable-names";
+    if (filtered.unreadableFiles > 0) {
+      return excludePatterns.length > 0 ? "withheld" : "unreadable-names";
+    }
+    return filtered.excludedFiles > 0 ? "excluded" : null;
   }
   if (signal.aborted) return null;
 

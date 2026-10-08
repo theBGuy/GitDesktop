@@ -3251,7 +3251,9 @@ runs and a toast tells you when the description is ready; **View** reopens it on
   git never re-includes below an excluded directory. Your global patterns are applied
   last, so a repo's committed file can never re-expose what you excluded yourself.
   While patterns are set, any part of a diff whose file can't be identified is kept
-  from AI too, so nothing reaches a model without being checked against them.
+  from AI too, so nothing reaches a model without being checked against them. That
+  includes every local diff in a repository that sets git's \`diff.noprefix\` or
+  custom diff prefixes.
   No need to hand-edit the file: {{secondaryclick}} a changed file → *Exclude from AI*
   (the file, its folder, or its file type — or a multi-selection) appends to
   \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
