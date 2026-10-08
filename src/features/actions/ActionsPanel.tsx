@@ -511,6 +511,11 @@ export function ActionsPanel({
                       ? pendingItemReason(cancel.isPaused, "cancelling…")
                       : undefined
                   }
+                  rerunHeld={
+                    rerun.isPending && rerun.variables?.runId === menuRun.id
+                      ? pendingItemReason(rerun.isPaused, "re-running…")
+                      : undefined
+                  }
                   actions={{
                     rerun: (runId, failedOnly) =>
                       void doRerun(runId, failedOnly),
