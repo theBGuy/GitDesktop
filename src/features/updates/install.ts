@@ -43,7 +43,10 @@ export async function installUpdateWithToast(
             duration: Number.POSITIVE_INFINITY,
           }),
         );
-        if (proceed) onProceed?.();
+        if (proceed) {
+          toast.loading(`Installing v${update.version}…`, { id });
+          onProceed?.();
+        }
         return proceed;
       },
     );
