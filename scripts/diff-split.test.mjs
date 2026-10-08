@@ -217,6 +217,24 @@ const shapes = [
     path: "yx",
     section: "diff --git a/x b/yx\n",
   },
+  {
+    name: "a binary rename to a name whose quotes are part of the filename",
+    path: '"secret.txt"',
+    section:
+      'diff --git a/old2.txt b/"secret.txt"\n' +
+      "rename from old2.txt\n" +
+      'rename to "secret.txt"\n' +
+      'Binary files a/old2.txt and b/"secret.txt" differ\n',
+  },
+  {
+    name: "a git-quoted rename destination containing escaped quotes",
+    path: '"escaped".txt',
+    section:
+      'diff --git a/old3.txt "b/\\"escaped\\".txt"\n' +
+      "rename from old3.txt\n" +
+      'rename to "\\"escaped\\".txt"\n' +
+      "Binary files differ\n",
+  },
 ];
 
 for (const { name, path, section } of shapes) {

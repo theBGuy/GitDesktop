@@ -87,13 +87,17 @@ function newFilePath(token: string): string | undefined {
   return path.startsWith("b/") ? path.slice(2) : undefined;
 }
 
-// Rename/copy destinations have no a/ or b/ prefix. git C-quotes whole values
-// only; synthesized headers arrive raw, even when a path starts with a quote.
+// Rename/copy destinations have no a/ or b/ prefix. git C-quotes only whole
+// values containing backslash escapes; synthesized headers arrive raw.
+// A raw name fully wrapped in quotes with a backslash remains ambiguous and
+// would be decoded as C-quoted; no real producer emits that combination.
 function movedFilePath(value: string): string | undefined {
   if (!value.startsWith('"')) return value || undefined;
   const close = value.lastIndexOf('"');
   if (close <= 0 || close !== value.length - 1) return value;
-  return unescapeCQuoted(value.slice(1, close)) || undefined;
+  const body = value.slice(1, close);
+  if (!body.includes("\\")) return value;
+  return unescapeCQuoted(body) || undefined;
 }
 
 /**
