@@ -1,5 +1,8 @@
 import type { DiffStatEntry } from "./types";
 
+// Only \n delimits lines; JS's \r/U+2028/U+2029 breaks would miskey sections.
+export const DIFF_SECTION_BOUNDARY = /(?<![^\n])(?=diff --git )/;
+
 const encoder = new TextEncoder();
 
 /** git's `quote_c_style` single-character escapes, mapped to their byte. */
@@ -87,9 +90,9 @@ function newFilePath(token: string): string | undefined {
 /**
  * A rename/copy destination, which has no a/ or b/ prefix.
  * git's final b-side field repeats the escaped destination after `"b/`.
- * The Rust reconstructors write both raw: destinations put their quote after
- * `b/`, so this suffix cannot match; quote runs in the old name cannot change
- * the result.
+ * A producer that writes both raw puts the destination's quote after `b/`,
+ * so this suffix cannot match; quote runs in the old name cannot change the
+ * result.
  */
 function movedFilePath(
   value: string,
@@ -177,7 +180,7 @@ export function sectionFilePath(section: string): string | undefined {
 export function diffSectionStats(diff: string): DiffStatEntry[] {
   if (typeof diff !== "string") return [];
   const stats: DiffStatEntry[] = [];
-  for (const part of diff.split(/(?<![^\n])(?=diff --git )/)) {
+  for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     try {
       const path = sectionFilePath(part);
@@ -209,12 +212,11 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
  * keyed by the new-file path, so each can be fed to the file diff viewer.
  *
  * A section whose path can't be keyed is dropped rather than passed through:
- * the AI-ignore filter rebuilds the diff from this map, and an unkeyable section
- * is one that was never checked against the user's patterns.
+ * an unkeyable section has no file row to attach to.
  */
 export function splitUnifiedDiff(diff: string): Map<string, string> {
   const sections = new Map<string, string>();
-  for (const part of diff.split(/(?<![^\n])(?=diff --git )/)) {
+  for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     const path = sectionFilePath(part);
     if (path) sections.set(path, part);

@@ -1,3 +1,4 @@
+import { DIFF_SECTION_BOUNDARY } from "@/lib/git/diff-split";
 import type { ContextBudgetProfile } from "./context-budget";
 
 /** Character budget for the staged diff inside the AI prompt. */
@@ -202,9 +203,7 @@ function headerNewPath(header: string): string | undefined {
 
 function splitIntoFileSections(diffText: string): FileSection[] {
   const sections: FileSection[] = [];
-  const parts = diffText
-    .split(/(?<![^\n])(?=diff --git )/)
-    .filter((p) => p.trim());
+  const parts = diffText.split(DIFF_SECTION_BOUNDARY).filter((p) => p.trim());
   for (const part of parts) {
     const header = part.slice(0, part.indexOf("\n"));
     sections.push({ path: headerNewPath(header) ?? header, text: part });

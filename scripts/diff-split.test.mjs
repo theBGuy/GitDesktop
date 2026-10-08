@@ -377,6 +377,15 @@ for (const { name, path, section } of shapes) {
   });
 }
 
+test("a CR-only rename destination falls through to the diff header", () => {
+  const path = "src/cr-only-fallback.txt";
+  const section =
+    "diff --git a/src/cr-only-fallback.txt b/src/cr-only-fallback.txt\n" +
+    "rename to \r\n";
+  assert.equal(sectionFilePath(section), path);
+  assert.deepEqual([...splitUnifiedDiff(section)], [[path, section]]);
+});
+
 // ------------------------------------------------------------ combinedSections
 
 const combined = shapes.map(({ section }) => section).join("");
@@ -456,15 +465,6 @@ test("per-file counts exclude headers and include hunk lines starting with three
 });
 
 // ----------------------------------------------------- emptyAndHeaderlessInput
-
-test("a CR-only rename destination falls through to the diff header", () => {
-  const path = "src/cr-only-fallback.txt";
-  const section =
-    "diff --git a/src/cr-only-fallback.txt b/src/cr-only-fallback.txt\n" +
-    "rename to \r\n";
-  assert.equal(sectionFilePath(section), path);
-  assert.deepEqual([...splitUnifiedDiff(section)], [[path, section]]);
-});
 
 test("empty input has no path, sections, or statistics", () => {
   assert.equal(sectionFilePath(""), undefined);
