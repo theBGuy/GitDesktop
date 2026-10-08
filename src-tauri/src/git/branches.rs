@@ -1750,7 +1750,7 @@ struct UpdatePins {
 /// The sha `refs/heads/<branch>` points at, or `None` when there is no such branch.
 /// The FULL ref path is the point: under a bare `rev-parse <branch>` a tag sharing
 /// the name would shadow it, and the pin would then guard the wrong object.
-async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
+pub(crate) async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
     validate_branch_name(branch)?;
     let out = run_git_raw(
         Some(repo_path),

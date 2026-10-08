@@ -511,8 +511,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Branch names as revs** — a branch name never reaches a REV position (a
   range, a `^{commit}` peel, a rev-taking argv, a `fetch` refspec source) bare:
   gitrevisions resolves a same-named tag first. Resolve it via
-  `git::branches::branch_first_rev` (`local_branch_revs` for a pair) or read
-  the tip sha via `branch_tip_sha`; frontend composes pass `refs/heads/…` /
+  `git::branches::branch_first_rev` (once per side for a pair; inside
+  compare.rs, `local_branch_revs`) or read the tip sha via
+  `git::branches::branch_tip_sha`; frontend composes pass `refs/heads/…` /
   `refs/remotes/…` as the rev and keep the short name for display.
   `<branch>@{upstream}` stays bare — git looks that name up as a branch and
   refuses the `refs/heads/` spelling (measured, git 2.51.1)

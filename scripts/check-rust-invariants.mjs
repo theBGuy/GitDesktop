@@ -30,7 +30,7 @@
 //   G. bare branch revs — a branch name in a REV position (a range, a peel, a
 //      rev-taking argv) resolves to a same-named tag first. A branch-first
 //      resolver (`git::branches::branch_first_rev`) or the measured tip sha
-//      (`branch_tip_sha`) is the replacement.
+//      (`git::branches::branch_tip_sha`) is the replacement.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
 // RULE: the lists only shrink by default. Adding an entry is a reviewed change —
@@ -888,7 +888,8 @@ const REV_SAFE_INIT_RE =
 const BARE_REV_FIX =
   "a bare branch name in a rev position resolves to a same-named TAG first " +
   "(gitrevisions) — resolve it via git::branches::branch_first_rev, read the " +
-  "tip sha (branch_tip_sha), or allowlist a deliberate use with rationale";
+  "tip sha (git::branches::branch_tip_sha), or allowlist a deliberate use with " +
+  "rationale";
 
 /** The body of the `[ … ]` opening at `openIdx`, bracket-balanced and
  *  literal-aware, so a `]` inside a string cannot end the argv list early. */
