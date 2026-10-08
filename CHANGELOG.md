@@ -12,6 +12,130 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-10-08
+
+### Changed
+
+- The Linux AppImage now runs natively on Wayland sessions.
+- Hunks deep in very large files are now syntax-highlighted.
+- **Offline-safe remote actions.** While you're offline, actions that change
+  the remote for good are unavailable, with the reason shown on the control,
+  and work again as soon as you reconnect. Held actions are never queued for
+  later. That covers merging or closing a pull request, updating its branch,
+  resolving its conflicts, and submitting or discarding a review. It covers
+  closing, transferring, or deleting an issue, and closing or deleting a
+  discussion. It covers creating pull requests, issues, discussions, and
+  releases, and publishing a branch or repository. It covers forking a
+  repository, approving a workflow run, and deleting a project or one of its
+  views. Pushing, pulling, fetching, deleting a remote branch, and editing,
+  publishing, or deleting a release (assets included) are held too, as are
+  pushing a tag or deleting it from origin. Comments and other quick edits
+  still queue and send when you reconnect, as long as GitDesktop stays open
+  until then. If any are still waiting when you quit from the tray, close the
+  window with **Keep running in the tray when the window is closed** turned
+  off, or install an update, GitDesktop asks before discarding them.
+
+### Fixed
+
+- Git hooks and other tools that the Linux AppImage starts now run with
+  your system's own Python setup and data directories, and AppImages they
+  launch start from their own bundle.
+- The pull request list refreshes as soon as an automated AI review posts its
+  comment on a pull request.
+- When reordering a card on a project board fails, the error names the card
+  whenever the board still has it loaded, so failures on different cards are
+  easy to tell apart.
+- Saving your commit identity, for a repository or as your global default, now
+  works when the Git config lists a name or email more than once, replacing
+  every copy with the one you enter. When another Git process keeps the
+  repository's settings busy during a submodule, remote, or new-worktree
+  change, the message now says what was already done and what to do next.
+- Renaming, deleting, or archiving branches, setting up upstream tracking,
+  changing remotes, setting a repository's commit identity, managing submodules,
+  and creating worktrees on new tracking branches now complete when another
+  program briefly holds the repository's Git config lock.
+- AI ignore patterns now cover files whose names or contents include Unicode
+  line or paragraph separators and embedded carriage returns, and PR and
+  commit file views now show those files' diffs.
+- AI ignore patterns now cover deleted, renamed, copied, binary,
+  mode-changed, and empty new files inside folders whose names end in a
+  space and `b` (such as `Plan b/`), and PR and commit file views now show
+  those files' diffs.
+- Upvote counts on discussions and their comments stay accurate when you switch
+  to another discussion, or go offline, before an upvote is saved.
+- AI ignore patterns now cover files whose names contain tabs, line breaks,
+  or other control characters in GitLab merge requests and commits and in
+  GitHub pull requests too large for a single diff, and PR and commit file
+  views now show those files' diffs. While ignore patterns are set, any diff
+  section that can't be matched against them is also left out of AI requests,
+  including local diffs from repositories that set git's `diff.noprefix` or
+  custom diff prefixes, which AI reviews now report as withheld.
+- While a repository's host can't be reached, or is still being checked, the
+  options that depend on it say so: opening a pull request or issue from the
+  **New** menu, the pull request and issue filters, publishing or managing a
+  release, running a workflow or pipeline, and refreshing runs or security
+  findings. An unreachable host points you to your network connection.
+- GitHub sign-in status keeps its last known state when the GitHub CLI's status
+  report can't be read, and Settings → About shows the check as unknown.
+- Inline failure messages in the clone dialog, Explore, the Code TODOs tab,
+  Jira setup and issue creation, account sign-in, and branch cleanup now read
+  as one clear line, and so do plan, research, and agent sessions that fail
+  to start.
+- While a worktree promote is finishing, GitDesktop's MCP server asks clients to
+  retry branch, stash, and history changes in a few seconds, so the promote
+  completes with your branch and stashed changes intact.
+- Per-repo MCP server states and repository-scoped servers now follow a
+  repository when its folder is moved or renamed.
+- When **My work** can't load, each failing forge gets one plain line saying
+  why, a forge that can't be reached points you to your network connection,
+  and **Details** opens the full error text.
+- Deleting a tag from your clone alone works while you're offline, from the
+  tag's view and from History. A comment post, edit, or delete, a Jira worklog
+  delete, a review-thread reply or resolve, a CI run cancel, re-run, or job
+  start, a label edit, a board view duplicate, or a Projects or project-field
+  edit that's waiting for the connection says so on its controls.
+- Reactions on pull requests, issues, and discussions always land on the item
+  you reacted to, and its reaction counts stay accurate, even if you switch to
+  another item or go offline before the reaction is saved.
+- Error messages for refused actions, such as a reset that would overwrite
+  untracked files, read as plain sentences, and so do keychain, file access,
+  and Git setup errors.
+- On a GitLab repository without the GitLab CLI installed, the release options
+  point you to installing it.
+- When a tag or another ref shares a branch's or tag's name, the branch, tag,
+  and remote-branch lists now show the real name and their actions target the
+  right ref. Pushes to a tracked upstream, publishing to GitLab or Bitbucket,
+  the Compare view's diffs and file previews, merging a local pull request
+  and detecting that it was merged, the recovery banner and operation
+  history, and the branch used when drafting a pull request description all
+  now name the right branch too.
+- Pulling with rebase on a branch that shares its name with a tag checks for
+  commits a rewritten upstream would drop, as it does on every other branch.
+  Deleting a remote's default branch is refused with a clear message, even
+  when a tag or local branch named like it (such as `origin/main`) exists.
+- When a tag shares its name with a branch or a remote-tracking branch (such as
+  `origin/main`), the app now reads the branch. The branch menu offers a reset
+  to the upstream only when every local commit is already upstream, updating a
+  branch from another one brings in the real base branch, a new branch starts
+  from the base you picked, and the branch menu's ahead/behind counts and the
+  Insights branch summary measure the branches themselves. The pull request
+  conflict preview, the commits previewed when creating a pull request or local
+  pull request and when rebasing onto another branch, branch names drafted from
+  committed work in the New branch and Rename branch dialogs and by the MCP
+  server, and newly installed hook templates that check the current branch read
+  the right branch too.
+- Replying to or resolving a review thread always acts on the pull request you
+  started from, and that pull request's threads refresh afterwards, even if you
+  switch to another pull request or go offline before the change is saved.
+- TypeScript stays fully highlighted after generic functions like
+  `<T>(x: T) => x` in diffs, `ts` code blocks in Markdown, blame, the Code
+  TODOs tab, and the merge-conflict views.
+- Syntax colors now match across the diff view, conflict panes, blame, and
+  code TODOs in both themes.
+- Deleting a worktree with Archive branch checked archives the branch even while
+  other Git activity is saving repository settings; when it still can't, the
+  message asks you to try again.
+
 ## [0.13.3] - 2026-10-06
 
 ### Fixed
@@ -4657,7 +4781,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.4...HEAD
+[0.13.4]: https://github.com/theBGuy/GitDesktop/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/theBGuy/GitDesktop/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/theBGuy/GitDesktop/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/theBGuy/GitDesktop/compare/v0.13.0...v0.13.1

@@ -1,1 +1,0 @@
-- The Linux AppImage now runs natively on Wayland sessions.
