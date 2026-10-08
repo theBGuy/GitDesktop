@@ -22,12 +22,15 @@ export function parseGuardAllowed(source) {
   if (lines.length === 0) {
     throw new Error("Could not find 'allowed=' in appimage-guard.sh");
   }
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const match = line.match(
-      /^\s*allowed="(?:\$allowed(?=\s|"))?([^"$]*)"\s*(?:#.*)?$/,
+      /^\s*allowed="(\$allowed(?=\s|"))?([^"$]*)"\s*(?:#.*)?$/,
     );
     if (!match) throw new Error(`Could not parse allowed assignment: ${line}`);
-    for (const name of match[1].trim().split(/\s+/).filter(Boolean)) {
+    if (index > 0 && !match[1]) {
+      throw new Error(`Replacement allowed assignment: ${line}`);
+    }
+    for (const name of match[2].trim().split(/\s+/).filter(Boolean)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
         throw new Error(`Could not parse allowed variable: ${name}`);
       }

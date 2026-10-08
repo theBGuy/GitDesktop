@@ -4464,6 +4464,15 @@ test("appimage-env-twins fails on missing markers or unsupported entries", () =>
   );
 });
 
+test("appimage-env-twins rejects replacement allowed assignments", () => {
+  for (const assignment of ['allowed=""', 'allowed="NEWVAR"']) {
+    assert.throws(
+      () => parseGuardAllowed(`${appimageGuardFixture}\n${assignment}\n`),
+      { message: `Replacement allowed assignment: ${assignment}` },
+    );
+  }
+});
+
 test("appimage-env-twins exemptions each carry a reason", () => {
   for (const [name, reason] of APPIMAGE_EXEMPT) {
     assert.equal(typeof reason, "string");
