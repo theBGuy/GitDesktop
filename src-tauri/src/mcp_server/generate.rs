@@ -1350,14 +1350,19 @@ impl GitDesktopMcp {
                     )
                 })?,
         };
-        // `head` names the branch in the recipe; `head_rev` is what the diffs read,
-        // which for the defaulted current branch is its full ref (see `current_branch`).
+        // `base`/`head` name the branches in the recipe; `base_rev`/`head_rev` are what
+        // the diff and the commit subjects read. Both are branch names, so each is read
+        // as its branch, never a same-named tag (the defaulted head is already its full
+        // ref, see `current_branch`, and passes through). Resolved after the flag checks:
+        // the resolution hands its input to `rev-parse`.
         let (head, head_rev) = match args.head {
             Some(h) => (h.clone(), h),
             None => current_branch(&self.repo).await?,
         };
         ensure_not_flag(&base, "base")?;
         ensure_not_flag(&head, "head")?;
+        let base_rev = crate::git::branches::branch_first_rev(&self.repo, &base).await;
+        let head_rev = crate::git::branches::branch_first_rev(&self.repo, &head_rev).await;
 
         // Same AI-ignore merge as the commit/branch recipes — an excluded file must
         // never reach the model.
@@ -1365,7 +1370,7 @@ impl GitDesktopMcp {
 
         let diff = crate::git::compare::git_branch_diff(
             self.repo.clone(),
-            base.clone(),
+            base_rev.clone(),
             head_rev.clone(),
             Some(RAW_DIFF_MAX_BYTES),
             Some(exclude),
@@ -1393,7 +1398,7 @@ impl GitDesktopMcp {
         // head), exactly as the in-app Create-PR flow derives `commitSubjects` from
         // `git_branch_ahead`. Best-effort: an error yields no list.
         let commit_subjects =
-            crate::git::compare::git_branch_ahead(self.repo.clone(), base.clone(), head_rev)
+            crate::git::compare::git_branch_ahead(self.repo.clone(), base_rev, head_rev)
                 .await
                 .map(|ahead| ahead.into_iter().map(|s| s.subject).collect::<Vec<_>>())
                 .unwrap_or_default();
@@ -3665,6 +3670,54 @@ mod tests {
             committed_base_ref(&repo_s).await,
             None,
             "no resolvable default branch ⇒ no committed-work fallback"
+        );
+    }
+
+    /// An explicit base and head are branch names too: under same-named tags the
+    /// recipe's commit subjects still come from `base..head` between the BRANCHES,
+    /// the same range its branch-first diff reads.
+    // Held across awaits deliberately — the guard IS the serialization (see SETTINGS_STORE_LOCK).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn pr_recipe_reads_explicit_branches_shadowed_by_tags() {
+        let _guard = settings_lock();
+        let base = tempfile::Builder::new()
+            .prefix("gd-pr-recipe-shadow-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_s = base.path().to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        git(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        git(&repo_s, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        // Both tags sit on the seed, behind both branches.
+        git(&repo_s, &["tag", "main"]).await;
+        git(&repo_s, &["tag", "feature"]).await;
+        std::fs::write(base.path().join("b.txt"), "b\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "base-only work"]).await;
+        git(&repo_s, &["switch", "-q", "-c", "feature"]).await;
+        std::fs::write(base.path().join("f.txt"), "f\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "branch-only work"]).await;
+
+        let mcp = GitDesktopMcp::with_options(repo_s, false, false, false, false);
+        let recipe = mcp
+            .build_pr_recipe(PrRecipeArgs {
+                base: Some("main".into()),
+                head: Some("feature".into()),
+            })
+            .await
+            .expect("assemble recipe");
+        assert_eq!(
+            (
+                recipe.prompt.contains("branch-only work"),
+                recipe.prompt.contains("base-only work"),
+            ),
+            (true, false),
+            "{}",
+            recipe.prompt
         );
     }
 

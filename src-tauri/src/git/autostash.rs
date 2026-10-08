@@ -376,7 +376,9 @@ pub(crate) async fn git_switch_autostash_core(
     if let Some(remote) = &remote {
         validate_ref_name(remote)?;
     }
-    let tracking = remote.map(|remote| format!("{remote}/{name}"));
+    // The full ref, as `git_checkout_remote_branch_core` passes it: a tag or local
+    // branch named `<remote>/<name>` makes the bare form ambiguous, and git refuses it.
+    let tracking = remote.map(|remote| format!("refs/remotes/{remote}/{name}"));
 
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a checkout").await?;
@@ -1100,6 +1102,55 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(head_branch(&repo).await, "feat");
+        assert_eq!(read(dir.path(), "b.txt"), "mine\n");
+        assert!(stash_list(&repo).await.is_empty());
+    }
+
+    /// The stash-and-switch twin of the remote-branch checkout: it tracks the
+    /// remote-tracking ref itself, since a tag named `<remote>/<name>` makes the bare
+    /// form ambiguous and git refuses to start from it.
+    #[tokio::test]
+    async fn switch_autostash_tracks_a_remote_ref_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("switch-remote-tag-shadow").await;
+        git(&repo, &["remote", "add", "origin", &repo]).await;
+        // The tag sits on the seed commit, the remote branch one commit past it.
+        git(&repo, &["tag", "origin/landing"]).await;
+        write(dir.path(), "c.txt", "remote\n");
+        commit_all(&repo, "remote work").await;
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/landing", "HEAD"],
+        )
+        .await;
+        git(&repo, &["reset", "-q", "--hard", "HEAD~1"]).await;
+        let remote_tip = git(&repo, &["rev-parse", "refs/remotes/origin/landing"]).await;
+        write(dir.path(), "b.txt", "mine\n");
+
+        let state = AppState::default();
+        let outcome = git_switch_autostash_core(
+            &state,
+            repo.clone(),
+            "landing".into(),
+            Some("origin".into()),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::Reapplied),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/landing"
+        );
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await, remote_tip);
+        assert_eq!(
+            git(&repo, &["config", "--get", "branch.landing.merge"])
+                .await
+                .trim(),
+            "refs/heads/landing"
+        );
         assert_eq!(read(dir.path(), "b.txt"), "mine\n");
         assert!(stash_list(&repo).await.is_empty());
     }
