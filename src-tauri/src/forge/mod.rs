@@ -42,7 +42,7 @@ pub trait Forge {
 /// Split a leading bracketed IPv6 literal off an authority, yielding the `[…]` span
 /// (brackets included) and whatever follows the `]`. `None` for an unterminated `[`,
 /// an empty `[]`, or a `/` inside the span — no IPv6 literal carries one, and refusing
-/// it here keeps callers that pre-split on `/` and callers that don't (`remote_path`'s
+/// it here keeps callers that pre-split on `/` and callers that don't (`split_remote_url`'s
 /// scp arm) agreeing on malformed spans. The URL-decomposition idioms, the authority
 /// gate, and glab's hosts-key normalizer share it so a literal's own `:`s can never be
 /// mistaken for a port or an scp path separator.
@@ -94,7 +94,8 @@ fn is_port(s: &str) -> bool {
 /// reconnect/credential host grammar — `valid_reconnect_host` delegates here and
 /// `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't drift.
 /// Needed because `remote_host`/`remote_authority` parse `/`, `:`, bracket spans,
-/// and scheme-only `?`/`#` boundaries, but can carry `=`, `;`, `$`, or spaces through.
+/// and `?`/`#` boundaries for http/https/ftp/ftps, but can carry `=`, `;`, `$`, or
+/// spaces through.
 /// A charset gate, not an IPv6 validator: `[:]` passes both sides, and that's fine —
 /// it's injection-safe garbage git will reject on its own.
 pub(crate) fn is_safe_authority(value: &str) -> bool {
@@ -133,18 +134,31 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 /// Returns the scheme flag, authority without userinfo, and optional path.
 fn split_remote_url(url: &str) -> (bool, &str, Option<&str>) {
     let url = url.trim();
-    let (had_scheme, rest) = match url.split_once("://") {
-        Some((_, after)) => (true, after),
-        None => (false, url),
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, after)) => (Some(scheme), after),
+        None => (None, url),
     };
-    let boundary = if had_scheme {
-        rest.find(['/', '?', '#'])
+    let had_scheme = scheme.is_some();
+    let boundary = if let Some(scheme) = scheme {
+        if ["http", "https", "ftp", "ftps"]
+            .iter()
+            .any(|curl_scheme| scheme.eq_ignore_ascii_case(curl_scheme))
+        {
+            rest.find(['/', '?', '#'])
+        } else {
+            rest.find('/')
+        }
     } else {
-        // In scp form, the last `@[` or a leading `[` marks a bracketed host.
+        // A leading `[` or the first `@[` opens a bracketed host (git's host_end).
+        // A span that doesn't close isn't host syntax, so the first `:` wins.
         let prefix = rest.split('/').next().unwrap_or(rest);
-        let host_start = prefix.rfind("@[").map_or(0, |i| i + 1);
+        let host_start = if prefix.starts_with('[') {
+            0
+        } else {
+            prefix.find("@[").map_or(0, |i| i + 1)
+        };
         let after_host = bracketed_split(&rest[host_start..])
-            .map_or(host_start, |(span, _)| host_start + span.len());
+            .map_or(0, |(span, _)| host_start + span.len());
         rest[after_host..].find(['/', ':']).map(|i| after_host + i)
     };
     let path_separator = if had_scheme { b'/' } else { b':' };
@@ -231,8 +245,9 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
 /// cut the host short. Used to address a repo on a provider's API (e.g. a GitLab
 /// project).
 ///
-/// With a scheme, a `?` or `#` before the first `/` after `://` means no path,
-/// even when the authority exists.
+/// For http/https/ftp/ftps (curl transports), a `?` or `#` before the first `/`
+/// after `://` means no path, even when the authority exists. Other schemes end
+/// the authority only at `/`.
 ///
 /// Gated on [`remote_authority`]: a URL it refuses has no path either, so the pair
 /// can't diverge — [`fork_url_from_origin`] splices from this path alone, and a
@@ -4728,6 +4743,41 @@ mod tests {
     }
 
     #[test]
+    fn remote_authority_ssh_question_mark_stays_in_authority() {
+        let url = "ssh://evil.com?x@github.com/o/r";
+        assert_eq!(remote_authority(url).as_deref(), Some("github.com"));
+        assert_eq!(remote_path(url).as_deref(), Some("o/r"));
+    }
+
+    #[test]
+    fn remote_authority_ssh_hash_stays_in_authority() {
+        let url = "ssh://github.com#@evil.com/r";
+        assert_eq!(remote_authority(url).as_deref(), Some("evil.com"));
+        assert_eq!(remote_path(url).as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn remote_authority_scp_unclosed_bracket_uses_first_colon() {
+        let url = "a:b@[x@github.com:o/r";
+        assert_eq!(remote_authority(url).as_deref(), Some("a"));
+        assert_eq!(remote_path(url).as_deref(), Some("b@[x@github.com:o/r"));
+    }
+
+    #[test]
+    fn remote_authority_scp_first_bracketed_host_owns_path() {
+        let url = "u@[2001:db8::1]:x@[2001:db8::2]:y";
+        assert_eq!(remote_authority(url).as_deref(), Some("[2001:db8::1]"));
+        assert_eq!(remote_path(url).as_deref(), Some("x@[2001:db8::2]:y"));
+    }
+
+    #[test]
+    fn remote_authority_scp_repeated_bracket_hosts_refuse_partial_authority() {
+        let url = "u@[other]@[::1]:p";
+        assert_eq!(remote_authority(url), None);
+        assert_eq!(remote_path(url), None);
+    }
+
+    #[test]
     fn remote_authority_scp_userinfo_bracket_keeps_the_host_bare() {
         assert_eq!(remote_authority("u[@host:22/o/r").as_deref(), Some("host"));
     }
@@ -4742,7 +4792,6 @@ mod tests {
         for (url, path) in [
             ("user:pw@[::1]:o/r", "o/r"),
             ("x@y@[::1]:p", "p"),
-            ("u@[other]@[::1]:p", "p"),
         ] {
             assert_eq!(remote_authority(url).as_deref(), Some("[::1]"), "{url}");
             assert_eq!(remote_path(url).as_deref(), Some(path), "{url}");
