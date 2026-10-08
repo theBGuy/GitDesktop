@@ -729,6 +729,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // `ahead` is newest-first (plain `git log base..<ref>`); cap the subjects.
     return {
       base: committedBase.label,
+      baseRev: committedBase.rev,
       compare: namedRev,
       subjects: ahead.slice(0, 30).map((c) => c.subject),
     };
