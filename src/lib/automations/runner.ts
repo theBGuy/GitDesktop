@@ -961,7 +961,6 @@ async function runOneAction({
       buildFailureNotification({
         event,
         action,
-        label,
         message,
         summary,
         keptPartial,
@@ -996,7 +995,6 @@ async function runOneAction({
 interface FailureNotificationInput {
   event: AutomationEvent;
   action: ActionId;
-  label: string;
   /** The whole error text, for the row's `detail`. */
   message: string;
   /** The one-line form of `message`, for the subtitle and OS ping. */
@@ -1014,7 +1012,6 @@ interface FailureNotificationInput {
 function buildFailureNotification({
   event,
   action,
-  label,
   message,
   summary,
   keptPartial,
@@ -1022,6 +1019,7 @@ function buildFailureNotification({
   selfKey,
   force,
 }: FailureNotificationInput): Parameters<typeof emitNotification>[0] {
+  const label = modeLabel(action);
   // Inbox parity with manual runs (reviews.ts's notifyReviewDone): the subtitle and
   // OS ping carry the one-line reason, the row's `detail` the full text, both under
   // the same subject and only when there is a message at all.
