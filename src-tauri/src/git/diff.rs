@@ -495,6 +495,7 @@ pub async fn git_staged_diff(
         truncated,
         files: filtered.files,
         excluded_files: filtered.excluded_files,
+        unreadable_files: filtered.unreadable_files,
     })
 }
 

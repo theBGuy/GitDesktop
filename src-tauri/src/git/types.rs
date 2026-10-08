@@ -133,8 +133,12 @@ pub struct StagedDiff {
     pub text: String,
     pub truncated: bool,
     pub files: Vec<DiffStatEntry>,
-    /// Changed files hidden from the AI context by ignore patterns.
+    /// Changed files hidden from the AI context — pattern matches plus names that
+    /// aren't valid UTF-8, which hide with no patterns at all.
     pub excluded_files: u32,
+    /// The subset of `excluded_files` hidden only for an undecodable name (always
+    /// `<= excluded_files`; the TS `filterDiffByAiIgnore` count is not a subset).
+    pub unreadable_files: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

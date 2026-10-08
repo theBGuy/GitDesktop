@@ -1,7 +1,11 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
-import { aiExcludePatterns, filterPathsByAiIgnore } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  filterPathsByAiIgnore,
+  lossyListingRows,
+} from "@/lib/ai/ignore";
 import { buildBranchNamePrompt, extractBranchName } from "@/lib/ai/prompt";
 import {
   gitBranchDiff,
@@ -13,6 +17,61 @@ import type { FileEntry } from "@/lib/git/types";
 
 /** Raw diff bytes requested from the backend; prompt budgeting trims further. */
 const RAW_DIFF_MAX_BYTES = 200_000;
+
+/** What one side (working tree, or committed work) of an empty branch-name run
+ *  held: changes the patterns hid, only files whose names aren't readable text,
+ *  or nothing at all. */
+type SideState = "patterns" | "unreadable" | "none";
+
+function sideState(patternHidden: boolean, unreadable: number): SideState {
+  if (patternHidden) return "patterns";
+  return unreadable > 0 ? "unreadable" : "none";
+}
+
+/** Empty-state copy with no committed work to fall back on, by working tree. */
+const NO_FALLBACK_COPY: Record<SideState, string> = {
+  patterns:
+    "All changes match your AI ignore patterns — nothing to name a branch after.",
+  unreadable:
+    "Nothing to name a branch after — the only changed files have names that aren't readable text.",
+  none: "No in-progress changes to name a branch after.",
+};
+
+/** Empty-state copy naming a branch that isn't checked out, by its committed
+ *  work vs `base`. */
+const COMMITTED_ONLY_COPY: Record<SideState, (base: string) => string> = {
+  patterns: () =>
+    "This branch's committed changes all match your AI ignore patterns — nothing to name it after.",
+  unreadable: (base) =>
+    `The only net changes vs ${base} are files whose names aren't readable text — nothing to name this branch after.`,
+  none: (base) => `No net changes vs ${base} to name this branch after.`,
+};
+
+/** Empty-state copy by `<working tree>-<committed work>` state. A side holding
+ *  only unreadable names is never described as having no changes. */
+const BOTH_SIDES_COPY: Record<
+  `${SideState}-${SideState}`,
+  (base: string) => string
+> = {
+  "patterns-patterns": () =>
+    "All changes match your AI ignore patterns — nothing left in your working tree or this branch's commits to name it after.",
+  "unreadable-patterns": () =>
+    "This branch's committed changes all match your AI ignore patterns, and the only in-progress changes are files whose names aren't readable text — nothing to name it after.",
+  "none-patterns": () =>
+    "This branch's committed changes all match your AI ignore patterns — nothing to name it after.",
+  "patterns-unreadable": (base) =>
+    `All your in-progress changes match your AI ignore patterns, and the only net changes vs ${base} are files whose names aren't readable text — nothing to name a branch after.`,
+  "patterns-none": (base) =>
+    `All your in-progress changes match your AI ignore patterns, and there are no net changes vs ${base} to name a branch after.`,
+  "unreadable-unreadable": (base) =>
+    `The only changes, in progress or committed vs ${base}, are files whose names aren't readable text — nothing to name a branch after.`,
+  "unreadable-none": (base) =>
+    `The only in-progress changes are files whose names aren't readable text, and there are no net changes vs ${base} to name a branch after.`,
+  "none-unreadable": (base) =>
+    `No in-progress changes, and the only net changes vs ${base} are files whose names aren't readable text — nothing to name a branch after.`,
+  "none-none": (base) =>
+    `No in-progress changes, and no net changes vs ${base} to name a branch after.`,
+};
 
 /** The committed work of the ref being named: its three-dot diff against
  *  `base` plus the subjects of the commits `compare` has that `base` doesn't.
@@ -85,9 +144,15 @@ export function useGenerateBranchName(repoPath: string) {
           readRepoInstructions(repoPath),
           // Untracked names never pass through a diff, so the ignore patterns
           // have to be applied to them here — a name is disclosure too.
-          filterPathsByAiIgnore({ repoPath, paths: untrackedPaths, exclude }),
+          filterPathsByAiIgnore({
+            repoPath,
+            paths: lossyListingRows(untrackedPaths),
+            exclude,
+          }),
         ]);
 
+        // Every pair summed below is wire-subset (`StagedDiff` and
+        // `filterPathsByAiIgnore` counts), so the sums stay subset too.
         if (diff && (diff.files.length > 0 || untracked.paths.length > 0)) {
           return buildBranchNamePrompt({
             diffText: diff.text,
@@ -95,7 +160,7 @@ export function useGenerateBranchName(repoPath: string) {
             files: diff.files,
             untrackedPaths: untracked.paths,
             excludedFiles: diff.excludedFiles + untracked.excluded,
-            unreadableFiles: untracked.unreadable,
+            unreadableFiles: diff.unreadableFiles + untracked.unreadable,
             commitSubjects: opts.workingTreeSubjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -134,7 +199,10 @@ export function useGenerateBranchName(repoPath: string) {
               committed.excludedFiles +
               (diff?.excludedFiles ?? 0) +
               untracked.excluded,
-            unreadableFiles: untracked.unreadable,
+            unreadableFiles:
+              committed.unreadableFiles +
+              (diff?.unreadableFiles ?? 0) +
+              untracked.unreadable,
             commitSubjects: fallback.subjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -147,43 +215,44 @@ export function useGenerateBranchName(repoPath: string) {
         // PATTERN-hidden files may be attributed to the patterns: an unreadable
         // name is hidden with no pattern configured at all, and blaming the
         // user's list would send them to an empty settings page.
+        const treeUnreadable =
+          (diff?.unreadableFiles ?? 0) + untracked.unreadable;
+        const committedUnreadable = committed?.unreadableFiles ?? 0;
         const treeHidden =
           diff !== null &&
-          (diff.excludedFiles > 0 ||
-            untracked.excluded - untracked.unreadable > 0);
+          diff.excludedFiles -
+            diff.unreadableFiles +
+            (untracked.excluded - untracked.unreadable) >
+            0;
         const committedHidden =
-          committed !== null && committed.excludedFiles > 0;
+          committed !== null &&
+          committed.excludedFiles - committed.unreadableFiles > 0;
+        const tree = sideState(treeHidden, treeUnreadable);
+        const committedSide = sideState(committedHidden, committedUnreadable);
         let message: string;
-        if (treeHidden && committedHidden) {
-          message =
-            "All changes match your AI ignore patterns — nothing left in your working tree or this branch's commits to name it after.";
-        } else if (committedHidden) {
-          message =
-            "This branch's committed changes all match your AI ignore patterns — nothing to name it after.";
-        } else if (treeHidden) {
-          message = fallback
-            ? `All your in-progress changes match your AI ignore patterns, and there are no net changes vs ${fallback.base} to name a branch after.`
-            : "All changes match your AI ignore patterns — nothing to name a branch after.";
-        } else if (untracked.unreadable > 0) {
-          message = fallback
-            ? `The only in-progress changes are new files whose names aren't readable text, and there are no net changes vs ${fallback.base} to name a branch after.`
-            : "Nothing to name a branch after — the only new files have names that aren't readable text.";
+        if (fallback && opts.useWorkingTree) {
+          message = BOTH_SIDES_COPY[`${tree}-${committedSide}`](fallback.base);
         } else if (fallback) {
-          message = opts.useWorkingTree
-            ? `No in-progress changes, and no net changes vs ${fallback.base} to name a branch after.`
-            : `No net changes vs ${fallback.base} to name this branch after.`;
+          message = COMMITTED_ONLY_COPY[committedSide](fallback.base);
         } else if (opts.useWorkingTree) {
-          message = "No in-progress changes to name a branch after.";
+          message = NO_FALLBACK_COPY[tree];
         } else {
           // Defensive: the caller disables the affordance in this state, and
           // with no working tree read there are no in-progress changes to cite.
           message = "Nothing to name this branch after.";
         }
-        // A pattern arm cited one cause; unreadable names are a second one, and
-        // the arms below it are only reachable when there are none.
-        if (untracked.unreadable > 0 && (treeHidden || committedHidden)) {
+        // A side labelled by its patterns may also hold unreadable names; say so
+        // unless the copy already names that cause for a side.
+        const hiddenUnreadable =
+          (tree === "patterns" && treeUnreadable > 0) ||
+          (committedSide === "patterns" && committedUnreadable > 0);
+        if (
+          hiddenUnreadable &&
+          tree !== "unreadable" &&
+          committedSide !== "unreadable"
+        ) {
           message +=
-            " Some new files were also left out because their names aren't readable text.";
+            " Some files were also left out because their names aren't readable text.";
         }
         toast.error(message);
         return null;

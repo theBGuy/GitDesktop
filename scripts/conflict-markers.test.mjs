@@ -68,7 +68,7 @@ const sides = (working, ours, theirs, workingExists = true) => ({
   base: null,
   ours,
   theirs,
-  aiIgnored: false,
+  aiIgnored: { ignored: false, unreadable: false },
   workingExists,
 });
 const SURVIVOR = "fn keep() {}\n";

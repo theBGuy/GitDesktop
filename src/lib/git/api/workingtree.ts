@@ -4,6 +4,7 @@ import type {
   CommitResult,
   FileDiff,
   IgnoredFile,
+  PathListingEntry,
   StagedDiff,
   UnignoreRule,
 } from "../types";
@@ -160,11 +161,11 @@ export const gitUntrack = (
 ) => invoke<void>("git_untrack", { repoPath, pathspecs, ignorePatterns });
 
 export const gitListTracked = (repoPath: string) =>
-  invoke<string[]>("git_list_tracked", { repoPath });
+  invoke<PathListingEntry[]>("git_list_tracked", { repoPath });
 
 /** Every file in the working tree git doesn't track and doesn't ignore. */
 export const gitListUntracked = (repoPath: string) =>
-  invoke<string[]>("git_list_untracked", { repoPath });
+  invoke<PathListingEntry[]>("git_list_untracked", { repoPath });
 
 export const gitIgnoredFiles = (repoPath: string) =>
   invoke<IgnoredFile[]>("git_ignored_files", { repoPath });

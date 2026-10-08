@@ -7,7 +7,13 @@ import {
   type ExternalContext,
   resolveExternalContext,
 } from "@/lib/ai/external-context";
-import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  type EmptyDiffCause,
+  emptyDiffCause,
+  filterDiffByAiIgnore,
+  unreadableNameCount,
+} from "@/lib/ai/ignore";
 import {
   type ReviewerNotesContext,
   resolveReviewerNotesContext,
@@ -1449,12 +1455,6 @@ interface ReviewResult {
   thoughts: string;
 }
 
-/** Why filtering emptied a review's diff: `excluded` when the user's patterns hid
- *  every file; `withheld` when sections couldn't be checked against active
- *  patterns; `unreadable-names` when, with no patterns, the only drops are names
- *  that aren't readable text. */
-type EmptyDiffCause = "excluded" | "withheld" | "unreadable-names";
-
 /** The empty-diff outcome's toast tail and history detail, per cause. `empty` is
  *  a diff with nothing in it. */
 const EMPTY_DIFF_COPY: Record<
@@ -1605,14 +1605,8 @@ async function generateReviewText(
     exclude: excludePatterns,
   });
   // Filtering emptied the diff ⇒ the empty-diff outcome, returned with its cause
-  // so the caller never reports hidden or withheld changes as none; with no
-  // patterns, only unreadable names can be withheld.
-  if (!filtered.text.trim()) {
-    if (filtered.unreadableFiles > 0) {
-      return excludePatterns.length > 0 ? "withheld" : "unreadable-names";
-    }
-    return filtered.excludedFiles > 0 ? "excluded" : null;
-  }
+  // so the caller never reports hidden or withheld changes as none.
+  if (!filtered.text.trim()) return emptyDiffCause(filtered);
   if (signal.aborted) return null;
 
   // Build on a prior review of this PR + mode (no-op when none) so a re-review focuses on
@@ -1731,6 +1725,7 @@ async function generateReviewText(
         isBinary: f.isBinary,
       })),
       excludedFiles: filtered.excludedFiles,
+      unreadableFiles: unreadableNameCount(filtered),
       provider,
       budgetProfile,
       repoInstructions,

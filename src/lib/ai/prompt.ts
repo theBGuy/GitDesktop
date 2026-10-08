@@ -34,6 +34,65 @@ Do not wrap the message in markdown fences. Do not add commentary before or afte
 const REFERENCE_RULE =
   "Reference syntax: write #N (or !N) only when deliberately referencing a real issue or pull request in this repository — on the forge it becomes a live cross-reference and notifies that thread. The # character itself is what links, and parentheses do not neutralize it: (#10) is still a live reference. For enumeration or internal labels write (1), (2) — never #1, never (#1). For numbered items in ANOTHER document (the PR description's list, a linked doc, a finding in an earlier review) name or quote the item — \"the description's item 11\" — never #11, never (#11). To mention a reference without linking it, wrap it in backticks.";
 
+/** The three forms of a files-section note on hidden changed files. */
+interface HiddenNoteForms {
+  both: (patternHidden: number, unreadable: number) => string;
+  patterns: (patternHidden: number) => string;
+  unreadable: (unreadable: number) => string;
+}
+
+// KEEP IN SYNC: `assemble_commit_recipe` (generate.rs) renders these byte-identically;
+// the review prompt shares them.
+const COMMIT_HIDDEN_NOTE: HiddenNoteForms = {
+  both: (p, u) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules; ${u} more left out because their names aren't readable text — do not speculate about any of them]`,
+  patterns: (p) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`,
+  unreadable: (u) =>
+    `\n[${u} changed file(s) left out because their names aren't readable text — do not speculate about them]`,
+};
+
+// KEEP IN SYNC: `assemble_pr_recipe` (generate.rs) renders these byte-identically.
+const PR_HIDDEN_NOTE: HiddenNoteForms = {
+  both: (p, u) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules; ${u} more left out because their names aren't readable text]`,
+  patterns: (p) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules]`,
+  unreadable: (u) =>
+    `\n[${u} changed file(s) left out because their names aren't readable text]`,
+};
+
+// KEEP IN SYNC: `assemble_branch_recipe` (generate.rs) renders these byte-identically.
+const BRANCH_HIDDEN_NOTE: HiddenNoteForms = {
+  both: (p, u) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules; ${u} more file(s) left out because their names aren't readable text]`,
+  patterns: (p) =>
+    `\n[${p} additional changed file(s) hidden by the user's AI ignore rules]`,
+  unreadable: (u) =>
+    `\n[${u} file(s) left out because their names aren't readable text]`,
+};
+
+/**
+ * The note on hidden changed files, naming each cause apart: an unreadable name
+ * hides with no pattern configured, so folding it in blames rules the user may
+ * not have. `unreadable` MUST be a subset of `excluded` for the subtraction to
+ * hold — true of the Rust `StagedDiff` wire and of `unreadableNameCount`, NOT of
+ * `filterDiffByAiIgnore`'s raw `unreadableFiles` (it also counts withheld
+ * unkeyable sections), which must never be passed here.
+ */
+function hiddenFilesNote(
+  excluded: number,
+  unreadable: number,
+  forms: HiddenNoteForms,
+): string {
+  const patternHidden = excluded - unreadable;
+  if (patternHidden > 0 && unreadable > 0) {
+    return forms.both(patternHidden, unreadable);
+  }
+  if (patternHidden > 0) return forms.patterns(patternHidden);
+  return unreadable > 0 ? forms.unreadable(unreadable) : "";
+}
+
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildCommitPrompt(input: CommitPromptInput): {
   system: string;
@@ -57,10 +116,11 @@ export function buildCommitPrompt(input: CommitPromptInput): {
 
   const budgeted = budgetDiff(stripBinarySections(input.diffText));
 
-  let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
-  if (input.excludedFiles > 0) {
-    filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;
-  }
+  const filesSection = `## Files changed\n${fileSummary || "(none)"}${hiddenFilesNote(
+    input.excludedFiles,
+    input.unreadableFiles,
+    COMMIT_HIDDEN_NOTE,
+  )}`;
   const promptParts = [filesSection];
   if (input.recentSubjects.length > 0) {
     promptParts.push(
@@ -114,18 +174,13 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput): {
 
   const budgeted = budgetDiff(stripBinarySections(input.diffText));
 
-  let filesSection = `## Files changed\n${fileSummary || "(none)"}`;
-  // The two causes stay separate: an unreadable name is hidden with no pattern
-  // configured at all, so folding it in blames rules the user may not have.
-  // KEEP IN SYNC: `assemble_branch_recipe` renders these three forms byte-identically.
-  const patternHidden = input.excludedFiles - input.unreadableFiles;
-  if (patternHidden > 0 && input.unreadableFiles > 0) {
-    filesSection += `\n[${patternHidden} additional changed file(s) hidden by the user's AI ignore rules; ${input.unreadableFiles} more new file(s) left out because their names aren't readable text]`;
-  } else if (patternHidden > 0) {
-    filesSection += `\n[${patternHidden} additional changed file(s) hidden by the user's AI ignore rules]`;
-  } else if (input.unreadableFiles > 0) {
-    filesSection += `\n[${input.unreadableFiles} new file(s) left out because their names aren't readable text]`;
-  }
+  // Both inputs sum wire-subset pairs (the diffs' `StagedDiff` counts and
+  // `filterPathsByAiIgnore`'s), so the subtraction inside stays valid.
+  const filesSection = `## Files changed\n${fileSummary || "(none)"}${hiddenFilesNote(
+    input.excludedFiles,
+    input.unreadableFiles,
+    BRANCH_HIDDEN_NOTE,
+  )}`;
   const promptParts = [filesSection];
   const prefixSection = branchPrefixSection(input.recentBranches);
   if (prefixSection) promptParts.push(prefixSection);
@@ -370,15 +425,18 @@ export function buildPrPrompt(input: PrPromptInput): {
     input.commitsUnknown,
   );
   if (commitsSection) promptParts.push(commitsSection);
-  let filesSection = filesChangedSection(
-    input.files,
-    input.diffText,
-    input.filesUnknown,
-    input.provider,
-  );
-  if ((input.excludedFiles ?? 0) > 0) {
-    filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules]`;
-  }
+  const filesSection =
+    filesChangedSection(
+      input.files,
+      input.diffText,
+      input.filesUnknown,
+      input.provider,
+    ) +
+    hiddenFilesNote(
+      input.excludedFiles ?? 0,
+      input.unreadableFiles ?? 0,
+      PR_HIDDEN_NOTE,
+    );
   promptParts.push(filesSection);
 
   // Author's "Notes for reviewers" — reflect the decisions, don't paste verbatim.
@@ -853,15 +911,18 @@ export function buildReviewPrompt(
   if (commitsSection) promptParts.push(commitsSection);
   // Stronger wording than the generator's twin: an invented finding about a
   // file the reviewer can't see reads as a real one.
-  let filesSection = filesChangedSection(
-    input.files,
-    input.diffText,
-    input.filesUnknown,
-    input.provider,
-  );
-  if ((input.excludedFiles ?? 0) > 0) {
-    filesSection += `\n[${input.excludedFiles} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]`;
-  }
+  const filesSection =
+    filesChangedSection(
+      input.files,
+      input.diffText,
+      input.filesUnknown,
+      input.provider,
+    ) +
+    hiddenFilesNote(
+      input.excludedFiles ?? 0,
+      input.unreadableFiles ?? 0,
+      COMMIT_HIDDEN_NOTE,
+    );
   promptParts.push(filesSection);
 
   // Soft context — our own prior review (+ "changes since" delta), our own PR

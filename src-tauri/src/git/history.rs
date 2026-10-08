@@ -378,6 +378,7 @@ pub async fn git_commit_diff(
         truncated,
         files: parse_numstat_z(&files_out.stdout_lossy()),
         excluded_files: 0,
+        unreadable_files: 0,
     })
 }
 

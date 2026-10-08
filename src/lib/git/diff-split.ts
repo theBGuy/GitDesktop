@@ -1,6 +1,6 @@
 import type { DiffStatEntry } from "./types";
 
-// Only \n delimits lines; JS's \r/U+2028/U+2029 breaks would miskey sections.
+/** Only \n delimits lines; JS's \r/U+2028/U+2029 breaks would miskey sections. */
 export const DIFF_SECTION_BOUNDARY = /(?<![^\n])(?=diff --git )/;
 
 const encoder = new TextEncoder();

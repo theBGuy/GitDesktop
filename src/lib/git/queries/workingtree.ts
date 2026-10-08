@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ignoreLines, REPLACEMENT_CHAR } from "@/lib/ai/ignore";
+import { ignoreLines } from "@/lib/ai/ignore";
 import * as api from "../api";
 import {
   checkoutConflictSide,
@@ -327,13 +327,13 @@ export function useAppendRepoAiIgnore(repo: string) {
  * Verdicts index into that array, so the caller reads a rule's source from its
  * position.
  *
- * A name carrying U+FFFD leaves the corpus before the IPC call and comes back
- * as `unreadable`: generation hides such a name whatever the patterns say, so
- * attributing it to a rule would be a lie. That is a conservative string-domain
- * rule — `gitListTracked`/`gitListUntracked` decode lossily, so a real U+FFFD is
- * indistinguishable here, while the Rust arms judge real bytes. Keyed on the
- * global patterns, so a settings edit produces a fresh view rather than a stale
- * attribution.
+ * A name the listing flags `undecodable` leaves the corpus before the IPC call
+ * and comes back as `unreadable`: generation hides such a name whatever the
+ * patterns say, so attributing it to a rule would be a lie. The flag is judged on
+ * the real bytes, so a name holding a real U+FFFD stays in the corpus and gets its
+ * true verdict; two names sharing one lossy spelling fail closed together. Keyed
+ * on the global patterns, so a settings edit produces a fresh view rather than a
+ * stale attribution.
  */
 export function useAiExcludedView(
   repo: string,
@@ -350,14 +350,29 @@ export function useAiExcludedView(
       ]);
       const globalRules = ignoreLines(globalPatterns);
       const exclude = [...repoRules, ...globalRules];
-      const candidates = [...new Set([...tracked, ...untracked])];
-      const corpus = candidates.filter((p) => !p.includes(REPLACEMENT_CHAR));
-      const unreadable = candidates.filter((p) => p.includes(REPLACEMENT_CHAR));
+      const undecodableByPath = new Map<string, boolean>();
+      for (const row of [...tracked, ...untracked]) {
+        undecodableByPath.set(
+          row.path,
+          row.undecodable || (undecodableByPath.get(row.path) ?? false),
+        );
+      }
+      const corpus: string[] = [];
+      const unreadable: string[] = [];
+      for (const [path, undecodable] of undecodableByPath) {
+        (undecodable ? unreadable : corpus).push(path);
+      }
       const verdicts =
         exclude.length > 0 && corpus.length > 0
           ? await api.gitAiIgnoreVerdicts(repo, corpus, exclude)
           : [];
-      return { repoRules, globalRules, verdicts, untracked, unreadable };
+      return {
+        repoRules,
+        globalRules,
+        verdicts,
+        untracked: untracked.map((row) => row.path),
+        unreadable,
+      };
     },
     enabled,
     staleTime: 30_000,
@@ -381,7 +396,8 @@ export function useUntrack(repo: string) {
 export function useTrackedFiles(repo: string, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "tracked-files"] as const,
-    queryFn: () => api.gitListTracked(repo),
+    queryFn: async () =>
+      (await api.gitListTracked(repo)).map((row) => row.path),
     enabled,
     staleTime: 30_000,
     networkMode: "always",

@@ -53,7 +53,11 @@ async fn refuse_untracked_reset_collisions(repo: &str, target: &str) -> AppResul
     // Every listing runs from the resolved toplevel: they are cwd-relative, so only
     // from there do their paths line up and cover the whole tree the reset writes.
     let top = crate::git::runner::worktree_toplevel(repo).await?;
-    let untracked = git_list_untracked(top.clone()).await?;
+    let untracked: Vec<String> = git_list_untracked(top.clone())
+        .await?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
     if untracked.is_empty() {
         return Ok(());
     }
@@ -1514,17 +1518,35 @@ pub(crate) async fn git_stash_pop_core(state: &AppState, repo_path: String) -> A
     Ok(())
 }
 
+/// One row of a path listing. `path` is the lossy decode, for display only;
+/// `undecodable` says the real name isn't valid UTF-8, so no text spelling of it
+/// (and no verdict taken on that spelling) can be vouched for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathListingEntry {
+    pub path: String,
+    pub undecodable: bool,
+}
+
+/// Splits `-z` output on the NUL BYTE before any decode, so each name's
+/// decodability is judged on its own raw bytes.
+fn path_listing(stdout: &[u8]) -> Vec<PathListingEntry> {
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| PathListingEntry {
+            path: String::from_utf8_lossy(name).into_owned(),
+            undecodable: std::str::from_utf8(name).is_err(),
+        })
+        .collect()
+}
+
 /// Every file git currently tracks (`git ls-files`), so the user can untrack one
 /// that isn't showing pending changes (e.g. accidentally committed). Read-only.
 #[tauri::command]
-pub async fn git_list_tracked(repo_path: String) -> AppResult<Vec<String>> {
+pub async fn git_list_tracked(repo_path: String) -> AppResult<Vec<PathListingEntry>> {
     let out = run_git(Some(&repo_path), &["ls-files", "-z"], DEFAULT_TIMEOUT).await?;
-    Ok(out
-        .stdout_lossy()
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(path_listing(&out.stdout))
 }
 
 /// Every untracked file git would report as new (`ls-files --others
@@ -1534,19 +1556,14 @@ pub async fn git_list_tracked(repo_path: String) -> AppResult<Vec<String>> {
 /// feature at all (absent from status and diffs), so the corpus matches what
 /// generation actually sees. Read-only.
 #[tauri::command]
-pub async fn git_list_untracked(repo_path: String) -> AppResult<Vec<String>> {
+pub async fn git_list_untracked(repo_path: String) -> AppResult<Vec<PathListingEntry>> {
     let out = run_git(
         Some(&repo_path),
         &["ls-files", "--others", "--exclude-standard", "-z"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(out
-        .stdout_lossy()
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(path_listing(&out.stdout))
 }
 
 /// An ignored file and the .gitignore rule responsible for ignoring it.
@@ -4983,7 +5000,70 @@ mod tests {
         std::fs::write(dir.path().join("secret.log"), "s\n").unwrap();
 
         let untracked = git_list_untracked(repo).await.unwrap();
-        assert_eq!(untracked, vec!["new.txt".to_string()]);
+        assert_eq!(
+            untracked,
+            vec![PathListingEntry {
+                path: "new.txt".to_string(),
+                undecodable: false
+            }]
+        );
+    }
+
+    /// `undecodable` is judged on each name's RAW bytes: a lost byte flags its own
+    /// row only, while a real U+FFFD is valid UTF-8 and never flags. Fed as bytes
+    /// because Windows git cannot put an undecodable name on disk or in the index.
+    #[test]
+    fn listing_rows_flag_only_genuinely_undecodable_names() {
+        let mut stdout: Vec<u8> = Vec::new();
+        for name in [
+            b"ok.txt".as_slice(),
+            b"caf\xE9.txt".as_slice(),
+            "x\u{FFFD}y.txt".as_bytes(),
+            b"sec\xFFret.md".as_slice(),
+        ] {
+            stdout.extend_from_slice(name);
+            stdout.push(0);
+        }
+        let row = |path: &str, undecodable| PathListingEntry {
+            path: path.to_string(),
+            undecodable,
+        };
+        assert_eq!(
+            path_listing(&stdout),
+            vec![
+                row("ok.txt", false),
+                row("caf\u{FFFD}.txt", true),
+                row("x\u{FFFD}y.txt", false),
+                row("sec\u{FFFD}ret.md", true),
+            ]
+        );
+        assert!(path_listing(b"").is_empty());
+        assert_eq!(
+            serde_json::to_value(row("a", true)).unwrap(),
+            serde_json::json!({ "path": "a", "undecodable": true })
+        );
+    }
+
+    /// The tracked listing reaches the same rows through git: a real U+FFFD name,
+    /// committed for real, comes back decodable.
+    #[tokio::test]
+    async fn list_tracked_reports_a_real_replacement_name_as_decodable() {
+        let (dir, repo) = setup_repo("tracked-fffd").await;
+        commit_file(&repo, dir.path(), "x\u{FFFD}y.txt", "r\n", "fffd").await;
+        let tracked = git_list_tracked(repo).await.unwrap();
+        assert_eq!(
+            tracked,
+            vec![
+                PathListingEntry {
+                    path: "a.txt".to_string(),
+                    undecodable: false
+                },
+                PathListingEntry {
+                    path: "x\u{FFFD}y.txt".to_string(),
+                    undecodable: false
+                },
+            ]
+        );
     }
 
     async fn subjects(repo: &str) -> Vec<String> {

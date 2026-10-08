@@ -116,7 +116,7 @@ export function ConflictResolveView({
     }
     if (gen !== genRef.current) return;
     setSides(resolved);
-    if (resolved.aiIgnored) {
+    if (resolved.aiIgnored.ignored) {
       runningRef.current = false;
       setPhase("blocked");
       return;
@@ -342,9 +342,15 @@ export function ConflictResolveView({
       <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
-            <span className="font-mono">{baseName(path)}</span> matches your AI
-            ignore patterns, so it isn't sent to a model. Resolve it by hand in
-            your editor, then stage it.
+            {sides?.aiIgnored.unreadable ? (
+              "This file's name can't be read as text, so it isn't sent to a model."
+            ) : (
+              <>
+                <span className="font-mono">{baseName(path)}</span> matches your
+                AI ignore patterns, so it isn't sent to a model.
+              </>
+            )}{" "}
+            Resolve it by hand in your editor, then stage it.
           </p>
         ) : phase === "loading" ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">

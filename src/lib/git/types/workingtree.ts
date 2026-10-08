@@ -44,8 +44,21 @@ export interface StagedDiff {
   text: string;
   truncated: boolean;
   files: DiffStatEntry[];
-  /** Changed files hidden from the AI context by ignore patterns. */
+  /** Changed files hidden from the AI context: pattern matches plus names that
+   *  aren't valid UTF-8, which hide with no patterns at all. */
   excludedFiles: number;
+  /** The subset of `excludedFiles` hidden only for an undecodable name, so on this
+   *  wire `unreadableFiles <= excludedFiles` and their difference is the
+   *  pattern-hidden count. `filterDiffByAiIgnore`'s pair is NOT a subset. */
+  unreadableFiles: number;
+}
+
+/** One row of `git_list_tracked` / `git_list_untracked`. `path` is a lossy decode
+ *  for display; `undecodable` says the real name isn't valid UTF-8, so no verdict
+ *  taken on that spelling can be vouched for. A real U+FFFD name is decodable. */
+export interface PathListingEntry {
+  path: string;
+  undecodable: boolean;
 }
 
 /** Why a `DeltaDiff` could (or couldn't) be computed — drives how the caller

@@ -79,7 +79,7 @@ export async function resolveDocSurfacesContext(
 ): Promise<DocSurfacesContext> {
   let tracked: string[];
   try {
-    tracked = await gitListTracked(repoPath);
+    tracked = (await gitListTracked(repoPath)).map((row) => row.path);
   } catch {
     return {};
   }

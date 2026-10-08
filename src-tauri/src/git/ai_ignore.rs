@@ -426,6 +426,10 @@ pub struct FilteredDiff {
     /// Changed files (rename pairs count once) kept out of the diff — pattern
     /// matches plus unreadable names, which hide with no patterns at all.
     pub excluded_files: u32,
+    /// The rows of `excluded_files` hidden ONLY because a name isn't valid UTF-8 —
+    /// a pattern-matched undecodable name counts as a pattern hit. Always a subset
+    /// (`<= excluded_files`), unlike the TS `filterDiffByAiIgnore` count.
+    pub unreadable_files: u32,
 }
 
 /// Whether an AI-ignore list can hide anything: a list of nothing but `!` lines
@@ -617,6 +621,7 @@ pub async fn filtered_diff(
                 text: content.stdout_lossy(),
                 files: rows.into_iter().map(|row| row.entry).collect(),
                 excluded_files: 0,
+                unreadable_files: 0,
             });
         }
     }
@@ -649,19 +654,21 @@ pub async fn filtered_diff(
         let mut terms: Vec<String> = Vec::new();
         let mut files: Vec<DiffStatEntry> = Vec::new();
         let mut excluded_files = 0u32;
+        let mut unreadable_files = 0u32;
         for row in rows {
             // Fail-closed display: a name that is not valid UTF-8 is withheld
             // whatever its verdict, since the app cannot vouch for a spelling it
-            // cannot decode.
-            let hidden = row
-                .names
-                .iter()
-                .any(|n| ignored.contains(n) || std::str::from_utf8(n).is_err());
-            if !hidden {
+            // cannot decode. A pattern hit on either side outranks that cause.
+            let matched = row.names.iter().any(|n| ignored.contains(n));
+            let unreadable = row.names.iter().any(|n| std::str::from_utf8(n).is_err());
+            if !matched && !unreadable {
                 files.push(row.entry);
                 continue;
             }
             excluded_files += 1;
+            if !matched {
+                unreadable_files += 1;
+            }
             // A pathspec carries text, so an undecodable name reaches it only as
             // its lossy spelling — which is what [`widened_glob_for_name`] makes
             // safe. The decision is taken on the bytes, before that decode.
@@ -684,6 +691,7 @@ pub async fn filtered_diff(
                 text: String::new(),
                 files,
                 excluded_files,
+                unreadable_files,
             });
         }
 
@@ -710,6 +718,7 @@ pub async fn filtered_diff(
             text: content.stdout_lossy(),
             files,
             excluded_files,
+            unreadable_files,
         });
     }
     Err(AppError::Command(
@@ -2051,6 +2060,10 @@ mod tests {
             ["keep.txt"]
         );
         assert_eq!(filtered.excluded_files, 1);
+        assert_eq!(
+            filtered.unreadable_files, 0,
+            "`*.env` matches the raw bytes, so the row is a pattern hit"
+        );
         assert!(!filtered.text.contains("caf"), "{}", filtered.text);
     }
 
@@ -2094,6 +2107,7 @@ mod tests {
                 "{label}: the lossy row is not listed"
             );
             assert_eq!(out.excluded_files, 1, "{label}: disclosed");
+            assert_eq!(out.unreadable_files, 1, "{label}: no rule hid it");
             assert!(!out.text.contains("caf"), "{label}: {}", out.text);
         }
 
@@ -2114,6 +2128,120 @@ mod tests {
         );
         assert_eq!(out.excluded_files, 0);
         assert!(out.text.contains("+++ b/a.txt"), "{}", out.text);
+    }
+
+    /// Attribution splits per row, and the unreadable count is a strict SUBSET of
+    /// the hidden one: an undecodable name a pattern also matches is a pattern
+    /// hit, so only rows no rule reached count as unreadable.
+    #[tokio::test]
+    async fn unreadable_rows_are_counted_apart_and_within_the_hidden_total() {
+        let (_dir, repo) = seed_repo("lossy-split").await;
+        let blob = seed_blob(&repo).await;
+
+        let mut rows: Vec<u8> = Vec::new();
+        for name in [
+            b"caf\xE9.env".as_slice(),   // undecodable AND matched → pattern hit
+            b"caf\xE9.txt".as_slice(),   // undecodable, unmatched → unreadable
+            b"plain.env".as_slice(),     // matched → pattern hit
+            "x\u{FFFD}y.txt".as_bytes(), // a real U+FFFD decodes → kept
+            b"keep.txt".as_slice(),
+        ] {
+            rows.extend_from_slice(format!("100644 blob {blob}\t").as_bytes());
+            rows.extend_from_slice(name);
+            rows.push(b'\n');
+        }
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        let out = git_branch_diff(
+            repo.clone(),
+            base,
+            head.clone(),
+            None,
+            Some(vec!["*.env".to_string()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.txt", "x\u{FFFD}y.txt"]
+        );
+        assert_eq!(out.excluded_files, 3);
+        assert_eq!(out.unreadable_files, 1);
+        assert!(out.unreadable_files <= out.excluded_files);
+
+        // An empty range hides nothing on either count, down both flows.
+        for patterns in [None, Some(vec!["*.env".to_string()])] {
+            let empty = git_branch_diff(repo.clone(), head.clone(), head.clone(), None, patterns)
+                .await
+                .unwrap();
+            assert!(empty.files.is_empty());
+            assert_eq!((empty.excluded_files, empty.unreadable_files), (0, 0));
+        }
+    }
+
+    /// A rename with an undecodable side is ONE hidden row: unreadable when no rule
+    /// reaches either side, a pattern hit when one does.
+    #[tokio::test]
+    async fn a_rename_with_an_unreadable_side_counts_once() {
+        let (_dir, repo) = seed_repo("lossy-rename").await;
+        let blob = seed_blob(&repo).await;
+
+        let mut old: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        old.extend_from_slice(b"caf\xE9.txt\n");
+        old.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let new = format!("100644 blob {blob}\tnew.md\n100644 blob {blob}\tkeep.txt\n");
+        let (old_tree, new_tree) = (mktree_raw(&repo, &old), mktree_raw(&repo, new.as_bytes()));
+        let commit = |tree: String, parent: Option<String>| {
+            let repo = repo.clone();
+            async move {
+                let mut args = vec!["commit-tree".to_string(), tree, "-m".into(), "c".into()];
+                if let Some(parent) = parent {
+                    args.extend(["-p".to_string(), parent]);
+                }
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_git(Some(&repo), &args, DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .stdout_lossy()
+                    .trim()
+                    .to_string()
+            }
+        };
+        let base = commit(old_tree, None).await;
+        let head = commit(new_tree, Some(base.clone())).await;
+
+        // Fixture precondition: one rename row, not an add + delete.
+        let all = run_git(
+            Some(&repo),
+            &["diff", "--numstat", "-z", &format!("{base}...{head}")],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_numstat_z_rows_bytes(&all.stdout).len(), 1);
+
+        for (patterns, unreadable) in [
+            (vec!["*.nomatch".to_string()], 1),
+            (vec!["*.md".to_string()], 0),
+        ] {
+            let label = format!("{patterns:?}");
+            let out = git_branch_diff(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                None,
+                Some(patterns),
+            )
+            .await
+            .unwrap();
+            assert!(out.files.is_empty(), "{label}: {:?}", out.files);
+            assert_eq!(out.excluded_files, 1, "{label}: the pair counts once");
+            assert_eq!(out.unreadable_files, unreadable, "{label}");
+            assert!(!out.text.contains("new.md"), "{label}: {}", out.text);
+        }
     }
 
     /// A REAL U+FFFD in a name is an ordinary character, not a byte that was
@@ -2142,6 +2270,7 @@ mod tests {
             ["keep.txt", "x\u{FFFD}y.txt"]
         );
         assert_eq!(out.excluded_files, 0);
+        assert_eq!(out.unreadable_files, 0);
         assert!(out.text.contains("x\u{FFFD}y.txt"), "{}", out.text);
     }
 
@@ -2174,6 +2303,10 @@ mod tests {
             ["keep.txt"]
         );
         assert_eq!(out.excluded_files, 1);
+        assert_eq!(
+            out.unreadable_files, 0,
+            "a decodable name is never unreadable"
+        );
         assert!(!out.text.contains("x\u{FFFD}y"), "{}", out.text);
     }
 

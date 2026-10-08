@@ -591,7 +591,10 @@ struct CommitPieces {
     diff_text: String,
     diff_truncated: bool,
     files: Vec<DiffStatEntry>,
+    /// Every hidden changed file — pattern matches AND unreadable names.
     excluded_files: u32,
+    /// The subset of `excluded_files` hidden only for a name that isn't readable text.
+    unreadable: u32,
     recent_subjects: Vec<String>,
     repo_instructions: Option<String>,
     global_instructions: String,
@@ -626,10 +629,26 @@ fn assemble_commit_recipe(p: CommitPieces) -> Recipe {
             &file_summary
         }
     );
-    if p.excluded_files > 0 {
+    // KEEP IN SYNC: `buildCommitPrompt` renders these three forms (both causes,
+    // pattern-only, unreadable-only) byte-identically.
+    let pattern_hidden = p.excluded_files.saturating_sub(p.unreadable);
+    if pattern_hidden > 0 && p.unreadable > 0 {
         files_section.push_str(&format!(
-            "\n[{} additional changed file(s) hidden by the user's AI ignore rules — do not speculate about them]",
-            p.excluded_files
+            "\n[{pattern_hidden} additional changed file(s) hidden by the user's AI ignore rules; \
+             {} more left out because their names aren't readable text — do not speculate about \
+             any of them]",
+            p.unreadable
+        ));
+    } else if pattern_hidden > 0 {
+        files_section.push_str(&format!(
+            "\n[{pattern_hidden} additional changed file(s) hidden by the user's AI ignore rules — \
+             do not speculate about them]"
+        ));
+    } else if p.unreadable > 0 {
+        files_section.push_str(&format!(
+            "\n[{} changed file(s) left out because their names aren't readable text — do not \
+             speculate about them]",
+            p.unreadable
         ));
     }
     let mut prompt_parts = vec![files_section];
@@ -769,12 +788,14 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
     );
     // The two causes stay separate: an unreadable name is hidden with no pattern
     // configured at all, so folding it in blames rules the user may not have.
-    // KEEP IN SYNC: `buildBranchNamePrompt` renders these three forms byte-identically.
+    // KEEP IN SYNC: `buildBranchNamePrompt` renders these three forms (both causes,
+    // pattern-only, unreadable-only) byte-identically; unreadable covers tracked
+    // and untracked names alike.
     let pattern_hidden = p.excluded_files.saturating_sub(p.unreadable);
     if pattern_hidden > 0 && p.unreadable > 0 {
         files_section.push_str(&format!(
             "\n[{pattern_hidden} additional changed file(s) hidden by the user's AI ignore rules; \
-             {} more new file(s) left out because their names aren't readable text]",
+             {} more file(s) left out because their names aren't readable text]",
             p.unreadable
         ));
     } else if pattern_hidden > 0 {
@@ -783,7 +804,7 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
         ));
     } else if p.unreadable > 0 {
         files_section.push_str(&format!(
-            "\n[{} new file(s) left out because their names aren't readable text]",
+            "\n[{} file(s) left out because their names aren't readable text]",
             p.unreadable
         ));
     }
@@ -845,10 +866,12 @@ struct PrPieces {
     diff_text: String,
     diff_truncated: bool,
     files: Vec<DiffStatEntry>,
-    /// How many changed files the user's AI ignore patterns hid from `files` /
-    /// `diff_text`, disclosed in the files section so the model knows the diff
-    /// isn't the whole story.
+    /// How many changed files were hidden from `files` / `diff_text` (pattern
+    /// matches AND unreadable names), disclosed in the files section so the model
+    /// knows the diff isn't the whole story.
     excluded_files: u32,
+    /// The subset of `excluded_files` hidden only for a name that isn't readable text.
+    unreadable: u32,
     commit_subjects: Vec<String>,
     base_branch: String,
     head_branch: String,
@@ -1011,10 +1034,23 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
             &file_summary
         }
     );
-    if p.excluded_files > 0 {
+    // KEEP IN SYNC: `buildPrPrompt` renders these three forms (both causes,
+    // pattern-only, unreadable-only) byte-identically.
+    let pattern_hidden = p.excluded_files.saturating_sub(p.unreadable);
+    if pattern_hidden > 0 && p.unreadable > 0 {
         files_section.push_str(&format!(
-            "\n[{} additional changed file(s) hidden by the user's AI ignore rules]",
-            p.excluded_files
+            "\n[{pattern_hidden} additional changed file(s) hidden by the user's AI ignore rules; \
+             {} more left out because their names aren't readable text]",
+            p.unreadable
+        ));
+    } else if pattern_hidden > 0 {
+        files_section.push_str(&format!(
+            "\n[{pattern_hidden} additional changed file(s) hidden by the user's AI ignore rules]"
+        ));
+    } else if p.unreadable > 0 {
+        files_section.push_str(&format!(
+            "\n[{} changed file(s) left out because their names aren't readable text]",
+            p.unreadable
         ));
     }
     prompt_parts.push(files_section);
@@ -1305,13 +1341,14 @@ impl GitDesktopMcp {
         .map_err(app_err)?;
 
         if staged.files.is_empty() {
-            let msg = if staged.excluded_files > 0 {
-                "All staged changes match the AI ignore patterns — nothing to describe. Stage \
-                 changes outside those patterns first."
-            } else {
-                "Nothing is staged — stage the changes you want a commit message for first."
+            let hidden = HiddenCounts {
+                excluded: staged.excluded_files,
+                unreadable: staged.unreadable_files,
             };
-            return Err(McpError::invalid_request(msg, None));
+            return Err(McpError::invalid_request(
+                commit_empty_message(hidden),
+                None,
+            ));
         }
 
         let commits = crate::git::commit::git_recent_commits(self.repo.clone(), 10)
@@ -1324,6 +1361,7 @@ impl GitDesktopMcp {
             diff_truncated: staged.truncated,
             files: staged.files,
             excluded_files: staged.excluded_files,
+            unreadable: staged.unreadable_files,
             recent_subjects: commits.into_iter().map(|c| c.subject).collect(),
             repo_instructions,
             global_instructions: settings.global_instructions,
@@ -1383,15 +1421,14 @@ impl GitDesktopMcp {
         // with excludes, from files it was never shown). Mirrors the in-app toast
         // and the commit/branch recipes' empty-input errors.
         if diff.files.is_empty() {
-            let msg = if diff.excluded_files > 0 {
-                format!(
-                    "All changes between {base} and {head} match the AI ignore patterns — nothing \
-                     to describe."
-                )
-            } else {
-                format!("No changes between {base} and {head} to describe.")
+            let hidden = HiddenCounts {
+                excluded: diff.excluded_files,
+                unreadable: diff.unreadable_files,
             };
-            return Err(McpError::invalid_request(msg, None));
+            return Err(McpError::invalid_request(
+                pr_empty_message(&base, &head, hidden),
+                None,
+            ));
         }
 
         // The commits the PR would introduce = base..head "ahead" set (compare =
@@ -1441,6 +1478,7 @@ impl GitDesktopMcp {
             diff_truncated: diff.truncated,
             files: diff.files,
             excluded_files: diff.excluded_files,
+            unreadable: diff.unreadable_files,
             commit_subjects,
             base_branch: base,
             head_branch: head,
@@ -1647,7 +1685,7 @@ impl GitDesktopMcp {
         let exclude = self.ai_ignore_patterns(&settings).await?;
 
         // Whole-worktree diff vs HEAD (the TS uses git_staged_diff with worktree=true).
-        let mut diff = crate::git::diff::git_staged_diff(
+        let diff = crate::git::diff::git_staged_diff(
             self.repo.clone(),
             Some(RAW_DIFF_MAX_BYTES),
             Some(exclude.clone()),
@@ -1665,20 +1703,14 @@ impl GitDesktopMcp {
         let filtered = filter_untracked_by_ai_ignore(&self.repo, untracked_paths, &exclude)
             .await
             .map_err(app_err)?;
+        // Only `pattern_hidden()` may be blamed on the patterns below: an unreadable
+        // name, tracked or untracked, is hidden with no pattern configured at all.
+        let tree = tree_hidden(&diff, &filtered);
         let untracked_paths = filtered.paths;
-        // Held BEFORE the fold: only these may be blamed on the patterns below. An
-        // unreadable name is hidden with no pattern configured at all.
-        let tree_pattern_hidden =
-            diff.excluded_files + filtered.excluded.saturating_sub(filtered.unreadable) > 0;
-        let unreadable_note = if filtered.unreadable > 0 {
-            " Some new files were left out because their names aren't readable text."
-        } else {
-            ""
-        };
-        diff.excluded_files += filtered.excluded;
+        let tree_pattern_hidden = tree.pattern_hidden() > 0;
 
         // Nothing in progress → name the branch after what it has already committed.
-        let (diff, untracked_paths, commit_subjects) = if diff.files.is_empty()
+        let (diff, untracked_paths, commit_subjects, hidden) = if diff.files.is_empty()
             && untracked_paths.is_empty()
         {
             // Resolve the base HERE, not above: only this path uses it, and the
@@ -1689,23 +1721,25 @@ impl GitDesktopMcp {
                 let msg = if tree_pattern_hidden {
                     "All in-progress changes match the AI ignore patterns — nothing to name a \
                      branch after."
-                } else if filtered.unreadable > 0 {
-                    "The only in-progress changes are new files whose names aren't readable text \
-                     — nothing to name a branch after."
+                } else if tree.unreadable > 0 {
+                    "The only in-progress changes are files whose names aren't readable text — \
+                     nothing to name a branch after."
                 } else {
                     "No in-progress changes, and no default branch to compare committed work \
                      against."
                 };
-                return Err(McpError::invalid_request(
-                    format!("{msg}{}", if tree_pattern_hidden { unreadable_note } else { "" }),
-                    None,
-                ));
+                let suffix = if tree_pattern_hidden && tree.unreadable > 0 {
+                    UNREADABLE_NOTE
+                } else {
+                    ""
+                };
+                return Err(McpError::invalid_request(format!("{msg}{suffix}"), None));
             };
             let CommittedBase {
                 rev: base_rev,
                 label: base,
             } = base;
-            let mut committed = crate::git::compare::git_branch_diff(
+            let committed = crate::git::compare::git_branch_diff(
                 self.repo.clone(),
                 base_rev.clone(),
                 "HEAD".to_string(),
@@ -1714,52 +1748,24 @@ impl GitDesktopMcp {
             )
             .await
             .map_err(app_err)?;
+            let committed_counts = HiddenCounts {
+                excluded: committed.excluded_files,
+                unreadable: committed.unreadable_files,
+            };
             if committed.files.is_empty() && committed.text.is_empty() {
-                // Name the side that actually hid something: claiming in-progress
-                // changes existed when the working tree was clean (or vice versa) is
-                // exactly the kind of confident-but-false reason an agent acts on.
-                let committed_hidden = committed.excluded_files > 0;
-                let msg = match (tree_pattern_hidden, committed_hidden) {
-                    (true, true) => "All in-progress and committed changes match the AI ignore \
-                                     patterns — nothing to name a branch after."
-                        .to_string(),
-                    (false, true) => format!(
-                        "No in-progress changes, and all committed changes vs {base} match the AI \
-                         ignore patterns — nothing to name a branch after."
-                    ),
-                    (true, false) => format!(
-                        "All in-progress changes match the AI ignore patterns, and there are no \
-                         committed changes vs {base} — nothing to name a branch after."
-                    ),
-                    // Unreadable names are the only in-progress work left to cite; below
-                    // that, being ON the default branch and a fully-merged branch.
-                    (false, false) if filtered.unreadable > 0 => format!(
-                        "The only in-progress changes are new files whose names aren't readable \
-                         text, and there are no committed changes vs {base} — nothing to name a \
-                         branch after."
-                    ),
-                    (false, false) => format!(
-                        "No in-progress changes, and no committed changes vs {base} — nothing to \
-                         name a branch after."
-                    ),
-                };
-                // A pattern arm cited one cause; unreadable names are a second one.
-                let suffix = if tree_pattern_hidden || committed_hidden {
-                    unreadable_note
-                } else {
-                    ""
-                };
-                return Err(McpError::invalid_request(format!("{msg}{suffix}"), None));
+                return Err(McpError::invalid_request(
+                    committed_fallback_empty_message(&base, tree, committed_counts),
+                    None,
+                ));
             }
             // Fold the working tree's hidden files into the committed diff's
             // disclosure — they're also changes the model can't see (mirrors the TS
             // fallback). The sum is an UPPER BOUND: a file hidden in both diffs is
             // counted twice, and over-disclosing is the safe direction here.
-            committed.excluded_files += diff.excluded_files;
             let subjects = branch_commit_subjects(&self.repo, &base_rev).await;
-            (committed, Vec::new(), subjects)
+            (committed, Vec::new(), subjects, committed_counts.plus(tree))
         } else {
-            (diff, untracked_paths, Vec::new())
+            (diff, untracked_paths, Vec::new(), tree)
         };
 
         let branches = crate::git::branches::git_branches(self.repo.clone())
@@ -1780,11 +1786,8 @@ impl GitDesktopMcp {
             diff_truncated: diff.truncated,
             files: diff.files,
             untracked_paths,
-            excluded_files: diff.excluded_files,
-            // Same subset on both paths: the working-tree fold put filtered.excluded
-            // (unreadable included) into diff.excluded_files, and the committed fold
-            // carries that total onward.
-            unreadable: filtered.unreadable,
+            excluded_files: hidden.excluded,
+            unreadable: hidden.unreadable,
             recent_branches: branches,
             commit_subjects,
             repo_instructions,
@@ -2029,6 +2032,167 @@ async fn filter_untracked_by_ai_ignore(
     })
 }
 
+/// Changed files a recipe hides, split by cause: `unreadable` is the subset hidden
+/// only for a name that isn't readable text, so no copy blames rules for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HiddenCounts {
+    excluded: u32,
+    unreadable: u32,
+}
+
+impl HiddenCounts {
+    fn pattern_hidden(self) -> u32 {
+        self.excluded.saturating_sub(self.unreadable)
+    }
+
+    fn plus(self, other: Self) -> Self {
+        Self {
+            excluded: self.excluded + other.excluded,
+            unreadable: self.unreadable + other.unreadable,
+        }
+    }
+}
+
+/// The branch recipe's in-progress hidden counts: the tracked diff's rows and the
+/// untracked names, each cause folded across both sources.
+fn tree_hidden(
+    diff: &crate::git::types::StagedDiff,
+    untracked: &FilteredUntracked,
+) -> HiddenCounts {
+    HiddenCounts {
+        excluded: diff.excluded_files + untracked.excluded,
+        unreadable: diff.unreadable_files + untracked.unreadable,
+    }
+}
+
+/// The commit recipe's refusal when nothing staged survives the filter, naming
+/// only the causes that actually hid something.
+fn commit_empty_message(hidden: HiddenCounts) -> &'static str {
+    match (hidden.pattern_hidden() > 0, hidden.unreadable > 0) {
+        (true, true) => {
+            "All staged changes were left out (some match the AI ignore patterns, the rest have \
+             file names that aren't readable text) — nothing to describe. Stage other changes \
+             first."
+        }
+        (true, false) => {
+            "All staged changes match the AI ignore patterns — nothing to describe. Stage \
+             changes outside those patterns first."
+        }
+        (false, true) => {
+            "Every staged change was left out because its file name isn't readable text — \
+             nothing to describe. Stage other changes first."
+        }
+        (false, false) => {
+            "Nothing is staged — stage the changes you want a commit message for first."
+        }
+    }
+}
+
+/// The PR recipe's refusal for a range with nothing left to describe, naming only
+/// the causes that actually hid something.
+fn pr_empty_message(base: &str, head: &str, hidden: HiddenCounts) -> String {
+    match (hidden.pattern_hidden() > 0, hidden.unreadable > 0) {
+        (true, true) => format!(
+            "All changes between {base} and {head} were left out (some match the AI ignore \
+             patterns, the rest have file names that aren't readable text) — nothing to describe."
+        ),
+        (true, false) => format!(
+            "All changes between {base} and {head} match the AI ignore patterns — nothing to \
+             describe."
+        ),
+        (false, true) => format!(
+            "Every change between {base} and {head} was left out because its file name isn't \
+             readable text — nothing to describe."
+        ),
+        (false, false) => format!("No changes between {base} and {head} to describe."),
+    }
+}
+
+/// Appended when a branch refusal cites the patterns but unreadable names it
+/// doesn't state also hid something.
+const UNREADABLE_NOTE: &str = " Some files were left out because their names aren't readable text.";
+
+/// The branch recipe's refusal when neither the working tree nor the committed
+/// range has anything left to show. Each side is named by what actually hid it:
+/// claiming a side had no changes when unreadable ones exist (or the reverse) is
+/// a confident-but-false reason an agent acts on.
+fn committed_fallback_empty_message(
+    base: &str,
+    tree: HiddenCounts,
+    committed: HiddenCounts,
+) -> String {
+    let (tree_patterns, committed_patterns) =
+        (tree.pattern_hidden() > 0, committed.pattern_hidden() > 0);
+    let tree_names = "The only in-progress changes are files whose names aren't readable text";
+    let (msg, unstated_unreadable) = match (tree_patterns, committed_patterns) {
+        (true, true) => (
+            "All in-progress and committed changes match the AI ignore patterns — nothing to \
+             name a branch after."
+                .to_string(),
+            tree.unreadable + committed.unreadable > 0,
+        ),
+        (false, true) if tree.unreadable > 0 => (
+            format!(
+                "{tree_names}, and all committed changes vs {base} match the AI ignore patterns \
+                 — nothing to name a branch after."
+            ),
+            committed.unreadable > 0,
+        ),
+        (false, true) => (
+            format!(
+                "No in-progress changes, and all committed changes vs {base} match the AI ignore \
+                 patterns — nothing to name a branch after."
+            ),
+            committed.unreadable > 0,
+        ),
+        (true, false) if committed.unreadable > 0 => (
+            format!(
+                "All in-progress changes match the AI ignore patterns, and the only committed \
+                 changes vs {base} are files whose names aren't readable text — nothing to name \
+                 a branch after."
+            ),
+            tree.unreadable > 0,
+        ),
+        (true, false) => (
+            format!(
+                "All in-progress changes match the AI ignore patterns, and there are no committed \
+                 changes vs {base} — nothing to name a branch after."
+            ),
+            tree.unreadable > 0,
+        ),
+        // Unreadable names are the only work left to cite; below that, being ON the
+        // default branch and a fully-merged branch.
+        (false, false) if committed.unreadable > 0 => (
+            format!(
+                "The only changes, in progress or committed vs {base}, are files whose names \
+                 aren't readable text — nothing to name a branch after."
+            ),
+            false,
+        ),
+        (false, false) if tree.unreadable > 0 => (
+            format!(
+                "{tree_names}, and there are no committed changes vs {base} — nothing to name a \
+                 branch after."
+            ),
+            false,
+        ),
+        (false, false) => (
+            format!(
+                "No in-progress changes, and no committed changes vs {base} — nothing to name a \
+                 branch after."
+            ),
+            false,
+        ),
+    };
+    // A pattern clause can share its side with unreadable names the sentence never
+    // stated; the note names that second cause once.
+    if unstated_unreadable {
+        format!("{msg}{UNREADABLE_NOTE}")
+    } else {
+        msg
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2100,6 +2264,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 1, false)],
             excluded_files: 0,
+            unreadable: 0,
             recent_subjects: vec!["feat: prior work".to_string()],
             repo_instructions: Some("Repo rule.".to_string()),
             global_instructions: "  Global rule.  ".to_string(),
@@ -2130,6 +2295,7 @@ mod tests {
             diff_truncated: true,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 3,
+            unreadable: 0,
             recent_subjects: vec![],
             repo_instructions: None,
             global_instructions: String::new(),
@@ -2145,6 +2311,45 @@ mod tests {
         assert!(!recipe.system.contains("## User instructions"));
     }
 
+    /// The disclosure splits by cause, each form byte-identical to the TS mirror:
+    /// a user with no patterns is never told their ignore rules hid anything.
+    #[test]
+    fn commit_recipe_note_splits_pattern_and_unreadable_causes() {
+        let note = |excluded: u32, unreadable: u32| {
+            let recipe = assemble_commit_recipe(CommitPieces {
+                diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
+                diff_truncated: false,
+                files: vec![file("x.rs", 1, 0, false)],
+                excluded_files: excluded,
+                unreadable,
+                recent_subjects: vec![],
+                repo_instructions: None,
+                global_instructions: String::new(),
+            });
+            let section = recipe.prompt.split("\n\n").next().unwrap().to_string();
+            section
+                .strip_prefix("## Files changed\nx.rs +1 -0")
+                .unwrap_or_else(|| panic!("files section: {section}"))
+                .to_string()
+        };
+        assert_eq!(
+            note(3, 1),
+            "\n[2 additional changed file(s) hidden by the user's AI ignore rules; 1 more left out \
+             because their names aren't readable text — do not speculate about any of them]"
+        );
+        assert_eq!(
+            note(3, 0),
+            "\n[3 additional changed file(s) hidden by the user's AI ignore rules — do not \
+             speculate about them]"
+        );
+        assert_eq!(
+            note(2, 2),
+            "\n[2 changed file(s) left out because their names aren't readable text — do not \
+             speculate about them]"
+        );
+        assert_eq!(note(0, 0), "");
+    }
+
     #[test]
     fn commit_recipe_empty_file_list_shows_none() {
         let recipe = assemble_commit_recipe(CommitPieces {
@@ -2152,6 +2357,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             recent_subjects: vec![],
             repo_instructions: None,
             global_instructions: String::new(),
@@ -2324,7 +2530,7 @@ mod tests {
         });
         assert!(
             recipe.prompt.contains(
-                "[2 additional changed file(s) hidden by the user's AI ignore rules; 1 more new \
+                "[2 additional changed file(s) hidden by the user's AI ignore rules; 1 more \
                  file(s) left out because their names aren't readable text]"
             ),
             "prompt:\n{}",
@@ -2351,7 +2557,7 @@ mod tests {
         assert!(
             recipe
                 .prompt
-                .contains("[2 new file(s) left out because their names aren't readable text]"),
+                .contains("[2 file(s) left out because their names aren't readable text]"),
             "prompt:\n{}",
             recipe.prompt
         );
@@ -2381,6 +2587,139 @@ mod tests {
         assert!(!recipe.prompt.contains("aren't readable text"));
     }
 
+    /// A TRACKED name that isn't readable text joins the unreadable cause, with
+    /// clean untracked names: the pattern count shrinks by it, so a user with no
+    /// patterns is never told their rules hid a tracked file.
+    #[test]
+    fn branch_recipe_folds_tracked_unreadable_names_into_their_own_cause() {
+        let untracked = FilteredUntracked {
+            paths: vec!["ok.rs".to_string()],
+            excluded: 0,
+            unreadable: 0,
+        };
+        let suffix = |excluded_files: u32, unreadable_files: u32| {
+            let diff = crate::git::types::StagedDiff {
+                text: String::new(),
+                truncated: false,
+                files: vec![file("x.rs", 1, 0, false)],
+                excluded_files,
+                unreadable_files,
+            };
+            let hidden = tree_hidden(&diff, &untracked);
+            let recipe = assemble_branch_recipe(BranchPieces {
+                diff_text: diff.text,
+                diff_truncated: false,
+                files: diff.files,
+                untracked_paths: untracked.paths.clone(),
+                excluded_files: hidden.excluded,
+                unreadable: hidden.unreadable,
+                recent_branches: vec![],
+                commit_subjects: vec![],
+                repo_instructions: None,
+                global_instructions: String::new(),
+            });
+            let section = recipe.prompt.split("\n\n").next().unwrap().to_string();
+            section
+                .strip_prefix("## Files changed\nx.rs +1 -0\nok.rs (new file)")
+                .unwrap_or_else(|| panic!("files section: {section}"))
+                .to_string()
+        };
+        assert_eq!(
+            suffix(3, 1),
+            "\n[2 additional changed file(s) hidden by the user's AI ignore rules; 1 more \
+             file(s) left out because their names aren't readable text]"
+        );
+        assert_eq!(
+            suffix(2, 2),
+            "\n[2 file(s) left out because their names aren't readable text]"
+        );
+        assert_eq!(
+            suffix(2, 0),
+            "\n[2 additional changed file(s) hidden by the user's AI ignore rules]"
+        );
+    }
+
+    /// The commit and PR refusals name exactly the causes that hid something.
+    #[test]
+    fn empty_recipe_errors_name_only_the_real_causes() {
+        let counts = |excluded, unreadable| HiddenCounts {
+            excluded,
+            unreadable,
+        };
+        let patterns = "match the AI ignore patterns";
+        let names = "readable text";
+        let cases = [
+            (counts(3, 1), true, true),
+            (counts(3, 0), true, false),
+            (counts(2, 2), false, true),
+            (counts(0, 0), false, false),
+        ];
+        for (hidden, blames_patterns, blames_names) in cases {
+            for msg in [
+                commit_empty_message(hidden).to_string(),
+                pr_empty_message("main", "topic", hidden),
+            ] {
+                assert_eq!(msg.contains(patterns), blames_patterns, "{hidden:?}: {msg}");
+                assert_eq!(msg.contains(names), blames_names, "{hidden:?}: {msg}");
+            }
+        }
+        assert_eq!(
+            commit_empty_message(counts(0, 0)),
+            "Nothing is staged — stage the changes you want a commit message for first."
+        );
+        assert_eq!(
+            pr_empty_message("main", "topic", counts(0, 0)),
+            "No changes between main and topic to describe."
+        );
+    }
+
+    /// The committed-fallback refusal never denies a side that holds unreadable
+    /// changes: the other side's pattern clause keeps its words, and the unreadable
+    /// side is named as such instead of "no changes".
+    #[test]
+    fn committed_fallback_names_each_side_by_its_real_cause() {
+        let counts = |excluded, unreadable| HiddenCounts {
+            excluded,
+            unreadable,
+        };
+        let msg = |tree, committed| committed_fallback_empty_message("main", tree, committed);
+
+        // In-progress patterns, committed side empty.
+        assert_eq!(
+            msg(counts(2, 0), counts(0, 0)),
+            "All in-progress changes match the AI ignore patterns, and there are no committed \
+             changes vs main — nothing to name a branch after."
+        );
+        assert_eq!(
+            msg(counts(2, 0), counts(1, 1)),
+            "All in-progress changes match the AI ignore patterns, and the only committed \
+             changes vs main are files whose names aren't readable text — nothing to name a \
+             branch after."
+        );
+        // The mirror: committed patterns, nothing in progress.
+        assert_eq!(
+            msg(counts(0, 0), counts(2, 0)),
+            "No in-progress changes, and all committed changes vs main match the AI ignore \
+             patterns — nothing to name a branch after."
+        );
+        assert_eq!(
+            msg(counts(1, 1), counts(2, 0)),
+            "The only in-progress changes are files whose names aren't readable text, and all \
+             committed changes vs main match the AI ignore patterns — nothing to name a branch \
+             after."
+        );
+        // Unreadable names sharing the pattern-cited side ride the note; the other
+        // side's are already in the sentence.
+        let shared = msg(counts(3, 1), counts(1, 1));
+        assert!(shared.ends_with(UNREADABLE_NOTE), "{shared}");
+        assert_eq!(shared.matches("aren't readable text").count(), 2, "{shared}");
+        assert_eq!(
+            msg(counts(0, 0), counts(0, 0)),
+            "No in-progress changes, and no committed changes vs main — nothing to name a \
+             branch after."
+        );
+    }
+
     #[test]
     fn pr_recipe_github_is_pull_request_wording() {
         let recipe = assemble_pr_recipe(PrPieces {
@@ -2388,6 +2727,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec!["feat: thing".to_string()],
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -2420,6 +2760,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: excluded,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2438,6 +2779,54 @@ mod tests {
         assert!(!none.prompt.contains("hidden by the user's AI ignore rules"));
     }
 
+    /// The PR twin of the commit split: same causes, tail-less forms, each
+    /// byte-identical to the TS mirror.
+    #[test]
+    fn pr_recipe_note_splits_pattern_and_unreadable_causes() {
+        let note = |excluded: u32, unreadable: u32| {
+            let recipe = assemble_pr_recipe(PrPieces {
+                diff_text: "diff --git a/x.rs b/x.rs\n+a\n".to_string(),
+                diff_truncated: false,
+                files: vec![file("x.rs", 1, 0, false)],
+                excluded_files: excluded,
+                unreadable,
+                commit_subjects: vec![],
+                base_branch: "main".to_string(),
+                head_branch: "topic".to_string(),
+                available_labels: vec![],
+                candidate_issues: vec![],
+                jira_candidates: vec![],
+                repo_instructions: None,
+                global_instructions: String::new(),
+                provider: Some("github".to_string()),
+            });
+            let section = recipe
+                .prompt
+                .split("\n\n")
+                .find(|part| part.starts_with("## Files changed"))
+                .unwrap()
+                .to_string();
+            section
+                .strip_prefix("## Files changed\nx.rs +1 -0")
+                .unwrap_or_else(|| panic!("files section: {section}"))
+                .to_string()
+        };
+        assert_eq!(
+            note(3, 1),
+            "\n[2 additional changed file(s) hidden by the user's AI ignore rules; 1 more left out \
+             because their names aren't readable text]"
+        );
+        assert_eq!(
+            note(3, 0),
+            "\n[3 additional changed file(s) hidden by the user's AI ignore rules]"
+        );
+        assert_eq!(
+            note(2, 2),
+            "\n[2 changed file(s) left out because their names aren't readable text]"
+        );
+        assert_eq!(note(0, 0), "");
+    }
+
     #[test]
     fn pr_recipe_gitlab_swaps_noun_and_flavor() {
         let recipe = assemble_pr_recipe(PrPieces {
@@ -2445,6 +2834,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2492,6 +2882,7 @@ mod tests {
                 diff_truncated: false,
                 files: vec![],
                 excluded_files: 0,
+                unreadable: 0,
                 commit_subjects: vec![],
                 base_branch: "main".to_string(),
                 head_branch: "topic".to_string(),
@@ -2525,6 +2916,7 @@ mod tests {
                 diff_truncated: false,
                 files: vec![],
                 excluded_files: 0,
+                unreadable: 0,
                 commit_subjects: vec![],
                 base_branch: "main".to_string(),
                 head_branch: "topic".to_string(),
@@ -2557,6 +2949,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2583,6 +2976,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2626,6 +3020,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2653,6 +3048,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "fix/123-crash".to_string(),
@@ -2703,6 +3099,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2734,6 +3131,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2841,6 +3239,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "feature/MYT-123-fix".to_string(),
@@ -2887,6 +3286,7 @@ mod tests {
             diff_truncated: false,
             files: vec![file("x.rs", 1, 0, false)],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -2917,6 +3317,7 @@ mod tests {
             diff_truncated: false,
             files: vec![],
             excluded_files: 0,
+            unreadable: 0,
             commit_subjects: vec![],
             base_branch: "main".to_string(),
             head_branch: "topic".to_string(),
@@ -3197,7 +3598,7 @@ mod tests {
         assert!(
             recipe
                 .prompt
-                .contains("[1 new file(s) left out because their names aren't readable text]"),
+                .contains("[1 file(s) left out because their names aren't readable text]"),
             "prompt:\n{}",
             recipe.prompt
         );

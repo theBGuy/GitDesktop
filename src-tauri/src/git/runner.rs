@@ -391,6 +391,8 @@ pub async fn run_git_raw_input_bytes(
     // Git for Windows gates long-path support on core.longpaths — the OS
     // LongPathsEnabled flag alone is not enough (probe-proven). Per-invocation so
     // the user's own git config is never mutated; other platforms ignore the key.
+    // Diff section keying (diff split, AI ignore) needs literal `a/` `b/` headers, so
+    // the prefix keys are pinned over diff.noprefix / custom / mnemonic user config.
     cmd.args([
         "-c",
         "core.quotePath=false",
@@ -398,6 +400,14 @@ pub async fn run_git_raw_input_bytes(
         "color.ui=false",
         "-c",
         "core.longpaths=true",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "diff.srcPrefix=a/",
+        "-c",
+        "diff.dstPrefix=b/",
+        "-c",
+        "diff.mnemonicPrefix=false",
     ]);
     cmd.args(args);
     if let Some(repo) = repo_path {
@@ -1248,12 +1258,64 @@ mod config_tests {
             ("core.longpaths", "true"),
             ("core.quotepath", "false"),
             ("color.ui", "false"),
+            ("diff.noprefix", "false"),
+            ("diff.srcprefix", "a/"),
+            ("diff.dstprefix", "b/"),
+            ("diff.mnemonicprefix", "false"),
         ] {
             let out = run_git(Some(&repo), &["config", "--get", key], DEFAULT_TIMEOUT)
                 .await
                 .unwrap_or_else(|e| panic!("read {key}: {e}"));
             assert_eq!(out.stdout_lossy().trim(), want, "{key}");
         }
+    }
+
+    /// The prefix pins reach a real `git diff`: a repo whose own config asks for
+    /// `diff.noprefix`, `diff.mnemonicPrefix` and custom prefixes still gets `a/` `b/`
+    /// headers, which every section-keying parser downstream assumes. Unpinned, the
+    /// same repo prints `diff --git x x` (measured, git 2.51.1).
+    #[tokio::test]
+    async fn diff_headers_keep_literal_prefixes_against_repo_config() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-prefix-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        let git = |args: &'static [&'static str]| {
+            let repo = repo.clone();
+            async move {
+                run_git(Some(&repo), args, DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+                    .stdout_lossy()
+            }
+        };
+        git(&["init", "-q"]).await;
+        git(&["config", "user.email", "t@t.local"]).await;
+        git(&["config", "user.name", "T"]).await;
+        std::fs::write(dir.path().join("x"), "one\n").unwrap();
+        git(&["add", "x"]).await;
+        git(&["commit", "-qm", "seed"]).await;
+        git(&["config", "diff.noprefix", "true"]).await;
+        git(&["config", "diff.mnemonicPrefix", "true"]).await;
+        git(&["config", "diff.srcPrefix", "SRC/"]).await;
+        git(&["config", "diff.dstPrefix", "DST/"]).await;
+        std::fs::write(dir.path().join("x"), "two\n").unwrap();
+
+        let first_line = |text: String| text.lines().next().unwrap_or_default().to_string();
+        assert_eq!(first_line(git(&["diff"]).await), "diff --git a/x b/x");
+        assert_eq!(
+            first_line(git(&["diff", "HEAD"]).await),
+            "diff --git a/x b/x"
+        );
+
+        // mnemonicPrefix OUTRANKS srcPrefix/dstPrefix whatever the `-c` order, so
+        // its own pin is required (measured, git 2.51.1): re-enabled after the
+        // runner's block, it wins over the still-pinned `a/` `b/`.
+        assert_eq!(
+            first_line(git(&["-c", "diff.mnemonicPrefix=true", "diff"]).await),
+            "diff --git i/x w/x"
+        );
     }
 }
 

@@ -56,8 +56,13 @@ export interface CommitPromptInput {
   diffText: string;
   diffTruncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
-  /** Changed files hidden from this context by the user's ignore patterns. */
+  /** Every changed file hidden from this context — pattern matches AND names
+   *  that aren't readable text. */
   excludedFiles: number;
+  /** The subset of `excludedFiles` hidden because their names aren't readable
+   *  text (`StagedDiff.unreadableFiles`), so the note never blames the user's
+   *  rules for them. Must be a subset: the prompt subtracts it. */
+  unreadableFiles: number;
   recentSubjects: string[];
   repoInstructions: string | null;
   globalInstructions: string;
@@ -71,10 +76,13 @@ export interface PrPromptInput {
    *  Absent/false ⇒ no disclosure line (prompt unchanged) — local file lists are
    *  never partial. */
   filesUnknown?: boolean;
-  /** Changed files hidden from this context by the user's ignore patterns.
-   *  Absent/0 ⇒ no disclosure line (prompt unchanged) — the remote-PR path
-   *  supplies its own diff and applies no excludes. */
+  /** Every changed file hidden from this context — pattern matches AND names
+   *  that aren't readable text. Absent/0 ⇒ no disclosure line. */
   excludedFiles?: number;
+  /** The subset of `excludedFiles` hidden because their names aren't readable
+   *  text. Must be a subset (the prompt subtracts it): a `filterDiffByAiIgnore`
+   *  result passes `unreadableNameCount`, never its raw `unreadableFiles`. */
+  unreadableFiles?: number;
   /** Subjects of the commits this PR would introduce (base..head). */
   commitSubjects: string[];
   /** The forge's commits read failed or hit a cap, so `commitSubjects` may be
@@ -122,8 +130,8 @@ export interface BranchNamePromptInput {
    *  names. The disclosure upper bound. */
   excludedFiles: number;
   /** The subset of `excludedFiles` hidden because their names aren't readable text
-   *  (untracked names only). Split out so the prompt's note never blames the user's
-   *  ignore rules for a file no pattern could have matched. */
+   *  (tracked and untracked alike). Split out so the prompt's note never blames
+   *  the user's ignore rules for a file no pattern could have matched. */
   unreadableFiles: number;
   /** Subjects of the commits already on this branch, newest first — the branch's
    *  committed work. Empty when there are none (or when it isn't resolvable). */
@@ -164,10 +172,14 @@ export interface ReviewPromptInput {
    *  Absent/false ⇒ no disclosure line (prompt unchanged) — local file lists are
    *  never partial. */
   filesUnknown?: boolean;
-  /** Changed files hidden from this review's diff by the user's AI-ignore
-   *  patterns; absent/0 ⇒ no disclosure line. Always 0 alongside `agentic` —
-   *  only a non-agentic run filters its diff. */
+  /** Changed files hidden from this review's diff — pattern matches AND names
+   *  that aren't readable text; absent/0 ⇒ no disclosure line. Always 0
+   *  alongside `agentic` — only a non-agentic run filters its diff. */
   excludedFiles?: number;
+  /** The subset of `excludedFiles` hidden because their names aren't readable
+   *  text — `unreadableNameCount` of the filter result, never its raw
+   *  `unreadableFiles`, which isn't a subset. */
+  unreadableFiles?: number;
   /** Author-provided "Notes for reviewers" — the author's deliberate calls behind
    *  the change. Treated as author input like `body` (NOT soft bot context), so it
    *  is fed to both review modes and never subject to the extras budget. Absent ⇒
