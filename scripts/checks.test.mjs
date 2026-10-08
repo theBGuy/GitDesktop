@@ -64,9 +64,11 @@ import {
   checkCompareEndpoints,
   checkRefspecTemplates,
   checkSecretArgv,
+  checkShortRefNames,
   checkStderrOnlyGitError,
   checkSyncCommands,
   enclosingFn,
+  splitStaleEntries,
   staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
 import {
@@ -2681,6 +2683,104 @@ test("compare-endpoint check ignores a fully literal path and the slug alone", (
     checkCompareEndpoints("fixture.rs", src, src.split("\n"), hits);
     assert.deepEqual(hits, [], `should ignore ${template}`);
   }
+});
+
+test("short-ref check flags --abbrev-ref and :short formats in production code", () => {
+  const src = [
+    "async fn head(repo: &str) {",
+    '    run(&["rev-parse", "--abbrev-ref", "HEAD"]);',
+    "}",
+    "async fn list(repo: &str) {",
+    '    run(&["for-each-ref", "--format=%(refname:short)%00%(upstream:short)"]);',
+    "}",
+    "async fn strict(repo: &str) {",
+    '    run(&["rev-parse", "--abbrev-ref=strict", "HEAD"]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkShortRefNames("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["head", 2],
+      ["list", 5],
+      ["list", 5],
+      ["strict", 8],
+    ],
+  );
+  assert.ok(hits.every((h) => !h.allowlisted));
+});
+
+test("short-ref check ignores comments, full refnames and test modules", () => {
+  const src = [
+    "/// Never `rev-parse --abbrev-ref`, never `%(refname:short)`.",
+    "async fn full(repo: &str) {",
+    '    run(&["for-each-ref", "--format=%(refname)%00%(upstream)"]); // not "--abbrev-ref"',
+    "}",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    async fn helper(repo: &str) {",
+    '        run(&["rev-parse", "--abbrev-ref", "HEAD"]);',
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkShortRefNames("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(hits, []);
+});
+
+test("short-ref check flags symbolic-ref --short, never rev-parse --short", () => {
+  const src = [
+    "async fn branch(repo: &str) {",
+    '    run(&["symbolic-ref", "--short", "HEAD"]);',
+    "}",
+    "async fn quiet(repo: &str) {",
+    '    run(&["symbolic-ref", "-q", "--short", "HEAD"]);',
+    "}",
+    "async fn sha(repo: &str, sha: &str) {",
+    '    run(&["rev-parse", "--short", sha]);',
+    '    run(&["symbolic-ref", "-q", "HEAD"]);',
+    '    run(&["log", "--short"]);',
+    "}",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    async fn helper(repo: &str) {",
+    '        run(&["symbolic-ref", "--short", "HEAD"]);',
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkShortRefNames("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["branch", 2],
+      ["quiet", 5],
+    ],
+  );
+});
+
+test("a retiring allowlist entry with no match notes, a plain one fails", () => {
+  const list = [
+    { file: "a.rs", fn: "kept", rationale: "r" },
+    { file: "a.rs", fn: "gone", rationale: "r" },
+    {
+      file: "a.rs",
+      fn: "leaving",
+      rationale: "r",
+      retiring: "parallel change",
+    },
+  ];
+  const hits = [{ file: "a.rs", fn: "kept" }];
+  const { failing, retired } = splitStaleEntries(list, hits);
+  assert.deepEqual(
+    failing.map((e) => e.fn),
+    ["gone"],
+  );
+  assert.deepEqual(
+    retired.map((e) => e.fn),
+    ["leaving"],
+  );
 });
 
 test("secret-shaped argv is caught next to a -f-family flag", () => {

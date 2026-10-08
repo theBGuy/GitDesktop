@@ -1350,12 +1350,19 @@ impl GitDesktopMcp {
                     )
                 })?,
         };
-        let head = match args.head {
-            Some(h) => h,
+        // `base`/`head` name the branches in the recipe; `base_rev`/`head_rev` are what
+        // the diff and the commit subjects read. Both are branch names, so each is read
+        // as its branch, never a same-named tag (the defaulted head is already its full
+        // ref, see `current_branch`, and passes through). Resolved after the flag checks:
+        // the resolution hands its input to `rev-parse`.
+        let (head, head_rev) = match args.head {
+            Some(h) => (h.clone(), h),
             None => current_branch(&self.repo).await?,
         };
         ensure_not_flag(&base, "base")?;
         ensure_not_flag(&head, "head")?;
+        let base_rev = crate::git::branches::branch_first_rev(&self.repo, &base).await;
+        let head_rev = crate::git::branches::branch_first_rev(&self.repo, &head_rev).await;
 
         // Same AI-ignore merge as the commit/branch recipes — an excluded file must
         // never reach the model.
@@ -1363,8 +1370,8 @@ impl GitDesktopMcp {
 
         let diff = crate::git::compare::git_branch_diff(
             self.repo.clone(),
-            base.clone(),
-            head.clone(),
+            base_rev.clone(),
+            head_rev.clone(),
             Some(RAW_DIFF_MAX_BYTES),
             Some(exclude),
         )
@@ -1390,14 +1397,11 @@ impl GitDesktopMcp {
         // The commits the PR would introduce = base..head "ahead" set (compare =
         // head), exactly as the in-app Create-PR flow derives `commitSubjects` from
         // `git_branch_ahead`. Best-effort: an error yields no list.
-        let commit_subjects = crate::git::compare::git_branch_ahead(
-            self.repo.clone(),
-            base.clone(),
-            head.clone(),
-        )
-        .await
-        .map(|ahead| ahead.into_iter().map(|s| s.subject).collect::<Vec<_>>())
-        .unwrap_or_default();
+        let commit_subjects =
+            crate::git::compare::git_branch_ahead(self.repo.clone(), base_rev, head_rev)
+                .await
+                .map(|ahead| ahead.into_iter().map(|s| s.subject).collect::<Vec<_>>())
+                .unwrap_or_default();
 
         // Labels are best-effort: a forge error omits the section entirely rather
         // than failing the tool.
@@ -1855,25 +1859,31 @@ impl GitDesktopMcp {
     }
 }
 
-/// The bound repo's current branch (`rev-parse --abbrev-ref HEAD`), erroring on a
-/// detached/unborn HEAD so the caller can pass an explicit `head`. Mirrors the
-/// current-branch read used across the git layer.
-async fn current_branch(repo: &str) -> Result<String, McpError> {
-    let out = crate::git::runner::run_git(
-        Some(repo),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    .map_err(app_err)?;
-    let branch = out.stdout_lossy().trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
+/// The bound repo's current branch as `(name, full_ref)`, erroring on a
+/// detached/unborn HEAD so the caller can pass an explicit `head`. The name is for
+/// display and extraction; a rev position takes the full `refs/heads/<name>`, which a
+/// same-named tag can't shadow (a bare name resolves to the tag first).
+async fn current_branch(repo: &str) -> Result<(String, String), McpError> {
+    let full = crate::git::branches::current_branch_ref(repo)
+        .await
+        .map_err(app_err)?;
+    let unborn = match &full {
+        Some(_) => crate::git::branches::head_is_unborn(repo)
+            .await
+            .map_err(app_err)?,
+        None => false,
+    };
+    let Some(full) = full.filter(|_| !unborn) else {
         return Err(McpError::invalid_request(
             "HEAD is detached or unborn — pass an explicit `head` branch.",
             None,
         ));
-    }
-    Ok(branch)
+    };
+    let name = full
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&full)
+        .to_string();
+    Ok((name, full))
 }
 
 /// How many commit subjects the branch-name recipe feeds the model (newest first).
@@ -3661,6 +3671,108 @@ mod tests {
             None,
             "no resolvable default branch ⇒ no committed-work fallback"
         );
+    }
+
+    /// An explicit base and head are branch names too: under same-named tags the
+    /// recipe's commit subjects still come from `base..head` between the BRANCHES,
+    /// the same range its branch-first diff reads.
+    // Held across awaits deliberately — the guard IS the serialization (see SETTINGS_STORE_LOCK).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn pr_recipe_reads_explicit_branches_shadowed_by_tags() {
+        let _guard = settings_lock();
+        let base = tempfile::Builder::new()
+            .prefix("gd-pr-recipe-shadow-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_s = base.path().to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        git(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        git(&repo_s, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        // Both tags sit on the seed, behind both branches.
+        git(&repo_s, &["tag", "main"]).await;
+        git(&repo_s, &["tag", "feature"]).await;
+        std::fs::write(base.path().join("b.txt"), "b\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "base-only work"]).await;
+        git(&repo_s, &["switch", "-q", "-c", "feature"]).await;
+        std::fs::write(base.path().join("f.txt"), "f\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "branch-only work"]).await;
+
+        let mcp = GitDesktopMcp::with_options(repo_s, false, false, false, false);
+        let recipe = mcp
+            .build_pr_recipe(PrRecipeArgs {
+                base: Some("main".into()),
+                head: Some("feature".into()),
+            })
+            .await
+            .expect("assemble recipe");
+        assert_eq!(
+            (
+                recipe.prompt.contains("branch-only work"),
+                recipe.prompt.contains("base-only work"),
+            ),
+            (true, false),
+            "{}",
+            recipe.prompt
+        );
+    }
+
+    /// The PR recipe's default head under a same-named tag: the recipe names the
+    /// branch, and the diffs read its full ref — the bare name would diff the TAG.
+    /// Detached and unborn HEADs keep the documented refusal.
+    #[tokio::test]
+    async fn current_branch_names_a_branch_shadowed_by_a_tag() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-head-shadow-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_s = base.path().to_string_lossy().into_owned();
+        let refused =
+            |r: Result<(String, String), McpError>| r.expect_err("refused").message.to_string();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        let contract = "HEAD is detached or unborn — pass an explicit `head` branch.";
+        assert_eq!(refused(current_branch(&repo_s).await), contract);
+        git(&repo_s, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        git(&repo_s, &["tag", "shadowed"]).await;
+        git(&repo_s, &["switch", "-q", "-c", "shadowed"]).await;
+        std::fs::write(base.path().join("f.txt"), "f\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "branch work"]).await;
+
+        let (name, head_rev) = current_branch(&repo_s).await.unwrap();
+        assert_eq!(name, "shadowed");
+        assert_eq!(head_rev, "refs/heads/shadowed");
+        let diff_files = |compare: String| {
+            let repo_s = repo_s.clone();
+            async move {
+                crate::git::compare::git_branch_diff(repo_s, "HEAD~1".into(), compare, None, None)
+                    .await
+                    .unwrap()
+                    .files
+                    .into_iter()
+                    .map(|f| f.path)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(diff_files(head_rev).await, vec!["f.txt".to_string()]);
+        // To git itself the bare name is the tag, which is why the recipe never
+        // hands a rev position the name alone.
+        assert!(
+            git(&repo_s, &["diff", "--name-only", "HEAD~1...shadowed"])
+                .await
+                .trim()
+                .is_empty(),
+            "the bare name is the tag"
+        );
+
+        git(&repo_s, &["switch", "-q", "--detach"]).await;
+        assert_eq!(refused(current_branch(&repo_s).await), contract);
     }
 
     /// A `clone -o upstream` repo: the only remote-tracking ref lives under

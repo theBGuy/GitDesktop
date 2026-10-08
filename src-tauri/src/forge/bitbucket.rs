@@ -5534,32 +5534,9 @@ pub async fn publish_repo(
     let description = description.trim();
     let website = website.trim();
 
-    // Current branch (unborn / detached HEAD → a clear error, like gitlab::publish_repo).
-    let branch_out = crate::git::runner::run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        crate::git::runner::NETWORK_TIMEOUT,
-    )
-    .await
-    .map_err(|e| match &e {
-        AppError::Git { stderr, .. }
-            if stderr.contains("ambiguous argument") || stderr.contains("unknown revision") =>
-        {
-            AppError::InvalidArgument(
-                "make an initial commit before publishing (this repository has none yet)".into(),
-            )
-        }
-        _ => e,
-    })?;
-    let branch = branch_out.stdout_lossy().trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err(AppError::InvalidArgument(
-            "check out a branch before publishing (detached HEAD)".into(),
-        ));
-    }
-    // The branch rides the publish push's refspec — validate it here, still
-    // before the create POST.
-    crate::git::branches::validate_ref_name(&branch)?;
+    // Current branch (unborn / detached HEAD → a clear error), validated for the
+    // publish refspec — still before the create POST.
+    let branch = crate::git::remote::publish_branch(repo_path).await?;
 
     // Origin must not already exist (an externally-added origin would strand an
     // orphaned repo when the post-create `remote add` fails).

@@ -63,11 +63,13 @@ export function BranchDiffView({
     diffEnabled,
   );
   // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
-  // The merge base's own placeholder flag proves the fork point belongs to this
-  // (base, compare); the converse — a stale DIFF paired with fresh revs — is
-  // DiffContent's refusal via `dataIsPlaceholder`.
+  // The new side, and Blame, read at `compareRev`, the rev the backend resolved
+  // `compare` to: the bare name would read a same-named tag's files instead. The
+  // query's own placeholder flag proves both revs belong to this (base, compare);
+  // the converse — a stale DIFF paired with fresh revs — is DiffContent's refusal
+  // via `dataIsPlaceholder`.
   const mergeBase = useMergeBase(repoPath, base, compare);
-  const sideOldRev =
+  const sides =
     mergeBase.data !== undefined && !mergeBase.isPlaceholderData
       ? mergeBase.data
       : null;
@@ -148,7 +150,7 @@ export function BranchDiffView({
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
             <FileRowActions
               repoPath={repoPath}
-              blameRev={compare}
+              blameRev={sides?.compareRev}
               onKeyDown={onFilesKeyDown}
             >
               {files.data.map((file) => (
@@ -187,10 +189,14 @@ export function BranchDiffView({
               diff={diff}
               repoPath={repoPath}
               imageRevs={
-                sideOldRev ? { old: sideOldRev, new: compare } : undefined
+                sides
+                  ? { old: sides.mergeBase, new: sides.compareRev }
+                  : undefined
               }
               contentRevs={
-                sideOldRev ? { oldRev: sideOldRev, newRev: compare } : undefined
+                sides
+                  ? { oldRev: sides.mergeBase, newRev: sides.compareRev }
+                  : undefined
               }
             />
           ) : (

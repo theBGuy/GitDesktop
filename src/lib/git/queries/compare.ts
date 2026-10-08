@@ -88,8 +88,9 @@ export function useBranchFileDiff(
   });
 }
 
-/** The fork point the three-dot compare diffs against — the old side whole-file
- *  reads must use. Same enabled gate and placeholder policy as
+/** The fork point the three-dot compare diffs against (the old side whole-file
+ *  reads must use) and the rev `compare` resolved to (the new side). Same enabled
+ *  gate and placeholder policy as
  *  {@link useBranchDiffFiles}, so callers can pair the two on one
  *  `isPlaceholderData` check. */
 export function useMergeBase(

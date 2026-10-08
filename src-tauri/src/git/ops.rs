@@ -830,31 +830,30 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     crate::git::update_marker::refuse_if_branch_updating(state, repo_path, target_branch).await?;
 
     // Where we are now, so we can return on failure. A detached HEAD has no
-    // branch name, so fall back to restoring its commit directly.
-    let original_ref = run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
-    let detached = original_ref == "HEAD";
-    let original_restore = if detached {
-        run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+    // branch name, so fall back to restoring its commit directly. The branch NAME,
+    // never the short ref: `git switch heads/<name>` refuses, while the plain name
+    // picks the branch over a same-named tag.
+    let original_branch = crate::git::branches::current_branch_name(repo_path).await?;
+    if original_branch.is_some() && crate::git::branches::head_is_unborn(repo_path).await? {
+        return Err(crate::git::branches::unborn_head_error());
+    }
+    let detached = original_branch.is_none();
+    let original_restore = match original_branch {
+        Some(name) => name,
+        None => run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
             .await?
             .stdout_lossy()
             .trim()
-            .to_string()
-    } else {
-        original_ref
+            .to_string(),
     };
 
-    // The target's tip before we touch it, so we can roll back cleanly.
+    // The target's tip before we touch it, so we can roll back cleanly. Read as the
+    // branch the switch below lands on: the rollback resets `target` to this, so a
+    // same-named tag's commit would discard the target's own work.
+    let target_rev = crate::git::branches::branch_first_rev(repo_path, target_branch).await;
     let target_tip = run_git(
         Some(repo_path),
-        &["rev-parse", target_branch],
+        &["rev-parse", &target_rev],
         DEFAULT_TIMEOUT,
     )
     .await?
@@ -2372,7 +2371,8 @@ pub(crate) async fn git_merge_core(
             _ => {}
         }
     }
-    args.push(&branch);
+    let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
+    args.push(&rev);
     let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw, because a conflicted merge reports entirely on stdout and leaves
     // stderr empty — the combined text is what keeps that report in the error.
@@ -2418,6 +2418,7 @@ pub async fn git_merge_preview(
         status: "unknown".to_string(),
         conflicts: Vec::new(),
     };
+    let branch = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
 
     let head = run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
     let tip = run_git_raw(Some(&repo_path), &["rev-parse", &branch], DEFAULT_TIMEOUT).await?;
@@ -2503,13 +2504,14 @@ pub(crate) async fn git_rebase_core(
     branch: String,
 ) -> AppResult<()> {
     validate_branch_arg(&branch)?;
+    let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted rebase splits its report — `could not apply` plus the
     // resolve hints on stderr, the `CONFLICT (…` file list on stdout.
     let out = run_git_mutating_raw(
         state,
         &repo_path,
-        &["-c", "core.editor=true", "rebase", &branch],
+        &["-c", "core.editor=true", "rebase", &rev],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -2540,6 +2542,8 @@ async fn rebase_onto(
 ) -> AppResult<()> {
     validate_branch_arg(new_base)?;
     validate_branch_arg(old_base)?;
+    let new_base = &crate::git::branches::branch_first_rev(repo_path, new_base).await;
+    let old_base = &crate::git::branches::branch_first_rev(repo_path, old_base).await;
     let already_unmerged = unmerged_paths(repo_path).await;
     // Raw, for the same split report as `git_rebase_core`.
     let out = run_git_mutating_raw(
@@ -2849,6 +2853,30 @@ async fn branch_tip(repo_path: &str, base: &str) -> AppResult<String> {
     .to_string())
 }
 
+/// The main tree's branch, as the `current` that [`finalize_base`] and the clean-tree
+/// gates compare `base` against: its NAME, or `"HEAD"` when detached (no branch is
+/// ever named that). An unborn HEAD is refused before any merge work starts.
+async fn current_branch_for_merge(repo_path: &str) -> AppResult<String> {
+    let Some(name) = crate::git::branches::current_branch_name(repo_path).await? else {
+        return Ok("HEAD".to_string());
+    };
+    if crate::git::branches::head_is_unborn(repo_path).await? {
+        return Err(crate::git::branches::unborn_head_error());
+    }
+    Ok(name)
+}
+
+/// The `originalRef` a history rewrite journals: HEAD's branch NAME, which
+/// `oplog::is_interrupted` compares against the branch HEAD is on later, or `"HEAD"`
+/// when detached; `None` when the read fails. Callers have already seen a born HEAD.
+async fn journal_original_ref(repo_path: &str) -> Option<String> {
+    match crate::git::branches::current_branch_name(repo_path).await {
+        Ok(Some(name)) => Some(name),
+        Ok(None) => Some("HEAD".to_string()),
+        Err(_) => None,
+    }
+}
+
 /// Advances `base` to `new_sha` after the merge landed in the resolve worktree,
 /// picking the safe mechanic for wherever `base` is checked out:
 /// - the MAIN repo's current branch → `merge --ff-only` there (the tree was gated
@@ -3083,15 +3111,7 @@ pub(crate) async fn merge_local_pr(
     };
 
     // Where the main tree is now, and base's tip — captured before any mutation.
-    let current = run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    let current = current_branch_for_merge(repo_path).await?;
     // Fully-qualified: this one read anchors the journal, the resolve worktree's
     // start point, and the rebase strategy's replay range.
     let base_tip = branch_tip(repo_path, base).await?;
@@ -3144,13 +3164,15 @@ pub(crate) async fn merge_local_pr(
     }
 
     // Run the strategy IN the worktree (cwd = worktree_path). Squash/merge write
-    // a commit; rebase cherry-picks the range. Conflicts leave unmerged paths.
-    let range = format!("{base_tip}..{head}");
+    // a commit; rebase cherry-picks the range. Conflicts leave unmerged paths. The
+    // head is read as the branch the PR names, never a same-named tag.
+    let head_rev = crate::git::branches::branch_first_rev(repo_path, head).await;
+    let range = format!("{base_tip}..{head_rev}");
     let result: AppResult<()> = match strategy {
         "squash" => {
             match run_git_raw(
                 Some(&worktree_path),
-                &["merge", "--squash", head],
+                &["merge", "--squash", &head_rev],
                 DEFAULT_TIMEOUT,
             )
             .await
@@ -3180,7 +3202,7 @@ pub(crate) async fn merge_local_pr(
         .and_then(check_code),
         _ => run_git_raw(
             Some(&worktree_path),
-            &["merge", "--no-ff", "-m", &message, head],
+            &["merge", "--no-ff", "-m", &message, &head_rev],
             DEFAULT_TIMEOUT,
         )
         .await
@@ -3303,15 +3325,7 @@ pub(crate) async fn finish_local_pr_merge(
     // into the main tree — re-guard clean HERE, since the user may have dirtied it
     // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
     // moves by `update-ref` and the main tree is never touched.
-    let current = run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    let current = current_branch_for_merge(repo_path).await?;
     if base == current {
         ensure_clean_tree(repo_path).await?;
     }
@@ -4168,6 +4182,8 @@ pub async fn git_conflict_preview(
         status: "unknown".to_string(),
         conflicts: Vec::new(),
     };
+    let base = crate::git::branches::branch_first_rev(&repo_path, &base).await;
+    let head = crate::git::branches::branch_first_rev(&repo_path, &head).await;
 
     let base_sha = run_git_raw(Some(&repo_path), &["rev-parse", &base], DEFAULT_TIMEOUT).await?;
     let head_sha = run_git_raw(Some(&repo_path), &["rev-parse", &head], DEFAULT_TIMEOUT).await?;
@@ -4354,15 +4370,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
     // mutation (`reset --hard`). Best-effort: a journal failure returns None and
     // the op proceeds unchanged. Runs under the lock (app-data I/O, not git) because
     // the `orig` anchor it records is only valid while this hold is unbroken.
-    let original_ref = run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()
-    .map(|o| o.stdout_lossy().trim().to_string())
-    .filter(|s| !s.is_empty());
+    let original_ref = journal_original_ref(repo_path).await;
     let label = format!("Rewrite {} commit(s)", steps.len());
     let op_id = crate::oplog::begin(
         repo_path,
@@ -4570,15 +4578,12 @@ pub async fn git_rebase_edit(
         .ok()
         .map(|o| o.stdout_lossy().trim().to_string())
         .unwrap_or_default();
-    let original_ref = run_git(
-        Some(&repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()
-    .map(|o| o.stdout_lossy().trim().to_string())
-    .filter(|s| !s.is_empty());
+    // An empty sha means an unborn HEAD (or a failed read), which journals no branch.
+    let original_ref = if original_sha.is_empty() {
+        None
+    } else {
+        journal_original_ref(&repo_path).await
+    };
     let label = format!("Interactive rebase onto {base}");
     let op_id = crate::oplog::begin(
         &repo_path,
@@ -4831,14 +4836,16 @@ pub(crate) async fn git_delete_tag_core(
 #[tauri::command]
 pub async fn git_list_tags(repo_path: String) -> AppResult<Vec<TagInfo>> {
     // %(*objectname) is the dereferenced commit for annotated tags (empty for
-    // lightweight, where %(objectname) already IS the commit).
+    // lightweight, where %(objectname) already IS the commit). The name is read in
+    // full and stripped of exactly `refs/tags/`: the short form is `tags/<name>` for a
+    // tag sharing its name with a branch.
     let out = run_git(
         Some(&repo_path),
         &[
             "for-each-ref",
             "--sort=-creatordate",
             "refs/tags",
-            "--format=%(refname:short)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(creatordate:iso-strict)%00%(contents:subject)",
+            "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(creatordate:iso-strict)%00%(contents:subject)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -4848,10 +4855,11 @@ pub async fn git_list_tags(repo_path: String) -> AppResult<Vec<TagInfo>> {
         .lines()
         .filter_map(|line| {
             let mut parts = line.split('\0');
-            let name = parts.next()?.to_string();
-            if name.is_empty() {
-                return None;
-            }
+            let name = parts
+                .next()?
+                .strip_prefix("refs/tags/")
+                .filter(|n| !n.is_empty())?
+                .to_string();
             let object_type = parts.next().unwrap_or("");
             let object_name = parts.next().unwrap_or("");
             let deref = parts.next().unwrap_or("");
@@ -8027,6 +8035,25 @@ detached
         }
     }
 
+    /// A tag sharing its name with a branch lists under that plain name, which the
+    /// delete and push paths then rebuild into `refs/tags/<name>`.
+    #[tokio::test]
+    async fn list_tags_names_a_tag_shadowed_by_a_branch() {
+        let (_dir, repo) = setup_repo("tags-branch-shadow").await;
+        git(&repo, &["tag", "release"]).await;
+        git(&repo, &["branch", "release"]).await;
+        git(&repo, &["tag", "plain"]).await;
+
+        let mut names: Vec<String> = git_list_tags(repo.clone())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["plain".to_string(), "release".to_string()]);
+    }
+
     /// A second bare repo wired to `repo` under `remote` — what a fork clone's
     /// `upstream` looks like.
     async fn add_bare_remote(
@@ -8684,6 +8711,325 @@ detached
             tree_before,
             "an all-ours merge keeps base's tree"
         );
+    }
+
+    /// A batch rollback returns to the branch it started on even when a tag shares
+    /// that branch's name: `git switch heads/<name>` refuses ("a branch is expected"),
+    /// while the plain name picks the branch over the tag.
+    #[tokio::test]
+    async fn cherry_pick_onto_rollback_returns_to_a_branch_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("pick-onto-tag-shadow").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "feature"]).await;
+        let feature_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["tag", "feature", "target"]).await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &[c1, c2], "target").await {
+            Err(AppError::Git { stderr, .. }) => {
+                assert!(stderr.contains("was rolled back"), "{stderr}");
+            }
+            Ok(_) => panic!("the conflicting pick must fail"),
+            Err(e) => panic!("expected the rolled-back verdict, got {e:?}"),
+        }
+        assert_eq!(rev(&repo, "refs/heads/target").await, target_tip);
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/feature"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, feature_tip);
+        assert_eq!(
+            pick_record(&repo).await.original_ref.as_deref(),
+            Some("feature"),
+            "the journal names the branch the recovery banner compares against"
+        );
+    }
+
+    /// Advancing the CURRENT branch touches the main tree, so a dirty one is refused
+    /// up front — including when a tag shares the branch's name.
+    #[tokio::test]
+    async fn merge_local_pr_guards_a_current_base_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("lpr-tag-shadow").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        git(&repo, &["tag", &base]).await;
+        let base_before = rev(&repo, "HEAD").await;
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let Err(err) =
+            merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root).await
+        else {
+            panic!("a dirty current base is refused");
+        };
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("uncommitted changes")),
+            "{err:?}"
+        );
+        // HEAD is still on `base`, so its tip is the branch's.
+        assert_eq!(rev(&repo, "HEAD").await, base_before);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "dirty\n");
+    }
+
+    /// The finish re-guards the main tree when `base` is the current branch; a tag
+    /// sharing that name must not skip it.
+    #[tokio::test]
+    async fn finish_local_pr_merge_guards_a_current_base_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("lpr-finish-tag-shadow").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["tag", &base]).await;
+        let base_before = rev(&repo, "HEAD").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        git(&wt, &["checkout", "--theirs", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+        // Dirtied during the resolution, after the merge's own upfront check.
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
+
+        let Err(err) = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "merge it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            outcome.op_id.clone(),
+        )
+        .await
+        else {
+            panic!("a dirty current base is refused");
+        };
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("uncommitted changes")),
+            "{err:?}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, base_before);
+        remove_resolve_worktree(&state, &repo, &wt).await;
+    }
+
+    /// The history rewrites journal the branch they started on by its plain name —
+    /// the recovery banner compares it against the branch HEAD is on now.
+    #[tokio::test]
+    async fn rewrites_journal_a_branch_shadowed_by_a_tag_by_its_name() {
+        let (dir, repo) = setup_repo("rewrite-tag-shadow").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["tag", "feature", &base]).await;
+
+        let state = AppState::default();
+        rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)])
+            .await
+            .unwrap();
+        let journaled = |op: &'static str| {
+            let repo = repo.clone();
+            async move {
+                crate::oplog::git_oplog_list(repo)
+                    .await
+                    .expect("the journal must be readable")
+                    .into_iter()
+                    .find(|e| e.op == op)
+                    .expect("the op must be journaled")
+                    .original_ref
+            }
+        };
+        assert_eq!(
+            journaled("rewrite_commits").await.as_deref(),
+            Some("feature")
+        );
+
+        let tip = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "d.txt", "d\n", "three").await;
+        let c3 = rev(&repo, "HEAD").await;
+        git_rebase_edit(repo.clone(), tip, vec![pick(&c3)])
+            .await
+            .unwrap();
+        assert_eq!(journaled("rebase_edit").await.as_deref(), Some("feature"));
+    }
+
+    /// A repo on its default branch at the seed commit, with `feature` one commit
+    /// (`f.txt`) ahead of it and a TAG `feature` on the seed. A bare `feature` resolves
+    /// to that tag (gitrevisions checks refs/tags before refs/heads), so every probe
+    /// below tells "branch" from "tag" apart. Returns the dir, repo, default branch and
+    /// the branch tip.
+    async fn branch_shadowed_by_tag(marker: &str) -> (tempfile::TempDir, String, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "f\n", "feature work").await;
+        let feature_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        git(&repo, &["tag", "feature"]).await;
+        (dir, repo, base, feature_tip)
+    }
+
+    /// Merging a branch picked by name merges the BRANCH, not a same-named tag.
+    #[tokio::test]
+    async fn merge_takes_the_branch_shadowed_by_a_tag() {
+        let (dir, repo, _base, feature_tip) = branch_shadowed_by_tag("merge-shadow").await;
+        let state = AppState::default();
+        git_merge_core(
+            &state,
+            repo.clone(),
+            "feature".into(),
+            false,
+            false,
+            "none".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rev(&repo, "HEAD").await, feature_tip);
+        assert!(dir.path().join("f.txt").exists());
+    }
+
+    /// An unshadowed branch merges under its plain name, so git's default message
+    /// still reads "Merge branch 'side'", never the qualified ref.
+    #[tokio::test]
+    async fn merge_keeps_the_default_message_for_an_unshadowed_branch() {
+        let (dir, repo) = setup_repo("merge-message").await;
+        git(&repo, &["switch", "-c", "side"]).await;
+        commit_file(&repo, dir.path(), "s.txt", "s\n", "side work").await;
+        git(&repo, &["switch", "-"]).await;
+        let state = AppState::default();
+        git_merge_core(
+            &state,
+            repo.clone(),
+            "side".into(),
+            false,
+            true,
+            "none".into(),
+        )
+        .await
+        .unwrap();
+        let subject = git(&repo, &["log", "-1", "--format=%s"]).await;
+        assert!(subject.starts_with("Merge branch 'side'"), "{subject}");
+    }
+
+    /// The merge preview predicts the BRANCH's merge (a fast-forward here), not the
+    /// tag's (already up to date).
+    #[tokio::test]
+    async fn merge_preview_reads_the_branch_shadowed_by_a_tag() {
+        let (_dir, repo, _base, _tip) = branch_shadowed_by_tag("preview-shadow").await;
+        let preview = git_merge_preview(repo.clone(), "feature".into(), "none".into())
+            .await
+            .unwrap();
+        assert_eq!(preview.status, "fast-forward");
+    }
+
+    /// Rebasing onto a branch picked by name replays onto the BRANCH.
+    #[tokio::test]
+    async fn rebase_onto_a_branch_shadowed_by_a_tag_takes_the_branch() {
+        let (dir, repo, _base, feature_tip) = branch_shadowed_by_tag("rebase-shadow").await;
+        git(&repo, &["switch", "-c", "topic"]).await;
+        commit_file(&repo, dir.path(), "t.txt", "t\n", "topic work").await;
+        let state = AppState::default();
+        git_rebase_core(&state, repo.clone(), "feature".into())
+            .await
+            .unwrap();
+        let plain = rev(&repo, "HEAD~1").await;
+
+        // `--onto` resolves its new base the same way.
+        let (dir2, repo2, base2, tip2) = branch_shadowed_by_tag("rebase-onto-shadow").await;
+        git(&repo2, &["switch", "-c", "wrong", &base2]).await;
+        commit_file(&repo2, dir2.path(), "w.txt", "w\n", "wrong base work").await;
+        git(&repo2, &["switch", "-c", "topic"]).await;
+        commit_file(&repo2, dir2.path(), "t.txt", "t\n", "topic work").await;
+        rebase_onto(&state, &repo2, "feature", "wrong")
+            .await
+            .unwrap();
+        let onto = rev(&repo2, "HEAD~1").await;
+        assert_eq!((plain, onto), (feature_tip, tip2));
+        assert!(
+            !dir2.path().join("w.txt").exists(),
+            "the wrong base's work is dropped"
+        );
+    }
+
+    /// The local-PR conflict precheck reads the head BRANCH: here it conflicts with
+    /// the base, where the tag (an ancestor of base) would read as a clean merge.
+    #[tokio::test]
+    async fn conflict_preview_reads_a_head_shadowed_by_a_tag() {
+        let (dir, repo, base, _tip) = branch_shadowed_by_tag("conflict-preview-shadow").await;
+        git(&repo, &["switch", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let preview = git_conflict_preview(repo.clone(), base.clone(), "feature".into())
+            .await
+            .unwrap();
+        assert_eq!(preview.status, "conflict");
+    }
+
+    /// A batch rollback restores the target BRANCH's own tip: rewinding it to a
+    /// same-named tag's commit would discard the target's commits.
+    #[tokio::test]
+    async fn cherry_pick_onto_rollback_keeps_a_target_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("pick-onto-target-shadow").await;
+        git(&repo, &["tag", "target"]).await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "refs/heads/target").await;
+        git(&repo, &["checkout", "feature"]).await;
+
+        let state = AppState::default();
+        assert!(
+            cherry_pick_onto(&state, &repo, &[c1, c2], "target")
+                .await
+                .is_err(),
+            "the conflicting batch fails and rolls back"
+        );
+        assert_eq!(rev(&repo, "refs/heads/target").await, target_tip);
+    }
+
+    /// A local-PR merge merges the head BRANCH, not a same-named tag.
+    #[tokio::test]
+    async fn merge_local_pr_merges_a_head_shadowed_by_a_tag() {
+        let (_dir, repo, base, _tip) = branch_shadowed_by_tag("lpr-head-shadow").await;
+        // Off `base`, so the merge advances it by update-ref.
+        git(&repo, &["switch", "-c", "work"]).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let Ok(outcome) =
+            merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root).await
+        else {
+            panic!("the merge succeeds");
+        };
+        assert_eq!(outcome.status, "merged");
+        git(&repo, &["cat-file", "-e", &format!("{base}:f.txt")]).await;
     }
 
     /// The wording `finalize_base`'s CAS refusal discriminates on. Both failures

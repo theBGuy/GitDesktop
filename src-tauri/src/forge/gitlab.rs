@@ -6550,37 +6550,7 @@ pub async fn publish_repo(
     // Every local precondition is checked BEFORE the mutating create — a guard
     // that fires after it would strand an orphaned GitLab project whose name
     // then blocks every retry with "has already been taken".
-    let branch_out = crate::git::runner::run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        crate::git::runner::NETWORK_TIMEOUT,
-    )
-    .await
-    .map_err(|e| {
-        // An unborn branch (fresh `git init`, no commits) makes rev-parse fail
-        // with "ambiguous argument 'HEAD'" — translate just that; any other
-        // failure (not a repo, git missing, …) keeps its real message.
-        match &e {
-            AppError::Git { stderr, .. }
-                if stderr.contains("ambiguous argument") || stderr.contains("unknown revision") =>
-            {
-                AppError::InvalidArgument(
-                    "make an initial commit before publishing (this repository has none yet)"
-                        .into(),
-                )
-            }
-            _ => e,
-        }
-    })?;
-    let branch = branch_out.stdout_lossy().trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err(AppError::InvalidArgument(
-            "check out a branch before publishing (detached HEAD)".into(),
-        ));
-    }
-    // The branch rides the publish push's refspec — validate it here, still
-    // before the create.
-    crate::git::branches::validate_ref_name(&branch)?;
+    let branch = crate::git::remote::publish_branch(repo_path).await?;
     // An origin remote may have appeared since the UI's (cached) no-origin
     // check — adding one externally then publishing would otherwise strand an
     // orphaned project when the post-create `remote add` fails.

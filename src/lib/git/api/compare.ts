@@ -2,6 +2,7 @@ import { invoke } from "@/lib/tauri/invoke";
 import type {
   BranchComparison,
   CommitSummary,
+  CompareSides,
   DeltaDiff,
   DiffStatEntry,
   FileDiff,
@@ -47,10 +48,11 @@ export const gitBranchFileDiff = (
     filePath,
   });
 
-/** The fork point of two refs. The compare surfaces diff three-dot, so their old
- *  side must be read from this commit rather than from `base`. */
+/** The fork point of two refs, plus the rev the compare side resolved to. The
+ *  compare surfaces diff three-dot, so their old side must be read from the fork
+ *  point rather than from `base`, and the new side from `compareRev`. */
 export const gitMergeBase = (repoPath: string, base: string, compare: string) =>
-  invoke<string>("git_merge_base", { repoPath, base, compare });
+  invoke<CompareSides>("git_merge_base", { repoPath, base, compare });
 
 /** Whether every SHA is already a local commit object (no network). Gates reads
  *  that need a remote PR's commits to exist in this checkout. */

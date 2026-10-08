@@ -978,14 +978,14 @@ pub(crate) async fn git_push_core(
                 &[
                     "for-each-ref",
                     &format!("refs/heads/{b}"),
-                    "--format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)",
+                    UPSTREAM_TRACKING_FORMAT,
                 ],
                 DEFAULT_TIMEOUT,
             )
             .await?;
             // No exact-refname line ⇒ no such local branch (an *untracked* branch
             // still emits `refs/heads/<b>\0\0\0`).
-            let Some((upstream_short, remotename, gone)) =
+            let Some((upstream, remotename, gone)) =
                 parse_upstream_tracking(&out.stdout_lossy(), &format!("refs/heads/{b}"))
             else {
                 return Err(AppError::InvalidArgument(format!("no such branch: {b}")));
@@ -996,7 +996,7 @@ pub(crate) async fn git_push_core(
             cred_remote = resolve_push_target(remote.as_deref(), &remotename, gone).to_string();
             build_push_args(
                 b,
-                &upstream_short,
+                &upstream,
                 &remotename,
                 gone,
                 set_upstream,
@@ -1117,26 +1117,58 @@ fn without_force_if_includes<'a>(argv: &[&'a str]) -> Vec<&'a str> {
         .collect()
 }
 
-/// Parse one `for-each-ref … --format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)`
-/// line into `(upstream_short, remotename, gone)`, but ONLY when its `%(refname)`
-/// equals `expected_ref`. `for-each-ref` matches a pattern as a prefix up to a
-/// slash (`refs/heads/feat` also matches `refs/heads/feat/sub`), so the exact
-/// refname check is what enforces "no such branch" for a non-exact name.
-/// Returns `None` when there is no line, or the first line's refname isn't
-/// `expected_ref`. An *untracked* branch still emits `refs/heads/<b>\0\0\0`,
-/// which (refname matches) parses to `Some(("","",false))`.
-fn parse_upstream_tracking(stdout: &str, expected_ref: &str) -> Option<(String, String, bool)> {
+/// The `for-each-ref` format [`parse_upstream_tracking`] reads. The upstream rides
+/// `%(upstream:remoteref)` (`branch.<b>.merge`, the branch's name ON the remote),
+/// never `%(upstream:short)`: the short form disambiguates against local refs, so a
+/// tag named `origin/<x>` turns it into `remotes/origin/<x>`, which the push would
+/// then create as a new remote branch. The remote-side name also needs no knowledge
+/// of the remote's fetch-refspec layout, and covers a local (`.`) upstream.
+const UPSTREAM_TRACKING_FORMAT: &str =
+    "--format=%(refname)%00%(upstream:remoteref)%00%(upstream:remotename)%00%(upstream:track)";
+
+/// What a local branch tracks, as [`build_push_args`] needs it.
+#[derive(Debug, Clone, PartialEq)]
+enum Upstream {
+    /// No upstream configured.
+    Untracked,
+    /// A branch on the upstream remote, by its name there.
+    Branch(String),
+    /// A ref that is no branch (`refs/pull/<n>/head`, `refs/tags/<x>`): nothing to
+    /// push INTO, and nothing a push may retrack away from.
+    NotABranch,
+}
+
+/// Parse one [`UPSTREAM_TRACKING_FORMAT`] line into `(upstream, remotename, gone)`,
+/// but ONLY when its `%(refname)` equals `expected_ref`. `for-each-ref` matches a
+/// pattern as a prefix up to a slash (`refs/heads/feat` also matches
+/// `refs/heads/feat/sub`), so the exact refname check is what enforces "no such
+/// branch" for a non-exact name. Returns `None` when there is no line, or the first
+/// line's refname isn't `expected_ref`. An *untracked* branch still emits
+/// `refs/heads/<b>\0\0\0`, which (refname matches) parses to
+/// `Some((Upstream::Untracked, "", false))`.
+fn parse_upstream_tracking(stdout: &str, expected_ref: &str) -> Option<(Upstream, String, bool)> {
     let line = stdout.lines().next()?;
     let mut parts = line.split('\0');
     let refname = parts.next().unwrap_or("");
     if refname != expected_ref {
         return None;
     }
-    let upstream_short = parts.next().unwrap_or("").to_string();
+    // Three shapes of `branch.<b>.merge`: `refs/heads/<x>` is branch `<x>`; any other
+    // `refs/` ref (`refs/pull/<n>/head` from a pull fetch refspec) is NOT a branch,
+    // pushed under the local name with its tracking config left alone; a bare name
+    // (hand-edited config, which git DWIMs) is the branch name itself.
+    let upstream = match parts.next().unwrap_or("") {
+        "" => Upstream::Untracked,
+        remoteref => match remoteref.strip_prefix("refs/heads/") {
+            Some(name) => Upstream::Branch(name.to_string()),
+            None if remoteref.starts_with("refs/") => Upstream::NotABranch,
+            None => Upstream::Branch(remoteref.to_string()),
+        },
+    };
     let remotename = parts.next().unwrap_or("").to_string();
     let track = parts.next().unwrap_or("");
     // Mirror branches.rs's gone detection: `[gone]` in %(upstream:track).
-    Some((upstream_short, remotename, track.contains("[gone]")))
+    Some((upstream, remotename, track.contains("[gone]")))
 }
 
 /// Resolve the remote a named-branch push targets. Pure so the decision table
@@ -1162,7 +1194,8 @@ fn resolve_push_target<'a>(
 /// tracking state and an optional caller-chosen `requested_remote`. Pure — no git
 /// calls — so the decision table is unit-testable.
 ///
-/// - `upstream_short`: `%(upstream:short)` (e.g. `origin/feat`), empty when untracked.
+/// - `upstream`: what the branch tracks, see [`parse_upstream_tracking`] (e.g.
+///   `Upstream::Branch("feat")` for `origin/feat`).
 /// - `remotename`: `%(upstream:remotename)` (the tracked upstream's remote).
 /// - `gone`: the tracked ref was deleted (`[gone]`).
 /// - `requested_remote`: an explicit push target (the switcher's per-remote Publish
@@ -1173,16 +1206,17 @@ fn resolve_push_target<'a>(
 /// The target `T` is [`resolve_push_target`]. Rules:
 /// - `remote_branch` = `rb` → `push T refs/heads/<branch>:refs/heads/<rb>`, no `-u`:
 ///   an explicitly named destination pins the refspec and leaves tracking alone.
-/// - untracked / gone / `set_upstream` → `-u T refs/heads/<branch>:refs/heads/<branch>`
-///   (publish + track). A *gone* upstream publishes under the LOCAL name, deliberately
-///   not resurrecting a differently-named deleted ref.
-/// - tracked and `T == remotename`: strip the `remotename/` prefix off
-///   `upstream_short` to get the remote branch name `up`;
-///   `push T refs/heads/<branch>:refs/heads/<up>` (a bare `push T <branch>` would
-///   advance the WRONG remote ref when the names differ).
+/// - untracked / gone branch / `set_upstream` → `-u T
+///   refs/heads/<branch>:refs/heads/<branch>` (publish + track). A *gone* upstream
+///   publishes under the LOCAL name, deliberately not resurrecting a differently-named
+///   deleted ref.
+/// - tracked branch `up` and `T == remotename`: `push T
+///   refs/heads/<branch>:refs/heads/<up>` (a bare `push T <branch>` would advance the
+///   WRONG remote ref when the names differ).
 /// - tracked and `T != remotename` (a copy elsewhere, e.g. a fork's `origin` snapshot
-///   of an `upstream`-tracked branch): `push T refs/heads/<branch>:refs/heads/<branch>`
-///   with NO `-u` — publishes under the LOCAL name, upstream config untouched.
+///   of an `upstream`-tracked branch), or a non-branch upstream: `push T
+///   refs/heads/<branch>:refs/heads/<branch>` with NO `-u` — publishes under the LOCAL
+///   name, upstream config untouched.
 ///
 /// Refspecs are fully qualified so a branch named `+x`/`-x` can't be read as a
 /// force/delete indicator; the remote is only ever the bare `push <remote>` arg.
@@ -1191,7 +1225,7 @@ fn resolve_push_target<'a>(
 #[allow(clippy::too_many_arguments)] // one flat arg per decision-table input
 fn build_push_args(
     branch: &str,
-    upstream_short: &str,
+    upstream: &Upstream,
     remotename: &str,
     gone: bool,
     set_upstream: bool,
@@ -1213,26 +1247,52 @@ fn build_push_args(
         args.push(format!("refs/heads/{branch}:refs/heads/{rb}"));
         return args;
     }
-    let untracked = upstream_short.is_empty();
-    if untracked || gone || set_upstream {
-        // Publish + track, under the LOCAL name.
-        args.extend(["-u", target].map(str::to_string));
-        args.push(publish_refspec(branch));
-    } else if target == remotename {
-        // Tracked → its own remote: target the remote branch name explicitly (it
-        // may differ from the local one).
-        let up = upstream_short
-            .strip_prefix(&format!("{remotename}/"))
-            .unwrap_or(upstream_short);
-        args.push(target.to_string());
-        args.push(format!("refs/heads/{branch}:refs/heads/{up}"));
-    } else {
-        // Tracked, but pushing to a DIFFERENT remote than the upstream — a copy
-        // under the local name, no `-u`, upstream config untouched (never retrack).
-        args.push(target.to_string());
-        args.push(publish_refspec(branch));
+    let publish = match upstream {
+        Upstream::Untracked => true,
+        Upstream::Branch(_) => gone || set_upstream,
+        // Only an explicit request retracks away from a non-branch upstream.
+        Upstream::NotABranch => set_upstream,
+    };
+    match upstream {
+        _ if publish => {
+            // Publish + track, under the LOCAL name.
+            args.extend(["-u", target].map(str::to_string));
+            args.push(publish_refspec(branch));
+        }
+        Upstream::Branch(up) if target == remotename => {
+            // Tracked → its own remote: target the remote branch name explicitly (it
+            // may differ from the local one).
+            args.push(target.to_string());
+            args.push(format!("refs/heads/{branch}:refs/heads/{up}"));
+        }
+        _ => {
+            // Tracked, but pushing to a DIFFERENT remote than the upstream, or tracking
+            // a non-branch ref — a copy under the local name, no `-u`, upstream config
+            // untouched (never retrack).
+            args.push(target.to_string());
+            args.push(publish_refspec(branch));
+        }
     }
     args
+}
+
+/// The branch a forge publish pushes: HEAD's branch NAME, validated for the publish
+/// refspec. Shared by the GitLab and Bitbucket publishes, which run it BEFORE they
+/// create the remote project — a refusal after the create would orphan it. The two
+/// refusal strings are the publish dialog's contract.
+pub(crate) async fn publish_branch(repo_path: &str) -> AppResult<String> {
+    let Some(branch) = crate::git::branches::current_branch_name(repo_path).await? else {
+        return Err(AppError::InvalidArgument(
+            "check out a branch before publishing (detached HEAD)".into(),
+        ));
+    };
+    if crate::git::branches::head_is_unborn(repo_path).await? {
+        return Err(AppError::InvalidArgument(
+            "make an initial commit before publishing (this repository has none yet)".into(),
+        ));
+    }
+    crate::git::branches::validate_ref_name(&branch)?;
+    Ok(branch)
 }
 
 /// Fully-qualified same-name push refspec. Qualification alone only stops a
@@ -1251,9 +1311,10 @@ mod tests {
         is_auth_class_failure, is_push_default_left, is_unknown_push_option,
         parse_upstream_tracking, publish_refspec, push_upstream_branch, push_upstream_target,
         remove_busy_tail, remove_remote, resolve_push_target, run_git_mutating_with_creds,
-        with_busy_tail, without_force_if_includes, PushGuard, FORCE_IF_INCLUDES,
+        with_busy_tail, without_force_if_includes, PushGuard, Upstream, FORCE_IF_INCLUDES,
         IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST,
         REMOTE_PUSH_DEFAULT_LEFT, REMOTE_PUSH_DEFAULT_LOST, REMOTE_SECTION_LOST, REMOTE_UNCHANGED,
+        UPSTREAM_TRACKING_FORMAT,
     };
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
@@ -2163,20 +2224,29 @@ mod tests {
 
     // --- Pure arg-building for a named-branch push. ---
 
+    /// The upstream a decision-table row tracks: `""` is none, else that branch.
+    fn up(name: &str) -> Upstream {
+        if name.is_empty() {
+            Upstream::Untracked
+        } else {
+            Upstream::Branch(name.to_string())
+        }
+    }
+
     #[test]
     fn push_untracked_publishes_with_upstream() {
         // Empty upstream → first-time publish + track.
         assert_eq!(
-            build_push_args("feature", "", "", false, false, false, None, None),
+            build_push_args("feature", &up(""), "", false, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
 
     #[test]
     fn push_gone_upstream_publishes_with_upstream() {
-        // A deleted upstream ref (still named by %(upstream:short)) republishes.
+        // A deleted upstream ref (still named by %(upstream:remoteref)) republishes.
         assert_eq!(
-            build_push_args("feature", "origin/feature", "origin", true, false, false, None, None),
+            build_push_args("feature", &up("feature"), "origin", true, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2184,7 +2254,7 @@ mod tests {
     #[test]
     fn push_tracked_same_name_plain_push() {
         assert_eq!(
-            build_push_args("feature", "origin/feature", "origin", false, false, false, None, None),
+            build_push_args("feature", &up("feature"), "origin", false, false, false, None, None),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2194,7 +2264,7 @@ mod tests {
         // Local `feature` tracks `origin/feat` → explicit refspec so we advance
         // the right remote ref, not `origin/feature`.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", false, false, false, None, None),
+            build_push_args("feature", &up("feat"), "origin", false, false, false, None, None),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feat"]
         );
     }
@@ -2204,7 +2274,7 @@ mod tests {
         // No requested remote + a branch tracking a fork's `upstream/main` targets
         // its OWN remote: T == remotename → the refspec-to-`up` arm.
         assert_eq!(
-            build_push_args("main", "upstream/main", "upstream", false, false, false, None, None),
+            build_push_args("main", &up("main"), "upstream", false, false, false, None, None),
             vec!["push", "upstream", "refs/heads/main:refs/heads/main"]
         );
     }
@@ -2214,7 +2284,7 @@ mod tests {
         // Explicitly requesting the branch's OWN tracked remote is the same arm:
         // T == remotename → advance the tracked remote-branch name explicitly.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", false, false, false, Some("origin"), None),
+            build_push_args("feature", &up("feat"), "origin", false, false, false, Some("origin"), None),
             vec!["push", "origin", "refs/heads/feature:refs/heads/feat"]
         );
     }
@@ -2224,7 +2294,7 @@ mod tests {
         // A tracked-on-origin branch pushed explicitly to `upstream` → a copy under
         // the LOCAL name, no `-u`, upstream config untouched.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", false, false, false, Some("upstream"), None),
+            build_push_args("feature", &up("feat"), "origin", false, false, false, Some("upstream"), None),
             vec!["push", "upstream", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2234,7 +2304,7 @@ mod tests {
         // Publishing an untracked branch to a chosen remote: `-u <remote>` under
         // the local name.
         assert_eq!(
-            build_push_args("feature", "", "", false, false, false, Some("fork"), None),
+            build_push_args("feature", &up(""), "", false, false, false, Some("fork"), None),
             vec!["push", "-u", "fork", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2243,7 +2313,7 @@ mod tests {
     fn push_set_upstream_forces_upstream_form_even_when_tracked() {
         // An explicit set_upstream request retracks even a tracked branch.
         assert_eq!(
-            build_push_args("feature", "origin/feature", "origin", false, true, false, None, None),
+            build_push_args("feature", &up("feature"), "origin", false, true, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -2252,7 +2322,7 @@ mod tests {
     fn push_force_flag_precedes_refspec_args() {
         // The force pair sits right after `push`, before the refspec.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", false, false, true, None, None),
+            build_push_args("feature", &up("feat"), "origin", false, false, true, None, None),
             vec![
                 "push",
                 "--force-with-lease",
@@ -2262,7 +2332,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            build_push_args("feature", "", "", false, false, true, None, None),
+            build_push_args("feature", &up(""), "", false, false, true, None, None),
             vec![
                 "push",
                 "--force-with-lease",
@@ -2279,7 +2349,7 @@ mod tests {
         // Force + a requested non-tracked remote: the force pair still sits right
         // after `push`, then the bare remote, then the fully-qualified refspec.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", false, false, true, Some("upstream"), None),
+            build_push_args("feature", &up("feat"), "origin", false, false, true, Some("upstream"), None),
             vec![
                 "push",
                 "--force-with-lease",
@@ -2348,6 +2418,85 @@ mod tests {
         run(&work_s, &["remote", "add", "origin", &url]).await;
         run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
         (guard, base, origin.to_string_lossy().into_owned(), url)
+    }
+
+    /// The forge publishes push HEAD's branch by NAME, so a tag sharing it (or a branch
+    /// taking its `heads/` form) can't send the push to `refs/heads/heads/<name>` after
+    /// the remote project already exists. Unborn and detached HEADs keep their
+    /// refusals, word for word.
+    #[tokio::test]
+    async fn publish_branch_names_the_branch_and_refuses_unborn_and_detached() {
+        let (_base, base) = temp_base("publish-branch");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        let refusal = |e: AppError| match e {
+            AppError::InvalidArgument(m) => m,
+            other => panic!("expected the worded refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refusal(super::publish_branch(&repo_s).await.unwrap_err()),
+            "make an initial commit before publishing (this repository has none yet)"
+        );
+
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "seed"]).await;
+        run(&repo_s, &["switch", "-q", "-c", "shadowed"]).await;
+        run(&repo_s, &["tag", "shadowed"]).await;
+        assert_eq!(super::publish_branch(&repo_s).await.unwrap(), "shadowed");
+        run(
+            &repo_s,
+            &["update-ref", "refs/heads/heads/shadowed", "HEAD"],
+        )
+        .await;
+        assert_eq!(super::publish_branch(&repo_s).await.unwrap(), "shadowed");
+
+        run(&repo_s, &["switch", "-q", "--detach"]).await;
+        assert_eq!(
+            refusal(super::publish_branch(&repo_s).await.unwrap_err()),
+            "check out a branch before publishing (detached HEAD)"
+        );
+    }
+
+    /// A tracked branch pushes to its upstream's real branch when a tag named
+    /// `origin/<branch>` shortens the upstream to `remotes/origin/<branch>` — never to a
+    /// brand-new `remotes/origin/<branch>` branch on the remote.
+    #[tokio::test]
+    async fn push_targets_the_upstream_branch_shadowed_by_a_tag() {
+        let (_guard, base, origin_s, _url) = seeded_origin("push-upstream-tag-shadow").await;
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        run(&work_s, &["switch", "-q", "-c", "feat"]).await;
+        run(&work_s, &["push", "-q", "-u", "origin", "feat"]).await;
+        run(&work_s, &["tag", "origin/feat"]).await;
+        std::fs::write(work.join("f.txt"), "f\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "feat work"]).await;
+        let tip = run(&work_s, &["rev-parse", "HEAD"]).await;
+
+        let state = AppState::default();
+        git_push_core(
+            &state,
+            work_s.clone(),
+            false,
+            false,
+            Some("feat".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("the push succeeds");
+        assert_eq!(run(&origin_s, &["rev-parse", "refs/heads/feat"]).await, tip);
+        let published = run(
+            &origin_s,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        assert!(!published.contains("refs/heads/remotes/"), "{published}");
     }
 
     /// `push -u` that loses `.git/config.lock` exits 0 with the push landed and the
@@ -4185,7 +4334,7 @@ and the repository exists.
         // qualifying the refspec embeds the `+` inside `refs/heads/+main`, never
         // as its leading char, so git can't read it as a force-push.
         assert_eq!(
-            build_push_args("+main", "", "", false, false, false, None, None),
+            build_push_args("+main", &up(""), "", false, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/+main:refs/heads/+main"]
         );
     }
@@ -4196,7 +4345,7 @@ and the repository exists.
         // `origin/feature`), not the deleted `feat` — matching the "Publish"
         // affordance and toast.
         assert_eq!(
-            build_push_args("feature", "origin/feat", "origin", true, false, false, None, None),
+            build_push_args("feature", &up("feat"), "origin", true, false, false, None, None),
             vec!["push", "-u", "origin", "refs/heads/feature:refs/heads/feature"]
         );
     }
@@ -4205,27 +4354,27 @@ and the repository exists.
     fn push_explicit_remote_branch_pins_the_destination_refspec() {
         // Untracked local branch, explicit remote + destination.
         assert_eq!(
-            build_push_args("local", "", "", false, false, false, Some("fork"), Some("contrib")),
+            build_push_args("local", &up(""), "", false, false, false, Some("fork"), Some("contrib")),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // A destination name never re-tracks, so `set_upstream` can't add `-u`.
         assert_eq!(
-            build_push_args("local", "", "", false, true, false, Some("fork"), Some("contrib")),
+            build_push_args("local", &up(""), "", false, true, false, Some("fork"), Some("contrib")),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // A gone upstream likewise can't drag the publish arm back in.
         assert_eq!(
-            build_push_args("local", "origin/local", "origin", true, false, false, Some("fork"), Some("contrib")),
+            build_push_args("local", &up("local"), "origin", true, false, false, Some("fork"), Some("contrib")),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // Tracked elsewhere: the refspec still targets `contrib`, upstream untouched.
         assert_eq!(
-            build_push_args("local", "origin/local", "origin", false, false, false, Some("fork"), Some("contrib")),
+            build_push_args("local", &up("local"), "origin", false, false, false, Some("fork"), Some("contrib")),
             vec!["push", "fork", "refs/heads/local:refs/heads/contrib"]
         );
         // `force` keeps its position ahead of the target, as in every other arm.
         assert_eq!(
-            build_push_args("local", "", "", false, false, true, Some("fork"), Some("contrib")),
+            build_push_args("local", &up(""), "", false, false, true, Some("fork"), Some("contrib")),
             vec![
                 "push",
                 "--force-with-lease",
@@ -4256,23 +4405,81 @@ and the repository exists.
         // An untracked branch: refname present, empty upstream fields → valid publish.
         assert_eq!(
             parse_upstream_tracking("refs/heads/feature\0\0\0\n", "refs/heads/feature"),
-            Some(("".into(), "".into(), false))
+            Some((Upstream::Untracked, "".into(), false))
         );
     }
 
     #[test]
     fn parse_upstream_tracking_gone() {
         assert_eq!(
-            parse_upstream_tracking("refs/heads/feature\0origin/feat\0origin\0[gone]", "refs/heads/feature"),
-            Some(("origin/feat".into(), "origin".into(), true))
+            parse_upstream_tracking("refs/heads/feature\0refs/heads/feat\0origin\0[gone]", "refs/heads/feature"),
+            Some((up("feat"), "origin".into(), true))
         );
     }
 
     #[test]
     fn parse_upstream_tracking_normal() {
         assert_eq!(
-            parse_upstream_tracking("refs/heads/feature\0origin/feature\0origin\0[ahead 2]", "refs/heads/feature"),
-            Some(("origin/feature".into(), "origin".into(), false))
+            parse_upstream_tracking("refs/heads/feature\0refs/heads/feature\0origin\0[ahead 2]", "refs/heads/feature"),
+            Some((up("feature"), "origin".into(), false))
+        );
+    }
+
+    /// The upstream is its name ON the remote, so a remote-side branch name that looks
+    /// like a remote-tracking path stays whole, and a local (`.`) upstream reads the
+    /// same way.
+    #[test]
+    fn parse_upstream_tracking_reads_the_remote_side_name() {
+        assert_eq!(
+            parse_upstream_tracking(
+                "refs/heads/x\0refs/heads/remotes/origin/x\0origin\0",
+                "refs/heads/x"
+            ),
+            Some((up("remotes/origin/x"), "origin".into(), false))
+        );
+        assert_eq!(
+            parse_upstream_tracking("refs/heads/x\0refs/heads/main\0.\0", "refs/heads/x"),
+            Some((up("main"), ".".into(), false))
+        );
+    }
+
+    /// A non-branch upstream (`refs/pull/<n>/head`, which a pull fetch refspec makes
+    /// trackable) is pushed under the local name with NO `-u`: there is no branch to
+    /// push into, and retracking would drop the branch's pull request association.
+    #[test]
+    fn parse_upstream_tracking_routes_a_non_branch_upstream_to_a_local_name_copy() {
+        let parsed = parse_upstream_tracking(
+            "refs/heads/pr-7\0refs/pull/7/head\0origin\0",
+            "refs/heads/pr-7",
+        );
+        assert_eq!(parsed, Some((Upstream::NotABranch, "origin".into(), false)));
+        let (upstream, remotename, gone) = parsed.unwrap();
+        assert_eq!(
+            build_push_args(
+                "pr-7",
+                &upstream,
+                &remotename,
+                gone,
+                false,
+                false,
+                None,
+                None
+            ),
+            vec!["push", "origin", "refs/heads/pr-7:refs/heads/pr-7"]
+        );
+    }
+
+    /// A hand-edited bare `branch.<b>.merge = main` on a local (`.`) upstream comes
+    /// back raw from `%(upstream:remoteref)`; git DWIMs it to the branch, and so does
+    /// the push.
+    #[test]
+    fn parse_upstream_tracking_reads_a_bare_merge_value_as_the_branch() {
+        let parsed = parse_upstream_tracking("refs/heads/x\0main\0.\0", "refs/heads/x");
+        assert_eq!(parsed, Some((up("main"), ".".into(), false)));
+        let (upstream, remotename, gone) = parsed.unwrap();
+        assert_eq!(
+            build_push_args("x", &upstream, &remotename, gone, false, false, None, None),
+            vec!["push", ".", "refs/heads/x:refs/heads/main"]
         );
     }
 
@@ -4567,13 +4774,19 @@ and the repository exists.
         run(&repo_s, &["branch", "feature"]).await; // untracked
         run(&repo_s, &["branch", "feat/sub"]).await; // prefix sibling; no exact `feat`
 
-        let fmt = "--format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)";
+        // Shortens the upstream past `origin/<def>`, which the parse must not read.
+        run(&repo_s, &["tag", &format!("origin/{def}")]).await;
+
         // Run the real `for-each-ref` and parse it exactly as the caller does.
         let track = |b: &str| {
             let repo_s = repo_s.clone();
             let refspec = format!("refs/heads/{b}");
             async move {
-                let out = run(&repo_s, &["for-each-ref", &refspec, fmt]).await;
+                let out = run(
+                    &repo_s,
+                    &["for-each-ref", &refspec, UPSTREAM_TRACKING_FORMAT],
+                )
+                .await;
                 parse_upstream_tracking(&out, &refspec)
             }
         };
@@ -4581,23 +4794,26 @@ and the repository exists.
         // Untracked branch → non-empty refname line with empty upstream fields.
         assert_eq!(
             track("feature").await,
-            Some((String::new(), String::new(), false))
+            Some((Upstream::Untracked, String::new(), false))
         );
-        // Tracked branch → upstream short + remote name; gone=false (ahead/behind are
-        // ignored by the parser, so divergent histories are fine).
-        assert_eq!(
-            track(&def).await,
-            Some((format!("origin/{def}"), "origin".into(), false))
-        );
+        // Tracked branch → the remote-side branch name + remote name; gone=false
+        // (ahead/behind are ignored by the parser, so divergent histories are fine).
+        assert_eq!(track(&def).await, Some((up(&def), "origin".into(), false)));
         // Prefix: `for-each-ref refs/heads/feat` matches `feat/sub`, whose refname
         // isn't `refs/heads/feat` → None (the exact-match guard, end to end).
         assert_eq!(track("feat").await, None);
 
         // Gone upstream: track origin/<def>, then delete the remote-tracking ref so
         // `%(upstream:track)` becomes `[gone]`. Do this LAST — it also makes <def> gone.
+        // The full ref: the tag above makes the bare `origin/<def>` ambiguous.
         run(
             &repo_s,
-            &["branch", "--track", "goner", &format!("origin/{def}")],
+            &[
+                "branch",
+                "--track",
+                "goner",
+                &format!("refs/remotes/origin/{def}"),
+            ],
         )
         .await;
         run(

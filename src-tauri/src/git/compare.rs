@@ -30,6 +30,17 @@ fn validate_ref(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// `base`/`compare` for the surfaces whose callers name LOCAL BRANCHES (the Compare
+/// tab, local PRs, the changes panel's count): each local branch is read by its full
+/// ref, never a same-named tag; remote-tracking refs and shas pass through. Not used
+/// by `git_branch_ahead`, which release notes also hand TAGS.
+async fn local_branch_revs(repo_path: &str, base: &str, compare: &str) -> (String, String) {
+    (
+        crate::git::branches::branch_first_rev(repo_path, base).await,
+        crate::git::branches::branch_first_rev(repo_path, compare).await,
+    )
+}
+
 async fn log_range(repo_path: &str, range: &str) -> AppResult<Vec<CommitSummary>> {
     let out = run_git(
         Some(repo_path),
@@ -51,6 +62,7 @@ pub async fn git_compare_branches(
 ) -> AppResult<BranchComparison> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let ahead = log_range(&repo_path, &format!("{base}..{compare}")).await?;
     let behind = log_range(&repo_path, &format!("{compare}..{base}")).await?;
     Ok(BranchComparison { ahead, behind })
@@ -80,6 +92,7 @@ pub async fn git_branch_ahead_count(
 ) -> AppResult<u32> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &["rev-list", "--count", &format!("{base}..{compare}")],
@@ -104,6 +117,7 @@ pub async fn git_branch_diff_files(
 ) -> AppResult<Vec<DiffStatEntry>> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &[
@@ -171,6 +185,7 @@ pub async fn git_branch_diff(
 ) -> AppResult<StagedDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let exclude = exclude.unwrap_or_default();
 
     let pinned = crate::git::ai_ignore::has_positive_pattern(&exclude);
@@ -213,6 +228,7 @@ pub async fn git_branch_file_diff(
 ) -> AppResult<FileDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     // Literal pathspec: a raw `[slug]`-style path pulls a glob-sibling's hunks
     // into this file's branch diff (measured).
     let spec = crate::git::pathspec::literal(&file_path);
@@ -241,24 +257,40 @@ pub async fn git_branch_file_diff(
     })
 }
 
-/// The fork point of `base` and `compare`. The compare surfaces diff three-dot
-/// (`base...compare`), so their old side is this commit rather than `base`'s
-/// tip — whole-file reads pairing a diff with `base` would map onto wrong lines.
+/// The two revs a compare surface's whole-file reads (content, image previews,
+/// blame) pair with its three-dot diff.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSides {
+    /// The fork point: the old side, rather than `base`'s tip, since the diff is
+    /// three-dot and a read of `base` would map onto wrong lines.
+    pub merge_base: String,
+    /// `compare` exactly as the diff commands resolve it: a local branch shadowed by
+    /// a same-named tag comes back as its full ref, which a read of the bare name
+    /// would lose to the tag.
+    pub compare_rev: String,
+}
+
+/// The fork point of `base` and `compare`, plus the rev the new side is read at.
 #[tauri::command]
 pub async fn git_merge_base(
     repo_path: String,
     base: String,
     compare: String,
-) -> AppResult<String> {
+) -> AppResult<CompareSides> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &["merge-base", &base, &compare],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(out.stdout_lossy().trim().to_string())
+    Ok(CompareSides {
+        merge_base: out.stdout_lossy().trim().to_string(),
+        compare_rev: compare,
+    })
 }
 
 /// What `git_diff_between_refs` could determine about the relationship between
@@ -372,6 +404,10 @@ pub async fn git_diff_between_refs(
 /// Current tip SHA of each requested local branch — one `for-each-ref` call,
 /// so watching N open local PRs' heads for new commits is a single git
 /// invocation. Branches that don't exist are simply absent from the map.
+///
+/// Names are read in full and stripped of exactly `refs/heads/`: the short form
+/// turns into `heads/<name>` for a branch shadowed by a same-named tag, which would
+/// drop it from the map.
 #[tauri::command]
 pub async fn git_branch_tips(
     repo_path: String,
@@ -383,7 +419,7 @@ pub async fn git_branch_tips(
         Some(&repo_path),
         &[
             "for-each-ref",
-            "--format=%(refname:short) %(objectname)",
+            "--format=%(refname) %(objectname)",
             "refs/heads/",
         ],
         DEFAULT_TIMEOUT,
@@ -391,6 +427,9 @@ pub async fn git_branch_tips(
     .await?;
     let mut map = std::collections::HashMap::new();
     for line in out.stdout_lossy().lines() {
+        let Some(line) = line.strip_prefix("refs/heads/") else {
+            continue;
+        };
         if let Some((name, sha)) = line.split_once(' ') {
             if wanted.contains(name) {
                 map.insert(name.to_string(), sha.to_string());
@@ -1236,6 +1275,122 @@ mod tests {
         assert!(!ok, "an absent object falls through to the (failing) fetch");
     }
 
+    /// A head branch sharing its name with a tag still reports the BRANCH's tip, keyed
+    /// by the plain name the caller asked for.
+    #[tokio::test]
+    async fn branch_tips_reports_a_branch_shadowed_by_a_tag() {
+        let (_base, repo) = seed_repo("tips-tag-shadow").await;
+        let root = std::path::Path::new(&repo);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        run(&repo, &["tag", "pr-head"]).await;
+        run(&repo, &["checkout", "-qb", "pr-head"]).await;
+        std::fs::write(root.join("head.txt"), "head\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "head work"]).await;
+        let tip = run(&repo, &["rev-parse", "refs/heads/pr-head"])
+            .await
+            .trim()
+            .to_string();
+
+        let tips = git_branch_tips(repo.clone(), vec!["pr-head".to_string()])
+            .await
+            .expect("read tips");
+        assert_eq!(tips.get("pr-head"), Some(&tip), "{tips:?}");
+    }
+
+    /// The Compare surfaces read the BRANCH a row names, never a same-named tag: the
+    /// fixture's `feature` forks off `base` with one commit, while a TAG `feature`
+    /// sits on base's own tip, so a bare name compares base against itself.
+    #[tokio::test]
+    async fn compare_surfaces_read_a_branch_shadowed_by_a_tag() {
+        let (_base, repo) = seed_repo("compare-tag-shadow").await;
+        let root = std::path::Path::new(&repo);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        let fork = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let base = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("f.txt"), "feature\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "feature work"]).await;
+        run(&repo, &["checkout", "-q", &base]).await;
+        std::fs::write(root.join("b.txt"), "base\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "base work"]).await;
+        run(&repo, &["tag", "feature"]).await;
+        let (b, f) = (base.clone(), "feature".to_string());
+
+        // Every surface is read before any assertion, so one run shows each verdict.
+        let cmp = git_compare_branches(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        let count = git_branch_ahead_count(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        let files: Vec<String> = git_branch_diff_files(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        let diff = git_branch_diff(repo.clone(), b.clone(), f.clone(), None, None)
+            .await
+            .unwrap();
+        let file = git_branch_file_diff(repo.clone(), b.clone(), f.clone(), "f.txt".into())
+            .await
+            .unwrap();
+        let sides = git_merge_base(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                (cmp.ahead.len(), cmp.behind.len()),
+                count,
+                files,
+                diff.files.len(),
+                file.text.contains("+feature"),
+                sides.merge_base == fork,
+            ),
+            ((1, 1), 1, vec!["f.txt".to_string()], 1, true, true)
+        );
+
+        // The new side's whole-file reads go through `compare_rev`: it reaches the
+        // branch's file, where git reading the bare name finds the tag (no f.txt).
+        assert_eq!(sides.compare_rev, "refs/heads/feature");
+        let show = |rev: &str| {
+            let (repo, spec) = (repo.clone(), format!("{rev}:f.txt"));
+            async move {
+                run_git_raw(Some(&repo), &["show", &spec], DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .code
+            }
+        };
+        assert_eq!(
+            (show(&sides.compare_rev).await, show("feature").await == 0),
+            (0, false)
+        );
+    }
+
+    /// The wire shape the TS `CompareSides` mirror reads.
+    #[test]
+    fn compare_sides_serialize_camel_case() {
+        let sides = CompareSides {
+            merge_base: "abc".into(),
+            compare_rev: "refs/heads/x".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&sides).unwrap(),
+            serde_json::json!({ "mergeBase": "abc", "compareRev": "refs/heads/x" })
+        );
+    }
+
     /// Seeds a fresh repo and returns `(base_guard, repo_path)`. The `TempDir`
     /// guard removes the base dir on Drop, so a panicking run cannot leak it.
     async fn seed_repo(tag: &str) -> (tempfile::TempDir, String) {
@@ -1408,9 +1563,12 @@ mod tests {
         run(&repo, &["commit", "-qm", "base work"]).await;
         let base_tip = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
 
-        let merge_base = git_merge_base(repo.clone(), base_branch, "feature".into())
+        let sides = git_merge_base(repo.clone(), base_branch, "feature".into())
             .await
             .unwrap();
+        // Unshadowed, the new side reads at the name exactly as given.
+        assert_eq!(sides.compare_rev, "feature");
+        let merge_base = sides.merge_base;
         assert_eq!(merge_base, fork, "the two branches' fork point");
         assert_ne!(
             merge_base, base_tip,

@@ -254,9 +254,12 @@ pub(crate) async fn git_merge_autostash_core(
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
+    // Read AFTER the push: it can mint `refs/stash`, which a bare `stash` resolves
+    // to before refs/heads, so only the post-push read sees that ambiguity.
+    let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     let op = run_git_raw(
         Some(&repo_path),
-        &["merge", "--no-edit", &branch],
+        &["merge", "--no-edit", &rev],
         DEFAULT_TIMEOUT,
     )
     .await;
@@ -288,12 +291,14 @@ pub(crate) async fn git_rebase_autostash_core(
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
+    // Read after the push, as in `git_merge_autostash_core`.
+    let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     // Inlined rather than delegating to `git_rebase_core`: that one runs through
     // `run_git_mutating_raw`, which re-acquires the lock held here (module doc).
     // `core.editor=true` mirrors it so git never blocks on an editor.
     let op = run_git_raw(
         Some(&repo_path),
-        &["-c", "core.editor=true", "rebase", &branch],
+        &["-c", "core.editor=true", "rebase", &rev],
         DEFAULT_TIMEOUT,
     )
     .await;
@@ -326,6 +331,9 @@ pub(crate) async fn git_rebase_onto_autostash_core(
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
+    // Read after the push, as in `git_merge_autostash_core`.
+    let new_base = crate::git::branches::branch_first_rev(&repo_path, &new_base).await;
+    let old_base = crate::git::branches::branch_first_rev(&repo_path, &old_base).await;
     // Inlined for the same reason as `git_rebase_autostash_core` above.
     let op = run_git_raw(
         Some(&repo_path),
@@ -368,7 +376,9 @@ pub(crate) async fn git_switch_autostash_core(
     if let Some(remote) = &remote {
         validate_ref_name(remote)?;
     }
-    let tracking = remote.map(|remote| format!("{remote}/{name}"));
+    // The full ref, as `git_checkout_remote_branch_core` passes it: a tag or local
+    // branch named `<remote>/<name>` makes the bare form ambiguous, and git refuses it.
+    let tracking = remote.map(|remote| format!("refs/remotes/{remote}/{name}"));
 
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a checkout").await?;
@@ -754,6 +764,81 @@ mod tests {
         (dir, repo)
     }
 
+    /// The stash-and-retry flows read a branch picked by name as the BRANCH, never a
+    /// same-named tag. Each flow runs before any assertion, so one run shows all three.
+    #[tokio::test]
+    async fn autostash_flows_take_a_branch_shadowed_by_a_tag() {
+        let state = AppState::default();
+
+        // Merge: the tag sits on `main` itself, so merging it would be a no-op.
+        let (dir, repo) = setup_with_feat("merge-tag-shadow").await;
+        git(&repo, &["tag", "feat", "main"]).await;
+        write(dir.path(), "b.txt", "mine\n");
+        git_merge_autostash_core(&state, repo.clone(), "feat".into())
+            .await
+            .unwrap();
+        let merged = read(dir.path(), "a.txt");
+
+        // Rebase: a `topic` off `main` replays onto the branch, not onto the tag.
+        let (dir2, repo2) = setup_with_feat("rebase-tag-shadow").await;
+        git(&repo2, &["tag", "feat", "main"]).await;
+        let feat_tip = git(&repo2, &["rev-parse", "refs/heads/feat"]).await;
+        git(&repo2, &["switch", "-c", "topic"]).await;
+        write(dir2.path(), "c.txt", "topic\n");
+        commit_all(&repo2, "topic").await;
+        write(dir2.path(), "b.txt", "mine\n");
+        git_rebase_autostash_core(&state, repo2.clone(), "feat".into())
+            .await
+            .unwrap();
+        let rebased = git(&repo2, &["rev-parse", "HEAD~1"]).await;
+
+        // Onto: same resolution for the new base.
+        let (dir3, repo3) = setup_with_feat("onto-tag-shadow").await;
+        git(&repo3, &["tag", "feat", "main"]).await;
+        let feat_tip3 = git(&repo3, &["rev-parse", "refs/heads/feat"]).await;
+        git(&repo3, &["switch", "-c", "wrong"]).await;
+        write(dir3.path(), "w.txt", "wrong\n");
+        commit_all(&repo3, "wrong base").await;
+        git(&repo3, &["switch", "-c", "topic"]).await;
+        write(dir3.path(), "c.txt", "topic\n");
+        commit_all(&repo3, "topic").await;
+        write(dir3.path(), "b.txt", "mine\n");
+        git_rebase_onto_autostash_core(&state, repo3.clone(), "feat".into(), "wrong".into())
+            .await
+            .unwrap();
+        let onto = git(&repo3, &["rev-parse", "HEAD~1"]).await;
+
+        assert_eq!(
+            (merged, rebased, onto),
+            ("feat\n".to_string(), feat_tip, feat_tip3)
+        );
+    }
+
+    /// A branch literally named `stash` stays the branch: the autostash's own push
+    /// mints `refs/stash`, which a bare `stash` resolves to first (refs/<name> is
+    /// checked before refs/heads), so the name is read only after that push.
+    #[tokio::test]
+    async fn merge_autostash_takes_a_branch_named_stash() {
+        let (dir, repo) = setup_repo("merge-branch-named-stash").await;
+        git(&repo, &["switch", "-c", "stash"]).await;
+        write(dir.path(), "s.txt", "branch\n");
+        commit_all(&repo, "stash branch work").await;
+        let branch_tip = git(&repo, &["rev-parse", "refs/heads/stash"]).await;
+        git(&repo, &["switch", "main"]).await;
+        write(dir.path(), "b.txt", "mine\n");
+
+        let state = AppState::default();
+        let outcome = git_merge_autostash_core(&state, repo.clone(), "stash".into())
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::Reapplied),
+            "{outcome:?}"
+        );
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await, branch_tip);
+        assert_eq!(read(dir.path(), "b.txt"), "mine\n");
+    }
+
     #[tokio::test]
     async fn merge_autostash_reapplies_non_overlapping_changes() {
         let (dir, repo) = setup_with_feat("merge-reapply").await;
@@ -1017,6 +1102,55 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(head_branch(&repo).await, "feat");
+        assert_eq!(read(dir.path(), "b.txt"), "mine\n");
+        assert!(stash_list(&repo).await.is_empty());
+    }
+
+    /// The stash-and-switch twin of the remote-branch checkout: it tracks the
+    /// remote-tracking ref itself, since a tag named `<remote>/<name>` makes the bare
+    /// form ambiguous and git refuses to start from it.
+    #[tokio::test]
+    async fn switch_autostash_tracks_a_remote_ref_shadowed_by_a_tag() {
+        let (dir, repo) = setup_repo("switch-remote-tag-shadow").await;
+        git(&repo, &["remote", "add", "origin", &repo]).await;
+        // The tag sits on the seed commit, the remote branch one commit past it.
+        git(&repo, &["tag", "origin/landing"]).await;
+        write(dir.path(), "c.txt", "remote\n");
+        commit_all(&repo, "remote work").await;
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/landing", "HEAD"],
+        )
+        .await;
+        git(&repo, &["reset", "-q", "--hard", "HEAD~1"]).await;
+        let remote_tip = git(&repo, &["rev-parse", "refs/remotes/origin/landing"]).await;
+        write(dir.path(), "b.txt", "mine\n");
+
+        let state = AppState::default();
+        let outcome = git_switch_autostash_core(
+            &state,
+            repo.clone(),
+            "landing".into(),
+            Some("origin".into()),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::Reapplied),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/landing"
+        );
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await, remote_tip);
+        assert_eq!(
+            git(&repo, &["config", "--get", "branch.landing.merge"])
+                .await
+                .trim(),
+            "refs/heads/landing"
+        );
         assert_eq!(read(dir.path(), "b.txt"), "mine\n");
         assert!(stash_list(&repo).await.is_empty());
     }
