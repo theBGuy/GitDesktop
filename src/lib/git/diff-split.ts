@@ -88,40 +88,74 @@ function newFilePath(token: string): string | undefined {
 }
 
 /**
- * The b-side token of a `diff --git` header.
- *
- * git quotes each side INDEPENDENTLY, so a plain a-side routinely sits beside a
- * quoted b-side (`diff --git a/x "b/y\r"` — a real GitHub rename diff). Both
- * spellings of the separator have to be accepted; keying off the a-side's
- * quoting drops every mixed header.
+ * A rename/copy destination, which has no a/ or b/ prefix.
+ * git's final b-side field repeats the escaped destination after `"b/`.
+ * The Rust reconstructors write both raw: destinations put their quote after
+ * `b/`, so this suffix cannot match; quote runs in the old name cannot change
+ * the result.
  */
-function newSideToken(headerRest: string): string {
-  const at = Math.max(
-    headerRest.lastIndexOf(' "b/'),
-    headerRest.lastIndexOf(" b/"),
-  );
-  return at < 0 ? "" : headerRest.slice(at + 1);
+function movedFilePath(
+  value: string,
+  headerRest: string | undefined,
+): string | undefined {
+  const quoted =
+    value.length >= 2 &&
+    value.startsWith('"') &&
+    value.endsWith('"') &&
+    !!headerRest?.endsWith(`"b/${value.slice(1)}`);
+  if (!quoted) return value || undefined;
+  return unescapeCQuoted(value.slice(1, -1)) || undefined;
+}
+
+/**
+ * The new path from a `diff --git` header's names. Unless the file was renamed
+ * or copied, git writes the same name on both sides, so an equal-name midpoint
+ * split is unique and wins; differing names fall back to separator search.
+ */
+function headerFilePath(rest: string): string | undefined {
+  if (rest.startsWith("a/")) {
+    const names = rest.slice(2);
+    const half = (names.length - 3) / 2;
+    if (
+      Number.isInteger(half) &&
+      half > 0 &&
+      names.slice(half, half + 3) === " b/" &&
+      names.slice(0, half) === names.slice(half + 3)
+    )
+      return names.slice(0, half);
+  }
+  // git never leaves quotes bare in a name and escapes them inside quoted
+  // tokens, so ` "b/` can only be the separator.
+  const quoted = rest.lastIndexOf(' "b/');
+  if (quoted >= 0) return newFilePath(rest.slice(quoted + 1));
+  if (rest.startsWith('"')) {
+    let i = 1;
+    // Skip both characters of escapes such as \"; bounds cover a trailing backslash.
+    while (i < rest.length && rest[i] !== '"') i += rest[i] === "\\" ? 2 : 1;
+    if (i < rest.length && rest[i + 1] === " ")
+      return newFilePath(rest.slice(i + 2));
+  }
+  // git never emits differing bare names without rename/copy headers; the last
+  // separator keys synthesized ones.
+  const at = rest.lastIndexOf(" b/");
+  return at < 0 ? undefined : newFilePath(rest.slice(at + 1));
 }
 
 /**
  * The decoded new-file path of one `diff --git` section.
- *
- * The single decoder for anything that has to KEY a section by path. Callers
- * that key a section and callers that build a parallel file list must use this
- * same one, or their keys disagree: the AI-ignore filter hides a file by
- * matching a section key against a file-list entry, and a file list parsed with
- * a different rule silently survives the filter.
+ * Section keys and parallel file lists must share this decoder so AI-ignore
+ * patterns match the same paths. A usable +++ path wins, then rename/copy
+ * destinations, then the diff header: extended headers disambiguate renames
+ * whose header names also match as an unrenamed pair.
  */
 export function sectionFilePath(section: string): string | undefined {
-  // Prefer the `+++ b/<path>` line (present for edits); fall back to the
-  // `diff --git` header, which is all a pure rename or a delete carries. Either
-  // side may arrive C-quoted, so the token is located by separator and decoded —
-  // a quoted token starts with `"`, not `b`.
   const plus = section.match(/^\+\+\+ (.+)$/m);
+  const moved = section.match(/^(?:rename|copy) to (.+)$/m);
   const header = section.match(/^diff --git (.+)$/m);
   return (
-    (plus?.[1] && newFilePath(plus[1])) ??
-    (header?.[1] && newFilePath(newSideToken(header[1]))) ??
+    (plus?.[1] && newFilePath(plus[1])) ||
+    (moved?.[1] && movedFilePath(moved[1], header?.[1])) ||
+    (header?.[1] && headerFilePath(header[1])) ||
     undefined
   );
 }
