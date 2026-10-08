@@ -51,7 +51,11 @@ import {
   saveReview,
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
-import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
+import {
+  type AppSettings,
+  effectiveReviewAi,
+  loadSettings,
+} from "@/lib/settings/api";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
   type NotificationTarget,
@@ -624,363 +628,26 @@ async function run(
       }
       claimKey = repoKey;
     }
-    // Liveness heartbeat for the claim just won: refreshing the claim file's mtime makes
-    // the Rust stale-reclaim window measure "this instance went quiet", not "this review
-    // is slow" (a 45/60-minute review would otherwise outlive the 30-minute window).
-    // Best-effort. ARMED as the try's first statement below: an interval leaked by a throw
-    // outside the `finally` would refresh the claim forever, defeating both the 30-minute
-    // reclaim and the 30-day sweep for the life of the process.
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    const stopHeartbeat = () => {
-      if (heartbeat !== undefined) {
-        clearInterval(heartbeat);
-        heartbeat = undefined;
-      }
-    };
-    // Release this instance's claim (best-effort) so a non-delivering terminal path
-    // (failure/cancel/no-op) doesn't permanently suppress the automation for this
-    // head across instances. A successfully DELIVERED review keeps its claim.
-    const releaseClaim = () => {
-      if (!claimKey) return;
-      void invoke("release_automation_claim", {
-        repoKey: claimKey,
-        target: claimTarget,
-        headSha,
-        action,
-      }).catch(() => undefined);
-    };
-
-    const label = modeLabel(action);
-    // The AI config this mode runs under (security audits may use `securityReviewAi`).
-    // Resolved once so the lane pick, the generation, the delivered comment's model label,
-    // and the persisted history model all agree.
-    const reviewCfg = effectiveReviewAi(settings, action);
     // Past every skip gate — counted so a Re-run that matches nothing can toast instead of
     // dying silently.
     attempted++;
-    // Record BEFORE the paid work: the longest operation must not be the one with zero
-    // trace. A process killed mid-stream leaves this "started" row behind, which the
-    // dialog renders as unsettled (its liveness check finds no matching live run).
-    await recordProgress({ action, code: "started" });
-    // Per-rule cancellation: HTTP providers stop via the AbortSignal, CLI providers by
-    // killing the subprocess (`cancelAgentReview` once its id is known); both are driven
-    // by the dock row's Cancel → `cancelReview`. `handle.isCancelled()` stays readable
-    // after a cancel, so the guards below skip delivery + the failure toast.
-    const controller = new AbortController();
-    // Wall-clock start, mirrored into the persisted history record so an automated review
-    // carries a real duration.
-    const runStartedMs = Date.now();
-    // Per-action, so a second mode's run never inherits the first's text or verdict.
-    const progress: RunProgress = { text: "", timedOut: false };
-    // Let-box so the rerun closure carries THIS run's own key (assigned right
-    // after registration): a re-run of the fresh row must replace the fresh row,
-    // not the stale one it grew from.
-    let selfKey = "";
-    const handle = registerAutomationRun({
-      // TaskRow already prefixes the mode name, so pass the bare subject.
-      title: event.kind === "commit" ? event.hash.slice(0, 7) : event.title,
-      mode: action,
-      // Same provider-kind signal the manual panel path uses to pick its lane.
-      local: isLocalProvider(reviewCfg.provider),
-      target: automationTarget(event),
-      abort: controller,
-      // Re-fires THIS event + mode (closes over this iteration's action) when the
-      // run's stopped row's Re-run is clicked, passing its own row key so the
-      // fresh row removes THIS row when it registers. `force` rides along so the
-      // retry of an explicitly-started run keeps the semantics the user chose.
-      rerun: () => rerunAutomation(event, action, selfKey, { force }),
+    await runOneAction({
+      event,
+      action,
+      force,
+      settings,
+      headSha,
+      claimTarget,
+      claimKey,
+      staleKey,
+      settled,
+      recordProgress,
     });
-    selfKey = handle.key;
-    // The replacement has registered — now remove the stopped row it replaces. Done here
-    // (not at the Re-run click) so a non-registering outcome keeps the row as a retry
-    // target; cleared so a second registering action in this pass can't re-trigger it.
-    if (staleKey) {
-      resetReview(staleKey);
-      staleKey = undefined;
-    }
-    // On cancel, persist the dismissed PR head so a cancelled re-review doesn't re-fire
-    // after relaunch (cancel marks no head covered). PR events with a headSha only;
-    // best-effort. Not written on non-cancel failures, which stay retryable.
-    const dismissOnCancel = () => {
-      if (event.kind === "commit" || !event.headSha) return;
-      void setDismissedHead(
-        event.repoPath,
-        "origin",
-        event.target.type,
-        targetRef(event),
-        action,
-        event.headSha,
-      ).catch(() => undefined);
-    };
-    try {
-      // Armed as the try's FIRST statement so a throw can't separate arm from disarm.
-      if (claimKey) {
-        let beats = 0;
-        heartbeat = setInterval(() => {
-          // Bounded (CLAIM_HEARTBEAT_MAX_BEATS) so a wedged run can't refresh forever.
-          if (beats >= CLAIM_HEARTBEAT_MAX_BEATS) {
-            stopHeartbeat();
-            return;
-          }
-          beats += 1;
-          void invoke("touch_automation_claim", {
-            repoKey: claimKey,
-            target: claimTarget,
-            headSha,
-            action,
-          }).catch(() => undefined);
-        }, CLAIM_HEARTBEAT_MS);
-      }
-      const result = await generateReviewText(
-        reviewCfg,
-        action,
-        event,
-        controller.signal,
-        handle.setCliId,
-        progress,
-      );
-      if (handle.isCancelled()) {
-        // The dock's Cancel already patched the row to "cancelled" (keeping its Re-run)
-        // and deleted the control — do NOT settle/remove it here.
-        releaseClaim();
-        dismissOnCancel();
-        settled.push({ action, code: "cancelled" });
-        await recordProgress();
-        toast.info(`AI ${label} cancelled.`, { duration: 4000 });
-        continue;
-      }
-      if (result === null) {
-        releaseClaim();
-        settled.push({ action, code: "empty-diff" });
-        await recordProgress();
-        toast.info(`AI ${label} skipped — no changes to review.`);
-        handle.settle(); // no-op run: remove the row as before
-        continue;
-      }
-      const { text, thoughts } = result;
-      // Both gates throw BEFORE deliver and persistReviewHistory, so a bad run
-      // neither posts a comment nor marks this head covered for pr-sync — it lands
-      // in the catch below (failure toast + inbox row with Re-run + released claim).
-      if (!text.trim()) {
-        throw new Error(
-          `The AI ${label} run produced no text — nothing was posted.`,
-        );
-      }
-      if (looksLikeProviderError(text)) {
-        const body = text.trim();
-        // Ellipsis only when the quote was actually cut, so a short error reads as the
-        // complete message it is.
-        const quoted =
-          body.length > ERROR_SHAPE_CLIP_CHARS
-            ? `${safeSlice(body, ERROR_SHAPE_CLIP_CHARS)}…`
-            : body;
-        throw new Error(
-          `The AI ${label} run returned an error message instead of a review: "${quoted}" — nothing was posted.`,
-        );
-      }
-      // The delivered comment body carries the final review text ONLY — the
-      // agentic narration is persisted to history for later inspection, never
-      // posted (buildAiCommentBody + deliver both take `text`).
-      const body = buildAiCommentBody({
-        kind: label,
-        model: reviewCfg.model,
-        automated: true,
-        // Unattended seam: suspect `#N` refs are backtick-wrapped — or, where a
-        // wrap can't neutralize (raw HTML), left alone — with a disclosure line
-        // naming each (owner ruling); the manual panel confirms with the user.
-        neutralizeRefs: true,
-        text,
-      });
-      const resultId = await deliver(event, action, body, text);
-      // Seed the review-history store so the next run (manual or auto) builds on these
-      // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
-      if (event.kind === "pr-open" || event.kind === "pr-sync") {
-        await persistReviewHistory(
-          event,
-          action,
-          text,
-          reviewCfg.model,
-          thoughts,
-          runStartedMs,
-        ).catch(() => undefined);
-      }
-      // Success: remove the dock row — a delivered review lands in Notifications.
-      handle.settle();
-      settled.push({
-        action,
-        code: "delivered",
-        ...(resultId ? { resultId } : {}),
-      });
-      await recordProgress();
-    } catch (e) {
-      // Release the claim on every failure/cancel path so a transient error doesn't
-      // permanently suppress this automation for this head across instances.
-      releaseClaim();
-      if (handle.isCancelled()) {
-        // Cancelled mid-stream: same as the post-generate cancel arm — the dock
-        // already owns the "cancelled" row, so leave it (do not settle).
-        dismissOnCancel();
-        settled.push({ action, code: "cancelled" });
-        await recordProgress();
-        toast.info(`AI ${label} cancelled.`, { duration: 4000 });
-        continue;
-      }
-      // errorMessage unwraps AppError/Error shapes — a raw interpolation renders
-      // Tauri invoke rejections as "[object Object]" (observed live).
-      const message = errorMessage(e);
-      // A run the backend killed at its deadline keeps whatever it wrote first: nothing
-      // else holds that text (the dock row is memory-only, no comment was delivered), so
-      // this record is its only copy. ONLY the timeout arm — the `looksLikeProviderError`
-      // throw's accumulated text is the provider's error message, not review output.
-      // Coverage stays safe for free: a PARTIAL is dropped by `listReviews`, so the
-      // pr-sync gate still sees this head as un-reviewed and re-reviews it.
-      let keptPartial = false;
-      // A kept COMMIT partial's record id — the failure row's click target, since a
-      // commit review has no panel to restore the output into.
-      let partialResultId = "";
-      if (
-        progress.timedOut &&
-        progress.text.trim() !== "" &&
-        (event.kind === "pr-open" || event.kind === "pr-sync")
-      ) {
-        // Resolved from the write itself, so the notification below only promises kept
-        // output when a record actually landed.
-        keptPartial = await persistPartialReviewHistory(
-          event,
-          action,
-          progress.text,
-          reviewCfg.model,
-          message,
-          runStartedMs,
-        )
-          .then(() => true)
-          .catch(() => false);
-      }
-      if (
-        event.kind === "commit" &&
-        progress.timedOut &&
-        progress.text.trim() !== ""
-      ) {
-        const partial: AutomationRunResult = {
-          schemaVersion: 1,
-          id: crypto.randomUUID(),
-          repoPath: event.repoPath,
-          subject: event.title,
-          mode: action,
-          text: progress.text,
-          createdAt: new Date().toISOString(),
-          hash: event.hash,
-          phase: "error",
-          error: message,
-          timedOut: true,
-        };
-        partialResultId = partial.id;
-        keptPartial = await useAutomationResults
-          .getState()
-          .add(partial)
-          .then(() => true)
-          .catch(() => false);
-      }
-      // The records written above and below keep `message` whole; one-line surfaces
-      // take the summary, since raw git/CLI output can run to many lines.
-      const summary = presentError(e).summary;
-      toast.error(`AI ${label} failed: ${summary}`);
-      // Inbox parity with manual runs (reviews.ts's notifyReviewDone): the subtitle and
-      // OS ping carry the one-line reason, the row's `detail` the full text, both under
-      // the same subject and only when there is a message at all.
-      const subject =
-        event.kind === "commit"
-          ? `"${event.hash.slice(0, 7)}"`
-          : `"${event.title}"`;
-      const trimmed = message.trim();
-      // Where the kept output waits differs by event: a PR partial is restored into
-      // the review panel, a commit partial only through this row.
-      const partialNote =
-        event.kind === "commit"
-          ? "Partial output is kept — open it from this notification."
-          : "Partial output is kept under Previous reviews.";
-      // The inbox row is where a kept partial gets discovered — a durable failure that
-      // doesn't mention it reads as a run with nothing to show for it. Both texts carry
-      // the note: the dock's hover shows `detail` in place of the truncated subtitle.
-      const withPartialNote = (text: string) =>
-        keptPartial
-          ? `${text}${text.endsWith(".") ? "" : "."} ${partialNote}`
-          : text;
-      const subtitle = withPartialNote(
-        trimmed ? `${subject} — ${summary}` : subject,
-      );
-      const detail = trimmed
-        ? withPartialNote(`${subject} — ${trimmed}`)
-        : undefined;
-      // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
-      // `run` body sees the outer `action` fine, but aliasing keeps the object
-      // literal (which also has a field named `action`) unambiguous to read.
-      const mode = action;
-      // A commit row navigates only when a partial actually landed — that record
-      // is the whole click-through. PR rows always land on their PR: automations
-      // run against the fork's own PRs (the poll that feeds them pins the origin
-      // slug deliberately), so the lens rides along.
-      let target: NotificationTarget | undefined;
-      if (event.kind === "commit") {
-        if (keptPartial) {
-          target = { type: "automation-result", id: partialResultId };
-        }
-      } else {
-        target = {
-          type: "pr",
-          kind: event.target.type,
-          ref: targetRef(event),
-          lens: "origin",
-        };
-      }
-      emitNotification({
-        source: "automations",
-        row: {
-          kind: "review-failed",
-          tone: "danger",
-          title: `AI ${label} failed`,
-          subtitle,
-          detail,
-          repoPath: event.repoPath,
-          repoName: repoNameFromPath(event.repoPath),
-          target,
-          // This run's stopped dock row; passing a dismissed key is safe (resetReview
-          // no-ops on a gone key).
-          action: {
-            label: "Re-run",
-            // Same semantics as the dock row's Re-run — both re-fire the same pass.
-            run: () => rerunAutomation(event, mode, selfKey, { force }),
-          },
-          dedupeKey: `automation-failed:${event.repoPath}:${event.kind}:${
-            event.kind === "commit" ? event.hash : targetRef(event)
-          }:${action}`,
-        },
-        os: { title: `AI ${label} failed`, body: subtitle, focus: "unfocused" },
-      });
-      // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
-      handle.fail(message);
-      // A deadline kill and an outright failure look the same from the dock but not
-      // from the history: one is a budget to raise, the other a thing to fix.
-      settled.push({
-        action,
-        code: progress.timedOut ? "timed-out" : "failed",
-        detail: message,
-        // A commit partial is the only failure output with a record of its own —
-        // a PR's lives in the review-history store, which this id can't address.
-        ...(event.kind === "commit" && keptPartial
-          ? { resultId: partialResultId }
-          : {}),
-      });
-      await recordProgress();
-    } finally {
-      // Every terminal path lands here — including both `continue`s and the delivered
-      // success path, which keeps its claim but must stop heartbeating it.
-      stopHeartbeat();
-      // This try is entered only past every gate, so reaching it means the action RAN:
-      // drop the shared snapshot so the next action re-reads what happened meanwhile
-      // (a delivery, or a cancel in another window flushing a dismissal).
-      gateSnapshot = null;
-    }
+    staleKey = undefined;
+    // Reaching here means the action RAN: drop the shared snapshot so the next action
+    // re-reads what happened meanwhile (a delivery, or a cancel in another window
+    // flushing a dismissal).
+    gateSnapshot = null;
   }
   // Nothing ran, but something was decided: one coalescing row. The steady upsert
   // in the store is what keeps a poll tick over an unchanged repo from paying a
@@ -1000,6 +667,431 @@ async function run(
   // one. Re-snapshot once so the row carries every decision the pass made.
   if (entryId !== null) await recordProgress();
   return { matched, attempted, outcomes: [...skips, ...settled] };
+}
+
+/** Input for {@link runOneAction}. An object rather than positionals: several of these
+ *  are strings a caller could silently transpose. */
+interface RunOneActionInput {
+  event: AutomationEvent;
+  action: ActionId;
+  force: boolean;
+  settings: AppSettings;
+  headSha: string;
+  claimTarget: string;
+  /** The identity key the claim was won under; empty when no claim was taken. */
+  claimKey: string;
+  /** The stopped row this pass replaces, removed once this action registers. */
+  staleKey: string | undefined;
+  /** The pass's settled outcomes — pushed to in place. */
+  settled: RunActionOutcome[];
+  recordProgress: (running?: RunActionOutcome) => Promise<void>;
+}
+
+/** One action of a {@link run} pass, entered past every skip gate with its claim won
+ *  (or none taken). A delivered review keeps the claim; the cancel, empty-diff and
+ *  failure terminals release it. */
+async function runOneAction({
+  event,
+  action,
+  force,
+  settings,
+  headSha,
+  claimTarget,
+  claimKey,
+  staleKey,
+  settled,
+  recordProgress,
+}: RunOneActionInput): Promise<void> {
+  // Liveness heartbeat for the claim just won: refreshing the claim file's mtime makes
+  // the Rust stale-reclaim window measure "this instance went quiet", not "this review
+  // is slow" (a 45/60-minute review would otherwise outlive the 30-minute window).
+  // Best-effort. ARMED as the try's first statement below: an interval leaked by a throw
+  // outside the `finally` would refresh the claim forever, defeating both the 30-minute
+  // reclaim and the 30-day sweep for the life of the process.
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stopHeartbeat = () => {
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+  };
+  // Release this instance's claim (best-effort) so a non-delivering terminal path
+  // (failure/cancel/no-op) doesn't permanently suppress the automation for this
+  // head across instances. A successfully DELIVERED review keeps its claim.
+  const releaseClaim = () => {
+    if (!claimKey) return;
+    void invoke("release_automation_claim", {
+      repoKey: claimKey,
+      target: claimTarget,
+      headSha,
+      action,
+    }).catch(() => undefined);
+  };
+
+  const label = modeLabel(action);
+  // The AI config this mode runs under (security audits may use `securityReviewAi`).
+  // Resolved once so the lane pick, the generation, the delivered comment's model label,
+  // and the persisted history model all agree.
+  const reviewCfg = effectiveReviewAi(settings, action);
+  // Record BEFORE the paid work: the longest operation must not be the one with zero
+  // trace. A process killed mid-stream leaves this "started" row behind, which the
+  // dialog renders as unsettled (its liveness check finds no matching live run).
+  await recordProgress({ action, code: "started" });
+  // Per-rule cancellation: HTTP providers stop via the AbortSignal, CLI providers by
+  // killing the subprocess (`cancelAgentReview` once its id is known); both are driven
+  // by the dock row's Cancel → `cancelReview`. `handle.isCancelled()` stays readable
+  // after a cancel, so the guards below skip delivery + the failure toast.
+  const controller = new AbortController();
+  // Wall-clock start, mirrored into the persisted history record so an automated review
+  // carries a real duration.
+  const runStartedMs = Date.now();
+  // Per-action, so a second mode's run never inherits the first's text or verdict.
+  const progress: RunProgress = { text: "", timedOut: false };
+  // Let-box so the rerun closure carries THIS run's own key (assigned right
+  // after registration): a re-run of the fresh row must replace the fresh row,
+  // not the stale one it grew from.
+  let selfKey = "";
+  const handle = registerAutomationRun({
+    // TaskRow already prefixes the mode name, so pass the bare subject.
+    title: event.kind === "commit" ? event.hash.slice(0, 7) : event.title,
+    mode: action,
+    // Same provider-kind signal the manual panel path uses to pick its lane.
+    local: isLocalProvider(reviewCfg.provider),
+    target: automationTarget(event),
+    abort: controller,
+    // Re-fires THIS event + mode (closes over this iteration's action) when the
+    // run's stopped row's Re-run is clicked, passing its own row key so the
+    // fresh row removes THIS row when it registers. `force` rides along so the
+    // retry of an explicitly-started run keeps the semantics the user chose.
+    rerun: () => rerunAutomation(event, action, selfKey, { force }),
+  });
+  selfKey = handle.key;
+  // The replacement has registered — now remove the stopped row it replaces. Done here
+  // (not at the Re-run click) so a non-registering outcome keeps the row as a retry
+  // target; `run()` clears its key after this returns.
+  if (staleKey) resetReview(staleKey);
+  // On cancel, persist the dismissed PR head so a cancelled re-review doesn't re-fire
+  // after relaunch (cancel marks no head covered). PR events with a headSha only;
+  // best-effort. Not written on non-cancel failures, which stay retryable.
+  const dismissOnCancel = () => {
+    if (event.kind === "commit" || !event.headSha) return;
+    void setDismissedHead(
+      event.repoPath,
+      "origin",
+      event.target.type,
+      targetRef(event),
+      action,
+      event.headSha,
+    ).catch(() => undefined);
+  };
+  try {
+    // Armed as the try's FIRST statement so a throw can't separate arm from disarm.
+    if (claimKey) {
+      let beats = 0;
+      heartbeat = setInterval(() => {
+        // Bounded (CLAIM_HEARTBEAT_MAX_BEATS) so a wedged run can't refresh forever.
+        if (beats >= CLAIM_HEARTBEAT_MAX_BEATS) {
+          stopHeartbeat();
+          return;
+        }
+        beats += 1;
+        void invoke("touch_automation_claim", {
+          repoKey: claimKey,
+          target: claimTarget,
+          headSha,
+          action,
+        }).catch(() => undefined);
+      }, CLAIM_HEARTBEAT_MS);
+    }
+    const result = await generateReviewText(
+      reviewCfg,
+      action,
+      event,
+      controller.signal,
+      handle.setCliId,
+      progress,
+    );
+    if (handle.isCancelled()) {
+      // The dock's Cancel already patched the row to "cancelled" (keeping its Re-run)
+      // and deleted the control — do NOT settle/remove it here.
+      releaseClaim();
+      dismissOnCancel();
+      settled.push({ action, code: "cancelled" });
+      await recordProgress();
+      toast.info(`AI ${label} cancelled.`, { duration: 4000 });
+      return;
+    }
+    if (result === null) {
+      releaseClaim();
+      settled.push({ action, code: "empty-diff" });
+      await recordProgress();
+      toast.info(`AI ${label} skipped — no changes to review.`);
+      handle.settle(); // no-op run: remove the row as before
+      return;
+    }
+    const { text, thoughts } = result;
+    // Both gates throw BEFORE deliver and persistReviewHistory, so a bad run
+    // neither posts a comment nor marks this head covered for pr-sync — it lands
+    // in the catch below (failure toast + inbox row with Re-run + released claim).
+    if (!text.trim()) {
+      throw new Error(
+        `The AI ${label} run produced no text — nothing was posted.`,
+      );
+    }
+    if (looksLikeProviderError(text)) {
+      const body = text.trim();
+      // Ellipsis only when the quote was actually cut, so a short error reads as the
+      // complete message it is.
+      const quoted =
+        body.length > ERROR_SHAPE_CLIP_CHARS
+          ? `${safeSlice(body, ERROR_SHAPE_CLIP_CHARS)}…`
+          : body;
+      throw new Error(
+        `The AI ${label} run returned an error message instead of a review: "${quoted}" — nothing was posted.`,
+      );
+    }
+    // The delivered comment body carries the final review text ONLY — the
+    // agentic narration is persisted to history for later inspection, never
+    // posted (buildAiCommentBody + deliver both take `text`).
+    const body = buildAiCommentBody({
+      kind: label,
+      model: reviewCfg.model,
+      automated: true,
+      // Unattended seam: suspect `#N` refs are backtick-wrapped — or, where a
+      // wrap can't neutralize (raw HTML), left alone — with a disclosure line
+      // naming each (owner ruling); the manual panel confirms with the user.
+      neutralizeRefs: true,
+      text,
+    });
+    const resultId = await deliver(event, action, body, text);
+    // Seed the review-history store so the next run (manual or auto) builds on these
+    // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
+    if (event.kind === "pr-open" || event.kind === "pr-sync") {
+      await persistReviewHistory(
+        event,
+        action,
+        text,
+        reviewCfg.model,
+        thoughts,
+        runStartedMs,
+      ).catch(() => undefined);
+    }
+    // Success: remove the dock row — a delivered review lands in Notifications.
+    handle.settle();
+    settled.push({
+      action,
+      code: "delivered",
+      ...(resultId ? { resultId } : {}),
+    });
+    await recordProgress();
+  } catch (e) {
+    // Release the claim on every failure/cancel path so a transient error doesn't
+    // permanently suppress this automation for this head across instances.
+    releaseClaim();
+    if (handle.isCancelled()) {
+      // Cancelled mid-stream: same as the post-generate cancel arm — the dock
+      // already owns the "cancelled" row, so leave it (do not settle).
+      dismissOnCancel();
+      settled.push({ action, code: "cancelled" });
+      await recordProgress();
+      toast.info(`AI ${label} cancelled.`, { duration: 4000 });
+      return;
+    }
+    // errorMessage unwraps AppError/Error shapes — a raw interpolation renders
+    // Tauri invoke rejections as "[object Object]" (observed live).
+    const message = errorMessage(e);
+    // A run the backend killed at its deadline keeps whatever it wrote first: nothing
+    // else holds that text (the dock row is memory-only, no comment was delivered), so
+    // this record is its only copy. ONLY the timeout arm — the `looksLikeProviderError`
+    // throw's accumulated text is the provider's error message, not review output.
+    // Coverage stays safe for free: a PARTIAL is dropped by `listReviews`, so the
+    // pr-sync gate still sees this head as un-reviewed and re-reviews it.
+    let keptPartial = false;
+    // A kept COMMIT partial's record id — the failure row's click target, since a
+    // commit review has no panel to restore the output into.
+    let partialResultId = "";
+    if (
+      progress.timedOut &&
+      progress.text.trim() !== "" &&
+      (event.kind === "pr-open" || event.kind === "pr-sync")
+    ) {
+      // Resolved from the write itself, so the notification below only promises kept
+      // output when a record actually landed.
+      keptPartial = await persistPartialReviewHistory(
+        event,
+        action,
+        progress.text,
+        reviewCfg.model,
+        message,
+        runStartedMs,
+      )
+        .then(() => true)
+        .catch(() => false);
+    }
+    if (
+      event.kind === "commit" &&
+      progress.timedOut &&
+      progress.text.trim() !== ""
+    ) {
+      const partial: AutomationRunResult = {
+        schemaVersion: 1,
+        id: crypto.randomUUID(),
+        repoPath: event.repoPath,
+        subject: event.title,
+        mode: action,
+        text: progress.text,
+        createdAt: new Date().toISOString(),
+        hash: event.hash,
+        phase: "error",
+        error: message,
+        timedOut: true,
+      };
+      partialResultId = partial.id;
+      keptPartial = await useAutomationResults
+        .getState()
+        .add(partial)
+        .then(() => true)
+        .catch(() => false);
+    }
+    // The records written above and below keep `message` whole; one-line surfaces
+    // take the summary, since raw git/CLI output can run to many lines.
+    const summary = presentError(e).summary;
+    toast.error(`AI ${label} failed: ${summary}`);
+    emitNotification(
+      buildFailureNotification({
+        event,
+        action,
+        message,
+        summary,
+        keptPartial,
+        partialResultId,
+        selfKey,
+        force,
+      }),
+    );
+    // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
+    handle.fail(message);
+    // A deadline kill and an outright failure look the same from the dock but not
+    // from the history: one is a budget to raise, the other a thing to fix.
+    settled.push({
+      action,
+      code: progress.timedOut ? "timed-out" : "failed",
+      detail: message,
+      // A commit partial is the only failure output with a record of its own —
+      // a PR's lives in the review-history store, which this id can't address.
+      ...(event.kind === "commit" && keptPartial
+        ? { resultId: partialResultId }
+        : {}),
+    });
+    await recordProgress();
+  } finally {
+    // Every terminal path lands here — including every `return` and the delivered
+    // success path, which keeps its claim but must stop heartbeating it.
+    stopHeartbeat();
+  }
+}
+
+/** Input for {@link buildFailureNotification}: one failed action's outcome. */
+interface FailureNotificationInput {
+  event: AutomationEvent;
+  action: ActionId;
+  /** The whole error text, for the row's `detail`. */
+  message: string;
+  /** The one-line form of `message`, for the subtitle and OS ping. */
+  summary: string;
+  keptPartial: boolean;
+  partialResultId: string;
+  /** The failed run's dock-row key — final by the time a failure is built, so the
+   *  Re-run closure can take it by value. */
+  selfKey: string;
+  force: boolean;
+}
+
+/** The inbox row + OS ping for a failed action. Pure computation, so the caller keeps
+ *  its toast → notify → fail order. */
+function buildFailureNotification({
+  event,
+  action,
+  message,
+  summary,
+  keptPartial,
+  partialResultId,
+  selfKey,
+  force,
+}: FailureNotificationInput): Parameters<typeof emitNotification>[0] {
+  const label = modeLabel(action);
+  // Inbox parity with manual runs (reviews.ts's notifyReviewDone): the subtitle and
+  // OS ping carry the one-line reason, the row's `detail` the full text, both under
+  // the same subject and only when there is a message at all.
+  const subject =
+    event.kind === "commit"
+      ? `"${event.hash.slice(0, 7)}"`
+      : `"${event.title}"`;
+  const trimmed = message.trim();
+  // Where the kept output waits differs by event: a PR partial is restored into
+  // the review panel, a commit partial only through this row.
+  const partialNote =
+    event.kind === "commit"
+      ? "Partial output is kept — open it from this notification."
+      : "Partial output is kept under Previous reviews.";
+  // The inbox row is where a kept partial gets discovered — a durable failure that
+  // doesn't mention it reads as a run with nothing to show for it. Both texts carry
+  // the note: the dock's hover shows `detail` in place of the truncated subtitle.
+  const withPartialNote = (text: string) =>
+    keptPartial
+      ? `${text}${text.endsWith(".") ? "" : "."} ${partialNote}`
+      : text;
+  const subtitle = withPartialNote(
+    trimmed ? `${subject} — ${summary}` : subject,
+  );
+  const detail = trimmed
+    ? withPartialNote(`${subject} — ${trimmed}`)
+    : undefined;
+  // Local alias for the `action` parameter — the Re-run closure's
+  // `run` body sees it fine, but aliasing keeps the object literal (which also
+  // has a field named `action`) unambiguous to read.
+  const mode = action;
+  // A commit row navigates only when a partial actually landed — that record
+  // is the whole click-through. PR rows always land on their PR: automations
+  // run against the fork's own PRs (the poll that feeds them pins the origin
+  // slug deliberately), so the lens rides along.
+  let target: NotificationTarget | undefined;
+  if (event.kind === "commit") {
+    if (keptPartial) {
+      target = { type: "automation-result", id: partialResultId };
+    }
+  } else {
+    target = {
+      type: "pr",
+      kind: event.target.type,
+      ref: targetRef(event),
+      lens: "origin",
+    };
+  }
+  return {
+    source: "automations",
+    row: {
+      kind: "review-failed",
+      tone: "danger",
+      title: `AI ${label} failed`,
+      subtitle,
+      detail,
+      repoPath: event.repoPath,
+      repoName: repoNameFromPath(event.repoPath),
+      target,
+      // This run's stopped dock row; passing a dismissed key is safe (resetReview
+      // no-ops on a gone key).
+      action: {
+        label: "Re-run",
+        // Same semantics as the dock row's Re-run — both re-fire the same pass.
+        run: () => rerunAutomation(event, mode, selfKey, { force }),
+      },
+      dedupeKey: `automation-failed:${event.repoPath}:${event.kind}:${
+        event.kind === "commit" ? event.hash : targetRef(event)
+      }:${action}`,
+    },
+    os: { title: `AI ${label} failed`, body: subtitle, focus: "unfocused" },
+  };
 }
 
 /**
