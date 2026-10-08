@@ -9,7 +9,6 @@ import {
   type LineRange,
   type MultiSelectResult,
   type MultiSelectState,
-  processAST,
   SplitSide,
 } from "@git-diff-view/react";
 import type { UseQueryResult } from "@tanstack/react-query";
@@ -54,8 +53,13 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang, fileExt } from "./diff-lang";
+import "./code-highlight.css";
+import { HUNK_SCOPED_MAX_LINES, hunkScopedProcessAST } from "./gap-isolation";
 import { djb2 } from "./highlight-worker-shared";
-import { installHljsGapIsolation } from "./hljs-gap-isolation";
+import {
+  hunkScopedHljsHighlighter,
+  installHljsGapIsolation,
+} from "./hljs-gap-isolation";
 import { installTsNoJsx } from "./hljs-ts-no-jsx";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
 import {
@@ -174,6 +178,17 @@ function diffMaxLineNumbers(diffText: string): { old: number; new: number } {
   return { old: maxOld, new: maxNew };
 }
 
+/**
+ * Whether the highlight.js singleton would skip this diff: hunk-only mode pads
+ * each side to the highest line its hunks reference, and the core skips a side
+ * whose padded length (that + 1, hence `>=`) passes SYNTAX_LINE_CAP. Content
+ * mode never qualifies: its reads cap at HIGHLIGHT_MAX_LINES.
+ */
+function pastSyntaxCap(diffText: string): boolean {
+  const max = diffMaxLineNumbers(diffText);
+  return Math.max(max.old, max.new) >= SYNTAX_LINE_CAP;
+}
+
 /** The persisted Unified/Split preference toggle. */
 export function DiffModeToggle({
   splitDisabled = false,
@@ -272,7 +287,7 @@ export function GitDiffView({
 // the 400KB budget), Shiki ≈1ms/KB rust to ≈3.2ms/KB tsx (~150–480ms at the
 // 150KB budget) — ~8× hljs, hence the tighter budget. Over budget, a Shiki
 // language tokenizes off-thread ({@link useWorkerHighlight}); an hljs one keeps
-// the view's own pass (≤15K lines).
+// the view's own whole-buffer pass (plain past SYNTAX_LINE_CAP lines).
 const HIGHLIGHT_MAX_CHARS_HLJS = 400_000;
 const HIGHLIGHT_MAX_CHARS_SHIKI = 150_000;
 
@@ -305,18 +320,20 @@ const EMPTY_WORKER_AST: DiffAST = { type: "root", children: [] };
  * `name`/`type` must stay `"shiki"`/`"style"`: the core's re-entry guards
  * (DiffFile.initSyntax, File.doSyntax) bail on a highlighter matching the one
  * already applied, so a pair matching the interim "lowlight" pass would keep it.
+ * Hunk-scoped like the worker's Shiki highlighter that produced the ASTs, so
+ * both carry the same (absent) line cap and placeholder-skipping `processAST`.
  */
 function precomputedHighlighter(asts: WorkerAsts): DiffFileHighlighter {
   return {
     name: "shiki",
     type: "style",
-    maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
+    maxLineToIgnoreSyntax: HUNK_SCOPED_MAX_LINES,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
     setIgnoreSyntaxHighlightList: () => undefined,
     getAST: (raw: string) =>
       asts.sides.find((s) => s.rawHash === djb2(raw))?.ast ?? EMPTY_WORKER_AST,
-    processAST,
+    processAST: hunkScopedProcessAST,
     hasRegisteredCurrentLang: () => true,
   };
 }
@@ -327,12 +344,12 @@ const CONTENT_HIGHLIGHT_MAX_CHARS = 100_000;
 // Deliberately tighter than the 15_000 renderer cap — same 2× reason as above.
 export const HIGHLIGHT_MAX_LINES = 2000;
 
-// Pin the highlight.js renderer's line cap: the core gates on the RECONSTRUCTED
-// file's line count, so this decides whether a small edit DEEP in a big file is
-// highlighted at all — the library's default 2000 silently drops it. Placeholder
-// lines tokenize at ~5–20µs (≤~200ms one-time here); real-content cost is bounded
-// by the char budgets above. SYNTAX_LINE_CAP is shared with the Shiki +
-// precomputed highlighters.
+// Pin the highlight.js singleton's line cap: the core gates its whole-buffer
+// pass on the RECONSTRUCTED file's line count — the library's default 2000
+// would drop a small edit deep in a big file. Placeholder lines tokenize at
+// ~5–20µs (≤~200ms one-time here); real-content cost is bounded by the char
+// budgets above. Past the cap, createDiffFile routes to the hunk-scoped hljs
+// highlighter instead (see {@link pastSyntaxCap}).
 highlighter.setMaxLineToIgnoreSyntax(SYNTAX_LINE_CAP);
 // Same singleton, gap isolation: a hunk-reconstructed buffer is tokenized per
 // contiguous non-blank run, so an unclosed construct at a hunk boundary can't
@@ -395,12 +412,13 @@ export function createDiffFile(
     const file = DiffFile.createInstance(data);
     file.initRaw();
     // Gate on the char budget for the engine this diff routes to (~8× apart —
-    // see the constants). Don't gate on line count here: that's the renderer's
-    // own per-engine `maxLineToIgnoreSyntax`, and a line gate would wrongly skip
-    // large Shiki files (e.g. Rust) the renderer would happily highlight.
+    // see the constants). Line count only picks the hljs highlighter: the
+    // singleton's whole-buffer pass below the cap, the hunk-scoped one past it.
     if (lang && !overHighlightBudget(text.length, useShiki)) {
       if (useShiki) {
         file.initSyntax({ registerHighlighter: shikiDiffHighlighter() });
+      } else if (pastSyntaxCap(text)) {
+        file.initSyntax({ registerHighlighter: hunkScopedHljsHighlighter });
       } else {
         file.initSyntax();
       }
@@ -544,23 +562,15 @@ export function useShikiRouting({
     () => diffLang(filePath, syntaxMap),
     [filePath, syntaxMap],
   );
-  // The core ignores syntax outright once the RECONSTRUCTED file passes
-  // SYNTAX_LINE_CAP lines, and hunk-only mode pads to the highest line number
-  // the hunks reference (`rawLength` = that + 1, hence `>=`) — so a small hunk
-  // deep in a big file gets no highlighting from ANY engine. Nothing would
-  // consume a grammar, a paint hold, or worker ASTs here. Content mode can't
-  // reach this: its reads cap at HIGHLIGHT_MAX_LINES.
-  const syntaxIgnored = useMemo(() => {
-    const max = diffMaxLineNumbers(text);
-    return Math.max(max.old, max.new) >= SYNTAX_LINE_CAP;
-  }, [text]);
+  // No line-count gate here: a hunk deep in a big file tokenizes hunk-scoped
+  // (Shiki always, hljs past SYNTAX_LINE_CAP), so it consumes a grammar, a paint
+  // hold, and worker ASTs exactly like a small file; the char budgets bound it.
   useEffect(() => {
     if (
       !lang ||
       // A blocked mega file shows a placeholder, not a diff — don't fetch a
       // grammar it will never render.
       blocked ||
-      syntaxIgnored ||
       !isBuiltinShikiLang(lang) ||
       isShikiLang(lang) ||
       grammarState[lang] !== undefined ||
@@ -579,7 +589,7 @@ export function useShikiRouting({
     return () => {
       cancelled = true;
     };
-  }, [lang, grammarState, text.length, blocked, syntaxIgnored]);
+  }, [lang, grammarState, text.length, blocked]);
 
   // A built-in Shiki grammar this diff needs is still loading (never seen a
   // "ready"/"failed" result for it): hold the paint. `isShikiLang(lang)` already
@@ -592,12 +602,12 @@ export function useShikiRouting({
 
   // Off-thread highlighting, Shiki-only: an over-budget Shiki-routed file would
   // otherwise get the view clone's hljs pass — the engine those languages are
-  // routed OFF on purpose. An over-budget hljs file sends NO request (the clone
-  // already highlights it correctly, ≤15K lines). A builtin Shiki lang whose
-  // grammar the main thread hasn't loaded also routes here — the worker loads
-  // its own copy. A custom `tmGrammar` routes directly: its registration happens
-  // lazily inside createDiffFile with no rebuild trigger, and the grammar (unlike
-  // module state) is available on the first render.
+  // routed OFF on purpose. An over-budget hljs file sends NO request (the
+  // clone's own hljs pass covers it, plain past SYNTAX_LINE_CAP). A builtin
+  // Shiki lang whose grammar the main thread hasn't loaded also routes here —
+  // the worker loads its own copy. A custom `tmGrammar` routes directly: its
+  // registration happens lazily inside createDiffFile with no rebuild trigger,
+  // and the grammar (unlike module state) is available on the first render.
   const tmGrammar = useMemo(
     () =>
       lang
@@ -614,7 +624,7 @@ export function useShikiRouting({
     // still settling — the worker input would be built on interim text and
     // superseded. (Over budget we never hold the paint on grammarPending, so it
     // isn't gated on here.)
-    enabled: overBudget && useShikiWorker && !contentPending && !syntaxIgnored,
+    enabled: overBudget && useShikiWorker && !contentPending,
     filePath,
     text,
     lang: lang ?? null,
@@ -631,7 +641,7 @@ export function useShikiRouting({
   // Over budget the main thread never Shiki-tokenizes, so holding the paint for
   // a grammar only the worker needs would just delay the interim paint. Under
   // budget, hold — so the lazy-grammar rebuild still lands in one paint.
-  const holdForGrammar = grammarPending && !overBudget && !syntaxIgnored;
+  const holdForGrammar = grammarPending && !overBudget;
 
   return { holdForGrammar, grammarState, workerHighlighter };
 }

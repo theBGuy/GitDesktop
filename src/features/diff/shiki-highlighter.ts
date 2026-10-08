@@ -1,8 +1,4 @@
-import {
-  type DiffAST,
-  type DiffFileHighlighter,
-  processAST,
-} from "@git-diff-view/core";
+import type { DiffAST, DiffFileHighlighter } from "@git-diff-view/core";
 import { createHighlighterCoreSync, type HighlighterCore } from "@shikijs/core";
 import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 // `json` stays a static import: it's small, and it backs the synchronous
@@ -13,8 +9,12 @@ import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import jsonGrammar from "@shikijs/langs/json";
 import type { LanguageRegistration } from "@shikijs/types";
 import type { CustomLanguage } from "@/lib/settings/api";
-import { gapIsolatedAst } from "./gap-isolation";
-import { gdDiff } from "./shiki-theme";
+import {
+  gapIsolatedAst,
+  HUNK_SCOPED_MAX_LINES,
+  hunkScopedProcessAST,
+} from "./gap-isolation.ts";
+import { gdDiff } from "./shiki-theme.ts";
 
 /**
  * A TextMate highlighter for the diff, backed by Shiki with the pure-JS regex
@@ -241,25 +241,25 @@ function buildHast(raw: string, lang: string): DiffAST {
 }
 
 /**
- * Line cap on the RECONSTRUCTED file, deciding whether a small edit deep in a
- * big file gets highlighted at all (not the diff's own size). Placeholder-
- * reconstructed lines tokenize cheaply (measured 61ms at 12K lines). The ONE
- * shared cap for every highlighter the diff uses — the Shiki object below, the
- * highlight.js singleton pin, and the worker-AST precomputed highlighter (both
- * in DiffSurface.tsx) — so they can't silently diverge.
+ * Line cap on the RECONSTRUCTED file for the highlight.js singleton's
+ * whole-buffer pass (pinned in DiffSurface.tsx). Placeholder-reconstructed
+ * lines tokenize cheaply (measured 61ms at 12K lines). Past it, hljs-routed
+ * diffs switch to the hunk-scoped highlighter; Shiki-routed ones are always
+ * hunk-scoped, so the cap never gates them.
  */
 export const SYNTAX_LINE_CAP = 15_000;
 
 /**
  * A @git-diff-view DiffFileHighlighter that tokenizes with Shiki and emits
- * style-based spans (the renderer applies `properties.style` directly). AST
- * post-processing is reused from the default highlighter's exported `processAST`.
+ * style-based spans (the renderer applies `properties.style` directly).
+ * Hunk-scoped: gap-isolated tokenization plus the placeholder-skipping
+ * `processAST`, so it carries no line cap of its own.
  */
 export function shikiDiffHighlighter(): DiffFileHighlighter {
   return {
     name: "shiki",
     type: "style",
-    maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
+    maxLineToIgnoreSyntax: HUNK_SCOPED_MAX_LINES,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
     setIgnoreSyntaxHighlightList: () => undefined,
@@ -271,7 +271,7 @@ export function shikiDiffHighlighter(): DiffFileHighlighter {
         return EMPTY_AST;
       }
     },
-    processAST,
+    processAST: hunkScopedProcessAST,
     hasRegisteredCurrentLang: (lang) => loaded.has(lang),
   };
 }
