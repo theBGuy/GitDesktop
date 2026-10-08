@@ -255,7 +255,7 @@ impl EventSink for Channel<ReviewEvent> {
 /// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
 /// dropped and the variable is unset when nothing survives — except `PATH`,
 /// which is replaced with a minimal host PATH.
-/// Twin of the `allowed` list in `.github/scripts/appimage-guard.sh`.
+/// Mirrors the `allowed` list in `.github/scripts/appimage-guard.sh`, minus `APPDIR`.
 const APPDIR_PATHLIST_VARS: &[&str] = &[
     "LD_LIBRARY_PATH",
     "PATH",
@@ -274,7 +274,7 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 /// `$APPDIR`. Deliberately left alone: `GTK_THEME` (hook-set, but not
 /// `$APPDIR`-derived), and `GDK_BACKEND` and `LD_PRELOAD` (the AppImage never
 /// sets them, so any value is the user's).
-/// Twin of the `allowed` list in `.github/scripts/appimage-guard.sh`.
+/// Mirrors the `allowed` list in `.github/scripts/appimage-guard.sh`, minus `APPDIR`.
 const APPDIR_SCALAR_VARS: &[&str] = &[
     // Only the bundle's AppRun.wrapped launcher sets PYTHONHOME.
     "PYTHONHOME",
