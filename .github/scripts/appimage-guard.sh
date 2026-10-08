@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run from the repo root. Reject bundled libwayland-client and startup exports
-# of $APPDIR-derived variables the app does not strip from spawned children.
+# Run from the repo root. Reject bundled libwayland-client and $APPDIR-derived
+# variables that the startup scripts or the launcher binary set outside the
+# `allowed` list below (what agent.rs strips from children, plus APPDIR).
 # When the pin action exports them, require that the bundler ran the hash-pinned
 # linuxdeploy and bundled the pinned AppRun; CI requires both pin exports.
 set -euo pipefail
@@ -69,11 +70,15 @@ elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
   exit 1
 fi
 
-# Every variable a startup script points into the bundle must also be stripped
-# from the environment of the tools we spawn. Twin of `APPDIR_PATHLIST_VARS` +
-# `APPDIR_SCALAR_VARS` in src-tauri/src/agent.rs — extend both together.
+# Every variable a startup script or the launcher binary points into the bundle
+# must also be stripped from the environment of the tools we spawn, except
+# `APPDIR` itself (allowed below but left in children's env). The rest mirror
+# `APPDIR_PATHLIST_VARS` + `APPDIR_SCALAR_VARS` in src-tauri/src/agent.rs —
+# extend both together.
 # Scans the generated AppRun wrapper, its hooks, and the NAME=%s environment
-# strings in the AppRun.wrapped binary. Script shape limit: only single-line
+# strings in the binary launcher (AppRun.wrapped, or AppRun itself when it is
+# a binary); each of those counts as $APPDIR-derived, since the launcher fills
+# that leading %s with its own directory. Script shape limit: only single-line
 # `export NAME=…` is matched — `NAME=…; export NAME` and `declare -x` are out
 # of scope (linuxdeploy emits single-line exports).
 allowed=" LD_LIBRARY_PATH PATH XDG_DATA_DIRS GTK_PATH"
