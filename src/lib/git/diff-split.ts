@@ -87,41 +87,64 @@ function newFilePath(token: string): string | undefined {
   return path.startsWith("b/") ? path.slice(2) : undefined;
 }
 
+// Rename/copy destinations have no a/ or b/ prefix. git C-quotes whole values
+// only; synthesized headers arrive raw, even when a path starts with a quote.
+function movedFilePath(value: string): string | undefined {
+  if (!value.startsWith('"')) return value || undefined;
+  const close = value.lastIndexOf('"');
+  if (close <= 0 || close !== value.length - 1) return value;
+  return unescapeCQuoted(value.slice(1, close)) || undefined;
+}
+
 /**
- * The b-side token of a `diff --git` header.
- *
- * git quotes each side INDEPENDENTLY, so a plain a-side routinely sits beside a
- * quoted b-side (`diff --git a/x "b/y\r"` — a real GitHub rename diff). Both
- * spellings of the separator have to be accepted; keying off the a-side's
- * quoting drops every mixed header.
+ * Without a rename, git's header names match, so equal-name midpoint matching
+ * comes first. Then try the quoted b-side, the escape-aware quoted a-side walk,
+ * and finally the legacy last bare separator for synthetic differing names.
  */
-function newSideToken(headerRest: string): string {
-  const at = Math.max(
-    headerRest.lastIndexOf(' "b/'),
-    headerRest.lastIndexOf(" b/"),
-  );
-  return at < 0 ? "" : headerRest.slice(at + 1);
+function headerFilePath(rest: string): string | undefined {
+  if (rest.startsWith("a/")) {
+    const names = rest.slice(2);
+    const half = (names.length - 3) / 2;
+    if (
+      Number.isInteger(half) &&
+      half > 0 &&
+      names.slice(half, half + 3) === " b/" &&
+      names.slice(0, half) === names.slice(half + 3)
+    )
+      return names.slice(0, half);
+  }
+  // git never leaves quotes bare in a name and escapes them inside quoted
+  // tokens, so ` "b/` can only be the separator.
+  const quoted = rest.lastIndexOf(' "b/');
+  if (quoted >= 0) return newFilePath(rest.slice(quoted + 1));
+  if (rest.startsWith('"')) {
+    let i = 1;
+    // Skip both characters of escapes such as \"; bounds cover a trailing backslash.
+    while (i < rest.length && rest[i] !== '"') i += rest[i] === "\\" ? 2 : 1;
+    if (i < rest.length && rest[i + 1] === " ")
+      return newFilePath(rest.slice(i + 2));
+  }
+  // Differing bare names without rename/copy headers are not emitted by git;
+  // retain last-separator parsing for these synthetic sections.
+  const at = rest.lastIndexOf(" b/");
+  return at < 0 ? undefined : newFilePath(rest.slice(at + 1));
 }
 
 /**
  * The decoded new-file path of one `diff --git` section.
- *
- * The single decoder for anything that has to KEY a section by path. Callers
- * that key a section and callers that build a parallel file list must use this
- * same one, or their keys disagree: the AI-ignore filter hides a file by
- * matching a section key against a file-list entry, and a file list parsed with
- * a different rule silently survives the filter.
+ * Section keys and parallel file lists must share this decoder so AI-ignore
+ * patterns match the same paths. A usable +++ path wins, then rename/copy
+ * destinations, then the diff header: extended headers disambiguate renames
+ * whose header names also match as an unrenamed pair.
  */
 export function sectionFilePath(section: string): string | undefined {
-  // Prefer the `+++ b/<path>` line (present for edits); fall back to the
-  // `diff --git` header, which is all a pure rename or a delete carries. Either
-  // side may arrive C-quoted, so the token is located by separator and decoded —
-  // a quoted token starts with `"`, not `b`.
   const plus = section.match(/^\+\+\+ (.+)$/m);
+  const moved = section.match(/^(?:rename|copy) to (.+)$/m);
   const header = section.match(/^diff --git (.+)$/m);
   return (
-    (plus?.[1] && newFilePath(plus[1])) ??
-    (header?.[1] && newFilePath(newSideToken(header[1]))) ??
+    (plus?.[1] && newFilePath(plus[1])) ||
+    (moved?.[1] && movedFilePath(moved[1])) ||
+    (header?.[1] && headerFilePath(header[1])) ||
     undefined
   );
 }

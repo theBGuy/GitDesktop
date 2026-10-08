@@ -94,6 +94,129 @@ const shapes = [
       "+++ /dev/null\n" +
       "@@ -1 +0,0 @@\n-removed\n",
   },
+  {
+    name: "a deletion whose path contains a b-side separator",
+    path: "docs/a b/c.txt",
+    section:
+      "diff --git a/docs/a b/c.txt b/docs/a b/c.txt\n" +
+      "deleted file mode 100644\n" +
+      "--- a/docs/a b/c.txt\t\n" +
+      "+++ /dev/null\n" +
+      "@@ -1 +0,0 @@\n-secret\n",
+  },
+  {
+    name: "a pure rename into a path containing a b-side separator",
+    path: "src/a b/new.txt",
+    section:
+      "diff --git a/src/old.txt b/src/a b/new.txt\n" +
+      "similarity index 100%\n" +
+      "rename from src/old.txt\n" +
+      "rename to src/a b/new.txt\n",
+  },
+  {
+    name: "a pure rename between paths that both contain a b-side separator",
+    path: "x b/z.txt",
+    section:
+      "diff --git a/x b/y.txt b/x b/z.txt\n" +
+      "similarity index 100%\n" +
+      "rename from x b/y.txt\n" +
+      "rename to x b/z.txt\n",
+  },
+  {
+    name: "a pure rename whose header also reads as an unrenamed path",
+    path: "n.txt",
+    section:
+      "diff --git a/p b/n.txt b/p b/n.txt\n" +
+      "similarity index 100%\n" +
+      "rename from p b/n.txt b/p\n" +
+      "rename to n.txt\n",
+  },
+  {
+    name: "a copy into a path containing a b-side separator",
+    path: "src/a b/copy.txt",
+    section:
+      "diff --git a/src/base.txt b/src/a b/copy.txt\n" +
+      "similarity index 100%\n" +
+      "copy from src/base.txt\n" +
+      "copy to src/a b/copy.txt\n",
+  },
+  {
+    name: "a deletion with both sides C-quoted and a b-side separator inside the quotes",
+    path: "docs/café b/x.txt",
+    section:
+      'diff --git "a/docs/caf\\303\\251 b/x.txt" "b/docs/caf\\303\\251 b/x.txt"\n' +
+      "deleted file mode 100644\n" +
+      '--- "a/docs/caf\\303\\251 b/x.txt"\t\n' +
+      "+++ /dev/null\n" +
+      "@@ -1 +0,0 @@\n-secret\n",
+  },
+  {
+    name: "a mode change whose path contains a b-side separator",
+    path: "bin/a b/run.sh",
+    section:
+      "diff --git a/bin/a b/run.sh b/bin/a b/run.sh\n" +
+      "old mode 100644\n" +
+      "new mode 100755\n",
+  },
+  {
+    name: "a binary change whose path contains a b-side separator",
+    path: "img/a b/logo.png",
+    section:
+      "diff --git a/img/a b/logo.png b/img/a b/logo.png\n" +
+      "index 1111111..2222222 100644\n" +
+      "Binary files a/img/a b/logo.png and b/img/a b/logo.png differ\n",
+  },
+  {
+    name: "an empty new file whose path contains a b-side separator",
+    path: "a b/empty.txt",
+    section:
+      "diff --git a/a b/empty.txt b/a b/empty.txt\n" +
+      "new file mode 100644\n" +
+      "index 0000000..e69de29\n",
+  },
+  {
+    name: "a deletion whose path repeats the b-side separator",
+    path: "a b/b b/c.txt",
+    section:
+      "diff --git a/a b/b b/c.txt b/a b/b b/c.txt\n" +
+      "deleted file mode 100644\n" +
+      "--- a/a b/b b/c.txt\t\n" +
+      "+++ /dev/null\n" +
+      "@@ -1 +0,0 @@\n-gone\n",
+  },
+  {
+    name: "a C-quoted old side beside a plain new side containing a b-side separator",
+    path: "p b/q.txt",
+    section: 'diff --git "a/caf\\303\\251.txt" b/p b/q.txt\n',
+  },
+  {
+    name: "a modification whose new-side name is empty, keyed by its diff header",
+    path: "src/empty-plus.txt",
+    section:
+      "diff --git a/src/empty-plus.txt b/src/empty-plus.txt\n" +
+      "--- a/src/empty-plus.txt\n" +
+      "+++ b/\n" +
+      "@@ -1 +1 @@\n-old\n+new\n",
+  },
+  {
+    name: "a header-only rename without extended headers",
+    path: "src/after.txt",
+    section: "diff --git a/src/before.txt b/src/after.txt\n",
+  },
+  {
+    name: "a binary rename whose raw destination starts with a quote",
+    path: '"q".txt',
+    section:
+      'diff --git a/old.txt b/"q".txt\n' +
+      "rename from old.txt\n" +
+      'rename to "q".txt\n' +
+      'Binary files a/old.txt and b/"q".txt differ\n',
+  },
+  {
+    name: "a synthetic header with differing bare names of uneven length",
+    path: "yx",
+    section: "diff --git a/x b/yx\n",
+  },
 ];
 
 for (const { name, path, section } of shapes) {
