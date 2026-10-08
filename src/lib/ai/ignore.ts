@@ -1,5 +1,5 @@
 import { gitFilterAiIgnored, readRepoAiIgnore } from "@/lib/git/api";
-import { splitUnifiedDiff } from "@/lib/git/diff-split";
+import { sectionFilePath } from "@/lib/git/diff-split";
 import { trimIgnorePattern } from "@/lib/git/glob";
 
 /** Lines of a newline-joined ignore-pattern string, dropping blanks + comments. */
@@ -101,10 +101,17 @@ export async function filterPathsByAiIgnore(input: {
  * fail CLOSED, ahead of the pattern check, exactly as `filterPathsByAiIgnore`
  * does. The Rust `filtered_diff` arm judges real bytes and shows a real-U+FFFD
  * name this hides; aligning them is a recorded follow-up. `unreadableFiles`
- * breaks that subset out of `excludedFiles` so a caller explaining itself can
- * keep the two causes apart. Only decodable candidates reach the matcher; an
- * empty `exclude` skips the IPC, though the sections are parsed either way,
- * since the unreadable check reads the same candidate keys.
+ * counts that subset again so a caller explaining itself can keep the two
+ * causes apart. Only decodable candidates reach the matcher; an empty `exclude`
+ * skips the IPC, though the sections are parsed either way, since the
+ * unreadable check reads the same candidate keys.
+ *
+ * A section that decodes to no key is dropped too, but only while patterns are
+ * active, and counts toward `unreadableFiles` ALONE: it can't be matched to a
+ * `files` entry (which stays listed), so counting it as excluded would
+ * double-count a name the patterns may already have hidden. `excludedFiles` is
+ * thus hidden NAMES (pattern matches plus U+FFFD names); `unreadableFiles` is
+ * the U+FFFD names plus withheld unkeyable sections, NOT a subset of it.
  *
  * The result is a local derivation — the input `text` is typically a cached
  * query string the Files tab and review threads want in full.
@@ -121,9 +128,16 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
   unreadableFiles: number;
 }> {
   const { repoPath, text, files, exclude } = input;
-  const sections = splitUnifiedDiff(text);
+  // KEEP IN SYNC with `splitUnifiedDiff`'s section split (diff-split.ts):
+  // boundaries only after a real LF, never after a CR or U+2028/U+2029.
+  const parts = text
+    .split(/(?<![^\n])(?=diff --git )/)
+    .map((part) => ({ part, path: sectionFilePath(part) }));
   const candidates = [
-    ...new Set([...sections.keys(), ...files.map((f) => f.path)]),
+    ...new Set([
+      ...parts.flatMap(({ path }) => (path ? [path] : [])),
+      ...files.map((f) => f.path),
+    ]),
   ];
   const hidden = new Set(
     candidates.filter((p) => p.includes(REPLACEMENT_CHAR)),
@@ -135,19 +149,28 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
       hidden.add(path);
     }
   }
-  if (hidden.size === 0) {
+  // A section no key decodes was never checked against the patterns, so it is
+  // withheld while any are active. With none it stays: a `diff.noprefix` or
+  // custom-prefix local diff keys NO section, and dropping them would blank it.
+  const unkeyable =
+    exclude.length > 0
+      ? parts.filter(({ part, path }) => !path && part.trim()).length
+      : 0;
+  if (hidden.size === 0 && unkeyable === 0) {
     return { text, files, excludedFiles: 0, unreadableFiles: 0 };
   }
-  // Each section keeps its own `diff --git` header, so the survivors rejoin
-  // into a valid unified diff in their original order.
-  const filtered = [...sections]
-    .filter(([path]) => !hidden.has(path))
-    .map(([, section]) => section)
+  // Filtering the parts in place keeps their order and every same-key section
+  // (both halves of a typechange); each keeps its own `diff --git` header.
+  const filtered = parts
+    .filter(({ part, path }) =>
+      path ? !hidden.has(path) : exclude.length === 0 || !part.trim(),
+    )
+    .map(({ part }) => part)
     .join("");
   return {
     text: filtered,
     files: files.filter((f) => !hidden.has(f.path)),
     excludedFiles: hidden.size,
-    unreadableFiles,
+    unreadableFiles: unreadableFiles + unkeyable,
   };
 }

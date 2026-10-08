@@ -4,7 +4,7 @@ use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
 use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
 use crate::forge::session::{classify_gh_failure, GhFailure};
-use crate::forge::validate_compare_branch;
+use crate::forge::{c_quote_label, c_quote_path, validate_compare_branch};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
@@ -6228,13 +6228,17 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
             new_path
         };
 
-        out.push_str(&format!("diff --git a/{old_path} b/{new_path}\n"));
+        // Every name rides git's C-quoting, so a control byte in a path can't
+        // break a line and forge a header the splitter would key on.
+        let a_label = c_quote_label("a/", old_path);
+        let b_label = c_quote_label("b/", new_path);
+        out.push_str(&format!("diff --git {a_label} {b_label}\n"));
         if is_renamed && old_path != new_path {
             out.push_str("rename from ");
-            out.push_str(old_path);
+            out.push_str(&c_quote_path(old_path));
             out.push('\n');
             out.push_str("rename to ");
-            out.push_str(new_path);
+            out.push_str(&c_quote_path(new_path));
             out.push('\n');
         }
         if is_added {
@@ -6246,14 +6250,14 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
         match &f.patch {
             Some(patch) if !patch.is_empty() => {
                 let minus = if is_added {
-                    "/dev/null".to_string()
+                    "/dev/null"
                 } else {
-                    format!("a/{old_path}")
+                    a_label.as_str()
                 };
                 let plus = if is_removed {
-                    "/dev/null".to_string()
+                    "/dev/null"
                 } else {
-                    format!("b/{new_path}")
+                    b_label.as_str()
                 };
                 out.push_str(&format!("--- {minus}\n+++ {plus}\n"));
                 out.push_str(patch);
@@ -6265,9 +6269,7 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
             // patch for. Emit git's binary placeholder (the frontend recognizes
             // the `Binary files ` marker and renders it as an undisplayable file).
             _ => {
-                out.push_str(&format!(
-                    "Binary files a/{old_path} and b/{new_path} differ\n"
-                ));
+                out.push_str(&format!("Binary files {a_label} and {b_label} differ\n"));
             }
         }
     }
@@ -9508,6 +9510,74 @@ mod tests {
         // No hunk header was synthesized for a patch-less file.
         assert!(!out.contains("@@"));
         assert!(!out.contains("--- "));
+    }
+
+    // Expected strings below are sections scripts/diff-split.test.mjs already
+    // decodes, so matching them byte-for-byte proves the frontend keys these files.
+
+    #[test]
+    fn quotes_only_the_rename_side_that_needs_it() {
+        let mut f = file("renamed", "\"escaped\".txt", None);
+        f.previous_filename = Some("old3.txt".to_string());
+        let out = reconstruct_pr_diff(&[f]);
+        assert!(out.contains("diff --git a/old3.txt \"b/\\\"escaped\\\".txt\"\n"));
+        assert!(out.contains("rename from old3.txt\n"));
+        assert!(out.contains("rename to \"\\\"escaped\\\".txt\"\n"));
+        assert!(out.contains("Binary files a/old3.txt and \"b/\\\"escaped\\\".txt\" differ\n"));
+    }
+
+    #[test]
+    fn quotes_a_control_byte_in_a_rename_destination() {
+        let mut f = file(
+            "renamed",
+            "src/mixed\rname.txt",
+            Some("@@ -1 +1 @@\n-a\n+b\n"),
+        );
+        f.previous_filename = Some("src/mixed.txt".to_string());
+        let out = reconstruct_pr_diff(&[f]);
+        assert!(out.contains("diff --git a/src/mixed.txt \"b/src/mixed\\rname.txt\"\n"));
+        assert!(out.contains("rename to \"src/mixed\\rname.txt\"\n"));
+        assert!(out.contains("--- a/src/mixed.txt\n+++ \"b/src/mixed\\rname.txt\"\n"));
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn quotes_a_non_ascii_deletion_as_octal_bytes() {
+        let out = reconstruct_pr_diff(&[file(
+            "removed",
+            "src/caf\u{e9}.txt",
+            Some("@@ -1 +0,0 @@\n-removed\n"),
+        )]);
+        assert_eq!(
+            out,
+            "diff --git \"a/src/caf\\303\\251.txt\" \"b/src/caf\\303\\251.txt\"\n\
+             deleted file mode 100644\n\
+             --- \"a/src/caf\\303\\251.txt\"\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n-removed\n",
+        );
+    }
+
+    #[test]
+    fn a_line_feed_in_a_path_cannot_forge_diff_structure() {
+        let forged = "evil\n+++ b/ok.txt\ndiff --git a/ok.txt b/ok.txt";
+        let out = reconstruct_pr_diff(&[
+            file("modified", forged, Some("@@ -1 +1 @@\n-a\n+b\n")),
+            file("removed", forged, None),
+        ]);
+        let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
+        assert!(out.contains(&format!("diff --git \"a/{quoted}\" \"b/{quoted}\"\n")));
+        assert!(out.contains(&format!("+++ \"b/{quoted}\"\n")));
+        assert!(out.contains(&format!(
+            "Binary files \"a/{quoted}\" and \"b/{quoted}\" differ\n"
+        )));
+        // Two files in, two sections and one +++ line out: nothing in the name broke a line.
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("diff --git ")).count(),
+            2
+        );
+        assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 1);
+        assert!(!out.contains("\n+++ b/ok.txt"));
     }
 
     #[test]
