@@ -20,8 +20,10 @@ export function HighlightedCode({
   className?: string;
 }) {
   const lang = diffLang(path);
-  // The wrapper object is memoized with the html: React ≤19.2 re-applies
-  // dangerouslySetInnerHTML on wrapper identity, replacing every child node.
+  // Memoized so re-renders don't re-run hljs.highlight over the whole file;
+  // keeping the wrapper object stable is also the ≤19.2 backstop (those
+  // react-doms re-apply dangerouslySetInnerHTML on wrapper identity; 19.3+
+  // compares the __html string first).
   const markup = useMemo(() => {
     if (!lang || !hljs.getLanguage(lang)) return null;
     const html = hljs.highlight(content, {

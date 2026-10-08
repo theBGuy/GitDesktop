@@ -1,2 +1,2 @@
-- Conflict panes, blame, and code views now share the diff view's syntax
-  colors in both themes.
+- Syntax colors now match across the diff view, conflict panes, blame, and
+  code TODOs in both themes.
