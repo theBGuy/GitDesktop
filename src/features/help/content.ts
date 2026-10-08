@@ -123,7 +123,7 @@ unrecognized host, a folder for a local-only repo) and, once resolved, a trailin
 
 If a repo's folder was moved or deleted, opening it offers to **Locate…** its new folder or
 **Remove** it from the list. After you confirm the folder, the entry keeps its alias and
-settings, and its local PRs and issues, and review history follow along to the new
+settings, and its local PRs, issues, and review history follow along to the new
 location{{ai}}, as do its automations and MCP server settings{{/ai}}.
 
 ## The repository menu
