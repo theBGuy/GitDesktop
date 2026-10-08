@@ -49,6 +49,8 @@ export function RunContextMenuItems({
   canRunAgain,
   writeBlocked,
   writeReason,
+  cancelHeld,
+  rerunHeld,
 }: {
   run: WorkflowRun;
   provider: ForgeProvider | null | undefined;
@@ -59,6 +61,12 @@ export function RunContextMenuItems({
   canRunAgain: boolean;
   writeBlocked: boolean;
   writeReason?: string;
+  /** Set while this run's cancel is pending: holds the Cancel item with this
+   *  compact parenthetical, below a push block's. */
+  cancelHeld?: string;
+  /** Set while a re-run of this run is pending: holds every re-run item with
+   *  this compact parenthetical, below a push block's. */
+  rerunHeld?: string;
 }) {
   // Destructured so each callback closes over a const binding rather than a
   // property read off the actions object.
@@ -82,25 +90,30 @@ export function RunContextMenuItems({
       {offers.map((offer) => (
         <ContextMenuItem
           key={offer.kind}
-          disabled={writeBlocked}
+          disabled={writeBlocked || rerunHeld !== undefined}
           // A disabled item's tooltip never shows, so a blocked item explains
           // itself through the label parenthetical instead.
-          title={writeBlocked ? undefined : RERUN_TITLES[offer.kind]}
+          title={
+            writeBlocked || rerunHeld !== undefined
+              ? undefined
+              : RERUN_TITLES[offer.kind]
+          }
           onClick={() => rerun(run.id, offer.kind === "failed")}
         >
           {offer.label}
-          {blockedHint}
+          {blockedHint || (rerunHeld === undefined ? "" : ` (${rerunHeld})`)}
         </ContextMenuItem>
       ))}
       {showCancel && (
         <>
           {offers.length > 0 && <ContextMenuSeparator />}
           <ContextMenuItem
-            disabled={writeBlocked}
+            disabled={writeBlocked || cancelHeld !== undefined}
             onClick={() => cancel(run.id)}
           >
             {cancelLabel(provider)}
-            {blockedHint}
+            {blockedHint ||
+              (cancelHeld === undefined ? "" : ` (${cancelHeld})`)}
           </ContextMenuItem>
         </>
       )}

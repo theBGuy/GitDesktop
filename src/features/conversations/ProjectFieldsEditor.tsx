@@ -53,7 +53,10 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { pendingWriteReason } from "@/lib/offline-writes";
+import {
+  pendingWriteReason,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { useRetryFocusRescue } from "./ConversationListPanel";
 import {
@@ -69,7 +72,6 @@ import {
 
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
-const SAVING_REASON = "Saving your last change…";
 const STRANDED_NOTICE =
   "Field changes weren't applied — this item is no longer on the board they were drafted for";
 const LOCKED_BOARD_NOTICE =
@@ -315,7 +317,10 @@ export function ProjectFieldsEditor({
       // that refetch is what a fresh draft would have to seed from. The mutation's
       // `onSettled` returns its invalidate promise, so this hold spans it.
       case setFields.isPending:
-        return pendingWriteReason(setFields.isPaused, SAVING_REASON);
+        return pendingWriteReason(
+          setFields.isPaused,
+          SAVING_LAST_CHANGE_REASON,
+        );
       case unsettledReason !== undefined:
         return unsettledReason;
       default:

@@ -30,7 +30,10 @@ import type {
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
-import { pendingWriteReason } from "@/lib/offline-writes";
+import {
+  pendingWriteReason,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import {
@@ -174,7 +177,7 @@ export function ProjectsPopover({
       case editProjects.isPending:
         return pendingWriteReason(
           editProjects.isPaused,
-          "Saving your last change…",
+          SAVING_LAST_CHANGE_REASON,
         );
       case membershipsParked:
         return offlinePendingMessage("projects");

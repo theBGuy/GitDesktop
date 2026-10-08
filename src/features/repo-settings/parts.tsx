@@ -42,6 +42,7 @@ import {
   ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
   OFFLINE_WRITE_REASON,
+  SAVING_LAST_CHANGE_REASON,
 } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import {
@@ -115,7 +116,7 @@ export function AsyncErrorCard({
 export { ACT_PENDING_REASON, AI_DRAFT_PENDING_REASON, OFFLINE_WRITE_REASON };
 
 /** The hold reason while a row's last change is still saving. */
-export const SAVING_REASON = "Saving your last change…";
+export const SAVING_REASON = SAVING_LAST_CHANGE_REASON;
 
 /** The hold reason on a save or update whose form matches what's saved. */
 export const NO_CHANGES_REASON = "No changes to save";
