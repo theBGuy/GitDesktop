@@ -9512,8 +9512,9 @@ mod tests {
         assert!(!out.contains("--- "));
     }
 
-    // Expected strings below are sections scripts/diff-split.test.mjs already
-    // decodes, so matching them byte-for-byte proves the frontend keys these files.
+    // The three shape tests below expect sections scripts/diff-split.test.mjs
+    // already decodes, so the byte match proves the frontend keys those files; the
+    // forged-LF test relies on diff-split.ts's C_ESCAPES decoding instead.
 
     #[test]
     fn quotes_only_the_rename_side_that_needs_it() {

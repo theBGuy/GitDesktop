@@ -68,7 +68,7 @@ jobs:
       # `marked`, the PR-create lane needs zustand plus @tanstack/react-query,
       # the keyboard-nav and disabled-key-filter suites reach react through
       # their modules under test, the notification-settings suite loads the
-      # settings graph, which pulls react plus @tauri-apps/plugin-store, and the
+      # settings graph, which pulls react plus @tauri-apps/plugin-store, the
       # ts-no-jsx-highlight suite drives highlight.js and @git-diff-view/core's
       # lowlight engine, and the ai-ignore-filter suite reaches @tauri-apps/api
       # through the git api barrel.
