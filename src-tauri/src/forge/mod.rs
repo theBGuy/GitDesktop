@@ -93,8 +93,8 @@ fn is_port(s: &str) -> bool {
 /// this gate is the layer that keeps it out of keys and argv. THE
 /// reconnect/credential host grammar — `valid_reconnect_host` delegates here and
 /// `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't drift.
-/// Needed because `remote_host`/`remote_authority` only split on `/`, `:` and the
-/// bracket span, so a crafted remote can carry `=`, `;`, `$`, or a space through them.
+/// Needed because `remote_host`/`remote_authority` parse `/`, `:`, bracket spans,
+/// and scheme-only `?`/`#` boundaries, but can carry `=`, `;`, `$`, or spaces through.
 /// A charset gate, not an IPv6 validator: `[:]` passes both sides, and that's fine —
 /// it's injection-safe garbage git will reject on its own.
 pub(crate) fn is_safe_authority(value: &str) -> bool {
@@ -129,6 +129,36 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
     port.is_none_or(is_port)
 }
 
+/// Userinfo belongs only to the authority span; an `@` in the path is path data.
+/// Returns the scheme flag, authority without userinfo, and optional path.
+fn split_remote_url(url: &str) -> (bool, &str, Option<&str>) {
+    let url = url.trim();
+    let (had_scheme, rest) = match url.split_once("://") {
+        Some((_, after)) => (true, after),
+        None => (false, url),
+    };
+    let boundary = if had_scheme {
+        rest.find(['/', '?', '#'])
+    } else {
+        // In scp form, the last `@[` or a leading `[` marks a bracketed host.
+        let prefix = rest.split('/').next().unwrap_or(rest);
+        let host_start = prefix.rfind("@[").map_or(0, |i| i + 1);
+        let after_host = bracketed_split(&rest[host_start..])
+            .map_or(host_start, |(span, _)| host_start + span.len());
+        rest[after_host..].find(['/', ':']).map(|i| after_host + i)
+    };
+    let path_separator = if had_scheme { b'/' } else { b':' };
+    let (authority, path) = match boundary {
+        Some(i) => (
+            &rest[..i],
+            (rest.as_bytes()[i] == path_separator).then_some(&rest[i + 1..]),
+        ),
+        None => (rest, None),
+    };
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    (had_scheme, authority, path)
+}
+
 /// The `host[:port]` AUTHORITY of a remote URL — [`remote_host`] plus the port it
 /// drops, when that port is one (see [`is_port`]); a non-numeric segment is not a port
 /// and yields the bare host. Host lowercased; `None` on no parseable host. Three
@@ -152,16 +182,7 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 /// in scp form the `:` after `]` opens the path, so the bare host comes back. An
 /// unterminated `[` or an empty `[]` is no host.
 pub(crate) fn remote_authority(url: &str) -> Option<String> {
-    let url = url.trim();
-    let (had_scheme, rest) = match url.split_once("://") {
-        Some((_, after)) => (true, after),
-        None => (false, url),
-    };
-    // Drop an optional `user@` (rsplit so `user@host` keeps `host`).
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-    // The authority ends at the first `/`; a bracketed literal can't contain one, so
-    // this split is safe to take before the bracket span is resolved.
-    let authority = rest.split('/').next().unwrap_or("");
+    let (had_scheme, authority, _) = split_remote_url(url);
     if authority.starts_with('[') {
         let (host, after) = bracketed_split(authority)?;
         let host = host.to_ascii_lowercase();
@@ -181,12 +202,6 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
             host
         });
     }
-    // Without a scheme the remaining `:` is scp's path separator, so trim there too.
-    let authority = if had_scheme {
-        authority
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
     let (host, port) = match authority.split_once(':') {
         // Only a real 1-5 digit port is carried. Anything else — an empty port, a mangled
         // IPv6 fragment, or a crafted `443.helper=!cmd #` — falls back to the bare host:
@@ -216,31 +231,16 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
 /// cut the host short. Used to address a repo on a provider's API (e.g. a GitLab
 /// project).
 ///
+/// With a scheme, a `?` or `#` before the first `/` after `://` means no path,
+/// even when the authority exists.
+///
 /// Gated on [`remote_authority`]: a URL it refuses has no path either, so the pair
 /// can't diverge — [`fork_url_from_origin`] splices from this path alone, and a
 /// divergence would build a fork URL on a malformed origin.
 pub(crate) fn remote_path(url: &str) -> Option<String> {
-    let url = url.trim();
     remote_authority(url)?;
-    let (had_scheme, rest) = match url.split_once("://") {
-        Some((_, after)) => (true, after),
-        None => (false, url),
-    };
-    // Drop an optional `user@` (rsplit so `user@host` keeps `host`).
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-    let path = if had_scheme {
-        // `host[:port]/path` → everything after the first `/`.
-        rest.split_once('/').map(|(_, after)| after)?
-    } else {
-        // scp `host:path` → everything after the first `:`, counted past a bracketed
-        // IPv6 literal so the address's own `:`s aren't read as the separator.
-        let after_host = if rest.starts_with('[') {
-            bracketed_split(rest)?.1
-        } else {
-            rest
-        };
-        after_host.split_once(':').map(|(_, after)| after)?
-    };
+    let (_, _, path) = split_remote_url(url);
+    let path = path?;
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     (!path.is_empty()).then(|| path.to_string())
@@ -4689,6 +4689,64 @@ mod tests {
         );
         // No host → None (local path).
         assert_eq!(remote_authority("/local/path"), None);
+        // Userinfo may contain an at-sign; its final at-sign precedes the host.
+        assert_eq!(
+            remote_authority("https://user:pa@ss@github.com/o/r").as_deref(),
+            Some("github.com"),
+        );
+        // Scheme-form SSH carries a real port, unlike scp form.
+        assert_eq!(
+            remote_authority("ssh://git@host:2222/o/r").as_deref(),
+            Some("host:2222"),
+        );
+        // The first colon ends the scp authority, even before a later at-sign.
+        assert_eq!(remote_authority("user:pw@host:o/r").as_deref(), Some("user"));
+        // Userinfo alone leaves no host in the authority.
+        assert_eq!(remote_authority("https://user@/o/r"), None);
+    }
+
+    #[test]
+    fn remote_authority_ends_before_a_query() {
+        let url = "https://github.com?x@evil.com/repo";
+        assert_eq!(remote_authority(url).as_deref(), Some("github.com"));
+        assert_eq!(remote_path(url), None);
+    }
+
+    #[test]
+    fn remote_authority_ends_before_a_fragment() {
+        let url = "https://github.com#@evil.com/r";
+        assert_eq!(remote_authority(url).as_deref(), Some("github.com"));
+        assert_eq!(remote_path(url), None);
+    }
+
+    #[test]
+    fn remote_authority_does_not_take_a_host_from_the_query() {
+        assert_eq!(
+            remote_authority("https://evil.com?x@github.com/repo").as_deref(),
+            Some("evil.com"),
+        );
+    }
+
+    #[test]
+    fn remote_authority_scp_userinfo_bracket_keeps_the_host_bare() {
+        assert_eq!(remote_authority("u[@host:22/o/r").as_deref(), Some("host"));
+    }
+
+    #[test]
+    fn remote_authority_scp_mid_host_bracket_keeps_the_host_bare() {
+        assert_eq!(remote_authority("host[x:22/r").as_deref(), Some("host[x"));
+    }
+
+    #[test]
+    fn remote_authority_scp_bracketed_host_follows_userinfo() {
+        for (url, path) in [
+            ("user:pw@[::1]:o/r", "o/r"),
+            ("x@y@[::1]:p", "p"),
+            ("u@[other]@[::1]:p", "p"),
+        ] {
+            assert_eq!(remote_authority(url).as_deref(), Some("[::1]"), "{url}");
+            assert_eq!(remote_path(url).as_deref(), Some(path), "{url}");
+        }
     }
 
     #[test]
@@ -4878,6 +4936,24 @@ mod tests {
 
     #[test]
     fn remote_path_extracts_project_path() {
+        // A raw slash ends the authority, so the later at-sign belongs to the path.
+        let url = "https://tok/en@github.com/o/r";
+        assert_eq!(remote_authority(url).as_deref(), Some("tok"));
+        assert_eq!(remote_path(url).as_deref(), Some("en@github.com/o/r"));
+        for (url, authority, path) in [
+            ("https://github.com/x@evil.com/repo", "github.com", "x@evil.com/repo"),
+            ("https://github.com/o/a@b.git", "github.com", "o/a@b"),
+            ("ssh://git@host:2222/o/a@evil.com/r", "host:2222", "o/a@evil.com/r"),
+            ("https://host:443.helper=!evil/o/a@b.git", "host", "o/a@b"),
+            ("git@github.com:x@evil.com/repo.git", "github.com", "x@evil.com/repo"),
+            ("github.com:o/a@b.git", "github.com", "o/a@b"),
+            ("https://github.com/@", "github.com", "@"),
+        ] {
+            assert_eq!(remote_authority(url).as_deref(), Some(authority), "authority {url}");
+            assert_eq!(remote_path(url).as_deref(), Some(path), "path {url}");
+        }
+        assert_eq!(remote_path("https://user@github.com/o/r.git").as_deref(), Some("o/r"));
+        assert_eq!(remote_path("git@github.com:o/r.git").as_deref(), Some("o/r"));
         // https, with and without .git, default and custom port.
         assert_eq!(remote_path("https://gitlab.com/group/repo.git").as_deref(), Some("group/repo"));
         assert_eq!(remote_path("https://gitlab.com/group/repo").as_deref(), Some("group/repo"));
@@ -4900,6 +4976,20 @@ mod tests {
 
     #[test]
     fn remote_path_parses_bracketed_hosts_and_refuses_malformed_ones() {
+        for url in [
+            "https://[2001:DB8::1]/o/a@b.git",
+            "https://user@[2001:DB8::1]/o/a@b.git",
+            "[2001:DB8::1]:o/a@b.git",
+            "git@[2001:DB8::1]:o/a@b.git",
+        ] {
+            assert_eq!(remote_authority(url).as_deref(), Some("[2001:db8::1]"), "{url}");
+            assert_eq!(remote_host(url).as_deref(), Some("[2001:db8::1]"), "{url}");
+            assert_eq!(remote_path(url).as_deref(), Some("o/a@b"), "{url}");
+        }
+        for url in ["https://[::1/o@evil.com/r", "file:///o@evil.com/r"] {
+            assert_eq!(remote_authority(url), None, "authority {url}");
+            assert_eq!(remote_path(url), None, "path {url}");
+        }
         assert_eq!(
             remote_path("git@[2001:db8::1]:group/sub/repo.git").as_deref(),
             Some("group/sub/repo"),
@@ -5005,12 +5095,8 @@ mod tests {
             web_repo_url("git://gitea.internal:9418/group/repo.git").as_deref(),
             Some("https://gitea.internal/group/repo"),
         );
-        // Userinfo never reaches the OS URL opener — this app's own Bitbucket
-        // remotes embed a username (`strip_https_userinfo`'s reason for
-        // existing), and a GitLab PAT-in-URL remote is a real shape too. Both
-        // rely on `remote_authority`/`remote_path`'s own `rsplit_once('@')`
-        // stripping userinfo before the authority is read; pinned here since
-        // this is the one consumer that hands the result to a browser.
+        // `split_remote_url` strips userinfo only from the authority, so embedded
+        // credentials never reach the OS URL opener and at-signs in paths survive.
         assert_eq!(
             web_repo_url("https://user@bitbucket.org/ws/repo.git").as_deref(),
             Some("https://bitbucket.org/ws/repo"),
@@ -5018,6 +5104,10 @@ mod tests {
         assert_eq!(
             web_repo_url("https://oauth2:glpat-fake@gitlab.com/g/r.git").as_deref(),
             Some("https://gitlab.com/g/r"),
+        );
+        assert_eq!(
+            web_repo_url("https://github.com/x@evil.com/repo").as_deref(),
+            Some("https://github.com/x@evil.com/repo"),
         );
     }
 
@@ -5378,6 +5468,10 @@ mod tests {
     #[test]
     fn fork_url_splices_the_path_and_keeps_scheme_userinfo_and_port() {
         let f = |url: &str| fork_url_from_origin(url, "contrib", "proj");
+        assert_eq!(
+            f("https://user:pa@ss@github.com:8443/x@evil.com/repo.git/").as_deref(),
+            Some("https://user:pa@ss@github.com:8443/contrib/proj.git")
+        );
         assert_eq!(
             f("https://ghe.acme.com:8443/base/proj.git").as_deref(),
             Some("https://ghe.acme.com:8443/contrib/proj.git")

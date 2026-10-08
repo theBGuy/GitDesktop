@@ -1,0 +1,1 @@
+- Remote URLs with unusual spellings (an `@` or `?` in the path, bracketed IPv6 hosts with userinfo) now resolve to the same host and path git itself sees, so repository links and host routing stay exact.
