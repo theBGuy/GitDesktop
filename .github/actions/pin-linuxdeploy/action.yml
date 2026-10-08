@@ -1,11 +1,13 @@
 name: Pin AppImage bundling tools
 description: >-
-  Seed the Tauri bundler's tool cache with SHA256-verified copies of its own
-  linuxdeploy and AppRun builds.
+  Seed the Tauri bundler's tool cache with SHA256-verified
+  linuxdeploy, AppRun, and AppImage plugin builds.
+  Supply a SHA256-verified runtime input.
 
 # Cache names must match the bundler's tools, including LINUXDEPLOY_COMMIT_HASH.
-# appimage-guard.sh checks that the bundler ran the pinned linuxdeploy and
-# bundled the pinned AppRun, which the bundler copies unmodified.
+# appimage-guard.sh checks the pinned linuxdeploy, bundled AppRun, and cached
+# AppImage plugin.
+# It also checks the pinned runtime input.
 
 runs:
   using: composite
@@ -18,6 +20,15 @@ runs:
         LINUXDEPLOY_SHA256: 36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62
         APPRUN_URL: https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
         APPRUN_SHA256: f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f
+
+        # Fixed tag: upstream re-uploads continuous monthly; no digest is published.
+        # SHA256 measured from the release asset 2026-10-08: 15,889,136 bytes.
+        PLUGIN_URL: https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage
+        PLUGIN_SHA256: 992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3
+
+        # GitHub-published digest for 20251108, 944,632 bytes; verified 2026-10-08.
+        RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+        RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
       run: |
         set -euo pipefail
         # The gate is arch-agnostic (runner.os); this pin is not.
@@ -40,3 +51,21 @@ runs:
         chmod +x "$target"
         echo "GD_LINUXDEPLOY_PIN=$LINUXDEPLOY_CACHE_NAME" >> "$GITHUB_ENV"
         echo "GD_APPRUN_SHA256=$APPRUN_SHA256" >> "$GITHUB_ENV"
+
+        # Tauri's plugin cache filename carries neither architecture nor version.
+        target="$cache_dir/linuxdeploy-plugin-appimage.AppImage"
+        curl -fsSL --retry 3 \
+          -o "$target" \
+          "$PLUGIN_URL"
+        echo "${PLUGIN_SHA256}  ${target}" | sha256sum -c -
+        chmod +x "$target"
+        echo "GD_PLUGIN_APPIMAGE_SHA256=$PLUGIN_SHA256" >> "$GITHUB_ENV"
+
+        # LDAI_RUNTIME_FILE prevents appimagetool from fetching a rolling runtime.
+        target="$(cd "$cache_dir" && pwd)/runtime-x86_64"
+        curl -fsSL --retry 3 \
+          -o "$target" \
+          "$RUNTIME_URL"
+        echo "${RUNTIME_SHA256}  ${target}" | sha256sum -c -
+        echo "LDAI_RUNTIME_FILE=$target" >> "$GITHUB_ENV"
+        echo "GD_RUNTIME_SHA256=$RUNTIME_SHA256" >> "$GITHUB_ENV"

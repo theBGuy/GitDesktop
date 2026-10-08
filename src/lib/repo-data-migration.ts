@@ -35,7 +35,8 @@ import { storeName } from "@/lib/test-mode";
 // flat list carrying a per-repo `scope` plus per-repo run confirmations, re-homed
 // by `rehomeTaskScopes`.
 //
-// Deliberately excluded: settings.json (already moved), sessions/*.jsonl (Rust-owned
+// Deliberately excluded: settings.json (already moved — its MCP per-repo keys too, re-homed
+// by `relocateRecentRepo` in settings/api.ts), sessions/*.jsonl (Rust-owned
 // append-only; a moved repo's session worktrees are broken at the git level anyway),
 // notifications.json (transient), analytics / agent-numbers / jira-field-maps
 // (not per-repo).

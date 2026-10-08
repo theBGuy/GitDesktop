@@ -140,6 +140,13 @@ import {
 } from "@/lib/git/types";
 import { eventToBinding, formatBinding, isMac } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  OFFLINE_ITEM_REASON,
+  pendingItemReason,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -3192,6 +3199,9 @@ export function ProjectsBoardPanel({
   const saveViewLayout = useUpdateProjectView();
   const deleteView = useDeleteProjectView();
   const duplicateView = useDuplicateProjectView();
+  // Deleting a project or a view holds offline rather than park: a parked delete
+  // lands for everyone whenever the connection returns.
+  const offlineHold = useOfflineHold();
   /** The project or view dialog on screen. Kept through the close — only
    *  `lifecycleOpen` drops — so a dialog's title and seeds hold still while it
    *  animates out. */
@@ -3338,7 +3348,7 @@ export function ProjectsBoardPanel({
   const closeReopenHeld = (() => {
     switch (true) {
       case closeProject.isPending:
-        return "saving…";
+        return pendingItemReason(closeProject.isPaused, "saving…");
       case projectScopeReadOnly(scopes.data):
         return "needs the project scope";
       case project?.closed === true && !project.viewerCanReopen:
@@ -3350,7 +3360,11 @@ export function ProjectsBoardPanel({
     }
   })();
   const deleteProjectHeld =
-    statusWriteHeld ?? (deleteProject.isPending ? "deleting…" : undefined);
+    statusWriteHeld ??
+    (deleteProject.isPending
+      ? pendingItemReason(deleteProject.isPaused, "deleting…")
+      : undefined) ??
+    (offlineHold ? OFFLINE_ITEM_REASON : undefined);
   // Close asks first, so it carries the ellipsis; a held row drops it for the
   // reason, the grammar the other held rows keep.
   const closeReopenLabel = project?.closed
@@ -3405,8 +3419,9 @@ export function ProjectsBoardPanel({
         body: `${target.title} is deleted for everyone, with its items, views, fields and status updates. Draft items live only in the project and are deleted with it; its issues and pull requests stay in their repositories. This can't be undone.`,
         confirmLabel: "Delete project",
         confirmVariant: "destructive",
+        holdOffline: true,
       });
-      if (!ok) return;
+      if (!ok || refuseWhileOffline()) return;
       const generation = pickGenerationRef.current;
       try {
         await deleteProject.mutateAsync({ repo, lens, projectId: target.id });
@@ -3439,17 +3454,25 @@ export function ProjectsBoardPanel({
   // Any update to the SOURCE view in flight (layout, fields or name) has patched
   // it optimistically, and a copy taken now would keep those values even if the
   // write then failed. Scoped to the source: a write to another view holds nothing.
-  const sourceWriteOut =
-    savedView !== null &&
-    [saveViewLayout, setViewFields, renameView].some(
-      (m) => m.isPending && m.variables?.viewId === savedView.id,
-    );
+  const sourceWrites =
+    savedView === null
+      ? []
+      : [saveViewLayout, setViewFields, renameView].filter(
+          (m) => m.isPending && m.variables?.viewId === savedView.id,
+        );
   const duplicateViewReason =
     viewActionReason(true) ??
     unknownLayoutHeld ??
     viewsRefreshing ??
-    (sourceWriteOut ? "Saving this view…" : undefined) ??
-    (duplicateView.isPending ? "Duplicating a view…" : undefined);
+    (sourceWrites.length > 0
+      ? pendingWriteReason(
+          sourceWrites.every((m) => m.isPaused),
+          "Saving this view…",
+        )
+      : undefined) ??
+    (duplicateView.isPending
+      ? pendingWriteReason(duplicateView.isPaused, "Duplicating a view…")
+      : undefined);
   const viewFieldsReason = viewActionReason(true) ?? viewsRefreshing;
   const lastView =
     views.data !== undefined &&
@@ -3458,11 +3481,16 @@ export function ProjectsBoardPanel({
   const deleteViewReason =
     viewActionReason(true) ??
     (lastView ? LAST_VIEW_REASON : undefined) ??
-    (deleteView.isPending ? "Deleting a view…" : undefined);
+    (deleteView.isPending
+      ? pendingWriteReason(deleteView.isPaused, "Deleting a view…")
+      : undefined) ??
+    offlineHold;
   const saveLayoutReason =
     viewActionReason(true) ??
     unknownLayoutHeld ??
-    (saveViewLayout.isPending ? "Saving the layout…" : undefined);
+    (saveViewLayout.isPending
+      ? pendingWriteReason(saveViewLayout.isPaused, "Saving the layout…")
+      : undefined);
 
   function openNewView() {
     if (projectId === null || viewActionReason(false) !== undefined) return;
@@ -3585,8 +3613,9 @@ export function ProjectsBoardPanel({
         body: `${target.name || UNTITLED_VIEW} is deleted for everyone on the project. GitHub can't bring a deleted view back, so this can't be undone.`,
         confirmLabel: "Delete view",
         confirmVariant: "destructive",
+        holdOffline: true,
       });
-      if (!ok) return;
+      if (!ok || refuseWhileOffline()) return;
       // A board drawn under it falls back to no view once the switcher stops
       // listing it, the way any vanished view does.
       try {

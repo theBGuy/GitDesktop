@@ -69,12 +69,13 @@ jobs:
       # the keyboard-nav and disabled-key-filter suites reach react through
       # their modules under test, the notification-settings suite loads the
       # settings graph, which pulls react plus @tauri-apps/plugin-store, the
-      # ts-no-jsx-highlight suite drives highlight.js and @git-diff-view/core's
-      # lowlight engine, and the ai-ignore-filter suite reaches @tauri-apps/api
-      # through the git api barrel.
+      # ts-no-jsx-highlight and hunk-scoped-highlight suites drive highlight.js
+      # and @git-diff-view/core's lowlight engine (the hunk-scoped-highlight
+      # suite loads Shiki too), and the ai-ignore-filter suite reaches
+      # @tauri-apps/api through the git api barrel.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
       # unresolvable import there into a failure rather than a silent skip.
       - name: Node suites needing node_modules (enforced)
         env:
           GD_EXPECT_DEPS: "1"
-        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs"
+        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs"

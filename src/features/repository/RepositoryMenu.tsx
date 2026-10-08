@@ -26,6 +26,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { lazy, Suspense, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -86,6 +87,12 @@ import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
 import { useRepoNotificationsDialog } from "@/lib/notifications/matrix";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
@@ -146,6 +153,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const repoTab = useUiStore((s) => s.repoTab);
   const selectedPr = useUiStore((s) => s.selectedPr);
   const fork = useForkRepo(repoPath);
+  // The fork dialog's submit holds offline rather than park: a parked fork lands
+  // whenever the connection returns and rewires origin under the user.
+  const offlineHold = useOfflineHold();
+  const forkHeldReason = fork.isPending
+    ? pendingWriteReason(fork.isPaused, ACT_PENDING_REASON)
+    : offlineHold;
   // The Fork item's verdict, sampled when the dropdown opens (see `canForkHere`).
   const [forkWhileOpen, setForkWhileOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
@@ -436,6 +449,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // still polls for readiness, and react-query then drops per-call callbacks —
   // origin is rewired either way, so the outcome must not depend on the menu.
   async function doFork() {
+    if (refuseWhileOffline()) return;
     try {
       const url = await fork.mutateAsync(forkIntent === "contribute");
       setForkOpen(false);
@@ -891,10 +905,16 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
             >
               Cancel
             </Button>
-            <Button disabled={fork.isPending} onClick={doFork}>
-              {fork.isPending && <Spinner data-icon="inline-start" />}
+            <DisabledReasonButton
+              disabled={forkHeldReason !== undefined}
+              reason={forkHeldReason}
+              onClick={doFork}
+            >
+              {fork.isPending && !fork.isPaused && (
+                <Spinner data-icon="inline-start" />
+              )}
               Fork repository
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

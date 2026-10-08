@@ -1,0 +1,1 @@
+- Hunks deep in very large files are now syntax-highlighted.

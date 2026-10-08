@@ -53,6 +53,12 @@ import {
   useRunFailedLogs,
 } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween, parseableDate } from "@/lib/time";
@@ -154,10 +160,11 @@ function JobRow({
    *  button element: this offer retires the moment the job starts, so the parent
    *  needs it to tell whether the click is about to lose focus. */
   onPlay?: (buttonEl: HTMLElement) => void;
-  /** Whether the play mutation is in flight for THIS job. */
+  /** Whether the play mutation is running for THIS job, which shows the
+   *  spinner; a parked one holds by its reason alone. */
   playing?: boolean;
-  /** Set when the viewer may not push: the play button stays visible but
-   *  disabled, with this text as its hint. */
+  /** Set when the viewer may not push or this job's play is pending: the play
+   *  button stays visible but disabled, with this text as its hint. */
   playDisabledReason?: string;
   /** Re-run this one finished job (GitHub + GitLab). Takes the button element
    *  for the same reason `onPlay` does — the offer retires on success. */
@@ -165,10 +172,11 @@ function JobRow({
   /** The provider's per-job wording — the button renders only with both this and
    *  `onRerun`, so the label can never be spelled at this call site. */
   rerunOffer?: JobRerunOffer;
-  /** Whether the re-run mutation is in flight for THIS job. */
+  /** Whether the re-run mutation is running for THIS job, which shows the
+   *  spinner; a parked one holds by its reason alone. */
   rerunning?: boolean;
-  /** Set when the viewer may not push: the re-run button stays visible but
-   *  disabled, with this text as its hint. */
+  /** Set when the viewer may not push or a re-run is pending: the re-run button
+   *  stays visible but disabled, with this text as its hint. */
   rerunDisabledReason?: string;
 }) {
   // Failed and in-progress jobs are the interesting ones — open them by default.
@@ -537,15 +545,19 @@ export function RunDetailView({
   // ONE busy notion for the re-run FAMILY — the run-level re-runs and the
   // per-job ones act on the same run, so an overlapping submission just buys the
   // forge's mid-run refusal. Play, cancel and approve are different operations
-  // and keep their own. Each control suppresses the reason on ITSELF while it is
-  // the one running: its spinner already says so.
+  // and keep their own. The running control holds with its own in-flight reason,
+  // never none: a disabled control without a reason drops focus.
   const rerunFamilyBusy = rerun.isPending || rerunJob.isPending;
+  const rerunFamilyPaused = rerun.isPaused || rerunJob.isPaused;
   const rerunHeldReason = (() => {
     switch (true) {
       case writeReason !== undefined:
         return writeReason;
       case rerunFamilyBusy:
-        return "A re-run is already in flight…";
+        return pendingWriteReason(
+          rerunFamilyPaused,
+          "A re-run is already in flight…",
+        );
       case runLatched:
         return "Re-run already started — waiting for the new attempt…";
       default:
@@ -568,8 +580,20 @@ export function RunDetailView({
     provider === "github" &&
     (run?.status === "action_required" ||
       run?.conclusion === "action_required");
+  // Approving starts the contributor's code, so it holds offline as its prompt
+  // does; cancel and the re-runs may park, and say so on their controls.
+  const offlineHold = useOfflineHold();
   const canApprove =
-    tabActive && approvalPending && !writeBlocked && !approveRun.isPending;
+    tabActive &&
+    approvalPending &&
+    !writeBlocked &&
+    !approveRun.isPending &&
+    !offlineHold;
+  const approveHeldReason =
+    writeReason ??
+    (approveRun.isPending
+      ? pendingWriteReason(approveRun.isPaused, ACT_PENDING_REASON)
+      : offlineHold);
 
   // Awaited, not per-call callbacks: this view is keyed per run and unmounts the
   // moment another run is selected, and react-query drops per-call callbacks once
@@ -650,7 +674,7 @@ export function RunDetailView({
 
   async function doApprove() {
     const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
-    if (!ok) return;
+    if (!ok || refuseWhileOffline()) return;
     try {
       await approveRun.mutateAsync({ runId });
       toast.success("Workflow run approved.");
@@ -796,10 +820,15 @@ export function RunDetailView({
                   variant="outline"
                   size="sm"
                   disabled={cancel.isPending || writeBlocked}
-                  reason={writeReason}
+                  reason={
+                    writeReason ??
+                    (cancel.isPending
+                      ? pendingWriteReason(cancel.isPaused, ACT_PENDING_REASON)
+                      : undefined)
+                  }
                   onClick={doCancel}
                 >
-                  {cancel.isPending ? (
+                  {cancel.isPending && !cancel.isPaused ? (
                     <Spinner data-icon="inline-start" />
                   ) : (
                     <ProhibitIcon data-icon="inline-start" />
@@ -821,11 +850,19 @@ export function RunDetailView({
                     variant="outline"
                     size="sm"
                     disabled={rerunFamilyBusy || runLatched || writeBlocked}
-                    reason={thisRerunning ? undefined : rerunHeldReason}
+                    reason={
+                      thisRerunning
+                        ? (writeReason ??
+                          pendingWriteReason(
+                            rerun.isPaused,
+                            ACT_PENDING_REASON,
+                          ))
+                        : rerunHeldReason
+                    }
                     title={RERUN_TITLES[offer.kind]}
                     onClick={() => doRerun(offer.kind === "failed")}
                   >
-                    {thisRerunning ? (
+                    {thisRerunning && !rerun.isPaused ? (
                       <Spinner data-icon="inline-start" />
                     ) : (
                       <ArrowClockwiseIcon data-icon="inline-start" />
@@ -863,11 +900,11 @@ export function RunDetailView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={approveRun.isPending || writeBlocked}
-            reason={writeReason}
+            disabled={approveRun.isPending || writeBlocked || !!offlineHold}
+            reason={approveHeldReason}
             onClick={() => void doApprove()}
           >
-            {approveRun.isPending ? (
+            {approveRun.isPending && !approveRun.isPaused ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlayIcon data-icon="inline-start" />
@@ -897,6 +934,8 @@ export function RunDetailView({
                 // the guards serialize, so `variables` still describe it.
                 const thisJobRerunning =
                   rerunJob.isPending && rerunJob.variables?.jobId === job.id;
+                const thisJobPlaying =
+                  playJob.isPending && playJob.variables === job.id;
                 return (
                   <JobRow
                     key={job.id}
@@ -917,8 +956,16 @@ export function RunDetailView({
                         ? (buttonEl) => void doPlay(job.id, buttonEl)
                         : undefined
                     }
-                    playing={playJob.isPending && playJob.variables === job.id}
-                    playDisabledReason={writeReason}
+                    playing={thisJobPlaying && !playJob.isPaused}
+                    playDisabledReason={
+                      writeReason ??
+                      (thisJobPlaying
+                        ? pendingWriteReason(
+                            playJob.isPaused,
+                            ACT_PENDING_REASON,
+                          )
+                        : undefined)
+                    }
                     onRerun={
                       // GitHub refuses a per-job re-run while the run is still in
                       // flight; GitLab accepts one, so only GitHub gates on `active`.
@@ -935,9 +982,15 @@ export function RunDetailView({
                         : undefined
                     }
                     rerunOffer={jobOffer ?? undefined}
-                    rerunning={thisJobRerunning}
+                    rerunning={thisJobRerunning && !rerunJob.isPaused}
                     rerunDisabledReason={
-                      thisJobRerunning ? undefined : rerunHeldReason
+                      thisJobRerunning
+                        ? (writeReason ??
+                          pendingWriteReason(
+                            rerunJob.isPaused,
+                            ACT_PENDING_REASON,
+                          ))
+                        : rerunHeldReason
                     }
                   />
                 );

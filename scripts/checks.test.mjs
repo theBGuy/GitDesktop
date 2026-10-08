@@ -24,6 +24,12 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  EXEMPT as APPIMAGE_EXEMPT,
+  verdict as appimageTwinsVerdict,
+  parseGuardAllowed,
+  parseRustVars,
+} from "./check-appimage-env-twins.mjs";
+import {
   CHECKS,
   okReportLine,
   reachesGitQueriesInternal,
@@ -4362,6 +4368,199 @@ test("skill-mirrors fails rather than passing vacuously", () => {
     // Any uncaught throw also exits 1, so pin the REASON — otherwise this control
     // cannot tell the vacuity guard firing from the gate crashing before it.
     assert.match(out, /no skill exists in both trees/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// -------------------------------------------------- check-appimage-env-twins
+
+const appimageGuardFixture = [
+  'allowed=" LD_LIBRARY_PATH PATH XDG_DATA_DIRS GTK_PATH"',
+  'allowed="$allowed GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0"',
+  'allowed="$allowed GI_TYPELIB_PATH"',
+  'allowed="$allowed PYTHONHOME PYTHONPATH PERLLIB QT_PLUGIN_PATH"',
+  'allowed="$allowed GSETTINGS_SCHEMA_DIR GTK_EXE_PREFIX GTK_DATA_PREFIX"',
+  'allowed="$allowed GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE"',
+  'allowed="$allowed GIO_EXTRA_MODULES GIO_MODULE_DIR"',
+  'allowed="$allowed APPDIR " # expected hook re-export, also stripped from children',
+].join("\n");
+
+for (const ending of ["\n", "\r\n"]) {
+  test(`appimage-env-twins parses ${JSON.stringify(ending)} lines`, () => {
+    assert.deepEqual(
+      parseGuardAllowed(appimageGuardFixture.replaceAll("\n", ending)),
+      new Set([
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "XDG_DATA_DIRS",
+        "GTK_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+        "GI_TYPELIB_PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PERLLIB",
+        "QT_PLUGIN_PATH",
+        "GSETTINGS_SCHEMA_DIR",
+        "GTK_EXE_PREFIX",
+        "GTK_DATA_PREFIX",
+        "GTK_IM_MODULE_FILE",
+        "GDK_PIXBUF_MODULE_FILE",
+        "GIO_EXTRA_MODULES",
+        "GIO_MODULE_DIR",
+        "APPDIR",
+      ]),
+    );
+  });
+}
+
+const appimageRustFixture = `
+// const APPDIR_PATHLIST_VARS: &[&str] = &["COMMENTED_TABLE"];
+const APPDIR_PATHLIST_VARS: &[&str] = &[
+    "PATH", // "COMMENTED_LINE",
+    /* "COMMENTED_BLOCK", */
+];
+const APPDIR_SCALAR_VARS: &[&str] = &["APPDIR"];
+`;
+
+test("appimage-env-twins parses Rust tables without comments", () => {
+  for (const ending of ["\n", "\r\n"]) {
+    assert.deepEqual(
+      parseRustVars(appimageRustFixture.replaceAll("\n", ending)),
+      new Set(["PATH", "APPDIR"]),
+    );
+  }
+});
+
+test("appimage-env-twins fails on missing markers or unsupported entries", () => {
+  assert.throws(() => parseGuardAllowed("# no assignments"), /Could not find/);
+  for (const marker of ["APPDIR_PATHLIST_VARS", "APPDIR_SCALAR_VARS"]) {
+    assert.throws(
+      () => parseRustVars(appimageRustFixture.replaceAll(marker, "REMOVED")),
+      /Could not find/,
+    );
+  }
+  assert.throws(() => parseGuardAllowed("allowed=' PATH '"), /Could not parse/);
+  for (const assignment of [
+    'allowed+=" NEWVAR"',
+    'declare allowed="$allowed NEWVAR"',
+    'local allowed="$allowed NEWVAR"',
+    'export allowed="$allowed NEWVAR"',
+    'declare -x allowed="$allowed NEWVAR"',
+    'typeset allowed="$allowed NEWVAR"',
+    'readonly allowed="$allowed NEWVAR"',
+    '[ -n "$x" ] && allowed="$allowed NEWVAR"',
+  ]) {
+    assert.throws(
+      () => parseGuardAllowed(`${appimageGuardFixture}\n${assignment}\n`),
+      /Could not parse allowed assignment/,
+    );
+    assert.deepEqual(
+      parseGuardAllowed(`${appimageGuardFixture}\n# ${assignment}\n`),
+      parseGuardAllowed(appimageGuardFixture),
+    );
+  }
+  assert.throws(
+    () => parseRustVars(appimageRustFixture.replace('"APPDIR"', "COMPUTED")),
+    /Could not parse/,
+  );
+});
+
+test("appimage-env-twins rejects replacement allowed assignments", () => {
+  for (const assignment of ['allowed=""', 'allowed="NEWVAR"']) {
+    assert.throws(
+      () => parseGuardAllowed(`${appimageGuardFixture}\n${assignment}\n`),
+      { message: `Replacement allowed assignment: ${assignment}` },
+    );
+  }
+});
+
+test("appimage-env-twins exemptions each carry a reason", () => {
+  for (const [name, reason] of APPIMAGE_EXEMPT) {
+    assert.equal(typeof reason, "string");
+    assert.ok(reason.trim().length > 10, `${name}'s exemption states why`);
+  }
+});
+
+test("appimage-env-twins exemptions ratchet names they no longer suppress", () => {
+  const exempt = new Map([
+    ["APPDIR", "Fixture exemption for a bundle export."],
+  ]);
+  const stripped = new Set(["PATH"]);
+  assert.deepEqual(
+    appimageTwinsVerdict(new Set(["PATH", "APPDIR"]), stripped, exempt),
+    { empty: false, notStripped: [], notAllowed: [], stale: [] },
+  );
+  assert.deepEqual(appimageTwinsVerdict(stripped, stripped, exempt), {
+    empty: false,
+    notStripped: [],
+    notAllowed: [],
+    stale: ["APPDIR"],
+  });
+  assert.deepEqual(
+    appimageTwinsVerdict(stripped, new Set(["PATH", "APPDIR"]), exempt),
+    { empty: false, notStripped: [], notAllowed: [], stale: ["APPDIR"] },
+  );
+  assert.deepEqual(
+    appimageTwinsVerdict(stripped, stripped, new Map([["PATH", "x"]])),
+    { empty: false, notStripped: [], notAllowed: [], stale: ["PATH"] },
+  );
+});
+
+test("appimage-env-twins CLI rejects drift and empty parses", () => {
+  const root = mkdtempSync(join(tmpdir(), "gd-appimage-twins-"));
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-appimage-env-twins.mjs",
+  );
+  let lastOut = "";
+  const run = () => {
+    try {
+      lastOut = String(
+        execFileSync(process.execPath, [gate], {
+          env: { ...process.env, GD_APPIMAGE_TWINS_ROOT: root },
+          stdio: "pipe",
+        }),
+      );
+      return 0;
+    } catch (err) {
+      lastOut = String(err.stdout || "") + String(err.stderr || "");
+      return err.status;
+    }
+  };
+  try {
+    mkdirSync(join(root, ".github/scripts"), { recursive: true });
+    mkdirSync(join(root, "src-tauri/src"), { recursive: true });
+    const guard = join(root, ".github/scripts/appimage-guard.sh");
+    const rust = join(root, "src-tauri/src/agent.rs");
+    writeFileSync(guard, 'allowed=" PATH APPDIR "\r\n');
+    writeFileSync(rust, appimageRustFixture);
+    assert.equal(run(), 0, lastOut);
+    assert.match(lastOut, /OK 2 variables in sync/);
+
+    writeFileSync(rust, appimageRustFixture.replace('"APPDIR"', ""));
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /in guard but not stripped: APPDIR/);
+
+    writeFileSync(rust, appimageRustFixture);
+    writeFileSync(guard, 'allowed=" PATH "\n');
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /stripped but not allowed: APPDIR/);
+
+    writeFileSync(guard, 'allowed=""\n');
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /empty parsed set/);
+
+    writeFileSync(guard, 'allowed=" PATH APPDIR "\n');
+    writeFileSync(rust, appimageRustFixture.replace(/"(?:PATH|APPDIR)"/g, ""));
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /empty parsed set/);
+
+    writeFileSync(rust, appimageRustFixture);
+    rmSync(guard);
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /appimage-env-twins: FAIL.*ENOENT/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

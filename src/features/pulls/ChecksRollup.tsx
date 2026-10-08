@@ -62,6 +62,13 @@ import {
 } from "@/lib/github/actions";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  ACT_PENDING_REASON,
+  isOfflineNow,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween } from "@/lib/time";
@@ -85,6 +92,9 @@ export const APPROVE_RUN_CONFIRM = {
   title: "Approve and run workflows?",
   body: "This runs the contributor's workflow code in this repository's CI.",
   confirmLabel: "Approve and run",
+  // Approving starts the contributor's code, so it holds offline rather than
+  // park and run it whenever the connection returns.
+  holdOffline: true,
 } as const;
 
 /** How long a started re-run waits before re-reading the PR's checks. The
@@ -328,7 +338,8 @@ function CheckRow({
     title: string;
     ariaLabel: string;
   } | null;
-  /** Whether the re-run mutation is in flight for THIS row's job. */
+  /** Whether the re-run mutation is running for THIS row's job, which shows the
+   *  spinner; a parked one holds by its reason alone. */
   jobRerunBusy: boolean;
   /** Whether anything outside this row holds the button: a read-only viewer, a
    *  write probe still answering, or another row's re-run in flight (the handler
@@ -853,14 +864,28 @@ export function ChecksRollup({
   // switch lands, while the transient wording doesn't.
   const heldReason =
     writeReason ?? (stale ? PR_SWITCH_LOADING_REASON : undefined);
+  // Approve holds offline, as its prompt does. A running batch keeps a reason
+  // of its own, so the button holds focus through the disable.
+  const offlineHold = useOfflineHold();
+  const approveHeldReason = (() => {
+    switch (true) {
+      case heldReason !== undefined:
+        return heldReason;
+      case approving:
+        return pendingWriteReason(approveRun.isPaused, ACT_PENDING_REASON);
+      default:
+        return offlineHold;
+    }
+  })();
   // ONE busy notion for both re-run paths — the run-level batch and any
   // single job. They act on the same runs, so an overlapping submission just
   // buys the forge's mid-run refusal; every control holds while either runs.
   const rerunBusy = rerunning || rerunningJob !== null;
-  // What holds EVERY re-run control, decided once. Each control suppresses the
-  // reason on ITSELF while it's the one running — its spinner already says so,
-  // and "already in flight" would read as a lie there.
+  // What holds EVERY re-run control, decided once. The running control takes its
+  // own in-flight reason instead ("already in flight" would read as a lie
+  // there), never none: a disabled control without a reason drops focus.
   const rerunHeld = rerunBusy || writeBlocked || writeAccess.isPending;
+  const rerunFamilyPaused = rerun.isPaused || rerunJobMutation.isPaused;
   const rerunHeldReason = (() => {
     switch (true) {
       case writeReason !== undefined:
@@ -868,7 +893,10 @@ export function ChecksRollup({
       case writeAccess.isPending:
         return "Checking write access…";
       case rerunBusy:
-        return "A re-run is already in flight…";
+        return pendingWriteReason(
+          rerunFamilyPaused,
+          "A re-run is already in flight…",
+        );
       default:
         return undefined;
     }
@@ -909,12 +937,24 @@ export function ChecksRollup({
     const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
     setApproving(true);
+    let approved = 0;
     try {
       // Sequential, and each failure is reported on its own: one run the viewer
       // can't approve must not strand the rest of the batch.
       for (const id of blockedRunIds) {
+        if (isOfflineNow()) {
+          // Runs approved before the drop have already started, so the refusal
+          // has to account for them rather than read as nothing happened.
+          if (approved > 0)
+            toast.info(
+              `You're offline — approved ${approved} of ${blockedRunIds.length} runs before the connection dropped. Approve the rest once you're back online.`,
+            );
+          else refuseWhileOffline();
+          break;
+        }
         try {
           await approveRun.mutateAsync({ runId: id, lens });
+          approved += 1;
         } catch (e) {
           toastError(e);
         }
@@ -1141,11 +1181,11 @@ export function ChecksRollup({
               <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={approving || writeBlocked || stale}
-                reason={heldReason}
+                disabled={approving || writeBlocked || stale || !!offlineHold}
+                reason={approveHeldReason}
                 onClick={() => void approveBlockedRuns()}
               >
-                {approving ? (
+                {approving && !approveRun.isPaused ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
                   <PlayIcon data-icon="inline-start" />
@@ -1193,11 +1233,16 @@ export function ChecksRollup({
                 variant="outline"
                 size="xs"
                 disabled={rerunHeld}
-                reason={rerunning ? undefined : rerunHeldReason}
+                reason={
+                  rerunning
+                    ? (writeReason ??
+                      pendingWriteReason(rerun.isPaused, ACT_PENDING_REASON))
+                    : rerunHeldReason
+                }
                 title={RERUN_TITLES[rerunOffer.kind]}
                 onClick={() => void rerunOfferedRuns()}
               >
-                {rerunning ? (
+                {rerunning && !rerun.isPaused ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
                   <ArrowClockwiseIcon data-icon="inline-start" />
@@ -1244,10 +1289,18 @@ export function ChecksRollup({
                           }
                         : null
                     }
-                    jobRerunBusy={rerunningJob === c.jobId}
+                    jobRerunBusy={
+                      rerunningJob === c.jobId && !rerunJobMutation.isPaused
+                    }
                     jobRerunDisabled={rerunHeld}
                     jobRerunReason={
-                      rerunningJob === c.jobId ? undefined : rerunHeldReason
+                      rerunningJob === c.jobId
+                        ? (writeReason ??
+                          pendingWriteReason(
+                            rerunJobMutation.isPaused,
+                            ACT_PENDING_REASON,
+                          ))
+                        : rerunHeldReason
                     }
                     onJobRerun={
                       candidate
