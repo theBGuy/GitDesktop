@@ -132,8 +132,9 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 
 /// Userinfo belongs only to the authority span; an `@` in the path is path data.
 /// Returns the scheme flag, authority without userinfo, and optional path.
-/// Deliberate divergence from git: in scp and non-http/ftp scheme form, an `@[` after
-/// the first `/` stays path data, where git's `host_end` would read it as a bracketed host.
+/// Deliberate divergence from git: in scp form and non-curl (http/https/ftp/ftps)
+/// scheme form, an `@[` after the first `/` stays path data, where git's `host_end`
+/// would read it as a bracketed host.
 fn split_remote_url(url: &str) -> (bool, &str, Option<&str>) {
     let url = url.trim();
     let (scheme, rest) = match url.split_once("://") {
@@ -4777,10 +4778,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_authority_scp_bracket_after_slash_stays_path_data() {
-        let url = "git@github.com:o/x@[2001:db8::2]:r";
-        assert_eq!(remote_authority(url).as_deref(), Some("github.com"));
-        assert_eq!(remote_path(url).as_deref(), Some("o/x@[2001:db8::2]:r"));
+    fn remote_authority_bracket_after_slash_stays_path_data() {
+        for (url, path) in [
+            ("git@github.com:o/x@[2001:db8::2]:r", "o/x@[2001:db8::2]:r"),
+            ("ssh://git@github.com/o/x@[2001:db8::2]/r", "o/x@[2001:db8::2]/r"),
+        ] {
+            assert_eq!(remote_authority(url).as_deref(), Some("github.com"), "{url}");
+            assert_eq!(remote_path(url).as_deref(), Some(path), "{url}");
+        }
     }
 
     #[test]

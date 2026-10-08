@@ -1,1 +1,1 @@
-- Remote URLs with an `@` in the repository path now resolve to the same host and path git itself uses, so repository links and host routing stay exact.
+- Remote URLs with an `@` in the repository path now keep the `@` in the path, so repository links and host routing stay exact.
