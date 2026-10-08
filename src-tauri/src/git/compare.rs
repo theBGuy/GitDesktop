@@ -257,15 +257,27 @@ pub async fn git_branch_file_diff(
     })
 }
 
-/// The fork point of `base` and `compare`. The compare surfaces diff three-dot
-/// (`base...compare`), so their old side is this commit rather than `base`'s
-/// tip — whole-file reads pairing a diff with `base` would map onto wrong lines.
+/// The two revs a compare surface's whole-file reads (content, image previews,
+/// blame) pair with its three-dot diff.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSides {
+    /// The fork point: the old side, rather than `base`'s tip, since the diff is
+    /// three-dot and a read of `base` would map onto wrong lines.
+    pub merge_base: String,
+    /// `compare` exactly as the diff commands resolve it: a local branch shadowed by
+    /// a same-named tag comes back as its full ref, which a read of the bare name
+    /// would lose to the tag.
+    pub compare_rev: String,
+}
+
+/// The fork point of `base` and `compare`, plus the rev the new side is read at.
 #[tauri::command]
 pub async fn git_merge_base(
     repo_path: String,
     base: String,
     compare: String,
-) -> AppResult<String> {
+) -> AppResult<CompareSides> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
     let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
@@ -275,7 +287,10 @@ pub async fn git_merge_base(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(out.stdout_lossy().trim().to_string())
+    Ok(CompareSides {
+        merge_base: out.stdout_lossy().trim().to_string(),
+        compare_rev: compare,
+    })
 }
 
 /// What `git_diff_between_refs` could determine about the relationship between
@@ -1330,7 +1345,7 @@ mod tests {
         let file = git_branch_file_diff(repo.clone(), b.clone(), f.clone(), "f.txt".into())
             .await
             .unwrap();
-        let merge_base = git_merge_base(repo.clone(), b.clone(), f.clone())
+        let sides = git_merge_base(repo.clone(), b.clone(), f.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -1340,9 +1355,39 @@ mod tests {
                 files,
                 diff.files.len(),
                 file.text.contains("+feature"),
-                merge_base == fork,
+                sides.merge_base == fork,
             ),
             ((1, 1), 1, vec!["f.txt".to_string()], 1, true, true)
+        );
+
+        // The new side's whole-file reads go through `compare_rev`: it reaches the
+        // branch's file, where git reading the bare name finds the tag (no f.txt).
+        assert_eq!(sides.compare_rev, "refs/heads/feature");
+        let show = |rev: &str| {
+            let (repo, spec) = (repo.clone(), format!("{rev}:f.txt"));
+            async move {
+                run_git_raw(Some(&repo), &["show", &spec], DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .code
+            }
+        };
+        assert_eq!(
+            (show(&sides.compare_rev).await, show("feature").await == 0),
+            (0, false)
+        );
+    }
+
+    /// The wire shape the TS `CompareSides` mirror reads.
+    #[test]
+    fn compare_sides_serialize_camel_case() {
+        let sides = CompareSides {
+            merge_base: "abc".into(),
+            compare_rev: "refs/heads/x".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&sides).unwrap(),
+            serde_json::json!({ "mergeBase": "abc", "compareRev": "refs/heads/x" })
         );
     }
 
@@ -1518,9 +1563,12 @@ mod tests {
         run(&repo, &["commit", "-qm", "base work"]).await;
         let base_tip = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
 
-        let merge_base = git_merge_base(repo.clone(), base_branch, "feature".into())
+        let sides = git_merge_base(repo.clone(), base_branch, "feature".into())
             .await
             .unwrap();
+        // Unshadowed, the new side reads at the name exactly as given.
+        assert_eq!(sides.compare_rev, "feature");
+        let merge_base = sides.merge_base;
         assert_eq!(merge_base, fork, "the two branches' fork point");
         assert_ne!(
             merge_base, base_tip,

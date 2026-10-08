@@ -102,3 +102,12 @@ export interface BranchComparison {
   /** On `base` but not `compare` — what `compare` is missing. */
   behind: CommitSummary[];
 }
+
+/** The revs a three-dot compare's whole-file reads pair with its diff. */
+export interface CompareSides {
+  /** The fork point — the old side (not `base`'s tip). */
+  mergeBase: string;
+  /** `compare` as the diff resolved it: a branch shadowed by a same-named tag
+   *  comes back as its full ref. Read the new side here, never at the bare name. */
+  compareRev: string;
+}
