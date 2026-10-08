@@ -52,6 +52,73 @@ pub(crate) fn validate_branch_name(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// HEAD's branch as its full ref (`refs/heads/<name>`), or `None` when HEAD is
+/// detached. Read with `symbolic-ref`, never `rev-parse --abbrev-ref`: the short form
+/// disambiguates, so a branch shadowed by a same-named tag reads `heads/<name>` (or the
+/// full ref, when that is ambiguous too). An UNBORN branch still answers here — sites
+/// that must refuse before the first commit check [`head_is_unborn`] themselves. Any
+/// other failure (not a repository, git missing) is an `Err`.
+pub(crate) async fn current_branch_ref(repo_path: &str) -> AppResult<Option<String>> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match out.code {
+        0 => {
+            let full = out.stdout_lossy();
+            let full = full.trim_end_matches(['\r', '\n']);
+            let named = full
+                .strip_prefix("refs/heads/")
+                .is_some_and(|name| !name.is_empty());
+            Ok(named.then(|| full.to_string()))
+        }
+        // `-q` exits 1, silently, exactly when HEAD is not a symbolic ref.
+        1 => Ok(None),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
+    }
+}
+
+/// The checked-out branch's NAME (what a branch argument, config key, refspec or
+/// comparison against `status --branch` wants), with [`current_branch_ref`]'s
+/// detached/unborn/error contract. A rev position takes the full ref instead: a bare
+/// name resolves to a same-named tag first.
+pub(crate) async fn current_branch_name(repo_path: &str) -> AppResult<Option<String>> {
+    Ok(current_branch_ref(repo_path)
+        .await?
+        .and_then(|full| full.strip_prefix("refs/heads/").map(str::to_string)))
+}
+
+/// Whether HEAD names a branch with no commits yet (a fresh `git init`, an orphan
+/// switch) — the state [`current_branch_name`] reports as an ordinary branch.
+pub(crate) async fn head_is_unborn(repo_path: &str) -> AppResult<bool> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(out.code != 0)
+}
+
+/// The refusal for an operation that needs a commit on HEAD's branch.
+pub(crate) fn unborn_head_error() -> AppError {
+    AppError::InvalidArgument(
+        "The current branch has no commits yet — commit on it, or switch to another branch, \
+         first."
+            .into(),
+    )
+}
+
+/// Every local branch. Names are read in FULL and stripped of exactly `refs/heads/`:
+/// `%(refname:short)` disambiguates, so a branch shadowed by a same-named tag lists as
+/// `heads/<name>` (or the full ref, when that is ambiguous too) and every row action
+/// would target the wrong name. `%(upstream:short)` stays short on purpose — the UI
+/// hands it back as a rev, which its disambiguated form resolves correctly.
 #[tauri::command]
 pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let out = run_git(
@@ -59,7 +126,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         &[
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname:short)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)",
+            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -69,7 +136,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let mut branches = Vec::new();
     for line in text.lines() {
         let mut parts = line.split('\0');
-        let (Some(name), upstream, head, date, track, upstream_remote) = (
+        let (Some(refname), upstream, head, date, track, upstream_remote) = (
             parts.next(),
             parts.next(),
             parts.next(),
@@ -79,9 +146,12 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         ) else {
             continue;
         };
-        if name.is_empty() {
+        let Some(name) = refname
+            .strip_prefix("refs/heads/")
+            .filter(|n| !n.is_empty())
+        else {
             continue;
-        }
+        };
         let (upstream_ahead, upstream_behind, upstream_gone) =
             parse_upstream_track(track.unwrap_or(""));
         branches.push(Branch {
@@ -138,7 +208,7 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
         &[
             "for-each-ref",
             "refs/remotes",
-            "--format=%(refname:short)%00%(committerdate:iso8601-strict)",
+            "--format=%(refname)%00%(committerdate:iso8601-strict)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -149,9 +219,14 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
         let (Some(refname), date) = (parts.next(), parts.next()) else {
             continue;
         };
-        // `%(refname:short)` is `<remote>/<branch>` (e.g. `origin/feature/x`).
-        // Split once so a branch name containing `/` stays intact.
-        let Some((remote, name)) = refname.split_once('/') else {
+        // Full ref, stripped of exactly `refs/remotes/`: the short form turns into
+        // `remotes/<remote>/<branch>` when a local ref is named `<remote>/<branch>`.
+        // Split once so a branch name containing `/` stays intact (a remote name
+        // containing `/` still mis-splits).
+        let Some((remote, name)) = refname
+            .strip_prefix("refs/remotes/")
+            .and_then(|r| r.split_once('/'))
+        else {
             continue;
         };
         // Skip the remote's symbolic HEAD (`origin/HEAD` → points at the default).
@@ -781,7 +856,7 @@ pub(crate) async fn git_checkout_branch_core(
 }
 
 /// Check out a remote-only branch as a new local tracking branch of a SPECIFIC
-/// remote. We pass `--track <remote>/<name>` explicitly rather than plain
+/// remote. We pass `--track refs/remotes/<remote>/<name>` explicitly rather than plain
 /// `switch <name>` because when the same branch name exists on 2+ remotes git's
 /// DWIM refuses ("matched multiple remote tracking branches"), and even in the
 /// single-remote case the switcher row promised the user this exact remote — so
@@ -807,7 +882,9 @@ pub(crate) async fn git_checkout_remote_branch_core(
     // A live update means a LOCAL `name` already exists and is held, so this switch
     // collides on it rather than creating anything.
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
-    let start = format!("{remote}/{name}");
+    // The full ref: a tag or local branch named `<remote>/<name>` makes the bare form
+    // ambiguous, and git refuses to start from it.
+    let start = format!("refs/remotes/{remote}/{name}");
     let (repo, local, start_s) = (repo_path.as_str(), name.as_str(), start.as_str());
     run_git_mutating_config_write(
         state,
@@ -992,20 +1069,25 @@ pub async fn git_branch_divergence(
     validate_ref_name(&base)?;
     let out = run_git(
         Some(&repo_path),
-        &["for-each-ref", "refs/heads", "--format=%(refname:short)"],
+        &["for-each-ref", "refs/heads", "--format=%(refname)"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let names: Vec<String> = out
+    // (full ref, name): the payload and the base comparison take the name, stripped of
+    // exactly `refs/heads/` as `git_branches` strips it, and the range takes the full
+    // ref, which a bare name would lose to a same-named tag.
+    let refs: Vec<(String, String)> = out
         .stdout_lossy()
         .lines()
         .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
+        .filter_map(|full| {
+            let name = full.strip_prefix("refs/heads/").filter(|n| !n.is_empty())?;
+            Some((full.to_string(), name.to_string()))
+        })
         .collect();
 
-    let mut result = Vec::with_capacity(names.len());
-    for name in names {
+    let mut result = Vec::with_capacity(refs.len());
+    for (full, name) in refs {
         if name == base {
             result.push(BranchDivergence {
                 name,
@@ -1016,7 +1098,7 @@ pub async fn git_branch_divergence(
         }
         // `base...name` left/right: left = on base only (behind), right = on
         // name only (ahead). A bad/unrelated ref just yields 0/0.
-        let range = format!("{base}...{name}");
+        let range = format!("{base}...{full}");
         let counts = run_git_raw(
             Some(&repo_path),
             &["rev-list", "--left-right", "--count", &range],
@@ -1459,18 +1541,15 @@ pub(crate) async fn update_branch_from(
     let domain = state.working_tree_lock(repo_path).await;
     let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
 
-    let current = run_git(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    // An unborn branch has nothing to merge into, and an in-place merge would adopt
+    // `base`'s history as its first commit.
+    let current = current_branch_name(repo_path).await?;
+    if current.is_some() && head_is_unborn(repo_path).await? {
+        return Err(unborn_head_error());
+    }
 
     // The current branch is already checked out, so just merge in place.
-    if branch == current {
+    if current.as_deref() == Some(branch) {
         let already_unmerged = crate::git::ops::unmerged_paths(repo_path).await;
         // Raw: a conflicted merge reports entirely on stdout and leaves stderr
         // empty (measured, git 2.51.1), which a stderr-only error renders as
@@ -2200,6 +2279,166 @@ mod tests {
             solo.upstream_remote, None,
             "an untracked branch carries no upstream remote"
         );
+    }
+
+    /// Every row names its branch exactly, however git would shorten it: a branch
+    /// shadowed by a same-named tag, and one whose `heads/<name>` is itself taken by a
+    /// branch (git then answers the full ref). The archive flag, keyed by name, follows.
+    #[tokio::test]
+    async fn git_branches_names_branches_shadowed_by_tags() {
+        let (_base, base) = temp_base("list-tag-shadow");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "shadowed"]).await;
+        run(&repo_s, &["tag", "shadowed"]).await;
+        run(&repo_s, &["branch", "ambiguous"]).await;
+        run(&repo_s, &["tag", "ambiguous"]).await;
+        run(&repo_s, &["branch", "heads/ambiguous"]).await;
+        set_branch_archived_core(&repo_s, "shadowed", true)
+            .await
+            .expect("archive shadowed");
+
+        let branches = git_branches(repo_s.clone()).await.expect("list branches");
+        let mut names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        names.sort_unstable();
+        assert!(
+            names.contains(&"shadowed")
+                && names.contains(&"ambiguous")
+                && names.contains(&"heads/ambiguous"),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| *n == "heads/shadowed" || n.starts_with("refs/")),
+            "{names:?}"
+        );
+        let shadowed = branches.iter().find(|b| b.name == "shadowed").unwrap();
+        assert!(
+            shadowed.archived,
+            "the archive flag is keyed by the real name"
+        );
+    }
+
+    /// A remote-tracking ref shortened past `<remote>/<branch>` by a tag named
+    /// `origin/main` still splits into that remote and branch, and the remote's
+    /// symbolic HEAD stays out of the list.
+    #[tokio::test]
+    async fn git_remote_branches_split_refs_shadowed_by_a_tag() {
+        let (_base, base) = temp_base("remote-list-tag-shadow");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        run(
+            &repo_s,
+            &["update-ref", "refs/remotes/origin/feat/x", "HEAD"],
+        )
+        .await;
+        run(
+            &repo_s,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await;
+        run(&repo_s, &["tag", "origin/main"]).await;
+
+        let rows = super::git_remote_branches(repo_s.clone())
+            .await
+            .expect("list remote branches");
+        let mut pairs: Vec<(String, String)> =
+            rows.into_iter().map(|b| (b.remote, b.name)).collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("origin".to_string(), "feat/x".to_string()),
+                ("origin".to_string(), "main".to_string()),
+            ]
+        );
+    }
+
+    /// The tracking checkout starts from the remote-tracking ref itself: a tag named
+    /// `origin/<branch>` makes the bare `origin/<branch>` ambiguous, and git refuses it.
+    #[tokio::test]
+    async fn checkout_remote_branch_tracks_the_remote_ref_shadowed_by_a_tag() {
+        let (_base, base) = temp_base("checkout-remote-tag-shadow");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        // The tag sits on the seed commit, the remote branch one commit past it.
+        run(&repo_s, &["tag", "origin/landing"]).await;
+        std::fs::write(repo.join("r.txt"), "remote\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "remote work"]).await;
+        run(
+            &repo_s,
+            &["update-ref", "refs/remotes/origin/landing", "HEAD"],
+        )
+        .await;
+        run(&repo_s, &["reset", "-q", "--hard", "HEAD~1"]).await;
+
+        let state = AppState::default();
+        git_checkout_remote_branch_core(&state, repo_s.clone(), "origin".into(), "landing".into())
+            .await
+            .expect("the tracking checkout succeeds");
+        assert_eq!(
+            run(&repo_s, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/landing"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/landing"]).await,
+            run(&repo_s, &["rev-parse", "refs/remotes/origin/landing"]).await,
+            "the branch starts at the remote ref, never the tag"
+        );
+        assert_eq!(
+            tracking_of(&repo_s, "landing").await,
+            (Some("origin".into()), Some("refs/heads/landing".into()))
+        );
+    }
+
+    /// Rows are named by the real branch and measured through its full ref: a bare
+    /// `feature` would resolve to the same-named tag (gitrevisions checks tags first)
+    /// and report the tag's counts.
+    #[tokio::test]
+    async fn branch_divergence_names_and_measures_branches_shadowed_by_tags() {
+        let (_base, base) = temp_base("divergence-tag-shadow");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        // A tag on the base's own tip keeps the bare base rev pointing where it did.
+        run(&repo_s, &["tag", &main]).await;
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        run(&repo_s, &["tag", "feature"]).await;
+        std::fs::write(repo.join("f.txt"), "f\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "feature work"]).await;
+        run(&repo_s, &["switch", "-q", &main]).await;
+
+        let rows = super::git_branch_divergence(repo_s.clone(), main.clone())
+            .await
+            .expect("measure divergence");
+        let mut got: Vec<(String, u32, u32)> = rows
+            .into_iter()
+            .map(|d| (d.name, d.ahead, d.behind))
+            .collect();
+        got.sort();
+        let mut want = vec![("feature".to_string(), 1, 0), (main.clone(), 0, 0)];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// `git clone -o upstream` writes `refs/remotes/upstream/HEAD` and no origin ref
@@ -3178,6 +3417,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Updating the CURRENT branch merges in place even when a tag shares its name;
+    /// missing that arm sends the update to a throwaway checkout of a branch that is
+    /// already checked out here.
+    #[tokio::test]
+    async fn update_branch_from_merges_a_current_branch_shadowed_by_a_tag_in_place() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-tag-shadow").await;
+        run(&repo_s, &["switch", "-q", "feature"]).await;
+        run(&repo_s, &["tag", "feature"]).await;
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "feature", &main)
+            .await
+            .expect("the in-place merge succeeds");
+        assert_eq!(outcome, "merge");
+        assert_eq!(
+            run(&repo_s, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/feature"
+        );
+        assert!(
+            repo.join("base.txt").exists(),
+            "the base's work is merged in"
+        );
+    }
+
+    /// An unborn current branch is still refused: `symbolic-ref` names it, but there
+    /// is nothing to merge INTO, and an in-place merge would quietly adopt `base`'s
+    /// history as the branch's first commit.
+    #[tokio::test]
+    async fn update_branch_from_refuses_an_unborn_current_branch() {
+        let (_base, base_dir) = temp_base("update-unborn");
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        run(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/fresh"]).await;
+        // A commit for `other` alone, written without moving HEAD off its unborn branch.
+        let tree = run(&repo_s, &["write-tree"]).await.trim().to_string();
+        let commit = run(&repo_s, &["commit-tree", &tree, "-m", "other"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["update-ref", "refs/heads/other", &commit]).await;
+
+        let state = AppState::default();
+        update_branch_from(&state, &repo_s, "fresh", "other")
+            .await
+            .expect_err("an unborn branch has nothing to update");
+        let head = run_git_raw(
+            Some(&repo_s),
+            &["rev-parse", "--verify", "-q", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(head.code, 0, "HEAD is still unborn");
     }
 
     /// A repo whose `feature` branch has diverged from the default branch — each side

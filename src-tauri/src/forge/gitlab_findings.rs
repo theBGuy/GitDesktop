@@ -876,20 +876,15 @@ enum Listed<T> {
     Unavailable(GlFindingAvailability, Option<String>),
 }
 
-/// The checked-out branch, or `"HEAD"` when detached (or unreadable) — read with
-/// the same `rev-parse --abbrev-ref HEAD` shape as the rest of the app.
+/// The checked-out branch's name, or `"HEAD"` when detached, unborn or unreadable —
+/// read through the shared `git::branches::current_branch_name`, never a short ref
+/// (a same-named tag turns that into `heads/<name>`).
 async fn current_branch(repo_path: &str) -> String {
-    crate::git::runner::run_git_raw(
-        Some(repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()
-    .filter(|o| o.code == 0)
-    .map(|o| o.stdout_lossy().trim().to_string())
-    .filter(|b| !b.is_empty())
-    .unwrap_or_else(|| "HEAD".to_string())
+    use crate::git::branches::{current_branch_name, head_is_unborn};
+    match current_branch_name(repo_path).await {
+        Ok(Some(name)) if matches!(head_is_unborn(repo_path).await, Ok(false)) => name,
+        _ => "HEAD".to_string(),
+    }
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(
@@ -2567,5 +2562,44 @@ mod tests {
         assert!(!artifacts_expired(None, now()));
         assert!(!artifacts_expired(Some(""), now()));
         assert!(!artifacts_expired(Some("last Tuesday"), now()));
+    }
+
+    /// The requested ref is the branch's NAME, so a same-named tag can't turn it into
+    /// `heads/<name>` (a 404, then the default branch's findings). Detached and unborn
+    /// HEADs request `"HEAD"`.
+    #[tokio::test]
+    async fn current_branch_names_a_branch_shadowed_by_a_tag() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gl-findings-branch-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        let git = |args: &'static [&'static str]| {
+            let repo = repo.clone();
+            async move {
+                crate::git::runner::run_git(Some(&repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+            }
+        };
+        git(&["init", "-q"]).await;
+        assert_eq!(current_branch(&repo).await, "HEAD", "unborn");
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ])
+        .await;
+        git(&["switch", "-q", "-c", "shadowed"]).await;
+        git(&["tag", "shadowed"]).await;
+        assert_eq!(current_branch(&repo).await, "shadowed");
+        git(&["switch", "-q", "--detach"]).await;
+        assert_eq!(current_branch(&repo).await, "HEAD", "detached");
     }
 }

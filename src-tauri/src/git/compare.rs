@@ -372,6 +372,10 @@ pub async fn git_diff_between_refs(
 /// Current tip SHA of each requested local branch — one `for-each-ref` call,
 /// so watching N open local PRs' heads for new commits is a single git
 /// invocation. Branches that don't exist are simply absent from the map.
+///
+/// Names are read in full and stripped of exactly `refs/heads/`: the short form
+/// turns into `heads/<name>` for a branch shadowed by a same-named tag, which would
+/// drop it from the map.
 #[tauri::command]
 pub async fn git_branch_tips(
     repo_path: String,
@@ -383,7 +387,7 @@ pub async fn git_branch_tips(
         Some(&repo_path),
         &[
             "for-each-ref",
-            "--format=%(refname:short) %(objectname)",
+            "--format=%(refname) %(objectname)",
             "refs/heads/",
         ],
         DEFAULT_TIMEOUT,
@@ -391,6 +395,9 @@ pub async fn git_branch_tips(
     .await?;
     let mut map = std::collections::HashMap::new();
     for line in out.stdout_lossy().lines() {
+        let Some(line) = line.strip_prefix("refs/heads/") else {
+            continue;
+        };
         if let Some((name, sha)) = line.split_once(' ') {
             if wanted.contains(name) {
                 map.insert(name.to_string(), sha.to_string());
@@ -1234,6 +1241,31 @@ mod tests {
             .await
             .expect("a failed fetch is Ok(false), not an error");
         assert!(!ok, "an absent object falls through to the (failing) fetch");
+    }
+
+    /// A head branch sharing its name with a tag still reports the BRANCH's tip, keyed
+    /// by the plain name the caller asked for.
+    #[tokio::test]
+    async fn branch_tips_reports_a_branch_shadowed_by_a_tag() {
+        let (_base, repo) = seed_repo("tips-tag-shadow").await;
+        let root = std::path::Path::new(&repo);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        run(&repo, &["tag", "pr-head"]).await;
+        run(&repo, &["checkout", "-qb", "pr-head"]).await;
+        std::fs::write(root.join("head.txt"), "head\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "head work"]).await;
+        let tip = run(&repo, &["rev-parse", "refs/heads/pr-head"])
+            .await
+            .trim()
+            .to_string();
+
+        let tips = git_branch_tips(repo.clone(), vec!["pr-head".to_string()])
+            .await
+            .expect("read tips");
+        assert_eq!(tips.get("pr-head"), Some(&tip), "{tips:?}");
     }
 
     /// Seeds a fresh repo and returns `(base_guard, repo_path)`. The `TempDir`

@@ -1350,8 +1350,10 @@ impl GitDesktopMcp {
                     )
                 })?,
         };
-        let head = match args.head {
-            Some(h) => h,
+        // `head` names the branch in the recipe; `head_rev` is what the diffs read,
+        // which for the defaulted current branch is its full ref (see `current_branch`).
+        let (head, head_rev) = match args.head {
+            Some(h) => (h.clone(), h),
             None => current_branch(&self.repo).await?,
         };
         ensure_not_flag(&base, "base")?;
@@ -1364,7 +1366,7 @@ impl GitDesktopMcp {
         let diff = crate::git::compare::git_branch_diff(
             self.repo.clone(),
             base.clone(),
-            head.clone(),
+            head_rev.clone(),
             Some(RAW_DIFF_MAX_BYTES),
             Some(exclude),
         )
@@ -1390,14 +1392,11 @@ impl GitDesktopMcp {
         // The commits the PR would introduce = base..head "ahead" set (compare =
         // head), exactly as the in-app Create-PR flow derives `commitSubjects` from
         // `git_branch_ahead`. Best-effort: an error yields no list.
-        let commit_subjects = crate::git::compare::git_branch_ahead(
-            self.repo.clone(),
-            base.clone(),
-            head.clone(),
-        )
-        .await
-        .map(|ahead| ahead.into_iter().map(|s| s.subject).collect::<Vec<_>>())
-        .unwrap_or_default();
+        let commit_subjects =
+            crate::git::compare::git_branch_ahead(self.repo.clone(), base.clone(), head_rev)
+                .await
+                .map(|ahead| ahead.into_iter().map(|s| s.subject).collect::<Vec<_>>())
+                .unwrap_or_default();
 
         // Labels are best-effort: a forge error omits the section entirely rather
         // than failing the tool.
@@ -1855,25 +1854,31 @@ impl GitDesktopMcp {
     }
 }
 
-/// The bound repo's current branch (`rev-parse --abbrev-ref HEAD`), erroring on a
-/// detached/unborn HEAD so the caller can pass an explicit `head`. Mirrors the
-/// current-branch read used across the git layer.
-async fn current_branch(repo: &str) -> Result<String, McpError> {
-    let out = crate::git::runner::run_git(
-        Some(repo),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    .map_err(app_err)?;
-    let branch = out.stdout_lossy().trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
+/// The bound repo's current branch as `(name, full_ref)`, erroring on a
+/// detached/unborn HEAD so the caller can pass an explicit `head`. The name is for
+/// display and extraction; a rev position takes the full `refs/heads/<name>`, which a
+/// same-named tag can't shadow (a bare name resolves to the tag first).
+async fn current_branch(repo: &str) -> Result<(String, String), McpError> {
+    let full = crate::git::branches::current_branch_ref(repo)
+        .await
+        .map_err(app_err)?;
+    let unborn = match &full {
+        Some(_) => crate::git::branches::head_is_unborn(repo)
+            .await
+            .map_err(app_err)?,
+        None => false,
+    };
+    let Some(full) = full.filter(|_| !unborn) else {
         return Err(McpError::invalid_request(
             "HEAD is detached or unborn — pass an explicit `head` branch.",
             None,
         ));
-    }
-    Ok(branch)
+    };
+    let name = full
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&full)
+        .to_string();
+    Ok((name, full))
 }
 
 /// How many commit subjects the branch-name recipe feeds the model (newest first).
@@ -3661,6 +3666,55 @@ mod tests {
             None,
             "no resolvable default branch ⇒ no committed-work fallback"
         );
+    }
+
+    /// The PR recipe's default head under a same-named tag: the recipe names the
+    /// branch, and the diffs read its full ref — the bare name would diff the TAG.
+    /// Detached and unborn HEADs keep the documented refusal.
+    #[tokio::test]
+    async fn current_branch_names_a_branch_shadowed_by_a_tag() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-head-shadow-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_s = base.path().to_string_lossy().into_owned();
+        let refused =
+            |r: Result<(String, String), McpError>| r.expect_err("refused").message.to_string();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        let contract = "HEAD is detached or unborn — pass an explicit `head` branch.";
+        assert_eq!(refused(current_branch(&repo_s).await), contract);
+        git(&repo_s, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        git(&repo_s, &["tag", "shadowed"]).await;
+        git(&repo_s, &["switch", "-q", "-c", "shadowed"]).await;
+        std::fs::write(base.path().join("f.txt"), "f\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "branch work"]).await;
+
+        let (name, head_rev) = current_branch(&repo_s).await.unwrap();
+        assert_eq!(name, "shadowed");
+        assert_eq!(head_rev, "refs/heads/shadowed");
+        let diff_files = |compare: String| {
+            let repo_s = repo_s.clone();
+            async move {
+                crate::git::compare::git_branch_diff(repo_s, "HEAD~1".into(), compare, None, None)
+                    .await
+                    .unwrap()
+                    .files
+                    .into_iter()
+                    .map(|f| f.path)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(diff_files(head_rev).await, vec!["f.txt".to_string()]);
+        assert!(
+            diff_files(name).await.is_empty(),
+            "the bare name is the tag"
+        );
+
+        git(&repo_s, &["switch", "-q", "--detach"]).await;
+        assert_eq!(refused(current_branch(&repo_s).await), contract);
     }
 
     /// A `clone -o upstream` repo: the only remote-tracking ref lives under

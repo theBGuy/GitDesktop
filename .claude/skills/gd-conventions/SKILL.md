@@ -497,6 +497,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   never read (re-attempting on the write path is what makes it self-heal).
   The flag alone suffices only where the state provably cannot change before
   the read lands — `agentNumber`, whose `ensure` won't mint while it's false.
+- **Ref names vs short refs** — HEAD's branch comes from
+  `git::branches::current_branch_name` (or `current_branch_ref` for a rev
+  position), never `rev-parse --abbrev-ref HEAD`; ref lists read `%(refname)`
+  and strip exactly `refs/heads/` / `refs/remotes/` / `refs/tags/`, never
+  `%(refname:short)`. git's short forms disambiguate (`heads/<x>`,
+  `remotes/<r>/<x>`, or the full ref) whenever a tag or other ref shares the
+  name, so a NAME use (comparison, branch argument, config key, refspec, forge
+  API) misroutes. A REV use keeps git's form or the full ref, never a stripped
+  bare name, which resolves to a same-named tag first. `symbolic-ref` also
+  answers on an unborn branch — a site that must refuse before the first commit
+  checks `head_is_unborn`.
 
 ## Rust / Tauri conventions
 

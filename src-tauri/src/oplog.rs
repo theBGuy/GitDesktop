@@ -333,7 +333,7 @@ const PAUSABLE_OPS: [&str; 2] = [CHERRY_PICK_ONTO, PULL_REBASE_DROP];
 /// [`PAUSABLE_OPS`] entry.
 ///
 /// The `bool`s are the caller's earlier [`crate::git::ops::op_state`] read, already
-/// two git subprocesses old by the time the lock is held, so they may only SPARE
+/// several git subprocesses old by the time the lock is held, so they may only SPARE
 /// records; the closures re-probe the marker files under the lock and are
 /// authoritative for "still live" (see [`conclude_stale_pauses`]).
 pub(crate) struct LiveOps<'a> {
@@ -391,7 +391,7 @@ fn is_interrupted(
 ) -> bool {
     let on_home = match original_ref {
         // Started on a branch → a completed op must be back on it. An empty
-        // current_branch means the `rev-parse` read failed; don't let that
+        // current_branch means the branch read failed; don't let that
         // manufacture a false interrupt (mirrors tree_dirty's fail-safe default).
         Some(r) if r != "HEAD" && !current_branch.is_empty() => current_branch == r,
         // Detached / unknown start, or a failed branch read: can't gate on the
@@ -411,7 +411,7 @@ fn is_interrupted(
 /// Each op is judged against its OWN signals, never `mid_op`: a concurrent merge
 /// says nothing about a pick, and a live rebase says nothing about one either. Both
 /// signals per op come from [`LiveOps`], and either one saying "live" spares that
-/// op's records — the `bool` is the caller's earlier op-state read, two git
+/// op's records — the `bool` is the caller's earlier op-state read, several git
 /// subprocesses old by the time we hold the lock (an op that paused in that window
 /// would have its brand-new record concluded permanently, leaving the user's later
 /// Continue/Abort no handle to close), so the closure re-probes the marker files
@@ -753,7 +753,7 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     // interrupt from a failed read, which the two probes below refuse to do.
     let mid_op = state.mid_op();
     // The stale-pause verdict keys on each op's OWN flag, not `mid_op` — see
-    // `conclude_stale_pauses`. These reads go stale across the two git subprocesses
+    // `conclude_stale_pauses`. These reads go stale across the git subprocesses
     // below, so `reconcile` re-probes the markers under the lock; these only
     // short-circuit.
     let (cherry_picking, rebasing) = (state.cherry_picking, state.rebasing);
@@ -768,14 +768,19 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     .await
     .map(|o| !o.stdout_lossy().trim().is_empty())
     .unwrap_or(false); // best-effort: a failed read must not manufacture an interrupt
-    let current_branch = run_git(
-        Some(&repo_path),
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .map(|o| o.stdout_lossy().trim().to_string())
-    .unwrap_or_default();
+
+    // The branch NAME, which is how every producer journals `originalRef`; a short ref
+    // would read `heads/<name>` under a same-named tag and fake an interrupt. The
+    // sentinels are `is_interrupted`'s: `"HEAD"` when detached, `""` when the branch
+    // can't be read, an unborn one included.
+    let current_branch = match crate::git::branches::current_branch_name(&repo_path).await {
+        Ok(Some(name)) => match crate::git::branches::head_is_unborn(&repo_path).await {
+            Ok(false) => name,
+            Ok(true) | Err(_) => String::new(),
+        },
+        Ok(None) => "HEAD".to_string(),
+        Err(_) => String::new(),
+    };
     // The store RMW blocks on the cross-process lock's retry budget, so it runs off the
     // async runtime; the marker re-probes are built inside the job, which keeps them on
     // the same thread as the lock they must run under.
@@ -934,7 +939,7 @@ mod tests {
 
     #[test]
     fn is_interrupted_ignores_a_failed_branch_read() {
-        // A failed `rev-parse` yields an empty current_branch; a completed op that
+        // A failed branch read yields an empty current_branch; a completed op that
         // started on a branch must NOT be flagged just because we couldn't read it.
         assert!(!is_interrupted(false, false, "", Some("feature")));
     }
@@ -1439,6 +1444,59 @@ mod tests {
         (dir, repo)
     }
 
+    /// A completed op journaled on `feature` is home again when HEAD is back on
+    /// `feature`, even with a tag sharing that name. A detached HEAD still reads as
+    /// "not home", and an unborn one as an unreadable branch (never an interrupt).
+    #[tokio::test]
+    async fn the_home_branch_check_reads_branch_names_not_short_refs() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-oplog-home-shadow-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit(&repo, dir.path(), "a.txt", "base\n", "base").await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        git(&repo, &["tag", "feature"]).await;
+
+        seed_entries(
+            &repo,
+            vec![pending_record("home", "2026-01-01T00:00:00.000Z")],
+        );
+        let returned = git_oplog_check(repo.clone()).await.unwrap();
+        assert!(returned.is_empty(), "back home on feature: {returned:?}");
+
+        git(&repo, &["switch", "--detach"]).await;
+        seed_entries(
+            &repo,
+            vec![pending_record("away", "2026-01-01T00:00:00.000Z")],
+        );
+        let returned = git_oplog_check(repo.clone()).await.unwrap();
+        assert_eq!(
+            returned.len(),
+            1,
+            "a detached HEAD is not home: {returned:?}"
+        );
+
+        let unborn = tempfile::Builder::new()
+            .prefix("gd-oplog-home-unborn-")
+            .tempdir()
+            .expect("create temp dir");
+        let unborn_repo = unborn.path().to_string_lossy().into_owned();
+        git(&unborn_repo, &["init"]).await;
+        seed_entries(
+            &unborn_repo,
+            vec![pending_record("unborn", "2026-01-01T00:00:00.000Z")],
+        );
+        let returned = git_oplog_check(unborn_repo.clone()).await.unwrap();
+        assert!(
+            returned.is_empty(),
+            "an unborn HEAD reads as unknown: {returned:?}"
+        );
+    }
+
     /// A pick concluded OUTSIDE the app leaves its record `"paused"` — nothing in-app
     /// ever closes it, so it was cap-immortal, a handle the next in-app close would
     /// misattribute, and a permanent lie in the history dialog. The next check must
@@ -1496,7 +1554,7 @@ mod tests {
         );
     }
 
-    /// The check's `git_op_state` read is two git subprocesses old by the time
+    /// The check's `git_op_state` read is several git subprocesses old by the time
     /// `reconcile` holds the lock, so a pick that pauses in that window arrives with
     /// the flag reading FALSE. Concluding then would retire a record the user's
     /// Continue/Abort still needs — the marker re-probe, taken under the lock, is what

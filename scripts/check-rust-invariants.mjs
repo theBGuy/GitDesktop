@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for five Rust invariants that have each cost this repo a fix
+// Static gate for six Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -22,6 +22,11 @@
 //      placeholders and a URL parser truncates at `#`/`?`, so an unvalidated
 //      segment answers 200 for the WRONG refs; fork head refs and owners are
 //      attacker-chosen. `forge::validate_compare_branch` is the chokepoint.
+//   F. short ref names — `rev-parse --abbrev-ref`, `symbolic-ref --short`,
+//      `%(refname:short)` and `%(upstream:short)` disambiguate (`heads/<x>`,
+//      `remotes/<r>/<x>`, or the full ref) whenever a tag or other ref shares the
+//      name, so a NAME use misroutes. `git::branches::current_branch_name` /
+//      `current_branch_ref` and a stripped `%(refname)` are the replacements.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
 // RULE: the lists only shrink by default. Adding an entry is a reviewed change —
@@ -29,7 +34,9 @@
 // call, a trusted producer), and it lands in review like any other diff. A
 // (file, fn) entry covers every site in that function, so entries are pruned
 // when their site goes away rather than left behind to pre-authorize whatever
-// the function grows next.
+// the function grows next. The one exception is an entry carrying `retiring`
+// (why its site is about to go): once nothing matches it, it prints a NOTE
+// instead of failing, so a parallel change removing the site stays green.
 //
 // Run: node scripts/check-rust-invariants.mjs
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -127,7 +134,7 @@ const REFSPEC_ALLOWLIST = [
     file: "git/remote.rs",
     fn: "branch_has_reflog",
     rationale:
-      "read-only `reflog exists` probe (never a refspec); the name is either git_push_core's branch, validated with validate_ref_name at the arm entry, or `symbolic-ref --short` output — git's own ref name",
+      "read-only `reflog exists` probe (never a refspec); the name is either git_push_core's branch, validated with validate_ref_name at the arm entry, or HEAD's full `symbolic-ref` output stripped of `refs/heads/` — git's own ref name",
   },
   {
     file: "git/remote.rs",
@@ -294,6 +301,31 @@ const COMPARE_ENDPOINT_ALLOWLIST = [
   },
 ];
 
+// Check F. Production reads that keep git's short form on purpose, verified by
+// reading each one.
+const SHORT_REF_ALLOWLIST = [
+  {
+    file: "git/branches.rs",
+    fn: "git_branches",
+    rationale:
+      "`%(upstream:short)` is a REV use: the UI hands it back as a rev, and the disambiguated short form resolves correctly where a stripped bare name would resolve to a same-named tag",
+  },
+  {
+    file: "git/branches.rs",
+    fn: "branch_rewrite_status",
+    rationale:
+      "`--abbrev-ref <branch>@{upstream}` feeds the upstream display and rev reads; recorded follow-up with the bare-name class",
+  },
+  {
+    file: "git/pull_guard.rs",
+    fn: "upstream_of",
+    rationale:
+      "`--abbrev-ref HEAD@{upstream}` in the pull guard's upstream read",
+    retiring:
+      "a parallel pull_guard change removes this read; the entry goes once that lands",
+  },
+];
+
 // ------------------------------------------------------------------- helpers
 
 /** Every `.rs` file under `src-tauri/src`, as absolute paths. */
@@ -337,6 +369,16 @@ export function staleAllowlistEntries(list, hits) {
   return list.filter(
     (e) => !hits.some((h) => h.file === e.file && h.fn === e.fn),
   );
+}
+
+/** Stale entries split into those that fail and the `retiring` ones that only
+ *  NOTE (see the RATCHET RULE's exception). */
+export function splitStaleEntries(list, hits) {
+  const stale = staleAllowlistEntries(list, hits);
+  return {
+    failing: stale.filter((e) => !e.retiring),
+    retired: stale.filter((e) => e.retiring),
+  };
 }
 
 // -------------------------------------------------------------------- checks
@@ -717,6 +759,44 @@ export function checkStderrOnlyGitError(file, _src, lines, hits) {
   }
 }
 
+// The short-form spellings as they appear in argv/format literals. Read from the
+// comment-stripped text so a doc comment naming them is not a use, and outside
+// `#[cfg(test)]` modules, whose fixtures read git's output as a user would.
+// `--short` counts only after `symbolic-ref` in the same argv list (or one command
+// string): `rev-parse --short` abbreviates a sha and is no ref name at all.
+const SHORT_REF_RE = new RegExp(
+  [
+    String.raw`"--abbrev-ref(?:=[^"]*)?"`,
+    String.raw`%\((?:refname|upstream):short\)`,
+    String.raw`"symbolic-ref"(?:\s*,\s*"[^"\n]*")*?\s*,\s*"--short"`,
+    String.raw`"symbolic-ref\s[^"\n]*--short\b`,
+  ].join("|"),
+  "g",
+);
+const SHORT_REF_FIX =
+  "git's short ref names disambiguate under a same-named tag or ref — read " +
+  "HEAD's branch via git::branches::current_branch_name/current_branch_ref and " +
+  "lists via %(refname) stripped of exactly refs/heads|remotes|tags/, or " +
+  "allowlist a deliberate REV use with rationale";
+
+export function checkShortRefNames(file, _src, lines, hits) {
+  const codeSrc = stripComments(lines).join("\n");
+  const spans = testModuleSpans(codeSrc);
+  SHORT_REF_RE.lastIndex = 0;
+  for (let m = SHORT_REF_RE.exec(codeSrc); m; m = SHORT_REF_RE.exec(codeSrc)) {
+    if (spans.some(([s, e]) => m.index > s && m.index < e)) continue;
+    const line = codeSrc.slice(0, m.index).split("\n").length;
+    const fn = enclosingFn(lines, line - 1);
+    hits.push({
+      file,
+      line,
+      fn,
+      allowlisted: allowed(SHORT_REF_ALLOWLIST, file, fn),
+      fix: SHORT_REF_FIX,
+    });
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -751,6 +831,12 @@ function main() {
       allowlist: COMPARE_ENDPOINT_ALLOWLIST,
       hits: [],
     },
+    {
+      name: "F. short ref names",
+      run: checkShortRefNames,
+      allowlist: SHORT_REF_ALLOWLIST,
+      hits: [],
+    },
   ];
 
   const files = rustFiles(SRC);
@@ -767,7 +853,15 @@ function main() {
   for (const check of CHECKS) {
     const violations = check.hits.filter((h) => !h.allowlisted);
     const allowlisted = check.hits.length - violations.length;
-    const stale = staleAllowlistEntries(check.allowlist, check.hits);
+    const { failing: stale, retired } = splitStaleEntries(
+      check.allowlist,
+      check.hits,
+    );
+    for (const e of retired) {
+      process.stdout.write(
+        `${check.name}: NOTE src-tauri/src/${e.file} fn ${e.fn} no longer matches (${e.retiring}) — remove its allowlist entry\n`,
+      );
+    }
     if (violations.length === 0 && stale.length === 0) {
       process.stdout.write(
         `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n`,
