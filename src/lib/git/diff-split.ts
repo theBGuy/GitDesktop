@@ -89,17 +89,21 @@ function newFilePath(token: string): string | undefined {
 
 /**
  * A rename/copy destination, which has no a/ or b/ prefix.
- * Decode only when the matching quoted b-side suffix confirms git quoting;
- * the Rust reconstructors write both raw.
+ * git's final b-side field repeats the escaped destination after `"b/`.
+ * The Rust reconstructors write both raw: destinations put their quote after
+ * `b/`, so this suffix cannot match; quote runs in the old name cannot change
+ * the result.
  */
-function movedFilePath(value: string, quoted: boolean): string | undefined {
-  if (
-    !quoted ||
-    value.length < 2 ||
-    !value.startsWith('"') ||
-    !value.endsWith('"')
-  )
-    return value || undefined;
+function movedFilePath(
+  value: string,
+  headerRest: string | undefined,
+): string | undefined {
+  const quoted =
+    value.length >= 2 &&
+    value.startsWith('"') &&
+    value.endsWith('"') &&
+    !!headerRest?.endsWith(`"b/${value.slice(1)}`);
+  if (!quoted) return value || undefined;
   return unescapeCQuoted(value.slice(1, -1)) || undefined;
 }
 
@@ -148,19 +152,9 @@ export function sectionFilePath(section: string): string | undefined {
   const plus = section.match(/^\+\+\+ (.+)$/m);
   const moved = section.match(/^(?:rename|copy) to (.+)$/m);
   const header = section.match(/^diff --git (.+)$/m);
-  const movedValue = moved?.[1];
-  // git's final b-side field repeats the escaped destination after `"b/`.
-  // Raw destinations put their quote after `b/`, so this suffix cannot match;
-  // quote runs in the old name cannot change the result.
-  const movedQuoted =
-    !!movedValue &&
-    movedValue.length >= 2 &&
-    movedValue.startsWith('"') &&
-    movedValue.endsWith('"') &&
-    !!header?.[1]?.endsWith(`"b/${movedValue.slice(1)}`);
   return (
     (plus?.[1] && newFilePath(plus[1])) ||
-    (movedValue && movedFilePath(movedValue, movedQuoted)) ||
+    (moved?.[1] && movedFilePath(moved[1], header?.[1])) ||
     (header?.[1] && headerFilePath(header[1])) ||
     undefined
   );
