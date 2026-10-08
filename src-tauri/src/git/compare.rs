@@ -30,6 +30,17 @@ fn validate_ref(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// `base`/`compare` for the surfaces whose callers name LOCAL BRANCHES (the Compare
+/// tab, local PRs, the changes panel's count): each local branch is read by its full
+/// ref, never a same-named tag; remote-tracking refs and shas pass through. Not used
+/// by `git_branch_ahead`, which release notes also hand TAGS.
+async fn local_branch_revs(repo_path: &str, base: &str, compare: &str) -> (String, String) {
+    (
+        crate::git::branches::branch_first_rev(repo_path, base).await,
+        crate::git::branches::branch_first_rev(repo_path, compare).await,
+    )
+}
+
 async fn log_range(repo_path: &str, range: &str) -> AppResult<Vec<CommitSummary>> {
     let out = run_git(
         Some(repo_path),
@@ -51,6 +62,7 @@ pub async fn git_compare_branches(
 ) -> AppResult<BranchComparison> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let ahead = log_range(&repo_path, &format!("{base}..{compare}")).await?;
     let behind = log_range(&repo_path, &format!("{compare}..{base}")).await?;
     Ok(BranchComparison { ahead, behind })
@@ -80,6 +92,7 @@ pub async fn git_branch_ahead_count(
 ) -> AppResult<u32> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &["rev-list", "--count", &format!("{base}..{compare}")],
@@ -104,6 +117,7 @@ pub async fn git_branch_diff_files(
 ) -> AppResult<Vec<DiffStatEntry>> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &[
@@ -171,6 +185,7 @@ pub async fn git_branch_diff(
 ) -> AppResult<StagedDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let exclude = exclude.unwrap_or_default();
 
     let pinned = crate::git::ai_ignore::has_positive_pattern(&exclude);
@@ -213,6 +228,7 @@ pub async fn git_branch_file_diff(
 ) -> AppResult<FileDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     // Literal pathspec: a raw `[slug]`-style path pulls a glob-sibling's hunks
     // into this file's branch diff (measured).
     let spec = crate::git::pathspec::literal(&file_path);
@@ -252,6 +268,7 @@ pub async fn git_merge_base(
 ) -> AppResult<String> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
+    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
     let out = run_git(
         Some(&repo_path),
         &["merge-base", &base, &compare],
@@ -1266,6 +1283,67 @@ mod tests {
             .await
             .expect("read tips");
         assert_eq!(tips.get("pr-head"), Some(&tip), "{tips:?}");
+    }
+
+    /// The Compare surfaces read the BRANCH a row names, never a same-named tag: the
+    /// fixture's `feature` forks off `base` with one commit, while a TAG `feature`
+    /// sits on base's own tip, so a bare name compares base against itself.
+    #[tokio::test]
+    async fn compare_surfaces_read_a_branch_shadowed_by_a_tag() {
+        let (_base, repo) = seed_repo("compare-tag-shadow").await;
+        let root = std::path::Path::new(&repo);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        let fork = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let base = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("f.txt"), "feature\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "feature work"]).await;
+        run(&repo, &["checkout", "-q", &base]).await;
+        std::fs::write(root.join("b.txt"), "base\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "base work"]).await;
+        run(&repo, &["tag", "feature"]).await;
+        let (b, f) = (base.clone(), "feature".to_string());
+
+        // Every surface is read before any assertion, so one run shows each verdict.
+        let cmp = git_compare_branches(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        let count = git_branch_ahead_count(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        let files: Vec<String> = git_branch_diff_files(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        let diff = git_branch_diff(repo.clone(), b.clone(), f.clone(), None, None)
+            .await
+            .unwrap();
+        let file = git_branch_file_diff(repo.clone(), b.clone(), f.clone(), "f.txt".into())
+            .await
+            .unwrap();
+        let merge_base = git_merge_base(repo.clone(), b.clone(), f.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                (cmp.ahead.len(), cmp.behind.len()),
+                count,
+                files,
+                diff.files.len(),
+                file.text.contains("+feature"),
+                merge_base == fork,
+            ),
+            ((1, 1), 1, vec!["f.txt".to_string()], 1, true, true)
+        );
     }
 
     /// Seeds a fresh repo and returns `(base_guard, repo_path)`. The `TempDir`

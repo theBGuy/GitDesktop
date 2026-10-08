@@ -105,6 +105,51 @@ pub(crate) async fn head_is_unborn(repo_path: &str) -> AppResult<bool> {
     Ok(out.code != 0)
 }
 
+/// `name` for a REV position whose callers name LOCAL BRANCHES. A name git already
+/// resolves to that branch stays as given (`merge` words its message from it: the full
+/// ref would read "Merge branch 'refs/heads/x'"). When something else captures it, a
+/// same-named tag first (gitrevisions checks refs/tags before refs/heads), the local
+/// branch named exactly `name` is taken by its full ref, git's own `%(refname)`.
+/// Anything that names no local branch (a remote-tracking ref, sha, rev expression)
+/// passes through, as does a failed read, leaving each command's own error to surface.
+/// An input already spelled as a full ref (`refs/...`) is returned untouched, so a
+/// branch literally named `refs/heads/x` can never capture it. Callers validate `name`
+/// first. Not for inputs that may legitimately be TAGS: a tag sharing a branch's name
+/// would lose to the branch.
+pub(crate) async fn branch_first_rev(repo_path: &str, name: &str) -> String {
+    if name.starts_with("refs/") {
+        return name.to_string();
+    }
+    // Ambiguous names answer empty on stdout with exit 0 (the error rides stderr).
+    let resolved = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--symbolic-full-name", name],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    if let Ok(out) = resolved {
+        if out.code == 0 && out.stdout_lossy().trim().strip_prefix("refs/heads/") == Some(name) {
+            return name.to_string();
+        }
+    }
+    let listed = run_git_raw(
+        Some(repo_path),
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    let Ok(out) = listed else {
+        return name.to_string();
+    };
+    if out.code != 0 {
+        return name.to_string();
+    }
+    out.stdout_lossy()
+        .lines()
+        .find(|full| full.strip_prefix("refs/heads/") == Some(name))
+        .map_or_else(|| name.to_string(), str::to_string)
+}
+
 /// The refusal for an operation that needs a commit on HEAD's branch.
 pub(crate) fn unborn_head_error() -> AppError {
     AppError::InvalidArgument(
@@ -1039,9 +1084,12 @@ pub async fn git_branch_merge_states(
             false
         };
         let merged = if valid_head && validate_branch_name(&pair.base).is_ok() {
+            // Both are branch names: read as the branches, never same-named tags.
+            let head = branch_first_rev(&repo_path, &pair.head).await;
+            let base = branch_first_rev(&repo_path, &pair.base).await;
             run_git_raw(
                 Some(&repo_path),
-                &["merge-base", "--is-ancestor", &pair.head, &pair.base],
+                &["merge-base", "--is-ancestor", &head, &base],
                 DEFAULT_TIMEOUT,
             )
             .await?
@@ -3347,6 +3395,84 @@ mod tests {
                 "base {bad_base:?}"
             );
         }
+    }
+
+    /// The branch-first read: an unambiguous branch keeps its name, a shadowed one
+    /// becomes its full ref, and names of no local branch pass through untouched.
+    #[tokio::test]
+    async fn branch_first_rev_qualifies_only_a_shadowed_branch() {
+        let (_base, base_dir) = temp_base("branch-first-rev");
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "plain"]).await;
+        run(&repo_s, &["branch", "shadowed"]).await;
+        run(&repo_s, &["tag", "shadowed"]).await;
+        run(&repo_s, &["tag", "v1"]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        // A branch literally named `refs/heads/plain` must not capture that full ref.
+        run(
+            &repo_s,
+            &["update-ref", "refs/heads/refs/heads/plain", "HEAD"],
+        )
+        .await;
+
+        let mut got = Vec::new();
+        for name in [
+            "plain",
+            "shadowed",
+            "v1",
+            "origin/main",
+            "HEAD~0",
+            "nope",
+            "refs/heads/plain",
+        ] {
+            got.push(super::branch_first_rev(&repo_s, name).await);
+        }
+        assert_eq!(
+            got,
+            [
+                "plain",
+                "refs/heads/shadowed",
+                "v1",
+                "origin/main",
+                "HEAD~0",
+                "nope",
+                "refs/heads/plain"
+            ]
+        );
+    }
+
+    /// A local PR's head is measured as the BRANCH: a same-named tag already merged
+    /// into the base must not report an unmerged branch as merged.
+    #[tokio::test]
+    async fn branch_merge_states_measure_a_head_shadowed_by_a_tag() {
+        let (_base, base_dir) = temp_base("merge-states-shadow");
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        let base = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["tag", "feature"]).await;
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        std::fs::write(repo.join("a.txt"), "feature\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "feature edit"]).await;
+        run(&repo_s, &["switch", "-q", &base]).await;
+
+        let states = git_branch_merge_states(
+            repo_s.clone(),
+            vec![MergePair {
+                base: base.clone(),
+                head: "feature".into(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!((states[0].merged, states[0].head_exists), (false, true));
     }
 
     /// The throwaway checkout is minted as a direct child of the SAME root the marker

@@ -3708,8 +3708,13 @@ mod tests {
             }
         };
         assert_eq!(diff_files(head_rev).await, vec!["f.txt".to_string()]);
+        // To git itself the bare name is the tag, which is why the recipe never
+        // hands a rev position the name alone.
         assert!(
-            diff_files(name).await.is_empty(),
+            git(&repo_s, &["diff", "--name-only", "HEAD~1...shadowed"])
+                .await
+                .trim()
+                .is_empty(),
             "the bare name is the tag"
         );
 
