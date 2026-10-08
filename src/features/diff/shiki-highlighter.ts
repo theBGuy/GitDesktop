@@ -218,15 +218,19 @@ const EMPTY_AST: DiffAST = { type: "root", children: [] };
 
 // Flat hast (the same shape highlight.js produces): token spans separated by
 // "\n" text nodes. The renderer applies each span's `properties.style` directly.
-// The `theme` arg @git-diff-view threads to `getAST` is ignored: token colors
-// are CSS variables, so one tokenization serves both app themes.
+// The tree must flatten back to `raw` exactly — mergeSegments' length check
+// depends on it — so the "\r" Shiki strips from each CRLF break is re-emitted
+// as its own text node. The `theme` arg @git-diff-view threads to `getAST` is
+// ignored: token colors are CSS variables, so one tokenization serves both.
 function buildHast(raw: string, lang: string): DiffAST {
   const lines = getCore().codeToTokensBase(raw, {
     lang,
     theme: gdDiff.name,
   });
   const children: DiffAST["children"] = [];
-  lines.forEach((line, i) => {
+  // Walked by index: `raw` can be a long padded buffer, so no split().
+  let lineEnd = raw.indexOf("\n");
+  for (const line of lines) {
     for (const token of line) {
       children.push({
         type: "element",
@@ -235,8 +239,13 @@ function buildHast(raw: string, lang: string): DiffAST {
         children: [{ type: "text", value: token.content }],
       });
     }
-    if (i < lines.length - 1) children.push({ type: "text", value: "\n" });
-  });
+    if (lineEnd === -1) break;
+    if (raw.charCodeAt(lineEnd - 1) === 13) {
+      children.push({ type: "text", value: "\r" });
+    }
+    children.push({ type: "text", value: "\n" });
+    lineEnd = raw.indexOf("\n", lineEnd + 1);
+  }
   return { type: "root", children };
 }
 

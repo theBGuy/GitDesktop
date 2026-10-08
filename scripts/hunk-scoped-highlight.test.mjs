@@ -276,25 +276,28 @@ test("vendor parity: identical to core processAST except skipped blank lines", {
 });
 
 /** A unified diff whose single hunk sits at `start` (new side gains a line). */
-function deepHunk(path, start) {
-  return [
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -${start},3 +${start},4 @@`,
+function deepHunk(path, start, eol = "") {
+  const content = [
     " const a = 1;",
     '-let b = "x";',
     '+let b = "y";',
     "+// added",
     " function f() {}",
+  ].map((line) => line + eol);
+  return [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${start},3 +${start},4 @@`,
+    ...content,
     "",
   ].join("\n");
 }
 
-function diffFileFor(path, lang, start) {
+function diffFileFor(path, lang, start, eol = "") {
   const file = core.DiffFile.createInstance({
     oldFile: { fileName: path, fileLang: lang, content: null },
     newFile: { fileName: path, fileLang: lang, content: null },
-    hunks: [deepHunk(path, start)],
+    hunks: [deepHunk(path, start, eol)],
   });
   file.initRaw();
   return file;
@@ -357,4 +360,32 @@ test("past the singleton cap, Shiki hunks keep their colors", {
   );
   const entries = Object.keys(file.getBundle().newFileSyntaxLines).length;
   assert.ok(entries <= 4 + 2, `entries ∝ hunk: ${entries}`);
+});
+
+// CRLF content lines keep their "\r" in the padded buffer while Shiki strips it
+// from each line break; a tree that dropped it would fail mergeSegments' length
+// check and fall back to tokenizing the whole buffer (one entry per line).
+test("CRLF hunks stay hunk-scoped on the Shiki path", { skip }, async () => {
+  assert.equal(await shiki.ensureBuiltinShikiLang("tsx"), true);
+  // New side: 4 hunk lines, plus line 1 (the leading run's first "\n") and the
+  // empty final line — 6 entries, against one per buffer line on the fallback.
+  for (const start of [30_001, 101]) {
+    const file = diffFileFor("big.tsx", "tsx", start, "\r");
+    file.initSyntax({ registerHighlighter: shiki.shikiDiffHighlighter() });
+    const line = file.getNewSyntaxLine(start + 1);
+    assert.ok(line, `line ${start + 1} has syntax`);
+    assert.ok(
+      line.nodeList.some((n) =>
+        String(n.wrapper?.properties?.style).includes("var(--gd-syn-keyword)"),
+      ),
+    );
+    assert.equal(line.value, 'let b = "y";\r\n');
+    const syntax = file.getBundle().newFileSyntaxLines;
+    const entries = Object.keys(syntax).length;
+    assert.ok(entries <= 4 + 2, `start ${start}: entries ∝ hunk: ${entries}`);
+    const { rawFile } = file._getFullBundle().newFileResult;
+    for (const entry of Object.values(syntax)) {
+      assert.equal(entry.value, rawFile[entry.lineNumber]);
+    }
+  }
 });

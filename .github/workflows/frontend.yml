@@ -70,7 +70,8 @@ jobs:
       # their modules under test, the notification-settings suite loads the
       # settings graph, which pulls react plus @tauri-apps/plugin-store, and the
       # ts-no-jsx-highlight and hunk-scoped-highlight suites drive highlight.js
-      # and @git-diff-view/core's lowlight engine (the latter loads Shiki too).
+      # and @git-diff-view/core's lowlight engine (the hunk-scoped-highlight
+      # suite loads Shiki too).
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
       # unresolvable import there into a failure rather than a silent skip.
       - name: Node suites needing node_modules (enforced)
