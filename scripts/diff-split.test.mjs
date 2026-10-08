@@ -257,6 +257,117 @@ const shapes = [
       'rename to "secret.png"\n' +
       "Binary files differ\n",
   },
+  {
+    name: "a modification with an embedded line separator",
+    path: "secret\u2028x.env",
+    section:
+      "diff --git a/secret\u2028x.env b/secret\u2028x.env\n" +
+      "--- a/secret\u2028x.env\n" +
+      "+++ b/secret\u2028x.env\n" +
+      "@@ -1 +1 @@\n-old\n+new\n",
+  },
+  {
+    name: "a new file with an embedded paragraph separator",
+    path: "created\u2029x.env",
+    section:
+      "diff --git a/created\u2029x.env b/created\u2029x.env\n" +
+      "new file mode 100644\n" +
+      "--- /dev/null\n" +
+      "+++ b/created\u2029x.env\n" +
+      "@@ -0,0 +1 @@\n+created\n",
+  },
+  {
+    name: "a rename destination with an embedded line separator",
+    path: "renamed\u2028x.env",
+    section:
+      "diff --git a/rename-ls-old.env b/renamed\u2028x.env\n" +
+      "similarity index 100%\n" +
+      "rename from rename-ls-old.env\n" +
+      "rename to renamed\u2028x.env\n",
+  },
+  {
+    name: "a copy destination with an embedded line separator",
+    path: "copied\u2028x.env",
+    section:
+      "diff --git a/copy-ls-old.env b/copied\u2028x.env\n" +
+      "similarity index 100%\n" +
+      "copy from copy-ls-old.env\n" +
+      "copy to copied\u2028x.env\n",
+  },
+  {
+    name: "a deletion with an embedded line separator",
+    path: "deleted\u2028x.env",
+    section:
+      "diff --git a/deleted\u2028x.env b/deleted\u2028x.env\n" +
+      "deleted file mode 100644\n" +
+      "--- a/deleted\u2028x.env\n" +
+      "+++ /dev/null\n" +
+      "@@ -1 +0,0 @@\n-removed\n",
+  },
+  {
+    name: "a mode change with an embedded line separator",
+    path: "bin/run\u2028x.sh",
+    section:
+      "diff --git a/bin/run\u2028x.sh b/bin/run\u2028x.sh\n" +
+      "old mode 100644\n" +
+      "new mode 100755\n",
+  },
+  {
+    name: "a binary change with an embedded line separator",
+    path: "img/logo\u2028x.png",
+    section:
+      "diff --git a/img/logo\u2028x.png b/img/logo\u2028x.png\n" +
+      "index 1111111..2222222 100644\n" +
+      "Binary files a/img/logo\u2028x.png and b/img/logo\u2028x.png differ\n",
+  },
+  {
+    name: "a raw line separator in the old name beside a C-quoted rename destination",
+    path: "quoted-new\rx.env",
+    section:
+      'diff --git a/raw\u2028old.env "b/quoted-new\\rx.env"\n' +
+      "similarity index 100%\n" +
+      "rename from raw\u2028old.env\n" +
+      'rename to "quoted-new\\rx.env"\n',
+  },
+  {
+    name: "a deletion whose content has a line separator before a rename-like suffix",
+    path: "src/ls-content.txt",
+    section:
+      "diff --git a/src/ls-content.txt b/src/ls-content.txt\n" +
+      "deleted file mode 100644\n" +
+      "--- a/src/ls-content.txt\n" +
+      "+++ /dev/null\n" +
+      "@@ -1 +0,0 @@\n-x\u2028rename to decoy.txt\n",
+  },
+  {
+    name: "content with a carriage return before a diff-like suffix",
+    path: "src/cr-content.txt",
+    section:
+      "diff --git a/src/cr-content.txt b/src/cr-content.txt\n" +
+      "--- a/src/cr-content.txt\n" +
+      "+++ b/src/cr-content.txt\n" +
+      "@@ -1 +1,2 @@\n-old\n" +
+      "+first\rdiff --git a/decoy.txt b/decoy.txt\n+second\n",
+  },
+  {
+    name: "content with a line separator before a diff-like suffix",
+    path: "src/ls-split-content.txt",
+    section:
+      "diff --git a/src/ls-split-content.txt b/src/ls-split-content.txt\n" +
+      "--- a/src/ls-split-content.txt\n" +
+      "+++ b/src/ls-split-content.txt\n" +
+      "@@ -1 +1,2 @@\n-old\n" +
+      "+first\u2028diff --git a/decoy.txt b/decoy.txt\n+second\n",
+  },
+  {
+    name: "a modification with an embedded raw carriage return",
+    path: "raw\rx.env",
+    section:
+      "diff --git a/raw\rx.env b/raw\rx.env\n" +
+      "--- a/raw\rx.env\n" +
+      "+++ b/raw\rx.env\n" +
+      "@@ -1 +1 @@\n-old\n+new\n",
+  },
 ];
 
 for (const { name, path, section } of shapes) {
@@ -265,6 +376,15 @@ for (const { name, path, section } of shapes) {
     assert.deepEqual([...splitUnifiedDiff(section)], [[path, section]], name);
   });
 }
+
+test("a CR-only rename destination falls through to the diff header", () => {
+  const path = "src/cr-only-fallback.txt";
+  const section =
+    "diff --git a/src/cr-only-fallback.txt b/src/cr-only-fallback.txt\n" +
+    "rename to \r\n";
+  assert.equal(sectionFilePath(section), path);
+  assert.deepEqual([...splitUnifiedDiff(section)], [[path, section]]);
+});
 
 // ------------------------------------------------------------ combinedSections
 
@@ -283,6 +403,19 @@ test("all sections resolve by filename in the synthetic PR diff", () => {
   const sections = splitUnifiedDiff(combined);
   for (const { name, path, section } of shapes) {
     assert.equal(sections.get(path), section, name);
+  }
+});
+
+test("CRLF sections retain the same full paths and section bytes", () => {
+  const crlf = combined.replaceAll("\n", "\r\n");
+  const sections = splitUnifiedDiff(crlf);
+  assert.deepEqual(
+    [...sections.keys()],
+    shapes.map(({ path }) => path),
+  );
+  assert.equal([...sections.values()].join(""), crlf);
+  for (const { name, path, section } of shapes) {
+    assert.equal(sectionFilePath(section.replaceAll("\n", "\r\n")), path, name);
   }
 });
 
@@ -311,6 +444,16 @@ test("literal and octal-escaped emoji decode without replacement characters", ()
 });
 
 // -------------------------------------------------------------- hunkStatistics
+
+test("a carriage return inside content preserves section keys and counts", () => {
+  const { path, section } = shapes.find(
+    ({ path }) => path === "src/cr-content.txt",
+  );
+  assert.deepEqual([...splitUnifiedDiff(section).keys()], [path]);
+  assert.deepEqual(diffSectionStats(section), [
+    { path, added: 2, deleted: 1, isBinary: false },
+  ]);
+});
 
 test("per-file counts exclude headers and include hunk lines starting with three signs", () => {
   const diff = shapes[0].section + shapes[1].section + shapes[4].section;

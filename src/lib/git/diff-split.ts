@@ -1,5 +1,8 @@
 import type { DiffStatEntry } from "./types";
 
+// Only \n delimits lines; JS's \r/U+2028/U+2029 breaks would miskey sections.
+export const DIFF_SECTION_BOUNDARY = /(?<![^\n])(?=diff --git )/;
+
 const encoder = new TextEncoder();
 
 /** git's `quote_c_style` single-character escapes, mapped to their byte. */
@@ -70,9 +73,6 @@ function unescapeCQuoted(body: string): string {
  * C-quoted. A bare token can carry a trailing TAB field, which git adds when the
  * name contains a space — cut at the tab rather than trimming, so a name that
  * genuinely ends in a space survives.
- *
- * No CR strip here, unlike the `\n`-slicing mirrors in truncate.ts and
- * generate.rs: both callers pass a `(.+)$` capture, and `.` never matches `\r`.
  */
 function newFilePath(token: string): string | undefined {
   if (!token) return undefined;
@@ -90,9 +90,9 @@ function newFilePath(token: string): string | undefined {
 /**
  * A rename/copy destination, which has no a/ or b/ prefix.
  * git's final b-side field repeats the escaped destination after `"b/`.
- * The Rust reconstructors write both raw: destinations put their quote after
- * `b/`, so this suffix cannot match; quote runs in the old name cannot change
- * the result.
+ * A producer that writes both raw puts the destination's quote after `b/`,
+ * so this suffix cannot match; quote runs in the old name cannot change the
+ * result.
  */
 function movedFilePath(
   value: string,
@@ -147,15 +147,25 @@ function headerFilePath(rest: string): string | undefined {
  * patterns match the same paths. A usable +++ path wins, then rename/copy
  * destinations, then the diff header: extended headers disambiguate renames
  * whose header names also match as an unrenamed pair.
+ *
+ * Logical lines use only `\n`; JS `.` and /m treat `\r`, U+2028 and U+2029
+ * as line breaks and can miskey names or content. Strip one trailing CR as
+ * CRLF transport; embedded CRs belong to the name and must survive.
  */
 export function sectionFilePath(section: string): string | undefined {
-  const plus = section.match(/^\+\+\+ (.+)$/m);
-  const moved = section.match(/^(?:rename|copy) to (.+)$/m);
-  const header = section.match(/^diff --git (.+)$/m);
+  const plus = section
+    .match(/(?<![^\n])\+\+\+ ([^\n]+)/)?.[1]
+    .replace(/\r$/, "");
+  const moved = section
+    .match(/(?<![^\n])(?:rename|copy) to ([^\n]+)/)?.[1]
+    .replace(/\r$/, "");
+  const header = section
+    .match(/(?<![^\n])diff --git ([^\n]+)/)?.[1]
+    .replace(/\r$/, "");
   return (
-    (plus?.[1] && newFilePath(plus[1])) ||
-    (moved?.[1] && movedFilePath(moved[1], header?.[1])) ||
-    (header?.[1] && headerFilePath(header[1])) ||
+    (plus && newFilePath(plus)) ||
+    (moved && movedFilePath(moved, header)) ||
+    (header && headerFilePath(header)) ||
     undefined
   );
 }
@@ -170,7 +180,7 @@ export function sectionFilePath(section: string): string | undefined {
 export function diffSectionStats(diff: string): DiffStatEntry[] {
   if (typeof diff !== "string") return [];
   const stats: DiffStatEntry[] = [];
-  for (const part of diff.split(/^(?=diff --git )/m)) {
+  for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     try {
       const path = sectionFilePath(part);
@@ -202,12 +212,11 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
  * keyed by the new-file path, so each can be fed to the file diff viewer.
  *
  * A section whose path can't be keyed is dropped rather than passed through:
- * the AI-ignore filter rebuilds the diff from this map, and an unkeyable section
- * is one that was never checked against the user's patterns.
+ * an unkeyable section has no file row to attach to.
  */
 export function splitUnifiedDiff(diff: string): Map<string, string> {
   const sections = new Map<string, string>();
-  for (const part of diff.split(/^(?=diff --git )/m)) {
+  for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     const path = sectionFilePath(part);
     if (path) sections.set(path, part);

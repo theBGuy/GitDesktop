@@ -1,4 +1,4 @@
-import { diffSectionStats } from "@/lib/git/diff-split";
+import { DIFF_SECTION_BOUNDARY, diffSectionStats } from "@/lib/git/diff-split";
 import type { ContextPack } from "./agent";
 import { branchPrefixSection } from "./branch-prefixes";
 import { distillReadme } from "./readme";
@@ -1089,7 +1089,7 @@ export function extractAgentPrompt(text: string): string | null {
 /** Binary file contents never help the model; drop those sections entirely. */
 function stripBinarySections(diffText: string): string {
   return diffText
-    .split(/^(?=diff --git )/m)
+    .split(DIFF_SECTION_BOUNDARY)
     .filter((section) => !section.includes("\nBinary files "))
     .join("");
 }
