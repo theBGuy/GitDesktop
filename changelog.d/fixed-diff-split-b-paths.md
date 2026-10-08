@@ -1,3 +1,4 @@
-- AI ignore patterns now cover files whose paths contain ` b/` for deletions,
-  additions of empty files, renames, copies, mode changes, and binary changes.
-  PR and commit file views also locate those files' diffs.
+- AI ignore patterns now cover deleted, renamed, copied, binary,
+  mode-changed, and empty new files inside folders whose names end in a
+  space and `b` (such as `Plan b/`), and PR and commit file views now show
+  those files' diffs.

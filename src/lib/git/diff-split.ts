@@ -87,23 +87,26 @@ function newFilePath(token: string): string | undefined {
   return path.startsWith("b/") ? path.slice(2) : undefined;
 }
 
-// Rename/copy destinations have no a/ or b/ prefix. git C-quotes only whole
-// values containing backslash escapes; synthesized headers arrive raw.
-// A raw name fully wrapped in quotes with a backslash remains ambiguous and
-// would be decoded as C-quoted; no real producer emits that combination.
-function movedFilePath(value: string): string | undefined {
-  if (!value.startsWith('"')) return value || undefined;
-  const close = value.lastIndexOf('"');
-  if (close <= 0 || close !== value.length - 1) return value;
-  const body = value.slice(1, close);
-  if (!body.includes("\\")) return value;
-  return unescapeCQuoted(body) || undefined;
+/**
+ * A rename/copy destination, which has no a/ or b/ prefix.
+ * git quotes it exactly when it quotes the header's b-side; the Rust
+ * reconstructors write both raw.
+ */
+function movedFilePath(value: string, quoted: boolean): string | undefined {
+  if (
+    !quoted ||
+    value.length < 2 ||
+    !value.startsWith('"') ||
+    !value.endsWith('"')
+  )
+    return value || undefined;
+  return unescapeCQuoted(value.slice(1, -1)) || undefined;
 }
 
 /**
- * Without a rename, git's header names match, so equal-name midpoint matching
- * comes first. Then try the quoted b-side, the escape-aware quoted a-side walk,
- * and finally the legacy last bare separator for synthetic differing names.
+ * The new path from a `diff --git` header's names. Unless the file was renamed
+ * or copied, git writes the same name on both sides, so an equal-name midpoint
+ * split is unique and wins; differing names fall back to separator search.
  */
 function headerFilePath(rest: string): string | undefined {
   if (rest.startsWith("a/")) {
@@ -128,8 +131,8 @@ function headerFilePath(rest: string): string | undefined {
     if (i < rest.length && rest[i + 1] === " ")
       return newFilePath(rest.slice(i + 2));
   }
-  // Differing bare names without rename/copy headers are not emitted by git;
-  // retain last-separator parsing for these synthetic sections.
+  // git never emits differing bare names without rename/copy headers; the last
+  // separator keys synthesized ones.
   const at = rest.lastIndexOf(" b/");
   return at < 0 ? undefined : newFilePath(rest.slice(at + 1));
 }
@@ -147,7 +150,7 @@ export function sectionFilePath(section: string): string | undefined {
   const header = section.match(/^diff --git (.+)$/m);
   return (
     (plus?.[1] && newFilePath(plus[1])) ||
-    (moved?.[1] && movedFilePath(moved[1])) ||
+    (moved?.[1] && movedFilePath(moved[1], !!header?.[1]?.includes(' "b/'))) ||
     (header?.[1] && headerFilePath(header[1])) ||
     undefined
   );

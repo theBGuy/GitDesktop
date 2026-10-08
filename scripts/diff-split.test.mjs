@@ -235,6 +235,19 @@ const shapes = [
       'rename to "\\"escaped\\".txt"\n' +
       "Binary files differ\n",
   },
+  {
+    name: "a raw rename destination containing quotes and a backslash",
+    path: '"x\\y"',
+    section:
+      'diff --git a/old4.txt b/"x\\y"\n' +
+      "rename from old4.txt\n" +
+      'rename to "x\\y"\n',
+  },
+  {
+    name: "a C-quoted old side with an escaped quote beside a plain new side",
+    path: "z.txt",
+    section: 'diff --git "a/x\\" b/y.txt" b/z.txt\n',
+  },
 ];
 
 for (const { name, path, section } of shapes) {
