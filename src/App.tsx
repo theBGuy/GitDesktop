@@ -41,6 +41,7 @@ import {
   useNotificationsDraft,
   useRepoNotificationsDialog,
 } from "@/lib/notifications/matrix";
+import { useQuitGuard } from "@/lib/parked-writes";
 import {
   useApplyTheme,
   useSaveSettings,
@@ -163,6 +164,9 @@ function App() {
       () => undefined,
     );
   }, [closeToTray]);
+  // The backend owns the quit decision too, which needs to know about parked
+  // writes.
+  useQuitGuard();
 
   // Drop a repo folder anywhere on the window to open it.
   useRepoDrop();

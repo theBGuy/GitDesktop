@@ -752,6 +752,10 @@ pub fn run() {
             agent::agent_review_cancel,
             agent::agent_session,
             tray::set_close_to_tray,
+            tray::set_parked_writes,
+            tray::quit_prompt_shown,
+            tray::quit_prompt_closed,
+            tray::quit_app,
             app_menu::set_recent_repos_menu,
         ])
         .run(tauri::generate_context!())

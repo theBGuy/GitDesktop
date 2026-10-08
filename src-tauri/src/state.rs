@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, OnceCell};
@@ -125,6 +125,15 @@ pub struct AppState {
     /// instead of quitting. Mirrors the user's setting, pushed from the frontend;
     /// defaults to true so the first close behaves correctly before that sync.
     close_to_tray: AtomicBool,
+    /// Whether the frontend holds writes parked offline. They live only in the
+    /// webview's memory, so a quit discards them; pushed from the frontend, and
+    /// false until it reports, which keeps quitting unguarded before that sync.
+    parked_writes: AtomicBool,
+    /// When the last quit prompt was emitted, in [`monotonic_ms`]; 0 = none open.
+    quit_prompt_emitted_ms: AtomicU64,
+    /// Whether the frontend's listener received that prompt. It acks before asking,
+    /// so this proves a live webview, not a painted dialog.
+    quit_prompt_acked: AtomicBool,
 }
 
 impl Default for AppState {
@@ -136,6 +145,9 @@ impl Default for AppState {
             git_info: OnceCell::new(),
             agent_cancels: Arc::new(SyncMutex::new(HashMap::new())),
             close_to_tray: AtomicBool::new(true),
+            parked_writes: AtomicBool::new(false),
+            quit_prompt_emitted_ms: AtomicU64::new(0),
+            quit_prompt_acked: AtomicBool::new(false),
         }
     }
 }
@@ -358,6 +370,77 @@ impl AppState {
     pub fn set_close_to_tray(&self, enabled: bool) {
         self.close_to_tray.store(enabled, Ordering::Relaxed);
     }
+
+    pub fn set_parked_writes(&self, parked: bool) {
+        self.parked_writes.store(parked, Ordering::Relaxed);
+    }
+
+    pub fn ack_quit_prompt(&self) {
+        self.quit_prompt_acked.store(true, Ordering::Relaxed);
+    }
+
+    pub fn close_quit_prompt(&self) {
+        self.quit_prompt_emitted_ms.store(0, Ordering::Relaxed);
+        self.quit_prompt_acked.store(false, Ordering::Relaxed);
+    }
+
+    /// Decides a quit request at `now_ms`, stamping a fresh prompt when it asks for
+    /// one. Called only from the event-loop thread, so two requests never interleave
+    /// here; the ack and close commands may, which errs toward prompting again.
+    pub fn begin_quit(&self, now_ms: u64) -> QuitDecision {
+        let decision = quit_decision(
+            self.parked_writes.load(Ordering::Relaxed),
+            self.quit_prompt_emitted_ms.load(Ordering::Relaxed),
+            self.quit_prompt_acked.load(Ordering::Relaxed),
+            now_ms,
+        );
+        if decision == QuitDecision::PromptNew {
+            self.quit_prompt_acked.store(false, Ordering::Relaxed);
+            self.quit_prompt_emitted_ms.store(now_ms, Ordering::Relaxed);
+        }
+        decision
+    }
+}
+
+/// What a quit request does while the frontend may hold parked writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitDecision {
+    Exit,
+    /// Show the window and emit a fresh prompt.
+    PromptNew,
+    /// A prompt was just emitted and not yet shown: bring the window forward only.
+    Reshow,
+}
+
+/// How long an unacknowledged prompt absorbs repeat quits (a double-clicked close,
+/// Alt+F4 key repeat) before a further quit treats the webview as hung and exits.
+pub const QUIT_ACK_GRACE_MS: u64 = 1500;
+
+/// The quit rule. An ACKED prompt answers a later quit with a fresh one rather
+/// than an exit: the user may have hidden or minimized it long ago. Only an
+/// unacknowledged prompt past the grace period exits, so the app is never trapped.
+pub fn quit_decision(parked: bool, emitted_ms: u64, acked: bool, now_ms: u64) -> QuitDecision {
+    if !parked {
+        return QuitDecision::Exit;
+    }
+    if emitted_ms == 0 || acked {
+        return QuitDecision::PromptNew;
+    }
+    if now_ms.saturating_sub(emitted_ms) < QUIT_ACK_GRACE_MS {
+        QuitDecision::Reshow
+    } else {
+        QuitDecision::Exit
+    }
+}
+
+/// Milliseconds on a process-local monotonic clock, never 0 (0 means "no prompt"):
+/// a wall clock stepped backward would otherwise stretch the grace period.
+pub fn monotonic_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    u64::try_from(start.elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 /// How long a cancel-created tombstone stays adoptable. The race it exists for is
@@ -968,5 +1051,85 @@ mod agent_cancel_tests {
             map.contains_key(adopted),
             "an adopted entry belongs to its run's guard, not the sweep"
         );
+    }
+}
+
+#[cfg(test)]
+mod quit_guard_tests {
+    use super::*;
+
+    const T: u64 = 10_000;
+
+    #[test]
+    fn without_parked_writes_every_quit_exits() {
+        assert_eq!(quit_decision(false, 0, false, T), QuitDecision::Exit);
+        assert_eq!(quit_decision(false, T, false, T + 1), QuitDecision::Exit);
+        assert_eq!(quit_decision(false, T, true, T + 1), QuitDecision::Exit);
+    }
+
+    #[test]
+    fn the_first_quit_over_parked_writes_prompts() {
+        assert_eq!(quit_decision(true, 0, false, T), QuitDecision::PromptNew);
+    }
+
+    #[test]
+    fn a_quit_over_an_acked_prompt_prompts_afresh() {
+        // However late: a prompt hidden or minimized hours ago still asks again.
+        assert_eq!(quit_decision(true, T, true, T + 1), QuitDecision::PromptNew);
+        assert_eq!(
+            quit_decision(true, T, true, T + 3_600_000),
+            QuitDecision::PromptNew
+        );
+    }
+
+    #[test]
+    fn a_repeat_inside_the_grace_period_only_reshows() {
+        assert_eq!(quit_decision(true, T, false, T), QuitDecision::Reshow);
+        assert_eq!(
+            quit_decision(true, T, false, T + QUIT_ACK_GRACE_MS - 1),
+            QuitDecision::Reshow
+        );
+    }
+
+    #[test]
+    fn an_unacked_prompt_past_the_grace_period_exits() {
+        assert_eq!(
+            quit_decision(true, T, false, T + QUIT_ACK_GRACE_MS),
+            QuitDecision::Exit
+        );
+    }
+
+    /// Writes that resume while a prompt is open leave its fields behind, and the
+    /// next quit must not consult them.
+    #[test]
+    fn parked_writes_draining_mid_prompt_lets_the_next_quit_exit() {
+        let state = AppState::default();
+        state.set_parked_writes(true);
+        assert_eq!(state.begin_quit(T), QuitDecision::PromptNew);
+        state.ack_quit_prompt();
+        state.set_parked_writes(false);
+        assert_eq!(state.begin_quit(T + 1), QuitDecision::Exit);
+    }
+
+    #[test]
+    fn begin_quit_stamps_and_the_ack_and_close_commands_move_it() {
+        let state = AppState::default();
+        state.set_parked_writes(true);
+        assert_eq!(state.begin_quit(T), QuitDecision::PromptNew);
+        assert_eq!(state.begin_quit(T + 1), QuitDecision::Reshow);
+        state.ack_quit_prompt();
+        assert_eq!(state.begin_quit(T + 2), QuitDecision::PromptNew);
+        // The re-stamp cleared the ack, so a hung webview still gets its escape.
+        assert_eq!(
+            state.begin_quit(T + 2 + QUIT_ACK_GRACE_MS),
+            QuitDecision::Exit
+        );
+        state.close_quit_prompt();
+        assert_eq!(state.begin_quit(T + 3), QuitDecision::PromptNew);
+    }
+
+    #[test]
+    fn the_monotonic_clock_never_reads_as_no_prompt() {
+        assert!(monotonic_ms() > 0);
     }
 }

@@ -3483,7 +3483,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   overridable per PR; pairs with *Review draft PRs when created* so a draft's automated
   first review waits until it's marked ready), **fetch link previews** (the title,
   description, and image behind a link in a rendered body; off leaves the card showing
-  the destination alone), and privacy options.
+  the destination alone), and privacy options. If changes made offline are still waiting
+  to send, quitting from the tray or closing the window with the tray option off asks
+  before discarding them.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
   and *Cycle theme* in the command palette steps through them.
@@ -3597,7 +3599,8 @@ and roughly every six hours in the background while the app stays open (you can 
 automatic checks off in **Settings → Updates**). When an update is waiting it shows a
 toast, a dot on the **Settings** gear, and an **Install & restart** banner in
 **Settings → Updates** — but it only ever installs **on your consent**, never silently.
-Updates are cryptographically signed and verified by the app. You can also check anytime
-with **Check for updates now**.`,
+If changes made offline are still waiting to send, GitDesktop asks before the restart
+discards them. Updates are cryptographically signed and verified by the app. You can also
+check anytime with **Check for updates now**.`,
   },
 ];

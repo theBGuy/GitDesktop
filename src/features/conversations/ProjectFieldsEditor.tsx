@@ -53,6 +53,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { useRetryFocusRescue } from "./ConversationListPanel";
 import {
@@ -314,7 +315,7 @@ export function ProjectFieldsEditor({
       // that refetch is what a fresh draft would have to seed from. The mutation's
       // `onSettled` returns its invalidate promise, so this hold spans it.
       case setFields.isPending:
-        return SAVING_REASON;
+        return pendingWriteReason(setFields.isPaused, SAVING_REASON);
       case unsettledReason !== undefined:
         return unsettledReason;
       default:
@@ -541,7 +542,7 @@ export function ProjectFieldsEditor({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized element,
             and a 16px swap would widen the label column mid-write. */}
-        {setFields.isPending ? (
+        {setFields.isPending && !setFields.isPaused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <SlidersHorizontalIcon data-icon="inline-start" />

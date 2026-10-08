@@ -20,12 +20,17 @@ export function UpdateChecker() {
   useEffect(() => {
     if (!update || notifiedVersion.current === update.version) return;
     notifiedVersion.current = update.version;
-    toast(`Update available: v${update.version}`, {
+    const id = toast(`Update available: v${update.version}`, {
       description: "A new version of GitDesktop is ready to install.",
       duration: Number.POSITIVE_INFINITY,
       action: {
         label: "Install & restart",
-        onClick: () => void installUpdateWithToast(update),
+        onClick: (event) => {
+          // Kept until the install proceeds: a declined confirm leaves the offer
+          // up, since this version is never toasted again.
+          event.preventDefault();
+          void installUpdateWithToast(update, () => toast.dismiss(id));
+        },
       },
     });
   }, [update]);

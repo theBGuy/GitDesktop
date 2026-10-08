@@ -30,6 +30,7 @@ import type {
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import {
@@ -171,7 +172,10 @@ export function ProjectsPopover({
       // this hold spans the settle REFETCH too — the placeholders are always
       // gone by the time it frees.
       case editProjects.isPending:
-        return "Saving your last change…";
+        return pendingWriteReason(
+          editProjects.isPaused,
+          "Saving your last change…",
+        );
       case membershipsParked:
         return offlinePendingMessage("projects");
       case loadingMemberships:
@@ -336,7 +340,7 @@ export function ProjectsPopover({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized
             element, and a 16px swap would widen the label column mid-write. */}
-        {editProjects.isPending ? (
+        {editProjects.isPending && !editProjects.isPaused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <KanbanIcon data-icon="inline-start" />
