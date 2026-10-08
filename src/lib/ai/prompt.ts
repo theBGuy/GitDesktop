@@ -1089,7 +1089,7 @@ export function extractAgentPrompt(text: string): string | null {
 /** Binary file contents never help the model; drop those sections entirely. */
 function stripBinarySections(diffText: string): string {
   return diffText
-    .split(/^(?=diff --git )/m)
+    .split(/(?<![^\n])(?=diff --git )/)
     .filter((section) => !section.includes("\nBinary files "))
     .join("");
 }
