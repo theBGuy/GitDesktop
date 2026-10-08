@@ -255,7 +255,9 @@ impl EventSink for Channel<ReviewEvent> {
 
 /// `PATH`-style lists the bundle prepends itself to; `$APPDIR` entries are
 /// dropped and the variable is unset when nothing survives — except `PATH`,
-/// which is replaced with a minimal host PATH.
+/// which is replaced with a minimal host PATH, and `XDG_DATA_DIRS`, whose
+/// pre-launch value is restored when the exact launch-chain prefix matches,
+/// also removing the hook's `/usr/share` entry.
 /// Together with `APPDIR_SCALAR_VARS`, exactly mirrors the guard's
 /// `allowed` list.
 const APPDIR_PATHLIST_VARS: &[&str] = &[
@@ -274,8 +276,9 @@ const APPDIR_PATHLIST_VARS: &[&str] = &[
 
 /// Single-path variables the bundle owns outright — unset when they point into
 /// `$APPDIR`. Deliberately left alone: `GTK_THEME` (hook-set, but not
-/// `$APPDIR`-derived), and `GDK_BACKEND` and `LD_PRELOAD` (the AppImage never
-/// sets them, so any value is the user's).
+/// `$APPDIR`-derived), `PYTHONDONTWRITEBYTECODE` (the AppRun launcher sets a
+/// harmless constant `1`, preventing `.pyc` writes), and `GDK_BACKEND` and
+/// `LD_PRELOAD` (the AppImage never sets them, so any value is the user's).
 /// Together with `APPDIR_PATHLIST_VARS`, exactly mirrors the guard's
 /// `allowed` list.
 const APPDIR_SCALAR_VARS: &[&str] = &[

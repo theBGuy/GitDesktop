@@ -14,10 +14,8 @@ export function parseGuardAllowed(source) {
   const names = new Set();
   const lines = source
     .split(/\r?\n/)
-    .filter((line) =>
-      /^\s*(?:(?:declare|local|export)\s+(?:-\S+\s+)*)?allowed\s*\+?=/.test(
-        line,
-      ),
+    .filter(
+      (line) => !/^\s*#/.test(line) && /(?<![\w$])allowed\s*\+?=/.test(line),
     );
   if (lines.length === 0) {
     throw new Error("Could not find 'allowed=' in appimage-guard.sh");

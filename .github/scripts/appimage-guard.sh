@@ -102,8 +102,8 @@ elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
   exit 1
 fi
 
-# This is an input-side hash check only; the appimage-check smoke leg's log
-# proves the plugin consumed LDAI_RUNTIME_FILE.
+# Input-side only: appimagetool writes sections into the embedded runtime,
+# so the bundle's runtime bytes can't be compared against this pin.
 if [ -n "${GD_RUNTIME_SHA256:-}" ]; then
   runtime_hash=$(sha256sum "${LDAI_RUNTIME_FILE:-}" 2>/dev/null) || runtime_hash=none
   runtime_hash="${runtime_hash%% *}"

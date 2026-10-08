@@ -4448,6 +4448,9 @@ test("appimage-env-twins fails on missing markers or unsupported entries", () =>
     'local allowed="$allowed NEWVAR"',
     'export allowed="$allowed NEWVAR"',
     'declare -x allowed="$allowed NEWVAR"',
+    'typeset allowed="$allowed NEWVAR"',
+    'readonly allowed="$allowed NEWVAR"',
+    '[ -n "$x" ] && allowed="$allowed NEWVAR"',
   ]) {
     assert.throws(
       () => parseGuardAllowed(`${appimageGuardFixture}\n${assignment}\n`),
