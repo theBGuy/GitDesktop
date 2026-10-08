@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { queryClient } from "@/lib/query-client";
+import { serializedMirror } from "@/lib/serialized-mirror";
 import { useConfirm } from "@/lib/stores/confirm";
 import { invoke } from "@/lib/tauri/invoke";
 
@@ -50,26 +51,22 @@ export async function confirmDiscardParkedWrites(
   });
 }
 
-let mirrored: boolean | undefined;
-
-function pushParked(parked: boolean) {
-  mirrored = parked;
-  invoke<void>("set_parked_writes", { parked }).catch(() => {
-    // Forget a push that never landed, so the next cache event retries it.
-    if (mirrored === parked) mirrored = undefined;
-  });
-}
+// `set_parked_writes` is async, so two calls can land out of order; pushes are
+// serialized, so the backend always converges to the latest value.
+const pushParked = serializedMirror((parked: boolean) =>
+  invoke<void>("set_parked_writes", { parked }),
+);
 
 /** Mirrors parked-write presence into the backend, which owns the quit decision
- *  (the tray's Quit never passes through the webview). Pushes on subscribe, as a
- *  reloaded webview leaves the mirror stale, then only when the zero boundary is
- *  crossed. Returns the unsubscribe. */
+ *  (the tray's Quit never passes through the webview). Reports on subscribe, as
+ *  a reloaded webview leaves the backend's copy stale, then on every cache event:
+ *  the mirror sends only a value that differs from what landed, and a failed
+ *  push is retried by the next event. Returns the unsubscribe. */
 function mirrorParkedWrites(): () => void {
   pushParked(hasParkedWrites());
-  return queryClient.getMutationCache().subscribe(() => {
-    const parked = hasParkedWrites();
-    if (parked !== mirrored) pushParked(parked);
-  });
+  return queryClient
+    .getMutationCache()
+    .subscribe(() => pushParked(hasParkedWrites()));
 }
 
 async function onQuitRequested() {
