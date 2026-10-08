@@ -202,7 +202,9 @@ function headerNewPath(header: string): string | undefined {
 
 function splitIntoFileSections(diffText: string): FileSection[] {
   const sections: FileSection[] = [];
-  const parts = diffText.split(/^(?=diff --git )/m).filter((p) => p.trim());
+  const parts = diffText
+    .split(/(?<![^\n])(?=diff --git )/)
+    .filter((p) => p.trim());
   for (const part of parts) {
     const header = part.slice(0, part.indexOf("\n"));
     sections.push({ path: headerNewPath(header) ?? header, text: part });
