@@ -16,8 +16,13 @@ interface PostcssDecl {
 }
 interface PostcssRule {
   selector: string;
+  selectors: string[];
   nodes: PostcssDecl[];
   remove: () => void;
+}
+interface PostcssRoot {
+  source?: { input: { file?: string } };
+  walkRules: (cb: (rule: PostcssRule) => void) => void;
 }
 
 // @git-diff-view ships `.diff-line-extend-wrapper * { color: initial }` (and the
@@ -44,6 +49,68 @@ const stripDiffViewColorReset = {
   },
 };
 
+// The same sheet carries a GitHub highlight.js theme (hex colors keyed on the
+// wrapper's data-theme) that would out-color our --gd-syn-* token rules in
+// code-highlight.css. Delete only rules whose every selector is a themed
+// `.diff-line-syntax-raw .hljs*` selector and whose declarations are purely
+// typographic; the layout rules (`pre code.hljs` padding) stay. Fails closed:
+// any sheet's surviving hljs color/background that isn't a --gd-syn-* token
+// fails the build, as does a vendor sheet missing either theme's strips.
+const VENDOR_HLJS_SELECTOR =
+  /^\.diff-tailwindcss-wrapper\[data-theme="(light|dark)"\] \.diff-line-syntax-raw \.hljs(?:-|$)/;
+// The `styles/*` export resolves to `dist/css/*`.
+const VENDOR_SHEET =
+  /@git-diff-view\/react\/(?:dist\/css|styles)\/diff-view\.css(?:\?|$)/;
+const VENDOR_HLJS_PROPS = new Set([
+  "color",
+  "background",
+  "background-color",
+  "font-style",
+  "font-weight",
+]);
+const PAINT_PROPS = new Set(["color", "background", "background-color"]);
+const stripDiffViewHljsTheme = {
+  postcssPlugin: "gd-strip-diff-view-hljs-theme",
+  Once(root: PostcssRoot) {
+    const file = root.source?.input.file?.replaceAll("\\", "/") ?? "";
+    const stripped = { light: 0, dark: 0 };
+    root.walkRules((rule) => {
+      const themes = rule.selectors.map(
+        (s) => VENDOR_HLJS_SELECTOR.exec(s)?.[1],
+      );
+      const typographic = rule.nodes.every(
+        (n) =>
+          n.type === "comment" ||
+          (n.type === "decl" && VENDOR_HLJS_PROPS.has(n.prop ?? "")),
+      );
+      if (themes.every((t) => t !== undefined) && typographic) {
+        rule.remove();
+        for (const t of new Set(themes)) stripped[t as "light" | "dark"]++;
+      }
+    });
+    const leftovers: string[] = [];
+    root.walkRules((rule) => {
+      const hljsSelector = rule.selectors.some(
+        (s) => s.includes(".diff-line-syntax-raw") && s.includes(".hljs"),
+      );
+      const painted = rule.nodes.some(
+        (n) =>
+          n.type === "decl" &&
+          PAINT_PROPS.has(n.prop ?? "") &&
+          !(n.value ?? "").trim().startsWith("var(--gd-syn-"),
+      );
+      if (hljsSelector && painted) leftovers.push(rule.selector);
+    });
+    const vendorShort =
+      VENDOR_SHEET.test(file) && (stripped.light === 0 || stripped.dark === 0);
+    if (leftovers.length > 0 || vendorShort) {
+      throw new Error(
+        `gd-strip-diff-view-hljs-theme: vendor hljs theme changed shape in ${file} (stripped light ${stripped.light} / dark ${stripped.dark}; unstripped: ${leftovers.join(" | ") || "none"}) — re-check the guard against diff-view.css`,
+      );
+    }
+  },
+};
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [
@@ -60,11 +127,11 @@ export default defineConfig(async () => ({
 
   // Tailwind v4 rides its own vite plugin (`tailwindcss()` above), not the
   // postcss config, so this postcss plugin list is purely additive — it only
-  // adds our diff-view color-reset stripper (declared above) to the css
-  // pipeline that runs in both dev and build.
+  // adds our diff-view strippers (declared above) to the css pipeline that runs
+  // in both dev and build.
   css: {
     postcss: {
-      plugins: [stripDiffViewColorReset],
+      plugins: [stripDiffViewColorReset, stripDiffViewHljsTheme],
     },
   },
 

@@ -1,99 +1,138 @@
-/* highlight.js token colors for read-only full-file code views (blame, the AI
-   conflict-resolution side panes), scoped to .gd-code so they don't leak.
-   GitHub-ish palette; the dark variant keys on the `.dark` class (set from the
-   resolved theme in theme.ts), so it follows a manual Light/Dark override — not
-   just the OS `prefers-color-scheme`. */
+/* highlight.js token colors, scoped to .gd-code and to the diff view's
+   hljs-routed lines (whose vendor theme vite.config.ts strips at build time).
+   The --gd-syn-* tokens are the single syntax palette; dark rides the token
+   cascade. The diff arm needs [data-theme] to outrank the vendor's `*` reset. */
+.gd-code,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw {
+  color: var(--gd-syn-fg);
+}
 .gd-code .hljs-comment,
-.gd-code .hljs-quote {
-  color: #6e7781;
+.gd-code .hljs-quote,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-comment,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-quote {
+  color: var(--gd-syn-comment);
   font-style: italic;
 }
+.gd-code .hljs-meta,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-meta {
+  color: var(--gd-syn-comment);
+}
 .gd-code .hljs-keyword,
-.gd-code .hljs-selector-tag,
 .gd-code .hljs-doctag,
-.gd-code .hljs-meta .hljs-keyword {
-  color: #cf222e;
+.gd-code .hljs-meta .hljs-keyword,
+.gd-code .hljs-operator,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-keyword,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-doctag,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-operator {
+  color: var(--gd-syn-keyword);
 }
 .gd-code .hljs-string,
 .gd-code .hljs-regexp,
-.gd-code .hljs-meta .hljs-string {
-  color: #0a3069;
+.gd-code .hljs-meta .hljs-string,
+.gd-code .hljs-code,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-string,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-regexp,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-code {
+  color: var(--gd-syn-string);
 }
 .gd-code .hljs-number,
-.gd-code .hljs-literal {
-  color: #0550ae;
+.gd-code .hljs-literal,
+.gd-code .hljs-char.escape_,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-number,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-literal,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-char.escape_ {
+  color: var(--gd-syn-number);
 }
 .gd-code .hljs-title,
 .gd-code .hljs-title.function_,
 .gd-code .hljs-section,
-.gd-code .hljs-built_in {
-  color: #8250df;
+.gd-code .hljs-built_in,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-title,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-title.function_,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-section,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-built_in {
+  color: var(--gd-syn-func);
 }
+.gd-code .hljs-section,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-section {
+  font-weight: bold;
+}
+/* Diff lines are flat spans (each carries only its innermost class), so the
+   diff arm reaches a class's name as the span right after an `.hljs-class`. */
 .gd-code .hljs-type,
 .gd-code .hljs-class .hljs-title,
-.gd-code .hljs-title.class_ {
-  color: #953800;
+.gd-code .hljs-title.class_,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-type,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-class
+  + .hljs-title,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-title.class_ {
+  color: var(--gd-syn-type);
+}
+.gd-code .hljs-property,
+.gd-code .hljs-variable,
+.gd-code .hljs-template-variable,
+.gd-code .hljs-params,
+.gd-code .hljs-variable.language_,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-property,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-variable,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-template-variable,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-params,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-variable.language_ {
+  color: var(--gd-syn-variable);
 }
 .gd-code .hljs-attr,
 .gd-code .hljs-attribute,
-.gd-code .hljs-property,
-.gd-code .hljs-variable,
-.gd-code .hljs-template-variable {
-  color: #0550ae;
+.gd-code .hljs-selector-class,
+.gd-code .hljs-selector-id,
+.gd-code .hljs-selector-attr,
+.gd-code .hljs-selector-pseudo,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-attr,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-attribute,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-selector-class,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-selector-id,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-selector-attr,
+.diff-tailwindcss-wrapper[data-theme]
+  .diff-line-syntax-raw
+  .hljs-selector-pseudo {
+  color: var(--gd-syn-attr);
 }
 .gd-code .hljs-tag,
 .gd-code .hljs-name,
+.gd-code .hljs-selector-tag,
 .gd-code .hljs-symbol,
-.gd-code .hljs-bullet {
-  color: #116329;
+.gd-code .hljs-bullet,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-tag,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-name,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-selector-tag,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-symbol,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-bullet {
+  color: var(--gd-syn-tag);
 }
-.gd-code .hljs-meta {
-  color: #6e7781;
+.gd-code .hljs-emphasis,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-emphasis {
+  color: var(--gd-syn-variable);
+  font-style: italic;
 }
-
-.dark .gd-code .hljs-comment,
-.dark .gd-code .hljs-quote {
-  color: #8b949e;
+.gd-code .hljs-strong,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-strong {
+  color: var(--gd-syn-variable);
+  font-weight: bold;
 }
-.dark .gd-code .hljs-keyword,
-.dark .gd-code .hljs-selector-tag,
-.dark .gd-code .hljs-doctag,
-.dark .gd-code .hljs-meta .hljs-keyword {
-  color: #ff7b72;
+.gd-code .hljs-addition,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-addition {
+  color: var(--gd-syn-tag);
 }
-.dark .gd-code .hljs-string,
-.dark .gd-code .hljs-regexp,
-.dark .gd-code .hljs-meta .hljs-string {
-  color: #a5d6ff;
-}
-.dark .gd-code .hljs-number,
-.dark .gd-code .hljs-literal {
-  color: #79c0ff;
-}
-.dark .gd-code .hljs-title,
-.dark .gd-code .hljs-title.function_,
-.dark .gd-code .hljs-section,
-.dark .gd-code .hljs-built_in {
-  color: #d2a8ff;
-}
-.dark .gd-code .hljs-type,
-.dark .gd-code .hljs-class .hljs-title,
-.dark .gd-code .hljs-title.class_ {
-  color: #ffa657;
-}
-.dark .gd-code .hljs-attr,
-.dark .gd-code .hljs-attribute,
-.dark .gd-code .hljs-property,
-.dark .gd-code .hljs-variable,
-.dark .gd-code .hljs-template-variable {
-  color: #79c0ff;
-}
-.dark .gd-code .hljs-tag,
-.dark .gd-code .hljs-name,
-.dark .gd-code .hljs-symbol,
-.dark .gd-code .hljs-bullet {
-  color: #7ee787;
-}
-.dark .gd-code .hljs-meta {
-  color: #8b949e;
+.gd-code .hljs-deletion,
+.diff-tailwindcss-wrapper[data-theme] .diff-line-syntax-raw .hljs-deletion {
+  color: var(--gd-syn-keyword);
 }

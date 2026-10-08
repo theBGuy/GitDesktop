@@ -1,8 +1,4 @@
-import {
-  type DiffAST,
-  type DiffFileHighlighter,
-  processAST,
-} from "@git-diff-view/core";
+import type { DiffAST, DiffFileHighlighter } from "@git-diff-view/core";
 import { createHighlighterCoreSync, type HighlighterCore } from "@shikijs/core";
 import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 // `json` stays a static import: it's small, and it backs the synchronous
@@ -13,8 +9,12 @@ import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import jsonGrammar from "@shikijs/langs/json";
 import type { LanguageRegistration } from "@shikijs/types";
 import type { CustomLanguage } from "@/lib/settings/api";
-import { gapIsolatedAst } from "./gap-isolation";
-import { gdDiff } from "./shiki-theme";
+import {
+  gapIsolatedAst,
+  HUNK_SCOPED_MAX_LINES,
+  hunkScopedProcessAST,
+} from "./gap-isolation.ts";
+import { gdDiff } from "./shiki-theme.ts";
 
 /**
  * A TextMate highlighter for the diff, backed by Shiki with the pure-JS regex
@@ -218,15 +218,19 @@ const EMPTY_AST: DiffAST = { type: "root", children: [] };
 
 // Flat hast (the same shape highlight.js produces): token spans separated by
 // "\n" text nodes. The renderer applies each span's `properties.style` directly.
-// The `theme` arg @git-diff-view threads to `getAST` is ignored: token colors
-// are CSS variables, so one tokenization serves both app themes.
+// The tree must flatten back to `raw` exactly — mergeSegments' length check
+// depends on it — so the "\r" Shiki strips from each CRLF break is re-emitted
+// as its own text node. The `theme` arg @git-diff-view threads to `getAST` is
+// ignored: token colors are CSS variables, so one tokenization serves both.
 function buildHast(raw: string, lang: string): DiffAST {
   const lines = getCore().codeToTokensBase(raw, {
     lang,
     theme: gdDiff.name,
   });
   const children: DiffAST["children"] = [];
-  lines.forEach((line, i) => {
+  // Walked by index: `raw` can be a long padded buffer, so no split().
+  let lineEnd = raw.indexOf("\n");
+  for (const line of lines) {
     for (const token of line) {
       children.push({
         type: "element",
@@ -235,31 +239,36 @@ function buildHast(raw: string, lang: string): DiffAST {
         children: [{ type: "text", value: token.content }],
       });
     }
-    if (i < lines.length - 1) children.push({ type: "text", value: "\n" });
-  });
+    if (lineEnd === -1) break;
+    if (raw.charCodeAt(lineEnd - 1) === 13) {
+      children.push({ type: "text", value: "\r" });
+    }
+    children.push({ type: "text", value: "\n" });
+    lineEnd = raw.indexOf("\n", lineEnd + 1);
+  }
   return { type: "root", children };
 }
 
 /**
- * Line cap on the RECONSTRUCTED file, deciding whether a small edit deep in a
- * big file gets highlighted at all (not the diff's own size). Placeholder-
- * reconstructed lines tokenize cheaply (measured 61ms at 12K lines). The ONE
- * shared cap for every highlighter the diff uses — the Shiki object below, the
- * highlight.js singleton pin, and the worker-AST precomputed highlighter (both
- * in DiffSurface.tsx) — so they can't silently diverge.
+ * Line cap on the RECONSTRUCTED file for the highlight.js singleton's
+ * whole-buffer pass (pinned in DiffSurface.tsx). Placeholder-reconstructed
+ * lines tokenize cheaply (measured 61ms at 12K lines). Past it, hljs-routed
+ * diffs switch to the hunk-scoped highlighter; Shiki-routed ones are always
+ * hunk-scoped, so the cap never gates them.
  */
 export const SYNTAX_LINE_CAP = 15_000;
 
 /**
  * A @git-diff-view DiffFileHighlighter that tokenizes with Shiki and emits
- * style-based spans (the renderer applies `properties.style` directly). AST
- * post-processing is reused from the default highlighter's exported `processAST`.
+ * style-based spans (the renderer applies `properties.style` directly).
+ * Hunk-scoped: gap-isolated tokenization plus the placeholder-skipping
+ * `processAST`, so it carries no line cap of its own.
  */
 export function shikiDiffHighlighter(): DiffFileHighlighter {
   return {
     name: "shiki",
     type: "style",
-    maxLineToIgnoreSyntax: SYNTAX_LINE_CAP,
+    maxLineToIgnoreSyntax: HUNK_SCOPED_MAX_LINES,
     setMaxLineToIgnoreSyntax: () => undefined,
     ignoreSyntaxHighlightList: [],
     setIgnoreSyntaxHighlightList: () => undefined,
@@ -271,7 +280,7 @@ export function shikiDiffHighlighter(): DiffFileHighlighter {
         return EMPTY_AST;
       }
     },
-    processAST,
+    processAST: hunkScopedProcessAST,
     hasRegisteredCurrentLang: (lang) => loaded.has(lang),
   };
 }

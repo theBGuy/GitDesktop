@@ -1,7 +1,17 @@
 // Import from core, never the react entry: both re-export the same singleton,
 // but react would pull React into any chunk this module reaches.
-import { highlighter } from "@git-diff-view/core";
-import { gapIsolatedAst, isHoley, mergeSegments } from "./gap-isolation";
+import {
+  type DiffAST,
+  type DiffFileHighlighter,
+  highlighter,
+} from "@git-diff-view/core";
+import {
+  gapIsolatedAst,
+  HUNK_SCOPED_MAX_LINES,
+  hunkScopedProcessAST,
+  isHoley,
+  mergeSegments,
+} from "./gap-isolation.ts";
 
 // A registry symbol, not a module-local one: on HMR this module re-evaluates
 // with fresh state while the lowlight singleton keeps the installed wrapper, so
@@ -61,3 +71,28 @@ export function installHljsGapIsolation(): void {
     // fail open: diffs render without gap isolation
   }
 }
+
+/**
+ * The highlight.js engine as a hunk-scoped highlighter for hljs diffs past the
+ * singleton's line cap (whose cap and `getAST` are non-writable and global).
+ * Always "registered" so the core never falls back to the singleton's uncapped
+ * `getAST`; an unknown language renders as one plain text node instead of
+ * whole-buffer auto-detection. `type: "class"` keeps the view clone's syntax.
+ */
+export const hunkScopedHljsHighlighter: DiffFileHighlighter = {
+  name: "lowlight-hunk",
+  type: "class",
+  maxLineToIgnoreSyntax: HUNK_SCOPED_MAX_LINES,
+  setMaxLineToIgnoreSyntax: () => undefined,
+  ignoreSyntaxHighlightList: [],
+  setIgnoreSyntaxHighlightList: () => undefined,
+  getAST: (raw: string, _fileName?: string, lang?: string): DiffAST => {
+    const engine = highlighter.getHighlighterEngine();
+    if (!lang || !engine.registered(lang)) {
+      return { type: "root", children: [{ type: "text", value: raw }] };
+    }
+    return gapIsolatedAst(raw, (segment) => engine.highlight(lang, segment));
+  },
+  processAST: hunkScopedProcessAST,
+  hasRegisteredCurrentLang: () => true,
+};

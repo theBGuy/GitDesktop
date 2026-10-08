@@ -1,4 +1,5 @@
 import hljs from "highlight.js/lib/common";
+import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import "./code-highlight.css";
 import { diffLang } from "./diff-lang";
@@ -19,20 +20,28 @@ export function HighlightedCode({
   className?: string;
 }) {
   const lang = diffLang(path);
-  const html =
-    lang && hljs.getLanguage(lang)
-      ? hljs.highlight(content, { language: lang, ignoreIllegals: true }).value
-      : null;
+  // Memoized so re-renders don't re-run hljs.highlight over the whole file;
+  // keeping the wrapper object stable is also the ≤19.2 backstop (those
+  // react-doms re-apply dangerouslySetInnerHTML on wrapper identity; 19.3+
+  // compares the __html string first).
+  const markup = useMemo(() => {
+    if (!lang || !hljs.getLanguage(lang)) return null;
+    const html = hljs.highlight(content, {
+      language: lang,
+      ignoreIllegals: true,
+    }).value;
+    return { __html: html };
+  }, [lang, content]);
   const base =
     "p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap wrap-break-word";
-  if (html === null) {
+  if (markup === null) {
     return <pre className={cn(base, className)}>{content || " "}</pre>;
   }
   return (
     // highlight.js output of a local file's text, themed + scoped to .gd-code.
     <pre
       className={cn("gd-code", base, className)}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={markup}
     />
   );
 }

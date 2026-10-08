@@ -41,6 +41,7 @@ import { djb2 } from "./highlight-worker-shared";
 import {
   ensureBuiltinShikiLang,
   ensureShikiGrammars,
+  isShikiLang,
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
 
@@ -65,7 +66,9 @@ async function ensureGrammar(req: HighlightWorkRequest): Promise<boolean> {
       tmGrammar: req.tmGrammar as Record<string, unknown>,
     };
     ensureShikiGrammars([synthetic]);
-    return true;
+    // A grammar Shiki refused would send the core to its uncapped lowlight
+    // fallback over the whole padded buffer; keep the interim paint instead.
+    return isShikiLang(req.lang);
   }
   // A built-in Shiki language (astro/tsx/rust &c.): the dynamic `@shikijs/langs/*`
   // imports work in a Vite module worker.
@@ -95,9 +98,9 @@ async function handle(req: HighlightWorkRequest): Promise<WorkerAsts | null> {
   // drives getAST (once per side — old then new), instead of shipping the whole
   // built DiffFile. initSyntax alone calls getAST for both sides via each
   // File.doSyntax (core composeSyntax) — no build*/getBundle needed.
-  // The worker inherits the highlighter's own 15_000 reconstructed-line cap
-  // (`shikiDiffHighlighter` sets it), mirroring the renderer; lifting that
-  // ceiling belongs to the diff-virtualization epic.
+  // The same hunk-scoped highlighter the sync path uses (no line cap, gap
+  // isolation), so a deep hunk gets the same tokens on either path; the
+  // request's own char ceiling (WORKER_MAX_CHARS) is the work bound.
   const inner = shikiDiffHighlighter();
   const sides: HighlightAst[] = [];
   const seen = new Set<number>();
