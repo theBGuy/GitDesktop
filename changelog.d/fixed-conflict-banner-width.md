@@ -1,3 +1,3 @@
-- With AI features on, the conflict banner keeps every action in view in the
-  sidebar at any width: **Resolve with AI** takes a compact sparkle-icon form
-  that names itself on hover, and the status line always keeps room to read.
+- With AI features on, the conflict banner keeps every action in view in the sidebar
+  while conflicts remain: **Resolve all with AI** shows as a compact sparkle icon that
+  names itself on hover, and the status line keeps room to read.
