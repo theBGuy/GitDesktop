@@ -132,6 +132,8 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 
 /// Userinfo belongs only to the authority span; an `@` in the path is path data.
 /// Returns the scheme flag, authority without userinfo, and optional path.
+/// Deliberate divergence from git: in scp and non-http/ftp scheme form, an `@[` after
+/// the first `/` stays path data, where git's `host_end` would read it as a bracketed host.
 fn split_remote_url(url: &str) -> (bool, &str, Option<&str>) {
     let url = url.trim();
     let (scheme, rest) = match url.split_once("://") {
@@ -149,14 +151,11 @@ fn split_remote_url(url: &str) -> (bool, &str, Option<&str>) {
             rest.find('/')
         }
     } else {
-        // A leading `[` or the first `@[` opens a bracketed host (git's host_end).
+        // The first `@[` before any `/`, else a leading `[`, opens a bracketed host
+        // (git's host_end).
         // A span that doesn't close isn't host syntax, so the first `:` wins.
         let prefix = rest.split('/').next().unwrap_or(rest);
-        let host_start = if prefix.starts_with('[') {
-            0
-        } else {
-            prefix.find("@[").map_or(0, |i| i + 1)
-        };
+        let host_start = prefix.find("@[").map_or(0, |i| i + 1);
         let after_host = bracketed_split(&rest[host_start..])
             .map_or(0, |(span, _)| host_start + span.len());
         rest[after_host..].find(['/', ':']).map(|i| after_host + i)
@@ -4768,6 +4767,20 @@ mod tests {
         let url = "u@[2001:db8::1]:x@[2001:db8::2]:y";
         assert_eq!(remote_authority(url).as_deref(), Some("[2001:db8::1]"));
         assert_eq!(remote_path(url).as_deref(), Some("x@[2001:db8::2]:y"));
+    }
+
+    #[test]
+    fn remote_authority_scp_userinfo_bracket_precedes_leading_bracket() {
+        let url = "[::1]:o@[2001:db8::2]:r";
+        assert_eq!(remote_authority(url).as_deref(), Some("[2001:db8::2]"));
+        assert_eq!(remote_path(url).as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn remote_authority_scp_bracket_after_slash_stays_path_data() {
+        let url = "git@github.com:o/x@[2001:db8::2]:r";
+        assert_eq!(remote_authority(url).as_deref(), Some("github.com"));
+        assert_eq!(remote_path(url).as_deref(), Some("o/x@[2001:db8::2]:r"));
     }
 
     #[test]
