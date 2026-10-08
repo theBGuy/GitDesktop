@@ -13,7 +13,11 @@ import {
 } from "@/components/ui/dialog";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { createAiClient } from "@/lib/ai/client";
-import { aiExcludePatterns } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  type HiddenCause,
+  hiddenCause,
+} from "@/lib/ai/ignore";
 import { buildCommitPrompt } from "@/lib/ai/prompt";
 import { required, useAppForm } from "@/lib/form";
 import {
@@ -28,6 +32,15 @@ import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+
+/** Why a commit range has nothing left to describe, by what hid it. */
+const EMPTY_RANGE_COPY: Record<HiddenCause, string> = {
+  patterns:
+    "These commits' changes all match your AI ignore patterns — nothing to describe.",
+  unreadable:
+    "Nothing to describe — files whose names aren't readable text are always kept from AI.",
+  both: "Nothing to describe — files whose names aren't readable text are always kept from AI, and the rest of these commits' changes match your AI ignore patterns.",
+};
 
 /**
  * Streams an AI commit message from a `base..head` diff — the commit-box
@@ -60,9 +73,10 @@ export function useGenerateSquashMessage(
         readRepoInstructions(repoPath),
       ]);
       if (!diff.text.trim()) {
+        const cause = hiddenCause(diff.excludedFiles, diff.unreadableFiles);
         toast.error(
-          diff.excludedFiles > 0
-            ? "These commits' changes all match your AI ignore patterns — nothing to describe."
+          cause
+            ? EMPTY_RANGE_COPY[cause]
             : "These commits have no combined changes to describe.",
         );
         return;
@@ -72,6 +86,7 @@ export function useGenerateSquashMessage(
         diffTruncated: diff.truncated,
         files: diff.files,
         excludedFiles: diff.excludedFiles,
+        unreadableFiles: diff.unreadableFiles,
         recentSubjects: commits.map((c) => c.subject),
         repoInstructions,
         globalInstructions: settings.globalInstructions,

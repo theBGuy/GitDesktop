@@ -4,7 +4,11 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { useAiStream } from "@/features/conversations/useAiStream";
 import { resolveModel } from "@/lib/ai/client";
-import { aiExcludePatterns } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  type HiddenCause,
+  hiddenCause,
+} from "@/lib/ai/ignore";
 import {
   buildPrLabelFallbackPrompt,
   buildPrPrompt,
@@ -24,14 +28,27 @@ const RAW_DIFF_MAX_BYTES = 200_000;
  *  `maxItems`, which not every provider's structured-output mode accepts. */
 const STRUCTURED_PICK_MAX_LABELS = 3;
 
+/** Why a range (`scope`: "between these branches", "in this pull request") has
+ *  nothing left to describe, by what hid it. */
+const emptyRangeCopy = (scope: string): Record<HiddenCause, string> => ({
+  patterns: `All changes ${scope} match your AI ignore patterns — nothing to describe.`,
+  unreadable: `Nothing to describe ${scope} — files whose names aren't readable text are always kept from AI.`,
+  both: `Nothing to describe ${scope} — files whose names aren't readable text are always kept from AI, and the rest match your AI ignore patterns.`,
+});
+
 /** The diff shape a supplier must yield — matches `buildPrPrompt`'s `files`. */
 interface SuppliedDiff {
   text: string;
   truncated: boolean;
   files: { path: string; added: number; deleted: number; isBinary: boolean }[];
-  /** Changed files the user's AI-ignore patterns hid. Every supplier applies the
-   *  patterns; absent or `0` ⇒ nothing was hidden to disclose. */
+  /** Changed files hidden from AI: pattern matches plus names that aren't
+   *  readable text. Every supplier applies the patterns; absent or `0` ⇒
+   *  nothing was hidden to disclose. */
   excludedFiles?: number;
+  /** The subset of `excludedFiles` hidden because their names aren't readable
+   *  text — `StagedDiff.unreadableFiles`, or `unreadableNameCount` of a
+   *  `filterDiffByAiIgnore` result (never its raw, non-subset count). */
+  unreadableFiles?: number;
 }
 
 /** A repo label the model may propose from — name plus its stated purpose. The
@@ -221,9 +238,13 @@ export function useGeneratePrDescription(repoPath: string) {
               emptyScope === "change-request"
                 ? `in this ${provider === "gitlab" ? "merge request" : "pull request"}`
                 : "between these branches";
+            const cause = hiddenCause(
+              diff.excludedFiles ?? 0,
+              diff.unreadableFiles ?? 0,
+            );
             toast.error(
-              (diff.excludedFiles ?? 0) > 0
-                ? `All changes ${scope} match your AI ignore patterns — nothing to describe.`
+              cause
+                ? emptyRangeCopy(scope)[cause]
                 : `No changes ${scope} to describe.`,
             );
             return null;
@@ -234,6 +255,7 @@ export function useGeneratePrDescription(repoPath: string) {
             files: diff.files,
             filesUnknown,
             excludedFiles: diff.excludedFiles,
+            unreadableFiles: diff.unreadableFiles,
             commitSubjects,
             commitsUnknown,
             baseBranch: base,

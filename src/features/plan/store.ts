@@ -204,7 +204,8 @@ export const usePlanStore = create<PlanState>((set, get) => {
       const cur = get().runs.find((r) => r.id === id);
       return !cur || cur.sessionId !== run0.sessionId || cur.stopped;
     };
-    const tracked = await gitListTracked(run0.repoPath).catch(
+    const tracked = await gitListTracked(run0.repoPath).then(
+      (rows) => rows.map((row) => row.path),
       () => [] as string[],
     );
     let finalText = "";

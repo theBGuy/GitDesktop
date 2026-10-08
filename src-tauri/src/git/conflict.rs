@@ -39,13 +39,23 @@ pub struct ConflictSides {
     pub ours: Option<String>,
     /// Their side / incoming (index stage 3). `None` when their side deleted it.
     pub theirs: Option<String>,
-    /// The path matches an AI-ignore pattern, so it must never be sent to a
-    /// model. The UI refuses to resolve it and says why.
-    pub ai_ignored: bool,
+    /// Whether the file must never be sent to a model, and why. The UI refuses to
+    /// resolve an ignored one and says which cause applies.
+    pub ai_ignored: AiIgnoreVerdict,
     /// Whether the working file is on disk. `working` collapses to "" for an
     /// empty file and a deleted one alike; this is what separates them. A file
     /// that exists but can't be read fails the whole command instead.
     pub working_exists: bool,
+}
+
+/// The AI-ignore gate's answer for one conflicted path. `unreadable` implies
+/// `ignored`: a name the app can't vouch for is withheld with no pattern at all,
+/// and the cause stays separate so no copy blames rules the user may not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIgnoreVerdict {
+    pub ignored: bool,
+    pub unreadable: bool,
 }
 
 /// Rejects paths that could be read as a git flag or escape the repo root. The
@@ -107,10 +117,22 @@ async fn unmerged_stages(repo: &str, spec: &str) -> AppResult<Vec<u8>> {
 /// pathspec's leading directory off every negative pattern as well, so with
 /// `docs/secrets.env` as the positive term the pattern `secrets.env` is
 /// compared as `rets.env` and silently matches nothing (measured, git 2.51.1).
-async fn is_ai_ignored(repo: &str, path: &str, exclude: &[String]) -> AppResult<bool> {
+///
+/// Conflict paths arrive lossy-decoded over IPC, so byte truth is unavailable
+/// here: any U+FFFD fails closed as unreadable, matching the TS twins.
+async fn is_ai_ignored(repo: &str, path: &str, exclude: &[String]) -> AppResult<AiIgnoreVerdict> {
+    if path.contains('\u{FFFD}') {
+        return Ok(AiIgnoreVerdict {
+            ignored: true,
+            unreadable: true,
+        });
+    }
     let one = [path.to_string()];
     let hits = crate::git::ai_ignore::filter_ignored(repo, &one, exclude).await?;
-    Ok(!hits.is_empty())
+    Ok(AiIgnoreVerdict {
+        ignored: !hits.is_empty(),
+        unreadable: false,
+    })
 }
 
 /// The base/ours/theirs blobs plus the marked working file for a conflicted
@@ -397,7 +419,13 @@ mod tests {
         assert_eq!(sides.base.as_deref(), Some("base\n"));
         assert_eq!(sides.ours.as_deref(), Some("ours\n"));
         assert_eq!(sides.theirs.as_deref(), Some("theirs\n"));
-        assert!(!sides.ai_ignored);
+        assert_eq!(
+            sides.ai_ignored,
+            AiIgnoreVerdict {
+                ignored: false,
+                unreadable: false
+            }
+        );
     }
 
     #[tokio::test]
@@ -793,11 +821,15 @@ mod tests {
         let hit = git_conflict_sides(repo.clone(), "file.txt".into(), vec!["*.txt".into()])
             .await
             .unwrap();
-        assert!(hit.ai_ignored);
+        assert!(hit.ai_ignored.ignored);
+        assert!(
+            !hit.ai_ignored.unreadable,
+            "a pattern hit is not an unreadable name"
+        );
         let miss = git_conflict_sides(repo.clone(), "file.txt".into(), vec!["*.lock".into()])
             .await
             .unwrap();
-        assert!(!miss.ai_ignored);
+        assert!(!miss.ai_ignored.ignored);
 
         // A NESTED copy of the same name: patterns are gitignore-style, so a bare
         // `file.txt` must flag `docs/file.txt` too — a missed depth is a leak.
@@ -810,7 +842,10 @@ mod tests {
         let nested = git_conflict_sides(repo.clone(), "docs/file.txt".into(), vec!["file.txt".into()])
             .await
             .unwrap();
-        assert!(nested.ai_ignored, "a bare name matches at any depth");
+        assert!(
+            nested.ai_ignored.ignored,
+            "a bare name matches at any depth"
+        );
 
         // ...while a leading `/` anchors to the repo root: the nested copy is
         // free, the root one is still flagged.
@@ -818,12 +853,42 @@ mod tests {
             git_conflict_sides(repo.clone(), "docs/file.txt".into(), vec!["/file.txt".into()])
                 .await
                 .unwrap();
-        assert!(!anchored_nested.ai_ignored);
+        assert!(!anchored_nested.ai_ignored.ignored);
         let anchored_root =
             git_conflict_sides(repo, "file.txt".into(), vec!["/file.txt".into()])
                 .await
                 .unwrap();
-        assert!(anchored_root.ai_ignored);
+        assert!(anchored_root.ai_ignored.ignored);
+    }
+
+    /// A U+FFFD in a conflicted path fails closed as UNREADABLE — ignored with no
+    /// pattern configured, and attributed to the name rather than to any rule — since
+    /// the path reaches this command lossy-decoded and its real bytes are gone.
+    #[tokio::test]
+    async fn a_replacement_character_path_is_withheld_as_unreadable() {
+        let name = "caf\u{FFFD}.txt";
+        let (_dir, repo) = conflicted_repo("fffd", name, &[]).await;
+        let unreadable = AiIgnoreVerdict {
+            ignored: true,
+            unreadable: true,
+        };
+        for patterns in [
+            vec![],
+            vec!["*.lock".to_string()],
+            vec!["*.txt".to_string()],
+        ] {
+            let label = format!("{patterns:?}");
+            let sides = git_conflict_sides(repo.clone(), name.into(), patterns)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(sides.ai_ignored, unreadable, "{label}");
+        }
+        // The IPC shape the TS mirror reads.
+        let json = serde_json::to_value(unreadable).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "ignored": true, "unreadable": true })
+        );
     }
 
     #[tokio::test]

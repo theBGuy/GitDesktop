@@ -1,7 +1,11 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useAiStream } from "@/features/conversations/useAiStream";
-import { aiExcludePatterns, filterPathsByAiIgnore } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  filterPathsByAiIgnore,
+  lossyListingRows,
+} from "@/lib/ai/ignore";
 import { buildBranchNamePrompt, extractBranchName } from "@/lib/ai/prompt";
 import {
   gitBranchDiff,
@@ -10,6 +14,7 @@ import {
 } from "@/lib/git/api";
 import { sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
+import { branchNameEmptyMessage } from "./branch-name-empty";
 
 /** Raw diff bytes requested from the backend; prompt budgeting trims further. */
 const RAW_DIFF_MAX_BYTES = 200_000;
@@ -85,9 +90,15 @@ export function useGenerateBranchName(repoPath: string) {
           readRepoInstructions(repoPath),
           // Untracked names never pass through a diff, so the ignore patterns
           // have to be applied to them here — a name is disclosure too.
-          filterPathsByAiIgnore({ repoPath, paths: untrackedPaths, exclude }),
+          filterPathsByAiIgnore({
+            repoPath,
+            paths: lossyListingRows(untrackedPaths),
+            exclude,
+          }),
         ]);
 
+        // Every pair summed below is wire-subset (`StagedDiff` and
+        // `filterPathsByAiIgnore` counts), so the sums stay subset too.
         if (diff && (diff.files.length > 0 || untracked.paths.length > 0)) {
           return buildBranchNamePrompt({
             diffText: diff.text,
@@ -95,7 +106,7 @@ export function useGenerateBranchName(repoPath: string) {
             files: diff.files,
             untrackedPaths: untracked.paths,
             excludedFiles: diff.excludedFiles + untracked.excluded,
-            unreadableFiles: untracked.unreadable,
+            unreadableFiles: diff.unreadableFiles + untracked.unreadable,
             commitSubjects: opts.workingTreeSubjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -134,7 +145,10 @@ export function useGenerateBranchName(repoPath: string) {
               committed.excludedFiles +
               (diff?.excludedFiles ?? 0) +
               untracked.excluded,
-            unreadableFiles: untracked.unreadable,
+            unreadableFiles:
+              committed.unreadableFiles +
+              (diff?.unreadableFiles ?? 0) +
+              untracked.unreadable,
             commitSubjects: fallback.subjects,
             recentBranches: opts.recentBranches,
             repoInstructions,
@@ -147,45 +161,29 @@ export function useGenerateBranchName(repoPath: string) {
         // PATTERN-hidden files may be attributed to the patterns: an unreadable
         // name is hidden with no pattern configured at all, and blaming the
         // user's list would send them to an empty settings page.
+        const treeUnreadable =
+          (diff?.unreadableFiles ?? 0) + untracked.unreadable;
+        const committedUnreadable = committed?.unreadableFiles ?? 0;
         const treeHidden =
           diff !== null &&
-          (diff.excludedFiles > 0 ||
-            untracked.excluded - untracked.unreadable > 0);
+          diff.excludedFiles -
+            diff.unreadableFiles +
+            (untracked.excluded - untracked.unreadable) >
+            0;
         const committedHidden =
-          committed !== null && committed.excludedFiles > 0;
-        let message: string;
-        if (treeHidden && committedHidden) {
-          message =
-            "All changes match your AI ignore patterns — nothing left in your working tree or this branch's commits to name it after.";
-        } else if (committedHidden) {
-          message =
-            "This branch's committed changes all match your AI ignore patterns — nothing to name it after.";
-        } else if (treeHidden) {
-          message = fallback
-            ? `All your in-progress changes match your AI ignore patterns, and there are no net changes vs ${fallback.base} to name a branch after.`
-            : "All changes match your AI ignore patterns — nothing to name a branch after.";
-        } else if (untracked.unreadable > 0) {
-          message = fallback
-            ? `The only in-progress changes are new files whose names aren't readable text, and there are no net changes vs ${fallback.base} to name a branch after.`
-            : "Nothing to name a branch after — the only new files have names that aren't readable text.";
-        } else if (fallback) {
-          message = opts.useWorkingTree
-            ? `No in-progress changes, and no net changes vs ${fallback.base} to name a branch after.`
-            : `No net changes vs ${fallback.base} to name this branch after.`;
-        } else if (opts.useWorkingTree) {
-          message = "No in-progress changes to name a branch after.";
-        } else {
-          // Defensive: the caller disables the affordance in this state, and
-          // with no working tree read there are no in-progress changes to cite.
-          message = "Nothing to name this branch after.";
-        }
-        // A pattern arm cited one cause; unreadable names are a second one, and
-        // the arms below it are only reachable when there are none.
-        if (untracked.unreadable > 0 && (treeHidden || committedHidden)) {
-          message +=
-            " Some new files were also left out because their names aren't readable text.";
-        }
-        toast.error(message);
+          committed !== null &&
+          committed.excludedFiles - committed.unreadableFiles > 0;
+        toast.error(
+          branchNameEmptyMessage({
+            tree: { patternHidden: treeHidden, unreadable: treeUnreadable },
+            committed: {
+              patternHidden: committedHidden,
+              unreadable: committedUnreadable,
+            },
+            fallbackBase: fallback?.base ?? null,
+            useWorkingTree: opts.useWorkingTree,
+          }),
+        );
         return null;
       });
 

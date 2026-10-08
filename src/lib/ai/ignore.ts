@@ -1,6 +1,7 @@
 import { gitFilterAiIgnored, readRepoAiIgnore } from "@/lib/git/api";
-import { sectionFilePath } from "@/lib/git/diff-split";
+import { DIFF_SECTION_BOUNDARY, sectionFilePath } from "@/lib/git/diff-split";
 import { trimIgnorePattern } from "@/lib/git/glob";
+import type { PathListingEntry } from "@/lib/git/types";
 
 /** Lines of a newline-joined ignore-pattern string, dropping blanks + comments. */
 export function ignoreLines(patterns: string): string[] {
@@ -42,28 +43,40 @@ export async function aiExcludePatterns(
 export const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
 
 /**
+ * Listing rows for names that crossed IPC as bare strings with no byte flag
+ * (status entries): any U+FFFD fails closed as undecodable, since a real one is
+ * indistinguishable from a lost byte there. Rows from `gitListTracked` /
+ * `gitListUntracked` carry the backend's flag and never need this.
+ */
+export function lossyListingRows(paths: string[]): PathListingEntry[] {
+  return paths.map((path) => ({
+    path,
+    undecodable: path.includes(REPLACEMENT_CHAR),
+  }));
+}
+
+/**
  * The survivors of a bare path list under the user's AI-ignore patterns, plus
  * how many were hidden — for prompt inputs that carry file NAMES with no diff to
  * route through `filterDiffByAiIgnore` (untracked files).
  *
- * A name carrying U+FFFD is dropped whatever the patterns say: every path here was
- * lossy-decoded on the Rust side before it crossed IPC, so a real U+FFFD is
- * indistinguishable from a byte that was lost, and both fail CLOSED ahead of the
- * pattern check. `excluded` counts every hidden name (the model can't see either
- * kind), while `unreadable` breaks out the subset no pattern could have matched — a
- * caller explaining itself must not blame the user's patterns for those. The Rust
- * twin `filter_untracked_by_ai_ignore` (src-tauri/src/mcp_server/generate.rs) judges
- * real bytes and so SHOWS a real-U+FFFD name this hides; the result shape stays KEEP
- * IN SYNC, and aligning the rule is a recorded follow-up. With nothing left to
- * check, or no patterns, the survivors are returned before any IPC.
+ * An `undecodable` row is dropped whatever the patterns say: its lossy spelling
+ * can't be matched for the real name, so it fails CLOSED ahead of the pattern
+ * check, while a decodable name holding a real U+FFFD gets its true verdict, as
+ * in the Rust twin `filter_untracked_by_ai_ignore`
+ * (src-tauri/src/mcp_server/generate.rs). `excluded` counts every hidden name (the
+ * model can't see either kind) and `unreadable` the subset no pattern decided, so
+ * `excluded - unreadable` is the pattern-hidden count. Result shape KEEP IN SYNC
+ * with the twin. With nothing left to check, or no patterns, the survivors are
+ * returned before any IPC.
  */
 export async function filterPathsByAiIgnore(input: {
   repoPath: string;
-  paths: string[];
+  paths: PathListingEntry[];
   exclude: string[];
 }): Promise<{ paths: string[]; excluded: number; unreadable: number }> {
   const { repoPath, paths, exclude } = input;
-  const decodable = paths.filter((p) => !p.includes(REPLACEMENT_CHAR));
+  const decodable = paths.filter((p) => !p.undecodable).map((p) => p.path);
   const unreadable = paths.length - decodable.length;
   if (decodable.length === 0 || exclude.length === 0) {
     return { paths: decodable, excluded: unreadable, unreadable };
@@ -82,6 +95,66 @@ export async function filterPathsByAiIgnore(input: {
   };
 }
 
+/** Which causes hid changed files. */
+export type HiddenCause = "patterns" | "unreadable" | "both";
+
+/**
+ * The causes behind a SUBSET pair (`unreadableFiles <= excludedFiles`: the
+ * `StagedDiff` wire, or `filterPathsByAiIgnore`'s counts), or null when nothing
+ * was hidden. Never fed `filterDiffByAiIgnore`'s raw pair, whose unreadable count
+ * isn't a subset — convert it with `unreadableNameCount` first.
+ */
+export function hiddenCause(
+  excludedFiles: number,
+  unreadableFiles: number,
+): HiddenCause | null {
+  const patternHidden = excludedFiles - unreadableFiles > 0;
+  if (patternHidden && unreadableFiles > 0) return "both";
+  if (unreadableFiles > 0) return "unreadable";
+  return patternHidden ? "patterns" : null;
+}
+
+/** The U+FFFD-name share of `filterDiffByAiIgnore`'s `unreadableFiles`: unlike the
+ *  raw count it is a subset of `excludedFiles`, so the pair it forms may be
+ *  subtracted. */
+export function unreadableNameCount(filtered: {
+  unreadableFiles: number;
+  unkeyableSections: number;
+}): number {
+  return filtered.unreadableFiles - filtered.unkeyableSections;
+}
+
+/** Why filtering emptied a diff: `withheld` when sections couldn't be checked
+ *  against active patterns; otherwise by the hidden names' causes —
+ *  `excluded` (the user's patterns), `unreadable-names` (names that aren't
+ *  readable text), or `unreadable-and-excluded` (both). */
+export type EmptyDiffCause =
+  | "excluded"
+  | "withheld"
+  | "unreadable-names"
+  | "unreadable-and-excluded";
+
+const EMPTY_CAUSE_BY_HIDDEN: Record<HiddenCause, EmptyDiffCause> = {
+  patterns: "excluded",
+  unreadable: "unreadable-names",
+  both: "unreadable-and-excluded",
+};
+
+/** The cause to name for a `filterDiffByAiIgnore` result whose text came back
+ *  empty; null when nothing was hidden at all. */
+export function emptyDiffCause(filtered: {
+  excludedFiles: number;
+  unreadableFiles: number;
+  unkeyableSections: number;
+}): EmptyDiffCause | null {
+  if (filtered.unkeyableSections > 0) return "withheld";
+  const cause = hiddenCause(
+    filtered.excludedFiles,
+    unreadableNameCount(filtered),
+  );
+  return cause && EMPTY_CAUSE_BY_HIDDEN[cause];
+}
+
 /**
  * Drops every AI-ignored file from an already-resolved unified diff and its
  * changed-file list, client-side — the one recipe for both diff sources, since
@@ -96,22 +169,23 @@ export async function filterPathsByAiIgnore(input: {
  * undercount.
  *
  * A candidate carrying U+FFFD is dropped whatever the patterns say, and with no
- * patterns configured at all: candidates arrive as already-decoded strings, so a
- * real U+FFFD is indistinguishable from a byte lost to a lossy decode and both
- * fail CLOSED, ahead of the pattern check, exactly as `filterPathsByAiIgnore`
- * does. The Rust `filtered_diff` arm judges real bytes and shows a real-U+FFFD
- * name this hides; aligning them is a recorded follow-up. `unreadableFiles`
- * counts that subset again so a caller explaining itself can keep the two
- * causes apart. Only decodable candidates reach the matcher; an empty `exclude`
- * skips the IPC, though the sections are parsed either way, since the
- * unreadable check reads the same candidate keys.
+ * patterns configured at all: diff text carries no per-name byte flag, so a real
+ * U+FFFD is indistinguishable from a byte lost to a lossy decode and both fail
+ * CLOSED, ahead of the pattern check. (Flagged listing rows through
+ * `filterPathsByAiIgnore`, and the Rust `filtered_diff` arm, judge real bytes and
+ * give a real-U+FFFD name its true verdict.) `unreadableFiles` counts that subset
+ * again so a caller explaining itself can keep the two causes apart. Only
+ * decodable candidates reach the matcher; an empty `exclude` skips the IPC,
+ * though the sections are parsed either way, since the unreadable check reads
+ * the same candidate keys.
  *
  * A section that decodes to no key is dropped too, but only while patterns are
- * active, and counts toward `unreadableFiles` ALONE: it can't be matched to a
- * `files` entry (which stays listed), so counting it as excluded would
- * double-count a name the patterns may already have hidden. `excludedFiles` is
- * thus hidden NAMES (pattern matches plus U+FFFD names); `unreadableFiles` is
- * the U+FFFD names plus withheld unkeyable sections, NOT a subset of it.
+ * active; it is counted in `unkeyableSections` and folded into `unreadableFiles`
+ * ALONE: it can't be matched to a `files` entry (which stays listed), so counting
+ * it as excluded would double-count a name the patterns may already have hidden.
+ * `excludedFiles` is thus hidden NAMES (pattern matches plus U+FFFD names);
+ * `unreadableFiles` is the U+FFFD names plus `unkeyableSections`, NOT a subset of
+ * it, so never subtract that pair — `unreadableNameCount` is the subset share.
  *
  * The result is a local derivation — the input `text` is typically a cached
  * query string the Files tab and review threads want in full.
@@ -126,12 +200,11 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
   files: F[];
   excludedFiles: number;
   unreadableFiles: number;
+  unkeyableSections: number;
 }> {
   const { repoPath, text, files, exclude } = input;
-  // KEEP IN SYNC with `splitUnifiedDiff`'s section split (diff-split.ts):
-  // boundaries only after a real LF, never after a CR or U+2028/U+2029.
   const parts = text
-    .split(/(?<![^\n])(?=diff --git )/)
+    .split(DIFF_SECTION_BOUNDARY)
     .map((part) => ({ part, path: sectionFilePath(part) }));
   const candidates = [
     ...new Set([
@@ -150,14 +223,22 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
     }
   }
   // A section no key decodes was never checked against the patterns, so it is
-  // withheld while any are active. With none it stays: a `diff.noprefix` or
-  // custom-prefix local diff keys NO section, and dropping them would blank it.
+  // withheld while any are active; with none there is nothing to check it
+  // against, so it stays. Runner diffs pin their `a/` `b/` prefixes, so prefix
+  // config never makes a section unkeyable; what does is a malformed header or
+  // text from another source (a forge-supplied or reconstructed diff).
   const unkeyable =
     exclude.length > 0
       ? parts.filter(({ part, path }) => !path && part.trim()).length
       : 0;
   if (hidden.size === 0 && unkeyable === 0) {
-    return { text, files, excludedFiles: 0, unreadableFiles: 0 };
+    return {
+      text,
+      files,
+      excludedFiles: 0,
+      unreadableFiles: 0,
+      unkeyableSections: 0,
+    };
   }
   // Filtering the parts in place keeps their order and every same-key section
   // (both halves of a typechange); each keeps its own `diff --git` header.
@@ -172,5 +253,6 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
     files: files.filter((f) => !hidden.has(f.path)),
     excludedFiles: hidden.size,
     unreadableFiles: unreadableFiles + unkeyable,
+    unkeyableSections: unkeyable,
   };
 }

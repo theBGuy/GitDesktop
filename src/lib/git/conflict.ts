@@ -1,5 +1,13 @@
 import { invoke } from "@/lib/tauri/invoke";
 
+/** The AI-ignore gate's answer for one conflicted path. `unreadable` implies
+ *  `ignored`: a name that can't be read as text is withheld with no pattern at
+ *  all, so copy naming it must not blame the user's rules. */
+export interface ConflictAiVerdict {
+  ignored: boolean;
+  unreadable: boolean;
+}
+
 /** The clean and marked versions of one conflicted file, for AI resolution. */
 export interface ConflictSides {
   /** The working-tree file with conflict markers — the primary input. Not every
@@ -11,8 +19,9 @@ export interface ConflictSides {
   ours: string | null;
   /** Their side / incoming (stage 3); null if their side deleted it. */
   theirs: string | null;
-  /** The path matches an AI-ignore pattern — never send it to a model. */
-  aiIgnored: boolean;
+  /** Whether the file must never be sent to a model, and why. Gate on
+   *  `.ignored`: the object itself is always truthy. */
+  aiIgnored: ConflictAiVerdict;
   /** Whether the working file exists on disk — false when the user deleted it
    *  (`working` collapses to "" either way). */
   workingExists: boolean;

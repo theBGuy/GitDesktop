@@ -86,7 +86,11 @@ import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
-import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
+import {
+  aiExcludePatterns,
+  filterDiffByAiIgnore,
+  unreadableNameCount,
+} from "@/lib/ai/ignore";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { prOpenEligible } from "@/lib/automations/sync";
 import {
@@ -2309,6 +2313,7 @@ export function RemotePrView({
           truncated: false,
           files: hidden.files,
           excludedFiles: hidden.excludedFiles,
+          unreadableFiles: unreadableNameCount(hidden),
         };
       },
       prForGen.baseRefName,
