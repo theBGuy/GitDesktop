@@ -8,6 +8,7 @@ import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import { THEME_ORDER, type ThemeSetting } from "@/lib/theme";
 
 export interface RecentRepo {
@@ -1039,23 +1040,25 @@ export function removeRecentRepo(path: string): Promise<void> {
 }
 
 /**
- * Repoints a recent-repo row from `oldPath` to `newPath` when the folder moved on disk.
- * Rides the same serialized RMW chain as the other recent-repo writes.
+ * Repoints a recent-repo row from `oldPath` to `newPath` when the folder moved on disk, and
+ * re-homes the MCP per-repo keys (`scope`, `repoOverrides`) onto the new location's identity
+ * via {@link rehomeServerRepoKeys}. Both land in ONE write on the serialized RMW chain, so the
+ * relocate mutation's settings invalidation refetches post-rewrite state.
  *
- * It rewrites ONLY the row's `path` — `name`, `lastOpenedAt`, list order, and every derived
- * field stay untouched; the follow-up `addRecentRepo` in the open flow refreshes them, and
- * carrying the derived fields verbatim avoids the wipe-on-reopen class fixed there.
+ * The row keeps everything but its `path` — `name`, `lastOpenedAt`, list order, and every
+ * derived field; the follow-up `addRecentRepo` in the open flow refreshes them, and carrying
+ * the derived fields verbatim avoids the wipe-on-reopen class fixed there.
  *
- * Cases: no row at `oldPath` → no-op (the follow-up add creates one). A row ALREADY at
- * `newPath` → MERGE: drop the old row, keep the new-path row in place, adopt the old alias
- * only when the new row has none — never two rows for one path. Otherwise: rewrite in place.
+ * Row cases: no row at `oldPath` → row untouched (the follow-up add creates one), MCP keys
+ * still re-homed. A row ALREADY at `newPath` → MERGE: drop the old row, keep the new-path row
+ * in place, adopt the old alias only when the new row has none — never two rows for one path.
+ * Otherwise: rewrite in place. Nothing to change in either → no write.
  */
 export function relocateRecentRepo(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
   return serializedRecentRepoWrite(async () => {
-    const settings = await loadSettings();
     // Windows paths are case-insensitive; compare them that way (see addRecentRepo).
     const samePath = (a: string, b: string) =>
       a.toLowerCase() === b.toLowerCase();
@@ -1063,25 +1066,35 @@ export function relocateRecentRepo(
     // no-op — the row already points there. Without this guard the merge branch
     // below would match the row as both `old` and `existing` and drop it.
     if (samePath(oldPath, newPath)) return;
+    const settings = await loadSettings();
+    // Never rejects; a raw-path fallback still matches, as reads key on [path, identity].
+    const newKey = await repoIdentity(newPath);
+    const mcp = rehomeServerRepoKeys(settings.mcpServers, oldPath, newKey);
     const old = settings.recentRepos.find((r) => samePath(r.path, oldPath));
-    if (!old) return;
-    const existing = settings.recentRepos.find((r) =>
-      samePath(r.path, newPath),
-    );
-    const recentRepos = existing
-      ? // Merge: keep the new-path row, drop the old, adopt its alias only if none.
-        settings.recentRepos
-          .filter((r) => !samePath(r.path, oldPath))
-          .map((r) =>
-            samePath(r.path, newPath)
-              ? { ...r, alias: existing.alias ?? old.alias }
-              : r,
-          )
-      : // Rewrite the old row in place — everything but `path` stays put.
-        settings.recentRepos.map((r) =>
-          samePath(r.path, oldPath) ? { ...r, path: newPath } : r,
-        );
-    await saveSettings({ ...settings, recentRepos });
+    let recentRepos = settings.recentRepos;
+    if (old) {
+      const existing = settings.recentRepos.find((r) =>
+        samePath(r.path, newPath),
+      );
+      recentRepos = existing
+        ? // Merge: keep the new-path row, drop the old, adopt its alias only if none.
+          settings.recentRepos
+            .filter((r) => !samePath(r.path, oldPath))
+            .map((r) =>
+              samePath(r.path, newPath)
+                ? { ...r, alias: existing.alias ?? old.alias }
+                : r,
+            )
+        : // Rewrite the old row in place — everything but `path` stays put.
+          settings.recentRepos.map((r) =>
+            samePath(r.path, oldPath) ? { ...r, path: newPath } : r,
+          );
+    } else if (!mcp.changed) return;
+    await saveSettings({
+      ...settings,
+      recentRepos,
+      mcpServers: mcp.servers,
+    });
   });
 }
 
@@ -1107,8 +1120,9 @@ export function setBitbucketTokenExpiresAt(
  *
  * `recentRepos` and `bitbucketTokenExpiresAt` are the only fields those writers own, so
  * they're re-pinned from a read taken INSIDE the critical section — the caller's snapshot
- * of them is stale by definition, every other field is the user's intent. Serialization is
- * per-runtime: a second window writing settings is a separate chain.
+ * of them is stale by definition, every other field is the user's intent. `mcpServers`,
+ * which `relocateRecentRepo` also rewrites, stays the caller's: the user edits it here.
+ * Serialization is per-runtime: a second window writing settings is a separate chain.
  */
 export function saveSettingsMerged(settings: AppSettings): Promise<void> {
   return serializedRecentRepoWrite(async () => {

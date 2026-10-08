@@ -473,9 +473,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `scope` string: the `"global"` sentinel (also the absent-value default) or
   an identity key. Reads match BOTH key forms (raw + identity, most-preferred
   last); writes fold raw→identity; an UNKNOWN scope fails closed (never widens
-  to global); the store registers a relocate rewrite in repo-data-migration.ts.
-  Two instances: `settings/mcp.ts` (`serverScope`) and `scripts/scope.ts`
-  (`taskScope`) — deliberate mirrors of each other, not a shared import.
+  to global); the owning store re-homes old-path keys on relocate, inside its
+  own serialized write. Two instances: `settings/mcp.ts` (`serverScope`;
+  `rehomeServerRepoKeys`, run by `relocateRecentRepo` on the settings chain)
+  and `scripts/scope.ts` (`taskScope`; its re-home is `rehomeTaskScopes` in
+  `scripts/store.ts`, run from repo-data-migration.ts) — deliberate mirrors of
+  each other, not a shared import.
 - **Repo-identity observers** — every observer of `["repo-identity", repoPath]`
   spreads the ONE factory `repoIdentityQueryOptions`
   (`src/lib/git/repo-identity-query.ts`), never an inline query: its strict
