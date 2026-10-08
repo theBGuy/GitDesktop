@@ -16,12 +16,17 @@ const RAW_DIFF_MAX_BYTES = 200_000;
 
 /** The committed work of the ref being named: its three-dot diff against
  *  `base` plus the subjects of the commits `compare` has that `base` doesn't.
- *  `compare` is the ref being named — the checked-out branch's NAME when
- *  creating (the literal `HEAD` only when HEAD is detached; keying on a name
- *  keeps a branch switch from serving the previous branch's commits), the
- *  target branch when renaming. */
+ *  `compare` is the ref being named — the checked-out branch's full
+ *  `refs/heads/` ref when creating (the literal `HEAD` only when HEAD is
+ *  detached; keying on the ref keeps a branch switch from serving the previous
+ *  branch's commits, and the full form keeps a same-named tag from capturing
+ *  the rev), the target branch when renaming. `base` is the default branch's
+ *  SHORT name, for copy only; `baseRev` is the same ref spelled in full, which
+ *  the diff takes so it reads the range the subjects came from (a short
+ *  `origin/main` resolves to a same-named tag first). */
 export interface CommittedNameSource {
   base: string;
+  baseRev: string;
   compare: string;
   subjects: string[];
 }
@@ -105,7 +110,7 @@ export function useGenerateBranchName(repoPath: string) {
         const committed = fallback
           ? await gitBranchDiff(
               repoPath,
-              fallback.base,
+              fallback.baseRev,
               fallback.compare,
               RAW_DIFF_MAX_BYTES,
               exclude,

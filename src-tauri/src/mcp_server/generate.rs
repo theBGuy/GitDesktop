@@ -1701,9 +1701,13 @@ impl GitDesktopMcp {
                     None,
                 ));
             };
+            let CommittedBase {
+                rev: base_rev,
+                label: base,
+            } = base;
             let mut committed = crate::git::compare::git_branch_diff(
                 self.repo.clone(),
-                base.clone(),
+                base_rev.clone(),
                 "HEAD".to_string(),
                 Some(RAW_DIFF_MAX_BYTES),
                 Some(exclude),
@@ -1752,7 +1756,7 @@ impl GitDesktopMcp {
             // fallback). The sum is an UPPER BOUND: a file hidden in both diffs is
             // counted twice, and over-disclosing is the safe direction here.
             committed.excluded_files += diff.excluded_files;
-            let subjects = branch_commit_subjects(&self.repo, &base).await;
+            let subjects = branch_commit_subjects(&self.repo, &base_rev).await;
             (committed, Vec::new(), subjects)
         } else {
             (diff, untracked_paths, Vec::new())
@@ -1902,12 +1906,15 @@ async fn ref_exists(repo: &str, full_ref: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Subjects of the commits `HEAD` adds over `base`, newest first, capped at
+/// Subjects of the commits `HEAD` adds over `base` (read branch-first, so a same-named
+/// tag can't capture it), newest first, capped at
 /// [`BRANCH_FALLBACK_MAX_SUBJECTS`]. Not `git_branch_ahead`: a subjects-only walk
 /// capped in-git (`--format=%s -n`) beats parsing full summaries just to keep their
 /// subjects. Best-effort — a git failure yields an empty list, not a failed recipe.
 async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
     let max = BRANCH_FALLBACK_MAX_SUBJECTS.to_string();
+    // Self-enforcing: the caller's full ref returns before any spawn.
+    let base = crate::git::branches::branch_first_rev(repo, base).await;
     let range = format!("{base}..HEAD");
     let Ok(out) = crate::git::runner::run_git(
         Some(repo),
@@ -1934,13 +1941,15 @@ async fn branch_commit_subjects(repo: &str, base: &str) -> Vec<String> {
 /// Remotes are probed in `git_default_branch`'s own order: origin, then the rest as
 /// `git remote` lists them.
 /// `None` = no default branch, or no ref resolves ⇒ no fallback is possible.
-async fn committed_base_ref(repo: &str) -> Option<String> {
+async fn committed_base_ref(repo: &str) -> Option<CommittedBase> {
     let default = crate::git::branches::git_default_branch(repo.to_string())
         .await
         .ok()
         .flatten()?;
-    if ref_exists(repo, &format!("refs/remotes/origin/{default}")).await {
-        return Some(format!("origin/{default}"));
+    let found = |rev: String, label: String| Some(CommittedBase { rev, label });
+    let origin = format!("refs/remotes/origin/{default}");
+    if ref_exists(repo, &origin).await {
+        return found(origin, format!("origin/{default}"));
     }
     // Only now pay for a remote listing — origin answers almost every repo. A clone
     // made with `-o <name>` keeps its remote-tracking refs under that name instead.
@@ -1948,14 +1957,24 @@ async fn committed_base_ref(repo: &str) -> Option<String> {
         .await
         .unwrap_or_default();
     for remote in remotes.iter().filter(|r| r.as_str() != "origin") {
-        if ref_exists(repo, &format!("refs/remotes/{remote}/{default}")).await {
-            return Some(format!("{remote}/{default}"));
+        let tracking = format!("refs/remotes/{remote}/{default}");
+        if ref_exists(repo, &tracking).await {
+            return found(tracking, format!("{remote}/{default}"));
         }
     }
-    if ref_exists(repo, &format!("refs/heads/{default}")).await {
-        return Some(default);
+    let local = format!("refs/heads/{default}");
+    if ref_exists(repo, &local).await {
+        return found(local, default);
     }
     None
+}
+
+/// [`committed_base_ref`]'s answer: the FULL ref for every rev position (a short
+/// `origin/main` resolves to a same-named tag first) and the short form for copy.
+#[derive(Debug, PartialEq)]
+struct CommittedBase {
+    rev: String,
+    label: String,
 }
 
 /// What the AI-ignore filter left of an untracked-name list. The result SHAPE
@@ -3649,9 +3668,15 @@ mod tests {
         git(&repo_s, &["add", "-A"]).await;
         git(&repo_s, &["commit", "-qm", "seed"]).await;
 
+        let base = |rev: &str, label: &str| {
+            Some(CommittedBase {
+                rev: rev.to_string(),
+                label: label.to_string(),
+            })
+        };
         assert_eq!(
             committed_base_ref(&repo_s).await,
-            Some("main".to_string()),
+            base("refs/heads/main", "main"),
             "local default branch is the fallback base when there's no remote twin"
         );
 
@@ -3659,7 +3684,7 @@ mod tests {
         git(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
         assert_eq!(
             committed_base_ref(&repo_s).await,
-            Some("origin/main".to_string()),
+            base("refs/remotes/origin/main", "origin/main"),
             "the remote-tracking ref is preferred over the local branch"
         );
 
@@ -3775,6 +3800,36 @@ mod tests {
         assert_eq!(refused(current_branch(&repo_s).await), contract);
     }
 
+    /// The committed base is a remote-tracking REF, so a tag named like its short form
+    /// (`origin/main`, sitting on the branch's tip here) can't stand in for it in the
+    /// subjects range or the diff.
+    #[tokio::test]
+    async fn committed_base_reads_the_tracking_ref_not_a_same_named_tag() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-basref-tag-shadow-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo_s = base.path().to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        git(&repo_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        git(&repo_s, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        git(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        git(&repo_s, &["switch", "-q", "-c", "feature"]).await;
+        std::fs::write(base.path().join("f.txt"), "f\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "branch work"]).await;
+        git(&repo_s, &["tag", "origin/main"]).await;
+
+        let base_ref = committed_base_ref(&repo_s).await.expect("a base resolves");
+        assert_eq!(base_ref.label, "origin/main");
+        assert_eq!(
+            branch_commit_subjects(&repo_s, &base_ref.rev).await,
+            vec!["branch work".to_string()]
+        );
+    }
+
     /// A `clone -o upstream` repo: the only remote-tracking ref lives under
     /// `upstream/`, and the base must follow it rather than the same-named local
     /// branch, which is exactly the copy that goes stale.
@@ -3821,7 +3876,10 @@ mod tests {
 
         assert_eq!(
             committed_base_ref(&repo_s).await,
-            Some("upstream/main".to_string()),
+            Some(CommittedBase {
+                rev: "refs/remotes/upstream/main".to_string(),
+                label: "upstream/main".to_string(),
+            }),
             "a non-origin remote's tracking ref wins over the local branch"
         );
     }

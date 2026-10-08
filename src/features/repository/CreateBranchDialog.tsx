@@ -128,8 +128,13 @@ export function CreateBranchDialog({
         return;
       }
       // Hoisted out of the try: a `||` value block inside try/catch bails the
-      // whole component out of the React Compiler.
-      const startPoint = value.base || undefined;
+      // whole component out of the React Compiler. The form holds the SHORT name
+      // the copy shows; the start point is its full ref, since a bare name
+      // resolves to a same-named tag first. Every value is a picker row: a local
+      // branch, or `<remote>/<branch>` when `baseIsRemote`.
+      const startPoint = value.base
+        ? `${baseIsRemote ? "refs/remotes" : "refs/heads"}/${value.base}`
+        : undefined;
       try {
         await createBranch.mutateAsync({
           name: sanitizeRefName(value.name),

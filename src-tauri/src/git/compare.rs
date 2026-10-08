@@ -142,6 +142,8 @@ pub async fn git_branch_diff_files(
 /// expansion (`HEAD^!`, `HEAD^@`) into a git error rather than an argument whose
 /// line count silently misaligns with the two SHAs expected below.
 async fn pinned_range(repo_path: &str, base: &str, compare: &str) -> AppResult<String> {
+    // Self-enforcing: a caller's already-resolved `refs/...` passes straight through.
+    let (base, compare) = local_branch_revs(repo_path, base, compare).await;
     let base_rev = format!("{base}^{{commit}}");
     let compare_rev = format!("{compare}^{{commit}}");
     let out = run_git(

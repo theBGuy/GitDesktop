@@ -82,10 +82,11 @@ export function RebaseOntoDialog({
   // The commits `oldBase..HEAD` — exactly what `--onto` will replay. Compares
   // against the literal `HEAD` ref (what the rebase itself operates on, so the
   // preview and the action can never disagree), gated on the dialog being open
-  // so it doesn't fetch in the background.
+  // so it doesn't fetch in the background. `oldBase` is a local branch, read by
+  // its full ref as the action reads it: bare, a same-named tag would win.
   const comparison = useBranchAhead(
     repoPath,
-    open && oldBase && !sameBranch ? oldBase : null,
+    open && oldBase && !sameBranch ? `refs/heads/${oldBase}` : null,
     open ? "HEAD" : null,
   );
   const moving = comparison.data ?? [];

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for six Rust invariants that have each cost this repo a fix
+// Static gate for seven Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -27,6 +27,10 @@
 //      `remotes/<r>/<x>`, or the full ref) whenever a tag or other ref shares the
 //      name, so a NAME use misroutes. `git::branches::current_branch_name` /
 //      `current_branch_ref` and a stripped `%(refname)` are the replacements.
+//   G. bare branch revs — a branch name in a REV position (a range, a peel, a
+//      rev-taking argv) resolves to a same-named tag first. A branch-first
+//      resolver (`git::branches::branch_first_rev`) or the measured tip sha
+//      (`git::branches::branch_tip_sha`) is the replacement.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
 // RULE: the lists only shrink by default. Adding an entry is a reviewed change —
@@ -79,6 +83,18 @@ const REFSPEC_ALLOWLIST = [
     fn: "git_branch_merge_states",
     rationale:
       "validates each pair's head/base with validate_branch_name inline",
+  },
+  {
+    file: "git/branches.rs",
+    fn: "branch_rewrite_status",
+    rationale:
+      "read-only `rev-list --walk-reflogs` of the branch (never a refspec); validates with validate_branch_name at fn entry",
+  },
+  {
+    file: "git/branches.rs",
+    fn: "update_branch_from",
+    rationale:
+      "the fast-forward's local `fetch .` destination; validates branch and base with validate_branch_name at fn entry",
   },
   {
     file: "git/ops.rs",
@@ -310,19 +326,69 @@ const SHORT_REF_ALLOWLIST = [
     rationale:
       "`%(upstream:short)` is a REV use: the UI hands it back as a rev, and the disambiguated short form resolves correctly where a stripped bare name would resolve to a same-named tag",
   },
+];
+
+// Check G. Rev positions that take a bare branch-named ident on purpose,
+// verified by reading each one.
+const BARE_REV_ALLOWLIST = [
   {
-    file: "git/branches.rs",
-    fn: "branch_rewrite_status",
+    file: "git/compare.rs",
+    fn: "git_branch_ahead",
     rationale:
-      "`--abbrev-ref <branch>@{upstream}` feeds the upstream display and rev reads; recorded follow-up with the bare-name class",
+      "takes revs as given on purpose: release notes hand it TAGS, which branch_first_rev would lose to a same-named branch",
   },
   {
-    file: "git/pull_guard.rs",
-    fn: "upstream_of",
+    file: "git/diff.rs",
+    fn: "git_session_file_diff",
     rationale:
-      "`--abbrev-ref HEAD@{upstream}` in the pull guard's upstream read",
-    retiring:
-      "a parallel pull_guard change removes this read; the entry goes once that lands",
+      "`base` is the agent session's base commit sha (the worktree's `rev-parse HEAD` at creation)",
+  },
+  {
+    file: "git/diff.rs",
+    fn: "git_staged_diff",
+    rationale: "`base` is the fixed literal `HEAD` or `--cached`, never a name",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "refuse_untracked_reset_collisions",
+    rationale:
+      "its only production caller (git_reset_core) passes a hash validated with validate_hash",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "cherry_pick_onto_with_timeouts",
+    rationale:
+      "`target_tip` is the sha rev-parsed from branch_first_rev(target_branch) at fn entry, beyond the checker's binding window",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "stash_file_diff_at",
+    rationale:
+      "`base` is the stash's own `<spec>^1` parent, never a branch name",
+  },
+  {
+    file: "git/worktree.rs",
+    fn: "git_worktree_squash",
+    rationale:
+      "`base` is the agent session's base commit sha (the worktree's `rev-parse HEAD` at creation)",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "rewrite_commits_with_timeouts",
+    rationale:
+      "`base` is a commit sha, validated with validate_hash at fn entry",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "git_unpushed_messages",
+    rationale:
+      "`base` is a commit sha, validated with validate_hash at fn entry",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "build_divergence_compare_path",
+    rationale:
+      "a forge REST compare path, not a git rev; its segments are check E's (validate_compare_branch)",
   },
 ];
 
@@ -685,11 +751,15 @@ export function stderrFieldValue(body) {
 
 /** The initializer of the nearest preceding `let <name> = …`, bounded by the
  *  enclosing signature so a same-named binding in another function can't answer.
- *  null when there is none — a parameter, or a pattern's binding. */
-export function bindingInitializer(lines, fromIdx, name) {
-  const decl = new RegExp(
-    `\\blet\\s+(?:mut\\s+)?${name}\\s*(?::[^=]*)?=\\s*(.*)$`,
-  );
+ *  null when there is none — a parameter, or (unless `patterns`) a pattern's
+ *  binding. With `patterns`, a destructuring `let (a, <name>) = …` or
+ *  `let Some(<name>) = …` answers too. */
+export function bindingInitializer(lines, fromIdx, name, { patterns } = {}) {
+  const decl = patterns
+    ? new RegExp(
+        `\\blet\\s+(?:mut\\s+)?(?=[^=]*?(?<![\\w.:])${name}\\b)[^=]*?=(?!=)\\s*(.*)$`,
+      )
+    : new RegExp(`\\blet\\s+(?:mut\\s+)?${name}\\s*(?::[^=]*)?=\\s*(.*)$`);
   for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
     if (FN_RE.test(lines[i])) return null;
     const m = decl.exec(lines[i]);
@@ -797,6 +867,123 @@ export function checkShortRefNames(file, _src, lines, hits) {
   }
 }
 
+// A branch-typed NAME interpolated where git expects a REVISION. gitrevisions
+// tries refs/tags/<x> before refs/heads/<x>, so a bare branch name in a range, a
+// peel, or a rev argument resolves to a same-named tag first. Name-keyed by
+// design: the idents below are the ones that carry branch names here, and an ident
+// bound from a branch-first resolver (or a measured tip sha) passes. Two shapes:
+// a `format!` rev template (`{x}..`, `..{x}`, `{x}^{{`, `{x}@{{`) and an argv list
+// led by a rev-taking command holding the bare ident (for `fetch`, also a refspec
+// template whose source is the ident). `{x}@{{upstream}}` (and
+// `u`/`push`) is exempt: git looks the name up as a BRANCH there, and the
+// full-ref spelling is refused outright ("no such branch", measured git 2.51.1).
+// An ident right after `/` is part of a qualified path, not a bare rev.
+const REV_NAME_RE = /^(?:branch|base|head|compare|target\w*)$/;
+const REV_TEMPLATE_RE =
+  /(?<![{/])\{(\w+)\}(?=\.\.|\^\{\{|@\{\{(?!(?:upstream|u|push)\}\}))|(?<=\.\.)\{(\w+)\}/g;
+const REV_ARGV_RE =
+  /\[\s*"(merge-base|rev-list|rev-parse|merge|log|diff|rebase|reset|merge-tree|show|cherry|revert|ls-tree|fetch)"/g;
+const REV_SAFE_INIT_RE =
+  /\b(?:branch_first_rev|local_branch_revs|branch_tip\w*)\s*\(/;
+const BARE_REV_FIX =
+  "a bare branch name in a rev position resolves to a same-named TAG first " +
+  "(gitrevisions) — resolve it via git::branches::branch_first_rev, read the " +
+  "tip sha (git::branches::branch_tip_sha), or allowlist a deliberate use with " +
+  "rationale";
+
+/** The body of the `[ … ]` opening at `openIdx`, bracket-balanced and
+ *  literal-aware, so a `]` inside a string cannot end the argv list early. */
+function bracketBody(text, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < text.length; i++) {
+    const lit = literalEnd(text, i);
+    if (lit >= 0) {
+      i = lit;
+      continue;
+    }
+    if ("([{".includes(text[i])) depth++;
+    else if (")]}".includes(text[i]) && --depth === 0)
+      return text.slice(openIdx + 1, i);
+  }
+  return text.slice(openIdx + 1);
+}
+
+/** Top-level comma-separated elements of an argv `body`, with their offsets. */
+function argvElements(body) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i <= body.length; i++) {
+    const lit = i < body.length ? literalEnd(body, i) : -1;
+    if (lit >= 0) {
+      i = lit;
+      continue;
+    }
+    const c = body[i];
+    if (i === body.length || (c === "," && depth === 0)) {
+      out.push({ text: body.slice(start, i), at: start });
+      start = i + 1;
+    } else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+  }
+  return out;
+}
+
+export function checkBareBranchRevs(file, _src, lines, hits) {
+  const code = stripComments(lines);
+  const codeSrc = code.join("\n");
+  const spans = testModuleSpans(codeSrc);
+  const inTest = (idx) => spans.some(([s, e]) => idx > s && idx < e);
+  const report = (idx, name) => {
+    const line = codeSrc.slice(0, idx).split("\n").length;
+    const init = bindingInitializer(code, line - 1, name, { patterns: true });
+    if (init !== null && REV_SAFE_INIT_RE.test(init)) return;
+    const fn = enclosingFn(lines, line - 1);
+    hits.push({
+      file,
+      line,
+      fn,
+      allowlisted: allowed(BARE_REV_ALLOWLIST, file, fn),
+      fix: BARE_REV_FIX,
+    });
+  };
+
+  FORMAT_RE.lastIndex = 0;
+  for (let m = FORMAT_RE.exec(codeSrc); m; m = FORMAT_RE.exec(codeSrc)) {
+    if (inTest(m.index)) continue;
+    REV_TEMPLATE_RE.lastIndex = 0;
+    for (
+      let t = REV_TEMPLATE_RE.exec(m[1]);
+      t;
+      t = REV_TEMPLATE_RE.exec(m[1])
+    ) {
+      const name = t[1] ?? t[2];
+      if (REV_NAME_RE.test(name)) report(m.index, name);
+    }
+  }
+
+  REV_ARGV_RE.lastIndex = 0;
+  for (let m = REV_ARGV_RE.exec(codeSrc); m; m = REV_ARGV_RE.exec(codeSrc)) {
+    if (inTest(m.index)) continue;
+    const open = m.index;
+    for (const el of argvElements(bracketBody(codeSrc, open))) {
+      const bare = /^\s*&?\s*(\w+)\s*$/.exec(el.text);
+      if (bare && REV_NAME_RE.test(bare[1])) {
+        report(open + 1 + el.at + el.text.indexOf(bare[1]), bare[1]);
+        continue;
+      }
+      // A fetch refspec's SOURCE resolves tag-first too (measured); its bare
+      // destination is redirected under refs/heads/ by git, so only `{x}:` counts.
+      if (m[1] !== "fetch") continue;
+      const tmpl = /^\s*&?\s*format!\s*\(\s*"((?:[^"\\]|\\.)*)"/.exec(el.text);
+      const src = tmpl && /(?<![{/])\{(\w+)\}:/.exec(tmpl[1]);
+      if (src && REV_NAME_RE.test(src[1])) {
+        report(open + 1 + el.at + el.text.indexOf("format!"), src[1]);
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -835,6 +1022,12 @@ function main() {
       name: "F. short ref names",
       run: checkShortRefNames,
       allowlist: SHORT_REF_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "G. bare branch revs",
+      run: checkBareBranchRevs,
+      allowlist: BARE_REV_ALLOWLIST,
       hits: [],
     },
   ];

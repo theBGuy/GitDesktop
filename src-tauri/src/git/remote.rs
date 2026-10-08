@@ -1060,29 +1060,15 @@ const IF_INCLUDES_REJECTION: &str = "remote ref updated since checkout";
 /// no reflog to reason about, so callers must not retry. Git itself walks the
 /// local ref named after the DESTINATION when one exists (measured); the source
 /// name probed here covers the app's same-name default — see the arm's comment.
-///
-/// Read in FULL and stripped of exactly `refs/heads/`: `--short` disambiguates, so a
-/// branch shadowed by a same-named tag comes back as `heads/<name>` (measured, git
-/// 2.51.1), and every consumer here rebuilds `refs/heads/<name>` from the result.
+/// Every consumer here rebuilds `refs/heads/<name>` from the result.
 async fn pushed_branch(repo_path: &str, branch: Option<&str>) -> Option<String> {
     if let Some(b) = branch {
         return Some(b.to_string());
     }
-    let out = run_git_raw(
-        Some(repo_path),
-        &["symbolic-ref", "-q", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .ok()?;
-    if out.code != 0 {
-        return None;
-    }
-    let full = out.stdout_lossy();
-    full.trim_end_matches(['\r', '\n'])
-        .strip_prefix("refs/heads/")
-        .filter(|b| !b.is_empty())
-        .map(str::to_string)
+    crate::git::branches::current_branch_name(repo_path)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Whether `refs/heads/<branch>` has a reflog (`git reflog exists`, exit 0/1). An

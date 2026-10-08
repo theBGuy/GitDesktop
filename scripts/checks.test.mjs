@@ -67,6 +67,7 @@ import {
   missingSentinels,
 } from "./check-rule-mirrors.mjs";
 import {
+  checkBareBranchRevs,
   checkCompareEndpoints,
   checkRefspecTemplates,
   checkSecretArgv,
@@ -2762,6 +2763,152 @@ test("short-ref check flags symbolic-ref --short, never rev-parse --short", () =
     [
       ["branch", 2],
       ["quiet", 5],
+    ],
+  );
+});
+
+test("bare-rev check flags the pre-fix rewrite-status range and reflog walk", () => {
+  // The shape `branch_rewrite_status` shipped with: a bare branch on the range's
+  // left side and as the reflog-walk argument.
+  const src = [
+    "pub(crate) async fn branch_rewrite_status(repo: &str, branch: &str) {",
+    '    let upstream_rev = format!("{branch}@{{upstream}}");',
+    '    let range = format!("{branch}...{upstream_rev}");',
+    "    let reflog = run_git_raw(",
+    "        Some(repo),",
+    '        &["rev-list", "--walk-reflogs", branch],',
+    "    );",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["branch_rewrite_status", 3],
+      ["branch_rewrite_status", 6],
+    ],
+  );
+  assert.ok(hits.every((h) => !h.allowlisted));
+});
+
+test("bare-rev check flags each rev shape and rev-taking argv", () => {
+  const src = [
+    "async fn shapes(base: &str, head: &str, target_ref: &str) {",
+    '    let a = format!("{base}..HEAD");',
+    '    let b = format!("HEAD...{head}");',
+    '    let c = format!("{target_ref}^{{commit}}");',
+    '    let d = format!("{base}@{{1}}");',
+    "}",
+    "async fn argv(branch: &str, base: String, compare: &str) {",
+    "    run(&[",
+    '        "merge-base",',
+    '        "--is-ancestor",',
+    "        &base,",
+    "        branch,",
+    "    ]);",
+    '    run(&["merge", "--no-edit", compare]);',
+    '    run(&["log", "--format=%s", &base]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["shapes", 2],
+      ["shapes", 3],
+      ["shapes", 4],
+      ["shapes", 5],
+      ["argv", 11],
+      ["argv", 12],
+      ["argv", 14],
+      ["argv", 15],
+    ],
+  );
+});
+
+test("bare-rev check passes resolved, qualified, upstream and non-rev uses", () => {
+  const src = [
+    '/// Never `format!("{branch}..x")` in a comment.',
+    "async fn resolved(repo: &str, branch: &str, base: &str) {",
+    "    let base = branch_first_rev(repo, base).await;",
+    '    let x = format!("{base}...{tip}");',
+    "    let (base, compare) = local_branch_revs(repo, base, compare).await;",
+    '    run(&["rev-list", "--count", &base, &compare]);',
+    "    let Some(head) = branch_tip_sha(repo, branch).await? else {",
+    "        return;",
+    "    };",
+    '    run(&["merge-base", "--is-ancestor", &head, "HEAD"]);',
+    '    let q = format!("refs/heads/{branch}^{{commit}}");',
+    '    let u = format!("{branch}@{{upstream}}");',
+    '    let lit = format!("{{branch}}..x");',
+    "    let base_rev = branch_first_rev(repo, base).await;",
+    '    run(&["fetch", ".", &format!("{base_rev}:refs/heads/{branch}")]);',
+    '    run(&["push", "origin", branch]);',
+    '    run(&["rev-parse", "--verify", sha]);',
+    '    let label = format!("{branch} vs {base}");',
+    "}",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn fixture(branch: &str) {",
+    '        run(&["merge", branch]);',
+    '        let r = format!("{branch}..HEAD");',
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(hits, []);
+});
+
+test("bare-rev check flags widened verbs and a fetch refspec's source", () => {
+  // `fetch .` resolves its refspec SOURCE tag-first, the shape the fast-forward
+  // arm of update_branch_from shipped with; a bare destination is redirected
+  // under refs/heads/ by git, so `:{branch}` alone is not a hit.
+  const src = [
+    "async fn widened(repo: &str, base: &str, branch: &str, target: &str) {",
+    '    run(&["diff", "--no-color", &base, "--", path]);',
+    '    run(&["fetch", ".", branch]);',
+    '    run(&["fetch", ".", &format!("{base}:{branch}")]);',
+    '    run(&["fetch", ".", &format!("refs/heads/x:{branch}")]);',
+    '    run(&["reset", "--hard", target]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["widened", 2],
+      ["widened", 3],
+      ["widened", 4],
+      ["widened", 6],
+    ],
+  );
+});
+
+test("bare-rev check fails closed on a binding it cannot resolve as safe", () => {
+  // A shadowing `let` from anything but the branch-first resolvers, and a binding
+  // too far above to find, both still flag.
+  const src = [
+    "async fn rebinds(repo: &str, base: &str) {",
+    "    let base = base.trim();",
+    '    let r = format!("{base}..HEAD");',
+    "}",
+    "async fn far(repo: &str) {",
+    "    let branch = branch_first_rev(repo, name).await;",
+    ...Array.from({ length: 45 }, () => "    noop();"),
+    '    run(&["rev-list", branch]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["rebinds", 3],
+      ["far", 52],
     ],
   );
 });

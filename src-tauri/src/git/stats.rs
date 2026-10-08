@@ -341,6 +341,9 @@ pub async fn git_branch_stats(
             )));
         }
     }
+    // Both are branch names: read as the branches, never same-named tags.
+    let branch = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
+    let base = crate::git::branches::branch_first_rev(&repo_path, &base).await;
     let range = format!("{base}..{branch}");
     let log = run_git(
         Some(&repo_path),
@@ -604,6 +607,47 @@ pub async fn git_punch_card(repo_path: String, weeks: u32) -> AppResult<Vec<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// Both sides are read as BRANCHES: tags named like the base and the branch sit
+    /// on the seed, where a bare name would resolve to them (gitrevisions checks tags
+    /// first) and measure an empty range.
+    #[tokio::test]
+    async fn branch_stats_measure_branches_shadowed_by_tags() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-stats-tag-shadow-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        git(&repo, &["tag", "main"]).await;
+        git(&repo, &["tag", "feature"]).await;
+        std::fs::write(dir.path().join("m.txt"), "m\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "base work"]).await;
+        git(&repo, &["switch", "-qc", "feature"]).await;
+        std::fs::write(dir.path().join("f.txt"), "f\nf\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "branch work"]).await;
+
+        let stats = git_branch_stats(repo, "feature".into(), "main".into())
+            .await
+            .expect("measure the branch");
+        assert_eq!(
+            (stats.commit_count, stats.files_changed, stats.additions),
+            (1, 1, 2)
+        );
+    }
 
     #[test]
     fn language_of_maps_names_and_extensions() {
