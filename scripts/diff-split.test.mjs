@@ -248,6 +248,15 @@ const shapes = [
     path: "z.txt",
     section: 'diff --git "a/x\\" b/y.txt" b/z.txt\n',
   },
+  {
+    name: "a raw binary rename whose old name contains a b-side-like quote run",
+    path: '"secret.png"',
+    section:
+      'diff --git a/dir "b/old.png b/"secret.png"\n' +
+      'rename from dir "b/old.png\n' +
+      'rename to "secret.png"\n' +
+      "Binary files differ\n",
+  },
 ];
 
 for (const { name, path, section } of shapes) {
