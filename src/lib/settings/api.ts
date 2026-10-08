@@ -8,8 +8,8 @@ import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import { THEME_ORDER, type ThemeSetting } from "@/lib/theme";
-import { rehomeServerRepoKeys } from "./mcp";
 
 export interface RecentRepo {
   path: string;
