@@ -3484,8 +3484,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   first review waits until it's marked ready), **fetch link previews** (the title,
   description, and image behind a link in a rendered body; off leaves the card showing
   the destination alone), and privacy options. If changes made offline are still waiting
-  to send, quitting asks before discarding them, whether from the tray or by closing the
-  window with the tray option off.
+  to send, quitting from the tray or closing the window with the tray option off asks
+  before discarding them.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
   and *Cycle theme* in the command palette steps through them.

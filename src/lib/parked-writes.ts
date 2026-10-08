@@ -4,6 +4,7 @@ import { queryClient } from "@/lib/query-client";
 import { serializedMirror } from "@/lib/serialized-mirror";
 import { useConfirm } from "@/lib/stores/confirm";
 import { invoke } from "@/lib/tauri/invoke";
+import { toastComposedError } from "@/lib/toast";
 
 /** Whether any write is parked: pressed, then paused before its request until
  *  the connection returns. The mutation cache lives only in memory, so anything
@@ -79,7 +80,13 @@ async function onQuitRequested() {
     await invoke<void>("quit_prompt_shown").catch(() => undefined);
   }
   if (await confirmDiscardParkedWrites("quit")) {
-    await invoke<void>("quit_app");
+    try {
+      await invoke<void>("quit_app");
+    } catch (e) {
+      // Still running, so the prompt is over: clear its stamp and say why.
+      toastComposedError({ title: "Couldn't quit — try again", errors: [e] });
+      await invoke<void>("quit_prompt_closed");
+    }
   } else {
     // A re-emitted prompt replaces this one, whose `false` lands here and clears
     // the newer prompt's stamp too: the next quit then just asks again.
