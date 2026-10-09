@@ -147,6 +147,57 @@ html:not(.mode-git) [data-view="git"] {
   height: auto;
 }
 
+/* Demo loops (DemoVideo.astro): the poster <img> sizes the frame and the video
+   overlays the same box, so revealing it never shifts layout. The control's
+   10px inset leaves room for the global 5px focus outline inside the frame's
+   overflow clip. */
+.demo video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  /* Clicks do nothing, and a right-click reaches the poster image. */
+  pointer-events: none;
+}
+/* Instant swap on first "playing": the poster is a frame of the clip. */
+.demo video[data-shown] {
+  opacity: 1;
+}
+.demo-toggle {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--color-bg) 72%, transparent);
+  color: var(--color-ink);
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 0.2s var(--ease-quint);
+}
+.demo:hover .demo-toggle,
+.demo-toggle:focus {
+  opacity: 1;
+}
+.demo-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+.demo-toggle[data-state="playing"] .demo-play,
+.demo-toggle:not([data-state="playing"]) .demo-pause {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-toggle {
+    transition: none;
+  }
+}
+
 /* Mint "active-line" rule — the editor cursor/active-line motif, used sparingly
    as a section accent. */
 .rule-mint {
@@ -188,102 +239,6 @@ html:not(.mode-git) [data-view="git"] {
   filter: blur(40px);
   pointer-events: none;
   z-index: -1;
-}
-
-/* --- Agent "watch it work" session motif (stands in for a screenshot) -------- */
-.session {
-  font-size: 0.82rem;
-  line-height: 1.6;
-}
-.session-head,
-.session-foot {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.7rem 1rem;
-  color: var(--color-muted);
-  font-size: 0.78rem;
-}
-.session-head {
-  border-bottom: 1px solid var(--color-line);
-  flex-wrap: wrap;
-}
-.session-foot {
-  border-top: 1px solid var(--color-line);
-  flex-wrap: wrap;
-  gap: 0.85rem;
-}
-.session-body {
-  padding: 1rem 1.1rem;
-}
-
-/* Vertical connected steps — each an agent action; nodes light mint as they run. */
-.steps > li {
-  position: relative;
-  padding: 0 0 0.95rem 1.6rem;
-  color: var(--color-body);
-}
-.steps > li:last-child {
-  padding-bottom: 0;
-}
-.steps > li::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 0.36em;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--color-surface-2);
-  border: 1.5px solid var(--color-line-2);
-}
-.steps > li::after {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: calc(0.36em + 11px);
-  bottom: 0;
-  width: 1px;
-  background: var(--color-line);
-}
-.steps > li:last-child::after {
-  display: none;
-}
-.steps > li[data-done]::before {
-  background: var(--color-mint);
-  border-color: var(--color-mint);
-}
-.steps > li[data-active]::before {
-  background: var(--color-mint);
-  border-color: var(--color-mint);
-  box-shadow: 0 0 0 4px oklch(0.82 0.12 178 / 0.16);
-}
-.step-kind {
-  color: var(--color-faint);
-}
-
-/* A small inline diff — as the agent expands one of its edits. */
-.diff-peek {
-  margin-top: 0.5rem;
-  border: 1px solid var(--color-line);
-  border-radius: 7px;
-  overflow: hidden;
-  font-size: 0.76rem;
-  line-height: 1.6;
-  background: oklch(1 0 0 / 0.015);
-}
-.diff-peek > div {
-  padding: 0.02rem 0.6rem;
-  white-space: pre;
-  overflow-x: auto;
-}
-.diff-peek .add {
-  background: oklch(0.74 0.13 155 / 0.1);
-  color: var(--color-add);
-}
-.diff-peek .del {
-  background: oklch(0.7 0.16 25 / 0.1);
-  color: var(--color-del);
 }
 
 /* --- Terminal / code motif (MCP config, capability ladder) ------------------- */
@@ -580,7 +535,7 @@ kbd {
 
 /* html sets `overflow-x: clip`, which — unlike hidden — creates NO scroll
    container, so a wide table or an 80-column code line would be permanently
-   unreachable rather than scrollable. Same precedent as .terminal / .diff-peek. */
+   unreachable rather than scrollable. Same precedent as .terminal. */
 .prose pre {
   border: 1px solid var(--color-line);
   border-radius: 9px;
