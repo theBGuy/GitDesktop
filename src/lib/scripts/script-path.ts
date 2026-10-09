@@ -34,7 +34,7 @@ export function isAbsoluteScriptPath(p: string): boolean {
 }
 
 const resolvesWithoutRepo = (p: string) =>
-  ABSOLUTE_RE.test(p) || DRIVE_RELATIVE_RE.test(p);
+  isAbsoluteScriptPath(p) || DRIVE_RELATIVE_RE.test(p);
 
 /** Join a relative script path under a checkout root, lexically (`..` is kept).
  *  Rust joins with the host's path rules, where a POSIX backslash is part of the
@@ -75,8 +75,9 @@ export function pathOnScopeFlip({
   return { kind: "unrepairable" };
 }
 
-/** Why a stored script path names no file: an absolute path is simply absent,
- *  while a relative one depends on where it was resolved. */
+/** Why a stored script path names no file: one that resolves without the repo
+ *  (absolute, or drive-relative like `C:x`) is simply absent, while a
+ *  repo-relative one depends on where it was resolved. */
 export function missingScriptCase(
   isGlobal: boolean,
   storedPath: string,

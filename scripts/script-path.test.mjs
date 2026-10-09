@@ -206,7 +206,7 @@ test("only a flip to all repositories acts", () => {
   assert.deepEqual(flip({ from: "global" }), { kind: "none" });
 });
 
-test("missingScriptCase keys on absoluteness first, then scope", () => {
+test("missingScriptCase keys on repo-independence first, then scope", () => {
   const rows = [
     [true, "C:/tools/x.mjs", "absolute"],
     [false, "C:/tools/x.mjs", "absolute"],
