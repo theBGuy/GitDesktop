@@ -766,7 +766,7 @@ const forges = [
           gitHighlights.map((c) => (
             <li class="flex items-start gap-2.5">
               <span class="mt-px select-none text-add" aria-hidden="true">+</span>
-              <span class="text-body">{c.short ?? c.label}</span>
+              <span class="text-body">{c.label}</span>
             </li>
           ))
         }
@@ -774,7 +774,7 @@ const forges = [
           aiHighlights.map((c) => (
             <li data-view="ai" class="flex items-start gap-2.5">
               <span class="mt-px select-none text-mint" aria-hidden="true">✦</span>
-              <span class="text-body">{c.short ?? c.label}</span>
+              <span class="text-body">{c.label}</span>
             </li>
           ))
         }
