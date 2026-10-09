@@ -1,4 +1,9 @@
-import { PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
+import {
+  PlusIcon,
+  SparkleIcon,
+  WarningIcon,
+  XIcon,
+} from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -39,6 +44,11 @@ import {
   TASK_SCOPE_UNKNOWN,
   taskScope,
 } from "@/lib/scripts/scope";
+import {
+  type FlipOutcome,
+  pathOnScopeFlip,
+  type ScopeKind,
+} from "@/lib/scripts/script-path";
 import {
   type ArgDoc,
   availableInterpreters,
@@ -111,6 +121,27 @@ const PATH_HINT: Record<"repo" | "global", string> = {
     "Choosing a file saves its full path; a path you type resolves against whichever repository is open. Either way it runs the live file, so edits to it take effect on the next run.",
 };
 
+/** The note a switch to all repositories leaves under **Script file**. Held
+ *  only while it describes the field: a "repaired" note is what arms the
+ *  flip-back restore and **Keep relative**, so every clear also disarms them. */
+type FlipNote = Exclude<FlipOutcome, { kind: "none" }>;
+
+const FLIP_NOTE: Record<FlipNote["kind"], string> = {
+  repaired: "Saved as the full path so this file runs from every repository.",
+  unrepairable:
+    "This path is relative, so it resolves against whichever repository is open. Choose the file to save its full path.",
+};
+
+/** A scope value as the path repair reads it, in the same order the dialog's
+ *  `isGlobalDraft` / `scopedToThisRepo` / `scopedElsewhere` locals partition it:
+ *  only "this repository" names a root (the open checkout) to make a path full. */
+function scopeKindOf(value: string, repoKeys: readonly string[]): ScopeKind {
+  if (value === TASK_SCOPE_GLOBAL) return "global";
+  if (repoKeys.includes(value)) return "this-repo";
+  if (value === TASK_SCOPE_UNKNOWN) return "unknown";
+  return "elsewhere";
+}
+
 /** Make a picked absolute path relative to the repo root when it's inside it, so a
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
  *  keep the absolute path (it's machine-specific). A null `repoRoot` means there is
@@ -179,6 +210,8 @@ export function TaskDialog({
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
+  const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
+  const pathInputRef = useRef<HTMLInputElement>(null);
 
   // Scope lookup keys for the open repo: [repoPath] while its identity resolves,
   // [repoPath, identity] once it does. The canonical value the "This repository"
@@ -283,6 +316,7 @@ export function TaskDialog({
     // render (`selectedScope`), so a scope seeded before the identity resolved
     // still lands on the right option once it does.
     setScope(editing ? taskScope(editing) : (thisRepoKey ?? TASK_SCOPE_GLOBAL));
+    setFlipNote(null);
   }, [open, editing, cancelGenerate, cancelAnalyze, thisRepoKey]);
 
   const trimmedName = name.trim();
@@ -322,9 +356,46 @@ export function TaskDialog({
     // Relativizing a global task's pick would store a path that resolves inside
     // whichever repo happens to be open at run time, so it keeps the full path.
     setPath(toRepoRelative(picked, isGlobalDraft ? null : repoPath));
+    setFlipNote(null);
     // Pre-select the interpreter from the extension (still overridable).
     const guess = interpreterForExt(picked);
     if (guess) setInterpreter(guess);
+  }
+
+  function changeScope(v: string) {
+    // Base UI reports a re-pick of the shown option too; that isn't a move, so
+    // it must not dismiss a note the field still matches. The repair follows the
+    // held `path`, not the visible source kind: it survives a detour through
+    // Inline and is what Save stores on return (an empty path yields nothing).
+    if (v !== selectedScope) {
+      const to = scopeKindOf(v, repoKeys);
+      const outcome = pathOnScopeFlip({
+        from: scopeKindOf(scope, repoKeys),
+        to,
+        path,
+        repoRoot: repoPath,
+      });
+      if (outcome.kind === "repaired") setPath(outcome.path);
+      // Moving back undoes only an untouched rewrite; anything the user has
+      // since typed or picked is theirs, absolute or not.
+      else if (
+        to === "this-repo" &&
+        flipNote?.kind === "repaired" &&
+        path === flipNote.path
+      )
+        setPath(flipNote.from);
+      setFlipNote(outcome.kind === "none" ? null : outcome);
+    }
+    setScope(v);
+  }
+
+  function keepRelative() {
+    if (flipNote?.kind !== "repaired") return;
+    setPath(flipNote.from);
+    setFlipNote(null);
+    // The button unmounts with the note; the field it restored keeps focus off
+    // <body>.
+    pathInputRef.current?.focus();
   }
 
   // Shared by the Generate button, the describe field's Enter key, and the
@@ -532,7 +603,7 @@ export function TaskDialog({
               // makes the trigger show the option label.
               items={scopeItems}
               value={selectedScope}
-              onValueChange={(v) => v && setScope(v)}
+              onValueChange={(v) => v && changeScope(v)}
             >
               <SelectTrigger id="task-scope" className="w-full">
                 <SelectValue onMouseEnter={clipTitleFromText} />
@@ -565,7 +636,12 @@ export function TaskDialog({
               <button
                 key={kind}
                 type="button"
-                onClick={() => setSourceKind(kind)}
+                // The flip note stays: `path` survives the switch, so on return
+                // the note still describes the field.
+                onClick={() => {
+                  if (kind === sourceKind) return;
+                  setSourceKind(kind);
+                }}
                 className={cn(
                   "rounded px-2.5 py-1 transition-colors",
                   sourceKind === kind
@@ -612,10 +688,14 @@ export function TaskDialog({
             <Label htmlFor="task-path">Script file</Label>
             <div className="flex gap-2">
               <Input
+                ref={pathInputRef}
                 id="task-path"
                 className="flex-1 font-mono"
                 value={path}
-                onChange={(e) => setPath(e.target.value)}
+                onChange={(e) => {
+                  setPath(e.target.value);
+                  setFlipNote(null);
+                }}
                 placeholder="scripts/release.mjs"
                 autoComplete="off"
                 spellCheck={false}
@@ -629,6 +709,40 @@ export function TaskDialog({
               >
                 Choose…
               </DisabledReasonButton>
+            </div>
+            {/* Mounted empty whenever the file source shows: a live region
+                inserted together with its text isn't announced. `empty:mb-0`
+                drops the stack gap an empty region would otherwise add. A note
+                set while Inline was shown is hidden until the file source
+                returns. */}
+            <div
+              role="status"
+              aria-live="polite"
+              className="text-xs empty:mb-0"
+            >
+              {flipNote?.kind === "repaired" && (
+                <p className="flex flex-wrap items-center gap-x-2 text-muted-foreground">
+                  <span>{FLIP_NOTE.repaired}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    onClick={keepRelative}
+                  >
+                    Keep relative
+                  </Button>
+                </p>
+              )}
+              {flipNote?.kind === "unrepairable" && (
+                // Icon + text, never color alone (WCAG AA).
+                <p className="flex items-start gap-1.5 text-warning">
+                  <WarningIcon
+                    weight="fill"
+                    className="mt-0.5 size-3.5 shrink-0"
+                  />
+                  <span className="min-w-0">{FLIP_NOTE.unrepairable}</span>
+                </p>
+              )}
             </div>
             <p className="text-xs text-muted-foreground">
               {PATH_HINT[isGlobalDraft ? "global" : "repo"]}
