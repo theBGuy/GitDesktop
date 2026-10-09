@@ -190,8 +190,8 @@ export function CreateReleaseDialog({
   });
   // Which draft the form holds, bumped only where the seed actually reseeds and
   // on a tag switch (the draft on screen was the previous tag's). The repo stamp
-  // can't tell drafts apart within one repo: an A→B→A round trip restores the
-  // same path behind different content.
+  // (`draftRepoRef`) can't tell drafts apart within one repo: an A→B→A round
+  // trip restores the same path behind different content.
   const seedGenRef = useRef(0);
   const tagSwitchAbortRef = useRef(false);
   useCancelOnIdentityChange(tagIdentity, () => {
