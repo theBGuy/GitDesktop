@@ -2361,8 +2361,9 @@ test("mutation-identity-pinning follows a create hook into its private wrapper",
 
 test("mutation-identity-pinning stops at its documented boundary", () => {
   // A seeding wrapper reached ONLY from non-create hooks — useTimeTrackingMutation's
-  // shape. Inside the check's stated class (a response seeded into a hook-scope key)
-  // but outside what it follows, since delegation is resolved from create hooks only.
+  // shape. Inside the check's stated class (a response seeded on success by an
+  // unpinned repo-scoped mutation, here keyed from its context) but outside what it
+  // follows, since delegation is resolved from create hooks only.
   // Pinned as a fixture so widening the rule fails HERE, loudly, instead of quietly
   // turning every such wrapper into a new pin-or-allowlist decision.
   const seedingWrapper = [
@@ -2377,8 +2378,9 @@ test("mutation-identity-pinning stops at its documented boundary", () => {
     "  const queryClient = useQueryClient();",
     "  return useMutation({",
     "    mutationFn,",
-    "    onSuccess: (stats, args) => {",
-    "      queryClient.setQueryData(statsKey(repo, args.number), stats);",
+    "    onMutate: () => ({ repo }),",
+    "    onSuccess: (stats, args, ctx) => {",
+    "      queryClient.setQueryData(statsKey(ctx.repo, args.number), stats);",
     "    },",
     "  });",
     "}",
@@ -2546,6 +2548,249 @@ test("mutation-identity-pinning is scoped to the query modules, with no allowlis
   ]);
   const { violations, stale } = runCheck(check, files, views);
   assert.deepEqual(violations, ["src/lib/git/queries/branches.ts:2"]);
+  assert.deepEqual(stale, []);
+});
+
+test("splitTopLevel nests generics in a parameter list only", async () => {
+  // Loaded here rather than at the top so this block's import stays inside it.
+  const { splitTopLevel } = await import("./check-banned-patterns.mjs");
+  // A comma inside `Promise<Record<string, unknown>>` is not a parameter break,
+  // and the `>` of the arrow before it is not a close.
+  assert.deepEqual(
+    splitTopLevel(
+      "repo: string, f: () => Promise<Record<string, unknown>>, key?: K",
+      { params: true },
+    ),
+    ["repo: string", "f: () => Promise<Record<string, unknown>>", "key?: K"],
+  );
+  assert.equal(splitTopLevel("repo, fn, key").length, 3);
+  // Argument lists keep bracket-only counting: `<`/`>` there are comparisons.
+  assert.equal(splitTopLevel("a < b, c > d").length, 2);
+});
+
+test("mutation-identity-pinning reads a generic-carrying parameter list right", () => {
+  // The conditionally-keyed wrapper's key parameter sits after a generic with a
+  // comma in it; over-counting that list raised the required index, so a call
+  // that DOES pass the key read as unpinned.
+  const mod = (call) =>
+    [
+      "function useLocalMutation<K>(",
+      "  repo: string,",
+      "  f: () => Promise<Record<string, unknown>>,",
+      "  key?: K,",
+      ") {",
+      "  return useMutation({",
+      "    ...(key ? { mutationKey: key } : {}),",
+      "    mutationFn: f,",
+      "  });",
+      "}",
+      "",
+      "export function useCreateLocalThing(repo: string) {",
+      `  return ${call};`,
+      "}",
+    ].join("\n");
+  assert.deepEqual(
+    unpinnedMutationIdentity(
+      mod('useLocalMutation(repo, fn, ["local", "create", repo])'),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    unpinnedMutationIdentity(mod("useLocalMutation(repo, fn)")),
+    [13],
+  );
+});
+
+/** The settle-cache-write scanner, resolved per call so a missing check fails
+ *  its own tests instead of the whole file at load. */
+const settleCacheWrite = (source) =>
+  scanner("settle-cache-write-identity")(source);
+
+test("settle-cache-write-identity flags a settle write keyed from hook scope", () => {
+  // A bare `repo` in a success seed: the settle runs with the CURRENT render's
+  // closure, so after a switch the response lands on the newly-live repo.
+  const bareRepo = [
+    "export function useUpdateGlRepoSettings(repo: string) {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn: (input: Input) => api.update(repo, input),",
+    "    onSuccess: (data) =>",
+    "      queryClient.setQueryData(glRepoSettingsKey(repo), data),",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settleCacheWrite(bareRepo), [6]);
+  // A key declared in the hook body, rolled back from onError — the useSetRepoStar
+  // shape. The onMutate write on the same key runs at mutate time and is clean.
+  const hookScopeKey = [
+    "export function useSetRepoStar(repo: string) {",
+    "  const queryClient = useQueryClient();",
+    '  const key = ["repo", repo, "star-status"] as const;',
+    "  return useMutation({",
+    "    mutationFn: (starred: boolean) => api.setStar(repo, starred),",
+    "    onMutate: async (starred: boolean) => {",
+    "      await queryClient.cancelQueries({ queryKey: key });",
+    "      const previous = queryClient.getQueryData<boolean>(key);",
+    "      queryClient.setQueryData<boolean>(key, starred);",
+    "      return { previous };",
+    "    },",
+    "    onError: (_e, _starred, ctx) => {",
+    "      if (ctx) queryClient.setQueryData(key, ctx.previous);",
+    "    },",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settleCacheWrite(hookScopeKey), [13]);
+  // A local built from hook scope inside the callback carries the same closure.
+  const taintedLocal = [
+    "export function useJiraComment(repo: string, link: JiraLink | null) {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn: (args: { issueKey: string }) => api.comment(args),",
+    "    onSuccess: (comment, args) => {",
+    "      if (!link) return;",
+    "      const key = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);",
+    "      queryClient.setQueryData<JiraIssueDetails>(key, (d) => d);",
+    "    },",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settleCacheWrite(taintedLocal), [8]);
+  // A value-typed hook parameter is hook scope too (an entity number, a kind);
+  // `setQueriesData`, a `function` value and an `onSettled` all count.
+  const hookParam = [
+    "export function useEditItemProjects(repo: string, kind: Kind, number: number) {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn: (a: Args) => api.edit(repo, a),",
+    "    onSettled: function (_d, _e, _a, ctx) {",
+    "      queryClient.setQueriesData(",
+    "        { queryKey: itemProjectsKey(ctx.repo, kind, number) },",
+    "        undefined,",
+    "      );",
+    "    },",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settleCacheWrite(hookParam), [6]);
+});
+
+test("settle-cache-write-identity accepts keys fixed at mutate time", () => {
+  for (const source of [
+    // The ctx-keyed rollback useOptimisticCacheMutation does.
+    "export function useX(repo: string) {\n  return useMutation({\n    onMutate: async (a) => {\n      const key = k(repo, a);\n      return { prev: undefined, key };\n    },\n    onError: (_e, _a, ctx) => {\n      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);\n    },\n  });\n}",
+    // Built from the callback's own parameters, inline or through a function-typed
+    // hook parameter (useTimeTrackingMutation's statsKey).
+    "function useTimeTracking(\n  repo: string,\n  statsKey: (repo: string, n: number) => readonly unknown[],\n) {\n  return useMutation({\n    onMutate: () => ({ repo }),\n    onSuccess: (stats, args, ctx) => {\n      queryClient.setQueryData(statsKey(ctx.repo, args.number), stats);\n    },\n  });\n}",
+    // A local built inside the callback from its parameters.
+    "export function useX(repo: string) {\n  return useMutation({\n    onSuccess: (comment, args, context) => {\n      const key = detailKey(context.repo, args.issueKey);\n      queryClient.setQueryData(key, comment);\n    },\n  });\n}",
+    // The write target rides the variables (useStarRepo's shape), including a
+    // destructured `repo` that shadows nothing in hook scope.
+    "export function useStarRepo() {\n  return useMutation({\n    onError: (_e, args, ctx) => queryClient.setQueryData(starredKey(args.repo), ctx.prev),\n  });\n}",
+    "export function useX(repo: string) {\n  return useMutation({\n    onSuccess: (data, { repo }) => queryClient.setQueryData(settingsKey(repo), data),\n  });\n}",
+    // A key with no identity component at all.
+    'export function useX(repo: string) {\n  return useMutation({\n    onSuccess: (data) => queryClient.setQueryData(["forge-repos", "github"], data),\n  });\n}',
+    // onMutate is mutate time: a hook-scope key there is the CAPTURE, not a defect.
+    "export function useX(repo: string) {\n  const key = k(repo);\n  return useMutation({\n    onMutate: () => {\n      queryClient.setQueryData(key, 1);\n      return { key };\n    },\n  });\n}",
+    // Comment stripping keeps the rule's own prose out of the scan.
+    "// onSuccess: (d) => queryClient.setQueryData(settingsKey(repo), d)",
+  ])
+    assert.deepEqual(settleCacheWrite(source), [], `should accept ${source}`);
+});
+
+test("settle-cache-write-identity stops at its documented blind spots", () => {
+  // Pinned so widening the rule fails HERE: a write through a helper (the
+  // landRealStatus shape) and a callback passed by name both read clean.
+  for (const source of [
+    "export function useT(repo: string, link: JiraLink) {\n  return useMutation({\n    onSuccess: (r, args) => landRealStatus(queryClient, repo, link, args.issueKey),\n  });\n}",
+    "export function useT(repo: string) {\n  const onSuccess = (d) => queryClient.setQueryData(k(repo), d);\n  return useMutation({ onSuccess });\n}",
+  ])
+    assert.deepEqual(settleCacheWrite(source), [], `blind spot: ${source}`);
+});
+
+test("settle-cache-write-identity sees the shapes a narrow anchor would miss", () => {
+  const cases = [
+    // Method shorthand is a settle callback too.
+    [
+      "export function useX(repo: string) {\n  return useMutation({\n    onSuccess(d) {\n      queryClient.setQueryData(k(repo), d);\n    },\n  });\n}",
+      [4],
+    ],
+    // Declared bare, then assigned from hook scope.
+    [
+      "export function useX(repo: string) {\n  return useMutation({\n    onSuccess: (d) => {\n      let key;\n      key = k(repo);\n      queryClient.setQueryData(key, d);\n    },\n  });\n}",
+      [6],
+    ],
+    // Taint is sticky: a later clean assignment does not launder an earlier write.
+    [
+      "export function useX(repo: string) {\n  return useMutation({\n    onSuccess: (d, _a, ctx) => {\n      let key = k(repo);\n      queryClient.setQueryData(key, d);\n      key = ctx.key;\n    },\n  });\n}",
+      [5],
+    ],
+    // A loop variable over a hook-scope list carries that list's identity.
+    [
+      "export function useX(repo: string) {\n  const hookKeys = [k(repo)];\n  return useMutation({\n    onError: () => {\n      for (const key of hookKeys) queryClient.setQueryData(key, undefined);\n    },\n  });\n}",
+      [5],
+    ],
+    // A hook spelled as an arrow const has a hook scope like a declared one.
+    [
+      "export const useX = (r: string) => {\n  const key = k(r);\n  return useMutation({\n    onSuccess: (d) => queryClient.setQueryData(key, d),\n  });\n};",
+      [4],
+    ],
+    // A parameter is skipped only when its TOP-LEVEL type is a function.
+    [
+      "export function useX(opts: { key: QueryKey; onDone?: () => void }) {\n  return useMutation({\n    onSuccess: (d) => queryClient.setQueryData(opts.key, d),\n  });\n}",
+      [3],
+    ],
+    // Every enclosing function's scope counts, not just the innermost.
+    [
+      "export function useX(repo: string) {\n  const key = k(repo);\n  function build() {\n    return { onSuccess: (d) => queryClient.setQueryData(key, d) };\n  }\n  return useMutation(build());\n}",
+      [4],
+    ],
+    // A CALL of a callback named onSuccess is not a method definition.
+    [
+      "export function useX(repo: string) {\n  opts.onSuccess(queryClient.setQueryData(k(repo), 1));\n}",
+      [],
+    ],
+  ];
+  for (const [source, expected] of cases)
+    assert.deepEqual(settleCacheWrite(source), expected, source);
+});
+
+test("settle-cache-write-identity is scoped like mutation-identity-pinning, with no allowlist", () => {
+  const check = CHECKS.find((c) => c.name === "settle-cache-write-identity");
+  assert.ok(check, "no settle-cache-write-identity check");
+  const pinning = CHECKS.find((c) => c.name === "mutation-identity-pinning");
+  // Directly after the pinning check, over the same modules and the same floor.
+  assert.equal(CHECKS.indexOf(check), CHECKS.indexOf(pinning) + 1);
+  assert.deepEqual(check.expectScanned, pinning.expectScanned);
+  for (const file of [
+    "src/lib/git/queries/branches.ts",
+    "src/lib/git/queries/internal.ts",
+    "src/lib/jira/queries.ts",
+    "src/lib/pulls/queries.ts",
+    "src/lib/issues/queries.ts",
+  ])
+    assert.equal(check.appliesTo(file), true, file);
+  for (const file of [
+    "src/lib/pulls/local.ts",
+    "src/features/pulls/CreatePrDialog.tsx",
+    "src/lib/settings/queries.ts",
+  ])
+    assert.equal(check.appliesTo(file), false, file);
+  assert.deepEqual(check.allowlist, []);
+  const fixed =
+    "export function useSetRepoStar(repo: string) {\n  return useMutation({\n    onMutate: () => ({ key: k(repo) }),\n    onError: (_e, _s, ctx) => queryClient.setQueryData(ctx.key, false),\n  });\n}";
+  const unfixed =
+    "export function useUpdateRepoSettings(repo: string) {\n  return useMutation({\n    onSuccess: (data) => queryClient.setQueryData(repoSettingsKey(repo), data),\n  });\n}";
+  const files = [
+    "src/lib/git/queries/repo-access.ts",
+    "src/lib/git/queries/repo-settings.ts",
+  ];
+  const views = new Map([
+    ["src/lib/git/queries/repo-access.ts", view(fixed)],
+    ["src/lib/git/queries/repo-settings.ts", view(unfixed)],
+  ]);
+  const { violations, stale } = runCheck(check, files, views);
+  assert.deepEqual(violations, ["src/lib/git/queries/repo-settings.ts:3"]);
   assert.deepEqual(stale, []);
 });
 

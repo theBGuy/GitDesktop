@@ -322,15 +322,18 @@ export function useJiraComment(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the call closes over the link's site and the seed below over `repo`
-    // and the site, and the issue view survives a repo switch — without the key a
-    // switch appends this comment to another repo's cached issue.
+    // Pinned: the call and the settle invalidation close over `repo`/the link's
+    // site, and the issue view survives a repo switch — without the key a switch
+    // retargets the pending comment.
     mutationKey: ["jira-comment", repo, link?.siteHost ?? null],
     mutationFn: (args: { issueKey: string; bodyMd: string }) =>
       jiraIssueComment((link as JiraLink).siteHost, args.issueKey, args.bodyMd),
-    onSuccess: (comment, args) => {
-      if (!link) return;
-      const key = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
+    // The seed's repo and site are captured at mutate time instead, like every
+    // settle-time cache write here.
+    onMutate: () => ({ repo, siteHost: link?.siteHost ?? null }),
+    onSuccess: (comment, args, ctx) => {
+      if (ctx.siteHost === null) return;
+      const key = jiraIssueDetailKey(ctx.repo, ctx.siteHost, args.issueKey);
       queryClient.setQueryData<JiraIssueDetails>(key, (d) =>
         d ? { ...d, comments: [...d.comments, comment] } : d,
       );
@@ -431,17 +434,17 @@ function rollbackOptimisticStatus(
 }
 
 /** Land the server's REAL status name + category onto the detail cache (success),
- *  so the chip reads e.g. "Done" not the generic optimistic guess. */
+ *  so the chip reads e.g. "Done" not the generic optimistic guess. `ctx` is the
+ *  optimistic patch's context: its key was built at mutate time, where a settle
+ *  callback's closure `repo`/`link` are the CURRENT render's. */
 function landRealStatus(
   queryClient: ReturnType<typeof useQueryClient>,
-  repo: string,
-  link: JiraLink,
-  issueKey: string,
+  ctx: StatusPatchCtx | undefined,
   statusName: string,
   statusCategory: JiraStatusCategory,
 ) {
-  const detailKey = jiraIssueDetailKey(repo, link.siteHost, issueKey);
-  queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
+  if (!ctx?.detailKey) return;
+  queryClient.setQueryData<JiraIssueDetails>(ctx.detailKey, (d) =>
     d ? { ...d, statusName, statusCategory } : d,
   );
 }
@@ -482,17 +485,13 @@ export function useJiraTransition(
       );
     },
     onError: (_e, _args, ctx) => rollbackOptimisticStatus(queryClient, ctx),
-    onSuccess: (result, args) => {
-      if (!link) return;
+    onSuccess: (result, _args, ctx) =>
       landRealStatus(
         queryClient,
-        repo,
-        link,
-        args.issueKey,
+        ctx,
         result.statusName,
         result.statusCategory,
-      );
-    },
+      ),
     onSettled: () => invalidateJiraForRepo(queryClient, repo),
   });
 }
@@ -529,17 +528,13 @@ export function useJiraTransitionTo(
       );
     },
     onError: (_e, _args, ctx) => rollbackOptimisticStatus(queryClient, ctx),
-    onSuccess: (result, args) => {
-      if (!link) return;
+    onSuccess: (result, _args, ctx) =>
       landRealStatus(
         queryClient,
-        repo,
-        link,
-        args.issueKey,
+        ctx,
         result.statusName,
         result.statusCategory,
-      );
-    },
+      ),
     onSettled: () => invalidateJiraForRepo(queryClient, repo),
   });
 }
@@ -776,9 +771,9 @@ export function useJiraCommentEdit(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the call, the optimistic patch, its rollback and the seed all close
-    // over `repo`/the link's site, and the issue view survives a repo switch —
-    // without the key a switch patches another repo's cached issue.
+    // Pinned: the call and the settle invalidation close over `repo`/the link's
+    // site, and the issue view survives a repo switch — without the key a switch
+    // retargets the pending edit. The rollback and the seed read the context.
     mutationKey: ["jira-comment-edit", repo, link?.siteHost ?? null],
     mutationFn: (args: {
       issueKey: string;
@@ -814,10 +809,9 @@ export function useJiraCommentEdit(
         queryClient.setQueryData(ctx.detailKey, ctx.prevDetail);
       }
     },
-    onSuccess: (comment, args) => {
-      if (!link) return;
-      const detailKey = jiraIssueDetailKey(repo, link.siteHost, args.issueKey);
-      queryClient.setQueryData<JiraIssueDetails>(detailKey, (d) =>
+    onSuccess: (comment, _args, ctx) => {
+      if (!ctx?.detailKey) return;
+      queryClient.setQueryData<JiraIssueDetails>(ctx.detailKey, (d) =>
         d
           ? {
               ...d,

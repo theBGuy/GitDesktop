@@ -1,15 +1,23 @@
 import {
-  notifyManager,
+  type MutationCache,
   queryOptions,
-  replaceEqualDeep,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useRef, useSyncExternalStore } from "react";
+import { useCallback } from "react";
 import * as api from "../api";
 import type { DiscussionDetails } from "../types";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
-import { useOptimisticCacheMutation, useRepoMutation } from "./internal";
+import {
+  useMutationCacheSnapshot,
+  useOptimisticCacheMutation,
+  useRepoMutation,
+} from "./internal";
+import {
+  type DiscussionUpvoteVars,
+  pendingDiscussionUpvoteFor,
+  pendingMutationEntries,
+} from "./pr-writes";
 
 export function useDiscussionMeta(repo: string, enabled: boolean) {
   return useQuery({
@@ -29,9 +37,7 @@ export function useDiscussionList(
 ) {
   return useQuery({
     queryKey: [
-      "repo",
-      repo,
-      "discussion-list",
+      ...repoKeys.discussionList(repo),
       category ?? "all",
       limit ?? null,
     ] as const,
@@ -129,10 +135,6 @@ export function useDeleteDiscussionComment(repo: string) {
 
 const UPVOTE_KEY = "toggle-discussion-upvote";
 
-// One type for the mutation's generic AND the pending-scan's cast: a drifted
-// `number` then fails to compile instead of silently matching nothing.
-type DiscussionUpvoteVars = { number: number; subjectId: string; up: boolean };
-
 /** Optimistic upvote toggle on a discussion or its comments, with rollback. Per call,
  *  `number` is the containing discussion and `subjectId` its body or a comment. */
 export function useToggleDiscussionUpvote(repo: string) {
@@ -172,7 +174,7 @@ export function useToggleDiscussionUpvote(repo: string) {
     (queryClient, args) => {
       // The discussion list shows upvote counts too.
       void queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "discussion-list"],
+        queryKey: repoKeys.discussionList(repo),
       });
       return queryClient.invalidateQueries({
         queryKey: discussionDetailsOptions(repo, args.number).queryKey,
@@ -186,39 +188,26 @@ const NO_PENDING_UPVOTE = { pending: false, paused: false };
 
 /**
  * Whether an upvote toggle on discussion `number` is in flight, and whether any such
- * toggle is parked offline. Read from the mutation cache, never the observer, which
- * tracks only its latest call (a toggle fired on another discussion would release
- * this one's hold), nor `useMutationState`, for the `<Activity>` blind spot
- * projects.ts records.
+ * toggle is parked offline. Read from the mutation cache through
+ * {@link useMutationCacheSnapshot}, never the observer, which tracks only its latest
+ * call (a toggle fired on another discussion would release this one's hold).
  */
 export function usePendingDiscussionUpvote(
   repo: string,
   number: number,
 ): { pending: boolean; paused: boolean } {
-  const cache = useQueryClient().getMutationCache();
-  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
-  // keeps one identity, as `useSyncExternalStore` requires.
-  const snapshot = useRef(NO_PENDING_UPVOTE);
-  const getSnapshot = useCallback(() => {
-    const matching = cache
-      .findAll({ mutationKey: [UPVOTE_KEY, repo], status: "pending" })
-      .filter(
-        (m) =>
-          (m.state.variables as DiscussionUpvoteVars | undefined)?.number ===
-          number,
-      );
-    snapshot.current = replaceEqualDeep(snapshot.current, {
-      pending: matching.length > 0,
-      paused: matching.some((m) => m.state.isPaused),
-    });
-    return snapshot.current;
-  }, [cache, repo, number]);
-  const subscribe = useCallback(
-    (onStoreChange: () => void) =>
-      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
-    [cache],
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingDiscussionUpvoteFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: [UPVOTE_KEY], status: "pending" }),
+        ),
+        repo,
+        number,
+      ),
+    [repo, number],
   );
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useMutationCacheSnapshot(select, NO_PENDING_UPVOTE);
 }
 
 export function useLockDiscussion(repo: string) {

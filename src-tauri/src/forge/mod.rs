@@ -1745,6 +1745,9 @@ pub async fn forge_pr_review_threads(
 /// Reply in an existing review thread, behind the abstraction. `thread_id` is the
 /// provider's thread id (GitHub reviewThread node id / GitLab discussion id /
 /// Bitbucket root comment id).
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_pr_thread_reply(
     repo_path: String,
@@ -1844,6 +1847,9 @@ pub async fn forge_pr_review_submit(
 
 /// Resolve / unresolve a review thread, behind the abstraction. Bitbucket has no
 /// thread-resolution surface wired (`mr_thread_resolve` false), so its arm errors.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_pr_thread_resolve(
     repo_path: String,
@@ -1912,6 +1918,9 @@ pub async fn forge_gitlab_review_token_clear() -> AppResult<()> {
 /// mutation); GitLab PUTs the MR note; Bitbucket PUTs the PR comment. `comment_id`
 /// is the id the thread already carries (GitHub node id / GitLab note id /
 /// Bitbucket comment id). Gated on `implemented.mrCommentEdit`.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_pr_edit_comment(
     repo_path: String,
@@ -1932,6 +1941,9 @@ pub async fn forge_pr_edit_comment(
 
 /// Delete a merge/pull request conversation comment, behind the abstraction. Same
 /// `comment_id` carriage as `forge_pr_edit_comment`.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_pr_delete_comment(
     repo_path: String,
@@ -2850,6 +2862,9 @@ pub async fn forge_issue_comment(
 /// the IssueComment node (the same mutation the PR path uses); GitLab PUTs the
 /// issue note; Bitbucket's tracker is being retired, so its arm errors. Gated on
 /// `implemented.issueCommentEdit` (GitLab true; Bitbucket false; GitHub true).
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_issue_edit_comment(
     repo_path: String,
@@ -2870,6 +2885,9 @@ pub async fn forge_issue_edit_comment(
 
 /// Delete an issue conversation comment, behind the abstraction. Same `comment_id`
 /// carriage as `forge_issue_edit_comment`; Bitbucket's arm errors.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_issue_delete_comment(
     repo_path: String,
@@ -3058,6 +3076,9 @@ pub async fn forge_pr_reactions(
 /// `target`/`number`; GitLab uses `target` (`"issue"`/`"mr"`) + `number`, with
 /// `subject_id` empty for the body or the note id for a comment. Discussions
 /// (GitHub-only) ride the GitHub arm with `target: "discussion"`.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_add_reaction(
     repo_path: String,
@@ -3080,6 +3101,9 @@ pub async fn forge_add_reaction(
 
 /// Remove the viewer's reaction, behind the abstraction (same subject carriage
 /// as `forge_add_reaction`; GitLab resolves the award id server-side).
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn forge_remove_reaction(
     repo_path: String,
@@ -3160,6 +3184,9 @@ pub async fn forge_assignable_users(
 /// the `labelable_id`); GitLab keys them by name (`add_names`/`remove_names` on the
 /// numeric `number`). `target` is `"issue"` or `"mr"`. The caller passes both id and
 /// name deltas so each provider takes the pair it addresses by.
+// No lens on the wire: the GitHub arm addresses by global node id (repo_path only
+// picks the cwd/host) and the lens switcher is GitHub-only, so this write is
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_edit_labels(

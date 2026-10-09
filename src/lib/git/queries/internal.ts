@@ -3,11 +3,15 @@
 // would widen its public surface.
 
 import {
+  type MutationCache,
+  notifyManager,
   type QueryClient,
   type QueryKey,
+  replaceEqualDeep,
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import {
   BOARD_WRITES_KEY,
   pausedBoardWriteOn,
@@ -79,6 +83,49 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
     onSettled: (_d: TData | undefined, _e: unknown, args: TArgs) =>
       reconcile(queryClient, args),
   });
+}
+
+/**
+ * A value derived from the mutation cache — the observer-independent reading the
+ * pending-write holds need, since an observer tracks only its own LATEST call.
+ * `select` is memoized by the caller — `useCallback` over its own primitive deps,
+ * which biome and the React Compiler can check — never a deps array passed in here.
+ *
+ * `getSnapshot` COMPUTES from the cache rather than returning a value some
+ * subscription last wrote, which is the whole point of doing this by hand instead of
+ * through `useMutationState`. That hook keeps its result in a ref refreshed ONLY
+ * inside its cache subscription, so any window without a live subscription is a
+ * blind spot it never reconciles: a host under `<Activity>` has its passive effects
+ * torn down on hide, and a write settling while the tab is away notifies nobody. On
+ * show, re-subscribing re-reads the same untouched ref, React sees no change, and
+ * the pre-hide list latches — holds and indicator lines for writes that finished
+ * minutes ago. `useMutationState` has the same blind spot for its filters, which
+ * reach it through an options ref updated after render.
+ *
+ * Computing on demand makes both moot: React calls this on every render and again
+ * when it re-subscribes, and each call reads the live cache under the CURRENT
+ * `select`. `replaceEqualDeep` against the previous snapshot keeps the identity
+ * stable when nothing changed, which `useSyncExternalStore` requires of a snapshot
+ * (and the library's own pattern for it); `initial` seeds that comparison.
+ */
+export function useMutationCacheSnapshot<T>(
+  select: (cache: MutationCache) => T,
+  initial: T,
+): T {
+  const cache = useQueryClient().getMutationCache();
+  const snapshot = useRef(initial);
+  const getSnapshot = useCallback(() => {
+    snapshot.current = replaceEqualDeep(snapshot.current, select(cache));
+    return snapshot.current;
+  }, [cache, select]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  // Third argument is the server snapshot, which this desktop app never renders;
+  // the same computation answers it, as the library does for its own hooks.
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** How many of a repo's own board writes are between their request and their

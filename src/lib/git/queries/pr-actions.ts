@@ -1,12 +1,11 @@
 import {
-  notifyManager,
+  type MutationCache,
   type QueryKey,
-  replaceEqualDeep,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useRef, useSyncExternalStore } from "react";
+import { useCallback } from "react";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import * as api from "../api";
 import type {
@@ -20,6 +19,7 @@ import type {
 import { invalidateRepoAfterWrite, repoKeys } from "./core";
 import {
   invalidateProjectBoards,
+  useMutationCacheSnapshot,
   useOptimisticCacheMutation,
   useRepoMutation,
 } from "./internal";
@@ -28,6 +28,7 @@ import {
   type PendingLocalPrWrite,
   type PendingPrWrite,
   PR_WRITES_KEY,
+  pendingMutationEntries,
   pendingWritesFor,
   prWriteKey,
   readPendingLocalPrWrite,
@@ -38,38 +39,26 @@ import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
 /**
  * Every write filed under `prefix` against `repo` that is in flight, one entry per
  * INVOCATION — an observer tracks only its latest call, so a second write from the
- * same hook would hide the first. Computed from the cache on every snapshot rather
- * than through `useMutationState`, for the `<Activity>` blind spot
- * `usePendingBoardWrites` (projects.ts) documents. `read` must be module-stable.
+ * same hook would hide the first. Read through {@link useMutationCacheSnapshot}.
+ * `prefix` and `read` must be module-stable.
  */
 function usePendingWritesUnder<W>(
   prefix: readonly string[],
   repo: string,
   read: (kind: string, vars: unknown, paused: boolean) => W,
 ): W[] {
-  const cache = useQueryClient().getMutationCache();
-  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
-  // keeps one identity, as `useSyncExternalStore` requires.
-  const snapshot = useRef<W[]>([]);
-  const getSnapshot = useCallback(() => {
-    const next = pendingWritesFor(
-      cache.findAll({ mutationKey: prefix, status: "pending" }).map((m) => ({
-        key: m.options.mutationKey,
-        vars: m.state.variables,
-        paused: m.state.isPaused,
-      })),
-      repo,
-      read,
-    );
-    snapshot.current = replaceEqualDeep(snapshot.current, next);
-    return snapshot.current;
-  }, [cache, prefix, repo, read]);
-  const subscribe = useCallback(
-    (onStoreChange: () => void) =>
-      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
-    [cache],
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: prefix, status: "pending" }),
+        ),
+        repo,
+        read,
+      ),
+    [prefix, repo, read],
   );
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useMutationCacheSnapshot(select, []);
 }
 
 /** Every PR write against `repo` that is in flight ({@link usePendingWritesUnder}). */

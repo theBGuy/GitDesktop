@@ -34,6 +34,9 @@ export const forgePrReviewThreads = (
     lens,
   });
 
+// No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
+// only picks the cwd/host) and the lens switcher is GitHub-only, so they are
+// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 /** Post a reply into an existing review thread. */
 export const forgePrThreadReply = (
   repoPath: string,
