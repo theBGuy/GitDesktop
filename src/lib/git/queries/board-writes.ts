@@ -9,6 +9,8 @@
  * Node's type stripping. A runtime import added here fails that test.
  */
 import type { InvalidateQueryFilters } from "@tanstack/react-query";
+import type { PendingMutationEntry } from "./pr-writes";
+import type { BoardWriteKind, PendingBoardWrite } from "./projects";
 
 /** EVERY cached board read in one repo — every board, every lens of each. The
  *  scope a board write settles against: a write changes what an item IS, which no
@@ -49,6 +51,33 @@ export function boardWriteVars(mutation: { state: { variables?: unknown } }): {
     number: typeof number === "number" ? number : null,
     count: list === null ? null : list.length,
   };
+}
+
+/** The board writes among `entries` (keyed `["board-write", kind]`) against `repo`,
+ *  one per invocation. The repo match reads each write's VARIABLES rather than a key
+ *  segment: variables are fixed when the write fires, where a key is re-derived from
+ *  whatever the hook's render scope holds later. An unknown key shape degrades to a
+ *  null kind rather than a guessed one, which drops the write from the labelled
+ *  lines but still counts it for the holds. An entry with no `mutationId` (never one
+ *  read from the cache) has nothing to name it by and is skipped. */
+export function pendingBoardWritesFor(
+  entries: readonly PendingMutationEntry[],
+  repo: string,
+): PendingBoardWrite[] {
+  return entries.flatMap((e): PendingBoardWrite[] => {
+    const vars = boardWriteVars({ state: { variables: e.vars } });
+    if (vars.repo !== repo || e.mutationId === undefined) return [];
+    const kind = e.key?.[1];
+    return [
+      {
+        mutationId: e.mutationId,
+        kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
+        itemId: vars.itemId,
+        number: vars.number,
+        count: vars.count,
+      },
+    ];
+  });
 }
 
 /**

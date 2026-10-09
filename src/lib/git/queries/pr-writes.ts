@@ -1,13 +1,16 @@
 /**
  * The pure pieces of the PR-write bookkeeping, remote and local: the key every PR
  * write is filed under, how a write's variables name what it targets, and the
- * matches a PR view holds its controls by.
+ * matches a PR view holds its controls by. Also the reading every cache-scan hold
+ * shares (a cache mutation as a {@link PendingMutationEntry}), and the review-thread
+ * and discussion-upvote projections over it.
  *
  * Import-free at runtime on purpose (types only, erased): `scripts/pr-writes.test.mjs`
  * loads it straight from `src/` under Node's type stripping, which resolves no
  * bundler aliases. A runtime import added here fails that test.
  */
 import type { RemoteLens } from "../types";
+import type { PendingThreadWrites } from "./prs";
 
 /** The PR writes whose in-flight state a PR view holds its controls on. */
 export type PrWriteKind =
@@ -110,11 +113,32 @@ export const readPendingPrWrite = (
   paused,
 });
 
-/** One pending mutation as the cache holds it. An absent `paused` reads as running. */
+/** One pending mutation as the cache holds it. An absent `paused` reads as running;
+ *  `mutationId` is the cache's own per-invocation id, absent in hand-built entries. */
 export interface PendingMutationEntry {
   key: readonly unknown[] | undefined;
   vars: unknown;
   paused?: boolean;
+  mutationId?: number;
+}
+
+/** The parts of a query-core `Mutation` a pending-write scan reads. */
+export interface PendingMutationLike {
+  mutationId: number;
+  options: { mutationKey?: readonly unknown[] };
+  state: { variables?: unknown; isPaused: boolean };
+}
+
+/** Cache mutations as {@link PendingMutationEntry} values, in cache order. */
+export function pendingMutationEntries(
+  mutations: readonly PendingMutationLike[],
+): PendingMutationEntry[] {
+  return mutations.map((m) => ({
+    mutationId: m.mutationId,
+    key: m.options.mutationKey,
+    vars: m.state.variables,
+    paused: m.state.isPaused,
+  }));
 }
 
 /** The writes among `entries` filed against `repo` (keyed `[prefix, kind, repo]`),
@@ -191,6 +215,82 @@ export function isStackWritePendingFor(
       (w.members?.includes(target) ?? false) &&
       (w.lens === null || w.lens === lens),
   );
+}
+
+/** Which thread-write kind a `["thread-<kind>", repo]` mutation key files under.
+ *  A switch, not an object lookup: the key is cache data, and a prefix like
+ *  "constructor" would resolve through a plain object's prototype. */
+function threadWriteKind(
+  prefix: unknown,
+): keyof PendingThreadWrites | undefined {
+  switch (prefix) {
+    case "thread-reply":
+      return "reply";
+    case "thread-resolve":
+      return "resolve";
+    default:
+      return undefined;
+  }
+}
+
+/** What a thread reply or resolve's variables carry for the pending scan. One type
+ *  for both mutations' generics AND the scan's cast below: a drifted field then fails
+ *  to compile instead of silently matching nothing. */
+export type ThreadWriteVars = {
+  number: number;
+  lens: RemoteLens;
+  threadId: string;
+};
+
+/** The thread replies and resolves among `entries` (both keys' writes, mixed) on PR
+ *  `number` in `lens` and `repo`, keyed by thread id. A thread's entry is paused when
+ *  ANY of its writes is parked offline. */
+export function pendingThreadWritesFor(
+  entries: readonly PendingMutationEntry[],
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+): PendingThreadWrites {
+  const out: PendingThreadWrites = { reply: {}, resolve: {} };
+  for (const e of entries) {
+    const [prefix, keyRepo] = e.key ?? [];
+    const kind = threadWriteKind(prefix);
+    if (kind === undefined || keyRepo !== repo) continue;
+    const vars = e.vars as ThreadWriteVars | undefined;
+    if (vars?.number !== number || vars.lens !== lens) continue;
+    const prev = out[kind][vars.threadId];
+    out[kind][vars.threadId] = {
+      paused: (prev?.paused ?? false) || (e.paused ?? false),
+    };
+  }
+  return out;
+}
+
+/** A discussion upvote toggle's variables. One type for the mutation's generic AND
+ *  the pending scan's cast: a drifted `number` then fails to compile instead of
+ *  silently matching nothing. */
+export type DiscussionUpvoteVars = {
+  number: number;
+  subjectId: string;
+  up: boolean;
+};
+
+/** Whether an upvote toggle on discussion `number` in `repo` is among `entries`
+ *  (keyed `[op, repo]`), and whether any such toggle is parked offline. */
+export function pendingDiscussionUpvoteFor(
+  entries: readonly PendingMutationEntry[],
+  repo: string,
+  number: number,
+): { pending: boolean; paused: boolean } {
+  const matching = entries.filter(
+    (e) =>
+      e.key?.[1] === repo &&
+      (e.vars as DiscussionUpvoteVars | undefined)?.number === number,
+  );
+  return {
+    pending: matching.length > 0,
+    paused: matching.some((e) => e.paused ?? false),
+  };
 }
 
 /** The local-PR writes whose in-flight state a local PR view holds its controls on. */

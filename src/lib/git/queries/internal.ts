@@ -3,11 +3,15 @@
 // would widen its public surface.
 
 import {
+  type MutationCache,
+  notifyManager,
   type QueryClient,
   type QueryKey,
+  replaceEqualDeep,
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import {
   BOARD_WRITES_KEY,
   pausedBoardWriteOn,
@@ -79,6 +83,34 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
     onSettled: (_d: TData | undefined, _e: unknown, args: TArgs) =>
       reconcile(queryClient, args),
   });
+}
+
+/**
+ * A value derived from the mutation cache, recomputed from the live cache under the
+ * current `select` on every read rather than via `useMutationState`, whose
+ * subscription-refreshed ref goes stale across an `<Activity>` hide.
+ * `replaceEqualDeep` keeps an unchanged snapshot's identity, as `useSyncExternalStore`
+ * requires; `initial` seeds that comparison. `select` is caller-memoized: a
+ * `useCallback` over stable deps (primitives or module-level constants).
+ */
+export function useMutationCacheSnapshot<T>(
+  select: (cache: MutationCache) => T,
+  initial: T,
+): T {
+  const cache = useQueryClient().getMutationCache();
+  const snapshot = useRef(initial);
+  const getSnapshot = useCallback(() => {
+    snapshot.current = replaceEqualDeep(snapshot.current, select(cache));
+    return snapshot.current;
+  }, [cache, select]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  // Third argument is the server snapshot, which this desktop app never renders;
+  // the same computation answers it, as the library does for its own hooks.
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** How many of a repo's own board writes are between their request and their

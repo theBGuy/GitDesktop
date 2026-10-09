@@ -115,7 +115,7 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
         ],
         discussion: (n) => [
           ["repo", repo, "discussion", n],
-          ["repo", repo, "discussion-list"],
+          repoKeys.discussionList(repo),
         ],
       };
       // RETURNED, not voided: react-query holds `isPending` until this settles,

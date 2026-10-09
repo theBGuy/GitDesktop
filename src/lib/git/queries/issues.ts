@@ -431,15 +431,32 @@ function useTimeTrackingMutation(
     // once the observer loses its listeners).
     onError: (e) => toastError(e),
     mutationFn,
-    onSuccess: (stats, args) => {
+    // The repo is captured at mutate time and the seed reads it back from the
+    // context: onSuccess runs off the current render's options, so after a repo
+    // switch a closure `repo` would seed the newly-live repo's stats. No mutation
+    // key instead — the time-tracking controls read `isPending`, which a detach
+    // would idle.
+    onMutate: () => ({ repo }),
+    onSuccess: (stats, args, ctx) => {
+      // A re-pushed observer (the repo switched mid-flight) may have resumed the
+      // write against the new repo, so neither repo can take the answer as truth.
+      if (repo !== ctx.repo) {
+        for (const r of [ctx.repo, repo])
+          for (const queryKey of [
+            statsKey(r, args.number),
+            viewKey(r, args.number),
+          ])
+            queryClient.invalidateQueries({ queryKey, exact: true });
+        return;
+      }
       queryClient.setQueryData<GitLabTimeStats>(
-        statsKey(repo, args.number),
+        statsKey(ctx.repo, args.number),
         stats,
       );
       // `exact` — the stats key extends the view key, so a prefix invalidation
       // would mark the stats we just wrote stale and refetch them for nothing.
       queryClient.invalidateQueries({
-        queryKey: viewKey(repo, args.number),
+        queryKey: viewKey(ctx.repo, args.number),
         exact: true,
       });
     },
