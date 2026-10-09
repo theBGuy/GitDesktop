@@ -11298,7 +11298,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_status_login_is_shared_by_every_repo_on_the_host() {
-        let host = "dd-r3-shared.test";
+        let host = "shared-login.test";
         *status_login_cell(&HOST_STATUS_LOGINS, host).lock().await = Some(StatusLogin {
             login: "alice".to_string(),
             resolved_at: Instant::now(),
