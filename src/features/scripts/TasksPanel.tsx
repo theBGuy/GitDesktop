@@ -100,7 +100,13 @@ export function TasksPanel() {
   // identity-scoped task through the other-repositories group.
   const { keys, settled } = useTaskRepoKeys(repoPath);
 
-  const [editing, setEditing] = useState<TaskDef | "new" | null>(null);
+  // One object per open: a settling write compares sessions by identity, so
+  // even two back-to-back "New task" sessions never match each other.
+  const [session, setSession] = useState<{ target: TaskDef | "new" } | null>(
+    null,
+  );
+  const editing = session?.target ?? null;
+  const openEditor = (target: TaskDef | "new") => setSession({ target });
   const [activeIndex, setActiveIndex] = useState(-1);
   const [othersOpen, setOthersOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -111,29 +117,39 @@ export function TasksPanel() {
   const inScope = tasks.filter((t) => taskInScope(t, keys));
   const elsewhere = tasks.filter((t) => taskScopedElsewhere(t, keys));
 
-  function saveTask(task: TaskDef) {
-    const isNew = editing === "new";
+  // A settled write closes the editor only while it still shows the session
+  // that submitted it — the panel survives repo switches, and the user may have
+  // closed and reopened the editor on something else meanwhile.
+  const closeEditorIf = (submitted: typeof session) =>
+    setSession((cur) => (cur === submitted ? null : cur));
+
+  async function saveTask(task: TaskDef) {
+    const submitted = session;
+    const isNew = submitted?.target === "new";
     const mutation = isNew ? addTask : updateTask;
-    mutation.mutate(task, {
-      onSuccess: () => {
-        setEditing(null);
-        toast.success(isNew ? `Added "${task.name}"` : `Saved "${task.name}"`);
-      },
-      onError: toastError,
-    });
+    try {
+      await mutation.mutateAsync(task);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    closeEditorIf(submitted);
+    toast.success(isNew ? `Added "${task.name}"` : `Saved "${task.name}"`);
   }
 
-  function deleteTask(id: string) {
+  async function deleteTask(id: string) {
     // All tasks, not just the in-scope ones: the other-repositories group deletes
     // through here too.
     const name = tasks.find((t) => t.id === id)?.name ?? "task";
-    removeTask.mutate(id, {
-      onSuccess: () => {
-        setEditing(null);
-        toast.success(`Deleted "${name}"`);
-      },
-      onError: toastError,
-    });
+    const submitted = session;
+    try {
+      await removeTask.mutateAsync(id);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    closeEditorIf(submitted);
+    toast.success(`Deleted "${name}"`);
   }
 
   // The row menus' delete is one click from gone, so it asks first. The editor's
@@ -146,7 +162,7 @@ export function TasksPanel() {
       confirmLabel: "Delete task",
       confirmVariant: "destructive",
     });
-    if (ok) deleteTask(task.id);
+    if (ok) await deleteTask(task.id);
   }
 
   const navRows: NavRow[] = [];
@@ -202,7 +218,7 @@ export function TasksPanel() {
           <Button
             size="icon-xs"
             variant="ghost"
-            onClick={() => setEditing("new")}
+            onClick={() => openEditor("new")}
             title="New task"
             aria-label="New task"
           >
@@ -233,11 +249,7 @@ export function TasksPanel() {
           <Button
             size="sm"
             disabled={setEnabled.isPending}
-            onClick={() =>
-              setEnabled.mutate(true, {
-                onError: toastError,
-              })
-            }
+            onClick={() => void setEnabled.mutateAsync(true).catch(toastError)}
           >
             Enable task running
           </Button>
@@ -253,7 +265,7 @@ export function TasksPanel() {
               repository instead.
             </p>
           </div>
-          <Button size="sm" onClick={() => setEditing("new")}>
+          <Button size="sm" onClick={() => openEditor("new")}>
             <PlusIcon data-icon="inline-start" />
             New task
           </Button>
@@ -279,7 +291,7 @@ export function TasksPanel() {
                     to.
                   </p>
                 </div>
-                <Button size="sm" onClick={() => setEditing("new")}>
+                <Button size="sm" onClick={() => openEditor("new")}>
                   <PlusIcon data-icon="inline-start" />
                   New task
                 </Button>
@@ -356,7 +368,7 @@ export function TasksPanel() {
                         <PlayIcon data-icon="inline-start" />
                         Run
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setEditing(task)}>
+                      <DropdownMenuItem onClick={() => openEditor(task)}>
                         <PencilSimpleIcon data-icon="inline-start" />
                         Edit
                       </DropdownMenuItem>
@@ -416,7 +428,7 @@ export function TasksPanel() {
                           active={index === clamped}
                           tabIndex={index === tabStop ? 0 : -1}
                           onFocus={() => setActiveIndex(index)}
-                          onEdit={() => setEditing(task)}
+                          onEdit={() => openEditor(task)}
                           onDelete={() => void confirmDeleteTask(task)}
                         />
                       );
@@ -432,10 +444,10 @@ export function TasksPanel() {
         task={editing}
         open={editing !== null}
         onOpenChange={(o) => {
-          if (!o) setEditing(null);
+          if (!o) setSession(null);
         }}
-        onSave={saveTask}
-        onDelete={deleteTask}
+        onSave={(task) => void saveTask(task)}
+        onDelete={(id) => void deleteTask(id)}
       />
     </div>
   );

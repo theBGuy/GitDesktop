@@ -26,6 +26,7 @@ import {
   repoEntry,
 } from "@/lib/automations/types";
 import { useRepoIdentity } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
@@ -188,14 +189,18 @@ export function RepoAutomationsDialog({
     setDraft(EMPTY_OVERRIDE);
   }
 
-  function doSave() {
-    save.mutate(sanitizeOverride(draft), {
-      onSuccess: () => {
-        toast.success("Repository automations saved");
-        onOpenChange(false);
-      },
-      onError: toastError,
-    });
+  async function doSave() {
+    const savedFor = repoPath;
+    try {
+      await save.mutateAsync(sanitizeOverride(draft));
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success("Repository automations saved");
+    // The dialog survives a repo switch (RepositoryView is one instance), so a
+    // save landing after one must not close the next repo's dialog.
+    if (useUiStore.getState().repoPath === savedFor) onOpenChange(false);
   }
 
   const hasOverrides = Object.keys(draft.lifecycles).length > 0;
@@ -243,7 +248,7 @@ export function RepoAutomationsDialog({
             // Below `sm` the footer stacks and stretches the wrapper span; the
             // Button fills it to match the stretched Cancel beside it.
             className="w-full"
-            onClick={doSave}
+            onClick={() => void doSave()}
             disabled={!dirty || save.isPending}
             reason={save.isPending ? "Saving…" : "No changes to save"}
           >

@@ -43,19 +43,17 @@ export function useComposerCollapsed(
     // refused write restores the previous value synchronously, so the caller's
     // re-homing has that one commit to ride.
     queryClient.setQueryData(settingsKeys.settings, updated);
-    saveSettings.mutate(updated, {
-      onError: () => {
-        // Only roll back if this call's change is still the latest: otherwise a
-        // late-failing earlier write would stomp a newer successful one (two
-        // fast toggles where the first write rejects after the second lands).
-        const latest = queryClient.getQueryData<AppSettings>(
-          settingsKeys.settings,
-        );
-        if (latest?.commentComposerCollapsed !== next) return;
-        // Armed before the restore, so the commit it rides is the very next one.
-        onRollback(current.commentComposerCollapsed);
-        queryClient.setQueryData(settingsKeys.settings, current);
-      },
+    void saveSettings.mutateAsync(updated).catch(() => {
+      // Only roll back if this call's change is still the latest: otherwise a
+      // late-failing earlier write would stomp a newer successful one (two
+      // fast toggles where the first write rejects after the second lands).
+      const latest = queryClient.getQueryData<AppSettings>(
+        settingsKeys.settings,
+      );
+      if (latest?.commentComposerCollapsed !== next) return;
+      // Armed before the restore, so the commit it rides is the very next one.
+      onRollback(current.commentComposerCollapsed);
+      queryClient.setQueryData(settingsKeys.settings, current);
     });
     return true;
   }

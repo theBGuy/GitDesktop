@@ -161,10 +161,14 @@ export const AutomationsSection = withForm({
 
     function doSave() {
       if (!automations.data) return;
-      save.mutate(
-        { ...automations.data, lifecycles: sanitizeLifecycles(draft) },
-        { onError: toastError },
-      );
+      // Detached: Settings' "Save and close" fires this right before unmounting
+      // the panel, so the failure toast must not depend on it staying mounted.
+      void save
+        .mutateAsync({
+          ...automations.data,
+          lifecycles: sanitizeLifecycles(draft),
+        })
+        .catch(toastError);
     }
 
     // Register/deregister the imperative save with the host, so Settings' "Save

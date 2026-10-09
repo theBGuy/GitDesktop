@@ -29,6 +29,7 @@ import {
   useWriteHook,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { HOOK_TEMPLATES } from "./templates";
@@ -98,54 +99,66 @@ export function HooksDialog({
   const canSave =
     entry !== null && !isBlank && (dirty || entry.state === "inactive");
 
-  function save() {
+  async function save() {
     if (!entry) return;
-    writeHook.mutate(
-      { name: entry.name, content: draft },
-      {
-        onSuccess: () => toast.success(`Saved the ${entry.name} hook`),
-        onError: toastError,
-      },
-    );
+    const name = entry.name;
+    try {
+      await writeHook.mutateAsync({ name, content: draft });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Saved the ${name} hook`);
   }
 
-  function toggle(enabled: boolean) {
+  async function toggle(enabled: boolean) {
     if (!entry) return;
-    setEnabled.mutate(
-      { name: entry.name, enabled },
-      {
-        onSuccess: () =>
-          toast.success(`${enabled ? "Enabled" : "Disabled"} ${entry.name}`),
-        onError: toastError,
-      },
-    );
+    const name = entry.name;
+    try {
+      await setEnabled.mutateAsync({ name, enabled });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`${enabled ? "Enabled" : "Disabled"} ${name}`);
   }
 
-  function doDelete() {
+  // The dialog survives a repo switch (RepositoryView is one instance), so a
+  // continuation writes its state only while the repo it fired in is live.
+  const stillIn = (firedIn: string) =>
+    useUiStore.getState().repoPath === firedIn;
+
+  async function doDelete() {
     if (!entry) return;
-    deleteHook.mutate(entry.name, {
-      onSuccess: () => {
-        toast.success(`Deleted ${entry.name}`);
-        setSelected(null);
-      },
-      onError: toastError,
-    });
+    const name = entry.name;
+    const firedIn = repoPath;
+    try {
+      await deleteHook.mutateAsync(name);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Deleted ${name}`);
+    if (stillIn(firedIn)) setSelected((cur) => (cur === name ? null : cur));
   }
 
-  function runManager(action: "install" | "update") {
+  async function runManager(action: "install" | "update") {
     const manager = hooks.data?.manager;
     if (!manager) return;
+    const firedIn = repoPath;
     setManagerOutput(null);
     const run = action === "install" ? installHookManager : updateHookManager;
-    run.mutate(manager, {
-      onSuccess: (out) => {
-        setManagerOutput(out || "Done.");
-        toast.success(
-          `${manager} ${action === "install" ? "installed" : "updated"}`,
-        );
-      },
-      onError: toastError,
-    });
+    let out: string;
+    try {
+      out = await run.mutateAsync(manager);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    if (stillIn(firedIn)) setManagerOutput(out || "Done.");
+    toast.success(
+      `${manager} ${action === "install" ? "installed" : "updated"}`,
+    );
   }
 
   // Arrow keys walk the hook list, mirroring the app's other lists.
@@ -202,7 +215,7 @@ export function HooksDialog({
                   variant="outline"
                   size="xs"
                   disabled={managerRunning}
-                  onClick={() => runManager("install")}
+                  onClick={() => void runManager("install")}
                 >
                   Install hooks
                 </Button>
@@ -212,7 +225,7 @@ export function HooksDialog({
                   variant="outline"
                   size="xs"
                   disabled={managerRunning}
-                  onClick={() => runManager("update")}
+                  onClick={() => void runManager("update")}
                 >
                   Update
                 </Button>
@@ -332,7 +345,7 @@ export function HooksDialog({
                   <div className="mt-2 flex items-center gap-2">
                     <Button
                       size="sm"
-                      onClick={save}
+                      onClick={() => void save()}
                       disabled={!canSave || writeHook.isPending}
                     >
                       {entry.state === "inactive" ? "Create hook" : "Save"}
@@ -341,7 +354,7 @@ export function HooksDialog({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => toggle(false)}
+                        onClick={() => void toggle(false)}
                         disabled={setEnabled.isPending}
                       >
                         Disable
@@ -351,7 +364,7 @@ export function HooksDialog({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => toggle(true)}
+                        onClick={() => void toggle(true)}
                         disabled={setEnabled.isPending}
                       >
                         Enable
@@ -374,7 +387,7 @@ export function HooksDialog({
                           <Button
                             variant="destructive"
                             size="sm"
-                            onClick={doDelete}
+                            onClick={() => void doDelete()}
                             disabled={deleteHook.isPending}
                           >
                             Delete

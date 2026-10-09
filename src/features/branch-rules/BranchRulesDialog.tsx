@@ -33,6 +33,7 @@ import {
 } from "@/lib/branch-rules/types";
 import { ghBranchProtections } from "@/lib/git/api";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -213,18 +214,25 @@ export function BranchRulesDialog({
     }
   }
 
-  function doSave() {
-    saving.mutate(draft, {
-      onSuccess: () => {
-        toast.success(
-          scope === "shared"
-            ? "Saved to .gitdesktop/branch-rules.json — commit it to share with your team"
-            : "Branch rules saved",
-        );
-        onOpenChange(false);
-      },
-      onError: toastError,
-    });
+  async function doSave() {
+    // Scope and repo are read before the await: the toast names where THIS save
+    // went, and a save landing after a repo switch must not close the next
+    // repo's dialog (RepositoryView is one instance across switches).
+    const savedFor = repoPath;
+    const savedShared = scope === "shared";
+    const target = savedShared ? saveShared : savePersonal;
+    try {
+      await target.mutateAsync(draft);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(
+      savedShared
+        ? "Saved to .gitdesktop/branch-rules.json — commit it to share with your team"
+        : "Branch rules saved",
+    );
+    if (useUiStore.getState().repoPath === savedFor) onOpenChange(false);
   }
 
   const promotionBranches = draft.promotionBranches;
@@ -534,7 +542,7 @@ export function BranchRulesDialog({
             // Below `sm` the footer stacks and stretches the wrapper span; the
             // Button fills it to match the stretched Cancel beside it.
             className="w-full"
-            onClick={doSave}
+            onClick={() => void doSave()}
             disabled={!dirty || saving.isPending}
             reason={!dirty ? "No changes to save" : "Saving…"}
           >

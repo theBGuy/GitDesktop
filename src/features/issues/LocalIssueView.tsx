@@ -197,6 +197,14 @@ export function LocalIssueView({
     setComment("");
   }
 
+  /** Whether the live UI still shows this issue in THIS repo. A write can settle
+   *  after the user has moved on, and its follow-up (closing the confirm,
+   *  deselecting) must not land on whatever they moved to. */
+  function stillShowing(issueId: string) {
+    const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
+    return liveRepo === repoPath && sel?.kind === "local" && sel.id === issueId;
+  }
+
   async function deleteIssue(issueId: string) {
     try {
       await del.mutateAsync(issueId);
@@ -204,12 +212,23 @@ export function LocalIssueView({
       toastError(e);
       return;
     }
+    if (!stillShowing(issueId)) return;
     setConfirmDelete(false);
-    // Deselect only while the deleted issue is still the selection in THIS
-    // repo — the write can settle after the user has moved on.
-    const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
-    if (liveRepo === repoPath && sel?.kind === "local" && sel.id === issueId)
-      selectIssue(null);
+    selectIssue(null);
+  }
+
+  async function setArchived(issueId: string, archived: boolean) {
+    try {
+      await update.mutateAsync({
+        id: issueId,
+        mutate: (cur) => ({ ...cur, archived }),
+      });
+    } catch (e) {
+      // The issue stays selected: nothing was archived.
+      toastError(e);
+      return;
+    }
+    if (archived && stillShowing(issueId)) selectIssue(null);
   }
 
   return (
@@ -408,20 +427,7 @@ export function LocalIssueView({
         <Button
           variant="outline"
           size="sm"
-          onClick={() => {
-            if (issue.archived) {
-              update.mutate({
-                id: issue.id,
-                mutate: (cur) => ({ ...cur, archived: false }),
-              });
-            } else {
-              update.mutate({
-                id: issue.id,
-                mutate: (cur) => ({ ...cur, archived: true }),
-              });
-              selectIssue(null);
-            }
-          }}
+          onClick={() => void setArchived(issue.id, !issue.archived)}
         >
           <ArchiveIcon data-icon="inline-start" />
           {issue.archived ? "Unarchive" : "Archive"}

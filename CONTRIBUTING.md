@@ -119,7 +119,7 @@ pnpm run checks
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
 a required check on master, and cover banned frontend UI and state patterns
 (hover-revealed row actions, hand-rolled modifier keys, bare `.mutate(` calls
-in the converted trees, `setQueryData(key, undefined)`, inline clip-measured
+anywhere under `src/`, `setQueryData(key, undefined)`, inline clip-measured
 tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
 blog OG-card references (every post's `ogImage` must resolve to a committed
 card plus its `.webp` sibling — a missing file ships as a 404 social card),

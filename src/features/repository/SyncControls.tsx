@@ -5,7 +5,7 @@ import {
   CaretDownIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { useRelativeNow } from "@/components/relative-time";
@@ -61,9 +61,10 @@ import {
 } from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { originNoteFor } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
@@ -101,6 +102,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // Shares that recovery: a decided re-run can still hit a dirty tree, and one
   // stash prompt on this surface is the whole point of handing it down.
   const pullDropGuard = usePullDropGuard(repoPath, recovery);
+  // Read only from async continuations, never in render.
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const markFetched = useFetchStatusStore((s) => s.markFetched);
   const lastFetchedAt = useLastFetchedAt(repoPath);
   // Effective bindings drive the discoverability hints on the sync buttons:
@@ -352,10 +361,24 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     const plain = pullSuccessMessage(mode);
+    const pulledIn = repoPath;
     try {
       await pull.mutateAsync(mode);
       if (plain) toast.success(plain);
     } catch (e) {
+      // These controls survive a repo switch, so a refusal from a repo the user
+      // has left (or one settling after an unmount) only toasts, naming its
+      // repo: its dialogs would open under the live repo, and act on it with
+      // the old one's SHAs.
+      const originNote = originNoteFor(pulledIn);
+      if (originNote) {
+        toastErrorWithNote(e, originNote);
+        return;
+      }
+      if (!mounted.current) {
+        onError(e);
+        return;
+      }
       if (pullDropGuard.handleError(e)) return;
       const taken = recovery.handleError(e, {
         operationLabel: "pull",
@@ -382,6 +405,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    const updatedIn = repoPath;
     try {
       const outcome = await updateUpstream.mutateAsync(undefined);
       const ref = `upstream/${outcome.branch}`;
@@ -389,9 +413,17 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         toast.success(`Already up to date with ${ref}.`);
       } else if (outcome.kind === "fast-forwarded") {
         toast.success(`Fast-forwarded to ${ref}.`);
+      } else if (outcome.kind === "dirty-blocked" && !mounted.current) {
+        // Unmounted mid-update: a prompt raised now would never be seen, so
+        // say what blocked the merge instead.
+        toast(
+          `Didn't update from ${ref} — uncommitted changes are in the way. Commit or stash them, then update again.`,
+          { description: originNoteFor(updatedIn) },
+        );
       } else if (outcome.kind === "dirty-blocked") {
         // The merge was refused, not attempted-and-broken: recover from the
-        // already-resolved ref, so confirming costs no second fetch.
+        // already-resolved ref, so confirming costs no second fetch. `begin`
+        // itself refuses a repo the user has since left.
         recovery.begin({
           operationLabel: "update",
           detail: ref,

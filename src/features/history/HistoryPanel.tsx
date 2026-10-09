@@ -119,6 +119,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // whenever the connection returns.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
+  // Tag pushes in flight, keyed by repo + tag: the panel survives repo switches,
+  // so an unkeyed `pushTag.isPending` would hold the next repo's items with a
+  // false reason. State rather than a ref, since `disabled` is read in render.
+  const [pushingTags, setPushingTags] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const pushingTagKey = (tag: string) => `${repoPath}\n${tag}`;
   const branches = useBranches(repoPath);
 
   const [resetHash, setResetHash] = useState<string | null>(null);
@@ -341,12 +348,20 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   async function pushTagToOrigin(tag: string) {
-    if (refuseWhileOffline()) return;
+    const key = pushingTagKey(tag);
+    if (pushingTags.has(key) || refuseWhileOffline()) return;
+    setPushingTags((cur) => new Set(cur).add(key));
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
       onError(e);
       return;
+    } finally {
+      setPushingTags((cur) => {
+        const next = new Set(cur);
+        next.delete(key);
+        return next;
+      });
     }
     toast.success(`Pushed tag ${tag} to origin`);
   }
@@ -775,16 +790,19 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           {editHistoryHint}
         </ContextMenuItem>
         {commit.tags.length > 0 && <ContextMenuSeparator />}
-        {commit.tags.map((tag) => (
-          <ContextMenuItem
-            key={`push:${tag}`}
-            disabled={!!offlineHold}
-            onClick={() => void pushTagToOrigin(tag)}
-          >
-            Push tag {tag} to origin
-            {offlineSuffix}
-          </ContextMenuItem>
-        ))}
+        {commit.tags.map((tag) => {
+          const pushing = pushingTags.has(pushingTagKey(tag));
+          return (
+            <ContextMenuItem
+              key={`push:${tag}`}
+              disabled={!!offlineHold || pushing}
+              onClick={() => void pushTagToOrigin(tag)}
+            >
+              Push tag {tag} to origin
+              {pushing ? " (pushing…)" : offlineSuffix}
+            </ContextMenuItem>
+          );
+        })}
         {commit.tags.map((tag) => (
           <ContextMenuItem
             key={`delete:${tag}`}

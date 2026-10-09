@@ -38,27 +38,28 @@ export function LocalPrContextMenu({
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Read the selection at action time, not render time — the row's own click
-  // may have just changed it. `pr` is the right-clicked record regardless.
+  // may have just changed it, and an awaited write can settle after a repo
+  // switch. `pr` is the right-clicked record regardless.
   const isSelected = () => {
-    const sel = useUiStore.getState().selectedPr;
-    return sel?.kind === "local" && sel.id === pr.id;
+    const { selectedPr: sel, repoPath: liveRepo } = useUiStore.getState();
+    return liveRepo === repoPath && sel?.kind === "local" && sel.id === pr.id;
   };
 
-  function toggleArchive() {
-    if (pr.archived) {
-      update.mutate({
+  async function toggleArchive() {
+    const archived = !pr.archived;
+    try {
+      await update.mutateAsync({
         id: pr.id,
-        mutate: (cur) => ({ ...cur, archived: false }),
+        mutate: (cur) => ({ ...cur, archived }),
       });
-    } else {
-      update.mutate({
-        id: pr.id,
-        mutate: (cur) => ({ ...cur, archived: true }),
-      });
-      // Deselect the archived PR so the detail view doesn't linger on a row the
-      // list just hid (mirrors LocalPrView's archive behavior).
-      if (isSelected()) selectPr(null);
+    } catch (e) {
+      // The PR stays selected: nothing was archived.
+      toastError(e);
+      return;
     }
+    // Deselect the archived PR so the detail view doesn't linger on a row the
+    // list just hid.
+    if (archived && isSelected()) selectPr(null);
   }
 
   // Awaited rather than per-call mutate callbacks: confirming can unmount this row
@@ -83,7 +84,7 @@ export function LocalPrContextMenu({
           <ContextMenuItem
             onClick={(e) => {
               e.stopPropagation();
-              toggleArchive();
+              void toggleArchive();
             }}
           >
             <ArchiveIcon />
