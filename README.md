@@ -34,7 +34,7 @@ active account per host.
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/loop-poster.webp">
-  <img src="site/src/assets/readme/loop.gif" width="960" alt="GitDesktop's whole pull request loop in one window: an AI commit message streams into the composer, the new pull request dialog drafts its title and description, and Squash and merge marks the pull request merged">
+  <img src="site/src/assets/readme/loop.gif" width="960" alt="GitDesktop committing three staged files with an AI-written message, publishing the branch, opening a pull request with an AI-drafted title and description, watching its three checks pass, and squash-merging it with the remote branch deleted">
 </picture>
 
 ## Install
