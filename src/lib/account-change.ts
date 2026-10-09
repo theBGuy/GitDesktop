@@ -101,9 +101,11 @@ export function installAccountChangeReset(
   client: AccountChangeClient,
   { invalidateKeys }: { invalidateKeys: readonly (readonly unknown[])[] },
 ): () => void {
-  // Keyed by host, never by query (its repo path would read a new repo as a change).
-  // Host-less statuses are skipped: the login may be another gh host's, `forgeReady`
-  // keeps their `repo: null` panels off, and the next resolved status catches it.
+  // Keyed by host, never by query: a per-repo baseline would miss a switch
+  // first seen on a newly visited repo, which has no earlier login to compare.
+  // Host-less statuses are skipped: the login may be another gh host's, and
+  // `forgeReady` keeps their `repo: null` panels off; the next resolved status
+  // on the host catches a real change.
   const baseline = new Map<string, string>();
   return client.getQueryCache().subscribe((event) => {
     if (event.type !== "updated" || event.action?.type !== "success") return;

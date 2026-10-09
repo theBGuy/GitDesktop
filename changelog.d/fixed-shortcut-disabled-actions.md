@@ -1,3 +1,3 @@
-- A keyboard shortcut or command-palette action can no longer run an action whose
-  button has already turned disabled, such as pressing Push again just after a push
-  starts.
+- Keyboard shortcuts and command-palette actions now follow their button's
+  state the moment it changes, so pressing Push again right after a push starts
+  does nothing.

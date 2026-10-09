@@ -257,7 +257,7 @@ test("host-less statuses never share a baseline", () => {
   assert.equal(resets(calls), 0);
 });
 
-test("a host-less status never seeds the baseline", () => {
+test("a host-less status never seeds a real host's baseline", () => {
   const { calls, emit } = install();
   emit(statusEvent({ host: null, login: "a" }));
   emit(statusEvent({ host: "github.com", login: "b" }));
