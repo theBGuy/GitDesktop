@@ -262,15 +262,18 @@ export function RepoAutomationsDialog({
             className="w-full"
             onClick={() => void doSave()}
             disabled={!automations.data || !dirty || save.isPending}
-            reason={
-              save.isPending
-                ? "Saving…"
-                : !automations.data
-                  ? automations.isError
-                    ? "Couldn't load repository automations"
-                    : "Loading repository automations…"
-                  : "No changes to save"
-            }
+            reason={(() => {
+              switch (true) {
+                case save.isPending:
+                  return "Saving…";
+                case !automations.data && automations.isError:
+                  return "Couldn't load repository automations";
+                case !automations.data:
+                  return "Loading repository automations…";
+                default:
+                  return "No changes to save";
+              }
+            })()}
           >
             Save changes
           </DisabledReasonButton>

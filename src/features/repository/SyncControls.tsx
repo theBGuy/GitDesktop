@@ -408,6 +408,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const updatedIn = repoPath;
     try {
       const outcome = await updateUpstream.mutateAsync(undefined);
+      const originNote = originNoteFor(updatedIn);
       const ref = `upstream/${outcome.branch}`;
       if (outcome.kind === "up-to-date") {
         toast.success(`Already up to date with ${ref}.`);
@@ -415,14 +416,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         toast.success(`Fast-forwarded to ${ref}.`);
       } else if (
         outcome.kind === "dirty-blocked" &&
-        (!mounted.current || originNoteFor(updatedIn) !== undefined)
+        (!mounted.current || originNote !== undefined)
       ) {
         // Unmounted mid-update, or the user has left this repo: a recovery
         // prompt would go unseen or land on the wrong repo, so say what blocked
         // the merge instead, naming the repo when it is no longer on screen.
         toast(
           `Didn't update from ${ref} — uncommitted changes are in the way. Commit or stash them, then update again.`,
-          { description: originNoteFor(updatedIn) },
+          { description: originNote },
         );
       } else if (outcome.kind === "dirty-blocked") {
         // The merge was refused, not attempted-and-broken: recover from the

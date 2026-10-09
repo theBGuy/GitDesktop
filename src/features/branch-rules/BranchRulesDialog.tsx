@@ -556,15 +556,18 @@ export function BranchRulesDialog({
             className="w-full"
             onClick={() => void doSave()}
             disabled={!active.data || !dirty || saving.isPending}
-            reason={
-              !active.data
-                ? active.isError
-                  ? "Couldn't load branch rules"
-                  : "Loading branch rules…"
-                : !dirty
-                  ? "No changes to save"
-                  : "Saving…"
-            }
+            reason={(() => {
+              switch (true) {
+                case !active.data && active.isError:
+                  return "Couldn't load branch rules";
+                case !active.data:
+                  return "Loading branch rules…";
+                case !dirty:
+                  return "No changes to save";
+                default:
+                  return "Saving…";
+              }
+            })()}
           >
             {scope === "shared" ? "Save to repository" : "Save changes"}
           </DisabledReasonButton>

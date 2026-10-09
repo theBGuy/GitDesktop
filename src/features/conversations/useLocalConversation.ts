@@ -77,7 +77,9 @@ export function useLocalConversation<T extends LocalConvEntity>(
       createdAt: new Date().toISOString(),
     };
     postingRef.current.add(key);
-    apply((cur) => patch(cur, { comments: [...cur.comments, c] } as Partial<T>))
+    void apply((cur) =>
+      patch(cur, { comments: [...cur.comments, c] } as Partial<T>),
+    )
       .then(
         // Keyed on the entity it was typed for, and only if untouched since:
         // text typed while the write ran survives it.
