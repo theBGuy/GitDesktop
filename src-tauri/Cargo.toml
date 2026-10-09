@@ -48,7 +48,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-io"] }
 # mint record ids (uuid v4, matching the frontend's crypto.randomUUID()), and stamp
 # createdAt in JS `toISOString()` format (chrono RFC3339 millis + Z). All already in
 # the tree transitively; declared here as direct deps for the MCP-server code paths.
-dirs = "6"
+dirs = "7"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # GitLab multi-line diff-note ranges: a `position.line_range` ref's `line_code` is

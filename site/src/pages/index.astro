@@ -1,17 +1,12 @@
 ---
 import { Image } from "astro:assets";
-import appActions from "../assets/app-actions.png";
-import appCommit from "../assets/app-commit.png";
 import appCompare from "../assets/app-compare.png";
 import appDiff from "../assets/app-diff.png";
 import appDiscussions from "../assets/app-discussions.png";
-import appHistory from "../assets/app-history-detail.png";
 import appIssues from "../assets/app-issues.png";
-import appPrDialog from "../assets/app-pr-dialog.png";
-import appReview from "../assets/app-review.png";
-import appStaging from "../assets/app-staging.png";
 import appStagingNoai from "../assets/app-staging-noai.png";
 import appTags from "../assets/app-tags.png";
+import DemoVideo from "../components/DemoVideo.astro";
 import FeatureRow from "../components/FeatureRow.astro";
 import ForgeMark from "../components/ForgeMark.astro";
 import McpConfig from "../components/McpConfig.astro";
@@ -147,7 +142,7 @@ const forges = [
               the wrong trade. */}
           <Image
             src={appDiff}
-            alt="GitDesktop staging a TypeScript diff line by line, with an AI-generated commit message in the composer"
+            alt="GitDesktop's Changes view: a TypeScript diff with Stage hunk controls on every hunk, two files already staged, and an AI-generated commit message in the composer"
             widths={[600, 900, 1296]}
             sizes="(min-width: 1024px) 620px, 92vw"
             format="webp"
@@ -232,7 +227,7 @@ const forges = [
               layout resolves. */}
           <Image
             src={appStagingNoai}
-            alt="GitDesktop showing a split diff with per-hunk stage controls — staging changes line by line"
+            alt="GitDesktop's Changes view: a TypeScript diff with Stage hunk and Discard controls on every hunk, two files already staged, and a commit title ready in the composer"
             widths={[600, 900, 1296]}
             sizes="(min-width: 1024px) 620px, 92vw"
             format="webp"
@@ -250,16 +245,15 @@ const forges = [
       class="mx-auto grid max-w-6xl items-center gap-x-14 gap-y-10 px-5 py-20 md:py-28 lg:grid-cols-[1.1fr_0.9fr]"
     >
       <div data-reveal class="order-2 min-w-0 lg:order-1">
-        <figure class="window mx-auto max-w-sm lg:mx-0">
-          <Image
-            src={appCommit}
-            alt="The commit composer with an AI-generated conventional-commit message describing the staged change"
-            widths={[340, 384]}
-            sizes="(min-width: 1024px) 360px, 80vw"
-            format="webp"
-            quality={84}
-          />
-        </figure>
+        <DemoVideo
+          name="commit"
+          label="The commit composer: Generate streams an AI-written conventional-commit message for the staged change"
+          width={768}
+          height={610}
+          posterAt={3.8}
+          class="mx-auto max-w-sm lg:mx-0"
+          reveal={false}
+        />
       </div>
       <div data-reveal class="order-1 min-w-0 lg:order-2">
         <h2 class="text-balance text-3xl tracking-[-0.02em] sm:text-4xl">
@@ -289,7 +283,7 @@ const forges = [
     </div>
   </section>
 
-  <!-- AI: agents (NEW — the "watch it work" session motif) -->
+  <!-- AI: agents -->
   <section data-view="ai" class="border-b border-line bg-surface/30">
     <div
       class="mx-auto grid max-w-6xl items-center gap-x-14 gap-y-12 px-5 py-20 md:py-28 lg:grid-cols-2"
@@ -316,43 +310,15 @@ const forges = [
         </p>
       </div>
 
-      <figure data-reveal style="transition-delay:80ms" class="window session min-w-0">
-        <div class="session-head">
-          <span class="inline-block h-2 w-2 rounded-full bg-mint" aria-hidden="true"></span>
-          <span class="text-ink">claude</span>
-          <span class="step-kind">· agent session</span>
-          <span class="ml-auto text-faint">fix: redirect after login</span>
-        </div>
-        <div class="session-body">
-          <ol class="steps">
-            <li data-done>
-              Read <code class="text-ink">src/auth/session.ts</code>
-              <span class="step-kind"> · read</span>
-            </li>
-            <li data-done>
-              Searched <code class="text-ink">"redirectTo"</code> — 4 matches
-              <span class="step-kind"> · search</span>
-            </li>
-            <li data-active>
-              Edited <code class="text-ink">src/auth/callback.ts</code>
-              <span class="step-kind"> · edit</span>
-              <div class="diff-peek" aria-hidden="true">
-                <div class="del">- return redirect("/")</div>
-                <div class="add">+ return redirect(returnTo ?? "/")</div>
-              </div>
-            </li>
-            <li>
-              Run <code class="text-ink">pnpm test auth</code>
-              <span class="step-kind"> · terminal</span>
-            </li>
-          </ol>
-        </div>
-        <div class="session-foot">
-          <span class="text-mint">Keep as branch</span>
-          <span>Open local PR</span>
-          <span class="text-faint">Discard</span>
-        </div>
-      </figure>
+      <DemoVideo
+        name="agent"
+        label="Handing a task to an agent: it searches, reads, and edits in an isolated worktree, sped up here, then its Changes view shows the diff"
+        width={1296}
+        height={810}
+        posterAt={7.6}
+        class="min-w-0"
+        style="transition-delay:80ms"
+      />
     </div>
   </section>
 
@@ -379,16 +345,15 @@ const forges = [
           CodeRabbit's findings instead of repeating them.
         </p>
       </div>
-      <figure data-reveal style="transition-delay:120ms" class="window mt-10">
-        <Image
-          src={appReview}
-          alt="An AI code review re-running on a pull request in GitDesktop — it builds on the previous review round, re-verifies every earlier finding, and lists blocker and should-fix issues with code references"
-          widths={[760, 1040, 1296]}
-          sizes="(min-width: 1100px) 1000px, 94vw"
-          format="webp"
-          quality={82}
-        />
-      </figure>
+      <DemoVideo
+        name="review"
+        label="An agentic AI review on a pull request: the reviewer reads the repository, then lists its findings with a suggested fix"
+        width={1296}
+        height={810}
+        posterAt={8.6}
+        class="mt-10"
+        style="transition-delay:120ms"
+      />
     </div>
   </section>
 
@@ -410,6 +375,15 @@ const forges = [
           GitHub's reset time).
         </p>
       </div>
+      <DemoVideo
+        name="forges"
+        label="The same pull request panel on a GitLab merge request and on a Bitbucket pull request"
+        width={1296}
+        height={810}
+        posterAt={1.8}
+        class="mt-12"
+        style="transition-delay:80ms"
+      />
       <ul
         data-reveal
         style="transition-delay:80ms"
@@ -445,7 +419,7 @@ const forges = [
     </div>
   </section>
 
-  <!-- Jira (NEW — the tracker layer; key-chip motif) -->
+  <!-- Jira (the tracker layer) -->
   <section class="border-b border-line bg-surface/30">
     <div
       class="mx-auto grid max-w-6xl items-center gap-x-14 gap-y-10 px-5 py-20 md:py-28 lg:grid-cols-2"
@@ -464,6 +438,10 @@ const forges = [
           action gated on your Jira permissions.
         </p>
         <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
+          Issue keys are spotted in your branch name, commit messages, and PR titles,
+          then linked straight back to the issue in the Issues tab.
+        </p>
+        <p class="mt-4 max-w-[56ch] leading-relaxed text-muted">
           Especially handy for Bitbucket, whose native tracker Atlassian retires on
           August 20, 2026.
           <a href={`${base}bitbucket-issues-sunset/`} class="text-mint underline-offset-4 hover:underline">What that means for your repos →</a>
@@ -473,26 +451,15 @@ const forges = [
         </p>
       </div>
 
-      <div data-reveal style="transition-delay:80ms" class="window min-w-0 p-6">
-        <p class="text-xs text-faint">referenced Jira issues</p>
-        <div class="mt-3 flex flex-wrap gap-2">
-          <span class="key-chip"><span class="text-mint">◆</span> PROJ-142</span>
-          <span class="key-chip"><span class="text-mint">◆</span> PROJ-138</span>
-        </div>
-        <p class="mt-5 text-sm leading-relaxed text-muted">
-          Issue keys are spotted in your branch name, commit messages, and PR titles,
-          then linked straight back to the issue in the Issues tab.
-        </p>
-        <div class="mt-5 border-t border-line pt-5 text-sm">
-          <p class="text-ink">PROJ-142 · Redirect loops on SSO login</p>
-          <p class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-            <span>In Progress</span><span class="text-faint">·</span>
-            <span>Bug</span><span class="text-faint">·</span>
-            <span>5 points</span><span class="text-faint">·</span>
-            <span>Sprint 24</span>
-          </p>
-        </div>
-      </div>
+      <DemoVideo
+        name="jira"
+        label="The Jira section of the Issues tab: moving through a linked project's issues, each with its status and story points"
+        width={1296}
+        height={810}
+        posterAt={3.2}
+        class="min-w-0"
+        style="transition-delay:80ms"
+      />
     </div>
   </section>
 
@@ -500,11 +467,9 @@ const forges = [
   <FeatureRow
     id="pull-requests"
     title="Pull requests. Without the browser. Or the cloud."
-    image={appPrDialog}
-    alt="The New local pull request dialog: merge one branch into another and review it locally"
+    video={{ name: "localpr", width: 1296, height: 810, posterAt: 9.1 }}
+    alt="Creating a local pull request: the New local pull request dialog, a typed title, and the new pull request opening in the list"
     side="right"
-    widths={[540, 677]}
-    sizes="(min-width: 1024px) 520px, 90vw"
   >
     <p>
       Open pull requests on GitHub, GitLab, and Bitbucket, or private
@@ -524,8 +489,8 @@ const forges = [
   <FeatureRow
     id="ci"
     title="Watch CI without a browser tab."
-    image={appActions}
-    alt="The GitHub Actions view: a workflow run with its jobs and step-by-step status, plus a re-run control"
+    video={{ name: "actions", width: 1296, height: 810, posterAt: 5.78 }}
+    alt="Opening a running GitHub Actions run from the list and watching its three jobs run to success, sped up"
     side="left"
     surface={true}
   >
@@ -547,7 +512,7 @@ const forges = [
     id="issues"
     title="Issues and to-dos, triaged in place."
     image={appIssues}
-    alt="An issue in GitDesktop: a bug report with labels, an assignee, a linked pull request, and a comment thread"
+    alt="A GitHub issue in GitDesktop: its description and two sub-issues, an assignee, labels, a milestone, three linked pull requests under Development, and an activity feed of milestone, label, assignment, and mention events"
     side="right"
   >
     <p>
@@ -576,7 +541,7 @@ const forges = [
     id="discussions"
     title="Discussions, where the thread lives."
     image={appDiscussions}
-    alt="A GitHub Discussion in GitDesktop: a roadmap thread with a category, an upvote count, reactions, and a threaded reply"
+    alt="A GitHub Discussion in GitDesktop: a thread in the Ideas category with upvotes on the post and its one comment, a Reply button, and a Write/Preview composer"
     side="left"
     surface={true}
   >
@@ -606,28 +571,25 @@ const forges = [
             <code class="text-ink">--cached</code>.
           </p>
         </div>
-        <figure data-reveal style="transition-delay:80ms" class="window min-w-0">
-          <Image
-            src={appStaging}
-            alt="A split diff with per-hunk stage controls and a hint to drag across lines to stage just those lines"
-            widths={[560, 860, 1296]}
-            sizes="(min-width: 1024px) 540px, 94vw"
-            format="webp"
-            quality={82}
-          />
-        </figure>
+        <DemoVideo
+          name="lines"
+          label="Dragging across individual lines of a diff, staging just those lines, then unstaging them from the staged copy"
+          width={1296}
+          height={810}
+          posterAt={2.5}
+          class="min-w-0"
+          style="transition-delay:80ms"
+        />
       </div>
       <div class="mt-16 grid items-center gap-x-14 gap-y-8 lg:grid-cols-2">
-        <figure data-reveal class="window order-2 min-w-0 lg:order-1">
-          <Image
-            src={appHistory}
-            alt="Browsing commit history with a selected commit's changed files and a syntax-highlighted diff"
-            widths={[560, 860, 1296]}
-            sizes="(min-width: 1024px) 540px, 94vw"
-            format="webp"
-            quality={82}
-          />
-        </figure>
+        <DemoVideo
+          name="history"
+          label="Arrowing through commit history while the selected commit's changed files and diff follow"
+          width={1296}
+          height={810}
+          posterAt={1.3}
+          class="order-2 min-w-0 lg:order-1"
+        />
         <div data-reveal style="transition-delay:80ms" class="order-1 min-w-0 lg:order-2">
           <h3 class="text-xl text-ink">Read the whole story.</h3>
           <p class="mt-4 max-w-[52ch] leading-relaxed text-body">
@@ -645,7 +607,7 @@ const forges = [
     id="compare"
     title="Compare anything."
     image={appCompare}
-    alt="Comparing a feature branch against main: ahead/behind counts, the changed files, and a diff"
+    alt="Comparing feat/keyboard-nav against main in GitDesktop: one commit ahead, two changed files (+49 -3), a Create local PR button, and the unified diff of CommandPalette.tsx"
     side="right"
     surface={true}
   >
@@ -771,7 +733,7 @@ const forges = [
     id="releases"
     title="Cut a release without the dashboard."
     image={appTags}
-    alt="The Tags panel beside a release in GitDesktop: version tags, the release's changelog notes, and its attached macOS, Linux, and Windows binaries with sizes"
+    alt="The Tags panel in GitDesktop: the v0.1.0 release marked Latest, its notes, and two attached assets with their sizes and download counts"
     side="left"
   >
     <p>

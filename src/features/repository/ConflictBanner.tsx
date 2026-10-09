@@ -12,7 +12,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { clipTitleFromText } from "@/lib/clip-title";
 import { useOpAbort, useOpContinue, useOpState } from "@/lib/git/queries";
 import type { RepoOp, RepoOpState } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
@@ -71,9 +70,9 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
   ["reverting", "revert"],
 ];
 
-/** The AI button drops to its icon below a 505px banner content box: the
- *  measured full-label cluster with "Continue cherry-pick" (396.8px) plus the
- *  gap and the status's 96px basis. Both classes carry the one cutoff. */
+/** The AI button drops to its icon below a 505px banner content box, where the
+ *  full-label cluster (396.8px measured with "Continue cherry-pick") can't share
+ *  a row with any status. Both classes carry the one cutoff. */
 const AI_ICON_ONLY =
   "@max-[505px]/conflict-banner:pr-1.5 @max-[505px]/conflict-banner:*:data-[slot=ai-label]:hidden";
 
@@ -156,29 +155,22 @@ export function ConflictBanner({
   }
 
   return (
-    // One calm status line — the per-file resolution actions live in the diff
-    // pane's conflict view, so this just carries merge state + Continue/Abort
-    // and the batch "Resolve all with AI". With AI on, the status keeps a
-    // readable basis and the strip wraps only once that no longer fits.
-    <div
-      className={cn(
-        "flex items-center justify-between gap-x-3 border-b px-3 py-1.5 text-xs",
-        canResolveWithAi && "@container/conflict-banner flex-wrap gap-y-1",
-      )}
-    >
+    // One row while the full status and the actions fit side by side; otherwise
+    // the actions wrap under it, right-aligned. The status keeps its content
+    // basis so line-breaking measures its whole text and it never truncates.
+    <div className="@container/conflict-banner flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
       <span
         className={cn(
-          "flex min-w-0 items-center gap-1.5",
-          canResolveWithAi && "grow basis-24",
+          "flex min-w-0 grow items-start gap-1.5",
           editPaused ? "text-info" : "text-warning",
         )}
       >
         {editPaused ? (
-          <InfoIcon className="size-3.5 shrink-0" />
+          <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
         ) : (
-          <WarningIcon className="size-3.5 shrink-0" />
+          <WarningIcon className="mt-0.5 size-3.5 shrink-0" />
         )}
-        <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
+        <span className="min-w-0 text-pretty">
           {editPaused
             ? "Rebase paused — amend this commit's changes in Changes, then Continue"
             : opVerb
@@ -189,7 +181,9 @@ export function ConflictBanner({
                 `${conflictText} — resolve ${conflictedCount === 1 ? "it" : "them"} in the changes list.`}
         </span>
       </span>
-      <div className="flex shrink-0 items-center gap-1.5">
+      {/* `empty:hidden` drops the item when there is nothing to act on: an empty
+          flex item still takes the column gap and would wrap onto a blank line. */}
+      <div className="ml-auto flex shrink-0 items-center gap-1.5 empty:hidden">
         {canResolveWithAi && (
           <Button
             size="xs"

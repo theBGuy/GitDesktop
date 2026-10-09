@@ -1,23 +1,34 @@
 ---
 import { Image } from "astro:assets";
+import DemoVideo from "./DemoVideo.astro";
 
-interface Props {
+/** Exactly one visual: a still screenshot or a demo loop (see DemoVideo). */
+type Visual =
+  | { image: ImageMetadata; video?: never }
+  | {
+      video: { name: string; width: number; height: number; posterAt: number };
+      image?: never;
+    };
+
+type Props = Visual & {
   title: string;
-  image: ImageMetadata;
+  /** The screenshot's alt text, or the demo loop's label. */
   alt: string;
-  /** Which side the screenshot sits on at desktop width. */
+  /** Which side the visual sits on at desktop width. */
   side?: "left" | "right";
+  /** eager, sizes, and widths apply to `image` only. */
   eager?: boolean;
   sizes?: string;
   widths?: number[];
   surface?: boolean;
   /** Stable anchor so posts and comparison pages can deep-link the section. */
   id?: string;
-}
+};
 
 const {
   title,
   image,
+  video,
   alt,
   side = "right",
   eager = false,
@@ -27,8 +38,13 @@ const {
   id,
 } = Astro.props;
 
-// Text always reads first on mobile; image side only matters at lg+.
-const imgOrder = side === "left" ? "order-2 lg:order-1" : "order-2";
+// `astro build` doesn't type-check, so the union above needs a build-time twin.
+if (!image === !video) {
+  throw new Error(`FeatureRow "${title}": pass exactly one of image or video.`);
+}
+
+// Text always reads first on mobile; the visual's side only matters at lg+.
+const visualOrder = side === "left" ? "order-2 lg:order-1" : "order-2";
 const txtOrder = side === "left" ? "order-1 lg:order-2" : "order-1";
 ---
 
@@ -45,20 +61,36 @@ const txtOrder = side === "left" ? "order-1 lg:order-2" : "order-1";
         <slot />
       </div>
     </div>
-    <figure
-      data-reveal
-      style="transition-delay:80ms"
-      class:list={["window min-w-0", imgOrder]}
-    >
-      <Image
-        src={image}
-        alt={alt}
-        widths={widths}
-        sizes={sizes}
-        format="webp"
-        quality={82}
-        loading={eager ? "eager" : "lazy"}
-      />
-    </figure>
+    {
+      video ? (
+        <DemoVideo
+          name={video.name}
+          label={alt}
+          width={video.width}
+          height={video.height}
+          posterAt={video.posterAt}
+          class:list={["min-w-0", visualOrder]}
+          style="transition-delay:80ms"
+        />
+      ) : (
+        image && (
+          <figure
+            data-reveal
+            style="transition-delay:80ms"
+            class:list={["window min-w-0", visualOrder]}
+          >
+            <Image
+              src={image}
+              alt={alt}
+              widths={widths}
+              sizes={sizes}
+              format="webp"
+              quality={82}
+              loading={eager ? "eager" : "lazy"}
+            />
+          </figure>
+        )
+      )
+    }
   </div>
 </section>

@@ -3386,7 +3386,9 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   **Available in** to **All repositories** for one you want everywhere (a general
   cleanup script, say), and switch it back at any time from the same editor. For an
   all-repositories task, choosing a script file saves its full path, so it runs the
-  same file wherever you are. Tasks you saved before this choice existed stay
+  same file wherever you are. Switching a task from this repository to **All
+  repositories** does the same for a relative script path, and **Keep relative**
+  under the field undoes it. Tasks you saved before this choice existed stay
   available in every repository.
 - **Tasks from your other repositories.** They stay listed in a collapsed **Other
   repositories** group, each with the repo it belongs to, so nothing you saved goes
