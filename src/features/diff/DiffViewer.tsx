@@ -281,7 +281,7 @@ function WorkingTreeDiff({
   // and while the non-staging fallback renders.
   useHotkeyAction(
     "stage-selected-lines",
-    () => applySelection({ cached: true, reverse: file.staged }),
+    () => void applySelection({ cached: true, reverse: file.staged }),
     hunkMode && selection !== null && !busy && discard === null,
   );
   useHotkeyAction(
@@ -350,36 +350,52 @@ function WorkingTreeDiff({
       ? ""
       : `${selection.length} ${selection.length === 1 ? "line" : "lines"} selected`;
 
-  function applyHunk(
+  async function applyHunk(
     hunk: DiffHunk,
     opts: { cached: boolean; reverse: boolean },
   ) {
     if (!parsed) return;
-    applyPatch.mutate(
-      { patch: buildHunkPatch(parsed, hunk), ...opts },
-      { onError, onSuccess: clearSelection },
-    );
+    try {
+      await applyPatch.mutateAsync({
+        patch: buildHunkPatch(parsed, hunk),
+        ...opts,
+      });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    clearSelection();
   }
 
   // Stage/unstage/discard the file-wide line selection. `build_partial_patch`
   // already distributes a multi-hunk selection, so hand it the WHOLE diff.
-  function applySelection(opts: { cached: boolean; reverse: boolean }) {
+  async function applySelection(opts: { cached: boolean; reverse: boolean }) {
     if (!selection || !diff.data) return;
-    applyPartial.mutate(
-      { diffText: diff.data.text, selected: selection, ...opts },
-      { onError, onSuccess: clearSelection },
-    );
+    try {
+      await applyPartial.mutateAsync({
+        diffText: diff.data.text,
+        selected: selection,
+        ...opts,
+      });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    clearSelection();
   }
 
   // Discard lines from an untracked (new) file: remove just those new-side line
   // numbers from the file. A new file is all additions, so there's nothing to
   // reverse-apply (reverse-applying its patch would delete the whole file).
-  function discardLines(lines: number[]) {
+  async function discardLines(lines: number[]) {
     if (lines.length === 0) return;
-    discardUntracked.mutate(
-      { path: file.path, lines },
-      { onError, onSuccess: clearSelection },
-    );
+    try {
+      await discardUntracked.mutateAsync({ path: file.path, lines });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    clearSelection();
   }
 
   // A whole-hunk action, fired by the per-hunk overlay buttons.
@@ -390,11 +406,11 @@ function WorkingTreeDiff({
         newFile: untracked,
         forText: diff.data?.text ?? "",
         run: untracked
-          ? () => discardLines(hunkAddedNewLines(hunk))
-          : () => applyHunk(hunk, { cached: false, reverse: true }),
+          ? () => void discardLines(hunkAddedNewLines(hunk))
+          : () => void applyHunk(hunk, { cached: false, reverse: true }),
       });
     } else {
-      applyHunk(hunk, { cached: true, reverse: kind === "unstage" });
+      void applyHunk(hunk, { cached: true, reverse: kind === "unstage" });
     }
   }
 
@@ -448,7 +464,7 @@ function WorkingTreeDiff({
                   title={selectionTitle}
                   aria-keyshortcuts={selectionKeyshortcuts}
                   onClick={() =>
-                    applySelection({ cached: true, reverse: true })
+                    void applySelection({ cached: true, reverse: true })
                   }
                 >
                   Unstage
@@ -462,7 +478,7 @@ function WorkingTreeDiff({
                     title={selectionTitle}
                     aria-keyshortcuts={selectionKeyshortcuts}
                     onClick={() =>
-                      applySelection({ cached: true, reverse: false })
+                      void applySelection({ cached: true, reverse: false })
                     }
                   >
                     Stage
@@ -479,13 +495,16 @@ function WorkingTreeDiff({
                         forText: diff.data?.text ?? "",
                         run: untracked
                           ? () =>
-                              discardLines(
+                              void discardLines(
                                 selection
                                   .filter((s) => s.side === "new")
                                   .map((s) => s.line),
                               )
                           : () =>
-                              applySelection({ cached: false, reverse: true }),
+                              void applySelection({
+                                cached: false,
+                                reverse: true,
+                              }),
                       })
                     }
                   >
@@ -588,13 +607,17 @@ function WorkingTreeDiff({
                 </span>
                 <button
                   type="button"
-                  onClick={() =>
-                    settings.data &&
-                    saveSettings.mutate({
-                      ...settings.data,
-                      showLineStageHint: false,
-                    })
-                  }
+                  onClick={() => {
+                    if (!settings.data) return;
+                    // A dismissed hint is cosmetic: a failed write only means
+                    // it shows again next time, which needs no toast.
+                    void saveSettings
+                      .mutateAsync({
+                        ...settings.data,
+                        showLineStageHint: false,
+                      })
+                      .catch(() => undefined);
+                  }}
                   className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
                 >
                   Don't show again

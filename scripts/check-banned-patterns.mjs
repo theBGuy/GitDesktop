@@ -258,22 +258,22 @@ const SELECT_ITEM_FLEX_TRUNCATE_RE = new RegExp(
 
 // A `.mutate(` call in any spelling — the token, not the callbacks object it
 // may carry. Matching the object instead would have to recognize every way one
-// reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
-// shape 5 of the settings sections used, and still live elsewhere under src/),
-// spread, shorthand keys. The token has no such surface, and it costs nothing
-// here because the directories this check applies to have no `.mutate(` calls
-// left at all — every mutation there is awaited. `.mutateAsync(` does not match:
-// the `(` must follow `mutate` directly.
+// reaches the call: inline literal, hoisted variable (`.mutate(v, opts)`),
+// spread, shorthand keys. The token has no such surface, and it stays cheap
+// because every `.mutate(` left under src/ is a single-argument call in an
+// allowlisted file whose hook reports its own failure, or whose failure is
+// harmless (a cosmetic preference, a background reconcile); every other
+// mutation is awaited.
+// `.mutateAsync(` does not match: the `(` must follow `mutate` directly.
 const MUTATE_CALL_RE = /\.mutate\s*\(/;
 
-// The dot-less route to the same call: `const { mutate } = useX()` (a live idiom
-// elsewhere in src/) reaches `.mutate` off a destructured binding, so the token
-// above never sees it. The `\b` after `mutate` is what keeps `{ mutateAsync }`
-// clean, while a renamed `{ mutate: save }` still hits. Run over the whole-file
-// view, not per line: a destructure long enough to wrap is a shape this codebase
-// already produces (15 wrapped hook destructures under src/, none binding
-// `mutate` today), and `[^}]*` can't cross the destructure's own closing brace,
-// so the joined view adds no reach.
+// The dot-less route to the same call: `const { mutate } = useX()` reaches
+// `.mutate` off a destructured binding, so the token above never sees it (one
+// live site, allowlisted). The `\b` after `mutate` is what keeps
+// `{ mutateAsync }` clean, while a renamed `{ mutate: save }` still hits. Run
+// over the whole-file view, not per line: a destructure long enough to wrap is a
+// shape this codebase already produces, and `[^}]*` can't cross the
+// destructure's own closing brace, so the joined view adds no reach.
 const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 
 // The broken shared-ContextMenu suppression: a `setMenu<X>(null)` reset followed
@@ -585,23 +585,27 @@ const chordIgnoresSubmit = ({ text, starts }) =>
 
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
-// before the store write resolves. The hit: that file's mutation `onError`
+// before the store write resolves. The hit: that file's mutation FAILURE arm
 // restoring by REFETCH rather than by writing the snapshot back, which lands the
 // restore a commit or more later — too late for a focus hand-off armed on the
-// flip, so focus drops to <body> on a refused write.
+// flip, so focus drops to <body> on a refused write. Either failure spelling
+// counts: an `onError` callback, or the `catch` of an awaited `mutateAsync`
+// (the `.catch(` arrow the settings writers use, or a try/catch block).
 // Co-presence is the class, and the gate is FORWARD-looking: nothing trips the
-// onError half today — every settings invalidate under src/ is success-path, and
-// settings/queries.ts's lone `onError` sits 467 normalized chars from the next
-// one, well past PAIR_GAP (measured while sizing this check). What the gate buys
-// is that a file which legitimately refetches settings from an `onError` with
-// nothing optimistic to roll back (DangerZone, RepoList, useRepoVisibilityProbe
-// are each one edit from that shape) can never read as a violation.
+// failure half today, since every settings invalidate under src/ is
+// success-path. What the gate buys is that a file which legitimately refetches
+// settings from a failure arm with nothing optimistic to roll back (DangerZone,
+// RepoList, useRepoVisibilityProbe are each one edit from that shape) can never
+// read as a violation.
 // The cost of file-scoping, accepted: one file that patches the settings cache
 // for its own feature AND refetches settings from an unrelated mutation's
-// onError pairs them anyway — a loud false positive, allowlist as remedy. It
+// failure arm pairs them anyway — a loud false positive, allowlist as remedy. It
 // buys the reverse, which matters more: the patch and the mutation it guards may
 // sit in different functions of the same hook file, and a proximity pair would
-// miss that. The reported line is the `onError`, which is the site to rewrite.
+// miss that. The reported line is the failure arm, which is the site to rewrite.
+// The failure-arm half is itself a PAIR_GAP proximity pair, not a parse: it
+// does not prove the invalidate sits INSIDE the arm, so a success-path
+// invalidate within PAIR_GAP after an unrelated `catch` also reports.
 // The optional type-argument group uses the same `<[^(]*?>` class as
 // SET_QUERY_DATA_RE above, for the same reason: a `<[^>]*>` group stops at the
 // INNER `>` of a nested generic (`setQueryData<Record<string, Foo>>`), and the
@@ -609,8 +613,8 @@ const chordIgnoresSubmit = ({ text, starts }) =>
 // here would turn this file's whole gate off, not just skip one line.
 const OPTIMISTIC_SETTINGS_PATCH_RE =
   /setQueryData\s*(?:<[^(]*?>)?\s*\(\s*settingsKeys\.settings\b/;
-const ONERROR_SETTINGS_REFETCH_RE = new RegExp(
-  `\\bonError\\b[\\s\\S]{0,${PAIR_GAP}}?invalidateQueries\\s*\\(\\s*\\{\\s*` +
+const SETTINGS_ROLLBACK_REFETCH_RE = new RegExp(
+  `\\b(?:onError|catch)\\b[\\s\\S]{0,${PAIR_GAP}}?invalidateQueries\\s*\\(\\s*\\{\\s*` +
     `queryKey:\\s*settingsKeys\\.settings\\b`,
   "g",
 );
@@ -1516,68 +1520,61 @@ export const CHECKS = [
     appliesTo: () => true,
     scan: onlyWhen(
       OPTIMISTIC_SETTINGS_PATCH_RE,
-      perFile(ONERROR_SETTINGS_REFETCH_RE),
+      perFile(SETTINGS_ROLLBACK_REFETCH_RE),
     ),
     allowlist: [],
     message:
       "an optimistically patched settings write rolls back SYNCHRONOUSLY — snapshot the previous value and setQueryData it back under a latest-write guard (useApplyTheme, src/lib/settings/queries.ts), never invalidateQueries: the refetch restores a commit or more later, so a collapse toggle's focus hand-off has nothing to ride and focus drops to <body>",
   },
   {
-    name: "bare-mutate-in-converted-trees",
-    // Scoped to the trees that are fully converted, so the check can only ever
-    // see a NEW site: the repo-settings dialog's own sections (which unmount on
-    // BOTH dialog close and every rail section switch — the keyed crossfade), Explore,
-    // whose detail pane is keyed per repo, Actions, whose run detail is keyed per
-    // run and whose dispatch dialog unmounts with the repo view, the repository
-    // and commit trees, whose panels ride <Activity>-hidden tabs and whose
-    // dialogs close mid-flight, and pulls / issues / history / discussions /
-    // tags, whose surfaces go through an `<Activity>` tab hide on every repo-tab
-    // switch. What is left is scattered singles (diff, compare, app settings,
-    // welcome, automations, conversations, scripts, hooks, branch-rules,
-    // updates, App.tsx, the detail rail), each joining on its own conversion —
-    // plus src/lib/settings/queries.ts's theme write, which STAYS: its onError
-    // is the synchronous rollback the async-settings-rollback check pins.
-    appliesTo: (file) =>
-      file.startsWith("src/features/repo-settings/") ||
-      file.startsWith("src/features/explore/") ||
-      file.startsWith("src/features/actions/") ||
-      file.startsWith("src/features/pulls/") ||
-      file.startsWith("src/features/repository/") ||
-      file.startsWith("src/features/commit/") ||
-      file.startsWith("src/features/issues/") ||
-      file.startsWith("src/features/history/") ||
-      file.startsWith("src/features/discussions/") ||
-      file.startsWith("src/features/tags/"),
+    name: "bare-mutate",
+    // Repo-wide: react-query drops per-call callbacks whenever their observer
+    // loses its listeners, and every surface here can lose them mid-flight — a
+    // dialog close, a Settings rail switch or close, an <Activity> tab hide, a
+    // keyed remount. A repo switch keeps RepositoryView mounted instead, so an
+    // awaited continuation that closes, clears, or deselects re-checks the live
+    // repo first. The vendored primitives are out (never edited, and none
+    // mutates).
+    appliesTo: notVendoredUi,
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
+    // Floor near the real count (702): an appliesTo typo that left the scan
+    // nearly inert would otherwise still print OK.
+    expectScanned: {
+      atLeast: 500,
+      hint: "every .ts/.tsx under src/ outside the vendored ui/ primitives",
+    },
     // Every entry is a call carrying NO per-call callbacks object, so there is
     // nothing an unmount can drop; the token match is the ratchet, and an
     // exemption is an entry here rather than a hole in the pattern.
     allowlist: [
-      // The local-conversation write-through and the archive/unarchive toggles,
-      // all single-arg `update.mutate(vars)` — the deselect the archive pairs
-      // with is synchronous.
-      "src/features/issues/LocalIssueView.tsx",
+      // The label edit, single-arg; its hook toasts failures itself.
+      "src/features/conversations/LabelsPopover.tsx",
+      // The project link edit, single-arg; its hook rolls back and toasts.
+      "src/features/conversations/ProjectsPopover.tsx",
+      // A section's collapsed state, single-arg: a cosmetic preference.
+      "src/features/conversations/useCollapsedSections.ts",
+      // The list-filter prefs write, single-arg; its hook patches the cache and
+      // toasts failures itself.
+      "src/features/conversations/useRemoteListFilter.ts",
       // Eight single-arg picker/field writes; their hooks report failures at the
       // mutation level.
       "src/features/issues/RemoteIssueViewParts.tsx",
-      // Archive/unarchive, single-arg `update.mutate(vars)` — the deselect it
-      // pairs with is synchronous.
-      "src/features/pulls/LocalPrContextMenu.tsx",
-      // The local-conversation write-through and the approve toggle, both
-      // single-arg `update.mutate(vars)`.
-      "src/features/pulls/LocalPrView.tsx",
-      // The palette's archive action, single-arg `updateLocalPr.mutate(vars)`.
-      "src/features/pulls/PullRequestsPanel.tsx",
+      // A card move and a reorder, both single-arg; their hooks restore and
+      // toast on failure.
+      "src/features/projects/ProjectsBoardPanel.tsx",
       // GitLab time tracking's set-estimate and add-spent, both single-arg.
       "src/features/pulls/RemotePrViewParts.tsx",
-      // Deleting one stored review, single-arg `del.mutate(id)`.
-      "src/features/pulls/ReviewHistory.tsx",
       // Reconciles merged/deleted heads from an effect: the destructured
       // `mutate` is called single-arg on both arms.
       "src/features/pulls/useReconcileLocalPrs.ts",
+      // Recording the last-seen version, single-arg: a failure only shows the
+      // notes again next launch.
+      "src/features/updates/WhatsNew.tsx",
+      // Dismissing the guide nudge, single-arg: a cosmetic preference.
+      "src/features/welcome/WelcomeScreen.tsx",
     ],
     message:
-      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, an <Activity> tab hide, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
+      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a Settings rail switch, an <Activity> tab hide, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — await mutateAsync and put the outcome in the continuation (re-checking the live repo before closing, clearing, or deselecting anything: RepositoryView survives a repo switch), so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
   },
   {
     name: "context-menu-suppression",

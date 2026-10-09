@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { makeQuoteReply } from "./quoteReply";
 
@@ -27,7 +28,8 @@ export interface LocalConvEntity {
  * which reload disk first — so a concurrent external write to the same entity
  * is merged, not clobbered — and comments are never held in local state.
  * `entity` may be undefined while the parent is mid-unmount, so every handler
- * guards on it.
+ * guards on it. `apply` resolves once the write lands and rejects when it
+ * fails; every failure toasts here, and a failed comment keeps its draft.
  *
  * `openEdit`/`editForm` stay at the call site (they need the per-view title);
  * this hook owns only conversation/label/composer state. The comment draft is
@@ -37,7 +39,7 @@ export interface LocalConvEntity {
 export function useLocalConversation<T extends LocalConvEntity>(
   id: string,
   entity: T | undefined,
-  apply: (mutate: (cur: T) => T) => void,
+  apply: (mutate: (cur: T) => T) => Promise<void>,
 ) {
   const draft = useKeyedEntityState(id, "");
   const comment = draft.value;
@@ -47,6 +49,9 @@ export function useLocalConversation<T extends LocalConvEntity>(
     null,
   );
   const composerRef = useRef<MarkdownEditorHandle>(null);
+  // Entities with a comment write in flight: the draft stays until the write
+  // lands, so a second submit meanwhile would post it twice.
+  const postingRef = useRef(new Set<string>());
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
   // React Compiler bail out of every component consuming this hook (refs-in-render
   // rule).
@@ -59,22 +64,34 @@ export function useLocalConversation<T extends LocalConvEntity>(
   // generic spread back to its own type parameter.
   const patch = (cur: T, next: Partial<T>): T => ({ ...cur, ...next }) as T;
 
+  const write = (mutate: (cur: T) => T) => {
+    void apply(mutate).catch(toastError);
+  };
+
   function addComment() {
-    if (!entity || !comment.trim()) return;
+    if (!entity || !comment.trim() || postingRef.current.has(id)) return;
+    const key = id;
     const c = {
       id: crypto.randomUUID(),
       body: comment.trim(),
       createdAt: new Date().toISOString(),
     };
-    apply((cur) =>
+    postingRef.current.add(key);
+    void apply((cur) =>
       patch(cur, { comments: [...cur.comments, c] } as Partial<T>),
-    );
-    setComment("");
+    )
+      .then(
+        // Keyed on the entity it was typed for, and only if untouched since:
+        // text typed while the write ran survives it.
+        () => draft.setFor(key, (prev) => (prev.trim() === c.body ? "" : prev)),
+        toastError,
+      )
+      .finally(() => postingRef.current.delete(key));
   }
 
   function editComment(commentId: string, body: string) {
     if (!entity) return;
-    apply((cur) =>
+    write((cur) =>
       patch(cur, {
         comments: cur.comments.map((c) =>
           c.id === commentId ? { ...c, body } : c,
@@ -85,7 +102,7 @@ export function useLocalConversation<T extends LocalConvEntity>(
 
   function deleteComment(commentId: string) {
     if (!entity) return;
-    apply((cur) =>
+    write((cur) =>
       patch(cur, {
         comments: cur.comments.filter((c) => c.id !== commentId),
       } as Partial<T>),
@@ -94,7 +111,7 @@ export function useLocalConversation<T extends LocalConvEntity>(
 
   function setCommentHidden(commentId: string, hidden: boolean) {
     if (!entity) return;
-    apply((cur) =>
+    write((cur) =>
       patch(cur, {
         comments: cur.comments.map((c) =>
           c.id === commentId ? { ...c, hidden } : c,
@@ -106,7 +123,7 @@ export function useLocalConversation<T extends LocalConvEntity>(
   function addLabel() {
     const name = labelInput.trim();
     if (!entity || !name) return;
-    apply((cur) =>
+    write((cur) =>
       cur.labels.includes(name)
         ? cur
         : patch(cur, { labels: [...cur.labels, name] } as Partial<T>),
@@ -116,7 +133,7 @@ export function useLocalConversation<T extends LocalConvEntity>(
 
   function removeLabel(label: string) {
     if (!entity) return;
-    apply((cur) =>
+    write((cur) =>
       patch(cur, {
         labels: cur.labels.filter((l) => l !== label),
       } as Partial<T>),

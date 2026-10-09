@@ -208,8 +208,8 @@ export function LocalPrView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(id, pr, (mutate) => {
-    if (pr) update.mutate({ id: pr.id, mutate });
+  } = useLocalConversation(id, pr, async (mutate) => {
+    if (pr) await update.mutateAsync({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
   // Close/Reopen's and the review post's single-flight holds: the pinned update
@@ -400,10 +400,16 @@ export function LocalPrView({
 
   function toggleApprove() {
     if (!pr) return;
-    update.mutate({
-      id: pr.id,
-      mutate: (cur) => ({ ...cur, approved: !cur.approved }),
-    });
+    // An absolute value read at click, not a flip of whatever is stored: two
+    // clicks before the record refreshes both write what the button offered
+    // instead of cancelling out.
+    const next = !pr.approved;
+    void update
+      .mutateAsync({
+        id: pr.id,
+        mutate: (cur) => ({ ...cur, approved: next }),
+      })
+      .catch(toastError);
   }
 
   // A typed note rides Close/Reopen rather than being discarded by them.

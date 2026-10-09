@@ -141,6 +141,16 @@ function GitHubAccounts() {
   const openReconnect = useUiStore((s) => s.openReconnect);
   const now = useRelativeNow();
 
+  async function switchTo(host: string, login: string) {
+    try {
+      await switchAccount.mutateAsync({ host, login });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Switched to ${login}`);
+  }
+
   const version = accounts.data?.version ?? "";
   const canSwitch = supportsSwitching(version);
   const list = accounts.data?.accounts ?? [];
@@ -277,16 +287,7 @@ function GitHubAccounts() {
                               }
                               title={`Make ${account.login} the active account on ${account.host}`}
                               onClick={() =>
-                                switchAccount.mutate(
-                                  { host: account.host, login: account.login },
-                                  {
-                                    onSuccess: () =>
-                                      toast.success(
-                                        `Switched to ${account.login}`,
-                                      ),
-                                    onError: (e) => toastError(e),
-                                  },
-                                )
+                                void switchTo(account.host, account.login)
                               }
                             >
                               {switchAccount.isPending && (

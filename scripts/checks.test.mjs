@@ -222,7 +222,7 @@ const inlineClipTitle = scanner("inline-clip-title");
 const selectItemClipTitle = scanner("select-item-clip-title");
 const setQueryData = scanner("setQueryData-noop");
 const settingsRollback = scanner("async-settings-rollback");
-const bareMutate = scanner("bare-mutate-in-converted-trees");
+const bareMutate = scanner("bare-mutate");
 const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
@@ -635,9 +635,10 @@ test("async-settings-rollback pairs across functions, not just adjacent code", (
 });
 
 test("async-settings-rollback needs BOTH halves, in the same file", () => {
-  // No live file trips the onError half today — every settings invalidate under
-  // src/ is success-path. The gate is forward-looking: a file that refetches
-  // settings from an onError with nothing optimistic to roll back stays clean.
+  // No live file trips the failure half today — every settings invalidate
+  // under src/ is success-path. The gate is forward-looking: a file that
+  // refetches settings from an onError with nothing optimistic to roll back
+  // stays clean.
   const noPatch = [
     "remove.mutate(path, {",
     "  onError: () =>",
@@ -659,8 +660,8 @@ test("async-settings-rollback needs BOTH halves, in the same file", () => {
 });
 
 test("async-settings-rollback leaves the guarded synchronous restore alone", () => {
-  // The useApplyTheme shape this check exists to hold: latest-write guard, then
-  // the snapshot written straight back.
+  // The guarded-restore shape this check exists to hold, in its onError
+  // spelling: latest-write guard, then the snapshot written straight back.
   const fixed = [
     "queryClient.setQueryData(settingsKeys.settings, updated);",
     "saveSettings.mutate(updated, {",
@@ -674,10 +675,45 @@ test("async-settings-rollback leaves the guarded synchronous restore alone", () 
   assert.deepEqual(settingsRollback(fixed), []);
 });
 
-test("bare-mutate-in-converted-trees flags every way a call reaches its callbacks", () => {
-  // The reason this check matches the CALL and not the callbacks object: the
-  // hoisted-options pair is the shape most of these sections used, and no
-  // regex anchored on `onSuccess`/`onError` sees it.
+test("async-settings-rollback flags the awaited catch form's refetch", () => {
+  // The settings writers start their save as `void mutateAsync(…).catch(…)`, so
+  // the rollback lives in a catch arrow — a refetch there is the same class.
+  const arrow = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "void saveSettings.mutateAsync(updated).catch(() =>",
+    "  queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+    ");",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(arrow), [2]);
+  const block = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "try {",
+    "  await saveSettings.mutateAsync(updated);",
+    "} catch {",
+    "  queryClient.invalidateQueries({ queryKey: settingsKeys.settings });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(block), [4]);
+});
+
+test("async-settings-rollback leaves the catch form's snapshot restore alone", () => {
+  // The shape the three settings writers ship (useApplyTheme, the detail rail,
+  // the composer collapse).
+  const fixed = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "void saveSettings.mutateAsync(updated).catch(() => {",
+    "  const latest = queryClient.getQueryData(settingsKeys.settings);",
+    "  if (latest?.theme !== next) return;",
+    "  queryClient.setQueryData(settingsKeys.settings, current);",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(fixed), []);
+});
+
+test("bare-mutate flags every way a call reaches its callbacks", () => {
+  // The reason this check matches the CALL and not the callbacks object: a
+  // hoisted options object (`.mutate(vars, opts)`) carries the callbacks out of
+  // sight, and no regex anchored on `onSuccess`/`onError` sees it.
   assert.deepEqual(
     bareMutate(
       'del.mutate(hook.id, { onSuccess: () => toast.success("x"), onError: e });',
@@ -695,7 +731,7 @@ test("bare-mutate-in-converted-trees flags every way a call reaches its callback
   );
 });
 
-test("bare-mutate-in-converted-trees flags a bare call carrying no callbacks", () => {
+test("bare-mutate flags a bare call carrying no callbacks", () => {
   // Deliberate: a fire-and-forget mutation here still loses nothing to the
   // unmount, but the ratchet stays a token match — an exemption is an
   // allowlist entry with rationale, not a hole in the pattern.
@@ -703,9 +739,9 @@ test("bare-mutate-in-converted-trees flags a bare call carrying no callbacks", (
   assert.deepEqual(bareMutate("refresh.mutate ();"), [1]);
 });
 
-test("bare-mutate-in-converted-trees catches the dot-less destructured route", () => {
+test("bare-mutate catches the dot-less destructured route", () => {
   // `const { mutate } = useX()` reaches the same call with no `.mutate` token
-  // for the first pattern to see — a live idiom elsewhere under src/.
+  // for the first pattern to see (useReconcileLocalPrs is a live site).
   assert.deepEqual(
     bareMutate("const { mutate } = useUpdateLocalPr(repo);"),
     [1],
@@ -729,7 +765,7 @@ test("bare-mutate-in-converted-trees catches the dot-less destructured route", (
   assert.deepEqual(bareMutate(wrapped), [1]);
 });
 
-test("bare-mutate-in-converted-trees leaves the awaited idiom and comments alone", () => {
+test("bare-mutate leaves the awaited idiom and comments alone", () => {
   const awaited = [
     "await update.mutateAsync(form);",
     'toast.success("Repository settings saved");',
@@ -753,37 +789,30 @@ test("bare-mutate-in-converted-trees leaves the awaited idiom and comments alone
   assert.deepEqual(bareMutate(documented), []);
 });
 
-test("bare-mutate-in-converted-trees applies to the converted trees only", () => {
-  // The tier boundary is the deliberate part: the converted trees are in, and
-  // the ones still carrying per-call callbacks in bulk are out until their own
-  // conversion lands. Widening this is a decision, not a drive-by.
-  const { appliesTo } = CHECKS.find(
-    (c) => c.name === "bare-mutate-in-converted-trees",
-  );
+test("bare-mutate applies repo-wide outside the vendored primitives", () => {
+  // Every surface can lose its observer mid-flight, so the scope is all of
+  // src/; the vendored ui/ primitives are the one carve-out (never edited here,
+  // and they never mutate). The floor pin keeps an appliesTo typo from leaving
+  // the scan nearly inert while it still prints OK.
+  const check = CHECKS.find((c) => c.name === "bare-mutate");
   for (const file of [
     "src/features/repo-settings/RulesetsSection.tsx",
-    "src/features/explore/ExploreDetail.tsx",
-    "src/features/actions/RunDetailView.tsx",
-    "src/features/pulls/RemotePrView.tsx",
     "src/features/pulls/useReconcileLocalPrs.ts",
-    // Joined when the repository/commit conversions landed:
-    "src/features/repository/ChangesPanel.tsx",
-    "src/features/commit/CommitBox.tsx",
-    // Joined when the issues/history/discussions/tags conversions landed:
-    "src/features/issues/RemoteIssueView.tsx",
-    "src/features/history/HistoryPanel.tsx",
-    "src/features/discussions/DiscussionView.tsx",
-    "src/features/tags/TagDetailView.tsx",
-  ]) {
-    assert.equal(appliesTo(file), true, `should scan ${file}`);
-  }
-  for (const file of [
     "src/features/diff/DiffViewer.tsx",
-    "src/features/welcome/WelcomeScreen.tsx",
+    "src/features/scripts/TasksPanel.tsx",
+    "src/App.tsx",
     "src/lib/settings/queries.ts",
+    "src/components/detail-rail.tsx",
   ]) {
-    assert.equal(appliesTo(file), false, `should not scan ${file}`);
+    assert.equal(check.appliesTo(file), true, `should scan ${file}`);
   }
+  assert.equal(
+    check.appliesTo("src/components/ui/button.tsx"),
+    false,
+    "should not scan the vendored primitives",
+  );
+  assert.match(scopePinFailure(check, 499), /SCOPE PIN FAILED/);
+  assert.equal(scopePinFailure(check, 702), null);
 });
 
 test("context-menu-suppression flags the state-reset-then-preventDefault shape", () => {

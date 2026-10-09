@@ -458,50 +458,63 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     selectedPr?.kind === "local"
       ? (localPrs.data ?? []).find((p) => p.id === selectedPr.id)
       : undefined;
-  const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
+  // Keyed by the PR it was opened for, never a bare flag: the dialog renders
+  // against the CURRENT selection, so a flag outliving its PR would offer to
+  // delete whichever local PR is selected next.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const shownSelectedLocalPr = useRetained(selectedLocalPr);
+
+  /** Whether the live UI still has this local PR selected in THIS repo. An
+   *  awaited write can settle after the user selected another PR or switched
+   *  repos (the panel survives both), and its follow-up must not land there. */
+  function stillSelected(id: string) {
+    const { selectedPr: sel, repoPath: liveRepo } = useUiStore.getState();
+    return liveRepo === repoPath && sel?.kind === "local" && sel.id === id;
+  }
+
+  async function archiveSelectedLocalPr(id: string, archived: boolean) {
+    try {
+      await updateLocalPr.mutateAsync({
+        id,
+        mutate: (cur) => ({ ...cur, archived }),
+      });
+    } catch (e) {
+      // The PR stays selected: nothing was archived.
+      toastError(e);
+      return;
+    }
+    if (archived && stillSelected(id)) selectPr(null);
+  }
 
   useHotkeyAction(
     "pr-archive",
     () => {
       if (!selectedLocalPr) return;
-      if (selectedLocalPr.archived) {
-        updateLocalPr.mutate({
-          id: selectedLocalPr.id,
-          mutate: (cur) => ({ ...cur, archived: false }),
-        });
-      } else {
-        updateLocalPr.mutate({
-          id: selectedLocalPr.id,
-          mutate: (cur) => ({ ...cur, archived: true }),
-        });
-        selectPr(null);
-      }
+      void archiveSelectedLocalPr(
+        selectedLocalPr.id,
+        !selectedLocalPr.archived,
+      );
     },
     selectedLocalPr !== undefined,
   );
   useHotkeyAction(
     "pr-delete",
-    () => setConfirmDeleteSelected(true),
+    () => {
+      if (selectedLocalPr) setConfirmDeleteId(selectedLocalPr.id);
+    },
     selectedLocalPr !== undefined,
   );
 
-  // Awaited rather than per-call mutate callbacks: an `<Activity>` tab hide tears
-  // this observer's subscription down mid-delete, and react-query drops per-call
-  // callbacks once an observer has no listeners — the confirm dialog would stay
-  // open over a PR that was already gone.
   async function deleteSelectedLocalPr(id: string) {
     try {
       await deleteLocalPr.mutateAsync(id);
-      setConfirmDeleteSelected(false);
-      // Deselect only if the deleted PR is still the selection — the await can
-      // resolve after the user has selected another PR or navigated, and a
-      // blind clear would wipe that newer selection.
-      const sel = useUiStore.getState().selectedPr;
-      if (sel?.kind === "local" && sel.id === id) selectPr(null);
     } catch (e) {
       toastError(e);
+      return;
     }
+    // A confirm the user opened for ANOTHER PR mid-flight stays open.
+    setConfirmDeleteId((cur) => (cur === id ? null : cur));
+    if (stillSelected(id)) selectPr(null);
   }
 
   // Opened from the command palette / New menu via requestCreate (any tab).
@@ -1328,8 +1341,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         {/* Confirm for the palette "Delete pull request" action (the row menu owns
           its own confirm). Guarded on a selected local PR still existing. */}
         <ConfirmDialog
-          open={confirmDeleteSelected && selectedLocalPr !== undefined}
-          onCancel={() => setConfirmDeleteSelected(false)}
+          open={
+            selectedLocalPr !== undefined &&
+            selectedLocalPr.id === confirmDeleteId
+          }
+          onCancel={() => setConfirmDeleteId(null)}
           title="Delete this local pull request?"
           body={
             shownSelectedLocalPr ? (

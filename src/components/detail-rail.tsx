@@ -137,9 +137,9 @@ export function DetailRail({
     // the focus move lands on the button that replaced the one focus was on, and
     // so a second press reads the new value instead of re-issuing the old flip.
     queryClient.setQueryData(settingsKeys.settings, updated);
-    saveSettings.mutate(updated, {
-      onError: () => rollbackCollapsePref(current, updated),
-    });
+    void saveSettings
+      .mutateAsync(updated)
+      .catch(() => rollbackCollapsePref(current, updated));
   };
   // Only the visible tab's rail answers the action: <Activity> keeps hidden
   // panels mounted, and its effect teardown is deferred.

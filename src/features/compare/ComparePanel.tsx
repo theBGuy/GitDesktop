@@ -235,10 +235,13 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    checkoutCommit.mutate(hash, {
-      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
-      onError,
-    });
+    try {
+      await checkoutCommit.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(checkoutCommitSuccessToast(hash));
   }
 
   async function doRevertCommit(hash: string) {
@@ -247,7 +250,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    revertCommit.mutate(hash, { onError });
+    try {
+      await revertCommit.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+    }
   }
 
   async function doCherryPick(hash: string) {
@@ -259,18 +266,20 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    cherryPick.mutate(hash, {
-      onSuccess: (applied) => {
-        if (applied) {
-          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
-        } else {
-          toast.info(
-            "Nothing to cherry-pick — these changes are already on this branch.",
-          );
-        }
-      },
-      onError,
-    });
+    let applied: boolean;
+    try {
+      applied = await cherryPick.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    if (applied) {
+      toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+    } else {
+      toast.info(
+        "Nothing to cherry-pick — these changes are already on this branch.",
+      );
+    }
   }
 
   // One shared context menu for both lists (capture phase, so it records the

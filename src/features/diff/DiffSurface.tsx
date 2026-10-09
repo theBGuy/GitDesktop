@@ -39,6 +39,7 @@ import type { CustomLanguage } from "@/lib/settings/api";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
+import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import {
@@ -213,11 +214,12 @@ export function DiffModeToggle({
         variant={effectiveViewMode === "unified" ? "secondary" : "ghost"}
         size="xs"
         aria-pressed={effectiveViewMode === "unified"}
-        onClick={() =>
-          !splitDisabled &&
-          settings.data &&
-          saveSettings.mutate({ ...settings.data, diffViewMode: "unified" })
-        }
+        onClick={() => {
+          if (splitDisabled || !settings.data) return;
+          void saveSettings
+            .mutateAsync({ ...settings.data, diffViewMode: "unified" })
+            .catch(toastError);
+        }}
       >
         Unified
       </Button>
@@ -228,10 +230,12 @@ export function DiffModeToggle({
         disabled={splitDisabled}
         reason="Pane too narrow for split view"
         className="border-l-0 focus-visible:relative focus-visible:z-10"
-        onClick={() =>
-          settings.data &&
-          saveSettings.mutate({ ...settings.data, diffViewMode: "split" })
-        }
+        onClick={() => {
+          if (!settings.data) return;
+          void saveSettings
+            .mutateAsync({ ...settings.data, diffViewMode: "split" })
+            .catch(toastError);
+        }}
       >
         Split
       </DisabledReasonButton>

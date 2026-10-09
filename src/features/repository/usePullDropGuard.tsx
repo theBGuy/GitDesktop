@@ -11,6 +11,7 @@ import type {
   PullWouldDrop,
 } from "@/lib/git/api";
 import { usePullRebaseDecided } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
@@ -42,7 +43,14 @@ export function usePullDropGuard(
   recovery: StashReapplyRecovery,
 ) {
   const decided = usePullRebaseDecided(repoPath);
-  const [refusal, setRefusal] = useState<PullWouldDrop | null>(null);
+  // The open question carries the repo it was raised in: the decided re-run
+  // goes through a hook bound to the LIVE repo, so answering it after a repo
+  // switch would rebase that repo with the old one's SHAs.
+  const [asked, setAsked] = useState<{
+    refusal: PullWouldDrop;
+    repo: string;
+  } | null>(null);
+  const refusal = asked?.refusal ?? null;
   const [running, setRunning] = useState<PullDecision | null>(null);
   // `running` is set synchronously before the mutation is fired, while
   // `isPending` only turns true once react-query flushes its own notification —
@@ -54,7 +62,9 @@ export function usePullDropGuard(
    *  owns the error and should present it normally. */
   function handleError(e: unknown): boolean {
     if (!isPullWouldDrop(e)) return false;
-    setRefusal(e);
+    // A refusal settling after a repo switch is the caller's to report.
+    if (useUiStore.getState().repoPath !== repoPath) return false;
+    setAsked({ refusal: e, repo: repoPath });
     return true;
   }
 
@@ -75,10 +85,18 @@ export function usePullDropGuard(
   // react-query drops those once the observer loses its listeners, and a rebase
   // the user explicitly authorized must report back either way.
   async function decide(decision: PullDecision) {
-    if (!refusal) return;
+    if (!asked) return;
+    const { refusal, repo } = asked;
+    if (useUiStore.getState().repoPath !== repo) {
+      toast.info(
+        "Didn't pull — that question was for another repository. Switch back to it and try again.",
+      );
+      setAsked(null);
+      return;
+    }
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      setRefusal(null);
+      setAsked(null);
       return;
     }
     const shas: PullDecisionShas = {
@@ -117,7 +135,7 @@ export function usePullDropGuard(
       // modal left standing would cover the banner or stash prompt the failure
       // arms above just handed the user.
       setRunning(null);
-      setRefusal(null);
+      setAsked(null);
     }
   }
 
@@ -130,7 +148,7 @@ export function usePullDropGuard(
         refusal={refusal}
         busy={busy}
         running={running}
-        onCancel={() => setRefusal(null)}
+        onCancel={() => setAsked(null)}
         onDecide={(decision) => void decide(decision)}
       />
     ),

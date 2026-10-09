@@ -15,6 +15,7 @@ import {
 } from "@/lib/git/queries";
 import { refuseWhileOffline } from "@/lib/offline-writes";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
@@ -159,7 +160,27 @@ export function useStashReapplyRecovery(repoPath: string) {
   const rebaseAutostash = useRebaseAutostash(repoPath);
   const rebaseOntoAutostash = useRebaseOntoAutostash(repoPath);
   const pullDecidedAutostash = usePullRebaseDecidedAutostash(repoPath);
-  const [request, setRequest] = useState<StashReapplyRequest | null>(null);
+  // The open prompt carries the repo it was raised for: the compounds run
+  // through hooks bound to the LIVE repo, so a prompt confirmed after a repo
+  // switch would stash and re-run in the wrong repository.
+  const [prompt, setPrompt] = useState<{
+    request: StashReapplyRequest;
+    repo: string;
+  } | null>(null);
+
+  /** True, after telling the user nothing ran, when `repo` is no longer live. */
+  function refuseOutsideRepo(repo: string, req: StashReapplyRequest) {
+    if (useUiStore.getState().repoPath === repo) return false;
+    toast.info(
+      `Didn't ${req.operationLabel} — it was for another repository. Switch back to it and try again.`,
+    );
+    return true;
+  }
+
+  /** A settled run clears only its own prompt: another may have been raised
+   *  while it ran. */
+  const clearOwnPrompt = (req: StashReapplyRequest) =>
+    setPrompt((cur) => (cur?.request === req ? null : cur));
 
   const pending =
     pullAutostash.isPending ||
@@ -191,10 +212,16 @@ export function useStashReapplyRecovery(repoPath: string) {
   // per-call callbacks once the observer has no listeners — the report of a
   // recovery the user explicitly asked for would never arrive, stash included.
   async function runRecovery(req: StashReapplyRequest) {
-    // Every compound funnels through here, whether confirmed or auto-run.
+    // Every compound funnels through here, whether confirmed or auto-run, so the
+    // repo check sits here too: the compounds run through hooks bound to the
+    // LIVE repo, and this closure's repo is the one the request was raised in.
+    if (refuseOutsideRepo(repoPath, req)) {
+      clearOwnPrompt(req);
+      return;
+    }
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      setRequest(null);
+      clearOwnPrompt(req);
       return;
     }
     // The one network compound: a pull holds offline like the sync controls'
@@ -211,28 +238,39 @@ export function useStashReapplyRecovery(repoPath: string) {
     } catch (e) {
       if (!req.onUnhandledError?.(e)) toastError(e);
     } finally {
-      setRequest(null);
+      clearOwnPrompt(req);
     }
   }
 
   /** Start the recovery for an already-classified refusal. */
   function begin(req: StashReapplyRequest) {
+    // A caller reaching here after an await may have outlived its repo: no
+    // prompt and no auto-run for a repo the user has left.
+    if (refuseOutsideRepo(repoPath, req)) return;
     // Fire-and-forget: `handleError` is a synchronous guard expression for its
     // callers, so the compound can't be awaited from here.
     if (settings.data?.autoStashOnPull) void runRecovery(req);
-    else setRequest(req);
+    else setPrompt({ request: req, repo: repoPath });
   }
 
   /** Take `e` if it's a dirty-tree refusal; `false` means the caller still owns
    *  the error and should present it normally. */
   function handleError(e: unknown, req: StashReapplyRequest): boolean {
     if (!isDirtyTreeRefusal(e)) return false;
+    // A refusal settling after a repo switch is the caller's to report: neither
+    // the prompt nor an auto-run may act on the repo the user moved to.
+    if (useUiStore.getState().repoPath !== repoPath) return false;
     begin(req);
     return true;
   }
 
   function confirm(always: boolean) {
-    if (!request) return;
+    if (!prompt) return;
+    const { request, repo } = prompt;
+    if (refuseOutsideRepo(repo, request)) {
+      setPrompt(null);
+      return;
+    }
     // Write only on change (AmendForcePush precedent) — the prompt never shows
     // while the preference is already on.
     if (always && settings.data && !settings.data.autoStashOnPull) {
@@ -250,15 +288,15 @@ export function useStashReapplyRecovery(repoPath: string) {
     dialog: (
       <StashReapplyDialog
         target={
-          request
+          prompt
             ? ({
-                operationLabel: request.operationLabel,
-                detail: request.detail,
-                detailPreposition: request.detailPreposition,
+                operationLabel: prompt.request.operationLabel,
+                detail: prompt.request.detail,
+                detailPreposition: prompt.request.detailPreposition,
               } satisfies StashReapplyTarget)
             : null
         }
-        onCancel={() => setRequest(null)}
+        onCancel={() => setPrompt(null)}
         onConfirm={confirm}
         pending={pending}
       />

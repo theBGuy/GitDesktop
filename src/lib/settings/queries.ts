@@ -134,18 +134,16 @@ export function useApplyTheme() {
       const updated = { ...current, theme: next };
       queryClient.setQueryData(settingsKeys.settings, updated);
       commitTheme(next);
-      saveSettings.mutate(updated, {
-        onError: () => {
-          // Only roll back if this call's change is still the latest: otherwise a
-          // late-failing earlier write would stomp a newer successful one (two
-          // fast cycles where the first write rejects after the second lands).
-          const latest = queryClient.getQueryData<AppSettings>(
-            settingsKeys.settings,
-          );
-          if (latest?.theme !== next) return;
-          queryClient.setQueryData(settingsKeys.settings, current);
-          commitTheme(current.theme);
-        },
+      void saveSettings.mutateAsync(updated).catch(() => {
+        // Only roll back if this call's change is still the latest: otherwise a
+        // late-failing earlier write would stomp a newer successful one (two
+        // fast cycles where the first write rejects after the second lands).
+        const latest = queryClient.getQueryData<AppSettings>(
+          settingsKeys.settings,
+        );
+        if (latest?.theme !== next) return;
+        queryClient.setQueryData(settingsKeys.settings, current);
+        commitTheme(current.theme);
       });
     },
     [queryClient, saveSettings],

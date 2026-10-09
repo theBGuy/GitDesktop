@@ -33,6 +33,7 @@ import {
 } from "@/lib/branch-rules/types";
 import { ghBranchProtections } from "@/lib/git/api";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -76,13 +77,20 @@ export function BranchRulesDialog({
   // Seed the editable draft from the active scope when the dialog opens or the
   // scope changes (switching scopes discards any unsaved edits in the other).
   const seededScope = useRef<string | null>(null);
+  // Open-session token, reminted on every reseed: the dialog stays mounted and
+  // Cancel is live mid-save, so a settle closes only the draft that submitted.
+  // Dropped only in `!open`, never by a cleanup: an `<Activity>` hide runs those.
+  const session = useRef<object | null>(null);
   useEffect(() => {
     if (!open) {
       seededScope.current = null;
+      session.current = null;
       return;
     }
+    if (session.current === null) session.current = {};
     if (seededScope.current !== scope && active.data) {
       seededScope.current = scope;
+      session.current = {};
       setDraft(active.data);
     }
   }, [open, scope, active.data]);
@@ -213,18 +221,30 @@ export function BranchRulesDialog({
     }
   }
 
-  function doSave() {
-    saving.mutate(draft, {
-      onSuccess: () => {
-        toast.success(
-          scope === "shared"
-            ? "Saved to .gitdesktop/branch-rules.json — commit it to share with your team"
-            : "Branch rules saved",
-        );
-        onOpenChange(false);
-      },
-      onError: toastError,
-    });
+  async function doSave() {
+    // Scope and repo are read before the await: the toast names where THIS save
+    // went, and a save landing after a repo switch must not close the next
+    // repo's dialog (RepositoryView is one instance across switches).
+    const savedFor = repoPath;
+    const submitted = session.current;
+    const savedShared = scope === "shared";
+    try {
+      await saving.mutateAsync(draft);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(
+      savedShared
+        ? "Saved to .gitdesktop/branch-rules.json — commit it to share with your team"
+        : "Branch rules saved",
+    );
+    if (
+      useUiStore.getState().repoPath === savedFor &&
+      submitted !== null &&
+      session.current === submitted
+    )
+      onOpenChange(false);
   }
 
   const promotionBranches = draft.promotionBranches;
@@ -534,9 +554,20 @@ export function BranchRulesDialog({
             // Below `sm` the footer stacks and stretches the wrapper span; the
             // Button fills it to match the stretched Cancel beside it.
             className="w-full"
-            onClick={doSave}
-            disabled={!dirty || saving.isPending}
-            reason={!dirty ? "No changes to save" : "Saving…"}
+            onClick={() => void doSave()}
+            disabled={!active.data || !dirty || saving.isPending}
+            reason={(() => {
+              switch (true) {
+                case !active.data && active.isError:
+                  return "Couldn't load branch rules";
+                case !active.data:
+                  return "Loading branch rules…";
+                case !dirty:
+                  return "No changes to save";
+                default:
+                  return "Saving…";
+              }
+            })()}
           >
             {scope === "shared" ? "Save to repository" : "Save changes"}
           </DisabledReasonButton>

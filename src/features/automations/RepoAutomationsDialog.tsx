@@ -26,6 +26,7 @@ import {
   repoEntry,
 } from "@/lib/automations/types";
 import { useRepoIdentity } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
@@ -113,11 +114,17 @@ export function RepoAutomationsDialog({
   // Seed the draft from the saved override when the dialog opens (reset on close
   // so a reopen reflects the persisted state, not stale in-flight edits).
   const seeded = useRef(false);
+  // Open-session token: the dialog stays mounted and Cancel is live mid-save, so
+  // a settle closes only the session that submitted. Dropped only in the `!open`
+  // branch, never by a cleanup: an `<Activity>` hide runs cleanups.
+  const session = useRef<object | null>(null);
   useEffect(() => {
     if (!open) {
       seeded.current = false;
+      session.current = null;
       return;
     }
+    if (session.current === null) session.current = {};
     if (!seeded.current && automations.data) {
       seeded.current = true;
       setDraft(savedOverride);
@@ -188,14 +195,24 @@ export function RepoAutomationsDialog({
     setDraft(EMPTY_OVERRIDE);
   }
 
-  function doSave() {
-    save.mutate(sanitizeOverride(draft), {
-      onSuccess: () => {
-        toast.success("Repository automations saved");
-        onOpenChange(false);
-      },
-      onError: toastError,
-    });
+  async function doSave() {
+    const savedFor = repoPath;
+    const submitted = session.current;
+    try {
+      await save.mutateAsync(sanitizeOverride(draft));
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success("Repository automations saved");
+    // The dialog survives a repo switch (RepositoryView is one instance), so a
+    // save landing after one must not close the next repo's dialog.
+    if (
+      useUiStore.getState().repoPath === savedFor &&
+      submitted !== null &&
+      session.current === submitted
+    )
+      onOpenChange(false);
   }
 
   const hasOverrides = Object.keys(draft.lifecycles).length > 0;
@@ -243,9 +260,20 @@ export function RepoAutomationsDialog({
             // Below `sm` the footer stacks and stretches the wrapper span; the
             // Button fills it to match the stretched Cancel beside it.
             className="w-full"
-            onClick={doSave}
-            disabled={!dirty || save.isPending}
-            reason={save.isPending ? "Saving…" : "No changes to save"}
+            onClick={() => void doSave()}
+            disabled={!automations.data || !dirty || save.isPending}
+            reason={(() => {
+              switch (true) {
+                case save.isPending:
+                  return "Saving…";
+                case !automations.data && automations.isError:
+                  return "Couldn't load repository automations";
+                case !automations.data:
+                  return "Loading repository automations…";
+                default:
+                  return "No changes to save";
+              }
+            })()}
           >
             Save changes
           </DisabledReasonButton>

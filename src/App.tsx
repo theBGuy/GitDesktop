@@ -50,6 +50,7 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_INSTANCE_ID, COLD_START } from "@/lib/test-mode";
 import { nextTheme, THEME_LABELS } from "@/lib/theme";
+import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
 function App() {
@@ -116,11 +117,13 @@ function App() {
     const persist = (extra?: { analyticsEnabled: false }) => {
       const latest = settingsRef.current;
       if (latest)
-        saveSettings.mutate({
-          ...latest,
-          ...extra,
-          seenAnalyticsNotice: true,
-        });
+        void saveSettings
+          .mutateAsync({
+            ...latest,
+            ...extra,
+            seenAnalyticsNotice: true,
+          })
+          .catch(toastError);
     };
     toast("GitDesktop sends anonymous usage data", {
       description:
