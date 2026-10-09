@@ -97,8 +97,8 @@ export function useInvalidateAfterReconnect() {
       // Partial keys with a repo path in slot 1, so match on the axis instead.
       // Its charter is SCOPE-GRANT RECOVERY only: every axis listed here is one a
       // newly granted scope can change the answer to. Cache identity across
-      // ACCOUNTS is a query-key-axis concern — a cache that may hold another
-      // account's answer needs that account in its key, never a wider sweep here.
+      // ACCOUNTS belongs to the account-change reset (src/lib/account-change.ts),
+      // which fires off forge-status's login — never a wider sweep here.
       predicate: (q) =>
         q.queryKey[0] === "repo" &&
         (q.queryKey[2] === "forge-status" ||

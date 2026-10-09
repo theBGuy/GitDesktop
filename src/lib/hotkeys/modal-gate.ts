@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useLayoutEffect, useSyncExternalStore } from "react";
 
 /**
  * Dialogs that must suppress App's global repo/settings actions while they are
@@ -32,7 +32,9 @@ function getSnapshot(): boolean {
  * webview's modal overlay) refuse while it is on screen.
  */
 export function useModalGateRegistration(open: boolean): void {
-  useEffect(() => {
+  // A LAYOUT effect, as useHotkeyAction's registration is: the gate feeds App's
+  // `enabled` flags, so it flips in the commit that opens or closes the dialog.
+  useLayoutEffect(() => {
     if (!open) return;
     const token = {};
     openModals.add(token);
