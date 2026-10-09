@@ -11,6 +11,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -32,7 +33,10 @@ import {
 } from "@/features/conversations/ProjectsPopover";
 import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
-import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import {
+  CREATE_PENDING_GENERATE_REASON,
+  useFinishAndSurface,
+} from "@/features/conversations/useAiStream";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
@@ -530,9 +534,11 @@ export function CreateIssueDialog({
   // focus on X. It is swallowed here whenever it may fire (the hook mirrors the
   // global listener's own guards), so the global generate-commit-message action
   // can't run behind the dialog; while generating it swallows but DOESN'T
-  // cancel.
+  // cancel. A running create holds it like the button: the draft it would
+  // revise has already been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: aiEnabled && !generating && notes.trim() !== "",
+    enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
   });
   // The one submit gate, shared by the button and the form's native submit:
@@ -540,7 +546,6 @@ export function CreateIssueDialog({
   // rather than park: a parked one would land after the dialog was left behind.
   const offlineHold = useOfflineHold();
   const submitBlocked = generating || !!offlineHold;
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   // The running draft, the running create, and offline carry a reason, ranked
   // running-first, so a flip between them never drops focus to a native disable.
   const offlineSubmit = useDisabledReason({
@@ -712,23 +717,29 @@ export function CreateIssueDialog({
                         Cancel
                       </Button>
                     ) : (
-                      <Button
+                      // Empty notes stay a plain disable; a running create says why.
+                      <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={!notes.trim()}
+                        disabled={!notes.trim() || isSubmitting}
+                        reason={
+                          isSubmitting
+                            ? CREATE_PENDING_GENERATE_REASON
+                            : undefined
+                        }
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          notes.trim()
+                          notes.trim() && !isSubmitting
                             ? `Expand your notes into a structured issue with AI${generateChord.hint}`
                             : "Expand your notes into a structured issue with AI"
                         }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Draft with AI
-                      </Button>
+                      </DisabledReasonButton>
                     )
                   }
                 />

@@ -213,7 +213,19 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   fetch; `consumeSkipSeed` is only for a caller discarding the waiting draft on
   purpose — an identity axis that moved on, or an explicit draft request that
   outranks it), and the repo-description store delivers only while the dialog
-  reports General active, stashing otherwise.
+  reports General active, stashing otherwise. While a dialog's own form submits,
+  its Generate holds with a reason (`CREATE_PENDING_GENERATE_REASON` from
+  useAiStream.ts for creates) and its chord's `enabled` carries `!isSubmitting`:
+  the draft is already sent and the settle closes the dialog holding it (the
+  `generate-held-while-submitting` guard in `pnpm run checks` is the ratchet). A
+  dialog a settle may close without a generation stamp carries an open-session
+  token (`{}`) minted in its open handler, its `useSeedOnOpen` seed, or the open
+  branch of a latched seed effect (re-minted when a reseed replaces the draft),
+  captured at submit, dropped on every close and compared after the await. When
+  the settle CLOSES the dialog it is never minted in an `[open]` effect whose
+  cleanup clears it: an `<Activity>` hide runs that cleanup, so a create
+  settling while hidden would leave its dialog open. A settle that only
+  navigates may (`RunWorkflowDialog`): a cleared token lands its safe arm.
 - Worktree actions gate on in-flight removal/promote state: menu items disable
   with the parenthetical reason riding the label (a disabled menu item can't
   carry a tooltip), and mutation choke points re-check at fire time —
@@ -460,10 +472,38 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `mutationKey:`. Guard: `mutation-identity-pinning` ratchets the cache-seeding
   sites and the create-family ones it can see by NAME, following delegation one
   level inside a module. It scans the git-queries package, `lib/jira/queries.ts`
-  and the local PR/issue query modules, where a wrapper keyed through an optional
-  parameter also obliges its delegating call to pass one — a repo-scoped create
+  and the local PR/issue query modules (both local wrappers key unconditionally,
+  `["local-pr" | "local-issue", op, repo]`; a wrapper keyed through an optional
+  parameter would oblige its delegating call to pass one) — a repo-scoped create
   written anywhere else is unratcheted, and the wider class stays a review
-  concern.
+  concern. The `Add…`/`Submit…`/`Publish…`/`Fork…` creates stay unpinned BY
+  DECISION: their callers read `isPending` as a re-entry guard, which a pin
+  idles, so the isPending → local-flag migration comes first. A cache WRITE
+  (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/`onSettled` keys
+  from the callback's own parameters, never hook scope: `onMutate` runs once at
+  mutate time, the settle callbacks off the CURRENT render's options, so build
+  the key in `onMutate`, return it in the context, read it back
+  (`useSetRepoStar` is the reference). The carve-out is a pinned
+  `useRepoMutation` seed: it has no `onMutate` to key from, so its identity pin
+  is what detaches it on a switch (`useCreateIssue`, writing through
+  `insertCreatedIssue`, is the live instance). Context-keying needs no pin
+  of its own, so `isPending` stays live — but the pin rule above is separate and
+  still applies: an EXPORTED repo-scoped hook whose `onSuccess` seeds the cache
+  keeps its mutation key however the seed is keyed. Guard:
+  `settle-cache-write-identity`, over the same modules; a write through a
+  helper, a callback passed by name, and `useOptimisticCacheMutation`'s
+  `reconcile` stay review concerns (the check's message lists the rest).
+- **Pending-write holds** read the mutation cache through
+  `useMutationCacheSnapshot` (`queries/internal.ts`) with a caller-memoized
+  `select` (`useCallback` over stable deps: primitives or module-level
+  constants), never `useMutationState` (its ref goes stale across an
+  `<Activity>` hide) and never the observer (it tracks only its latest
+  call). The pure projection goes in an import-free module (`pr-writes.ts`,
+  `board-writes.ts`). A projection that CASTS the variables
+  casts through the same exported type the mutation's generic uses
+  (`ThreadWriteVars`, `DiscussionUpvoteVars`), so a renamed field fails to
+  compile; the runtime-guarded readers (`boardWriteVars`, `pendingPrWriteTarget`)
+  `typeof`-check each field instead.
 - **Plugin-store open/reload** — an app-data store opens via
   `memoizedStoreLoader` and re-reads via `reloadToleratingEmptyStore`
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a

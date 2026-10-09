@@ -456,6 +456,133 @@ const GENERATOR_HOOK_RE =
 const USE_SEED_ON_OPEN_CALL_RE = /\buseSeedOnOpen\s*\(/g;
 const FINISH_AND_SURFACE_RE = /\buseFinishAndSurface\s*\(/g;
 
+// A create's settle closes the dialog holding the draft it sent, so nothing may
+// revise that draft once it is in flight: while the form submits, Generate
+// holds, and the generate chord with it. Statically: in a file that builds a
+// form (`useAppForm(` or `withForm(`, code only), every `useGenerateChord(`
+// call passes an object literal whose own `enabled` value is a top-level `&&`
+// chain with `!isSubmitting` as one conjunct (redundant parens stripped). A
+// top-level `||`, `??` or ternary in that value, a missing, shorthand,
+// duplicated or spread-overridable `enabled`, and an unreadable call all
+// report. File-scoped: a form and a chord in different components of one file
+// still pair, a loud over-match the allowlist answers. The visible Generate's
+// own hold is render output this can't see; the chord is the ratcheted half.
+const FORM_HOST_RE = /\b(?:useAppForm|withForm)\s*\(/g;
+const GENERATE_CHORD_CALL_RE = /\buseGenerateChord\s*\(/g;
+
+/** Walks `src` skipping string and template contents, calling `visit(i)` at
+ *  each bracket-depth-0 index; a truthy return stops the walk and is returned.
+ *  null on unbalanced brackets or an unclosed string, so callers fail closed. */
+function walkTopLevel(src, visit) {
+  let depth = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
+      if (j >= src.length) return null;
+      i = j;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      if (depth < 0) return null;
+    } else if (depth === 0) {
+      const out = visit(i);
+      if (out) return out;
+    }
+  }
+  return depth === 0 ? false : null;
+}
+
+/** `src` split at its depth-0 occurrences of `sep`, or null if unreadable. */
+function splitAtTopLevel(src, sep) {
+  const parts = [];
+  let from = 0;
+  const walked = walkTopLevel(src, (i) => {
+    if (i >= from && src.startsWith(sep, i)) {
+      parts.push(src.slice(from, i));
+      from = i + sep.length;
+    }
+  });
+  if (walked === null) return null;
+  parts.push(src.slice(from));
+  return parts;
+}
+
+/** `src` trimmed, minus any parens wrapping the WHOLE expression. */
+function stripOuterParens(src) {
+  let s = src.trim();
+  while (s.startsWith("(") && balancedEnd(s, 0, "(", ")") === s.length - 1)
+    s = s.slice(1, -1).trim();
+  return s;
+}
+
+/** Whether `expr` has a depth-0 `||`, `??` or ternary `?` (optional chaining
+ *  aside); null if unreadable. */
+function hasTopLevelAlternative(expr) {
+  const found = walkTopLevel(expr, (i) => {
+    if (expr.startsWith("||", i)) return true;
+    if (expr[i] !== "?") return false;
+    // `?.` before a non-digit is optional chaining; `??` and a bare `?` aren't.
+    return !(expr[i + 1] === "." && !/\d/.test(expr[i + 2] ?? ""));
+  });
+  return found === null ? null : Boolean(found);
+}
+
+/** The `&&` conjuncts of `expr`, flattening parenthesized `&&` chains; null
+ *  when `expr` itself is not a pure conjunction or can't be read. */
+function conjuncts(expr) {
+  const e = stripOuterParens(expr);
+  if (hasTopLevelAlternative(e) !== false) return null;
+  const parts = splitAtTopLevel(e, "&&");
+  if (parts === null) return null;
+  if (parts.length === 1) return [e];
+  return parts.flatMap((p) => conjuncts(p) ?? [stripOuterParens(p)]);
+}
+
+/** Whether a `useGenerateChord` call's argument source (between its parens)
+ *  holds the chord on submit, per the class comment above. */
+export function chordOptionsHoldSubmit(args) {
+  const obj = args.trim();
+  if (!obj.startsWith("{") || balancedEnd(obj, 0, "{", "}") !== obj.length - 1)
+    return false;
+  const props = splitAtTopLevel(obj.slice(1, -1), ",");
+  if (props === null) return false;
+  const entries = props.map((p) => p.trim()).filter((p) => p !== "");
+  // A spread can supply or override `enabled` out of sight.
+  if (entries.some((p) => p.startsWith("..."))) return false;
+  const keyed = entries.filter((p) => /^(["']?)enabled\1\s*(?::|$)/.test(p));
+  // Missing, duplicated, or shorthand (`{ enabled, run }`): unreadable.
+  if (keyed.length !== 1) return false;
+  const colon = keyed[0].indexOf(":");
+  if (colon === -1) return false;
+  const terms = conjuncts(keyed[0].slice(colon + 1));
+  return (
+    terms !== null &&
+    terms.some((t) => t.replace(/\s+/g, "") === "!isSubmitting")
+  );
+}
+
+/** Each `useGenerateChord(` call in a view's text, with whether it holds on
+ *  submit; an unclosed call reads as unheld. */
+export function generateChordCalls(text) {
+  return [...text.matchAll(GENERATE_CHORD_CALL_RE)].map((m) => {
+    const open = m.index + m[0].length - 1;
+    const close = balancedEnd(text, open, "(", ")");
+    return {
+      index: m.index,
+      held: close !== -1 && chordOptionsHoldSubmit(text.slice(open + 1, close)),
+    };
+  });
+}
+
+const chordIgnoresSubmit = ({ text, starts }) =>
+  generateChordCalls(text)
+    .filter((call) => !call.held)
+    .map((call) => lineAt(starts, call.index));
+
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
 // before the store write resolves. The hit: that file's mutation FAILURE arm
@@ -717,6 +844,18 @@ const JIRA_QUERIES = "src/lib/jira/queries.ts";
  *  package, in their own directories, so they are named into scope one by one
  *  rather than reached by a directory prefix. */
 const LOCAL_QUERIES = ["src/lib/pulls/queries.ts", "src/lib/issues/queries.ts"];
+/** The modules that declare repo-scoped mutation hooks, shared by the two
+ *  mutation-identity checks. */
+const isMutationModule = (file) =>
+  (file.startsWith(QUERIES_DIR) && file.endsWith(".ts")) ||
+  file === JIRA_QUERIES ||
+  LOCAL_QUERIES.includes(file);
+/** Floor near the real module count (38): a low floor would let a typo in
+ *  QUERIES_DIR leave the scan almost entirely inert and still pass. */
+const MUTATION_MODULES_SCANNED = {
+  atLeast: 35,
+  hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES} + ${LOCAL_QUERIES.join(" + ")}`,
+};
 
 // The mutation-identity family. Anchors are deliberately structural rather than
 // textual: react-query re-pushes a hook's options onto its PENDING mutation on
@@ -785,20 +924,21 @@ function paramListOpen(text, from) {
   return text[i] === "(" ? i : -1;
 }
 
-/** A parameter or argument list split on its TOP-LEVEL commas. `<`/`>` are not
- *  counted as brackets — `=> Promise<T>` would otherwise drive the depth negative
- *  and misplace every later comma. The residual is a comma inside a generic
- *  (`Promise<Record<string, unknown>>`), which over-counts in BOTH directions: an
- *  over-counted ARGUMENT list can hide a missing key, and an over-counted PARAMETER
- *  list raises the required index so a call that does pass the key trips the check.
- *  Zero-instance in the scanned modules today; a real generic parser is the fix. */
-function splitTopLevel(list) {
+/** A parameter or argument list split on its TOP-LEVEL commas. With `params`, `<`
+ *  opens a nesting level and `>` closes one unless an `=` precedes it (an arrow), so
+ *  a comma inside `Promise<Record<string, unknown>>` stays in its parameter.
+ *  Argument lists keep bracket-only counting: there `<`/`>` can be comparisons, and
+ *  `a < b, c > d` is two arguments. */
+export function splitTopLevel(list, { params = false } = {}) {
   const out = [];
   let depth = 0;
   let cur = "";
+  let prev = "";
   for (const ch of list) {
-    if ("([{".includes(ch)) depth++;
-    else if (")]}".includes(ch)) depth--;
+    if ("([{".includes(ch) || (params && ch === "<")) depth++;
+    else if (")]}".includes(ch) || (params && ch === ">" && prev !== "="))
+      depth--;
+    prev = ch;
     if (ch === "," && depth === 0) {
       out.push(cur);
       cur = "";
@@ -817,8 +957,9 @@ const CONDITIONAL_KEY_SPREAD_RE =
   /\.\.\.\(\s*([A-Za-z_$][\w$]*)\s*(?:\?\s*\{\s*mutationKey\s*:\s*\1\s*\}\s*:\s*\{\s*\}|&&\s*\{\s*mutationKey\s*:\s*\1\s*\})\s*\)/;
 
 /**
- * The index of the wrapper parameter its mutation key is CONDITIONAL on — the
- * spread the local PR/issue wrappers use — or -1 when the key is unconditional.
+ * The index of the wrapper parameter its mutation key is CONDITIONAL on (a
+ * `...(key ? { mutationKey: key } : {})` spread; no live instance, fixture-pinned),
+ * or -1 when the key is unconditional.
  * `MUTATION_KEYED_RE` sees that spread and reads the wrapper as pinned no matter
  * what its delegators pass, so the obligation moves to the delegating call: it has
  * to supply the argument.
@@ -854,7 +995,9 @@ function repoScopedHooks(text) {
     out.push({
       name: decl[2],
       exported: Boolean(decl[1]),
-      params: splitTopLevel(text.slice(paramOpen + 1, paramClose)),
+      params: splitTopLevel(text.slice(paramOpen + 1, paramClose), {
+        params: true,
+      }),
       bodyOpen,
       body: text.slice(bodyOpen, bodyClose),
     });
@@ -916,6 +1059,328 @@ const unpinnedMutationIdentity = ({ text, starts }) => {
         if (passed <= needed) hits.add(lineAt(starts, callOpen));
       }
       if (delegates) unpinned(wrapper, () => true);
+    }
+  }
+  return [...hits];
+};
+
+// The settle-cache-write family. query-core runs `onMutate` once, at mutate time,
+// but calls `onSuccess`/`onError`/`onSettled` off whatever options a mounted
+// observer last re-pushed onto the pending mutation — so a key those callbacks
+// build from hook scope is the CURRENT render's, not the one the write fired under.
+/** A settle callback as a property (`onSuccess:`) or a method (`onSuccess(…) {`);
+ *  a member CALL (`opts.onSuccess(…)`) is excluded by the lookbehind. */
+const SETTLE_CALLBACK_RE =
+  /(?<![\w$.])on(?:Success|Error|Settled)\s*(:\s*|(?=\())/g;
+const CACHE_WRITE_RE = /\bset(?:Query|Queries)Data\s*/g;
+/** Identity axes by name: a bare one in a settle key is hook scope even where the
+ *  scan finds no declaration for it (a module-level helper's parameter). */
+const IDENTITY_NAMES = new Set(["repo", "lens", "link"]);
+const FUNCTION_DECL_RE = /\bfunction\s+[A-Za-z_$][\w$]*\s*(?=[<(])/g;
+/** A hook spelled as an arrow: `const useX = (…) => …`. */
+const ARROW_HOOK_RE = /\b(?:const|let)\s+use[A-Za-z0-9_$]*\s*=\s*/g;
+/** A plain `name = …` assignment (not `==`, `=>`, or a compound operator). */
+const ASSIGN_RE = /(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])/g;
+const DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*|[{[])/g;
+const IDENT_RE = /[A-Za-z_$][\w$]*/g;
+/** Words a key expression can carry that never name a binding. */
+const NON_BINDINGS = new Set([
+  "as",
+  "async",
+  "await",
+  "const",
+  "false",
+  "function",
+  "in",
+  "instanceof",
+  "keyof",
+  "new",
+  "null",
+  "readonly",
+  "return",
+  "satisfies",
+  "this",
+  "true",
+  "typeof",
+  "undefined",
+  "void",
+]);
+
+/** Index where the expression starting at `from` ends: a top-level `,`, `;`, or the
+ *  closer of the bracket that contains it. Brackets inside string literals count,
+ *  the residual `balancedEnd` shares. */
+function expressionEnd(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) {
+      if (depth === 0) return i;
+      depth--;
+    } else if ((ch === "," || ch === ";") && depth === 0) return i;
+  }
+  return text.length;
+}
+
+/** The function literal (arrow or `function`) at `at`: its parameter text and its
+ *  body span, or null when the value is anything else — a callback passed by name,
+ *  or a call returning one. */
+function functionLiteralAt(text, at) {
+  let i = at;
+  const rest = () => text.slice(i);
+  const skipWs = () => {
+    while (i < text.length && /\s/.test(text[i])) i++;
+  };
+  if (/^async\b/.test(rest())) {
+    i += 5;
+    skipWs();
+  }
+  let params;
+  if (/^function\b/.test(rest())) {
+    i += 8;
+    skipWs();
+    i += rest().match(/^[A-Za-z_$][\w$]*/)?.[0].length ?? 0;
+    const open = paramListOpen(text, i);
+    if (open < 0) return null;
+    const close = balancedEnd(text, open, "(", ")");
+    const bodyOpen = text.indexOf("{", close);
+    if (close < 0 || bodyOpen < 0) return null;
+    return {
+      params: text.slice(open + 1, close),
+      start: bodyOpen,
+      end: balancedEnd(text, bodyOpen, "{", "}"),
+    };
+  }
+  const single = rest().match(/^([A-Za-z_$][\w$]*)\s*=>\s*/);
+  if (single) {
+    params = single[1];
+    i += single[0].length;
+  } else {
+    const open = paramListOpen(text, i);
+    if (open < 0) return null;
+    const close = balancedEnd(text, open, "(", ")");
+    if (close < 0) return null;
+    params = text.slice(open + 1, close);
+    i = close + 1;
+    skipWs();
+    // A return-type annotation sits between the list and the arrow.
+    if (text[i] === ":") i = text.indexOf("=>", i);
+    if (i < 0 || !rest().startsWith("=>")) return null;
+    i += 2;
+    skipWs();
+  }
+  if (text[i] === "{")
+    return { params, start: i, end: balancedEnd(text, i, "{", "}") };
+  return { params, start: i, end: expressionEnd(text, i) };
+}
+
+/** Names a destructuring pattern's inside binds: `a`, the `b` of `a: b`, and the
+ *  same again inside nested patterns. */
+function patternBindings(inner, names) {
+  for (const part of splitTopLevel(inner, { params: true })) {
+    const element = part.replace(/^\.\.\./, "");
+    const renamed = element.match(/^[A-Za-z_$][\w$]*\s*:\s*/);
+    const target = renamed ? element.slice(renamed[0].length) : element;
+    bindingTarget(target, names);
+  }
+}
+
+/** Names one binding target binds: an identifier, or a nested pattern. */
+function bindingTarget(target, names) {
+  const open = target[0];
+  if (open === "{" || open === "[") {
+    const close = balancedEnd(target, 0, open, open === "{" ? "}" : "]");
+    if (close > 0) patternBindings(target.slice(1, close), names);
+    return;
+  }
+  const name = target.match(/^[A-Za-z_$][\w$]*/);
+  if (name) names.add(name[0]);
+}
+
+/** The method body at `at` (`onSuccess(…) { … }` with `at` on the `(`), or null
+ *  when the parentheses open a call rather than a method definition. */
+function methodLiteralAt(text, at) {
+  const close = balancedEnd(text, at, "(", ")");
+  if (close < 0) return null;
+  let i = close + 1;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  if (text[i] !== "{") return null;
+  return {
+    params: text.slice(at + 1, close),
+    start: i,
+    end: balancedEnd(text, i, "{", "}"),
+  };
+}
+
+/** Whether a parameter's OWN annotation is a function type, read at its top level:
+ *  `f: () => T` is, `opts: { onDone?: () => void }` is not. A default value ends
+ *  the annotation. */
+function hasFunctionType(param) {
+  let depth = 0;
+  let typed = false;
+  for (let i = 0; i < param.length; i++) {
+    const ch = param[i];
+    if ("([{<".includes(ch)) depth++;
+    else if (")]}".includes(ch) || (ch === ">" && param[i - 1] !== "="))
+      depth--;
+    else if (depth === 0 && ch === ":") typed = true;
+    else if (depth === 0 && typed && ch === "=") return param[i + 1] === ">";
+  }
+  return false;
+}
+
+/** The names a parameter list binds; with `valuesOnly`, a parameter whose type
+ *  is a function is skipped — a key built THROUGH a passed-in builder is fine. */
+function parameterBindings(list, valuesOnly = false) {
+  const names = new Set();
+  for (const param of splitTopLevel(list, { params: true })) {
+    if (valuesOnly && hasFunctionType(param)) continue;
+    bindingTarget(param.replace(/^\.\.\./, ""), names);
+  }
+  return names;
+}
+
+/** Every `const`/`let`/`var` in `src`, in order, as its bound names, its offset,
+ *  and the expression its value comes from: the initializer, or the iterable of a
+ *  `for (… of|in …)` head (empty when there is neither). */
+function declarations(src) {
+  const out = [];
+  for (const m of src.matchAll(DECL_RE)) {
+    const names = new Set();
+    let after = m.index + m[0].length;
+    if (m[1] === "{" || m[1] === "[") {
+      const open = after - 1;
+      const close = balancedEnd(src, open, m[1], m[1] === "{" ? "}" : "]");
+      if (close < 0) continue;
+      patternBindings(src.slice(open + 1, close), names);
+      after = close + 1;
+    } else names.add(m[1]);
+    const source = src
+      .slice(after)
+      .match(/^\s*(?::[^=]*)?=(?!=)|^\s+(?:of|in)\s+/);
+    const initStart = source ? after + source[0].length : after;
+    out.push({
+      at: m.index,
+      names,
+      init: source ? src.slice(initStart, expressionEnd(src, initStart)) : "",
+    });
+  }
+  return out;
+}
+
+/** Every plain assignment in `src` as the same shape {@link declarations} returns,
+ *  so a binding declared bare and assigned later is read at its assignment. */
+function assignments(src) {
+  return [...src.matchAll(ASSIGN_RE)].map((m) => {
+    const initStart = m.index + m[0].length;
+    return {
+      at: m.index,
+      names: new Set([m[1]]),
+      init: src.slice(initStart, expressionEnd(src, initStart)),
+    };
+  });
+}
+
+/** The hook scopes the scan reads: every `function` declaration and every arrow
+ *  `const use… =`, as parameter text plus body span. */
+function hookHosts(text) {
+  const hosts = [];
+  for (const decl of text.matchAll(FUNCTION_DECL_RE)) {
+    const open = paramListOpen(text, decl.index + decl[0].length);
+    if (open < 0) continue;
+    const close = balancedEnd(text, open, "(", ")");
+    const bodyOpen = close < 0 ? -1 : text.indexOf("{", close);
+    const bodyClose = bodyOpen < 0 ? -1 : balancedEnd(text, bodyOpen, "{", "}");
+    if (bodyClose < 0) continue;
+    hosts.push({ params: text.slice(open + 1, close), bodyOpen, bodyClose });
+  }
+  for (const decl of text.matchAll(ARROW_HOOK_RE)) {
+    const fn = functionLiteralAt(text, decl.index + decl[0].length);
+    if (!fn || fn.end < 0) continue;
+    hosts.push({ params: fn.params, bodyOpen: fn.start, bodyClose: fn.end });
+  }
+  return hosts;
+}
+
+/** The binding names an expression reads: no member names (`ctx.key` reads `ctx`),
+ *  no object-literal property names, nothing inside a string literal. A template's
+ *  `${…}` parts are kept, since they are code. */
+function bareReferences(expr) {
+  const code = expr
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, (tpl) =>
+      [...tpl.matchAll(/\$\{([^}]*)\}/g)].map((p) => p[1]).join(" "),
+    );
+  const out = [];
+  for (const m of code.matchAll(IDENT_RE)) {
+    const before = code.slice(0, m.index).trimEnd();
+    if (/[\w$]$/.test(code.slice(0, m.index))) continue;
+    if (before.endsWith(".") && !before.endsWith("...")) continue;
+    const after = code.slice(m.index + m[0].length).trimStart();
+    if (/^:(?!:)/.test(after) && /[{,]$/.test(before)) continue;
+    if (NON_BINDINGS.has(m[0])) continue;
+    out.push(m[0]);
+  }
+  return out;
+}
+
+/**
+ * Scanner: a `setQueryData`/`setQueriesData` inside an `onSuccess`/`onError`/
+ * `onSettled` function literal whose KEY argument reads hook scope — a bare
+ * `repo`/`lens`/`link`, a value parameter of the enclosing function, a name declared
+ * in its body outside the callback, or a callback local built from any of those.
+ * Reads of the callback's own parameters (`ctx.key`, `args.number`) are what a fix
+ * looks like. The shapes it cannot see are listed in the check's `message`.
+ */
+const settleCacheWriteFromHookScope = ({ text, starts }) => {
+  const hits = new Set();
+  const hosts = hookHosts(text);
+  for (const m of text.matchAll(SETTLE_CALLBACK_RE)) {
+    const at = m.index + m[0].length;
+    const callback =
+      m[1] === "" ? methodLiteralAt(text, at) : functionLiteralAt(text, at);
+    if (!callback || callback.end < 0) continue;
+    // Every function around the callback is hook scope it can close over, not just
+    // the innermost: a callback built in a nested helper still reads the hook's.
+    const hookScope = new Set();
+    for (const host of hosts) {
+      if (!(host.bodyOpen < m.index && m.index < host.bodyClose)) continue;
+      for (const name of parameterBindings(host.params, true))
+        hookScope.add(name);
+      const outside =
+        text.slice(host.bodyOpen, m.index) +
+        text.slice(callback.end, host.bodyClose);
+      for (const { names } of declarations(outside))
+        for (const name of names) hookScope.add(name);
+    }
+    const body = text.slice(callback.start, callback.end);
+    const own = parameterBindings(callback.params);
+    const tainted = new Set();
+    const readsHookScope = (expr) =>
+      bareReferences(expr).some((name) => {
+        if (tainted.has(name)) return true;
+        if (own.has(name)) return false;
+        return IDENTITY_NAMES.has(name) || hookScope.has(name);
+      });
+    // Taint is sticky: a binding that ever held hook scope stays suspect, since the
+    // scan is not flow-sensitive and a later clean assignment can follow the write.
+    const bindings = [...declarations(body), ...assignments(body)].sort(
+      (a, b) => a.at - b.at,
+    );
+    for (const { names, init } of bindings) {
+      const fromHookScope = readsHookScope(init);
+      for (const name of names) {
+        if (fromHookScope) tainted.add(name);
+        else own.add(name);
+      }
+    }
+    for (const write of body.matchAll(CACHE_WRITE_RE)) {
+      const at = callback.start + write.index + write[0].length;
+      const open = paramListOpen(text, at);
+      if (open < 0) continue;
+      const key = text.slice(open + 1, expressionEnd(text, open + 1));
+      if (readsHookScope(key))
+        hits.add(lineAt(starts, callback.start + write.index));
     }
   }
   return [...hits];
@@ -1190,6 +1655,20 @@ export const CHECKS = [
       "closing a dialog must never discard a paid AI generation — a mounted generator dialog rides useFinishAndSurface (src/features/conversations/useAiStream.ts): a run that settles while the dialog is closed latches skip-seed so the reopen shows the draft, and toasts it with a View reopen; a surface that genuinely aborts its run on close needs an allowlist entry with rationale",
   },
   {
+    name: "generate-held-while-submitting",
+    appliesTo: (file) => file.endsWith(".tsx") && notVendoredUi(file),
+    scan: onlyWhen(FORM_HOST_RE, chordIgnoresSubmit),
+    allowlist: [
+      // The shared title+description EDIT dialog: an edit re-saves the same
+      // entity rather than creating a second one, so by owner decision its
+      // Generate (in each host's `bodyActions`, mirrored by the chord through
+      // `generateDisabled`) stays live during the save.
+      "src/features/conversations/EditTitleBodyDialog.tsx",
+    ],
+    message:
+      "a dialog's generate chord holds while its own form submits — add `!isSubmitting` (read via `useSelector(form.store, (s) => s.isSubmitting)`) as an `&&` conjunct of the chord's `enabled` and hold the visible Generate with a reason (DisabledReasonButton): the draft has already been sent, and its settle closes the dialog holding it; a surface whose submit can't strand a revision needs an allowlist entry with rationale",
+  },
+  {
     name: "hand-rolled-diff-stat",
     // The component IS the idiom; everything else routes through it.
     appliesTo: (file) =>
@@ -1438,38 +1917,34 @@ export const CHECKS = [
   },
   {
     name: "mutation-identity-pinning",
-    // The modules that declare repo-scoped mutation hooks: the git queries
-    // package, the Jira queries, and the two local-entity modules. The check is
-    // deliberately NARROWER than the convention it serves: the convention governs
-    // every mutation whose callbacks close over repo/lens, which is ~200 sites here,
-    // while this ratchet covers the two where a retarget is not self-healing — a
-    // create landing in the wrong repo, and a response seeded into the wrong repo's
-    // cache. The rest stay a review concern, not an exempted one.
-    // Within that boundary the scan still has named gaps (message lists them): it
-    // recognizes a create by NAME, so the `Add…`/`Submit…`/`Publish…`/`Fork…`
-    // spellings of one are invisible; and it follows delegation only to a `use…`
-    // wrapper in the SAME file, and only from a create hook. Widening the name
-    // heuristic makes each newly-seen site a pin-or-allowlist decision, so it is a
-    // deliberate follow-up — widen here rather than allowlisting the consequences.
-    // The local-entity wrappers keep their key OPTIONAL on purpose: making it
-    // mandatory would pin their update/delete hooks too, and those callers read
-    // `isPending` as a re-entry guard that a detach silently opens. That migration
-    // (isPending → a local submitting flag) is the recorded follow-up; until it
-    // lands, the delegating-call check above is what holds the create half.
-    appliesTo: (file) =>
-      (file.startsWith(QUERIES_DIR) && file.endsWith(".ts")) ||
-      file === JIRA_QUERIES ||
-      LOCAL_QUERIES.includes(file),
+    // Deliberately narrower than its convention: it ratchets a create landing in
+    // the wrong repo and a response seeded into the wrong repo's cache, the
+    // retargets that don't self-heal; a retargeted invalidation refetches its way
+    // back, so the rest stay a review concern. The `Add…`/`Submit…`/`Publish…`/
+    // `Fork…` creates stay outside BY DECISION: a pin idles the `isPending` their
+    // callers read as a re-entry guard, so the local-flag migration comes first.
+    appliesTo: (file) => isMutationModule(file),
     scan: unpinnedMutationIdentity,
     allowlist: [],
-    // Floor near the real module count (33): a low floor would let a typo in
-    // QUERIES_DIR leave the scan almost entirely inert and still pass.
-    expectScanned: {
-      atLeast: 27,
-      hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES} + ${LOCAL_QUERIES.join(" + ")}`,
-    },
+    expectScanned: MUTATION_MODULES_SCANNED,
     message:
-      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see seven shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, a cache-seeding wrapper reached only from non-create hooks, a conditionally-keyed wrapper whose delegating call DOES pass the identity argument but passes something undefined or keyless in it (the call-site check counts arguments, it cannot evaluate them — src/lib/pulls/queries.ts and src/lib/issues/queries.ts are the live pair), a hook declared as `export const useX = (repo) => …` (the declaration anchor requires the `function` keyword), and one whose return type is an inline object literal (`): { … } {` — the body scan would take the return type as the body). The last two are zero-instance in the scanned modules today, so adding either shape means teaching this scanner first",
+      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see seven shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live, left unpinned by decision while their callers guard re-entry on `isPending`), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, a cache-seeding wrapper reached only from non-create hooks, a conditionally-keyed wrapper whose delegating call DOES pass the identity argument but passes something undefined or keyless in it (the call-site check counts arguments, it cannot evaluate them), a hook declared as `export const useX = (repo) => …` (the declaration anchor requires the `function` keyword), and one whose return type is an inline object literal (`): { … } {` — the body scan would take the return type as the body). The last three are zero-instance in the scanned modules today (both local-entity wrappers key unconditionally), so adding any of them means teaching this scanner first",
+  },
+  {
+    name: "settle-cache-write-identity",
+    // Same modules as mutation-identity-pinning, every hook regardless of name: a
+    // settle callback's cache WRITE keyed from hook scope lands, after a switch,
+    // the old entity's snapshot or seed on the new entity's key, stamped fresh —
+    // nothing refetches it away. Settle-time invalidations stay out of scope for
+    // the self-healing reason the previous check gives. This rule is separate from
+    // the pin rule: an EXPORTED repo-scoped hook whose onSuccess seeds the cache
+    // still needs its mutation key there, however its seed is keyed.
+    appliesTo: (file) => isMutationModule(file),
+    scan: settleCacheWriteFromHookScope,
+    allowlist: [],
+    expectScanned: MUTATION_MODULES_SCANNED,
+    message:
+      "a setQueryData/setQueriesData inside an onSuccess/onError/onSettled callback (property or method) must take its KEY from the callback's own parameters (`ctx.key`, `context.repo`, `args.number`), never from hook scope (a bare `repo`/`lens`/`link`, a value parameter of any enclosing function, a name declared in its body, or a callback local that was ever declared, assigned or looped from those) — react-query calls the settle callbacks off the options the CURRENT render re-pushed onto the pending mutation, so after a repo or entity switch a hook-scope key names the new target, while `onMutate` runs once at mutate time: build the key there, return it in the context, and read it back in the settle callback (useSetRepoStar is the reference). Context-keying is what THIS check asks for; it does not replace mutation-identity-pinning, which still requires a mutation key on an exported repo-scoped hook whose onSuccess seeds the cache. This scan does NOT see six shapes, so review them by hand: a cache write through a helper the callback calls (the Jira `landRealStatus` shape — pass it context values, not hook scope; `useCreateIssue`'s `insertCreatedIssue` is the exception, a pinned `useRepoMutation` seed safe only through its identity pin), a callback defined outside the options object and passed by name (`onSuccess,`) or spread in, `useOptimisticCacheMutation`'s `reconcile` argument (it runs from internal.ts's onSettled, another module), a key reaching the write through a compound assignment or a mutation of a local (`key.push(repo)`, `key += …`), a hook declared neither as `function use…` nor as `const use… =` (only the bare `repo`/`lens`/`link` names are seen there), and a parameter whose own annotation is a function type (skipped as a key BUILDER, so a function-typed value used as a key reads clean). It also over-reads one shape: per-call `.mutate(v, { onSuccess })` and `.mutateAsync(v, { onSuccess })` callbacks are fixed at mutate time and would flag although correct — moot here, since no scanned mutation module calls either",
   },
 ];
 

@@ -116,6 +116,7 @@ export function GenerateBranchNameButton({
   committedFallback,
   committedStatus,
   basedElsewhere,
+  heldReason = null,
   onSetupAi,
 }: {
   /** Owned by the host dialog — see {@link BranchNameGenerator}. */
@@ -144,6 +145,10 @@ export function GenerateBranchNameButton({
    *  none of that work), and the disabled state must say THAT rather than
    *  claim there's no committed work. Null whenever the fallback does apply. */
   basedElsewhere: string | null;
+  /** The host's own hold, outranking the button's: set while the dialog's
+   *  submit is in flight, since the name a generation would revise has already
+   *  been sent. The host's chord gates on the same flag. */
+  heldReason?: string | null;
   /** Close the host dialog and open AI settings. */
   onSetupAi: () => void;
 }) {
@@ -196,12 +201,14 @@ export function GenerateBranchNameButton({
           variant="ghost"
           size="xs"
           className="text-muted-foreground"
-          disabled={!action.enabled}
-          reason={reason}
+          disabled={!action.enabled || heldReason !== null}
+          reason={heldReason ?? reason}
           // `reason` doubles as the enabled-state hint ("Suggest a name from…"),
           // which is where the chord belongs — a disabled button's shortcut does
           // nothing, so it isn't offered.
-          title={action.enabled ? `${reason}${hint}` : reason}
+          title={
+            action.enabled && heldReason === null ? `${reason}${hint}` : reason
+          }
           onClick={action.run}
         >
           <SparkleIcon data-icon="inline-start" />

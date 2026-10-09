@@ -71,6 +71,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
 
@@ -129,6 +130,11 @@ export function TagDetailView({
   const selectTag = useUiStore((s) => s.selectTag);
 
   const [editOpen, setEditOpen] = useState(false);
+  // The open editor's session: minted by the Edit opener, dropped by every close.
+  // A plain save stays dismissible, so its settle closes only the session it was
+  // submitted from. State, not a ref: the tag-switch reset below drops it in render.
+  const [editSession, setEditSession] = useState<object | null>(null);
+  const editSessionRef = useLatestRef(editSession);
   const [editTitle, setEditTitle] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editPrerelease, setEditPrerelease] = useState(false);
@@ -145,16 +151,57 @@ export function TagDetailView({
   const [deleteTagOpen, setDeleteTagOpen] = useState(false);
   const [deleteTagRemote, setDeleteTagRemote] = useState(false);
 
+  // A different tag must never inherit this one's dialogs or its typed release
+  // edit (which would save into the new tag once its release loads) — a
+  // render-time state adjustment, not an effect: this view swaps tags without
+  // remounting.
+  const tagKey = `${repoPath}#${tag}`;
+  const [lastTagKey, setLastTagKey] = useState(tagKey);
+  if (tagKey !== lastTagKey) {
+    setLastTagKey(tagKey);
+    setEditOpen(false);
+    setEditSession(null);
+    setEditTitle("");
+    setEditNotes("");
+    setEditPrerelease(false);
+    setEditLatest(false);
+    setEditSyncUpdater(true);
+    setSyncArmed(false);
+    setDeleteOpen(false);
+    setCleanupTag(false);
+    setCreateReleaseOpen(false);
+    setDeleteTagOpen(false);
+    setDeleteTagRemote(false);
+  }
+  // Live identity for write continuations: one started on a tag the user has
+  // since left must not close or disarm the next tag's dialogs.
+  const tagKeyRef = useLatestRef(tagKey);
+  const isLiveTag = (startedFor: string) => startedFor === tagKeyRef.current;
+
   const onError = (e: unknown) => toastError(e);
-  const rel = release.data;
+  // The release view unmounts Create release without closing it, so the flag
+  // retires once this tag has its own release — a render-time adjustment, so a
+  // later reset can't reopen the dialog over a released tag.
+  if (
+    createReleaseOpen &&
+    release.data !== undefined &&
+    !release.isPlaceholderData
+  )
+    setCreateReleaseOpen(false);
+  // Placeholder data is another tag's once this tag's read settles, or while
+  // Create release is open (only ever over a plain tag, per the above and the
+  // switch reset), covering a placeholder a reset can't clear (gc'd, reused).
+  const rel =
+    release.isPlaceholderData && (release.isFetched || createReleaseOpen)
+      ? undefined
+      : release.data;
   const tagInfo = tagList.data?.find((t) => t.name === tag);
   const isLatest =
     (releaseList.data ?? []).find((r) => r.tagName === tag)?.isLatest ?? false;
-  // A tag switch keeps the PREVIOUS tag's release painted (the query's placeholder
-  // frees the tag key axis), so every release write holds until the two agree —
-  // this is the only gate that covers it: with placeholder data present the query
-  // reads as success (never `isLoading`), and a disabled query still serves it.
-  const relStale = release.isPlaceholderData;
+  // A tag switch paints the PREVIOUS tag's release as placeholder data (success,
+  // never `isLoading`, even disabled), so every release write holds on this until
+  // the two agree. Read off `rel`, so a placeholder it drops holds nothing.
+  const relStale = rel !== undefined && release.isPlaceholderData;
   const staleDim = relStale && "opacity-80";
   // Why the rendered release can't be acted on at all — it gates DOWNLOAD too,
   // which a read-only viewer is otherwise free to use. Not-ready outranks stale
@@ -202,7 +249,10 @@ export function TagDetailView({
     }
   })();
 
-  if (release.isLoading) {
+  // Never over an open Create-release dialog, whose draft a skeleton would
+  // unmount: a no-release (404) refetch drops the read back to pending, and a
+  // query reset also zeroes `isFetched`.
+  if (release.isLoading && !release.isFetched && !createReleaseOpen) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
@@ -317,17 +367,18 @@ export function TagDetailView({
   async function onDeleteTag() {
     // Only the remote arm is held: the local-only delete runs offline.
     if (deleteTagRemote && refuseWhileOffline()) return;
+    const startedFor = tagKey;
     try {
       await (deleteTagRemote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(
         tag,
       );
     } catch (e) {
       onError(e);
-      setDeleteTagOpen(false);
+      if (isLiveTag(startedFor)) setDeleteTagOpen(false);
       return;
     }
     toast.success(`Deleted ${tag}`);
-    setDeleteTagOpen(false);
+    if (isLiveTag(startedFor)) setDeleteTagOpen(false);
     deselectIfStillHere();
   }
 
@@ -380,6 +431,20 @@ export function TagDetailView({
       const syncManifest =
         canSyncUpdater && editSyncUpdater && !!editNotes.trim();
       setSyncArmed(syncManifest);
+      // Every write past the first await answers to this tag: another tag's own
+      // two-phase save may be armed by then, and dropping its latch mid-flight
+      // would let that dialog close between the phases.
+      const startedFor = tagKey;
+      const submitted = editSessionRef.current;
+      const disarm = () => {
+        if (isLiveTag(startedFor)) setSyncArmed(false);
+      };
+      const close = () => {
+        if (isLiveTag(startedFor) && editSessionRef.current === submitted) {
+          setEditSession(null);
+          setEditOpen(false);
+        }
+      };
       try {
         await editRelease.mutateAsync({
           tag,
@@ -395,14 +460,14 @@ export function TagDetailView({
       } catch (e) {
         // The capture dies with the save it was taken for — phase 1 failing
         // means no phase 2 will ever consume it.
-        setSyncArmed(false);
+        disarm();
         onError(e);
         return;
       }
       if (!syncManifest) {
-        setSyncArmed(false);
+        disarm();
         toast.success("Release updated");
-        setEditOpen(false);
+        close();
         return;
       }
       // The body edit has already landed, so a manifest failure is partial
@@ -418,7 +483,7 @@ export function TagDetailView({
           );
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {
-        setSyncArmed(false);
+        disarm();
         // Which stage failed decides what recovery is possible — only a failed
         // upload leaves a parked copy — so the summary stays arm-neutral and the
         // backend's own text (carried into Details by toastError) names the specifics.
@@ -427,25 +492,26 @@ export function TagDetailView({
             `Release updated, but the updater manifest may not have been.\n\n${presentError(err).fullText}`,
           ),
         );
-        setEditOpen(false);
+        close();
         return;
       }
-      setSyncArmed(false);
+      disarm();
       toast.success("Release updated");
-      setEditOpen(false);
+      close();
     };
 
     const onDeleteRelease = async () => {
       if (refuseWhileOffline()) return;
+      const startedFor = tagKey;
       try {
         await deleteRelease.mutateAsync({ tag, cleanupTag });
       } catch (e) {
         onError(e);
-        setDeleteOpen(false);
+        if (isLiveTag(startedFor)) setDeleteOpen(false);
         return;
       }
       toast.success("Release deleted");
-      setDeleteOpen(false);
+      if (isLiveTag(startedFor)) setDeleteOpen(false);
       deselectIfStillHere();
     };
 
@@ -493,6 +559,7 @@ export function TagDetailView({
                     setEditLatest(isLatest);
                     setEditSyncUpdater(true);
                     setSyncArmed(false);
+                    setEditSession({});
                     setEditOpen(true);
                   }}
                 >
@@ -681,7 +748,9 @@ export function TagDetailView({
         <Dialog
           open={editOpen}
           onOpenChange={(o) => {
-            if (!saveLatched) setEditOpen(o);
+            if (saveLatched) return;
+            if (!o) setEditSession(null);
+            setEditOpen(o);
           }}
         >
           {/* A fixed height (not a cap): release bodies routinely run thousands of
@@ -793,7 +862,10 @@ export function TagDetailView({
                   type="button"
                   variant="outline"
                   disabled={saveLatched}
-                  onClick={() => setEditOpen(false)}
+                  onClick={() => {
+                    setEditSession(null);
+                    setEditOpen(false);
+                  }}
                 >
                   Cancel
                 </Button>

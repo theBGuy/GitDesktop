@@ -96,6 +96,16 @@ export function PromoteLocalPrDialog({
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
 
+  /** Whether a settle may still close and navigate: its repo is the live one AND
+   *  this local PR is still selected. The host keeps one `promoteOpen` state and
+   *  blanks it when the selection moves, so a close landing on another pull
+   *  request's confirm would shut a dialog the user opened for something else.
+   *  Read after the await, from the store, never from render. */
+  function stillOnThisPr(live: boolean): boolean {
+    const { selectedPr } = useUiStore.getState();
+    return live && selectedPr?.kind === "local" && selectedPr.id === pr.id;
+  }
+
   async function promote() {
     if (refuseWhileOffline()) return;
     // Fire-time admission, claimed before the first await: the push plus the
@@ -164,10 +174,10 @@ export function PromoteLocalPrDialog({
       });
       // One read for both halves: the toast is unconditional and names the repo
       // when it isn't the one on screen, while the navigation below only lands
-      // when it is. That navigation is the lens flip plus the selection plus the
-      // close, and this continuation outlives the host's unmount on a repo
-      // switch: landed elsewhere they would close a dialog the user reopened
-      // there and point that repo's Pulls tab at a number belonging to this one.
+      // while this repo and this local PR still are. That navigation is the lens
+      // flip plus the selection plus the close, and this continuation outlives
+      // both a repo switch and a move to another pull request: landed elsewhere
+      // they would close a dialog the user reopened there and pull them back.
       const { live, away } = landedIn(repoPath);
       toast.success(`Opened ${prNoun} #${number}${away}`, {
         description: url,
@@ -178,7 +188,7 @@ export function PromoteLocalPrDialog({
       });
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
-      if (live) {
+      if (stillOnThisPr(live)) {
         onOpenChange(false);
         setLens("origin");
         selectPr({ kind: "remote", id: String(number) });
@@ -200,18 +210,12 @@ export function PromoteLocalPrDialog({
       // pull request is a duplicate factory — the local PR wasn't closed, so it
       // still reads as promotable) and disclose what was created and what
       // failed. The local PR is left untouched so the user can reconcile
-      // manually. The close names its SUBJECT as well as its repo: the host
-      // keeps one `promoteOpen` state and already blanks it when the selection
-      // moves, so a close landing on another pull request's confirm protects
-      // nothing here and shuts a dialog the user opened for something else.
+      // manually. The close names its subject as well as its repo, while the
+      // toast names only the REPO, since that is the part the user can't see
+      // for themselves.
       const { number, url } = created;
-      const ui = useUiStore.getState();
       const { live, away } = landedIn(repoPath);
-      // The close needs the subject too; the toast names only the REPO, since
-      // that is the part the user can't see for themselves.
-      const onThisPr =
-        live && ui.selectedPr?.kind === "local" && ui.selectedPr.id === pr.id;
-      if (onThisPr) onOpenChange(false);
+      if (stillOnThisPr(live)) onOpenChange(false);
       toastComposedError({
         title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],

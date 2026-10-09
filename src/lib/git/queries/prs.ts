@@ -1,19 +1,12 @@
 import {
-  notifyManager,
+  type MutationCache,
   type QueryKey,
   queryOptions,
-  replaceEqualDeep,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import type {
@@ -38,11 +31,17 @@ import {
   repoKeys,
 } from "./core";
 import {
+  useMutationCacheSnapshot,
   useOptimisticCacheMutation,
   useRepoMutation,
   workingTreeKeys,
 } from "./internal";
-import { prWriteKey } from "./pr-writes";
+import {
+  pendingMutationEntries,
+  pendingThreadWritesFor,
+  prWriteKey,
+  type ThreadWriteVars,
+} from "./pr-writes";
 
 export function usePrsForBranch(
   repo: string,
@@ -897,12 +896,8 @@ export function useThreadReply(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: ["thread-reply", repo],
-    mutationFn: (args: {
-      number: number;
-      lens: RemoteLens;
-      threadId: string;
-      body: string;
-    }) => api.forgePrThreadReply(repo, args.number, args.threadId, args.body),
+    mutationFn: (args: ThreadWriteVars & { body: string }) =>
+      api.forgePrThreadReply(repo, args.number, args.threadId, args.body),
     onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
         queryKey: prReviewThreadsKey(repo, args.number, args.lens),
@@ -914,12 +909,7 @@ export function useThreadResolve(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: ["thread-resolve", repo],
-    mutationFn: (args: {
-      number: number;
-      lens: RemoteLens;
-      threadId: string;
-      resolved: boolean;
-    }) =>
+    mutationFn: (args: ThreadWriteVars & { resolved: boolean }) =>
       api.forgePrThreadResolve(repo, args.number, args.threadId, args.resolved),
     onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
@@ -947,45 +937,35 @@ const NO_PENDING_THREAD_WRITES: PendingThreadWrites = {
 
 /**
  * The thread replies and resolves on PR `number` (in `lens`) that are in flight.
- * Read from the mutation cache because a card's own pending flag dies with a
- * remount, and a second press would then queue a duplicate write; never through
- * `useMutationState`, for the `<Activity>` blind spot projects.ts records.
+ * Read from the mutation cache, through {@link useMutationCacheSnapshot}, because a
+ * card's own pending flag dies with a remount, and a second press would then queue
+ * a duplicate write.
  */
 export function usePendingThreadWrites(
   repo: string,
   number: number,
   lens: RemoteLens,
 ): PendingThreadWrites {
-  const cache = useQueryClient().getMutationCache();
-  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
-  // keeps one identity, as `useSyncExternalStore` requires.
-  const snapshot = useRef(NO_PENDING_THREAD_WRITES);
-  const getSnapshot = useCallback(() => {
-    const next: PendingThreadWrites = { reply: {}, resolve: {} };
-    for (const kind of ["reply", "resolve"] as const) {
-      for (const m of cache.findAll({
-        mutationKey: [`thread-${kind}`, repo],
-        status: "pending",
-      })) {
-        const vars = m.state.variables as
-          | { number: number; lens: RemoteLens; threadId: string }
-          | undefined;
-        if (vars?.number !== number || vars.lens !== lens) continue;
-        const prev = next[kind][vars.threadId];
-        next[kind][vars.threadId] = {
-          paused: (prev?.paused ?? false) || m.state.isPaused,
-        };
-      }
-    }
-    snapshot.current = replaceEqualDeep(snapshot.current, next);
-    return snapshot.current;
-  }, [cache, repo, number, lens]);
-  const subscribe = useCallback(
-    (onStoreChange: () => void) =>
-      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
-    [cache],
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingThreadWritesFor(
+        pendingMutationEntries([
+          ...cache.findAll({
+            mutationKey: ["thread-reply"],
+            status: "pending",
+          }),
+          ...cache.findAll({
+            mutationKey: ["thread-resolve"],
+            status: "pending",
+          }),
+        ]),
+        repo,
+        number,
+        lens,
+      ),
+    [repo, number, lens],
   );
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useMutationCacheSnapshot(select, NO_PENDING_THREAD_WRITES);
 }
 
 /** Warms a remote PR's view (metadata + diff) on row hover and adjacent rows — PR data

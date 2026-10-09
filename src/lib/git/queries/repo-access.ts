@@ -31,19 +31,23 @@ export function useRepoStarStatus(repo: string, enabled: boolean) {
 
 export function useSetRepoStar(repo: string) {
   const queryClient = useQueryClient();
-  const key = ["repo", repo, "star-status"] as const;
   return useMutation({
     mutationFn: (starred: boolean) => api.forgeRepoSetStar(repo, starred),
+    // The key is built HERE, at mutate time, and the settle callbacks read it back
+    // from the context: they run off the current render's options, so a repo
+    // switch mid-flight would otherwise roll back the newly-live repo's star.
     onMutate: async (starred: boolean) => {
+      const key = ["repo", repo, "star-status"] as const;
       await queryClient.cancelQueries({ queryKey: key });
       const previous = queryClient.getQueryData<boolean>(key);
       queryClient.setQueryData<boolean>(key, starred);
-      return { previous };
+      return { previous, key };
     },
     onError: (_e, _starred, ctx) => {
-      if (ctx) queryClient.setQueryData(key, ctx.previous);
+      if (ctx) queryClient.setQueryData(ctx.key, ctx.previous);
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onSettled: (_d, _e, _starred, ctx) =>
+      ctx && queryClient.invalidateQueries({ queryKey: ctx.key }),
   });
 }
 

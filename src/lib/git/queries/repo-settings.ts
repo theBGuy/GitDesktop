@@ -24,14 +24,15 @@ export function useRepoSettings(repo: string, enabled: boolean) {
 export function useUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the PATCH, the cache seed below and the invalidation all close over
-    // `repo`, and the settings dialog survives a repo switch — without the key a
-    // switch seeds the newly-live repo's settings with this repo's response.
+    // Pinned: the PATCH and the invalidation close over `repo`, and the settings
+    // dialog survives a repo switch — without the key a switch retargets both. The
+    // seed's key is captured at mutate time instead, like every settle-time write.
     mutationKey: ["update-repo-settings", repo],
     mutationFn: (input: RepoSettingsInput) =>
       api.ghRepoSettingsUpdate(repo, input),
+    onMutate: () => ({ key: repoSettingsKey(repo) }),
     // The PATCH returns the fresh settings — seed the cache, then refetch.
-    onSuccess: (data) => queryClient.setQueryData(repoSettingsKey(repo), data),
+    onSuccess: (data, _input, ctx) => queryClient.setQueryData(ctx.key, data),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: repoSettingsKey(repo) }),
   });
@@ -56,15 +57,15 @@ export function useGlRepoSettings(repo: string, enabled: boolean) {
 export function useUpdateGlRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the PUT, the seed below and the invalidation all close over `repo`,
-    // and the settings dialog survives a repo switch — without the key a switch
-    // seeds the newly-live repo's settings with this repo's response.
+    // Pinned: the PUT and the invalidation close over `repo`, and the settings
+    // dialog survives a repo switch — without the key a switch retargets both. The
+    // seed's key is captured at mutate time instead, like every settle-time write.
     mutationKey: ["update-gl-repo-settings", repo],
     mutationFn: (input: GitLabRepoSettingsInput) =>
       api.forgeGlRepoSettingsUpdate(repo, input),
+    onMutate: () => ({ key: glRepoSettingsKey(repo) }),
     // The PUT returns the fresh settings — seed the cache, then refetch.
-    onSuccess: (data) =>
-      queryClient.setQueryData(glRepoSettingsKey(repo), data),
+    onSuccess: (data, _input, ctx) => queryClient.setQueryData(ctx.key, data),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: glRepoSettingsKey(repo) }),
   });
@@ -267,11 +268,13 @@ export function useGlProtectBranch(repo: string) {
  *  and snaps back. */
 export function useGlUpdateProtectedBranch(repo: string) {
   const queryClient = useQueryClient();
-  const key = glProtectedBranchesKey(repo);
   return useMutation({
     mutationFn: (a: { name: string; allowForcePush: boolean }) =>
       api.forgeGlProtectedBranchUpdate(repo, a.name, a.allowForcePush),
+    // Keyed at mutate time and carried in the context, for useSetRepoStar's
+    // reason: the rollback must land on the repo the toggle was made in.
     onMutate: async (a) => {
+      const key = glProtectedBranchesKey(repo);
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<GitLabProtectedBranch[]>(key);
       queryClient.setQueryData<GitLabProtectedBranch[]>(key, (rows) =>
@@ -279,12 +282,13 @@ export function useGlUpdateProtectedBranch(repo: string) {
           r.name === a.name ? { ...r, allowForcePush: a.allowForcePush } : r,
         ),
       );
-      return { prev };
+      return { prev, key };
     },
     onError: (_e, _a, ctx) => {
-      if (ctx?.prev !== undefined) queryClient.setQueryData(key, ctx.prev);
+      if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onSettled: (_d, _e, _a, ctx) =>
+      ctx && queryClient.invalidateQueries({ queryKey: ctx.key }),
   });
 }
 
@@ -356,15 +360,15 @@ export function useBbRepoSettings(repo: string, enabled: boolean) {
 export function useBbUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the PUT, the seed below and the invalidation all close over `repo`,
-    // and the settings dialog survives a repo switch — without the key a switch
-    // seeds the newly-live repo's settings with this repo's response.
+    // Pinned: the PUT and the invalidation close over `repo`, and the settings
+    // dialog survives a repo switch — without the key a switch retargets both. The
+    // seed's key is captured at mutate time instead, like every settle-time write.
     mutationKey: ["bb-update-repo-settings", repo],
     mutationFn: (input: BitbucketRepoSettingsInput) =>
       api.forgeBbRepoSettingsUpdate(repo, input),
+    onMutate: () => ({ key: bbRepoSettingsKey(repo) }),
     // The PUT returns the fresh settings — seed the cache, then refetch.
-    onSuccess: (data) =>
-      queryClient.setQueryData(bbRepoSettingsKey(repo), data),
+    onSuccess: (data, _input, ctx) => queryClient.setQueryData(ctx.key, data),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: bbRepoSettingsKey(repo) }),
   });

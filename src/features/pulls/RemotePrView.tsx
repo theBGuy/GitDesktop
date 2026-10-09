@@ -918,7 +918,6 @@ export function RemotePrView({
     const row = openPrs.find((p) => p.number === n);
     return row ? [{ number: row.number, title: row.title }] : [];
   });
-  const stackWriteError = stackCreate.error ?? stackAdd.error ?? null;
   // A fork row is dropped from the chain rather than voiding the list, so it only
   // explains THIS PR's missing offer when it would have been its CHILD. The mirror
   // test (a fork whose head is this PR's base) is not specific: fork PRs are
@@ -951,6 +950,21 @@ export function RemotePrView({
     }
   })();
 
+  // Write state belongs to ONE offer on ONE PR: this component isn't remounted
+  // per PR (RepositoryView renders it without a key), and a list refetch can
+  // reshape the chain under the same PR. So a failed write's message lives here,
+  // set only while the offer it was fired from is still on screen and cleared the
+  // moment the key moves — a render-time adjustment. The hold is unaffected:
+  // `stackWritePending` reads the mutation cache, not this state.
+  const stackWriteKey = `${entityKey}|${stackOffer ? offerIdentity(stackOffer) : ""}`;
+  const stackWriteKeyRef = useLatestRef(stackWriteKey);
+  const [stackWriteError, setStackWriteError] = useState<unknown>(null);
+  const [lastStackWriteKey, setLastStackWriteKey] = useState(stackWriteKey);
+  if (stackWriteKey !== lastStackWriteKey) {
+    setLastStackWriteKey(stackWriteKey);
+    setStackWriteError(null);
+  }
+
   async function confirmStackOffer() {
     // `offerEnabled` withholds the offer entirely until details are the selected
     // PR's, so the placeholder arm here is insurance against a looser gate later.
@@ -962,15 +976,22 @@ export function RemotePrView({
       stackWritePending
     )
       return;
+    // A failed stack write renders inline beside the offer it was fired from, so
+    // these paths deliberately toast nothing — and one landing after the offer
+    // moved is dropped rather than painted beside another.
+    const startedFor = stackWriteKey;
+    const showFailure = (e: unknown) => {
+      if (startedFor === stackWriteKeyRef.current) setStackWriteError(e);
+    };
+    setStackWriteError(null);
     if (stackOffer.kind === "create") {
       try {
         const outcome = await stackCreate.mutateAsync(stackOffer.members);
         toast.success(
           `Stack created — ${outcome.members.length} pull requests`,
         );
-      } catch {
-        // A failed stack write renders inline beside the offer off the mutation's
-        // own `error`, so this path deliberately says nothing.
+      } catch (e) {
+        showFailure(e);
       }
       return;
     }
@@ -985,32 +1006,16 @@ export function RemotePrView({
       toast.success(
         `Added to stack #${stackNumber} — ${outcome.members.length} pull requests`,
       );
-    } catch {
-      // Same inline-error contract as the create arm.
+    } catch (e) {
+      showFailure(e);
     }
   }
 
   // A failed write's message belongs beside the affordance, not in a toast — so
   // Cancel clears it along with the preview.
   function cancelStackOffer() {
-    stackCreate.reset();
-    stackAdd.reset();
+    setStackWriteError(null);
   }
-
-  // Write state belongs to ONE offer on ONE PR: this component isn't remounted
-  // per PR (RepositoryView renders it without a key), and a list refetch can
-  // reshape the chain under the same PR. Either way a surviving error would render
-  // against an offer it was never fired for, so both triggers reset through this one
-  // path. The hold survives it: `reset()` detaches the observer, never the pending
-  // write `stackWritePending` reads. The ref makes the mount pass a no-op.
-  const stackWriteKey = `${number}|${stackOffer ? offerIdentity(stackOffer) : ""}`;
-  const stackWriteFor = useRef(stackWriteKey);
-  const resetStackWrites = useEffectEvent(() => cancelStackOffer());
-  useEffect(() => {
-    if (stackWriteFor.current === stackWriteKey) return;
-    stackWriteFor.current = stackWriteKey;
-    resetStackWrites();
-  }, [stackWriteKey]);
 
   // Dissolve is offered only for a stack GitDesktop can actually write: a
   // GitHub-native one (a GitLab-inferred chain has no stack to dissolve).
@@ -1383,7 +1388,11 @@ export function RemotePrView({
       await abortRemotePrResolve.mutateAsync({
         worktreePath: target.worktreePath,
       });
-      setResolve(null);
+      // Functional: by now the takeover may be another PR's resolve, which this
+      // discard never touched.
+      setResolve((cur) =>
+        cur?.worktreePath === target.worktreePath ? null : cur,
+      );
       toast.success("Resolution discarded");
     } catch (e) {
       onError(e);
@@ -2550,6 +2559,8 @@ export function RemotePrView({
     }
   }
 
+  // The delete confirms close functionally: by the settle the dialog may hold
+  // another comment, on this PR or the next one.
   async function deleteConversationComment(commentId: string) {
     try {
       await deleteComment.mutateAsync({ number, commentId });
@@ -2557,7 +2568,7 @@ export function RemotePrView({
     } catch (e) {
       onError(e);
     } finally {
-      setDeletingCommentId(null);
+      setDeletingCommentId((cur) => (cur === commentId ? null : cur));
     }
   }
 
@@ -2568,14 +2579,17 @@ export function RemotePrView({
     } catch (e) {
       onError(e);
     } finally {
-      setDeletingThreadCommentId(null);
+      setDeletingThreadCommentId((cur) => (cur === commentId ? null : cur));
     }
   }
 
   async function discardPendingReview() {
+    // Closes only while its PR is on screen: another PR's discard confirm may be
+    // open by the settle.
+    const startedFor = entityKey;
     try {
       await clearDrafts.mutateAsync(undefined);
-      setDiscardConfirmOpen(false);
+      if (startedFor === entityKeyRef.current) setDiscardConfirmOpen(false);
     } catch {
       // `useClearReviewDrafts` toasts its own failure here (no `silent` opt-out),
       // and react-query fires that mutation-level handler for a rejected

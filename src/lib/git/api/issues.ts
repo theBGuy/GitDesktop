@@ -324,6 +324,9 @@ export const ghIssueRemoveSubIssue = (
   subId: string,
 ) => invoke<void>("gh_issue_remove_sub_issue", { repoPath, parentId, subId });
 
+// No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
+// only picks the cwd/host) and the lens switcher is GitHub-only, so they are
+// lens-free by construction; lens support on another forge must thread one.
 export const forgeIssueEditComment = (
   repoPath: string,
   number: number,

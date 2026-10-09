@@ -1,5 +1,10 @@
 import { formOptions } from "@tanstack/react-form";
-import { type ReactNode, useState } from "react";
+import {
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +19,7 @@ import { required, useAppForm, withForm } from "@/lib/form";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import type { MentionSource } from "./useMentionCandidates";
 
 /** Shared form shape so the hook's `useAppForm` and the `withForm` dialog agree. */
@@ -32,13 +38,24 @@ export function useEditTitleBody(opts: {
   /** Shown after a successful save (remote views); omitted for local views. */
   successToast?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState(false);
+  // The open dialog's session: minted by `openEdit`, dropped by every close. The
+  // views keep this dialog mounted across entity switches, so a save closes only
+  // the session it was submitted from. State, not a ref: views close it in render.
+  const [session, setSession] = useState<object | null>(null);
+  const sessionRef = useLatestRef(session);
+  const setOpen: Dispatch<SetStateAction<boolean>> = (action) => {
+    const next = typeof action === "function" ? action(open) : action;
+    if (!next) setSession(null);
+    setOpenState(next);
+  };
   const form = useAppForm({
     ...editTitleBodyFormOpts,
     onSubmit: async ({ value }) => {
+      const savedFrom = sessionRef.current;
       try {
         await opts.onSave({ title: value.title.trim(), body: value.body });
-        setOpen(false);
+        if (sessionRef.current === savedFrom) setOpen(false);
         if (opts.successToast) toast.success(opts.successToast);
       } catch (e) {
         toastError(e);
@@ -50,7 +67,8 @@ export function useEditTitleBody(opts: {
     // keepDefaultValues: otherwise the per-render options sync clobbers the
     // seeded values back to empty (untouched form).
     form.reset(seed, { keepDefaultValues: true });
-    setOpen(true);
+    setSession({});
+    setOpenState(true);
   }
 
   return { form, open, setOpen, openEdit };

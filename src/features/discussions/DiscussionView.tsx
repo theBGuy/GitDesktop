@@ -96,6 +96,7 @@ import {
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 
 /** A discussion comment/reply shares the conversation shape minus review state. */
@@ -271,6 +272,9 @@ export function DiscussionView({
     setDeletingCommentId(null);
     setDeletingDiscussion(false);
   }
+  // Live identity for write continuations: one started on a discussion the user
+  // has since left must not close the next one's confirm.
+  const discussionIdentityRef = useLatestRef(discussionIdentity);
 
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
@@ -598,15 +602,20 @@ export function DiscussionView({
 
   async function doDelete() {
     if (!d || detailsStale || refuseWhileOffline()) return;
+    const startedFor = discussionIdentity;
+    const closeIfStillHere = () => {
+      if (startedFor === discussionIdentityRef.current)
+        setDeletingDiscussion(false);
+    };
     try {
       await deleteDiscussion.mutateAsync(d.id);
     } catch (e) {
       onError(e);
-      setDeletingDiscussion(false);
+      closeIfStillHere();
       return;
     }
     toast.success("Discussion deleted");
-    setDeletingDiscussion(false);
+    closeIfStillHere();
     // `selectDiscussion` is a global store write that outlives this view, so a
     // delete settling after the viewer moved on (another discussion, another
     // repo) must not clear their live selection.
@@ -618,17 +627,20 @@ export function DiscussionView({
       selectDiscussion(null);
   }
 
-  /** Close-on-error is the dialog's documented contract, so both arms close it. */
+  /** Close-on-error is the dialog's documented contract, so both arms close it —
+   *  functionally, since by the settle it may hold another comment. */
   async function doDeleteComment(commentId: string) {
+    const closeIfStillOpen = () =>
+      setDeletingCommentId((cur) => (cur === commentId ? null : cur));
     try {
       await deleteComment.mutateAsync(commentId);
     } catch (e) {
       onError(e);
-      setDeletingCommentId(null);
+      closeIfStillOpen();
       return;
     }
     toast.success("Comment deleted");
-    setDeletingCommentId(null);
+    closeIfStillOpen();
   }
 
   return (

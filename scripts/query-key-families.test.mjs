@@ -22,15 +22,17 @@ const FAMILIES = [
   { name: "pr-mergeability", builder: "repoKeys.prMergeability" },
   { name: "pr-review-state", builder: "repoKeys.prReviewState" },
   { name: "issue-list", builder: "repoKeys.issueList" },
+  { name: "discussion-list", builder: "repoKeys.discussionList" },
   { name: "findings", builder: "repoKeys.findings" },
   { name: "reactions", builder: "repoKeys.reactions" },
 ];
 
-// Two hand-spelled shapes are refused outside core.ts, by two mechanisms: the bare
-// array literal `["repo", <anything>, "<family>"` is regular, so a regex settles it;
-// the composed form `[...repoKeys.all(repo), "<family>"` is not, because a nested
-// argument (`repoKeys.all(normalizeRepo(repo))`) puts a `)` in the way that no
-// `[^)]*` can cross — that one takes a balanced-paren scan. `\s` covers CRLF in both.
+// Three hand-spelled shapes are refused outside core.ts: the bare array literal
+// `["repo", <anything>, "<family>"` is regular, so a regex settles it; the composed
+// forms are not — `[...repoKeys.all(repo), "<family>"`, and a family appended to any
+// other spread (`[...detailKey, "reactions"]`) — because a nested argument puts a
+// closer in the way that no `[^)]*` can cross, so those take a balanced scan. `\s`
+// covers CRLF throughout.
 
 const literalPattern = (family) =>
   new RegExp(`\\[\\s*"repo",\\s*[^\\]]*?"${family}"`);
@@ -53,9 +55,34 @@ function hasComposedSpelling(source, family) {
   return false;
 }
 
-/** Either shape, for one family. */
+/** Whether `source` appends a family string to a spread — `[...<expr>, "<family>"` —
+ *  at the spread's own bracket depth. A spread whose brackets never balance before
+ *  the source ends is not a spelling, the same fall-out as the repoKeys.all walk. */
+function hasSpreadSpelling(source, family) {
+  const opener = /\[\s*\.\.\./g;
+  const tail = new RegExp(String.raw`^,\s*"${family}"`);
+  for (let m = opener.exec(source); m; m = opener.exec(source)) {
+    let depth = 0;
+    for (let i = m.index + m[0].length; i < source.length; i++) {
+      const ch = source[i];
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) {
+        if (depth === 0) break;
+        depth--;
+      } else if (ch === "," && depth === 0) {
+        if (tail.test(source.slice(i))) return true;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+/** Any shape, for one family. */
 const spellsFamily = (source, family) =>
-  literalPattern(family).test(source) || hasComposedSpelling(source, family);
+  literalPattern(family).test(source) ||
+  hasComposedSpelling(source, family) ||
+  hasSpreadSpelling(source, family);
 
 /** Floor for the scanned corpus, ~half the 700 .ts/.tsx files under src/ measured
  *  when this guard was written. A path-pinned scan that finds nothing scans nothing
@@ -105,6 +132,22 @@ test("every hand-spelled shape is matched (negative control)", () => {
       reactions.name,
     ),
     "a hand-spelled entity reactions key went unmatched",
+  );
+  assert.ok(
+    spellsFamily('  queryKey: [...detailKey, "reactions"],', reactions.name),
+    "a family appended to a SPREAD prefix other than repoKeys.all went unmatched",
+  );
+  assert.ok(
+    spellsFamily(
+      '  queryKey: [...keyFor(repo, [n, "x"]), "reactions"],',
+      reactions.name,
+    ),
+    "the spread scan stopped at a NESTED bracket inside the spread expression",
+  );
+  assert.equal(
+    spellsFamily('  queryKey: [...prKey(repo, "reactions")],', reactions.name),
+    false,
+    "a family string INSIDE the spread expression is not appended to it",
   );
   assert.equal(
     spellsFamily('[...repoKeys.all(repo, "pr-ci"', "pr-ci"),

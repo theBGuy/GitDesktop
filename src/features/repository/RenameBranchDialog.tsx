@@ -1,4 +1,5 @@
-import { useEffect, useEffectEvent } from "react";
+import { useSelector } from "@tanstack/react-store";
+import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +28,10 @@ import {
   type CommittedNameSource,
   useGenerateBranchName,
 } from "./useGenerateBranchName";
+
+/** Why Generate holds while the rename runs: the name it would revise has
+ *  already been sent. */
+const RENAME_PENDING_GENERATE_REASON = "Wait for the rename to finish";
 
 /**
  * Rename-branch dialog. Open when `target` is the branch being renamed (null =
@@ -83,10 +88,16 @@ export function RenameBranchDialog({
       await branchNameGen.generate(opts);
     },
   };
+  // The open session a rename settles against: minted by the [target] seed (each
+  // open and hotkey retarget), dropped by every close. A name compare can't tell
+  // a same-named branch reopened in the next repo (this dialog outlives repo
+  // switches), and a repo compare would leave a dialog open across the switch.
+  const sessionRef = useRef<object | null>(null);
   // Every close path routes through here: the dialog stays mounted, so an
   // in-flight suggestion would otherwise land in the field on the NEXT open,
   // which may be naming a different branch.
   const closeDialog = () => {
+    sessionRef.current = null;
     branchNameGen.cancel();
     onClose();
   };
@@ -111,10 +122,14 @@ export function RenameBranchDialog({
         return;
       }
       const newName = sanitizeRefName(value.name);
+      const session = sessionRef.current;
       try {
         await renameBranch.mutateAsync({ oldName: target, newName });
         toast.success(`Renamed to ${newName}`);
-        onClose();
+        if (sessionRef.current === session) {
+          sessionRef.current = null;
+          onClose();
+        }
       } catch (e) {
         toastError(e);
       }
@@ -126,6 +141,7 @@ export function RenameBranchDialog({
   // sync sees "different defaults + untouched form" and clobbers the seeded
   // values right back on the next render.
   const seedOnOpen = useEffectEvent((name: string) => {
+    sessionRef.current = {};
     renameForm.reset({ name }, { keepDefaultValues: true });
   });
   useEffect(() => {
@@ -162,9 +178,11 @@ export function RenameBranchDialog({
   // This dialog opens from any branch row over any tab, including Changes where
   // the global generate-commit-message action is live. The chord is swallowed
   // here whenever it may fire, generate-capable or not (the hook mirrors the
-  // global listener's own guards).
+  // global listener's own guards). A running rename holds it like the button:
+  // the name it would revise has already been sent.
+  const isSubmitting = useSelector(renameForm.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: generateAction.enabled,
+    enabled: generateAction.enabled && !isSubmitting,
     run: generateAction.run,
   });
 
@@ -221,6 +239,7 @@ export function RenameBranchDialog({
             committedStatus={shownCommittedStatus}
             // Renaming never picks a base — the fallback always applies here.
             basedElsewhere={null}
+            heldReason={isSubmitting ? RENAME_PENDING_GENERATE_REASON : null}
             onSetupAi={() => {
               closeDialog();
               onOpenSettings("ai");

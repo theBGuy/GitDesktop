@@ -1,18 +1,17 @@
 import {
   hashKey,
   type InfiniteData,
-  notifyManager,
+  type MutationCache,
   partialMatchKey,
   type Query,
   type QueryClient,
   type QueryKey,
-  replaceEqualDeep,
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useRef, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -83,8 +82,8 @@ import {
 } from "./board-order";
 import {
   BOARD_WRITES_KEY,
-  boardWriteVars,
   holdLens,
+  pendingBoardWritesFor,
   projectItemsRepoKey,
   refetchOnMountUnlessHeld,
   releaseLens,
@@ -100,7 +99,9 @@ import {
   oweBoardReads,
   pendingBoardWrites,
   subscribeBoardRereads,
+  useMutationCacheSnapshot,
 } from "./internal";
+import { pendingMutationEntries } from "./pr-writes";
 import {
   dropStatusUpdate,
   insertNewestFirst,
@@ -219,8 +220,6 @@ export function useEditItemProjects(
   lens: RemoteLens,
 ) {
   const queryClient = useQueryClient();
-  const key = itemProjectsKey(repo, lens, kind, number);
-  const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
   return useMutation({
     mutationFn: (args: {
       contentId: string;
@@ -235,7 +234,13 @@ export function useEditItemProjects(
         args.adds.map((p) => p.id),
         args.removes,
       ),
+    // Every key the settle touches is built HERE and read back from the context:
+    // the rail hosting this survives an entity switch, and the settle callbacks run
+    // off the current render's options, so closure keys would roll back and
+    // re-read the item the user switched TO.
     onMutate: async (args) => {
+      const key = itemProjectsKey(repo, lens, kind, number);
+      const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<ItemProjects>(key);
       if (prev) {
@@ -266,13 +271,13 @@ export function useEditItemProjects(
           };
         });
       }
-      return { prev };
+      return { prev, key, fieldsKey, repo };
     },
     // Reporting lives here, not in the caller's `mutate` options: the popover
     // that fires this closes as it does, and react-query drops mutate-scoped
     // callbacks once the observer loses its listeners.
     onError: (e, _args, ctx) => {
-      if (ctx?.prev) queryClient.setQueryData<ItemProjects>(key, ctx.prev);
+      if (ctx?.prev) queryClient.setQueryData<ItemProjects>(ctx.key, ctx.prev);
       toastError(e);
     },
     // RETURNED, not voided: react-query holds `isPending` until this promise
@@ -280,7 +285,9 @@ export function useEditItemProjects(
     // refetch rather than freeing while the cache still holds `pending:` ids.
     // `invalidateQueries` resolves even when the refetch errors, so there is no
     // stuck-trigger mode.
-    onSettled: () => {
+    onSettled: (_d, _e, _args, ctx) => {
+      if (ctx === undefined) return;
+      const { key, fieldsKey, repo: writtenRepo } = ctx;
       // The fields read stays UNAWAITED — the rail filters its lines by the live
       // memberships, so it is already correct — but has to be CANCELLED first: a
       // first link enables that query mid-mutation, and query-core dedupes a
@@ -289,7 +296,7 @@ export function useEditItemProjects(
       void queryClient
         .cancelQueries({ queryKey: fieldsKey })
         .then(() => queryClient.invalidateQueries({ queryKey: fieldsKey }));
-      invalidateProjectBoards(queryClient, repo);
+      invalidateProjectBoards(queryClient, writtenRepo);
       return queryClient.invalidateQueries({ queryKey: key });
     },
   });
@@ -314,7 +321,8 @@ export function useProjectFields(
 
 /** Repo + board + LENS, with NO account axis — deliberately the same contract
  *  every forge-cache family here keeps (pr-list, pr, the sibling Projects reads).
- *  An account axis belongs to all of them at once, in the account-switch task.
+ *  An account change is handled by the account-change reset installed with the
+ *  QueryClient instead.
  *
  *  `query` is the saved view's filter, and it is an identity axis rather than an
  *  option: the server answers a filtered read with a DIFFERENT set of items, so
@@ -497,66 +505,22 @@ export interface PendingBoardWrite {
 /**
  * Every board write against `repo` that is currently in flight, one entry per
  * INVOCATION — the observer-independent reading the panel's gates and write
- * indicator need.
- *
- * `getSnapshot` COMPUTES from the cache rather than returning a value some
- * subscription last wrote, which is the whole point of doing this by hand instead of
- * through `useMutationState`. That hook keeps its result in a ref refreshed ONLY
- * inside its cache subscription, so any window without a live subscription is a
- * blind spot it never reconciles: this panel lives under `<Activity>`, which tears
- * passive effects down on hide, and a write settling while the tab is away notifies
- * nobody. On show, re-subscribing re-reads the same untouched ref, React sees no
- * change, and the pre-hide list latches — holds and indicator lines for writes
- * that finished minutes ago. `useMutationState` has the same blind spot for
- * `repo`, which reaches its filters through an options ref updated after render.
- *
- * Computing on demand makes both moot: React calls this on every render and again
- * when it re-subscribes, and each call reads the live cache under the CURRENT
- * `repo`. `replaceEqualDeep` keeps the identity stable when nothing changed, which
- * is what `useSyncExternalStore` requires of a snapshot (and the library's own
- * pattern for it).
- *
- * The repo match reads each write's own VARIABLES rather than a key segment:
- * variables are fixed when the write fires, where a key is re-derived from whatever
- * the hook's render scope holds later.
+ * indicator need. The panel lives under `<Activity>`, which is why this reads
+ * through {@link useMutationCacheSnapshot}; the repo match reads each write's own
+ * VARIABLES ({@link pendingBoardWritesFor}).
  */
 export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
-  const cache = useQueryClient().getMutationCache();
-  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
-  // keeps returning one identity — `useSyncExternalStore` loops on a snapshot that
-  // is a fresh value every call.
-  const snapshot = useRef<PendingBoardWrite[]>([]);
-  const getSnapshot = useCallback(() => {
-    const next = cache
-      .findAll({ mutationKey: BOARD_WRITES_KEY, status: "pending" })
-      .flatMap((m): PendingBoardWrite[] => {
-        const vars = boardWriteVars(m);
-        if (vars.repo !== repo) return [];
-        // The key's own tail; an unknown shape degrades to a null kind rather
-        // than a guessed one, which drops the write from the labelled lines but
-        // still counts it for the holds.
-        const kind = m.options.mutationKey?.[1];
-        return [
-          {
-            mutationId: m.mutationId,
-            kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
-            itemId: vars.itemId,
-            number: vars.number,
-            count: vars.count,
-          },
-        ];
-      });
-    snapshot.current = replaceEqualDeep(snapshot.current, next);
-    return snapshot.current;
-  }, [cache, repo]);
-  const subscribe = useCallback(
-    (onStoreChange: () => void) =>
-      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
-    [cache],
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingBoardWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: BOARD_WRITES_KEY, status: "pending" }),
+        ),
+        repo,
+      ),
+    [repo],
   );
-  // Third argument is the server snapshot, which this desktop app never renders;
-  // the same computation answers it, as the library does for its own hooks.
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useMutationCacheSnapshot(select, []);
 }
 
 /**

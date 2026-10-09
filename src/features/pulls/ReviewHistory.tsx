@@ -5,7 +5,7 @@ import {
   PencilSimpleIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,7 @@ import {
 } from "@/lib/pulls/reviews-history";
 import { formatDuration, validEpochMs } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -66,8 +67,22 @@ export function ReviewHistory({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // The open trim's session: minted by startEdit, dropped by every close. Cancel
+  // stays live during a save, so a settle closes only the trim it was saved from.
+  const editSessionRef = useRef<object | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // The PR views swap pull requests without remounting this disclosure, so its
+  // armed Clear confirm belongs to one review scope: it resets on a switch (a
+  // render-time adjustment), and a clear settling after one leaves the next
+  // scope's confirm alone.
+  const scopeKey = `${repoPath}#${lens}#${prKind}#${prRef}`;
+  const scopeKeyRef = useLatestRef(scopeKey);
+  const [lastScopeKey, setLastScopeKey] = useState(scopeKey);
+  if (scopeKey !== lastScopeKey) {
+    setLastScopeKey(scopeKey);
+    setConfirmingClear(false);
+  }
 
   // ONE list: completed reviews and kept partial runs interleave by time, so the
   // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
@@ -78,12 +93,18 @@ export function ReviewHistory({
   );
   if (records.length === 0) return null;
 
-  function toggleExpand(id: string) {
+  function closeEdit() {
+    editSessionRef.current = null;
     setEditingId(null);
+  }
+
+  function toggleExpand(id: string) {
+    closeEdit();
     setExpandedId((cur) => (cur === id ? null : id));
   }
 
   function startEdit(id: string, text: string) {
+    editSessionRef.current = {};
     setExpandedId(id);
     setEditingId(id);
     setDraft(text);
@@ -95,21 +116,23 @@ export function ReviewHistory({
   // the confirm would stay armed. The catches do nothing: neither this surface nor
   // the shared review-history mutation has a failure surface.
   async function saveEdit(id: string) {
+    const session = editSessionRef.current;
     try {
       await update.mutateAsync({ id, text: draft });
-      setEditingId(null);
+      if (editSessionRef.current === session) closeEdit();
     } catch {
       // No failure surface (see above).
     }
   }
 
   async function clearHistory() {
+    const startedFor = scopeKey;
     try {
       await clear.mutateAsync(undefined);
     } catch {
       // No failure surface (see above).
     } finally {
-      setConfirmingClear(false);
+      if (startedFor === scopeKeyRef.current) setConfirmingClear(false);
     }
   }
 
@@ -280,11 +303,7 @@ export function ReviewHistory({
                           >
                             Save
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="xs"
-                            onClick={() => setEditingId(null)}
-                          >
+                          <Button variant="ghost" size="xs" onClick={closeEdit}>
                             Cancel
                           </Button>
                           <span className="text-muted-foreground">

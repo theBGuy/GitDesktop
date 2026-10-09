@@ -89,6 +89,14 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
   const [createReleaseOpen, setCreateReleaseOpen] = useState(false);
   const [newTagOpen, setNewTagOpen] = useState(false);
   const [newTagName, setNewTagName] = useState("");
+  // The New-tag dialog's open session: minted by each opener and cleared on
+  // close, so a create settling after a close-and-reopen leaves the reopened
+  // dialog and its typed name alone.
+  const newTagSessionRef = useRef<object | null>(null);
+  const onNewTagOpenChange = (open: boolean) => {
+    if (!open) newTagSessionRef.current = null;
+    setNewTagOpen(open);
+  };
   const filterRef = useRef<HTMLInputElement>(null);
   const pendingCreate = useUiStore((s) => s.pendingCreate);
   const clearPendingCreate = useUiStore((s) => s.clearPendingCreate);
@@ -103,6 +111,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
       if (canCreateRelease) setCreateReleaseOpen(true);
       clearPendingCreate();
     } else if (pendingCreate === "tag") {
+      newTagSessionRef.current = {};
       setNewTagOpen(true);
       clearPendingCreate();
     }
@@ -144,6 +153,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
   async function createNewTag() {
     const name = newTagName.trim();
     if (!name || !headOid) return;
+    const session = newTagSessionRef.current;
     try {
       await createTag.mutateAsync({ name, hash: headOid });
     } catch (e) {
@@ -151,8 +161,10 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
       return;
     }
     toast.success(`Created tag ${name}`);
-    setNewTagOpen(false);
-    setNewTagName("");
+    const live = newTagSessionRef.current;
+    if (live === session) onNewTagOpenChange(false);
+    // A closed dialog has no typed name to protect; a reopened one does.
+    if (live === session || live === null) setNewTagName("");
     // `selectTag` is global — a repo switch mid-create must not adopt this
     // tag into the other repo's selection.
     if (useUiStore.getState().repoPath === repoPath) selectTag({ tag: name });
@@ -185,6 +197,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
               title={headOid ? undefined : "No commit to tag yet."}
               onClick={() => {
                 setNewTagName("");
+                newTagSessionRef.current = {};
                 setNewTagOpen(true);
               }}
             >
@@ -263,7 +276,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
         onOpenChange={setCreateReleaseOpen}
       />
 
-      <Dialog open={newTagOpen} onOpenChange={setNewTagOpen}>
+      <Dialog open={newTagOpen} onOpenChange={onNewTagOpenChange}>
         <DialogContent>
           <form
             className="space-y-4"
@@ -292,7 +305,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setNewTagOpen(false)}
+                onClick={() => onNewTagOpenChange(false)}
               >
                 Cancel
               </Button>

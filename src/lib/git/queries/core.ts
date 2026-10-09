@@ -102,6 +102,7 @@ export const repoKeys = {
   prMergeability: (repo: string) => ["repo", repo, "pr-mergeability"] as const,
   prReviewState: (repo: string) => ["repo", repo, "pr-review-state"] as const,
   issueList: (repo: string) => ["repo", repo, "issue-list"] as const,
+  discussionList: (repo: string) => ["repo", repo, "discussion-list"] as const,
   // The findings family: one key per category, sections named by the store's
   // limits so a category and its limit share one spelling. The limit sits at
   // index 4, which the detail view reads positionally off cached pages.
