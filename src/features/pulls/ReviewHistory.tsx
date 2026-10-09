@@ -28,6 +28,7 @@ import {
   reviewText,
 } from "@/lib/pulls/reviews-history";
 import { formatDuration, validEpochMs } from "@/lib/time";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -67,6 +68,17 @@ export function ReviewHistory({
   const [draft, setDraft] = useState("");
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // The PR views swap pull requests without remounting this disclosure, so its
+  // armed Clear confirm belongs to one review scope: it resets on a switch (a
+  // render-time adjustment), and a clear settling after one leaves the next
+  // scope's confirm alone.
+  const scopeKey = `${repoPath}#${lens}#${prKind}#${prRef}`;
+  const scopeKeyRef = useLatestRef(scopeKey);
+  const [lastScopeKey, setLastScopeKey] = useState(scopeKey);
+  if (scopeKey !== lastScopeKey) {
+    setLastScopeKey(scopeKey);
+    setConfirmingClear(false);
+  }
 
   // ONE list: completed reviews and kept partial runs interleave by time, so the
   // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
@@ -96,19 +108,21 @@ export function ReviewHistory({
   async function saveEdit(id: string) {
     try {
       await update.mutateAsync({ id, text: draft });
-      setEditingId(null);
+      // Functional: by the settle another row may be the one being edited.
+      setEditingId((cur) => (cur === id ? null : cur));
     } catch {
       // No failure surface (see above).
     }
   }
 
   async function clearHistory() {
+    const startedFor = scopeKey;
     try {
       await clear.mutateAsync(undefined);
     } catch {
       // No failure surface (see above).
     } finally {
-      setConfirmingClear(false);
+      if (startedFor === scopeKeyRef.current) setConfirmingClear(false);
     }
   }
 

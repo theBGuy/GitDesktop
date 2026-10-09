@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -132,6 +133,10 @@ function parseTopics(text: string): string[] {
     ),
   ].slice(0, 20);
 }
+
+/** Why Generate holds while the publish runs: the description it would revise
+ *  has already been sent. */
+const PUBLISH_PENDING_GENERATE_REASON = "Wait for the publish to finish";
 
 export function PublishDialog({
   repoPath,
@@ -375,9 +380,11 @@ export function PublishDialog({
   // global generate-commit-message action is live. The chord is swallowed here
   // whenever it may fire, generate-capable or not (the hook mirrors the global
   // listener's own guards). Mounted on DialogContent, not the
-  // <form>: the X close button is a form SIBLING inside the Popup.
+  // <form>: the X close button is a form SIBLING inside the Popup. A running
+  // publish holds it like the button: the draft it would revise has been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: aiEnabled && !descGen.generating,
+    enabled: aiEnabled && !descGen.generating && !isSubmitting,
     run: runGenerate,
   });
 
@@ -390,7 +397,6 @@ export function PublishDialog({
   // The running description draft, the running publish, and offline carry a
   // reason, ranked running-first, so a flip between them never drops focus to a
   // native disable; the name refusals keep their field hints and a plain disable.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
@@ -537,10 +543,12 @@ export function PublishDialog({
                     Cancel
                   </Button>
                 ) : (
-                  <Button
+                  <DisabledReasonButton
                     type="button"
                     variant="ghost"
                     size="xs"
+                    disabled={isSubmitting}
+                    reason={PUBLISH_PENDING_GENERATE_REASON}
                     onClick={runGenerate}
                     title={
                       isBitbucket
@@ -552,7 +560,7 @@ export function PublishDialog({
                     {isBitbucket
                       ? "Generate description"
                       : "Generate description & topics"}
-                  </Button>
+                  </DisabledReasonButton>
                 )}
               </div>
             )}

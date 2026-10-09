@@ -1,3 +1,4 @@
+import { useSelector } from "@tanstack/react-store";
 import { useEffect, useEffectEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,10 @@ import {
   type CommittedNameSource,
   useGenerateBranchName,
 } from "./useGenerateBranchName";
+
+/** Why Generate holds while the rename runs: the name it would revise has
+ *  already been sent. */
+const RENAME_PENDING_GENERATE_REASON = "Wait for the rename to finish";
 
 /**
  * Rename-branch dialog. Open when `target` is the branch being renamed (null =
@@ -162,9 +167,11 @@ export function RenameBranchDialog({
   // This dialog opens from any branch row over any tab, including Changes where
   // the global generate-commit-message action is live. The chord is swallowed
   // here whenever it may fire, generate-capable or not (the hook mirrors the
-  // global listener's own guards).
+  // global listener's own guards). A running rename holds it like the button:
+  // the name it would revise has already been sent.
+  const isSubmitting = useSelector(renameForm.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: generateAction.enabled,
+    enabled: generateAction.enabled && !isSubmitting,
     run: generateAction.run,
   });
 
@@ -221,6 +228,7 @@ export function RenameBranchDialog({
             committedStatus={shownCommittedStatus}
             // Renaming never picks a base — the fallback always applies here.
             basedElsewhere={null}
+            heldReason={isSubmitting ? RENAME_PENDING_GENERATE_REASON : null}
             onSetupAi={() => {
               closeDialog();
               onOpenSettings("ai");

@@ -919,6 +919,104 @@ test("generator-dialog-finish-and-surface applies to .tsx call sites only", () =
   assert.equal(appliesTo("src/features/pulls/CreatePrDialog.tsx"), true);
 });
 
+const generateHeldWhileSubmitting = scanner("generate-held-while-submitting");
+
+test("generate-held-while-submitting flags a form host's chord that ignores the submit", () => {
+  const unheld = [
+    "  const form = useAppForm({ onSubmit: async () => create() });",
+    "  const generateChord = useGenerateChord({",
+    "    enabled: aiEnabled && !generating,",
+    "    run: runGenerate,",
+    "  });",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(unheld), [2]);
+  // The flag has to hold the chord, not merely appear in its options.
+  const wrongPolarity = [
+    "  const form = useAppForm({ onSubmit: async () => create() });",
+    "  const generateChord = useGenerateChord({",
+    "    enabled: isSubmitting || ready,",
+    "    run: runGenerate,",
+    "  });",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(wrongPolarity), [2]);
+  // A withForm-rendered dialog hosts a form too.
+  const withFormHost = [
+    "export const Dialog = withForm({",
+    "  render: function Render({ form }) {",
+    "    const generateChord = useGenerateChord({ enabled: true, run });",
+    "  },",
+    "});",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(withFormHost), [3]);
+});
+
+test("generate-held-while-submitting accepts a held chord and ignores form-less surfaces", () => {
+  const held = [
+    "  const form = useAppForm({ onSubmit: async () => create() });",
+    "  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);",
+    "  const generateChord = useGenerateChord({",
+    "    enabled:",
+    '      aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,',
+    "    run: runGenerate,",
+    "  });",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(held), []);
+  // No form, no submit to wait on: the settings shell and the script dialog.
+  assert.deepEqual(
+    generateHeldWhileSubmitting(
+      "  const generateChord = useGenerateChord({ enabled: true, run });",
+    ),
+    [],
+  );
+  // Comments name neither a form nor a chord.
+  const documented = [
+    "  // useAppForm({ onSubmit }) and useGenerateChord({ enabled }) live elsewhere.",
+    "  const generateChord = useGenerateChord({ enabled: true, run });",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(documented), []);
+  const chordInComment = [
+    "  const form = useAppForm({ onSubmit: async () => create() });",
+    "  // useGenerateChord({ enabled: ready }) is wired by the host.",
+  ].join("\n");
+  assert.deepEqual(generateHeldWhileSubmitting(chordInComment), []);
+});
+
+test("generate-held-while-submitting applies to .tsx outside the vendored primitives", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "generate-held-while-submitting",
+  );
+  // The hook's own definition is a .ts module.
+  assert.equal(appliesTo("src/lib/hotkeys/useGenerateChord.ts"), false);
+  assert.equal(appliesTo("src/components/ui/dialog.tsx"), false);
+  assert.equal(appliesTo("src/features/pulls/CreatePrDialog.tsx"), true);
+});
+
+test("generate-held-while-submitting sees every real form-hosted chord", async () => {
+  // A rename of the chord hook, the form hooks, or the flag would leave the
+  // check scanning nothing and printing OK; the floor is the ten create and
+  // rewrite dialogs that hold their Generate.
+  const { readdirSync } = await import("node:fs");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "generate-held-while-submitting",
+  );
+  const hosts = readdirSync(join(root, "src"), { recursive: true })
+    .map((entry) => `src/${String(entry).split("\\").join("/")}`)
+    .filter(appliesTo)
+    .filter((file) => {
+      const { text } = view(readFileSync(join(root, file), "utf8"));
+      return (
+        /\b(?:useAppForm|withForm)\s*\(/.test(text) &&
+        /\buseGenerateChord\s*\(/.test(text) &&
+        /!\s*isSubmitting\b/.test(text)
+      );
+    });
+  assert.ok(
+    hosts.length >= 10,
+    `expected at least 10 form-hosted chords held on submit, saw ${hosts.length}`,
+  );
+});
+
 test("lone-activity-boundary flags a JSX Activity in either spelling", () => {
   assert.deepEqual(
     loneActivity('<Activity mode="hidden">{kids}</Activity>'),

@@ -41,9 +41,15 @@ import {
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 
 const onError = (e: unknown) => toastError(e);
+
+// The write dialogs below can be dismissed while their write runs, and the host
+// may reopen one on another subject before the settle: a settle closes only
+// while the dialog still shows the subject it was fired on, read off the live
+// prop. A selection clear has its own rule, at its site.
 
 /** Confirm-and-delete a tag, optionally on origin too. Owns its mutation; the
  *  parent keeps the open + "delete on origin" state (reset on each open). */
@@ -66,18 +72,23 @@ export function DeleteTagDialog({
   // Offline holds only the origin arm; the local-only delete runs offline.
   const offlineHold = useOfflineHold();
   const shownName = useRetained(name);
+  const liveName = useLatestRef(name);
   async function run() {
     if (!name) return;
     if (remote && refuseWhileOffline()) return;
+    const startedFor = name;
+    const closeIfStillOpen = () => {
+      if (liveName.current === startedFor) onClose();
+    };
     try {
       await (remote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(name);
     } catch (e) {
       onError(e);
-      onClose();
+      closeIfStillOpen();
       return;
     }
     toast.success(`Deleted tag ${name}${remote ? " (local and origin)" : ""}`);
-    onClose();
+    closeIfStillOpen();
   }
   return (
     <Dialog
@@ -141,21 +152,26 @@ export function ResetCommitDialog({
 }) {
   const resetMutation = useResetToCommit(repoPath);
   const shownHash = useRetained(hash);
+  const liveHash = useLatestRef(hash);
   async function run() {
     if (!hash) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    const startedFor = hash;
+    const closeIfStillOpen = () => {
+      if (liveHash.current === startedFor) onClose();
+    };
     try {
       await resetMutation.mutateAsync(hash);
     } catch (e) {
       onError(e);
-      onClose();
+      closeIfStillOpen();
       return;
     }
     toast.success(`Reset to ${hash.slice(0, 7)}`);
-    onClose();
+    closeIfStillOpen();
   }
   return (
     <Dialog
@@ -217,6 +233,7 @@ export function CherryPickOntoDialog({
   const destId = useId();
   const shownHashes = useRetained(hashes);
   const count = shownHashes?.length ?? 0;
+  const liveHashes = useLatestRef(hashes);
   async function run() {
     if (!hashes || !branch) return;
     // It switches to the destination branch, so it moves HEAD.
@@ -224,6 +241,9 @@ export function CherryPickOntoDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // Compared by value: the host hands a fresh array on every open.
+    const startedFor = hashes.join();
+    const stillOpen = () => liveHashes.current?.join() === startedFor;
     const target = branch;
     let result: CherryPickRangeResult;
     try {
@@ -243,7 +263,7 @@ export function CherryPickOntoDialog({
       } else {
         onError(e);
       }
-      onClose();
+      if (stillOpen()) onClose();
       return;
     }
     const { applied, skipped } = result;
@@ -257,6 +277,11 @@ export function CherryPickOntoDialog({
         `Copied ${applied} commit${applied === 1 ? "" : "s"} onto ${target}${note}`,
       );
     }
+    // The pick moved HEAD to the destination, so the source selection no longer
+    // describes the view — a dismissed dialog's included. Only a pick reopened on
+    // ANOTHER selection is a new session: neither it nor that selection is ours.
+    const live = liveHashes.current;
+    if (live !== null && live.join() !== startedFor) return;
     onClose();
     onDone();
   }

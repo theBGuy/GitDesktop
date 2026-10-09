@@ -4,6 +4,7 @@ import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,7 +14,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import {
+  CREATE_PENDING_GENERATE_REASON,
+  useFinishAndSurface,
+} from "@/features/conversations/useAiStream";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
@@ -318,9 +322,12 @@ export function CreateLocalPrDialog({
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
-  // the chord falls through instead of being swallowed for nothing.
+  // the chord falls through instead of being swallowed for nothing. A running
+  // create holds it like the button: the draft it would revise has been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: !generating && !(sameBranch || ahead.length === 0),
+    enabled:
+      !generating && !(sameBranch || ahead.length === 0) && !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -454,23 +461,32 @@ export function CreateLocalPrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      <Button
+                      // Nothing to merge stays a plain disable; a running create
+                      // says why.
+                      <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={sameBranch || ahead.length === 0}
+                        disabled={
+                          sameBranch || ahead.length === 0 || isSubmitting
+                        }
+                        reason={
+                          isSubmitting
+                            ? CREATE_PENDING_GENERATE_REASON
+                            : undefined
+                        }
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          !(sameBranch || ahead.length === 0)
+                          !(sameBranch || ahead.length === 0 || isSubmitting)
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Generate
-                      </Button>
+                      </DisabledReasonButton>
                     )
                   }
                 />

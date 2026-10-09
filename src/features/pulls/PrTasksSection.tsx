@@ -32,6 +32,7 @@ import type { PrTask } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 
 /** Count of unresolved tasks — shared by the section and the header chip. */
@@ -285,6 +286,8 @@ export function PrTasksSection({
     setDeletingId(null);
     setFocusedId(null);
   }, [number]);
+  const prKey = `${repoPath}#${number}`;
+  const prKeyRef = useLatestRef(prKey);
 
   const onError = (e: unknown) => toastError(e);
   const tasks = tasksQuery.data;
@@ -355,11 +358,15 @@ export function PrTasksSection({
     setAdding(true);
   }
 
+  // The settles below can land after a switch to another pull request (this
+  // section isn't remounted per PR), so each clears only what it was fired from:
+  // the add field while its PR is on screen, the edit and delete ids functionally.
   async function submitAdd(text: string) {
+    const startedFor = prKey;
     try {
       await createTask.mutateAsync({ number, text });
       // Clear the controlled field but keep the row open for rapid entry.
-      setAddText("");
+      if (startedFor === prKeyRef.current) setAddText("");
     } catch (e) {
       onError(e);
     }
@@ -373,7 +380,7 @@ export function PrTasksSection({
   async function submitEdit(taskId: string, text: string) {
     try {
       await editTask.mutateAsync({ number, taskId, text });
-      setEditingId(null);
+      setEditingId((cur) => (cur === taskId ? null : cur));
     } catch (e) {
       onError(e);
     }
@@ -385,7 +392,7 @@ export function PrTasksSection({
     } catch (e) {
       onError(e);
     } finally {
-      setDeletingId(null);
+      setDeletingId((cur) => (cur === taskId ? null : cur));
     }
   }
 

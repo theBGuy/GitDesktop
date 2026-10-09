@@ -11,6 +11,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import {
   MarkdownEditor,
@@ -50,6 +51,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  CREATE_PENDING_GENERATE_REASON,
   useCancelOnIdentityChange,
   useFinishAndSurface,
 } from "@/features/conversations/useAiStream";
@@ -164,6 +166,10 @@ export function CreateReleaseDialog({
     void surface.consumeSkipSeed();
     tagSwitchAbortRef.current = aiNotes.generating;
     aiNotes.cancel();
+    // The draft on screen was the previous tag's, so a create still in flight for
+    // it must not close whatever this dialog shows next. The close itself belongs
+    // to the host's tag-switch reset.
+    seedGenRef.current += 1;
   });
   // The From-GitHub run's identity while it is in flight; nothing cancels it.
   const ghRunIdentityRef = useRef<{ repo: string; tag: string } | null>(null);
@@ -214,15 +220,17 @@ export function CreateReleaseDialog({
   // repo's). A dialog left open across a repo switch never re-seeds, so this
   // still reads the submit's repo and the settle's close is the right one.
   const draftRepoRef = useRef(repoPath);
-  // Which draft the form holds, bumped only where the seed actually reseeds. The
-  // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
-  // restores the same path behind different content.
+  // Which draft the form holds, bumped only where the seed actually reseeds and
+  // on a tag switch (the draft on screen was the previous tag's). The repo stamp
+  // can't tell drafts apart within one repo: an A→B→A round trip restores the
+  // same path behind different content.
   const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: RELEASE_DEFAULTS,
     onSubmit: async ({ value }) => {
       const submitGen = seedGenRef.current;
+      const submitTag = initialTag;
       const tag = value.tag.trim();
       if (!tag || refuseWhileOffline()) return;
       const hasTarget = !initialTag && createdTags.includes(tag);
@@ -250,8 +258,14 @@ export function CreateReleaseDialog({
         // is a global write, so it takes the live-repo guard instead.
         const ourDraft =
           draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
-        if (ourDraft) onOpenChange(false);
-        if (stillHere) selectTag({ tag });
+        // The tag host's subject is its selected tag: once another is selected
+        // (a host showing that tag's release unmounts this dialog, so its refs
+        // can't see the switch) neither the close nor the selection is ours.
+        const onSubmitTag =
+          submitTag === undefined ||
+          useUiStore.getState().selectedTag?.tag === submitTag;
+        if (ourDraft && onSubmitTag) onOpenChange(false);
+        if (stillHere && onSubmitTag) selectTag({ tag });
       } catch (e) {
         // Read at the failure, not before it: a create that fails after a repo
         // switch has to name the repo it belongs to, same as the success arm.
@@ -426,9 +440,12 @@ export function CreateReleaseDialog({
   // close button is a form SIBLING inside the Popup. It is swallowed here
   // whenever it may fire (the hook mirrors the global listener's own guards),
   // so the global generate-commit-message action can't run behind the dialog;
-  // while generating it swallows but DOESN'T cancel.
+  // while generating it swallows but DOESN'T cancel. A running create holds it
+  // like the menu: the draft it would revise has already been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: aiEnabled && Boolean(tagTrimmed) && !busyGenerating,
+    enabled:
+      aiEnabled && Boolean(tagTrimmed) && !busyGenerating && !isSubmitting,
     run: generateWithAi,
   });
   // The chord's shortcut belongs on the item it drives; with AI off that item is
@@ -449,7 +466,6 @@ export function CreateReleaseDialog({
   // disable. The GitHub generator isn't AI (it stays offered with Hide AI on),
   // so it gets its own non-AI line. An empty tag stays a plain disable: no copy
   // names it.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
@@ -654,13 +670,21 @@ export function CreateReleaseDialog({
                     </Button>
                   ) : (
                     <DropdownMenu>
+                      {/* Both generators revise the notes, so a running create
+                          holds the whole menu; an empty tag stays a plain
+                          disable, as on submit. */}
                       <DropdownMenuTrigger
                         render={
-                          <Button
+                          <DisabledReasonButton
                             type="button"
                             variant="ghost"
                             size="xs"
-                            disabled={!tagTrimmed}
+                            disabled={!tagTrimmed || isSubmitting}
+                            reason={
+                              isSubmitting
+                                ? CREATE_PENDING_GENERATE_REASON
+                                : undefined
+                            }
                           />
                         }
                       >

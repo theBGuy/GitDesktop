@@ -1039,6 +1039,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDelete() {
     if (!deleteTarget) return;
+    // Functional clears below an await: by the settle the confirm may hold another
+    // branch the user picked, which this delete never touched.
+    const target = deleteTarget;
+    const clearTarget = () =>
+      setDeleteTarget((cur) => (cur === target ? null : cur));
     // The guard below reads not-blocked from the stand-in config while the rules
     // are still loading, so it would pass vacuously — refuse instead of deleting
     // a branch a settled rule protects.
@@ -1091,7 +1096,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           toast.error(
             "Can't switch off this branch — every other branch is checked out in a worktree.",
           );
-          setDeleteTarget(null);
+          clearTarget();
           return;
         }
         // Below the occupancy await, so a promote that started meanwhile counts;
@@ -1107,7 +1112,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     } catch (e) {
       onError(e);
     } finally {
-      setDeleteTarget(null);
+      clearTarget();
     }
   }
 
@@ -1122,7 +1127,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     } catch (e) {
       onError(e);
     } finally {
-      setRemoteDeleteTarget(null);
+      // Functional, for the same reason as the local delete's clear.
+      setRemoteDeleteTarget((cur) => (cur === target ? null : cur));
     }
   }
 

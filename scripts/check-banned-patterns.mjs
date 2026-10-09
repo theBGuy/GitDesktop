@@ -456,6 +456,31 @@ const GENERATOR_HOOK_RE =
 const USE_SEED_ON_OPEN_CALL_RE = /\buseSeedOnOpen\s*\(/g;
 const FINISH_AND_SURFACE_RE = /\buseFinishAndSurface\s*\(/g;
 
+// A create's settle closes the dialog holding the draft it sent, so nothing may
+// revise that draft once it is in flight: while the form submits, Generate
+// holds, and the generate chord with it. Statically: in a file that builds a
+// form (`useAppForm(` or `withForm(`, code only), every `useGenerateChord(`
+// call's options, read up to the call's balanced close, spell `!isSubmitting` —
+// the form store's flag, negated, so a mere mention doesn't pass. File-scoped:
+// a form and a chord in different components of one file still pair, a loud
+// over-match the allowlist answers. The visible Generate's own hold is render
+// output this can't see; the chord is the ratcheted half.
+const FORM_HOST_RE = /\b(?:useAppForm|withForm)\s*\(/g;
+const GENERATE_CHORD_CALL_RE = /\buseGenerateChord\s*\(/g;
+const NOT_SUBMITTING_RE = /!\s*isSubmitting\b/;
+
+const chordIgnoresSubmit = ({ text, starts }) => {
+  const hits = [];
+  for (const m of text.matchAll(GENERATE_CHORD_CALL_RE)) {
+    const open = m.index + m[0].length - 1;
+    const close = balancedEnd(text, open, "(", ")");
+    // An unclosed call can't be read, so it reports rather than passes.
+    const options = close === -1 ? "" : text.slice(open, close + 1);
+    if (!NOT_SUBMITTING_RE.test(options)) hits.push(lineAt(starts, m.index));
+  }
+  return hits;
+};
+
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
 // before the store write resolves. The hit: that file's mutation `onError`
@@ -1191,6 +1216,20 @@ export const CHECKS = [
     allowlist: [],
     message:
       "closing a dialog must never discard a paid AI generation — a mounted generator dialog rides useFinishAndSurface (src/features/conversations/useAiStream.ts): a run that settles while the dialog is closed latches skip-seed so the reopen shows the draft, and toasts it with a View reopen; a surface that genuinely aborts its run on close needs an allowlist entry with rationale",
+  },
+  {
+    name: "generate-held-while-submitting",
+    appliesTo: (file) => file.endsWith(".tsx") && notVendoredUi(file),
+    scan: onlyWhen(FORM_HOST_RE, chordIgnoresSubmit),
+    allowlist: [
+      // The shared title+description EDIT dialog: an edit re-saves the same
+      // entity rather than creating a second one, and its visible Generate lives
+      // in each host view's `bodyActions`, which the chord mirrors through
+      // `generateDisabled` — so a hold belongs to the hosts, not this file.
+      "src/features/conversations/EditTitleBodyDialog.tsx",
+    ],
+    message:
+      "a dialog's generate chord holds while its own form submits — add `!isSubmitting` (read via `useSelector(form.store, (s) => s.isSubmitting)`) to the `useGenerateChord` options and hold the visible Generate with a reason (DisabledReasonButton): the draft has already been sent, and its settle closes the dialog holding it; a surface whose submit can't strand a revision needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-diff-stat",

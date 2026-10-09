@@ -71,6 +71,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { CreateReleaseDialog } from "./CreateReleaseDialog";
 
@@ -145,6 +146,32 @@ export function TagDetailView({
   const [deleteTagOpen, setDeleteTagOpen] = useState(false);
   const [deleteTagRemote, setDeleteTagRemote] = useState(false);
 
+  // A different tag must never inherit this one's dialogs or its typed release
+  // edit (which would save into the new tag once its release loads) — a
+  // render-time state adjustment, not an effect: this view swaps tags without
+  // remounting.
+  const tagKey = `${repoPath}#${tag}`;
+  const [lastTagKey, setLastTagKey] = useState(tagKey);
+  if (tagKey !== lastTagKey) {
+    setLastTagKey(tagKey);
+    setEditOpen(false);
+    setEditTitle("");
+    setEditNotes("");
+    setEditPrerelease(false);
+    setEditLatest(false);
+    setEditSyncUpdater(true);
+    setSyncArmed(false);
+    setDeleteOpen(false);
+    setCleanupTag(false);
+    setCreateReleaseOpen(false);
+    setDeleteTagOpen(false);
+    setDeleteTagRemote(false);
+  }
+  // Live identity for write continuations: one started on a tag the user has
+  // since left must not close or disarm the next tag's dialogs.
+  const tagKeyRef = useLatestRef(tagKey);
+  const isLiveTag = (startedFor: string) => startedFor === tagKeyRef.current;
+
   const onError = (e: unknown) => toastError(e);
   const rel = release.data;
   const tagInfo = tagList.data?.find((t) => t.name === tag);
@@ -202,7 +229,10 @@ export function TagDetailView({
     }
   })();
 
-  if (release.isLoading) {
+  // Only until this tag's read first settles: a no-release (404) read holds no
+  // data, so each refetch drops it back to pending, and a skeleton then would
+  // unmount the open Create-release dialog along with its draft.
+  if (release.isLoading && !release.isFetched) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
@@ -317,17 +347,18 @@ export function TagDetailView({
   async function onDeleteTag() {
     // Only the remote arm is held: the local-only delete runs offline.
     if (deleteTagRemote && refuseWhileOffline()) return;
+    const startedFor = tagKey;
     try {
       await (deleteTagRemote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(
         tag,
       );
     } catch (e) {
       onError(e);
-      setDeleteTagOpen(false);
+      if (isLiveTag(startedFor)) setDeleteTagOpen(false);
       return;
     }
     toast.success(`Deleted ${tag}`);
-    setDeleteTagOpen(false);
+    if (isLiveTag(startedFor)) setDeleteTagOpen(false);
     deselectIfStillHere();
   }
 
@@ -380,6 +411,16 @@ export function TagDetailView({
       const syncManifest =
         canSyncUpdater && editSyncUpdater && !!editNotes.trim();
       setSyncArmed(syncManifest);
+      // Every write past the first await answers to this tag: another tag's own
+      // two-phase save may be armed by then, and dropping its latch mid-flight
+      // would let that dialog close between the phases.
+      const startedFor = tagKey;
+      const disarm = () => {
+        if (isLiveTag(startedFor)) setSyncArmed(false);
+      };
+      const close = () => {
+        if (isLiveTag(startedFor)) setEditOpen(false);
+      };
       try {
         await editRelease.mutateAsync({
           tag,
@@ -395,14 +436,14 @@ export function TagDetailView({
       } catch (e) {
         // The capture dies with the save it was taken for — phase 1 failing
         // means no phase 2 will ever consume it.
-        setSyncArmed(false);
+        disarm();
         onError(e);
         return;
       }
       if (!syncManifest) {
-        setSyncArmed(false);
+        disarm();
         toast.success("Release updated");
-        setEditOpen(false);
+        close();
         return;
       }
       // The body edit has already landed, so a manifest failure is partial
@@ -418,7 +459,7 @@ export function TagDetailView({
           );
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {
-        setSyncArmed(false);
+        disarm();
         // Which stage failed decides what recovery is possible — only a failed
         // upload leaves a parked copy — so the summary stays arm-neutral and the
         // backend's own text (carried into Details by toastError) names the specifics.
@@ -427,25 +468,26 @@ export function TagDetailView({
             `Release updated, but the updater manifest may not have been.\n\n${presentError(err).fullText}`,
           ),
         );
-        setEditOpen(false);
+        close();
         return;
       }
-      setSyncArmed(false);
+      disarm();
       toast.success("Release updated");
-      setEditOpen(false);
+      close();
     };
 
     const onDeleteRelease = async () => {
       if (refuseWhileOffline()) return;
+      const startedFor = tagKey;
       try {
         await deleteRelease.mutateAsync({ tag, cleanupTag });
       } catch (e) {
         onError(e);
-        setDeleteOpen(false);
+        if (isLiveTag(startedFor)) setDeleteOpen(false);
         return;
       }
       toast.success("Release deleted");
-      setDeleteOpen(false);
+      if (isLiveTag(startedFor)) setDeleteOpen(false);
       deselectIfStillHere();
     };
 

@@ -33,7 +33,10 @@ import { Label } from "@/components/ui/label";
 import { LABELS_PICKER_COPY } from "@/features/conversations/LabelsPopover";
 import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
-import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import {
+  CREATE_PENDING_GENERATE_REASON,
+  useFinishAndSurface,
+} from "@/features/conversations/useAiStream";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
@@ -1066,9 +1069,10 @@ export function CreatePrDialog({
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
-  // the chord falls through instead of being swallowed for nothing.
+  // the chord falls through instead of being swallowed for nothing. A running
+  // create holds it like the button: the draft it would revise has been sent.
   const generateChord = useGenerateChord({
-    enabled: !generating && !nothingToMerge,
+    enabled: !generating && !nothingToMerge && !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -1436,23 +1440,30 @@ export function CreatePrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      <Button
+                      // Nothing to merge stays a plain disable; a running create
+                      // says why.
+                      <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={nothingToMerge}
+                        disabled={nothingToMerge || isSubmitting}
+                        reason={
+                          isSubmitting
+                            ? CREATE_PENDING_GENERATE_REASON
+                            : undefined
+                        }
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          !nothingToMerge
+                          !nothingToMerge && !isSubmitting
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Generate
-                      </Button>
+                      </DisabledReasonButton>
                     )
                   }
                 />

@@ -107,6 +107,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
 import { IssueSubIssues } from "./IssueRelations";
@@ -293,6 +294,9 @@ export function RemoteIssueView({
     setTransferDest("");
     edit.setOpen(false);
   }
+  // Live identity for write continuations: one started on an issue the user has
+  // since left must not close the next issue's dialogs.
+  const issueIdentityRef = useLatestRef(issueIdentity);
   // Destination suggestions come from the viewer's repos on the SAME provider
   // as this repo; each query only fires while its dialog variant is open. The
   // GitLab list is repo-scoped so it targets the repo's own (possibly
@@ -658,6 +662,7 @@ export function RemoteIssueView({
     // The dialog's Enter submit reaches here past its held button.
     if (!destination || refuseWhileOffline()) return;
     const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
+    const startedFor = issueIdentity;
     let url: string;
     try {
       url = await transferIssue.mutateAsync({ number, destination });
@@ -674,7 +679,7 @@ export function RemoteIssueView({
           }
         : undefined,
     );
-    setTransferOpen(false);
+    if (startedFor === issueIdentityRef.current) setTransferOpen(false);
     // The issue no longer lives in this repo; clear the now-stale view.
     deselectIfStillHere(firedUnder);
   }
@@ -682,15 +687,19 @@ export function RemoteIssueView({
   async function confirmDelete() {
     if (refuseWhileOffline()) return;
     const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
+    const startedFor = issueIdentity;
+    const closeIfStillHere = () => {
+      if (startedFor === issueIdentityRef.current) setDeleteOpen(false);
+    };
     try {
       await deleteIssue.mutateAsync(number);
     } catch (e) {
       onError(e);
-      setDeleteOpen(false);
+      closeIfStillHere();
       return;
     }
     toast.success(`Deleted #${number}`);
-    setDeleteOpen(false);
+    closeIfStillHere();
     deselectIfStillHere(firedUnder);
   }
 
@@ -727,17 +736,21 @@ export function RemoteIssueView({
   }
 
   async function removeComment(commentId: string) {
+    // Functional: by the settle the dialog may hold another comment, on this
+    // issue or the next one.
+    const closeIfStillOpen = () =>
+      setDeletingCommentId((cur) => (cur === commentId ? null : cur));
     try {
       await deleteComment.mutateAsync({ number, commentId });
     } catch (e) {
       // Closes on failure too: DeleteCommentDialog never closes itself, and the
       // toast already carries the outcome.
       onError(e);
-      setDeletingCommentId(null);
+      closeIfStillOpen();
       return;
     }
     toast.success("Comment deleted");
-    setDeletingCommentId(null);
+    closeIfStillOpen();
   }
 
   // Repo suggestions for the transfer/move destination (excludes archived

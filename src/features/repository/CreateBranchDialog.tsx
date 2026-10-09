@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useId, useMemo, useState } from "react";
+import { useEffectEvent, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { CREATE_PENDING_GENERATE_REASON } from "@/features/conversations/useAiStream";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import {
   branchNameError,
@@ -95,9 +96,16 @@ export function CreateBranchDialog({
 }) {
   const createBranch = useCreateBranch(repoPath);
   const branchNameGen = useGenerateBranchName(repoPath);
+  // The open session a create settles against: minted by the open seed, dropped
+  // by every close this dialog makes (a host-side close is re-minted over by the
+  // next seed), so a create that outlives a close-and-reopen leaves the reopened
+  // dialog alone. Never minted in an `[open]` effect with a clearing cleanup: an
+  // <Activity> hide runs that cleanup, stranding a hidden settle.
+  const sessionRef = useRef<object | null>(null);
   // Every close path routes through here: the dialog stays mounted, so an
   // in-flight suggestion would otherwise land in the field on the next open.
   const closeDialog = () => {
+    sessionRef.current = null;
     branchNameGen.cancel();
     onOpenChange(false);
   };
@@ -135,6 +143,7 @@ export function CreateBranchDialog({
       const startPoint = value.base
         ? `${baseIsRemote ? "refs/remotes" : "refs/heads"}/${value.base}`
         : undefined;
+      const session = sessionRef.current;
       try {
         await createBranch.mutateAsync({
           name: sanitizeRefName(value.name),
@@ -144,7 +153,10 @@ export function CreateBranchDialog({
           // its own name (no upstream copied from `origin/…`).
           noTrack: baseIsRemote && Boolean(startPoint),
         });
-        onOpenChange(false);
+        if (sessionRef.current === session) {
+          sessionRef.current = null;
+          onOpenChange(false);
+        }
       } catch (e) {
         toastError(e);
       }
@@ -184,6 +196,7 @@ export function CreateBranchDialog({
   // sync sees "different defaults + untouched form" and clobbers the seeded
   // values right back on the next render.
   const seedOnOpen = useEffectEvent(() => {
+    sessionRef.current = {};
     // Seed only a value the picker would actually offer (see `useSeedBase`) — a
     // seeded base absent from the list would render in the trigger yet be
     // unselectable. `seedBase` already encodes that invariant.
@@ -211,9 +224,12 @@ export function CreateBranchDialog({
   // This dialog opens from the header over any tab, including Changes where the
   // global generate-commit-message action is live. The chord is swallowed here
   // whenever it may fire, generate-capable or not (the hook mirrors the global
-  // listener's own guards), so nothing writes into the commit box behind it.
+  // listener's own guards), so nothing writes into the commit box behind it. A
+  // running create holds it like the button: the name it would revise has
+  // already been sent.
+  const isSubmitting = useSelector(createForm.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: generateAction.enabled,
+    enabled: generateAction.enabled && !isSubmitting,
     run: generateAction.run,
   });
 
@@ -286,6 +302,7 @@ export function CreateBranchDialog({
             // explains the picked base instead of waiting on a lookup it won't use.
             committedStatus={baseIsHead ? committedStatus : "ready"}
             basedElsewhere={baseIsHead ? null : createBase}
+            heldReason={isSubmitting ? CREATE_PENDING_GENERATE_REASON : null}
             onSetupAi={() => {
               closeDialog();
               onOpenSettings("ai");
