@@ -1,6 +1,7 @@
 import {
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useSyncExternalStore,
 } from "react";
@@ -13,64 +14,18 @@ import {
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "./binding";
+import {
+  dispatchAction,
+  getAvailableSnapshot,
+  type HandlerEntry,
+  hasLiveHandler,
+  registerHandler,
+  subscribe,
+  unregisterHandler,
+} from "./handler-registry";
 import { ACTIONS, type ActionId } from "./registry";
 
-interface HandlerEntry {
-  run: () => void;
-  enabled: boolean;
-}
-
-/**
- * Live handlers, registered by whichever components are currently mounted.
- * Hidden <Activity> tabs unmount their effects, so per-tab actions are only
- * live on the visible tab. The newest enabled registration wins.
- */
-const liveHandlers = new Map<ActionId, HandlerEntry[]>();
-
-// Notified on every register/unregister/enable change so the palette can
-// re-derive "what's available right now".
-const subscribers = new Set<() => void>();
-
-// Snapshot for useSyncExternalStore: a stable Set reference that's only
-// rebuilt when the handler map actually changes. NOTE: reading liveHandlers
-// directly during render would be invisible to the React Compiler's
-// memoization — the store subscription is the sanctioned reactive path.
-let availableSnapshot: Set<ActionId> | null = null;
-
-function getAvailableSnapshot(): Set<ActionId> {
-  if (availableSnapshot === null) {
-    const out = new Set<ActionId>();
-    for (const [id, entries] of liveHandlers) {
-      if (entries.some((e) => e.enabled)) out.add(id);
-    }
-    availableSnapshot = out;
-  }
-  return availableSnapshot;
-}
-
-function notify() {
-  availableSnapshot = null;
-  for (const fn of subscribers) fn();
-}
-
-function subscribe(fn: () => void): () => void {
-  subscribers.add(fn);
-  return () => {
-    subscribers.delete(fn);
-  };
-}
-
-/** Runs the newest enabled handler for an action. True when one ran. */
-export function dispatchAction(id: ActionId): boolean {
-  const entries = liveHandlers.get(id) ?? [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].enabled) {
-      entries[i].run();
-      return true;
-    }
-  }
-  return false;
-}
+export { dispatchAction };
 
 /**
  * Registers `run` as the live handler for an action while the component is
@@ -79,19 +34,13 @@ export function dispatchAction(id: ActionId): boolean {
  */
 export function useHotkeyAction(id: ActionId, run: () => void, enabled = true) {
   const stableRun = useEffectEvent(run);
-  useEffect(() => {
+  // A LAYOUT effect: `stableRun` swaps in during the commit, and a passive
+  // registration would leave a dispatch landing before the passive flush running
+  // the new closure under the previous commit's `enabled`.
+  useLayoutEffect(() => {
     const entry: HandlerEntry = { run: stableRun, enabled };
-    const list = liveHandlers.get(id) ?? [];
-    liveHandlers.set(id, [...list, entry]);
-    notify();
-    return () => {
-      const current = liveHandlers.get(id) ?? [];
-      liveHandlers.set(
-        id,
-        current.filter((e) => e !== entry),
-      );
-      notify();
-    };
+    registerHandler(id, entry);
+    return () => unregisterHandler(id, entry);
   }, [id, enabled]);
 }
 
@@ -164,7 +113,7 @@ export function useHotkeysListener() {
     // Ctrl+W / Ctrl+F on the repositories list, where RepositoryView is
     // unmounted) keeps its native meaning: we leave it alone. (The
     // editable-target guard above already exits for typing contexts.)
-    if (id && (liveHandlers.get(id)?.length ?? 0) > 0) {
+    if (id && hasLiveHandler(id)) {
       dispatchAction(id);
       e.preventDefault();
     }

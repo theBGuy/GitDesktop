@@ -1,4 +1,10 @@
-import { createContext, useContext, useEffect, useMemo, useRef } from "react";
+import {
+  createContext,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import {
   eventToBinding,
   firesInEditable,
@@ -180,7 +186,9 @@ export function usePublishGenerateAction(
   const keyRef = useRef(sink?.activeKey ?? null);
   // No dep array: `run` is a fresh closure on most renders and republishing is
   // a single ref write, so re-running every render is cheaper than comparing.
-  useEffect(() => {
+  // A LAYOUT effect, so a chord landing before the passive flush reads this
+  // commit's `enabled` and `run`, never the previous commit's.
+  useLayoutEffect(() => {
     const key = keyRef.current;
     if (!sink || key === null) return;
     const action: PublishedGenerateAction = { key, enabled, run };
