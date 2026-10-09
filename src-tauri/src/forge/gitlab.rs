@@ -114,7 +114,7 @@ impl Forge for GitLabForge {
         // The project's path (group/name), derived from the origin remote — this is
         // both how we address the glab API and what flips the integration ready.
         let repo = project_path(repo_path).await.ok();
-        let login = cached_status_login(repo_path).await;
+        let login = cached_host_status_login(&self.host, repo_path).await;
         Ok(gitlab_status(true, authenticated, &self.host, repo, login))
     }
 }
@@ -3676,7 +3676,6 @@ struct StatusLogin {
 const STATUS_LOGIN_TTL: Duration = Duration::from_secs(120);
 type StatusLoginCell = Arc<AsyncMutex<Option<StatusLogin>>>;
 type StatusLoginCache = LazyLock<Mutex<HashMap<String, StatusLoginCell>>>;
-static STATUS_LOGINS: StatusLoginCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Keyed by host rather than repo path; see [`cached_host_status_login`].
 static HOST_STATUS_LOGINS: StatusLoginCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -3685,16 +3684,12 @@ fn status_login_cell(cache: &StatusLoginCache, key: &str) -> StatusLoginCell {
     Arc::clone(cache.entry(key.to_string()).or_default())
 }
 
+/// The signed-in login on `host`, shared by every repo on it: the frontend's
+/// account-change reset compares logins per host (src/lib/account-change.ts), so two
+/// repos reading separate entries would flip its baseline. `repo_path` must pin `host`.
 /// Re-probe on the next request after two minutes to bound stale ownership after
-/// reconnects or origin edits, at one spawn per repo per window. Failures retry;
-/// the per-repo async lock coalesces concurrent successful probes.
-async fn cached_status_login(repo_path: &str) -> Option<String> {
-    let cell = status_login_cell(&STATUS_LOGINS, repo_path);
-    resolve_status_login(&cell, current_user_login(repo_path)).await
-}
-
-/// [`cached_status_login`] keyed by host, so the background tick pays one spawn per
-/// host per window however many repos share it. `repo_path` must pin `host`.
+/// reconnects or origin edits, at one spawn per host per window. Failures retry;
+/// the per-host async lock coalesces concurrent successful probes.
 async fn cached_host_status_login(host: &str, repo_path: &str) -> Option<String> {
     let cell = status_login_cell(&HOST_STATUS_LOGINS, host);
     resolve_status_login(&cell, current_user_login(repo_path)).await
@@ -11299,6 +11294,22 @@ mod tests {
             resolve_status_login(&cell, async { Some("bob".to_string()) }).await,
             Some("bob".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn host_status_login_is_shared_by_every_repo_on_the_host() {
+        let host = "shared-login.test";
+        *status_login_cell(&HOST_STATUS_LOGINS, host).lock().await = Some(StatusLogin {
+            login: "alice".to_string(),
+            resolved_at: Instant::now(),
+        });
+        for repo in ["C:/gd-missing/repo-a", "C:/gd-missing/repo-b"] {
+            assert_eq!(
+                cached_host_status_login(host, repo).await,
+                Some("alice".to_string()),
+                "{repo}",
+            );
+        }
     }
 
     /// The web URL resolves purely from `origin` — no `glab` spawn — for https,

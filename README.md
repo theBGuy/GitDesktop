@@ -32,7 +32,10 @@ Enterprise** servers work the same as github.com once you've run
 `gh auth login --hostname <host>`, and Settings → Accounts switches the
 active account per host.
 
-![GitDesktop's Changes view: a split, syntax-highlighted diff on the right; the changes list, a stash browser, and an AI-generated commit message with co-authors on the left.](site/src/assets/app-staging.png)
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/loop-poster.webp">
+  <img src="site/src/assets/readme/loop.gif" width="960" alt="GitDesktop committing three staged files with an AI-written message, publishing the branch, opening a pull request with an AI-drafted title and description, watching its three checks pass, and squash-merging it with the remote branch deleted">
+</picture>
 
 ## Install
 
@@ -142,6 +145,11 @@ multi-selection from the context menu (staging and unstaging a selection sit
 in the command palette too); discarding a whole untracked file goes to the
 recycle bin. Commit with title + body, co-authors suggested from history,
 amend, undo, reset, and revert.
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/lines-poster.webp">
+  <img src="site/src/assets/readme/lines.gif" width="960" alt="Dragging across lines in two hunks of a diff and staging just those lines with a keyboard shortcut, while a debug console.log line stays unstaged">
+</picture>
 
 Markdown and MDX files add a Raw / Preview toggle to the diff, so you can
 read a doc change as rendered prose (headings, tables, and code blocks) on
@@ -475,7 +483,10 @@ in one click.
   command palette) can **Archive / Unarchive** or **Delete** it. Delete
   confirms; the branches are untouched.
 
-![A pull request open in GitDesktop with an inline AI review summarizing the diff; the left sidebar lists both local and GitHub pull requests, and the footer offers Approve, Comment, and Publish-to-GitHub actions.](site/src/assets/app-review.png)
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/review-poster.webp">
+  <img src="site/src/assets/readme/review.gif" width="960" alt="An agentic AI review in GitDesktop: it reads files across the repository, then reports that nothing blocks the merge and suggests a stronger test">
+</picture>
 
 ### AI review and security audits
 
@@ -573,7 +584,7 @@ repository jumps to the pull request or issue it names (under a fork's
 state changes, milestones, assignment, locks, duplicates, and same-project
 mentions.
 
-![An issue open in GitDesktop with its description, labels, assignees, milestone, sub-issues, and a linked development branch and pull request; local and GitHub issues appear together in the sidebar.](site/src/assets/app-issues.png)
+![A GitHub issue open in GitDesktop with its description, two sub-issues, an assignee, labels, a milestone, and three linked pull requests under Development; the issue list beside it groups issues into Local and GitHub sections.](site/src/assets/app-issues.png)
 
 ### Project boards
 
@@ -709,7 +720,10 @@ dispatch that would be rejected is visible before you run it.
 - **Debug failed CI with AI**: turn a failed job's logs into a streamed
   root-cause + fix, ending with a ready-to-paste prompt for a coding agent.
 
-![GitDesktop's GitHub Actions tab: a workflow run with its Lint, Unit tests, and Build jobs listed, the Build job expanded into individual steps and durations, plus Re-run all jobs and View on GitHub controls.](site/src/assets/app-actions.png)
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/ci-poster.webp">
+  <img src="site/src/assets/readme/ci.gif" width="960" alt="A pull request's checks in GitDesktop: the Lint job's steps tick off live until all three checks pass">
+</picture>
 
 ### Security findings
 

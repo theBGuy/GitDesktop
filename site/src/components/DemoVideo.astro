@@ -1,0 +1,75 @@
+---
+// A silent demo loop in a .window frame. The poster <img> is the no-JS still
+// and sizes the frame; the video overlays it and the control stays `hidden`
+// until demoScript in SiteLayout.astro takes over (no `autoplay` anywhere).
+interface Props {
+  /** Clip base name under /media/: <name>.mp4, <name>.webm, and the <name>.webp poster. */
+  name: string;
+  /** What the clip shows: the poster's alt text and the video's accessible name. */
+  label: string;
+  /** Intrinsic pixel size of the clip and poster. */
+  width: number;
+  height: number;
+  /** Second of the clip the poster shows; playback starts there so the hand-off is seamless. */
+  posterAt: number;
+  /** Extra classes on the figure (order, margins, max-width). */
+  class?: string;
+  style?: string;
+  /** data-reveal on the figure (default true). */
+  reveal?: boolean;
+}
+
+const {
+  name,
+  label,
+  width,
+  height,
+  posterAt,
+  class: className,
+  style,
+  reveal = true,
+} = Astro.props;
+
+const base = import.meta.env.BASE_URL;
+const src = `${base}media/${name}`;
+---
+
+<figure
+  data-demo
+  data-reveal={reveal || undefined}
+  style={style}
+  class:list={["window demo", className]}
+>
+  <img
+    src={`${src}.webp`}
+    width={width}
+    height={height}
+    alt={label}
+    loading="lazy"
+    decoding="async"
+  />
+  <video
+    muted
+    playsinline
+    loop
+    preload="none"
+    disablepictureinpicture
+    width={width}
+    height={height}
+    aria-label={label}
+    hidden
+    data-poster-at={posterAt}
+  >
+    <source src={`${src}.mp4`} type="video/mp4" />
+    <source src={`${src}.webm`} type="video/webm" />
+  </video>
+  <button type="button" class="demo-toggle" aria-label="Play demo" hidden>
+    <svg class="demo-pause" viewBox="0 0 12 12" aria-hidden="true">
+      <rect x="2" y="1.5" width="2.75" height="9" rx="0.75" fill="currentColor"></rect>
+      <rect x="7.25" y="1.5" width="2.75" height="9" rx="0.75" fill="currentColor"></rect>
+    </svg>
+    <svg class="demo-play" viewBox="0 0 12 12" aria-hidden="true">
+      <path d="M3.25 1.6v8.8a.6.6 0 0 0 .9.52l7.04-4.4a.6.6 0 0 0 0-1.04L4.15 1.08a.6.6 0 0 0-.9.52Z" fill="currentColor"></path>
+    </svg>
+  </button>
+</figure>
