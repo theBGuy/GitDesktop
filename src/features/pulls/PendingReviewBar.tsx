@@ -13,6 +13,7 @@ import {
   useReviewDrafts,
   useUpdateReviewDraft,
 } from "@/lib/pulls/review-drafts";
+import { useLatestRef } from "@/lib/use-latest-ref";
 
 /** The anchor label for a draft: "Lines a–b" for a range, "Line b" otherwise. */
 function draftLabel(draft: ReviewDraft): string {
@@ -164,11 +165,22 @@ export function PendingReviewBar({
   const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const count = drafts.data?.length ?? 0;
+  // The PR view swaps pull requests without remounting this bar, so its confirm
+  // resets on a switch (a render-time adjustment), and a discard settling after
+  // one leaves the next PR's confirm alone.
+  const prKey = `${repoPath}#${lens}#${number}`;
+  const prKeyRef = useLatestRef(prKey);
+  const [lastPrKey, setLastPrKey] = useState(prKey);
+  if (prKey !== lastPrKey) {
+    setLastPrKey(prKey);
+    setConfirmDiscard(false);
+  }
 
   async function discard() {
+    const startedFor = prKey;
     try {
       await clearDrafts.mutateAsync(undefined);
-      setConfirmDiscard(false);
+      if (startedFor === prKeyRef.current) setConfirmDiscard(false);
     } catch {
       // Awaited with a do-nothing catch: see DraftCommentCard.
     }

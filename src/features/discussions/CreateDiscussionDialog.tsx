@@ -1,6 +1,6 @@
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
@@ -43,11 +44,21 @@ export function CreateDiscussionDialog({
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
   const categories = meta.data?.categories ?? [];
   const repoId = meta.data?.repoId ?? "";
+  // The host panel is retained across repo switches, so a draft left open would
+  // carry one repo's category into the next repo's create. A switch closes it;
+  // the next open reseeds.
+  useCancelOnIdentityChange(repoPath, () => onOpenChange(false));
+  // Which repo's draft the form holds, and which viewing session — both stamped
+  // by the seed: a create settling after a close-and-reopen (here or in another
+  // repo) closes only the draft that was submitted.
+  const draftRepoRef = useRef(repoPath);
+  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "", categoryId: "" },
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
+      const submitGen = seedGenRef.current;
       try {
         const { number, url } = await createDiscussion.mutateAsync({
           repoId,
@@ -59,7 +70,11 @@ export function CreateDiscussionDialog({
           description: url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
-        onOpenChange(false);
+        if (
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        )
+          onOpenChange(false);
         // Adopt the new discussion only while this repo is still on screen —
         // the create can settle after a repo switch.
         if (number > 0 && useUiStore.getState().repoPath === repoPath)
@@ -96,6 +111,8 @@ export function CreateDiscussionDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    draftRepoRef.current = repoPath;
+    seedGenRef.current += 1;
     form.reset(
       { title: "", body: "", categoryId: categories[0]?.id ?? "" },
       { keepDefaultValues: true },

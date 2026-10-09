@@ -124,6 +124,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const [resetHash, setResetHash] = useState<string | null>(null);
   const [branchHash, setBranchHash] = useState<string | null>(null);
   const [tagHash, setTagHash] = useState<string | null>(null);
+  // Each dialog's open session: minted by every opener, dropped by its close. A
+  // create isn't held against Esc, so its settle closes only the session it was
+  // submitted from, never a dialog reopened on another commit.
+  const branchSessionRef = useRef<object | null>(null);
+  const tagSessionRef = useRef<object | null>(null);
   // Both dialogs' descriptions are built at their call sites below.
   const shownBranchHash = useRetained(branchHash);
   const shownTagHash = useRetained(tagHash);
@@ -200,6 +205,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         return;
       }
       const name = sanitizeRefName(value.name);
+      const session = branchSessionRef.current;
       try {
         await createBranch.mutateAsync({
           name,
@@ -207,7 +213,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           startPoint: branchHash,
         });
         toast.success(`Created branch ${name}`);
-        setBranchHash(null);
+        if (branchSessionRef.current === session) {
+          branchSessionRef.current = null;
+          setBranchHash(null);
+        }
       } catch (e) {
         onError(e);
       }
@@ -219,10 +228,14 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     onSubmit: async ({ value }) => {
       if (!tagHash) return;
       const name = sanitizeRefName(value.name);
+      const session = tagSessionRef.current;
       try {
         await createTag.mutateAsync({ name, hash: tagHash });
         toast.success(`Created tag ${name}`);
-        setTagHash(null);
+        if (tagSessionRef.current === session) {
+          tagSessionRef.current = null;
+          setTagHash(null);
+        }
       } catch (e) {
         onError(e);
       }
@@ -660,10 +673,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               ),
             createBranch: (hash) => {
               branchForm.reset({ name: "" });
+              branchSessionRef.current = {};
               setBranchHash(hash);
             },
             createTag: (hash) => {
               tagForm.reset({ name: "" });
+              tagSessionRef.current = {};
               setTagHash(hash);
             },
           }}
@@ -737,6 +752,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         <ContextMenuItem
           onClick={() => {
             branchForm.reset({ name: "" });
+            branchSessionRef.current = {};
             setBranchHash(commit.hash);
           }}
         >
@@ -745,6 +761,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         <ContextMenuItem
           onClick={() => {
             tagForm.reset({ name: "" });
+            tagSessionRef.current = {};
             setTagHash(commit.hash);
           }}
         >
@@ -989,7 +1006,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       <CreateRefFromCommitDialog
         form={branchForm}
         open={branchHash !== null}
-        onClose={() => setBranchHash(null)}
+        onClose={() => {
+          branchSessionRef.current = null;
+          setBranchHash(null);
+        }}
         title="Create branch from commit"
         description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
         fieldLabel="Branch name"
@@ -1000,7 +1020,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       <CreateRefFromCommitDialog
         form={tagForm}
         open={tagHash !== null}
-        onClose={() => setTagHash(null)}
+        onClose={() => {
+          tagSessionRef.current = null;
+          setTagHash(null);
+        }}
         title="Create tag"
         description={`Tags commit ${shownTagHash?.slice(0, 7) ?? ""}.`}
         fieldLabel="Tag name"

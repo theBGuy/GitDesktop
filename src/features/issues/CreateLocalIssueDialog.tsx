@@ -3,6 +3,7 @@ import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,7 +13,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import {
+  CREATE_PENDING_GENERATE_REASON,
+  useFinishAndSurface,
+} from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useCreateLocalIssue } from "@/lib/issues/queries";
@@ -159,9 +163,11 @@ export function CreateLocalIssueDialog({
   // focus on X. It is swallowed here whenever it may fire (the hook mirrors the
   // global listener's own guards), so the global generate-commit-message action
   // can't run behind the dialog; while generating it swallows but DOESN'T
-  // cancel.
+  // cancel. A running create holds it like the button: the draft it would
+  // revise has already been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
-    enabled: aiEnabled && !generating && notes.trim() !== "",
+    enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
   });
   // The one submit gate, shared by the button and the form's native submit:
@@ -222,23 +228,29 @@ export function CreateLocalIssueDialog({
                         Cancel
                       </Button>
                     ) : (
-                      <Button
+                      // Empty notes stay a plain disable; a running create says why.
+                      <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={!notes.trim()}
+                        disabled={!notes.trim() || isSubmitting}
+                        reason={
+                          isSubmitting
+                            ? CREATE_PENDING_GENERATE_REASON
+                            : undefined
+                        }
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          notes.trim()
+                          notes.trim() && !isSubmitting
                             ? `Expand your notes into a structured issue with AI${generateChord.hint}`
                             : "Expand your notes into a structured issue with AI"
                         }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Draft with AI
-                      </Button>
+                      </DisabledReasonButton>
                     )
                   }
                 />

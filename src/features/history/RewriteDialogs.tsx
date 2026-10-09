@@ -1,4 +1,5 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
+import { useSelector } from "@tanstack/react-store";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -32,6 +33,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 
 /** Why a commit range has nothing left to describe, by what hid it. */
 const EMPTY_RANGE_COPY: Record<HiddenCause, string> = {
@@ -41,6 +43,10 @@ const EMPTY_RANGE_COPY: Record<HiddenCause, string> = {
     "Nothing to describe — files whose names aren't readable text are always kept from AI.",
   both: "Nothing to describe — files whose names aren't readable text are always kept from AI, and the rest of these commits' changes match your AI ignore patterns.",
 };
+
+/** Why Generate holds while the squash runs: the message it would revise has
+ *  already been sent. */
+const SQUASH_PENDING_GENERATE_REASON = "Wait for the squash to finish";
 
 /**
  * Streams an AI commit message from a `base..head` diff — the commit-box
@@ -146,18 +152,17 @@ export function SquashDialog({
   // The squash step is oldest-first, so its last hash is the run's tip;
   // diffing base..tip yields exactly the changes the new commit will hold.
   const runHead = steps.find((s) => s.hashes.length > 1)?.hashes.at(-1);
-  // The generate chord writes the squashed message while this dialog is open.
-  // Mounted on DialogContent so it also covers the X close button (a form
-  // SIBLING inside the Popup). It is swallowed here whenever it may fire (the
-  // hook mirrors the global listener's own guards), so the global
-  // generate-commit-message action can't run behind the dialog; while
-  // generating it swallows but DOESN'T cancel.
-  const generateChord = useGenerateChord({
-    enabled: aiEnabled && !ai.generating && Boolean(runHead),
-    run: () => {
-      if (runHead) ai.generate(base, runHead);
-    },
-  });
+
+  // The squash can be dismissed while it runs, and the host mounts this dialog
+  // per squash: a settle closes it only while this instance is still the open
+  // one on the same run. The dismissal flag covers the unmount (a frozen prop ref
+  // can't see the host's next squash); the live steps cover a retarget in place.
+  const dismissedRef = useRef(false);
+  const liveSteps = useLatestRef(steps);
+  const onDialogOpenChange = (next: boolean) => {
+    if (!next) dismissedRef.current = true;
+    onOpenChange(next);
+  };
 
   const form = useAppForm({
     defaultValues: { message: defaultMessage },
@@ -166,6 +171,7 @@ export function SquashDialog({
         toast.info(PROMOTION_BLOCKS_CHECKOUT);
         return;
       }
+      const startedFor = steps;
       try {
         await rewrite.mutateAsync({
           base,
@@ -174,7 +180,11 @@ export function SquashDialog({
           ),
         });
         toast.success(`Squashed ${count} commits into one`);
-        onOpenChange(false);
+        if (!dismissedRef.current && liveSteps.current === startedFor)
+          onOpenChange(false);
+        // A selection made against the pre-rewrite list (one made mid-flight
+        // included) may name dead hashes, so it clears whatever became of the
+        // dialog.
         onDone();
       } catch (e) {
         toastError(e);
@@ -182,8 +192,23 @@ export function SquashDialog({
     },
   });
 
+  // The generate chord writes the squashed message while this dialog is open.
+  // Mounted on DialogContent so it also covers the X close button (a form
+  // SIBLING inside the Popup). It is swallowed here whenever it may fire (the
+  // hook mirrors the global listener's own guards), so the global
+  // generate-commit-message action can't run behind the dialog; while
+  // generating it swallows but DOESN'T cancel. A running squash holds it like
+  // the button: the message it would revise has already been sent.
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const generateChord = useGenerateChord({
+    enabled: aiEnabled && !ai.generating && Boolean(runHead) && !isSubmitting,
+    run: () => {
+      if (runHead) ai.generate(base, runHead);
+    },
+  });
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onDialogOpenChange}>
       <DialogContent onKeyDown={generateChord.onKeyDown}>
         <form
           className="space-y-4"
@@ -232,15 +257,19 @@ export function SquashDialog({
                   variant="outline"
                   size="sm"
                   wrapperClassName="mr-auto"
-                  disabled={!runHead}
+                  disabled={!runHead || isSubmitting}
                   // The chord is only offered while it would do something — a
                   // disabled Generate's shortcut is dead too.
                   title={
-                    runHead
+                    runHead && !isSubmitting
                       ? `Generate the commit message with AI${generateChord.hint}`
                       : "Generate the commit message with AI"
                   }
-                  reason="Nothing to generate from — this squash has no run of commits to combine"
+                  reason={
+                    isSubmitting
+                      ? SQUASH_PENDING_GENERATE_REASON
+                      : "Nothing to generate from — this squash has no run of commits to combine"
+                  }
                   onClick={() => runHead && ai.generate(base, runHead)}
                 >
                   <SparkleIcon data-icon="inline-start" />
@@ -250,7 +279,7 @@ export function SquashDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => onDialogOpenChange(false)}
             >
               Cancel
             </Button>

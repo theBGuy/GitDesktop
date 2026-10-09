@@ -456,6 +456,133 @@ const GENERATOR_HOOK_RE =
 const USE_SEED_ON_OPEN_CALL_RE = /\buseSeedOnOpen\s*\(/g;
 const FINISH_AND_SURFACE_RE = /\buseFinishAndSurface\s*\(/g;
 
+// A create's settle closes the dialog holding the draft it sent, so nothing may
+// revise that draft once it is in flight: while the form submits, Generate
+// holds, and the generate chord with it. Statically: in a file that builds a
+// form (`useAppForm(` or `withForm(`, code only), every `useGenerateChord(`
+// call passes an object literal whose own `enabled` value is a top-level `&&`
+// chain with `!isSubmitting` as one conjunct (redundant parens stripped). A
+// top-level `||`, `??` or ternary in that value, a missing, shorthand,
+// duplicated or spread-overridable `enabled`, and an unreadable call all
+// report. File-scoped: a form and a chord in different components of one file
+// still pair, a loud over-match the allowlist answers. The visible Generate's
+// own hold is render output this can't see; the chord is the ratcheted half.
+const FORM_HOST_RE = /\b(?:useAppForm|withForm)\s*\(/g;
+const GENERATE_CHORD_CALL_RE = /\buseGenerateChord\s*\(/g;
+
+/** Walks `src` skipping string and template contents, calling `visit(i)` at
+ *  each bracket-depth-0 index; a truthy return stops the walk and is returned.
+ *  null on unbalanced brackets or an unclosed string, so callers fail closed. */
+function walkTopLevel(src, visit) {
+  let depth = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
+      if (j >= src.length) return null;
+      i = j;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      if (depth < 0) return null;
+    } else if (depth === 0) {
+      const out = visit(i);
+      if (out) return out;
+    }
+  }
+  return depth === 0 ? false : null;
+}
+
+/** `src` split at its depth-0 occurrences of `sep`, or null if unreadable. */
+function splitAtTopLevel(src, sep) {
+  const parts = [];
+  let from = 0;
+  const walked = walkTopLevel(src, (i) => {
+    if (i >= from && src.startsWith(sep, i)) {
+      parts.push(src.slice(from, i));
+      from = i + sep.length;
+    }
+  });
+  if (walked === null) return null;
+  parts.push(src.slice(from));
+  return parts;
+}
+
+/** `src` trimmed, minus any parens wrapping the WHOLE expression. */
+function stripOuterParens(src) {
+  let s = src.trim();
+  while (s.startsWith("(") && balancedEnd(s, 0, "(", ")") === s.length - 1)
+    s = s.slice(1, -1).trim();
+  return s;
+}
+
+/** Whether `expr` has a depth-0 `||`, `??` or ternary `?` (optional chaining
+ *  aside); null if unreadable. */
+function hasTopLevelAlternative(expr) {
+  const found = walkTopLevel(expr, (i) => {
+    if (expr.startsWith("||", i)) return true;
+    if (expr[i] !== "?") return false;
+    // `?.` before a non-digit is optional chaining; `??` and a bare `?` aren't.
+    return !(expr[i + 1] === "." && !/\d/.test(expr[i + 2] ?? ""));
+  });
+  return found === null ? null : Boolean(found);
+}
+
+/** The `&&` conjuncts of `expr`, flattening parenthesized `&&` chains; null
+ *  when `expr` itself is not a pure conjunction or can't be read. */
+function conjuncts(expr) {
+  const e = stripOuterParens(expr);
+  if (hasTopLevelAlternative(e) !== false) return null;
+  const parts = splitAtTopLevel(e, "&&");
+  if (parts === null) return null;
+  if (parts.length === 1) return [e];
+  return parts.flatMap((p) => conjuncts(p) ?? [stripOuterParens(p)]);
+}
+
+/** Whether a `useGenerateChord` call's argument source (between its parens)
+ *  holds the chord on submit, per the class comment above. */
+export function chordOptionsHoldSubmit(args) {
+  const obj = args.trim();
+  if (!obj.startsWith("{") || balancedEnd(obj, 0, "{", "}") !== obj.length - 1)
+    return false;
+  const props = splitAtTopLevel(obj.slice(1, -1), ",");
+  if (props === null) return false;
+  const entries = props.map((p) => p.trim()).filter((p) => p !== "");
+  // A spread can supply or override `enabled` out of sight.
+  if (entries.some((p) => p.startsWith("..."))) return false;
+  const keyed = entries.filter((p) => /^(["']?)enabled\1\s*(?::|$)/.test(p));
+  // Missing, duplicated, or shorthand (`{ enabled, run }`): unreadable.
+  if (keyed.length !== 1) return false;
+  const colon = keyed[0].indexOf(":");
+  if (colon === -1) return false;
+  const terms = conjuncts(keyed[0].slice(colon + 1));
+  return (
+    terms !== null &&
+    terms.some((t) => t.replace(/\s+/g, "") === "!isSubmitting")
+  );
+}
+
+/** Each `useGenerateChord(` call in a view's text, with whether it holds on
+ *  submit; an unclosed call reads as unheld. */
+export function generateChordCalls(text) {
+  return [...text.matchAll(GENERATE_CHORD_CALL_RE)].map((m) => {
+    const open = m.index + m[0].length - 1;
+    const close = balancedEnd(text, open, "(", ")");
+    return {
+      index: m.index,
+      held: close !== -1 && chordOptionsHoldSubmit(text.slice(open + 1, close)),
+    };
+  });
+}
+
+const chordIgnoresSubmit = ({ text, starts }) =>
+  generateChordCalls(text)
+    .filter((call) => !call.held)
+    .map((call) => lineAt(starts, call.index));
+
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
 // before the store write resolves. The hit: that file's mutation `onError`
@@ -1529,6 +1656,20 @@ export const CHECKS = [
     allowlist: [],
     message:
       "closing a dialog must never discard a paid AI generation — a mounted generator dialog rides useFinishAndSurface (src/features/conversations/useAiStream.ts): a run that settles while the dialog is closed latches skip-seed so the reopen shows the draft, and toasts it with a View reopen; a surface that genuinely aborts its run on close needs an allowlist entry with rationale",
+  },
+  {
+    name: "generate-held-while-submitting",
+    appliesTo: (file) => file.endsWith(".tsx") && notVendoredUi(file),
+    scan: onlyWhen(FORM_HOST_RE, chordIgnoresSubmit),
+    allowlist: [
+      // The shared title+description EDIT dialog: an edit re-saves the same
+      // entity rather than creating a second one, so by owner decision its
+      // Generate (in each host's `bodyActions`, mirrored by the chord through
+      // `generateDisabled`) stays live during the save.
+      "src/features/conversations/EditTitleBodyDialog.tsx",
+    ],
+    message:
+      "a dialog's generate chord holds while its own form submits — add `!isSubmitting` (read via `useSelector(form.store, (s) => s.isSubmitting)`) as an `&&` conjunct of the chord's `enabled` and hold the visible Generate with a reason (DisabledReasonButton): the draft has already been sent, and its settle closes the dialog holding it; a surface whose submit can't strand a revision needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-diff-stat",

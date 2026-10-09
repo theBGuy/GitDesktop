@@ -16,6 +16,10 @@ import { toastError, toastErrorWithNote } from "@/lib/toast";
 
 type Settings = Awaited<ReturnType<typeof loadSettings>>;
 
+/** Why a create dialog's Generate holds while its own create is in flight: the
+ *  draft has already been sent, and the settle closes the dialog holding it. */
+export const CREATE_PENDING_GENERATE_REASON = "Wait for the create to finish";
+
 export interface AiStreamRequest {
   system: string;
   prompt: string;
