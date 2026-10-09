@@ -284,6 +284,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const shownDeleteTarget = useRetained(deleteTarget);
+  // The delete confirm's open session: minted by openDelete, dropped by every
+  // close. The confirm is dismissible mid-delete and this switcher outlives repo
+  // switches, so a settle closes only the confirm it was fired from, never one
+  // reopened on a same-named branch here or in another repo.
+  const deleteSessionRef = useRef<object | null>(null);
+  function openDelete(branch: string) {
+    deleteSessionRef.current = {};
+    setDeleteTarget(branch);
+  }
+  function closeDelete() {
+    deleteSessionRef.current = null;
+    setDeleteTarget(null);
+  }
   // The worktree a branch row offers to remove (resolved from `userWorktrees`).
   const [removeWorktreeTarget, setRemoveWorktreeTarget] =
     useState<UserWorktree | null>(null);
@@ -1039,17 +1052,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDelete() {
     if (!deleteTarget) return;
-    // Functional clears below an await: by the settle the confirm may hold another
-    // branch the user picked, which this delete never touched.
-    const target = deleteTarget;
-    const clearTarget = () =>
-      setDeleteTarget((cur) => (cur === target ? null : cur));
+    // Session-checked clears below an await: by the settle the confirm may have
+    // been reopened on another branch, or the same name in another repo.
+    const session = deleteSessionRef.current;
+    const clearTarget = () => {
+      if (deleteSessionRef.current === session) closeDelete();
+    };
     // The guard below reads not-blocked from the stand-in config while the rules
     // are still loading, so it would pass vacuously — refuse instead of deleting
     // a branch a settled rule protects.
     if (rulesSettling) {
       toast.error("Branch rules are still loading — try again in a moment");
-      setDeleteTarget(null);
+      closeDelete();
       return;
     }
     // Belt-and-suspenders: the menu items are already disabled for protected
@@ -1058,7 +1072,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.error(
         `${deleteTarget} is protected from deletion by a branch rule`,
       );
-      setDeleteTarget(null);
+      closeDelete();
       return;
     }
     try {
@@ -1127,7 +1141,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     } catch (e) {
       onError(e);
     } finally {
-      // Functional, for the same reason as the local delete's clear.
+      // Functional, for the same reason as the local delete's clear: each open
+      // hands a fresh row object, so identity already marks the session.
       setRemoteDeleteTarget((cur) => (cur === target ? null : cur));
     }
   }
@@ -1719,7 +1734,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     "delete-branch",
     () => {
       setOpen(false);
-      if (currentName) setDeleteTarget(currentName);
+      if (currentName) openDelete(currentName);
     },
     Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)),
   );
@@ -2452,7 +2467,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             disabled={deletionBlocked || inWorktree}
             onClick={() => {
               setOpen(false);
-              setDeleteTarget(branch.name);
+              openDelete(branch.name);
             }}
           >
             {deletionBlocked
@@ -2703,7 +2718,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   onClick={() => {
                     if (!currentName) return;
                     setOpen(false);
-                    setDeleteTarget(currentName);
+                    openDelete(currentName);
                   }}
                 >
                   {currentName && isDeletionBlocked(rulesConfig, currentName)
@@ -2928,7 +2943,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
       <ConfirmDialog
         open={deleteTarget !== null}
-        onCancel={() => setDeleteTarget(null)}
+        onCancel={closeDelete}
         title="Delete branch?"
         body={
           <>

@@ -130,6 +130,11 @@ export function TagDetailView({
   const selectTag = useUiStore((s) => s.selectTag);
 
   const [editOpen, setEditOpen] = useState(false);
+  // The open editor's session: minted by the Edit opener, dropped by every close.
+  // A plain save stays dismissible, so its settle closes only the session it was
+  // submitted from. State, not a ref: the tag-switch reset below drops it in render.
+  const [editSession, setEditSession] = useState<object | null>(null);
+  const editSessionRef = useLatestRef(editSession);
   const [editTitle, setEditTitle] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editPrerelease, setEditPrerelease] = useState(false);
@@ -155,6 +160,7 @@ export function TagDetailView({
   if (tagKey !== lastTagKey) {
     setLastTagKey(tagKey);
     setEditOpen(false);
+    setEditSession(null);
     setEditTitle("");
     setEditNotes("");
     setEditPrerelease(false);
@@ -429,11 +435,15 @@ export function TagDetailView({
       // two-phase save may be armed by then, and dropping its latch mid-flight
       // would let that dialog close between the phases.
       const startedFor = tagKey;
+      const submitted = editSessionRef.current;
       const disarm = () => {
         if (isLiveTag(startedFor)) setSyncArmed(false);
       };
       const close = () => {
-        if (isLiveTag(startedFor)) setEditOpen(false);
+        if (isLiveTag(startedFor) && editSessionRef.current === submitted) {
+          setEditSession(null);
+          setEditOpen(false);
+        }
       };
       try {
         await editRelease.mutateAsync({
@@ -549,6 +559,7 @@ export function TagDetailView({
                     setEditLatest(isLatest);
                     setEditSyncUpdater(true);
                     setSyncArmed(false);
+                    setEditSession({});
                     setEditOpen(true);
                   }}
                 >
@@ -737,7 +748,9 @@ export function TagDetailView({
         <Dialog
           open={editOpen}
           onOpenChange={(o) => {
-            if (!saveLatched) setEditOpen(o);
+            if (saveLatched) return;
+            if (!o) setEditSession(null);
+            setEditOpen(o);
           }}
         >
           {/* A fixed height (not a cap): release bodies routinely run thousands of
@@ -849,7 +862,10 @@ export function TagDetailView({
                   type="button"
                   variant="outline"
                   disabled={saveLatched}
-                  onClick={() => setEditOpen(false)}
+                  onClick={() => {
+                    setEditSession(null);
+                    setEditOpen(false);
+                  }}
                 >
                   Cancel
                 </Button>

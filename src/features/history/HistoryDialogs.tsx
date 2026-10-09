@@ -46,10 +46,12 @@ import { useRetained } from "@/lib/use-retained";
 
 const onError = (e: unknown) => toastError(e);
 
-// The write dialogs below can be dismissed while their write runs, and the host
-// may reopen one on another subject before the settle: a settle closes only
-// while the dialog still shows the subject it was fired on, read off the live
-// prop. A selection clear has its own rule, at its site.
+// The delete-tag, reset and cherry-pick dialogs below can be dismissed while
+// their write runs, and the host (one panel across repo switches) may reopen one
+// on another subject or repo before the settle: a settle closes only while the
+// dialog still shows its subject in the repo it fired in, both read off live
+// props. A selection clear has its own rule, at its site; the create-from-commit
+// dialogs settle by open session in their host.
 
 /** Confirm-and-delete a tag, optionally on origin too. Owns its mutation; the
  *  parent keeps the open + "delete on origin" state (reset on each open). */
@@ -73,12 +75,15 @@ export function DeleteTagDialog({
   const offlineHold = useOfflineHold();
   const shownName = useRetained(name);
   const liveName = useLatestRef(name);
+  const liveRepo = useLatestRef(repoPath);
   async function run() {
     if (!name) return;
     if (remote && refuseWhileOffline()) return;
     const startedFor = name;
+    const startedIn = repoPath;
     const closeIfStillOpen = () => {
-      if (liveName.current === startedFor) onClose();
+      if (liveRepo.current === startedIn && liveName.current === startedFor)
+        onClose();
     };
     try {
       await (remote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(name);
@@ -153,6 +158,7 @@ export function ResetCommitDialog({
   const resetMutation = useResetToCommit(repoPath);
   const shownHash = useRetained(hash);
   const liveHash = useLatestRef(hash);
+  const liveRepo = useLatestRef(repoPath);
   async function run() {
     if (!hash) return;
     if (promotionBlocksCheckout(repoPath)) {
@@ -160,8 +166,10 @@ export function ResetCommitDialog({
       return;
     }
     const startedFor = hash;
+    const startedIn = repoPath;
     const closeIfStillOpen = () => {
-      if (liveHash.current === startedFor) onClose();
+      if (liveRepo.current === startedIn && liveHash.current === startedFor)
+        onClose();
     };
     try {
       await resetMutation.mutateAsync(hash);
@@ -234,6 +242,7 @@ export function CherryPickOntoDialog({
   const shownHashes = useRetained(hashes);
   const count = shownHashes?.length ?? 0;
   const liveHashes = useLatestRef(hashes);
+  const liveRepo = useLatestRef(repoPath);
   async function run() {
     if (!hashes || !branch) return;
     // It switches to the destination branch, so it moves HEAD.
@@ -243,7 +252,10 @@ export function CherryPickOntoDialog({
     }
     // Compared by value: the host hands a fresh array on every open.
     const startedFor = hashes.join();
-    const stillOpen = () => liveHashes.current?.join() === startedFor;
+    const startedIn = repoPath;
+    const stillOpen = () =>
+      liveRepo.current === startedIn &&
+      liveHashes.current?.join() === startedFor;
     const target = branch;
     let result: CherryPickRangeResult;
     try {
@@ -277,6 +289,8 @@ export function CherryPickOntoDialog({
         `Copied ${applied} commit${applied === 1 ? "" : "s"} onto ${target}${note}`,
       );
     }
+    // Another repo's dialog and selection are never this pick's to clear.
+    if (liveRepo.current !== startedIn) return;
     // The pick moved HEAD to the destination, so the source selection no longer
     // describes the view — a dismissed dialog's included. Only a pick reopened on
     // ANOTHER selection is a new session: neither it nor that selection is ours.

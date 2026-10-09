@@ -17,6 +17,7 @@ import type { FileEntry } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
@@ -107,6 +108,10 @@ export function RenameBranchDialog({
   // Only the checked-out branch's own working tree describes it.
   const targetIsCurrent = shownTarget !== null && shownTarget === currentName;
 
+  // A settle closes only the target it was submitted for: Esc isn't held during
+  // the rename, and the rename hotkey can retarget the open dialog. A value
+  // compare suffices, since a successful rename retires the old name.
+  const liveTarget = useLatestRef(target);
   const renameForm = useAppForm({
     defaultValues: { name: "" },
     onSubmit: async ({ value }) => {
@@ -116,10 +121,11 @@ export function RenameBranchDialog({
         return;
       }
       const newName = sanitizeRefName(value.name);
+      const startedFor = target;
       try {
-        await renameBranch.mutateAsync({ oldName: target, newName });
+        await renameBranch.mutateAsync({ oldName: startedFor, newName });
         toast.success(`Renamed to ${newName}`);
-        onClose();
+        if (liveTarget.current === startedFor) onClose();
       } catch (e) {
         toastError(e);
       }

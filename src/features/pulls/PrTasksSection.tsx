@@ -8,7 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -270,6 +270,9 @@ export function PrTasksSection({
   const [editingId, setEditingId] = useState<string | null>(null);
   // The edit-input's text, seeded when a row's Edit is opened (see startEdit).
   const [editText, setEditText] = useState("");
+  // The open edit's session: minted by startEdit, dropped by every close. Cancel
+  // stays live during a save, so a settle closes only the edit it was saved from.
+  const editSessionRef = useRef<object | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   // The row the arrow-key nav walks from — updated as focus moves between rows.
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -282,6 +285,7 @@ export function PrTasksSection({
     setAdding(false);
     setAddText("");
     setEditingId(null);
+    editSessionRef.current = null;
     setEditText("");
     setDeletingId(null);
     setFocusedId(null);
@@ -359,28 +363,39 @@ export function PrTasksSection({
   }
 
   // The settles below can land after a switch to another pull request (this
-  // section isn't remounted per PR), so each clears only what it was fired from:
-  // the add field while its PR is on screen, the edit and delete ids functionally.
+  // section isn't remounted per PR) or after the user moved on, so each clears
+  // only what it was fired from: the add field while its PR is on screen and it
+  // still holds the submitted text, the edit by its session, the delete id
+  // functionally.
   async function submitAdd(text: string) {
     const startedFor = prKey;
+    const submittedText = addText;
     try {
       await createTask.mutateAsync({ number, text });
       // Clear the controlled field but keep the row open for rapid entry.
-      if (startedFor === prKeyRef.current) setAddText("");
+      if (startedFor === prKeyRef.current)
+        setAddText((cur) => (cur === submittedText ? "" : cur));
     } catch (e) {
       onError(e);
     }
   }
 
   function startEdit(task: PrTask) {
+    editSessionRef.current = {};
     setEditText(task.text);
     setEditingId(task.id);
   }
 
+  function closeEdit() {
+    editSessionRef.current = null;
+    setEditingId(null);
+  }
+
   async function submitEdit(taskId: string, text: string) {
+    const session = editSessionRef.current;
     try {
       await editTask.mutateAsync({ number, taskId, text });
-      setEditingId((cur) => (cur === taskId ? null : cur));
+      if (editSessionRef.current === session) closeEdit();
     } catch (e) {
       onError(e);
     }
@@ -462,7 +477,7 @@ export function PrTasksSection({
                 submitLabel="Save"
                 pending={editTask.isPending}
                 onSubmit={(text) => void submitEdit(task.id, text)}
-                onCancel={() => setEditingId(null)}
+                onCancel={closeEdit}
               />
             ) : (
               <TaskRow

@@ -188,6 +188,11 @@ export function CreateReleaseDialog({
       onOpenChange(true);
     },
   });
+  // Which draft the form holds, bumped only where the seed actually reseeds and
+  // on a tag switch (the draft on screen was the previous tag's). The repo stamp
+  // can't tell drafts apart within one repo: an A→B→A round trip restores the
+  // same path behind different content.
+  const seedGenRef = useRef(0);
   const tagSwitchAbortRef = useRef(false);
   useCancelOnIdentityChange(tagIdentity, () => {
     void surface.consumeSkipSeed();
@@ -247,11 +252,6 @@ export function CreateReleaseDialog({
   // repo's). A dialog left open across a repo switch never re-seeds, so this
   // still reads the submit's repo and the settle's close is the right one.
   const draftRepoRef = useRef(repoPath);
-  // Which draft the form holds, bumped only where the seed actually reseeds and
-  // on a tag switch (the draft on screen was the previous tag's). The repo stamp
-  // can't tell drafts apart within one repo: an A→B→A round trip restores the
-  // same path behind different content.
-  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: RELEASE_DEFAULTS,
