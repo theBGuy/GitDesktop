@@ -219,10 +219,13 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   the draft is already sent and the settle closes the dialog holding it (the
   `generate-held-while-submitting` guard in `pnpm run checks` is the ratchet). A
   dialog a settle may close without a generation stamp carries an open-session
-  token (`{}`) minted in its open handler or `useSeedOnOpen` seed, captured at
-  submit, dropped on every close and compared after the await, never minted in
-  an `[open]` effect whose cleanup clears it: an `<Activity>` hide runs that
-  cleanup, so a create settling while hidden would leave its dialog open.
+  token (`{}`) minted in its open handler, its `useSeedOnOpen` seed, or the open
+  branch of a latched seed effect (re-minted when a reseed replaces the draft),
+  captured at submit, dropped on every close and compared after the await. When
+  the settle CLOSES the dialog it is never minted in an `[open]` effect whose
+  cleanup clears it: an `<Activity>` hide runs that cleanup, so a create
+  settling while hidden would leave its dialog open. A settle that only
+  navigates may (`RunWorkflowDialog`): a cleared token lands its safe arm.
 - Worktree actions gate on in-flight removal/promote state: menu items disable
   with the parenthetical reason riding the label (a disabled menu item can't
   carry a tooltip), and mutation choke points re-check at fire time —

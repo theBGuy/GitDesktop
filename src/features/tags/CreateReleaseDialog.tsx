@@ -8,7 +8,13 @@ import {
 } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -139,6 +145,15 @@ export function CreateReleaseDialog({
     liveTagRef.current = tagIdentity;
   }, [tagIdentity]);
   const settleTagRef = useRef(tagIdentity);
+  // The notes live in THIS instance's form, which the tag host unmounts under a
+  // switch, a skeleton, or a release view: a View outliving it has nothing left.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Closing mid-generation never cancels the run: it finishes into the retained
   // form state, and this surfaces the result while the dialog is away. Both
   // hosts pass a plain open setter, so `onOpenChange(true)` reopens.
@@ -151,11 +166,23 @@ export function CreateReleaseDialog({
     readyDescription: "They're waiting in the dialog.",
     reopen: () => {
       // A tag switch drains the latch, so the notes are gone — say so instead of
-      // opening an emptied dialog. Inert in TagsPanel, whose tagIdentity is "".
-      if (liveTagRef.current !== settleTagRef.current) {
+      // opening an emptied dialog. The selection is read live: an unmounted
+      // instance's refs never see the switch. Inert in TagsPanel (tagIdentity "").
+      const settleTag = settleTagRef.current;
+      const { selectedTag, repoTab } = useUiStore.getState();
+      const liveTag = selectedTag?.tag;
+      if (
+        liveTagRef.current !== settleTag ||
+        (settleTag !== "" && liveTag !== settleTag)
+      ) {
         toast.info(
-          `Those notes were for ${settleTagRef.current} — they were discarded when you switched tags.`,
+          `Those notes were for ${settleTag} — they were discarded when you switched tags.`,
         );
+        return;
+      }
+      // Only on the Tags tab: an <Activity> hide runs effect cleanups too.
+      if (settleTag !== "" && !mountedRef.current && repoTab === "tags") {
+        toast.info(`Those notes for ${settleTag} are no longer available.`);
         return;
       }
       onOpenChange(true);

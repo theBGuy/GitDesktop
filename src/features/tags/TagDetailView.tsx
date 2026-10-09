@@ -173,15 +173,29 @@ export function TagDetailView({
   const isLiveTag = (startedFor: string) => startedFor === tagKeyRef.current;
 
   const onError = (e: unknown) => toastError(e);
-  const rel = release.data;
+  // The release view unmounts Create release without closing it, so the flag
+  // retires once this tag has its own release — a render-time adjustment, so a
+  // later reset can't reopen the dialog over a released tag.
+  if (
+    createReleaseOpen &&
+    release.data !== undefined &&
+    !release.isPlaceholderData
+  )
+    setCreateReleaseOpen(false);
+  // Placeholder data is another tag's once this tag's read settles, or while
+  // Create release is open (only ever over a plain tag, per the above and the
+  // switch reset), covering a placeholder a reset can't clear (gc'd, reused).
+  const rel =
+    release.isPlaceholderData && (release.isFetched || createReleaseOpen)
+      ? undefined
+      : release.data;
   const tagInfo = tagList.data?.find((t) => t.name === tag);
   const isLatest =
     (releaseList.data ?? []).find((r) => r.tagName === tag)?.isLatest ?? false;
-  // A tag switch keeps the PREVIOUS tag's release painted (the query's placeholder
-  // frees the tag key axis), so every release write holds until the two agree —
-  // this is the only gate that covers it: with placeholder data present the query
-  // reads as success (never `isLoading`), and a disabled query still serves it.
-  const relStale = release.isPlaceholderData;
+  // A tag switch paints the PREVIOUS tag's release as placeholder data (success,
+  // never `isLoading`, even disabled), so every release write holds on this until
+  // the two agree. Read off `rel`, so a placeholder it drops holds nothing.
+  const relStale = rel !== undefined && release.isPlaceholderData;
   const staleDim = relStale && "opacity-80";
   // Why the rendered release can't be acted on at all — it gates DOWNLOAD too,
   // which a read-only viewer is otherwise free to use. Not-ready outranks stale
@@ -229,10 +243,10 @@ export function TagDetailView({
     }
   })();
 
-  // Only until this tag's read first settles: a no-release (404) read holds no
-  // data, so each refetch drops it back to pending, and a skeleton then would
-  // unmount the open Create-release dialog along with its draft.
-  if (release.isLoading && !release.isFetched) {
+  // Never over an open Create-release dialog, whose draft a skeleton would
+  // unmount: a no-release (404) refetch drops the read back to pending, and a
+  // query reset also zeroes `isFetched`.
+  if (release.isLoading && !release.isFetched && !createReleaseOpen) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
