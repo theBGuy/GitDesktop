@@ -17,7 +17,15 @@ import {
   useTaskRepoKeys,
   useUpdateTask,
 } from "@/lib/scripts/queries";
-import { isRunConfirmedIn } from "@/lib/scripts/scope";
+import {
+  isRunConfirmedIn,
+  TASK_SCOPE_GLOBAL,
+  taskScope,
+} from "@/lib/scripts/scope";
+import {
+  type MissingScriptCase,
+  missingScriptCase,
+} from "@/lib/scripts/script-path";
 import { INTERPRETERS, type TaskDef } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
 import { useUiStore } from "@/lib/stores/ui";
@@ -26,6 +34,15 @@ import { useRetained } from "@/lib/use-retained";
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
 );
+
+/** Why the resolved script is missing. Only a relative path depends on the open
+ *  repository, so only those cases name it. */
+const MISSING_SCRIPT_COPY: Record<MissingScriptCase, string> = {
+  absolute: "No file at this path.",
+  "repo-relative": "No such file in this repository.",
+  "global-relative":
+    "This path is relative, so it resolves against the open repository, which has no such file.",
+};
 
 /**
  * The run dialog, driven by the task-run store's `pending`. Hoisted at the repo
@@ -185,8 +202,15 @@ export function TaskRunConfirm() {
                   className="mt-0.5 size-3.5 shrink-0"
                 />
                 <span className="min-w-0">
-                  No such file in this repository. The run will stop with
-                  “script file not found”.
+                  {
+                    MISSING_SCRIPT_COPY[
+                      missingScriptCase(
+                        taskScope(task) === TASK_SCOPE_GLOBAL,
+                        task.source.path,
+                      )
+                    ]
+                  }{" "}
+                  The run will stop with “script file not found”.
                 </span>
               </p>
             ) : null}
