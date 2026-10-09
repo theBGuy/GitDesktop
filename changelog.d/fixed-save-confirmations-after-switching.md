@@ -4,4 +4,6 @@
   even if you switch tabs or repositories or close Settings while they finish.
   Archiving a local pull request or issue keeps it selected until the archive
   succeeds, a refused pull is always reported, and **Push tag** can't run twice
-  at once.
+  at once. Saving comments or labels on a local pull request or issue, or a
+  diff view or language choice, reports a failure, and a comment that fails to
+  post keeps the text you typed.

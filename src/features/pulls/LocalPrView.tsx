@@ -208,8 +208,8 @@ export function LocalPrView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(id, pr, (mutate) => {
-    if (pr) update.mutate({ id: pr.id, mutate });
+  } = useLocalConversation(id, pr, async (mutate) => {
+    if (pr) await update.mutateAsync({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
   // Close/Reopen's and the review post's single-flight holds: the pinned update

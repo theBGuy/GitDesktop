@@ -261,7 +261,9 @@ const SELECT_ITEM_FLEX_TRUNCATE_RE = new RegExp(
 // reaches the call: inline literal, hoisted variable (`.mutate(v, opts)`),
 // spread, shorthand keys. The token has no such surface, and it stays cheap
 // because every `.mutate(` left under src/ is a single-argument call in an
-// allowlisted file; every mutation with an outcome to report is awaited.
+// allowlisted file whose hook reports its own failure, or whose failure is
+// harmless (a cosmetic preference, a background reconcile); every other
+// mutation is awaited.
 // `.mutateAsync(` does not match: the `(` must follow `mutate` directly.
 const MUTATE_CALL_RE = /\.mutate\s*\(/;
 
@@ -1080,9 +1082,6 @@ export const CHECKS = [
     // nothing an unmount can drop; the token match is the ratchet, and an
     // exemption is an entry here rather than a hole in the pattern.
     allowlist: [
-      // The analytics-notice bookkeeping write, single-arg; the app root never
-      // unmounts.
-      "src/App.tsx",
       // The label edit, single-arg; its hook toasts failures itself.
       "src/features/conversations/LabelsPopover.tsx",
       // The project link edit, single-arg; its hook rolls back and toasts.
@@ -1092,25 +1091,14 @@ export const CHECKS = [
       // The list-filter prefs write, single-arg; its hook patches the cache and
       // toasts failures itself.
       "src/features/conversations/useRemoteListFilter.ts",
-      // Mapping or clearing an extension's language, both single-arg settings
-      // writes.
-      "src/features/diff/DiffLanguagePicker.tsx",
-      // The unified/split toggle, single-arg settings writes.
-      "src/features/diff/DiffSurface.tsx",
-      // The local-conversation write-through, single-arg `update.mutate(vars)`.
-      "src/features/issues/LocalIssueView.tsx",
       // Eight single-arg picker/field writes; their hooks report failures at the
       // mutation level.
       "src/features/issues/RemoteIssueViewParts.tsx",
       // A card move and a reorder, both single-arg; their hooks restore and
       // toast on failure.
       "src/features/projects/ProjectsBoardPanel.tsx",
-      // The local-conversation write-through, single-arg `update.mutate(vars)`.
-      "src/features/pulls/LocalPrView.tsx",
       // GitLab time tracking's set-estimate and add-spent, both single-arg.
       "src/features/pulls/RemotePrViewParts.tsx",
-      // Deleting one stored review, single-arg `del.mutate(id)`.
-      "src/features/pulls/ReviewHistory.tsx",
       // Reconciles merged/deleted heads from an effect: the destructured
       // `mutate` is called single-arg on both arms.
       "src/features/pulls/useReconcileLocalPrs.ts",

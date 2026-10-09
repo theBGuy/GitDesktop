@@ -228,9 +228,8 @@ export function BranchRulesDialog({
     const savedFor = repoPath;
     const submitted = session.current;
     const savedShared = scope === "shared";
-    const target = savedShared ? saveShared : savePersonal;
     try {
-      await target.mutateAsync(draft);
+      await saving.mutateAsync(draft);
     } catch (e) {
       toastError(e);
       return;

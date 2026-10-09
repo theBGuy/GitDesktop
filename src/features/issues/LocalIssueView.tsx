@@ -103,8 +103,8 @@ export function LocalIssueView({
     setCommentHidden,
     addLabel,
     removeLabel,
-  } = useLocalConversation(id, issue, (mutate) => {
-    if (issue) update.mutate({ id: issue.id, mutate });
+  } = useLocalConversation(id, issue, async (mutate) => {
+    if (issue) await update.mutateAsync({ id: issue.id, mutate });
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);

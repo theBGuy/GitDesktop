@@ -1,6 +1,7 @@
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
+import { toastError } from "@/lib/toast";
 import { diffLang, fileExt } from "./diff-lang";
 import { LanguagePicker } from "./LanguagePicker";
 
@@ -35,17 +36,21 @@ export function DiffLanguagePicker({
 
   function setLang(lang: string) {
     if (!settings.data) return;
-    saveSettings.mutate({
-      ...settings.data,
-      syntaxMap: { ...settings.data.syntaxMap, [ext]: lang },
-    });
+    void saveSettings
+      .mutateAsync({
+        ...settings.data,
+        syntaxMap: { ...settings.data.syntaxMap, [ext]: lang },
+      })
+      .catch(toastError);
   }
 
   function clearLang() {
     if (!settings.data) return;
     const next = { ...settings.data.syntaxMap };
     delete next[ext];
-    saveSettings.mutate({ ...settings.data, syntaxMap: next });
+    void saveSettings
+      .mutateAsync({ ...settings.data, syntaxMap: next })
+      .catch(toastError);
   }
 
   return (

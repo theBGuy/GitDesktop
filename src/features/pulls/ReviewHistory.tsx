@@ -28,6 +28,7 @@ import {
   reviewText,
 } from "@/lib/pulls/reviews-history";
 import { formatDuration, validEpochMs } from "@/lib/time";
+import { toastError } from "@/lib/toast";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -254,7 +255,7 @@ export function ReviewHistory({
                         : "Delete this review from history"
                     }
                     className="shrink-0 text-muted-foreground hover:text-destructive"
-                    onClick={() => del.mutate(r.id)}
+                    onClick={() => void del.mutateAsync(r.id).catch(toastError)}
                   >
                     <TrashIcon className="size-3.5" />
                   </button>
