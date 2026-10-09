@@ -146,6 +146,139 @@ const toggleScript = `
   });
 })();
 `;
+
+// Demo loops (DemoVideo.astro). Nothing loads until a clip first plays: at 40%
+// in view, or on the Play control when reduced motion, Save-Data, or ?still
+// rules out autoplay. Out of view pauses it (a display:none view never
+// intersects; `inView` turns on at 40% and off only at 0); a visitor's Pause
+// holds for the page view, and a bfcache restore re-applies these rules.
+// Missing IntersectionObserver leaves the posters alone.
+// - The first play() runs inside the press itself: deferring it past
+//   loadedmetadata loses the user activation that blocked-autoplay browsers
+//   require. loadedmetadata then seeks to data-poster-at.
+// - Managed videos are un-hidden at setup (WebKit may not play a display:none
+//   video) but stay transparent and aria-hidden until a "playing" or "seeked"
+//   lands with a decoded frame and no seek pending: play() precedes the seek,
+//   so a "playing" queued at 0s would otherwise flash the wrong frame.
+// - play() rejecting with NotAllowedError disarms the clip until a press;
+//   AbortError is a pause() overtaking the play, which the in-view rules own.
+// - preload turns "auto" only once play() resolves: a blocked play() never
+//   starts a fetch, but switching preload away from "none" on its own does.
+// - With <source> children a load failure fires on the sources, not the video.
+const demoScript = `
+(function () {
+  var figs = document.querySelectorAll("[data-demo]");
+  if (!figs.length || !("IntersectionObserver" in window)) return;
+  var conn = navigator.connection;
+  var manual =
+    matchMedia("(prefers-reduced-motion: reduce)").matches ||
+    !!(conn && conn.saveData) ||
+    location.search.indexOf("still") !== -1;
+  var updates = [];
+  addEventListener("pageshow", function (e) {
+    if (e.persisted) updates.forEach(function (u) { u(); });
+  });
+  Array.prototype.forEach.call(figs, function (fig) {
+    var video = fig.querySelector("video");
+    var btn = fig.querySelector(".demo-toggle");
+    var img = fig.querySelector("img");
+    if (!video || !btn || !img) return;
+    var sources = video.querySelectorAll("source");
+    var at = parseFloat(video.getAttribute("data-poster-at")) || 0;
+    var armed = !manual, inView = false, userPaused = false;
+    var ready = false, shown = false, failed = false;
+    var io;
+
+    function sync() {
+      var playing = !video.paused;
+      btn.setAttribute("aria-label", playing ? "Pause demo" : "Play demo");
+      btn.setAttribute("data-state", playing ? "playing" : "paused");
+    }
+    function attempt() {
+      var p = video.play();
+      if (p && p.then) {
+        p.then(
+          function () {
+            video.preload = "auto";
+          },
+          function (err) {
+            if (err && err.name === "NotAllowedError") armed = false;
+            sync();
+          }
+        );
+      }
+    }
+    function update() {
+      if (failed) return;
+      if (armed && inView && !userPaused) {
+        attempt();
+      } else if (!video.paused) {
+        video.pause();
+      }
+    }
+    function fail() {
+      if (failed) return;
+      failed = true;
+      if (io) io.disconnect();
+      if (!video.paused) video.pause();
+      video.hidden = true;
+      video.removeAttribute("data-shown");
+      btn.hidden = true;
+      img.removeAttribute("aria-hidden");
+    }
+
+    video.addEventListener("loadedmetadata", function () {
+      if (ready) return;
+      ready = true;
+      if (at > 0 && at < video.duration) {
+        try { video.currentTime = at; } catch (e) {}
+      }
+      update();
+    });
+    function reveal() {
+      if (shown || failed || video.paused || video.seeking) return;
+      if (video.readyState < 2) return;
+      shown = true;
+      video.setAttribute("data-shown", "");
+      video.removeAttribute("aria-hidden");
+      img.setAttribute("aria-hidden", "true");
+    }
+    video.addEventListener("playing", reveal);
+    video.addEventListener("seeked", reveal);
+    video.addEventListener("play", sync);
+    video.addEventListener("pause", sync);
+    video.addEventListener("error", fail);
+    if (sources.length) sources[sources.length - 1].addEventListener("error", fail);
+
+    btn.addEventListener("click", function () {
+      if (video.paused) {
+        userPaused = false;
+        armed = true;
+        inView = true;
+        update();
+      } else {
+        userPaused = true;
+        video.pause();
+      }
+    });
+
+    io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) inView = false;
+        else if (e.intersectionRatio >= 0.399) inView = true;
+        else return;
+        update();
+      });
+    }, { threshold: [0, 0.4] });
+    io.observe(fig);
+    updates.push(update);
+    video.setAttribute("aria-hidden", "true");
+    video.hidden = false;
+    sync();
+    btn.hidden = false;
+  });
+})();
+`;
 ---
 
 <!doctype html>
@@ -298,6 +431,7 @@ const toggleScript = `
     </footer>
 
     <script is:inline set:html={toggleScript}></script>
+    <script is:inline set:html={demoScript}></script>
     <slot name="scripts" />
   </body>
 </html>
