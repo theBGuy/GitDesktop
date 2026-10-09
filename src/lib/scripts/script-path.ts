@@ -22,19 +22,29 @@ export type MissingScriptCase =
 // is relative on Linux); this approximation only decides whether to rewrite and
 // which copy to show, so an exotic input fails safe as "absolute": no rewrite.
 const ABSOLUTE_RE = /^(?:[\\/]|[A-Za-z]:[\\/])/;
-// `C:x` is relative to drive C's current directory, so no root can be prefixed.
+// `C:x` is relative to drive C's current directory: Rust's join ignores the repo
+// for it, so no root can be prefixed.
 const DRIVE_RELATIVE_RE = /^[A-Za-z]:(?![\\/])/;
+// A drive-absolute or UNC checkout root: the only roots whose paths use `\`.
+const WINDOWS_ROOT_RE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 
 /** A rooted POSIX path, a drive-absolute Windows path, or a UNC share. */
 export function isAbsoluteScriptPath(p: string): boolean {
   return ABSOLUTE_RE.test(p);
 }
 
-/** Join a relative script path under a checkout root with forward slashes.
- *  Lexical only: `..` segments are kept, never resolved. */
+const resolvesWithoutRepo = (p: string) =>
+  ABSOLUTE_RE.test(p) || DRIVE_RELATIVE_RE.test(p);
+
+/** Join a relative script path under a checkout root, lexically (`..` is kept).
+ *  Rust joins with the host's path rules, where a POSIX backslash is part of the
+ *  filename, so separators become `/` only under a Windows root. */
 export function absolutizeScriptPath(repoRoot: string, rel: string): string {
-  const root = repoRoot.replace(/\\/g, "/").replace(/\/+$/, "");
-  const tail = rel.replace(/\\/g, "/").replace(/^\.\//, "");
+  const norm = WINDOWS_ROOT_RE.test(repoRoot)
+    ? (p: string) => p.replace(/\\/g, "/")
+    : (p: string) => p;
+  const root = norm(repoRoot).replace(/\/+$/, "");
+  const tail = norm(rel).replace(/^\.\//, "");
   return `${root}/${tail}`;
 }
 
@@ -55,12 +65,8 @@ export function pathOnScopeFlip({
 }): FlipOutcome {
   if (to !== "global" || from === "global") return { kind: "none" };
   const trimmed = path.trim();
-  if (trimmed === "" || isAbsoluteScriptPath(trimmed)) return { kind: "none" };
-  if (
-    from === "this-repo" &&
-    repoRoot !== null &&
-    !DRIVE_RELATIVE_RE.test(trimmed)
-  )
+  if (trimmed === "" || resolvesWithoutRepo(trimmed)) return { kind: "none" };
+  if (from === "this-repo" && repoRoot !== null)
     return {
       kind: "repaired",
       path: absolutizeScriptPath(repoRoot, trimmed),
@@ -75,6 +81,6 @@ export function missingScriptCase(
   isGlobal: boolean,
   storedPath: string,
 ): MissingScriptCase {
-  if (isAbsoluteScriptPath(storedPath.trim())) return "absolute";
+  if (resolvesWithoutRepo(storedPath.trim())) return "absolute";
   return isGlobal ? "global-relative" : "repo-relative";
 }

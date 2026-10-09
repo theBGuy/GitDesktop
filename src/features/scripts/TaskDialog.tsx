@@ -121,10 +121,10 @@ const PATH_HINT: Record<"repo" | "global", string> = {
     "Choosing a file saves its full path; a path you type resolves against whichever repository is open. Either way it runs the live file, so edits to it take effect on the next run.",
 };
 
-/** The note a switch to all repositories leaves under **Script file**. Held
- *  only while it describes the field: a "repaired" note is what arms the
- *  flip-back restore and **Keep relative**, so every clear also disarms them. */
-type FlipNote = Exclude<FlipOutcome, { kind: "none" }>;
+/** The note a switch to all repositories leaves under **Script file**. `sig` is
+ *  the path it was produced for: the note (and the flip-back restore and **Keep
+ *  relative** a "repaired" one arms) retires once the path or global scope moves. */
+type FlipNote = Exclude<FlipOutcome, { kind: "none" }> & { sig: string };
 
 const FLIP_NOTE: Record<FlipNote["kind"], string> = {
   repaired: "Saved as the full path so this file runs from every repository.",
@@ -132,9 +132,8 @@ const FLIP_NOTE: Record<FlipNote["kind"], string> = {
     "This path is relative, so it resolves against whichever repository is open. Choose the file to save its full path.",
 };
 
-/** A scope value as the path repair reads it, in the same order the dialog's
- *  `isGlobalDraft` / `scopedToThisRepo` / `scopedElsewhere` locals partition it:
- *  only "this repository" names a root (the open checkout) to make a path full. */
+/** A scope value as the path repair and the dialog's scope locals read it: only
+ *  "this repository" names a root (the open checkout) to make a path full. */
 function scopeKindOf(value: string, repoKeys: readonly string[]): ScopeKind {
   if (value === TASK_SCOPE_GLOBAL) return "global";
   if (repoKeys.includes(value)) return "this-repo";
@@ -146,10 +145,10 @@ function scopeKindOf(value: string, repoKeys: readonly string[]): ScopeKind {
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
  *  keep the absolute path (it's machine-specific). A null `repoRoot` means there is
  *  no root to be relative to — no repo open, or a draft scoped to every repository.
- *  Windows and macOS paths compare case-insensitively; store forward slashes either
- *  way. */
+ *  Windows and macOS paths compare case-insensitively; Windows paths store forward
+ *  slashes, while POSIX ones keep `\` as picked since it is a filename character. */
 function toRepoRelative(picked: string, repoRoot: string | null): string {
-  const norm = (p: string) => p.replace(/\\/g, "/");
+  const norm = (p: string) => (isWindows ? p.replace(/\\/g, "/") : p);
   const p = norm(picked);
   if (!repoRoot) return p;
   const root = norm(repoRoot).replace(/\/+$/, "");
@@ -219,18 +218,25 @@ export function TaskDialog({
   // matching what the store folds a written scope onto.
   const { keys: repoKeys } = useTaskRepoKeys(repoPath);
   const thisRepoKey = repoKeys.length ? repoKeys[repoKeys.length - 1] : null;
+  const draftKind = scopeKindOf(scope, repoKeys);
   // A draft offered everywhere has no repo root to resolve a script path against
   // — the one discriminant behind how the picker stores a path and how the field
   // describes itself.
-  const isGlobalDraft = scope === TASK_SCOPE_GLOBAL;
+  const isGlobalDraft = draftKind === "global";
   // A legacy raw-path scope for the OPEN repo reads as "this repository" too
   // (repoKeys carries both forms), so it selects that option rather than falling
   // through to the other-repository one.
-  const scopedToThisRepo = !isGlobalDraft && repoKeys.includes(scope);
+  const scopedToThisRepo = draftKind === "this-repo";
   // The draft belongs to a repo that isn't the one open behind this dialog. Read
   // from the DRAFT, not the saved task, so re-scoping to this repository releases
   // the file-source controls in the same keystroke that adopts the task.
-  const scopedElsewhere = !isGlobalDraft && !scopedToThisRepo;
+  const scopedElsewhere = draftKind === "elsewhere" || draftKind === "unknown";
+  // Set during render: React's derived-state reset, so a stale note never
+  // commits. Retiring on the first mismatch keeps a path that returns to `sig`
+  // from resurrecting it.
+  if (flipNote && (flipNote.sig !== path || !isGlobalDraft)) setFlipNote(null);
+  const shownFlipNote =
+    flipNote && flipNote.sig === path && isGlobalDraft ? flipNote : null;
   // One source for every string a foreign scope produces here — the option label
   // and both file-control reasons — so they can't disagree about what it is.
   const elsewhereCopy = elsewhereScopeCopy(scope);
@@ -356,7 +362,6 @@ export function TaskDialog({
     // Relativizing a global task's pick would store a path that resolves inside
     // whichever repo happens to be open at run time, so it keeps the full path.
     setPath(toRepoRelative(picked, isGlobalDraft ? null : repoPath));
-    setFlipNote(null);
     // Pre-select the interpreter from the extension (still overridable).
     const guess = interpreterForExt(picked);
     if (guess) setInterpreter(guess);
@@ -370,7 +375,7 @@ export function TaskDialog({
     if (v !== selectedScope) {
       const to = scopeKindOf(v, repoKeys);
       const outcome = pathOnScopeFlip({
-        from: scopeKindOf(scope, repoKeys),
+        from: draftKind,
         to,
         path,
         repoRoot: repoPath,
@@ -378,13 +383,16 @@ export function TaskDialog({
       if (outcome.kind === "repaired") setPath(outcome.path);
       // Moving back undoes only an untouched rewrite; anything the user has
       // since typed or picked is theirs, absolute or not.
-      else if (
-        to === "this-repo" &&
-        flipNote?.kind === "repaired" &&
-        path === flipNote.path
-      )
-        setPath(flipNote.from);
-      setFlipNote(outcome.kind === "none" ? null : outcome);
+      else if (to === "this-repo" && shownFlipNote?.kind === "repaired")
+        setPath(shownFlipNote.from);
+      setFlipNote(
+        outcome.kind === "none"
+          ? null
+          : {
+              ...outcome,
+              sig: outcome.kind === "repaired" ? outcome.path : path,
+            },
+      );
     }
     setScope(v);
   }
@@ -392,7 +400,6 @@ export function TaskDialog({
   function keepRelative() {
     if (flipNote?.kind !== "repaired") return;
     setPath(flipNote.from);
-    setFlipNote(null);
     // The button unmounts with the note; the field it restored keeps focus off
     // <body>.
     pathInputRef.current?.focus();
@@ -638,10 +645,7 @@ export function TaskDialog({
                 type="button"
                 // The flip note stays: `path` survives the switch, so on return
                 // the note still describes the field.
-                onClick={() => {
-                  if (kind === sourceKind) return;
-                  setSourceKind(kind);
-                }}
+                onClick={() => setSourceKind(kind)}
                 className={cn(
                   "rounded px-2.5 py-1 transition-colors",
                   sourceKind === kind
@@ -692,10 +696,7 @@ export function TaskDialog({
                 id="task-path"
                 className="flex-1 font-mono"
                 value={path}
-                onChange={(e) => {
-                  setPath(e.target.value);
-                  setFlipNote(null);
-                }}
+                onChange={(e) => setPath(e.target.value)}
                 placeholder="scripts/release.mjs"
                 autoComplete="off"
                 spellCheck={false}
@@ -720,7 +721,7 @@ export function TaskDialog({
               aria-live="polite"
               className="text-xs empty:mb-0"
             >
-              {flipNote?.kind === "repaired" && (
+              {shownFlipNote?.kind === "repaired" && (
                 <p className="flex flex-wrap items-center gap-x-2 text-muted-foreground">
                   <span>{FLIP_NOTE.repaired}</span>
                   <Button
@@ -733,7 +734,7 @@ export function TaskDialog({
                   </Button>
                 </p>
               )}
-              {flipNote?.kind === "unrepairable" && (
+              {shownFlipNote?.kind === "unrepairable" && (
                 // Icon + text, never color alone (WCAG AA).
                 <p className="flex items-start gap-1.5 text-warning">
                   <WarningIcon

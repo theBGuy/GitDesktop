@@ -2,7 +2,7 @@
 // case (src/lib/scripts/script-path.ts). The contract: only a flip TO all
 // repositories acts; a relative path flipped from this repository becomes the
 // full path under the open checkout root, while one with no knowable root is
-// flagged, never guessed; absolute and empty paths are left alone.
+// flagged, never guessed; absolute, drive-relative, and empty paths stay as is.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so the module
@@ -65,6 +65,29 @@ test("absolutizeScriptPath joins with forward slashes", () => {
   assert.equal(absolutizeScriptPath(ROOT, "././x.mjs"), `${ROOT}/./x.mjs`);
 });
 
+test("absolutizeScriptPath keeps POSIX backslashes as filename characters", () => {
+  assert.equal(
+    absolutizeScriptPath("/home/u/repo", "scripts\\release.sh"),
+    "/home/u/repo/scripts\\release.sh",
+  );
+  assert.equal(
+    absolutizeScriptPath("/home/u/repo/", "./a.sh"),
+    "/home/u/repo/a.sh",
+  );
+});
+
+test("absolutizeScriptPath normalizes separators under a Windows root", () => {
+  assert.equal(
+    absolutizeScriptPath("C:\\r\\", "scripts\\x.ps1"),
+    "C:/r/scripts/x.ps1",
+  );
+  assert.equal(absolutizeScriptPath("C:/r", ".\\x.ps1"), "C:/r/x.ps1");
+  assert.equal(
+    absolutizeScriptPath("\\\\srv\\share\\r", "a\\b.cmd"),
+    "//srv/share/r/a/b.cmd",
+  );
+});
+
 test("absolutizeScriptPath never resolves ..", () => {
   assert.equal(
     absolutizeScriptPath(ROOT, "../tools/x.mjs"),
@@ -103,6 +126,17 @@ test("a POSIX root with a trailing slash", () => {
   });
 });
 
+test("a POSIX root keeps a backslash in the file name", () => {
+  assert.deepEqual(
+    flip({ repoRoot: "/home/u/repo", path: "scripts\\release.sh" }),
+    {
+      kind: "repaired",
+      path: "/home/u/repo/scripts\\release.sh",
+      from: "scripts\\release.sh",
+    },
+  );
+});
+
 test("a ./-prefixed path drops the ./", () => {
   assert.deepEqual(flip({ path: "./scripts/x.mjs" }), {
     kind: "repaired",
@@ -127,11 +161,9 @@ test("a parent-relative path is joined, never resolved", () => {
   });
 });
 
-test("a drive-relative path is unrepairable", () => {
-  assert.deepEqual(flip({ path: "C:x" }), { kind: "unrepairable" });
-  assert.deepEqual(flip({ path: "d:scripts\\x.ps1" }), {
-    kind: "unrepairable",
-  });
+test("a drive-relative path resolves without the repo, so is left alone", () => {
+  assert.deepEqual(flip({ path: "C:x" }), { kind: "none" });
+  assert.deepEqual(flip({ path: "d:scripts\\x.ps1" }), { kind: "none" });
 });
 
 test("absolute paths are left alone", () => {
@@ -162,6 +194,7 @@ test("no knowable root still leaves an absolute path alone", () => {
     kind: "none",
   });
   assert.deepEqual(flip({ from: "unknown", path: "C:/x" }), { kind: "none" });
+  assert.deepEqual(flip({ from: "elsewhere", path: "C:x" }), { kind: "none" });
 });
 
 test("only a flip to all repositories acts", () => {
@@ -181,8 +214,8 @@ test("missingScriptCase keys on absoluteness first, then scope", () => {
     [false, "\\\\srv\\s\\x", "absolute"],
     [false, "scripts/x.mjs", "repo-relative"],
     [true, "scripts/x.mjs", "global-relative"],
-    [true, "C:x", "global-relative"],
-    [false, "C:x", "repo-relative"],
+    [true, "C:x", "absolute"],
+    [false, "C:x", "absolute"],
   ];
   for (const [isGlobal, path, expected] of rows)
     assert.equal(
