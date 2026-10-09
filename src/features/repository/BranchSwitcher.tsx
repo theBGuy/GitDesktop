@@ -1374,6 +1374,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return true;
   }
 
+  // The menu can outlive the state that disabled its update items, and a
+  // promote's claim never re-renders it. A worktree removal doesn't wait on the
+  // working-tree lock a holder update takes, so the two must never overlap.
+  function refuseUpdateWhileHolderLeaving(target: string) {
+    const holder = worktreeByBranch.get(target);
+    return (
+      holder !== undefined &&
+      refuseWhileLeaving(holder, removingPaths.has(holder))
+    );
+  }
+
   // Pull the latest from the default branch into `target` without switching to
   // it (unless it's already current): fast-forwards when possible, otherwise
   // merges via a throwaway worktree so the working tree — and its watchers —
@@ -1404,6 +1415,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseUpdateWhileHolderLeaving(target)) return;
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
@@ -1429,6 +1441,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseUpdateWhileHolderLeaving(target)) return;
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
@@ -2009,15 +2022,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // also on `busy`: an in-place merge must not start under another HEAD-moving
     // op. Other rows stay free of `busy` so updates run in parallel.
     const rowUpdateHeld = rowUpdating || (branch.isCurrent && busy);
-    const updatingSuffix = (() => {
-      switch (true) {
-        case rowUpdating:
-          return " (updating…)";
-        case branch.isCurrent && busy:
-          return busySuffix;
-        default:
-          return "";
-      }
+    const updateHeldReason = (() => {
+      if (rowUpdating) return "updating…";
+      if (branch.isCurrent && busy) return "operation in progress";
+      return undefined;
     })();
     const rowWorktreeRemoving = Boolean(
       rowWorktree && removingPaths.has(rowWorktree.path),
@@ -2027,6 +2035,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const renameWorktreeBlockedReason = (() => {
       if (rowWorktree?.isMain) return rowCopy.noun;
       if (rowWorktree?.isLocked) return "locked";
+      return undefined;
+    })();
+    const deleteWorktreeBlockedReason = (() => {
+      if (rowWorktree?.isMain) return rowCopy.noun;
+      if (rowUpdating) return "updating…";
+      return undefined;
+    })();
+    // A promote also removes this worktree, so it races an in-flight update the
+    // same way a removal does.
+    const promoteBlockedReason = (() => {
+      if (rowWorktree?.isLocked) return "locked";
+      if (rowUpdating) return "updating…";
       return undefined;
     })();
     // Best-effort by design: a null `defaultName` (still loading, or unresolvable)
@@ -2360,14 +2380,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <>
               {canUpdate && (
                 <ContextMenuItem
-                  disabled={rowUpdateHeld || rowPromotion}
+                  disabled={
+                    rowUpdateHeld || rowPromotion || rowWorktreeRemoving
+                  }
                   onClick={() => {
                     fallThroughGuardUntil.current = Date.now() + 300;
                     void doUpdateFromDefault(branch.name);
                   }}
                 >
-                  Update from {defaultName}
-                  {rowPromotion ? " (promotion branch)" : updatingSuffix}
+                  {rowPromotion
+                    ? `Update from ${defaultName} (promotion branch)`
+                    : wtLabel(`Update from ${defaultName}`, updateHeldReason)}
                 </ContextMenuItem>
               )}
               {/* Pull the branch's own upstream in without switching — the star
@@ -2413,14 +2436,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }
                   return (
                     <ContextMenuItem
-                      disabled={rowUpdateHeld}
+                      disabled={rowUpdateHeld || rowWorktreeRemoving}
                       onClick={() => {
                         fallThroughGuardUntil.current = Date.now() + 300;
                         void doUpdateFromUpstream(branch.name, base);
                       }}
                     >
-                      Update from {base}
-                      {updatingSuffix}
+                      {wtLabel(`Update from ${base}`, updateHeldReason)}
                     </ContextMenuItem>
                   );
                 })()}
@@ -2554,29 +2576,28 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   so it needs a linked worktree with a branch. */}
               {!rowWorktree.isMain && !rowWorktree.isDetached && (
                 <ContextMenuItem
-                  disabled={rowWorktree.isLocked || rowWorktreeRemoving}
+                  disabled={
+                    rowWorktree.isLocked || rowWorktreeRemoving || rowUpdating
+                  }
                   onClick={() => {
                     setOpen(false);
                     setPromoteTarget(rowWorktree);
                   }}
                 >
-                  {wtLabel(
-                    "Promote to main workspace…",
-                    rowWorktree.isLocked ? "locked" : undefined,
-                  )}
+                  {wtLabel("Promote to main workspace…", promoteBlockedReason)}
                 </ContextMenuItem>
               )}
               <ContextMenuItem
-                disabled={rowWorktree.isMain || rowWorktreeRemoving}
+                // A removal mid-update races it: removal doesn't wait on the update's lock.
+                disabled={
+                  rowWorktree.isMain || rowWorktreeRemoving || rowUpdating
+                }
                 onClick={() => {
                   setOpen(false);
                   setRemoveWorktreeTarget(rowWorktree);
                 }}
               >
-                {wtLabel(
-                  "Delete worktree…",
-                  rowWorktree.isMain ? rowCopy.noun : undefined,
-                )}
+                {wtLabel("Delete worktree…", deleteWorktreeBlockedReason)}
               </ContextMenuItem>
               <ContextMenuSeparator />
             </>

@@ -1936,11 +1936,14 @@ async fn update_in_holder(
         return Ok(updated("up-to-date"));
     }
 
+    // Both merges pass `--no-overwrite-ignore`: an ignored file is local data its owner
+    // can't see being consumed, and the flag turns git's silent overwrite into a refusal
+    // the failure arms below already classify.
     let subject = match merge {
         HolderMerge::FastForward => {
             let out = run_git_raw(
                 Some(holder),
-                &["merge", "--ff-only", base_sha],
+                &["merge", "--ff-only", "--no-overwrite-ignore", base_sha],
                 DEFAULT_TIMEOUT,
             )
             .await?;
@@ -1964,7 +1967,7 @@ async fn update_in_holder(
 
     // Raw: a conflicted merge reports entirely on stdout with stderr empty (measured,
     // git 2.51.1), the same trap the in-place arm documents.
-    let mut args = vec!["merge", "--no-edit"];
+    let mut args = vec!["merge", "--no-edit", "--no-overwrite-ignore"];
     if let Some(subject) = subject.as_deref() {
         args.extend(["-m", subject]);
     }
@@ -1979,7 +1982,8 @@ async fn update_in_holder(
     };
 
     // The conflict list comes from the index, read before the abort clears it. A merge
-    // git refused before starting (an untracked file in the way) has nothing to abort.
+    // git refused before starting (an untracked or ignored file in the way) has nothing
+    // to abort.
     let conflicts = crate::git::ops::unmerged_paths(holder).await;
     // An unreadable op state counts as mid-merge, so it can never pass as restored.
     let mid_merge =
@@ -5280,6 +5284,56 @@ mod tests {
             tip(&repo_s, &main).await
         );
         assert!(scratch.exists());
+    }
+
+    /// An IGNORED file in the holder at a path the base tracks is refused rather than
+    /// silently overwritten (git's default), and survives byte for byte.
+    #[tokio::test]
+    async fn a_holder_ignored_file_the_base_tracks_is_never_overwritten() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-ignored", "held-ignored").await;
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "build.log\n").unwrap();
+        let ignored = holder_dir.join("build.log");
+        std::fs::write(&ignored, "local build output\n").unwrap();
+        commit_file(&repo_s, "build.log", "tracked by the base\n").await;
+        let held_tip = tip(&repo_s, "held-ignored").await;
+
+        let state = AppState::default();
+        let err = update_branch_from(
+            &state,
+            &repo_s,
+            "held-ignored",
+            &main,
+            &HashSet::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        let AppError::BranchHeld {
+            message,
+            holder: named,
+            reason,
+            ..
+        } = &err
+        else {
+            panic!("expected a BranchHeld refusal, got {err:?}");
+        };
+        assert_eq!(
+            (reason.as_str(), named.as_str()),
+            ("failed", porcelain.as_str())
+        );
+        assert!(message.contains("held-ignored is unchanged."), "{message}");
+        assert!(
+            message.contains("build.log"),
+            "git's refusal names the file: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ignored).unwrap(),
+            "local build output\n"
+        );
+        assert_eq!(tip(&repo_s, "held-ignored").await, held_tip);
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
     }
 
     /// A conflicting merge inside the holder is aborted: no MERGE_HEAD, a clean tree, the
