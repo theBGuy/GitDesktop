@@ -161,7 +161,8 @@ html:not(.mode-git) [data-view="git"] {
   /* Clicks do nothing, and a right-click reaches the poster image. */
   pointer-events: none;
 }
-/* Instant swap on first "playing": the poster is a frame of the clip. */
+/* Instant swap once a decoded frame is up with no seek pending: the poster
+   is a frame of the clip. */
 .demo video[data-shown] {
   opacity: 1;
 }

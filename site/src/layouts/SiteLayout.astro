@@ -162,6 +162,8 @@ const toggleScript = `
 //   so a "playing" queued at 0s would otherwise flash the wrong frame.
 // - play() rejecting with NotAllowedError disarms the clip until a press;
 //   AbortError is a pause() overtaking the play, which the in-view rules own.
+// - preload turns "auto" only once play() resolves: a blocked play() never
+//   starts a fetch, but switching preload away from "none" on its own does.
 // - With <source> children a load failure fires on the sources, not the video.
 const demoScript = `
 (function () {
@@ -184,7 +186,7 @@ const demoScript = `
     var sources = video.querySelectorAll("source");
     var at = parseFloat(video.getAttribute("data-poster-at")) || 0;
     var armed = !manual, inView = false, userPaused = false;
-    var loading = false, ready = false, shown = false, failed = false;
+    var ready = false, shown = false, failed = false;
     var io;
 
     function sync() {
@@ -195,19 +197,20 @@ const demoScript = `
     function attempt() {
       var p = video.play();
       if (p && p.then) {
-        p.then(null, function (err) {
-          if (err && err.name === "NotAllowedError") armed = false;
-          sync();
-        });
+        p.then(
+          function () {
+            video.preload = "auto";
+          },
+          function (err) {
+            if (err && err.name === "NotAllowedError") armed = false;
+            sync();
+          }
+        );
       }
     }
     function update() {
       if (failed) return;
       if (armed && inView && !userPaused) {
-        if (!ready && !loading) {
-          loading = true;
-          video.preload = "auto";
-        }
         attempt();
       } else if (!video.paused) {
         video.pause();

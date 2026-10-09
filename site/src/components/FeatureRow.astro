@@ -14,7 +14,7 @@ type Props = Visual & {
   title: string;
   /** The screenshot's alt text, or the demo loop's label. */
   alt: string;
-  /** Which side the screenshot sits on at desktop width. */
+  /** Which side the visual sits on at desktop width. */
   side?: "left" | "right";
   /** eager, sizes, and widths apply to `image` only. */
   eager?: boolean;
@@ -43,7 +43,7 @@ if (!image === !video) {
   throw new Error(`FeatureRow "${title}": pass exactly one of image or video.`);
 }
 
-// Text always reads first on mobile; image side only matters at lg+.
+// Text always reads first on mobile; the visual's side only matters at lg+.
 const imgOrder = side === "left" ? "order-2 lg:order-1" : "order-2";
 const txtOrder = side === "left" ? "order-1 lg:order-2" : "order-1";
 ---
