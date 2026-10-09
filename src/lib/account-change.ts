@@ -59,17 +59,16 @@ export type ResetCandidate = {
 const isJiraSlot = (slot: unknown) =>
   typeof slot === "string" && slot.startsWith("jira");
 
-/** Whether an account change resets this cached query. The networkmode guard
- *  (scripts/networkmode-local-queries.test.mjs) holds every LOCAL-reading queryFn
- *  to "always", so local state under "repo" falls out by construction. */
+/** Whether an account change resets this cached query. Local reads under "repo"
+ *  fall out as "always" (scripts/networkmode-local-queries.test.mjs guards it), and
+ *  Jira reads sit under a forge root only as the `repo` root's kind slot. */
 export function shouldResetOnAccountChange(query: ResetCandidate): boolean {
   const [root, , kind] = query.queryKey;
   return (
     query.options.networkMode !== "always" &&
     typeof root === "string" &&
     FORGE_ROOTS.has(root) &&
-    !isJiraSlot(root) &&
-    !isJiraSlot(kind)
+    !(root === "repo" && isJiraSlot(kind))
   );
 }
 
@@ -91,8 +90,6 @@ export type AccountChangeClient = {
   invalidateQueries(filters: { queryKey: readonly unknown[] }): Promise<void>;
 };
 
-const UNKNOWN_HOST = "<unknown-host>";
-
 function isForgeStatusKey(key: readonly unknown[]): boolean {
   return key.length === 3 && key[0] === "repo" && key[2] === "forge-status";
 }
@@ -104,8 +101,9 @@ export function installAccountChangeReset(
   client: AccountChangeClient,
   { invalidateKeys }: { invalidateKeys: readonly (readonly unknown[])[] },
 ): () => void {
-  // Keyed by host, never by query: the forge-status key carries the repo path, so
-  // a per-query baseline would read a first visit to another repo as a change.
+  // Keyed by host, never by query (its repo path would read a new repo as a change).
+  // Host-less statuses are skipped: the login may be another gh host's, `forgeReady`
+  // keeps their `repo: null` panels off, and the next resolved status catches it.
   const baseline = new Map<string, string>();
   return client.getQueryCache().subscribe((event) => {
     if (event.type !== "updated" || event.action?.type !== "success") return;
@@ -113,11 +111,11 @@ export function installAccountChangeReset(
     const data = event.query.state.data;
     if (typeof data !== "object" || data === null) return;
     const { host, login } = data as { host?: unknown; login?: unknown };
-    const hostKey = typeof host === "string" ? host : UNKNOWN_HOST;
+    if (typeof host !== "string") return;
     const next = typeof login === "string" ? login : null;
     if (next === null) return;
-    const verdict = loginChange(baseline.get(hostKey), next);
-    baseline.set(hostKey, next);
+    const verdict = loginChange(baseline.get(host), next);
+    baseline.set(host, next);
     if (verdict !== "reset") return;
     void client.resetQueries({ predicate: shouldResetOnAccountChange });
     for (const queryKey of invalidateKeys)

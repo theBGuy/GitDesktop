@@ -86,6 +86,18 @@ test("shouldResetOnAccountChange: each query shape (table)", () => {
     ["jira issue under repo", q(["repo", REPO, "jira-issue", "x"]), false],
     ["jira project search", q(["jira-project-search", "site", "k"]), false],
     ["jira labels", q(["jira-labels", "site"]), false],
+    // Slot 2 of the other forge roots is user data, never a Jira kind.
+    ["search for jira", q(["forge-search", "github", "jira", "best"]), true],
+    [
+      "star state of a jira owner",
+      q(["forge-starred", "github", "jira-tools", "cli"]),
+      true,
+    ],
+    [
+      "readme of a jira owner",
+      q(["forge-readme", "github", "jira-co", "x", "main"]),
+      true,
+    ],
     ["unknown root", q(["settings"]), false],
     ["empty key", q([]), false],
     ["non-string root", q([7, REPO]), false],
@@ -234,6 +246,22 @@ test("the baseline is per host, shared by every repo on it", () => {
   // Another host keeps its own baseline.
   emit(statusEvent({ repo: OTHER_REPO, host: "gitlab.com", login: "b" }));
   assert.equal(resets(calls), 1, "first observation on another host");
+});
+
+test("host-less statuses never share a baseline", () => {
+  const { calls, emit } = install();
+  emit(statusEvent({ host: "github.com", login: "a" }));
+  emit(statusEvent({ repo: OTHER_REPO, host: null, login: "b" }));
+  emit(statusEvent({ repo: OTHER_REPO, host: null, login: "c" }));
+  emit(statusEvent({ host: "github.com", login: "a" }));
+  assert.equal(resets(calls), 0);
+});
+
+test("a host-less status never seeds the baseline", () => {
+  const { calls, emit } = install();
+  emit(statusEvent({ host: null, login: "a" }));
+  emit(statusEvent({ host: "github.com", login: "b" }));
+  assert.equal(resets(calls), 0);
 });
 
 test("malformed status data reads as an unknown login", () => {
