@@ -466,12 +466,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   written anywhere else is unratcheted, and the wider class stays a review
   concern. The `Add…`/`Submit…`/`Publish…`/`Fork…` creates stay unpinned BY
   DECISION: their callers read `isPending` as a re-entry guard, which a pin
-  idles, so the isPending → local-flag migration comes first. Whatever the pin,
-  a cache WRITE (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/
-  `onSettled` keys from the callback's own parameters, never hook scope:
-  `onMutate` runs once at mutate time, the settle callbacks off the CURRENT
-  render's options, so build the key in `onMutate`, return it in the context,
-  read it back (`useSetRepoStar` is the reference). Context-keying needs no pin
+  idles, so the isPending → local-flag migration comes first. A cache WRITE
+  (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/`onSettled` keys
+  from the callback's own parameters, never hook scope: `onMutate` runs once at
+  mutate time, the settle callbacks off the CURRENT render's options, so build
+  the key in `onMutate`, return it in the context, read it back
+  (`useSetRepoStar` is the reference). The carve-out is a pinned
+  `useRepoMutation` seed: it has no `onMutate` to key from, so its identity pin
+  is what detaches it on a switch (`useCreateIssue`, writing through
+  `insertCreatedIssue`, is the live instance). Context-keying needs no pin
   of its own, so `isPending` stays live — but the pin rule above is separate and
   still applies: an EXPORTED repo-scoped hook whose `onSuccess` seeds the cache
   keeps its mutation key however the seed is keyed. Guard:
@@ -480,10 +483,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `reconcile` stay review concerns (the check's message lists the rest).
 - **Pending-write holds** read the mutation cache through
   `useMutationCacheSnapshot` (`queries/internal.ts`) with a caller-memoized
-  `select` (`useCallback` over primitive deps), never `useMutationState` (its
-  ref goes stale across an `<Activity>` hide) and never the observer (it tracks
-  only its latest call). The pure projection goes in an import-free module
-  (`pr-writes.ts`, `board-writes.ts`). A projection that CASTS the variables
+  `select` (`useCallback` over stable deps: primitives or module-level
+  constants), never `useMutationState` (its ref goes stale across an
+  `<Activity>` hide) and never the observer (it tracks only its latest
+  call). The pure projection goes in an import-free module (`pr-writes.ts`,
+  `board-writes.ts`). A projection that CASTS the variables
   casts through the same exported type the mutation's generic uses
   (`ThreadWriteVars`, `DiscussionUpvoteVars`), so a renamed field fails to
   compile; the runtime-guarded readers (`boardWriteVars`, `pendingPrWriteTarget`)

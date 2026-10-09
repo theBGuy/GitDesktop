@@ -101,12 +101,12 @@ export const forgePrReviewerCandidates = (
     lens,
   });
 
-// No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
-// only picks the cwd/host) and the lens switcher is GitHub-only, so they are
-// lens-free by construction. A non-GitHub lens is the trigger to thread one.
 // Comment edit/delete are provider-neutral (GitHub via `gh`, GitLab via `glab`,
 // Bitbucket via its API). `number` is the PR/MR (or issue) the comment lives on —
 // GitLab/Bitbucket address the note by MR/issue + comment id, GitHub ignores it.
+// No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
+// only picks the cwd/host) and the lens switcher is GitHub-only, so they are
+// lens-free by construction; lens support on another forge must thread one.
 export const forgePrEditComment = (
   repoPath: string,
   number: number,
@@ -167,9 +167,7 @@ export const ghPrMinimizeComment = (
 export const ghPrUnminimizeComment = (repoPath: string, commentId: string) =>
   invoke<void>("gh_pr_unminimize_comment", { repoPath, commentId });
 
-// No lens on the wire: GitHub addresses this write by global node id (`repoPath`
-// only picks the cwd/host) and the lens switcher is GitHub-only, so it is
-// lens-free by construction. A non-GitHub lens is the trigger to thread one.
+// GitHub-only and addressed by node id, so lens-free by construction.
 /** Discards an unsubmitted (PENDING) review by its node id; only its author sees one. */
 export const ghPrDiscardPendingReview = (repoPath: string, reviewId: string) =>
   invoke<void>("gh_pr_discard_pending_review", { repoPath, reviewId });

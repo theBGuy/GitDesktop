@@ -6,7 +6,7 @@ export const forgeRepoLabels = (repoPath: string, lens: RemoteLens) =>
 
 // No lens on the wire: GitHub addresses this write by global node id (`repoPath`
 // only picks the cwd/host) and the lens switcher is GitHub-only, so it is
-// lens-free by construction. A non-GitHub lens is the trigger to thread one.
+// lens-free by construction; lens support on another forge must thread one.
 /** Add/remove labels on an issue or MR. GitHub keys them by GraphQL node id
  *  (`addIds`/`removeIds` on `labelableId`); GitLab keys them by name
  *  (`addNames`/`removeNames` on `number`). Callers pass both; the forge command

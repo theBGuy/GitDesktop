@@ -10,7 +10,7 @@ export const forgeIssueReactions = (
 
 // No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
 // only picks the cwd/host) and the lens switcher is GitHub-only, so they are
-// lens-free by construction. A non-GitHub lens is the trigger to thread one.
+// lens-free by construction; lens support on another forge must thread one.
 /** The reaction subject travels in BOTH provider vocabularies: GitHub keys on
  *  `subjectId` (a GraphQL node id) and ignores `target`/`number`; GitLab keys on
  *  `target` ("issue"/"mr") + `number`, with `subjectId` empty for the body or

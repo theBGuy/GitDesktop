@@ -86,27 +86,12 @@ export function useOptimisticCacheMutation<TArgs, TData, TCache>(
 }
 
 /**
- * A value derived from the mutation cache — the observer-independent reading the
- * pending-write holds need, since an observer tracks only its own LATEST call.
- * `select` is memoized by the caller — `useCallback` over its own primitive deps,
- * which biome and the React Compiler can check — never a deps array passed in here.
- *
- * `getSnapshot` COMPUTES from the cache rather than returning a value some
- * subscription last wrote, which is the whole point of doing this by hand instead of
- * through `useMutationState`. That hook keeps its result in a ref refreshed ONLY
- * inside its cache subscription, so any window without a live subscription is a
- * blind spot it never reconciles: a host under `<Activity>` has its passive effects
- * torn down on hide, and a write settling while the tab is away notifies nobody. On
- * show, re-subscribing re-reads the same untouched ref, React sees no change, and
- * the pre-hide list latches — holds and indicator lines for writes that finished
- * minutes ago. `useMutationState` has the same blind spot for its filters, which
- * reach it through an options ref updated after render.
- *
- * Computing on demand makes both moot: React calls this on every render and again
- * when it re-subscribes, and each call reads the live cache under the CURRENT
- * `select`. `replaceEqualDeep` against the previous snapshot keeps the identity
- * stable when nothing changed, which `useSyncExternalStore` requires of a snapshot
- * (and the library's own pattern for it); `initial` seeds that comparison.
+ * A value derived from the mutation cache, recomputed from the live cache under the
+ * current `select` on every read rather than via `useMutationState`, whose
+ * subscription-refreshed ref goes stale across an `<Activity>` hide.
+ * `replaceEqualDeep` keeps an unchanged snapshot's identity, as `useSyncExternalStore`
+ * requires; `initial` seeds that comparison. `select` is caller-memoized: a
+ * `useCallback` over stable deps (primitives or module-level constants).
  */
 export function useMutationCacheSnapshot<T>(
   select: (cache: MutationCache) => T,

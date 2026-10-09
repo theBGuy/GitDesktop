@@ -1936,7 +1936,6 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
 /// [`RawReview::id`] already carries — so no repo slug or lens is involved and this
 /// works through any remote. GitHub only ever returns a PENDING review to its own
 /// author, so the caller can only reach (and delete) its own.
-// The lens switcher is GitHub-only; a non-GitHub lens is the trigger to thread one.
 #[tauri::command]
 pub async fn gh_pr_discard_pending_review(repo_path: String, review_id: String) -> AppResult<()> {
     if review_id.trim().is_empty() {

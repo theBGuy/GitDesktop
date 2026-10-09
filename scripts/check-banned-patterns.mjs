@@ -722,7 +722,7 @@ const isMutationModule = (file) =>
 /** Floor near the real module count (38): a low floor would let a typo in
  *  QUERIES_DIR leave the scan almost entirely inert and still pass. */
 const MUTATION_MODULES_SCANNED = {
-  atLeast: 27,
+  atLeast: 35,
   hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES} + ${LOCAL_QUERIES.join(" + ")}`,
 };
 
@@ -1779,24 +1779,12 @@ export const CHECKS = [
   },
   {
     name: "mutation-identity-pinning",
-    // The modules that declare repo-scoped mutation hooks: the git queries
-    // package, the Jira queries, and the two local-entity modules. The check is
-    // deliberately NARROWER than the convention it serves: the convention governs
-    // every mutation whose callbacks close over repo/lens, which is ~200 sites here,
-    // while this ratchet covers a create landing in the wrong repo and a response
-    // seeded into the wrong repo's cache, where a retarget is not self-healing. A
-    // retargeted INVALIDATION refetches its way back, so the rest stay a review
-    // concern, not an exempted one. Settle-time cache writes for EVERY hook, create
-    // or not, are the next check's arm (settle-cache-write-identity).
-    // Within that boundary the scan recognizes a create by NAME, and the
-    // `Add…`/`Submit…`/`Publish…`/`Fork…` spellings stay outside it BY DECISION:
-    // pinning them detaches `isPending`, which their callers read as a re-entry
-    // guard (SubmodulesDialog, RepositoryMenu, SubmitReviewDialog,
-    // CollaboratorsSection, DiscussionView), so the isPending → local-flag migration
-    // comes first. It also follows delegation only to a `use…` wrapper in the SAME
-    // file, and only from a create hook. Both local-entity wrappers key
-    // unconditionally (`["local-pr" | "local-issue", op, repo]`), so the
-    // conditional-key arm has no live instance; its fixtures keep it honest.
+    // Deliberately narrower than its convention: it ratchets a create landing in
+    // the wrong repo and a response seeded into the wrong repo's cache, the
+    // retargets that don't self-heal; a retargeted invalidation refetches its way
+    // back, so the rest stay a review concern. The `Add…`/`Submit…`/`Publish…`/
+    // `Fork…` creates stay outside BY DECISION: a pin idles the `isPending` their
+    // callers read as a re-entry guard, so the local-flag migration comes first.
     appliesTo: (file) => isMutationModule(file),
     scan: unpinnedMutationIdentity,
     allowlist: [],
@@ -1818,7 +1806,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: MUTATION_MODULES_SCANNED,
     message:
-      "a setQueryData/setQueriesData inside an onSuccess/onError/onSettled callback (property or method) must take its KEY from the callback's own parameters (`ctx.key`, `context.repo`, `args.number`), never from hook scope (a bare `repo`/`lens`/`link`, a value parameter of any enclosing function, a name declared in its body, or a callback local that was ever declared, assigned or looped from those) — react-query calls the settle callbacks off the options the CURRENT render re-pushed onto the pending mutation, so after a repo or entity switch a hook-scope key names the new target, while `onMutate` runs once at mutate time: build the key there, return it in the context, and read it back in the settle callback (useSetRepoStar is the reference). Context-keying is what THIS check asks for; it does not replace mutation-identity-pinning, which still requires a mutation key on an exported repo-scoped hook whose onSuccess seeds the cache. This scan does NOT see six shapes, so review them by hand: a cache write through a helper the callback calls (the Jira `landRealStatus` shape — pass it context values, not hook scope), a callback defined outside the options object and passed by name (`onSuccess,`) or spread in, `useOptimisticCacheMutation`'s `reconcile` argument (it runs from internal.ts's onSettled, another module), a key reaching the write through a compound assignment or a mutation of a local (`key.push(repo)`, `key += …`), a hook declared neither as `function use…` nor as `const use… =` (only the bare `repo`/`lens`/`link` names are seen there), and a parameter whose own annotation is a function type (skipped as a key BUILDER, so a function-typed value used as a key reads clean). It also over-reads one shape: per-call `.mutate(v, { onSuccess })` and `.mutateAsync(v, { onSuccess })` callbacks are fixed at mutate time and would flag although correct — moot here, since no scanned mutation module calls either",
+      "a setQueryData/setQueriesData inside an onSuccess/onError/onSettled callback (property or method) must take its KEY from the callback's own parameters (`ctx.key`, `context.repo`, `args.number`), never from hook scope (a bare `repo`/`lens`/`link`, a value parameter of any enclosing function, a name declared in its body, or a callback local that was ever declared, assigned or looped from those) — react-query calls the settle callbacks off the options the CURRENT render re-pushed onto the pending mutation, so after a repo or entity switch a hook-scope key names the new target, while `onMutate` runs once at mutate time: build the key there, return it in the context, and read it back in the settle callback (useSetRepoStar is the reference). Context-keying is what THIS check asks for; it does not replace mutation-identity-pinning, which still requires a mutation key on an exported repo-scoped hook whose onSuccess seeds the cache. This scan does NOT see six shapes, so review them by hand: a cache write through a helper the callback calls (the Jira `landRealStatus` shape — pass it context values, not hook scope; `useCreateIssue`'s `insertCreatedIssue` is the exception, a pinned `useRepoMutation` seed safe only through its identity pin), a callback defined outside the options object and passed by name (`onSuccess,`) or spread in, `useOptimisticCacheMutation`'s `reconcile` argument (it runs from internal.ts's onSettled, another module), a key reaching the write through a compound assignment or a mutation of a local (`key.push(repo)`, `key += …`), a hook declared neither as `function use…` nor as `const use… =` (only the bare `repo`/`lens`/`link` names are seen there), and a parameter whose own annotation is a function type (skipped as a key BUILDER, so a function-typed value used as a key reads clean). It also over-reads one shape: per-call `.mutate(v, { onSuccess })` and `.mutateAsync(v, { onSuccess })` callbacks are fixed at mutate time and would flag although correct — moot here, since no scanned mutation module calls either",
   },
 ];
 

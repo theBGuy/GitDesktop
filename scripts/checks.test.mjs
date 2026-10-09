@@ -36,6 +36,7 @@ import {
   reachesQueriesInternalFromSibling,
   runCheck,
   scopePinFailure,
+  splitTopLevel,
   stripComments,
   view,
 } from "./check-banned-patterns.mjs";
@@ -2551,9 +2552,7 @@ test("mutation-identity-pinning is scoped to the query modules, with no allowlis
   assert.deepEqual(stale, []);
 });
 
-test("splitTopLevel nests generics in a parameter list only", async () => {
-  // Loaded here rather than at the top so this block's import stays inside it.
-  const { splitTopLevel } = await import("./check-banned-patterns.mjs");
+test("splitTopLevel nests generics in a parameter list only", () => {
   // A comma inside `Promise<Record<string, unknown>>` is not a parameter break,
   // and the `>` of the arrow before it is not a close.
   assert.deepEqual(

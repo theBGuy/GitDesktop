@@ -326,7 +326,7 @@ export const ghIssueRemoveSubIssue = (
 
 // No lens on the wire: GitHub addresses these writes by global node id (`repoPath`
 // only picks the cwd/host) and the lens switcher is GitHub-only, so they are
-// lens-free by construction. A non-GitHub lens is the trigger to thread one.
+// lens-free by construction; lens support on another forge must thread one.
 export const forgeIssueEditComment = (
   repoPath: string,
   number: number,
