@@ -240,6 +240,7 @@ export function useBranchDivergence(
 /** Merge `base` into `branch`. Filed with the local-PR writes because the local PR
  *  view holds its Update branch on any running one, from whichever surface fired it. */
 export function useUpdateBranchFrom(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { branch: string; base: string }) =>
@@ -248,6 +249,18 @@ export function useUpdateBranchFrom(repo: string) {
       // Local branch write — never park it offline.
       networkMode: "always",
       identity: localPrWriteKey("update-from", repo),
+      // The default invalidation covers only this repo; an update run inside the
+      // holder moved that checkout too. Git reports it forward-slashed, a window
+      // opened on it keys validate_repo's backslashed form (state.rs), so both
+      // are invalidated; on POSIX the backslashed one matches nothing.
+      onSuccess: (data) => {
+        if (!data.holder) return;
+        for (const key of new Set([
+          data.holder,
+          data.holder.replace(/\//g, "\\"),
+        ]))
+          void queryClient.invalidateQueries({ queryKey: repoKeys.all(key) });
+      },
     },
   );
 }

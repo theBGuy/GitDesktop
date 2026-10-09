@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
@@ -1559,27 +1561,71 @@ pub(crate) async fn branch_reset_to_upstream(
 /// - diverged → merge `base` in a throwaway worktree so the main checkout is
 ///   untouched, `"merge"`; a conflicting merge is aborted and the branch left as-is,
 ///   and a `branch` that moved while that worktree was materializing is refused.
+/// - checked out in ANOTHER checkout → the same fast-forward or merge runs inside that
+///   checkout, which reports back as `holder`; a session's, mid-operation, dirty or
+///   conflicting holder is refused as [`AppError::BranchHeld`] with nothing changed.
 ///
 /// When `branch` IS the current branch there's nothing to avoid switching to, so it
 /// merges in place (conflicts surface in the changes list as usual — no abort).
 #[tauri::command]
 pub async fn git_update_branch_from(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     repo_path: String,
     branch: String,
     base: String,
-) -> AppResult<String> {
-    update_branch_from(&state, &repo_path, &branch, &base).await
+) -> AppResult<UpdateBranchOutcome> {
+    use tauri::Manager;
+    let session_paths = crate::sessions::session_worktree_paths(&app);
+    // The same root `worktree::git_worktree_list_user` hides as app-internal.
+    let app_data_root =
+        app.path().app_data_dir().ok().map(|d| {
+            crate::git::worktree::normalize_wt_path(&d.join("worktrees").to_string_lossy())
+        });
+    update_branch_from(
+        &state,
+        &repo_path,
+        &branch,
+        &base,
+        &session_paths,
+        app_data_root.as_deref(),
+    )
+    .await
+}
+
+/// What an update did, and where.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateBranchOutcome {
+    /// "merge" | "up-to-date" | "fast-forward" — the existing strings, unchanged.
+    pub outcome: String,
+    /// The holder checkout's path (porcelain spelling from `worktree list`) when the
+    /// update ran inside another checkout; None on every other arm.
+    pub holder: Option<String>,
+}
+
+impl UpdateBranchOutcome {
+    /// An update that ran in this checkout or a throwaway one.
+    fn unheld(outcome: &str) -> Self {
+        Self {
+            outcome: outcome.to_string(),
+            holder: None,
+        }
+    }
 }
 
 /// Testable core of [`git_update_branch_from`] — takes a plain `&AppState` so
 /// real-repo tokio tests can drive it (mirrors `git::ops`' `*_core` pairs).
+/// `session_paths` (the agent-session registry's worktree set) and `app_data_root` (the
+/// normalized app-data worktrees root) name checkouts a held branch is never updated in.
 pub(crate) async fn update_branch_from(
     state: &AppState,
     repo_path: &str,
     branch: &str,
     base: &str,
-) -> AppResult<String> {
+    session_paths: &HashSet<String>,
+    app_data_root: Option<&str>,
+) -> AppResult<UpdateBranchOutcome> {
     validate_branch_name(branch)?;
     validate_branch_name(base)?;
     if branch == base {
@@ -1636,10 +1682,10 @@ pub(crate) async fn update_branch_from(
             )
             .await);
         }
-        return Ok("merge".to_string());
+        return Ok(UpdateBranchOutcome::unheld("merge"));
     }
 
-    // Read under THIS hold: the diverged arm below pins it too.
+    // Read under THIS hold: the holder and diverged arms below pin it too.
     let Some(branch_tip) = branch_tip_sha(repo_path, branch).await? else {
         return Err(AppError::InvalidArgument(format!(
             "unknown branch: {branch}"
@@ -1654,34 +1700,20 @@ pub(crate) async fn update_branch_from(
     )
     .await?;
     if already.code == 0 {
-        return Ok("up-to-date".to_string());
+        return Ok(UpdateBranchOutcome::unheld("up-to-date"));
     }
 
-    // branch reachable from base → pure fast-forward; move the ref directly.
-    // `fetch .` refuses to touch a checked-out branch, but we've excluded the
-    // current branch above, so this only ever updates an idle branch. Its SOURCE
-    // resolves tag-first like any rev; the destination is spelled in full so it can
-    // only ever name the branch.
+    // branch reachable from base → pure fast-forward.
     let ff = run_git_raw(
         Some(repo_path),
         &["merge-base", "--is-ancestor", &branch_tip, &base_rev],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if ff.code == 0 {
-        run_git(
-            Some(repo_path),
-            &["fetch", ".", &format!("{base_rev}:refs/heads/{branch}")],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        return Ok("fast-forward".to_string());
-    }
+    let fast_forward = ff.code == 0;
 
-    // Diverged → merge in a throwaway worktree so the user's checkout is untouched.
-    // Both ends are pinned under THIS hold, because the worktree steps below run in
-    // the worktree-admin domain, which nests with no other: the working-tree lock is
-    // released across them, so either ref can move meanwhile.
+    // Both ends are pinned under THIS hold, because the holder and diverged arms below
+    // release it: either ref can move meanwhile.
     let base_out = run_git_raw(
         Some(repo_path),
         &[
@@ -1700,6 +1732,56 @@ pub(crate) async fn update_branch_from(
         branch_tip,
         base_sha: base_out.stdout_lossy().trim().to_string(),
     };
+
+    // A branch another checkout holds is updated INSIDE that checkout. Clearing a dead
+    // update's holder takes ADMIN and removes its checkout under THIS hold: a bounded,
+    // try-only exception to the nesting rule, rare once `claim_dead_updates_for_branch` ran.
+    let mut holder = worktree_holding_branch(repo_path, branch).await;
+    if let Some(path) = holder.as_deref() {
+        if clear_update_holder(state, repo_path, branch, path).await? {
+            holder = worktree_holding_branch(repo_path, branch).await;
+        }
+    }
+    if let Some(holder) = holder {
+        if is_session_holder(&holder, branch, session_paths, app_data_root) {
+            return Err(branch_held(
+                "session",
+                &holder,
+                branch,
+                format!(
+                    "{branch} is checked out in a worktree GitDesktop manages at {holder}, so \
+                     it is not updated from here. {branch} is unchanged."
+                ),
+            ));
+        }
+        let merge = if fast_forward {
+            HolderMerge::FastForward
+        } else {
+            HolderMerge::Merge {
+                subject: merge_subject(repo_path, &base_rev, branch).await,
+            }
+        };
+        // No task takes two locks of one domain: release this checkout's first.
+        drop(guard);
+        return update_in_holder(state, &holder, branch, base, &pins.base_sha, merge).await;
+    }
+
+    // `fetch .` refuses a branch checked out anywhere, so it runs only for an UNHELD one:
+    // the current branch took the in-place arm and every held one the holder arm. Its
+    // SOURCE resolves tag-first like any rev; the destination is spelled in full so it
+    // can only ever name the branch.
+    if fast_forward {
+        run_git(
+            Some(repo_path),
+            &["fetch", ".", &format!("{base_rev}:refs/heads/{branch}")],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        return Ok(UpdateBranchOutcome::unheld("fast-forward"));
+    }
+
+    // Diverged → merge in a throwaway worktree so the user's checkout is untouched. The
+    // worktree steps below run in the worktree-admin domain, which nests with no other.
     drop(guard);
 
     // Minted under the app-data worktrees root, never the OS temp dir: that
@@ -1724,6 +1806,282 @@ pub(crate) async fn update_branch_from(
         Some(marker),
     )
     .await
+    .map(|outcome| UpdateBranchOutcome::unheld(&outcome))
+}
+
+/// Whether `holder` is an app-internal checkout, matched as the worktree manager hides
+/// one (`worktree::is_session_worktree`): registry paths compared normalized, with the
+/// `gd/session/` branch and the app-data root (a hidden update's home too) as backstops.
+/// The root takes a trailing separator, so a SIBLING `<root>x/…` never matches.
+fn is_session_holder(
+    holder: &str,
+    branch: &str,
+    session_paths: &HashSet<String>,
+    app_data_root: Option<&str>,
+) -> bool {
+    use crate::git::worktree::normalize_wt_path;
+    let holder = normalize_wt_path(holder);
+    branch.starts_with("gd/session/")
+        || session_paths.iter().any(|p| normalize_wt_path(p) == holder)
+        || app_data_root.is_some_and(|root| holder.starts_with(&format!("{root}/")))
+}
+
+/// A refusal from the holder arm, which leaves `branch` and its holder as they were.
+fn branch_held(reason: &str, holder: &str, branch: &str, message: String) -> AppError {
+    AppError::BranchHeld {
+        message,
+        holder: holder.to_string(),
+        branch: branch.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Which merge the holder arm runs, decided by the ancestry read under the first hold.
+enum HolderMerge {
+    FastForward,
+    /// `subject` words the commit as a merge of `base` by name ([`merge_subject`]).
+    Merge {
+        subject: Option<String>,
+    },
+}
+
+/// The update of a `branch` that the checkout at `holder` has checked out: `fetch .`
+/// and `worktree add` both refuse a held branch, so the fast-forward or merge runs
+/// inside that checkout, under ITS working-tree lock, and its index and tree advance
+/// with the ref. The caller must not hold another working-tree lock, and everything
+/// here runs on lock-free runners because the hold is ours.
+///
+/// The merge takes `base_sha`, the base PINNED under the first hold, so a base that
+/// moved after the pin cannot change what lands. A branch that already contains the pin
+/// by the time the hold is taken answers `"up-to-date"` without merging.
+async fn update_in_holder(
+    state: &AppState,
+    holder: &str,
+    branch: &str,
+    base: &str,
+    base_sha: &str,
+    merge: HolderMerge,
+) -> AppResult<UpdateBranchOutcome> {
+    validate_branch_name(branch)?;
+    let domain = state.working_tree_lock(holder).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
+
+    // Re-checked under the hold, in order: the holder was found before it was taken.
+    if current_branch_name(holder).await?.as_deref() != Some(branch) {
+        return Err(branch_held(
+            "moved",
+            holder,
+            branch,
+            format!(
+                "The checkout at {holder} switched away from {branch} before it could be \
+                 updated — try again. {branch} is unchanged."
+            ),
+        ));
+    }
+    // The reads `ops::refuse_mid_op_for` gates on, split so the refusal can name the
+    // operation.
+    let op = crate::git::ops::op_state(holder).await?;
+    let paused = if op.rebasing {
+        Some("a rebase")
+    } else if op.merging {
+        Some("a merge")
+    } else if op.cherry_picking {
+        Some("a cherry-pick")
+    } else if op.reverting {
+        Some("a revert")
+    } else if crate::git::ops::has_unmerged(holder).await? {
+        Some("resolving conflicts")
+    } else {
+        None
+    };
+    if let Some(paused) = paused {
+        return Err(branch_held(
+            "mid-op",
+            holder,
+            branch,
+            format!(
+                "The checkout at {holder} is in the middle of {paused} — finish or abort it \
+                 there, then try again. {branch} is unchanged."
+            ),
+        ));
+    }
+    // Tracked changes only: untracked files don't block a merge, and one the merge
+    // would overwrite is refused by git itself in the failure arms below.
+    if has_tracked_changes(holder).await? {
+        return Err(branch_held(
+            "dirty",
+            holder,
+            branch,
+            format!(
+                "The checkout at {holder} has uncommitted changes — commit or stash them \
+                 there, then try again. {branch} is unchanged."
+            ),
+        ));
+    }
+
+    let updated = |outcome: &str| UpdateBranchOutcome {
+        outcome: outcome.to_string(),
+        holder: Some(holder.to_string()),
+    };
+
+    // A branch that took in the base since the first read must not report git's
+    // "Already up to date" no-op as an update.
+    let contains = run_git_raw(
+        Some(holder),
+        &["merge-base", "--is-ancestor", base_sha, "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if contains.code == 0 {
+        return Ok(updated("up-to-date"));
+    }
+
+    let subject = match merge {
+        HolderMerge::FastForward => {
+            let out = run_git_raw(
+                Some(holder),
+                &["merge", "--ff-only", base_sha],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if out.code != 0 {
+                // A refused ff-only merge writes nothing.
+                return Err(branch_held(
+                    "failed",
+                    holder,
+                    branch,
+                    format!(
+                        "Couldn't fast-forward {branch} to {base} in the checkout at {holder}. \
+                         {branch} is unchanged.\n{}",
+                        out.full_failure_text()
+                    ),
+                ));
+            }
+            return Ok(updated("fast-forward"));
+        }
+        HolderMerge::Merge { subject } => subject,
+    };
+
+    // Raw: a conflicted merge reports entirely on stdout with stderr empty (measured,
+    // git 2.51.1), the same trap the in-place arm documents.
+    let mut args = vec!["merge", "--no-edit"];
+    if let Some(subject) = subject.as_deref() {
+        args.extend(["-m", subject]);
+    }
+    args.push(base_sha);
+    let merged = run_git_raw(Some(holder), &args, DEFAULT_TIMEOUT).await;
+    if merged.as_ref().is_ok_and(|out| out.code == 0) {
+        return Ok(updated("merge"));
+    }
+    let merge_text = match &merged {
+        Ok(out) => out.full_failure_text(),
+        Err(e) => e.to_string(),
+    };
+
+    // The conflict list comes from the index, read before the abort clears it. A merge
+    // git refused before starting (an untracked file in the way) has nothing to abort.
+    let conflicts = crate::git::ops::unmerged_paths(holder).await;
+    // An unreadable op state counts as mid-merge, so it can never pass as restored.
+    let mid_merge =
+        |probe: AppResult<crate::git::types::RepoOpState>| probe.map_or(true, |s| s.merging);
+    let abort_failure = if mid_merge(crate::git::ops::op_state(holder).await) {
+        match run_git_raw(Some(holder), &["merge", "--abort"], DEFAULT_TIMEOUT).await {
+            Ok(out) if out.code == 0 => None,
+            Ok(out) => Some(out.full_failure_text()),
+            Err(e) => Some(e.to_string()),
+        }
+    } else {
+        None
+    };
+    // Our own residue only: the hold serializes GitDesktop, not the user's editor, so a
+    // tracked edit saved during the merge is theirs and never reads as a failed restore.
+    let restored = abort_failure.is_none() && !mid_merge(crate::git::ops::op_state(holder).await);
+    if !restored {
+        let abort_text = abort_failure.unwrap_or_default();
+        return Err(branch_held(
+            "failed",
+            holder,
+            branch,
+            format!(
+                "Merging {base} into {branch} in the checkout at {holder} failed, and that \
+                 checkout could not be put back as it was, so it needs manual attention. \
+                 {branch} is unchanged.\n{merge_text}\n{abort_text}"
+            )
+            .trim_end()
+            .to_string(),
+        ));
+    }
+    if !conflicts.is_empty() {
+        return Err(branch_held(
+            "conflict",
+            holder,
+            branch,
+            format!(
+                "{branch} has changes that conflict with {base} in {}, so the merge in the \
+                 checkout at {holder} was aborted. {branch} is unchanged.",
+                name_conflicts(&conflicts)
+            ),
+        ));
+    }
+    Err(branch_held(
+        "failed",
+        holder,
+        branch,
+        format!(
+            "Couldn't merge {base} into {branch} in the checkout at {holder}. {branch} is \
+             unchanged.\n{merge_text}"
+        ),
+    ))
+}
+
+/// Whether `dir`'s checkout has staged or unstaged changes to TRACKED files.
+async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
+    let status = run_git(
+        Some(dir),
+        &["status", "--porcelain", "--untracked-files=no"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(!status.stdout_lossy().trim().is_empty())
+}
+
+/// The first three conflicting paths, then a count of the rest.
+fn name_conflicts(paths: &[String]) -> String {
+    const NAMED: usize = 3;
+    let named = paths
+        .iter()
+        .take(NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths.len().saturating_sub(NAMED) {
+        0 => named,
+        more => format!("{named} and {more} more"),
+    }
+}
+
+/// The subject git gives a merge of `base_rev` by name, for a merge that takes its
+/// pinned sha instead, which git would title "Merge commit '<sha>'". `None` — git's own
+/// wording — when the rev names neither a local nor a remote-tracking branch.
+async fn merge_subject(repo_path: &str, base_rev: &str, branch: &str) -> Option<String> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--symbolic-full-name", base_rev],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|out| out.code == 0)?;
+    let full = out.stdout_lossy();
+    let full = full.trim();
+    let source = if let Some(name) = full.strip_prefix("refs/heads/") {
+        format!("branch '{name}'")
+    } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+        format!("remote-tracking branch '{name}'")
+    } else {
+        return None;
+    };
+    Some(format!("Merge {source} into {branch}"))
 }
 
 /// Where an update's throwaway checkout goes: `<app-data>/worktrees/<identity-hash>/
@@ -2040,12 +2398,17 @@ mod tests {
         update_worktree_path, validate_branch_name, validate_ref_name, BranchRewriteStatus,
         MergePair, UpdatePins, RENAMED_CONFIG_LEFT_BEHIND, UPSTREAM_WRITE_FAILED,
     };
+    use super::{
+        branch_tip_sha, current_branch_name, is_session_holder, name_conflicts, update_in_holder,
+        worktree_holding_branch, HolderMerge, UpdateBranchOutcome,
+    };
     use crate::error::AppError;
     use crate::git::runner::{
         acquire_repo_lock, hold_config_lock, release_config_lock_before_attempt, run_git,
         run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
     };
     use crate::state::AppState;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     // Full decision table for the create-branch argv: checkout × start_point ×
@@ -2703,7 +3066,7 @@ mod tests {
         run(&repo_s, &["commit", "-qam", "main edit"]).await;
 
         let state = AppState::default();
-        let err = update_branch_from(&state, &repo_s, &main, "feature")
+        let err = update_branch_from(&state, &repo_s, &main, "feature", &HashSet::new(), None)
             .await
             .unwrap_err();
         let AppError::Conflict { op, paths, report } = &err else {
@@ -3693,7 +4056,7 @@ mod tests {
             "a*b",
         ] {
             for (branch, base) in [(bad, "feature"), ("feature", bad)] {
-                let err = update_branch_from(&state, &repo_s, branch, base)
+                let err = update_branch_from(&state, &repo_s, branch, base, &HashSet::new(), None)
                     .await
                     .unwrap_err();
                 assert!(
@@ -3714,10 +4077,10 @@ mod tests {
         run(&repo_s, &["tag", "feature"]).await;
 
         let state = AppState::default();
-        let outcome = update_branch_from(&state, &repo_s, "feature", &main)
+        let outcome = update_branch_from(&state, &repo_s, "feature", &main, &HashSet::new(), None)
             .await
             .expect("the in-place merge succeeds");
-        assert_eq!(outcome, "merge");
+        assert_eq!(outcome.outcome, "merge");
         assert_eq!(
             run(&repo_s, &["symbolic-ref", "HEAD"]).await.trim(),
             "refs/heads/feature"
@@ -3750,7 +4113,7 @@ mod tests {
         run(&repo_s, &["update-ref", "refs/heads/other", &commit]).await;
 
         let state = AppState::default();
-        update_branch_from(&state, &repo_s, "fresh", "other")
+        update_branch_from(&state, &repo_s, "fresh", "other", &HashSet::new(), None)
             .await
             .expect_err("an unborn branch has nothing to update");
         let head = run_git_raw(
@@ -3864,22 +4227,25 @@ mod tests {
         .expect("the admin domain is free");
 
         assert_eq!(
-            update_branch_from(&state, &repo_s, "level", &main)
+            update_branch_from(&state, &repo_s, "level", &main, &HashSet::new(), None)
                 .await
-                .expect("up-to-date needs no worktree"),
+                .expect("up-to-date needs no worktree")
+                .outcome,
             "up-to-date"
         );
         assert_eq!(
-            update_branch_from(&state, &repo_s, "behind", &main)
+            update_branch_from(&state, &repo_s, "behind", &main, &HashSet::new(), None)
                 .await
-                .expect("a fast-forward needs no worktree"),
+                .expect("a fast-forward needs no worktree")
+                .outcome,
             "fast-forward"
         );
         // Last, since it moves the default branch: `branch == current` merges in place.
         assert_eq!(
-            update_branch_from(&state, &repo_s, &main, "feature")
+            update_branch_from(&state, &repo_s, &main, "feature", &HashSet::new(), None)
                 .await
-                .expect("an in-place merge needs no worktree"),
+                .expect("an in-place merge needs no worktree")
+                .outcome,
             "merge"
         );
     }
@@ -3896,10 +4262,10 @@ mod tests {
         run(&repo_s, &["switch", "-q", "feature"]).await;
 
         let state = AppState::default();
-        let outcome = update_branch_from(&state, &repo_s, "feature", &main)
+        let outcome = update_branch_from(&state, &repo_s, "feature", &main, &HashSet::new(), None)
             .await
             .expect("the in-place merge succeeds");
-        assert_eq!(outcome, "merge");
+        assert_eq!(outcome.outcome, "merge");
         assert!(
             repo.join("base.txt").exists(),
             "the base branch's work is merged in"
@@ -3920,9 +4286,10 @@ mod tests {
 
         let state = AppState::default();
         assert_eq!(
-            update_branch_from(&state, &repo_s, "behind", &main)
+            update_branch_from(&state, &repo_s, "behind", &main, &HashSet::new(), None)
                 .await
-                .expect("the update succeeds"),
+                .expect("the update succeeds")
+                .outcome,
             "fast-forward"
         );
         assert_eq!(
@@ -3947,9 +4314,10 @@ mod tests {
 
         let state = AppState::default();
         assert_eq!(
-            update_branch_from(&state, &repo_s, "behind", &main)
+            update_branch_from(&state, &repo_s, "behind", &main, &HashSet::new(), None)
                 .await
-                .expect("the update succeeds"),
+                .expect("the update succeeds")
+                .outcome,
             "fast-forward"
         );
         assert_eq!(
@@ -3982,9 +4350,10 @@ mod tests {
 
         let state = AppState::default();
         assert_eq!(
-            update_branch_from(&state, &repo_s, "behind", &main)
+            update_branch_from(&state, &repo_s, "behind", &main, &HashSet::new(), None)
                 .await
-                .expect("the update succeeds"),
+                .expect("the update succeeds")
+                .outcome,
             "fast-forward"
         );
         assert_eq!(
@@ -4023,9 +4392,17 @@ mod tests {
 
         let state = AppState::default();
         assert_eq!(
-            update_branch_from(&state, &repo_s, "update-base-tag", &main)
-                .await
-                .expect("the update succeeds"),
+            update_branch_from(
+                &state,
+                &repo_s,
+                "update-base-tag",
+                &main,
+                &HashSet::new(),
+                None
+            )
+            .await
+            .expect("the update succeeds")
+            .outcome,
             "merge"
         );
         let files = run(
@@ -4575,10 +4952,11 @@ mod tests {
         );
 
         let state = AppState::default();
-        let outcome = update_branch_from(&state, &repo_s, "update-e2e", &main)
-            .await
-            .expect("a diverged update merges");
-        assert_eq!(outcome, "merge");
+        let outcome =
+            update_branch_from(&state, &repo_s, "update-e2e", &main, &HashSet::new(), None)
+                .await
+                .expect("a diverged update merges");
+        assert_eq!(outcome.outcome, "merge");
 
         // A merge commit carrying exactly the two tips the update pinned.
         let merged = run(
@@ -4608,6 +4986,383 @@ mod tests {
                 .await
                 .contains("gd-update-"),
             "and git holds no registration for it either"
+        );
+    }
+
+    // --- The holder arm: a branch checked out in ANOTHER checkout is updated inside it.
+    // Each test names its branch uniquely, since the marker guards read a process-wide
+    // root a concurrently running sibling may have overridden.
+
+    /// A repo whose `branch` is checked out in a LINKED worktree beside it. Returns the
+    /// temp guard, the repo path, the default branch, the holder's path, and the holder
+    /// as `worktree list --porcelain` spells it.
+    async fn held_branch_repo(
+        tag: &str,
+        branch: &str,
+    ) -> (tempfile::TempDir, String, String, String, String) {
+        let (guard, base_dir) = temp_base(tag);
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "seed.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let holder_s = base_dir.join("holder").to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-q", "-b", branch, &holder_s]).await;
+        let porcelain = worktree_holding_branch(&repo_s, branch)
+            .await
+            .expect("the linked worktree holds the branch");
+        (guard, repo_s, main, holder_s, porcelain)
+    }
+
+    async fn commit_file(dir: &str, file: &str, body: &str) {
+        std::fs::write(std::path::Path::new(dir).join(file), body).unwrap();
+        run(dir, &["add", "-A"]).await;
+        run(dir, &["commit", "-qm", file]).await;
+    }
+
+    async fn tip(repo: &str, branch: &str) -> String {
+        branch_tip_sha(repo, branch)
+            .await
+            .expect("the tip read runs")
+            .expect("the branch exists")
+    }
+
+    /// Asserts a holder-arm refusal's structured fields, and that its message closes on
+    /// the sentence every one of them ends with; returns the message.
+    fn expect_branch_held(err: &AppError, reason: &str, holder: &str, branch: &str) -> String {
+        let AppError::BranchHeld {
+            message,
+            holder: named,
+            branch: held,
+            reason: why,
+        } = err
+        else {
+            panic!("expected a BranchHeld refusal, got {err:?}");
+        };
+        assert_eq!(
+            (why.as_str(), named.as_str(), held.as_str()),
+            (reason, holder, branch)
+        );
+        assert!(
+            message.ends_with(&format!("{branch} is unchanged.")),
+            "{message}"
+        );
+        message.clone()
+    }
+
+    /// The fast-forward a held branch used to die on (`fetch .` refuses it) runs inside
+    /// the holder, and the holder's index and tree advance with its HEAD.
+    #[tokio::test]
+    async fn a_held_branch_fast_forwards_inside_its_holder() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-ff", "held-ff").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let main_tip = tip(&repo_s, &main).await;
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "held-ff", &main, &HashSet::new(), None)
+            .await
+            .expect("a held fast-forward succeeds");
+        assert_eq!(outcome.outcome, "fast-forward");
+        assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
+
+        assert_eq!(run(&holder, &["rev-parse", "HEAD"]).await.trim(), main_tip);
+        assert_eq!(
+            run(&holder, &["status", "--porcelain"]).await,
+            "",
+            "the holder's index and tree advanced with its HEAD"
+        );
+        assert!(std::path::Path::new(&holder).join("base.txt").exists());
+        assert_eq!(
+            current_branch_name(&repo_s).await.unwrap(),
+            Some(main.clone()),
+            "the active checkout stays where it was"
+        );
+        assert_eq!(tip(&repo_s, &main).await, main_tip);
+        assert_eq!(run(&repo_s, &["status", "--porcelain"]).await, "");
+    }
+
+    /// A diverged held branch merges inside a clean, idle holder, titled as the unheld
+    /// arms title theirs rather than by the pinned sha.
+    #[tokio::test]
+    async fn a_held_diverged_branch_merges_inside_a_clean_holder() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-merge", "held-merge").await;
+        commit_file(&holder, "feature.txt", "feature\n").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let (held_tip, main_tip) = (tip(&repo_s, "held-merge").await, tip(&repo_s, &main).await);
+
+        let state = AppState::default();
+        let outcome =
+            update_branch_from(&state, &repo_s, "held-merge", &main, &HashSet::new(), None)
+                .await
+                .expect("a held diverged update merges");
+        assert_eq!(outcome.outcome, "merge");
+        assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
+
+        let merged = run(
+            &repo_s,
+            &["rev-list", "--parents", "-n", "1", "refs/heads/held-merge"],
+        )
+        .await;
+        let parents: Vec<&str> = merged.split_whitespace().skip(1).collect();
+        assert_eq!(parents, vec![held_tip.as_str(), main_tip.as_str()]);
+        assert_eq!(
+            run(
+                &repo_s,
+                &["log", "-1", "--format=%s", "refs/heads/held-merge"]
+            )
+            .await
+            .trim(),
+            format!("Merge branch '{main}' into held-merge")
+        );
+        assert_eq!(run(&holder, &["status", "--porcelain"]).await, "");
+        assert!(std::path::Path::new(&holder).join("base.txt").exists());
+    }
+
+    /// An agent session's worktree is never updated from outside it, matched on the
+    /// path exactly as the porcelain spells it.
+    #[tokio::test]
+    async fn a_branch_held_by_a_session_worktree_is_refused() {
+        let (_guard, repo_s, main, _holder, porcelain) =
+            held_branch_repo("held-session", "held-session").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let held_tip = tip(&repo_s, "held-session").await;
+
+        let state = AppState::default();
+        let sessions = HashSet::from([porcelain.clone()]);
+        let err = update_branch_from(&state, &repo_s, "held-session", &main, &sessions, None)
+            .await
+            .unwrap_err();
+        expect_branch_held(&err, "session", &porcelain, "held-session");
+        assert_eq!(tip(&repo_s, "held-session").await, held_tip);
+    }
+
+    /// The app-data root backstops an app-internal checkout the registry doesn't list (a
+    /// lost session entry, a pre-marker hidden update): a holder under it is refused as
+    /// a session's, with the registry empty and the branch not `gd/session/*`.
+    #[tokio::test]
+    async fn a_branch_held_under_the_app_data_root_is_refused() {
+        let (_guard, repo_s, main, _holder, porcelain) =
+            held_branch_repo("held-app-data", "held-app-data").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let held_tip = tip(&repo_s, "held-app-data").await;
+        // The holder's parent in the porcelain's own spelling stands in for the root.
+        let parent = std::path::Path::new(&porcelain).parent().unwrap();
+        let root = crate::git::worktree::normalize_wt_path(&parent.to_string_lossy());
+
+        let state = AppState::default();
+        let err = update_branch_from(
+            &state,
+            &repo_s,
+            "held-app-data",
+            &main,
+            &HashSet::new(),
+            Some(&root),
+        )
+        .await
+        .unwrap_err();
+        expect_branch_held(&err, "session", &porcelain, "held-app-data");
+        assert_eq!(tip(&repo_s, "held-app-data").await, held_tip);
+    }
+
+    /// Each arm of the session match, and the separator that keeps a SIBLING of the
+    /// app-data root from passing as inside it.
+    #[test]
+    fn session_holder_matches_each_arm_but_not_a_root_sibling() {
+        let none = HashSet::new();
+        let registry = HashSet::from(["C:/S/One".to_string()]);
+        let root = Some("c:/app/wts");
+        assert!(is_session_holder(r"c:\s\one", "topic", &registry, None));
+        assert!(is_session_holder("C:/x", "gd/session/x", &none, None));
+        assert!(is_session_holder("C:/App/wts/h/wt", "topic", &none, root));
+        assert!(!is_session_holder("C:/App/wtsx/wt", "topic", &none, root));
+        assert!(!is_session_holder("C:/x", "topic", &none, root));
+    }
+
+    /// A branch that took in the base between the first read and the holder's lock says
+    /// "up-to-date", not git's no-op dressed as an update. Driven through the holder arm
+    /// directly, since the outer read would already answer it.
+    #[tokio::test]
+    async fn a_holder_already_containing_the_base_reports_up_to_date() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-current", "held-current").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let base_sha = tip(&repo_s, &main).await;
+        run(&holder, &["merge", "-q", "--ff-only", &base_sha]).await;
+        commit_file(&holder, "more.txt", "more\n").await;
+        let held_tip = tip(&repo_s, "held-current").await;
+
+        let state = AppState::default();
+        for merge in [
+            HolderMerge::FastForward,
+            HolderMerge::Merge { subject: None },
+        ] {
+            let outcome =
+                update_in_holder(&state, &porcelain, "held-current", &main, &base_sha, merge)
+                    .await
+                    .expect("a holder already containing the base is not an error");
+            assert_eq!(outcome.outcome, "up-to-date");
+            assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
+        }
+        assert_eq!(tip(&repo_s, "held-current").await, held_tip);
+    }
+
+    /// A holder paused mid-merge is refused by name and left paused.
+    #[tokio::test]
+    async fn a_holder_mid_operation_is_refused() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-midop", "held-midop").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        run(&holder, &["merge", "--no-commit", "--no-ff", &main]).await;
+        let held_tip = tip(&repo_s, "held-midop").await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, "held-midop", &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        let message = expect_branch_held(&err, "mid-op", &porcelain, "held-midop");
+        assert!(message.contains("in the middle of a merge"), "{message}");
+        assert_eq!(tip(&repo_s, "held-midop").await, held_tip);
+        assert!(crate::git::ops::op_state(&holder).await.unwrap().merging);
+    }
+
+    /// Tracked changes in the holder refuse the update and survive it untouched.
+    #[tokio::test]
+    async fn a_holder_with_tracked_changes_is_refused() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-dirty", "held-dirty").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let seed = std::path::Path::new(&holder).join("seed.txt");
+        std::fs::write(&seed, "work in progress\n").unwrap();
+        let held_tip = tip(&repo_s, "held-dirty").await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, "held-dirty", &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_branch_held(&err, "dirty", &porcelain, "held-dirty");
+        assert_eq!(tip(&repo_s, "held-dirty").await, held_tip);
+        assert_eq!(
+            std::fs::read_to_string(&seed).unwrap(),
+            "work in progress\n"
+        );
+    }
+
+    /// Untracked files alone don't make the holder dirty: the update proceeds and
+    /// leaves them where they were.
+    #[tokio::test]
+    async fn a_holder_with_only_untracked_files_still_updates() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-untracked", "held-untracked").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let scratch = std::path::Path::new(&holder).join("scratch.txt");
+        std::fs::write(&scratch, "notes\n").unwrap();
+
+        let state = AppState::default();
+        let outcome = update_branch_from(
+            &state,
+            &repo_s,
+            "held-untracked",
+            &main,
+            &HashSet::new(),
+            None,
+        )
+        .await
+        .expect("untracked files don't block the update");
+        assert_eq!(outcome.outcome, "fast-forward");
+        assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
+        assert_eq!(
+            tip(&repo_s, "held-untracked").await,
+            tip(&repo_s, &main).await
+        );
+        assert!(scratch.exists());
+    }
+
+    /// A conflicting merge inside the holder is aborted: no MERGE_HEAD, a clean tree, the
+    /// branch where it stood, and the conflicting file named.
+    #[tokio::test]
+    async fn a_conflicting_held_merge_is_aborted_and_refused() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-conflict", "held-conflict").await;
+        commit_file(&holder, "seed.txt", "holder side\n").await;
+        commit_file(&repo_s, "seed.txt", "main side\n").await;
+        let held_tip = tip(&repo_s, "held-conflict").await;
+
+        let state = AppState::default();
+        let err = update_branch_from(
+            &state,
+            &repo_s,
+            "held-conflict",
+            &main,
+            &HashSet::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        let message = expect_branch_held(&err, "conflict", &porcelain, "held-conflict");
+        assert!(message.contains("seed.txt"), "{message}");
+        assert!(message.contains(&porcelain), "{message}");
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
+        assert_eq!(run(&holder, &["status", "--porcelain"]).await, "");
+        assert_eq!(tip(&repo_s, "held-conflict").await, held_tip);
+    }
+
+    /// A holder that switched away between the lookup and its lock is refused; driven
+    /// through the holder arm directly, since a fresh lookup would no longer find it.
+    #[tokio::test]
+    async fn a_holder_that_switched_branches_is_refused() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-moved", "held-moved").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let (held_tip, base_sha) = (tip(&repo_s, "held-moved").await, tip(&repo_s, &main).await);
+        run(&holder, &["switch", "-qc", "elsewhere"]).await;
+
+        let state = AppState::default();
+        let err = update_in_holder(
+            &state,
+            &porcelain,
+            "held-moved",
+            &main,
+            &base_sha,
+            HolderMerge::FastForward,
+        )
+        .await
+        .unwrap_err();
+        expect_branch_held(&err, "moved", &porcelain, "held-moved");
+        assert_eq!(tip(&repo_s, "held-moved").await, held_tip);
+        assert_eq!(
+            run(&holder, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/elsewhere"
+        );
+    }
+
+    #[test]
+    fn name_conflicts_names_three_then_counts_the_rest() {
+        let paths = |n: usize| (1..=n).map(|i| format!("f{i}")).collect::<Vec<_>>();
+        assert_eq!(name_conflicts(&paths(1)), "f1");
+        assert_eq!(name_conflicts(&paths(3)), "f1, f2, f3");
+        assert_eq!(name_conflicts(&paths(5)), "f1, f2, f3 and 2 more");
+    }
+
+    /// The update UI reads both keys; `holder` must serialize as an explicit null on
+    /// every arm that ran in no other checkout.
+    #[test]
+    fn update_outcome_serializes_to_the_pinned_wire_shape() {
+        let held = UpdateBranchOutcome {
+            outcome: "fast-forward".to_string(),
+            holder: Some("C:/path/to/wt".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&held).unwrap(),
+            r#"{"outcome":"fast-forward","holder":"C:/path/to/wt"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&UpdateBranchOutcome::unheld("merge")).unwrap(),
+            r#"{"outcome":"merge","holder":null}"#
         );
     }
 

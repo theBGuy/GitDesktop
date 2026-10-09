@@ -42,6 +42,15 @@ export type AppError =
    *  running in the user's terms ("a worktree removal"), never the lock itself;
    *  `message` is already the complete sentence a toast shows. */
   | { kind: "busy"; message: string; holder: string }
+  /** A branch update refused because another checkout holds `branch` and the
+   *  update couldn't run there: `holder` is that checkout's path, `reason` why. */
+  | {
+      kind: "branchHeld";
+      message: string;
+      holder: string;
+      branch: string;
+      reason: "session" | "mid-op" | "dirty" | "conflict" | "moved" | "failed";
+    }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

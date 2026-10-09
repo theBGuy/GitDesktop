@@ -25,6 +25,16 @@ pub enum AppError {
     /// running in the user's terms ("a worktree removal"), never the lock itself.
     #[error("{}", busy_message(holder))]
     Busy { holder: String },
+    /// A branch update aimed at a branch another checkout holds was refused or failed
+    /// there; `holder` names that checkout so the UI can offer opening it.
+    #[error("{message}")]
+    BranchHeld {
+        message: String,
+        holder: String,
+        branch: String,
+        /// "session" | "mid-op" | "dirty" | "conflict" | "moved" | "failed"
+        reason: String,
+    },
     #[error("not a git repository: {0}")]
     NotARepo(String),
     #[error("git executable not found")]
@@ -106,6 +116,7 @@ impl Serialize for AppError {
             // keep-or-drop decision instead of presenting an error.
             AppError::PullRebaseWouldDrop(_) => "pullRebaseWouldDrop",
             AppError::Busy { .. } => "busy",
+            AppError::BranchHeld { .. } => "branchHeld",
             AppError::NotARepo(_) => "notARepo",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
@@ -134,6 +145,16 @@ impl Serialize for AppError {
             }
             AppError::Busy { holder } => {
                 map.serialize_entry("holder", holder)?;
+            }
+            AppError::BranchHeld {
+                holder,
+                branch,
+                reason,
+                ..
+            } => {
+                map.serialize_entry("holder", holder)?;
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("reason", reason)?;
             }
             AppError::Conflict { op, paths, report } => {
                 map.serialize_entry("op", op)?;
@@ -255,6 +276,23 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&err).unwrap(),
             r#"{"kind":"busy","message":"A worktree removal is still running — try again when it finishes.","holder":"a worktree removal"}"#
+        );
+    }
+
+    /// The update UI offers opening `holder` and words its notice off `reason`, so
+    /// all five keys are the contract.
+    #[test]
+    fn branch_held_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::BranchHeld {
+            message: "The checkout at C:/wt/feature has uncommitted changes. feature is unchanged."
+                .to_string(),
+            holder: "C:/wt/feature".to_string(),
+            branch: "feature".to_string(),
+            reason: "dirty".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"branchHeld","message":"The checkout at C:/wt/feature has uncommitted changes. feature is unchanged.","holder":"C:/wt/feature","branch":"feature","reason":"dirty"}"#
         );
     }
 

@@ -737,6 +737,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   update completes. Every worktree of the repository sees the same hold. An update a crash
   or a quit cut short doesn't stay in the way: the next update, delete, or reset of that
   branch clears it on the spot, and a background pass catches the rest.
+- **A branch checked out in another worktree updates too** — the update runs inside that
+  worktree when it's clean and between operations; otherwise the message names the
+  worktree and offers to open it. Each branch updates on its own, so several can run at
+  once.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
   of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
