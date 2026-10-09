@@ -77,13 +77,20 @@ export function BranchRulesDialog({
   // Seed the editable draft from the active scope when the dialog opens or the
   // scope changes (switching scopes discards any unsaved edits in the other).
   const seededScope = useRef<string | null>(null);
+  // Open-session token, reminted on every reseed: the dialog stays mounted and
+  // Cancel is live mid-save, so a settle closes only the draft that submitted.
+  // Dropped only in `!open`, never by a cleanup: an `<Activity>` hide runs those.
+  const session = useRef<object | null>(null);
   useEffect(() => {
     if (!open) {
       seededScope.current = null;
+      session.current = null;
       return;
     }
+    if (session.current === null) session.current = {};
     if (seededScope.current !== scope && active.data) {
       seededScope.current = scope;
+      session.current = {};
       setDraft(active.data);
     }
   }, [open, scope, active.data]);
@@ -219,6 +226,7 @@ export function BranchRulesDialog({
     // went, and a save landing after a repo switch must not close the next
     // repo's dialog (RepositoryView is one instance across switches).
     const savedFor = repoPath;
+    const submitted = session.current;
     const savedShared = scope === "shared";
     const target = savedShared ? saveShared : savePersonal;
     try {
@@ -232,7 +240,12 @@ export function BranchRulesDialog({
         ? "Saved to .gitdesktop/branch-rules.json — commit it to share with your team"
         : "Branch rules saved",
     );
-    if (useUiStore.getState().repoPath === savedFor) onOpenChange(false);
+    if (
+      useUiStore.getState().repoPath === savedFor &&
+      submitted !== null &&
+      session.current === submitted
+    )
+      onOpenChange(false);
   }
 
   const promotionBranches = draft.promotionBranches;
@@ -543,8 +556,16 @@ export function BranchRulesDialog({
             // Button fills it to match the stretched Cancel beside it.
             className="w-full"
             onClick={() => void doSave()}
-            disabled={!dirty || saving.isPending}
-            reason={!dirty ? "No changes to save" : "Saving…"}
+            disabled={!active.data || !dirty || saving.isPending}
+            reason={
+              !active.data
+                ? active.isError
+                  ? "Couldn't load branch rules"
+                  : "Loading branch rules…"
+                : !dirty
+                  ? "No changes to save"
+                  : "Saving…"
+            }
           >
             {scope === "shared" ? "Save to repository" : "Save changes"}
           </DisabledReasonButton>
