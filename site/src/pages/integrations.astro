@@ -25,7 +25,7 @@ const forges = [
     ],
     note: "Requires gh installed and authenticated. Switch the active account per host in Settings → Accounts.",
     image: appGithub,
-    alt: "A GitHub pull request in GitDesktop: CI checks (2 passed, 1 failed) with per-job status, an automated AI review, and the merge action",
+    alt: "A GitHub pull request in GitDesktop: its branch and line counts, a label, a rollup of 3 passed checks, and the description with Closes and Relates to issue links",
   },
   {
     forge: "gitlab",
@@ -41,7 +41,7 @@ const forges = [
     ],
     note: "The activity feed folds in commits, approvals and close/reopen/merge, but GitLab has no force-push or draft events. Insights charts GitLab pipelines and lists the project's recently active forks alongside your local-git analytics.",
     image: appGitlab,
-    alt: "A GitLab merge request in GitDesktop: colored labels, a passing pipeline, an approval, a review comment, and the merge action",
+    alt: "A GitLab merge request in GitDesktop: bug and enhancement labels, an assignee, time tracking, a rollup of 3 passed checks, and an activity feed with a pushed commit, a comment, and close and reopen events",
   },
   {
     forge: "bitbucket",
@@ -58,7 +58,7 @@ const forges = [
     ],
     note: "Build statuses link out with name, state, and URL; logs aren't fetchable. Reopening a declined PR isn't available (a Bitbucket platform limit), and Bitbucket has no native issue tracker. Link a Jira project instead (below).",
     image: appBitbucket,
-    alt: "A Bitbucket pull request in GitDesktop: a Tasks checklist, an approval, review comments, and the merge action",
+    alt: "A Bitbucket pull request in GitDesktop: its description, an empty Tasks checklist with an Add task control, a comment, and the start of an automated AI review",
   },
 ] as const;
 
@@ -198,7 +198,7 @@ const jiraFeatures = [
       <figure data-reveal class="window mt-12">
         <Image
           src={appJira}
-          alt="The Issues tab in GitDesktop showing a linked Jira project: an issue list with statuses and story-point badges, and an issue detail with status, priority, assignee, story points, labels, and a comment"
+          alt="The Issues tab in GitDesktop on a Bitbucket repository with a linked Jira project: the project's issues with their statuses and story points, and the open issue MYT-2 with its In Progress status, description, a comment, and its type, priority, assignee, story points, labels, and time tracking"
           widths={[720, 1080, 1440]}
           sizes="(min-width: 1024px) 1100px, 94vw"
           format="webp"
