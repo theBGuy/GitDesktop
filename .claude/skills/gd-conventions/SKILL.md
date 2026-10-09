@@ -738,7 +738,12 @@ sweep stale "coming soon" mentions when a feature ships.
   that exits 0 on input it could not parse approves exactly what it cannot
   see. Each arm gets a miss fixture in `scripts/checks.test.mjs`, and an
   empty-corpus / zero-files-matched result is a FAIL or an explicit annotated
-  skip, never a pass.
+  skip, never a pass. **A PR that ships a scanner/guard is a parser-grade
+  adversarial surface:** budget a dedicated adversarial loop over its input
+  grammar (aliased/namespace imports, destructured params, catch bindings —
+  the shapes reviewers actually threw) or ship the guard as its own PR — one
+  cycle-3 PR (#425) paid 9+ consecutive reviewer rounds draining exactly those
+  arms one at a time.
 
 ## Definition of done
 
