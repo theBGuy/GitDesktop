@@ -149,10 +149,12 @@ export function applyRepoLens(
   queryClient.setQueryData(lensKey(repo), lens);
   if (!clearSelections) return;
   // A remote number selected under the old lens would resolve against the
-  // wrong repo — drop it. Local + Jira selections are lens-independent.
-  const ui = useUiStore.getState();
-  if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
-  if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
+  // wrong repo — drop it. Local + Jira selections are lens-independent. A prune,
+  // so it never bumps the interaction epoch: every caller bumps for itself (a
+  // navigator at its request, the switcher's note, a create or promote
+  // continuation's own note), and a bump from inside a navigator's
+  // `beforeSelect` would retire a newer action claimed before that callback ran.
+  useUiStore.getState().clearRemoteSelections();
 }
 
 /** The switcher's setter — {@link applyRepoLens} with the selection clears and the disk
@@ -160,11 +162,12 @@ export function applyRepoLens(
  *  door: the interaction is noted FIRST, or a settling navigation lands and applies ITS
  *  lens over the choice just made. One exception: a call from inside a navigator's
  *  `beforeSelect` (the branch-chip route) is covered by that navigator's own
- *  request-time epoch bump instead. Navigation-owned direct {@link applyRepoLens}
- *  callers stay silent — each is re-checked by its navigator's `stillValid`. A create
- *  continuation that flips the lens itself (CreatePrDialog's upstream arm) does note
- *  the interaction, but only while its repo is the live one: off-screen the epoch and
- *  the selection clears would hit the repo the user moved to instead. */
+ *  request-time epoch bump instead, and the note is a no-op there. Navigation-owned
+ *  direct {@link applyRepoLens} callers stay silent — each is re-checked by its
+ *  navigator's `stillValid`. A create continuation that flips the lens itself
+ *  (CreatePrDialog's upstream arm) does note the interaction, but only while its repo
+ *  is the live one: off-screen the epoch and the selection clears would hit the repo
+ *  the user moved to instead. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();
   const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);

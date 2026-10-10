@@ -431,9 +431,11 @@ interface UiState {
     reviewId?: string | null;
     /** Store-external state this navigation depends on (the caller's repo-lens
      *  write), run inside the SAME view-transition callback as the selection.
-     *  Written outside it, it would land a render early — the transition callback
-     *  is deferred on Chromium — pairing the new lens with the old PR number and
-     *  fetching a pair the user never selected. */
+     *  Written outside it, it would land a render early — with View Transitions
+     *  the callback runs in a later task, crossfaded or not — pairing the new lens
+     *  with the old PR number and fetching a pair the user never selected. A
+     *  {@link UiState.noteUserInteraction} it makes is dropped: this navigation's
+     *  request-time bump covers it, and a late one would retire a newer action. */
     beforeSelect?: () => void;
     /** Re-check for the deferred-apply window, run FIRST inside the transition
      *  callback: an async caller's validity can lapse between scheduling and applying,
@@ -511,7 +513,15 @@ interface UiState {
   closeMyWork: () => void;
   setRepoTab: (tab: RepoTab) => void;
   setCompareBranch: (branch: string | null) => void;
+  /** `setCompareBranch` for the panel's own default, picked when the target is
+   *  unset or no longer offered (deleted, archived, checked out): an automatic
+   *  correction, so it never advances {@link UiState.interactionEpoch}. */
+  defaultCompareBranch: (branch: string) => void;
   selectPr: (pr: SelectedPr | null) => void;
+  /** Drop the REMOTE PR and issue selections (with the PR's one-shot reveal and
+   *  align) in one set: the prune a lens flip runs, never a user's pick, so it
+   *  never advances {@link UiState.interactionEpoch}. */
+  clearRemoteSelections: () => void;
   /** `selectPr` that also arms `pendingPrAlign`, for a pick made off the list: the
    *  list's open/closed tab can't contain every stack member a PR view links to, so
    *  the panel resolves the chosen PR's real state and aligns the tab to it. */
@@ -564,7 +574,8 @@ interface UiState {
   clearSelectedFile: () => void;
   /** Advance {@link UiState.interactionEpoch} for a USER action whose state lives in a
    *  component rather than this store — a panel-local tab pick is still "where the user
-   *  is". Call it BEFORE the local set, so a continuation strands before it can land. */
+   *  is". Call it BEFORE the local set, so a continuation strands before it can land.
+   *  A no-op inside a navigator's `beforeSelect`, whose request-time bump covers it. */
   noteUserInteraction: () => void;
   selectCommit: (hash: string | null) => void;
   selectCompareCommit: (hash: string | null) => void;
@@ -581,6 +592,10 @@ interface UiState {
   setGenerating: (generating: boolean) => void;
   setCommitAiGenerated: (generated: boolean) => void;
   setAmending: (hash: string | null) => void;
+  /** Lands an amend on the Changes tab: the commit's message and amend mode in ONE
+   *  set. It never bumps {@link UiState.interactionEpoch}: it runs after the commit
+   *  lookup's await, so the amend's request bumped instead (see useAmendCommit). */
+  landAmend: (hash: string, title: string, body: string) => void;
   /** Point the live commit fields at `key`'s saved draft (load on repo/branch
    *  switch). The previous draft is already mirrored in `commitDrafts`. */
   loadCommitDraft: (key: string) => void;
@@ -598,47 +613,53 @@ interface UiState {
 }
 
 export const useUiStore = create<UiState>()((set, get) => {
+  type DraftFieldsPatch = Partial<{
+    commitTitle: string;
+    commitBody: string;
+    commitCoAuthors: CommitAuthor[];
+    commitAiGenerated: boolean;
+    amendingHash: string | null;
+  }>;
   // Mirror the live commit-draft fields into commitDrafts[activeDraftKey] on
   // every edit so a draft survives repo/branch switches; empty drafts are
   // pruned so the map doesn't accumulate blanks.
-  const setDraftFields = (
-    patch: Partial<{
-      commitTitle: string;
-      commitBody: string;
-      commitCoAuthors: CommitAuthor[];
-      commitAiGenerated: boolean;
-      amendingHash: string | null;
-    }>,
-  ) =>
-    set((s) => {
-      const next = {
-        commitTitle: s.commitTitle,
-        commitBody: s.commitBody,
-        commitCoAuthors: s.commitCoAuthors,
-        commitAiGenerated: s.commitAiGenerated,
-        amendingHash: s.amendingHash,
-        ...patch,
+  const draftFieldsPatch = (
+    s: UiState,
+    patch: DraftFieldsPatch,
+  ): Partial<UiState> => {
+    const next = {
+      commitTitle: s.commitTitle,
+      commitBody: s.commitBody,
+      commitCoAuthors: s.commitCoAuthors,
+      commitAiGenerated: s.commitAiGenerated,
+      amendingHash: s.amendingHash,
+      ...patch,
+    };
+    const result: Partial<UiState> = { ...patch };
+    if (s.activeDraftKey) {
+      const draft: CommitDraft = {
+        title: next.commitTitle,
+        body: next.commitBody,
+        coAuthors: next.commitCoAuthors,
+        aiGenerated: next.commitAiGenerated,
+        amendingHash: next.amendingHash,
       };
-      const result: Partial<UiState> = { ...patch };
-      if (s.activeDraftKey) {
-        const draft: CommitDraft = {
-          title: next.commitTitle,
-          body: next.commitBody,
-          coAuthors: next.commitCoAuthors,
-          aiGenerated: next.commitAiGenerated,
-          amendingHash: next.amendingHash,
-        };
-        const drafts = { ...s.commitDrafts };
-        if (isEmptyDraft(draft)) delete drafts[s.activeDraftKey];
-        else drafts[s.activeDraftKey] = draft;
-        result.commitDrafts = drafts;
-      }
-      return result;
-    });
+      const drafts = { ...s.commitDrafts };
+      if (isEmptyDraft(draft)) delete drafts[s.activeDraftKey];
+      else drafts[s.activeDraftKey] = draft;
+      result.commitDrafts = drafts;
+    }
+    return result;
+  };
+  const setDraftFields = (patch: DraftFieldsPatch) =>
+    set((s) => draftFieldsPatch(s, patch));
 
   // Advance the epoch NOW, ahead of a transition-backed navigation's scheduling:
-  // startViewTransition applies its patch deferred, so an epoch riding inside the
-  // callback would land after a settling continuation's guard had already passed.
+  // with View Transitions, startViewTransition applies its patch in a later task
+  // (under a crossfade, or without animation after any pending transition's
+  // update; only reduced motion or a missing API applies it synchronously), so an
+  // epoch riding inside the callback would land after a settling continuation's
+  // guard had passed.
   // Safe outside the transition — the epoch has no visual subscribers, so this set
   // can't disturb the snapshot the transition captures. Returns the value it produced,
   // which a navigator hands to `stillValid` as the only epoch its re-check can compare
@@ -647,6 +668,30 @@ export const useUiStore = create<UiState>()((set, get) => {
   const bumpEpochNow = (): number => {
     set((s) => ({ interactionEpoch: s.interactionEpoch + 1 }));
     return get().interactionEpoch;
+  };
+
+  // The repo-view navigators (openRepo, openPr, openIssue, openRun, openAgentTab,
+  // openRepoView) crossfade only when they change the top-level view: a
+  // repo→repo swap or an in-repo landing skips the animation, since a crossfade
+  // there double-exposes two differently laid-out headers. Read at REQUEST time.
+  const repoViewMotion = () => ({ animate: get().view !== "repo" });
+
+  // Set while a navigator runs its caller's `beforeSelect`. That navigator bumped
+  // at request time, so a note requested here (a lens switch's) is already
+  // covered, and landing it now would retire a newer action claimed before the
+  // callback ran, such as a pending repo open.
+  let inBeforeSelect = false;
+  const runBeforeSelect = (beforeSelect: (() => void) | undefined) => {
+    if (!beforeSelect) return;
+    // Restored, not cleared: a navigator applied synchronously from inside a
+    // `beforeSelect` (reduced motion, no API) must not end the outer run early.
+    const outer = inBeforeSelect;
+    inBeforeSelect = true;
+    try {
+      beforeSelect();
+    } finally {
+      inBeforeSelect = outer;
+    }
   };
 
   return {
@@ -694,18 +739,20 @@ export const useUiStore = create<UiState>()((set, get) => {
 
     openRepo: (info) => {
       bumpEpochNow();
-      startViewTransition(() =>
-        set({
-          view: "repo",
-          previousView: "repo",
-          repoPath: info.root,
-          repoName: info.name,
-          repoTab: "changes",
-          // Clear the live fields; the previous repo's draft stays in
-          // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
-          // repo's draft once its branch is known.
-          ...CROSS_REPO_RESET,
-        }),
+      startViewTransition(
+        () =>
+          set({
+            view: "repo",
+            previousView: "repo",
+            repoPath: info.root,
+            repoName: info.name,
+            repoTab: "changes",
+            // Clear the live fields; the previous repo's draft stays in
+            // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
+            // repo's draft once its branch is known.
+            ...CROSS_REPO_RESET,
+          }),
+        repoViewMotion(),
       );
     },
     closeRepo: () => {
@@ -725,13 +772,14 @@ export const useUiStore = create<UiState>()((set, get) => {
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         // Nothing lands once the caller says the request has lapsed: the patch below
-        // applies deferred, so its preconditions are re-checked here, not at request
-        // time. The caller gets this navigation's own epoch to compare against.
+        // can apply in a later task, so its preconditions are re-checked here, not
+        // at request time. The caller gets this navigation's own epoch to compare
+        // against.
         if (target.stillValid?.(epochAtRequest) === false) return;
         // Before the set, inside this callback: react-query updates an
         // observer's result synchronously, so the flush below renders the
         // caller's write and this selection in one pass.
-        target.beforeSelect?.();
+        runBeforeSelect(target.beforeSelect);
         const switchingRepo = get().repoPath !== target.repoPath;
         set({
           view: "repo",
@@ -754,12 +802,12 @@ export const useUiStore = create<UiState>()((set, get) => {
           // the PR's real state.
           pendingPrAlign: true,
         });
-      });
+      }, repoViewMotion());
     },
     openIssue: (target) => {
       bumpEpochNow();
       startViewTransition(() => {
-        target.beforeSelect?.();
+        runBeforeSelect(target.beforeSelect);
         const switchingRepo = get().repoPath !== target.repoPath;
         set({
           view: "repo",
@@ -773,7 +821,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
           selectedIssue: { kind: "remote", id: String(target.number) },
         });
-      });
+      }, repoViewMotion());
     },
     openRun: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -790,7 +838,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // After the reset (which nulls it) so the run stays selected.
           selectedRunId: target.runId,
         });
-      });
+      }, repoViewMotion());
     },
     openAgentTab: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -805,7 +853,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           repoTab: "agent",
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
-      });
+      }, repoViewMotion());
     },
     openRepoView: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -820,7 +868,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...(target.tab ? { repoTab: target.tab } : {}),
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
-      });
+      }, repoViewMotion());
     },
     setRepoTab: (tab) =>
       set((s) => ({ repoTab: tab, interactionEpoch: s.interactionEpoch + 1 })),
@@ -837,6 +885,8 @@ export const useUiStore = create<UiState>()((set, get) => {
         compareCommitHash: null,
         interactionEpoch: s.interactionEpoch + 1,
       })),
+    defaultCompareBranch: (branch) =>
+      set({ compareBranch: branch, compareCommitHash: null }),
     // Clears any armed reveal AND tab align in the SAME set (openPr's atomicity):
     // both belong to the PR the notification opened, and picking another from the
     // list would leave them armed to fire on a later return to that one.
@@ -846,6 +896,13 @@ export const useUiStore = create<UiState>()((set, get) => {
         pendingReviewId: null,
         pendingPrAlign: false,
         interactionEpoch: s.interactionEpoch + 1,
+      })),
+    clearRemoteSelections: () =>
+      set((s) => ({
+        ...(s.selectedPr?.kind === "remote"
+          ? { selectedPr: null, pendingReviewId: null, pendingPrAlign: false }
+          : {}),
+        ...(s.selectedIssue?.kind === "remote" ? { selectedIssue: null } : {}),
       })),
     setPendingPrSection: (section) => set({ pendingPrSection: section }),
     setPendingReviewId: (reviewId) => set({ pendingReviewId: reviewId }),
@@ -1012,7 +1069,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       })),
     clearSelectedFile: () => set({ selectedFile: null }),
     noteUserInteraction: () => {
-      bumpEpochNow();
+      if (!inBeforeSelect) bumpEpochNow();
     },
     setCommitDraft: (title, body) =>
       setDraftFields({ commitTitle: title, commitBody: body }),
@@ -1063,6 +1120,15 @@ export const useUiStore = create<UiState>()((set, get) => {
     setCommitAiGenerated: (generated) =>
       setDraftFields({ commitAiGenerated: generated }),
     setAmending: (hash) => setDraftFields({ amendingHash: hash }),
+    landAmend: (hash, title, body) =>
+      set((s) => ({
+        ...draftFieldsPatch(s, {
+          commitTitle: title,
+          commitBody: body,
+          amendingHash: hash,
+        }),
+        repoTab: "changes",
+      })),
     loadCommitDraft: (key) =>
       set((s) => {
         // The outgoing draft is already mirrored in commitDrafts, so just point

@@ -50,7 +50,7 @@ import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
-import { useOpenRepoByPath } from "./useOpenRepoByPath";
+import { claimRepoOpen, useOpenRepoByPath } from "./useOpenRepoByPath";
 
 /** "Modified" carries the warning tokens so it can't be mistaken for the
  *  identically-weighted "Up to date" at a glance; the labels differ too, so the
@@ -295,9 +295,13 @@ function SubmoduleList({
 
   async function handleOpenAsRepo(s: Submodule) {
     const full = submodulePath(repoPath, s.path);
-    // useOpenRepoByPath reports its own failures as a toast and resolves the
-    // same either way, so probe first — closing the manager on a failed open
-    // would hide the toast's context behind a dismissed dialog.
+    // Claimed before the probe, which is part of this open's request: a newer
+    // open during it wins, and a failed probe retires older ones like any
+    // failed open does.
+    const stillCurrent = claimRepoOpen();
+    // Probed here rather than left to useOpenRepoByPath, whose failure toast
+    // names the full path: a bad submodule reports its submodule-relative path,
+    // and the manager stays open beside it instead of closing on a failed open.
     try {
       await validateRepo(full);
     } catch (e) {
@@ -310,7 +314,7 @@ function SubmoduleList({
     }
     // A submodule is an independent repository that nothing else in the app can
     // reach, so it earns a recents row like any other opened repo.
-    await openByPath(full, "picker");
+    await openByPath(full, "picker", stillCurrent);
     onClose();
   }
 

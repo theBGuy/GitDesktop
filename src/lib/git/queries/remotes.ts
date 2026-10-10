@@ -1,16 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import { useRepoMutation } from "./internal";
 
-export function useRemotes(repo: string) {
-  return useQuery({
+export function remotesOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "remotes"] as const,
     queryFn: () => api.gitRemotes(repo),
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useRemotes(repo: string) {
+  return useQuery(remotesOptions(repo));
 }
 
 export function usePublishRepo(repo: string) {
@@ -48,17 +54,22 @@ export function usePublishRepo(repo: string) {
 /** Which providers this machine can publish to — drives the publish buttons for
  *  a repo with no hosted remote yet. Honors the cold-start test mode like
  *  `useForgeStatus` (the probe hits the real CLIs otherwise). */
-export function usePublishTargets(repo: string, enabled: boolean) {
-  return useQuery({
+export function publishTargetsOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "publish-targets"] as const,
     queryFn: COLD_START_NO_GH
       ? () =>
           Promise.resolve({ github: false, gitlab: false, bitbucket: false })
       : () => api.forgePublishTargets(repo),
-    enabled,
     staleTime: 60_000,
     retry: false,
-  });
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** The publish-button providers; the read is {@link publishTargetsOptions}. */
+export function usePublishTargets(repo: string, enabled: boolean) {
+  return useQuery({ ...publishTargetsOptions(repo), enabled });
 }
 
 export function useRemoteUrl(repo: string, name: string, enabled: boolean) {

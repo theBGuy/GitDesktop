@@ -80,6 +80,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
   const compareBranch = useUiStore((s) => s.compareBranch);
   const setCompareBranch = useUiStore((s) => s.setCompareBranch);
+  const defaultCompareBranch = useUiStore((s) => s.defaultCompareBranch);
   const compareCommitHash = useUiStore((s) => s.compareCommitHash);
   const selectCompareCommit = useUiStore((s) => s.selectCompareCommit);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
@@ -137,11 +138,20 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const defaultOffered = otherBranches.some((b) => b.name === defaultName);
 
   // Default the comparison to the default branch (when offered), else the first
-  // other branch.
+  // other branch. An automatic correction (also after a refetch drops the target),
+  // so it rides the non-bumping setter; the user's pick below keeps the bump.
   useEffect(() => {
     if (firstOther === null || compareValid) return;
-    setCompareBranch(defaultOffered && defaultName ? defaultName : firstOther);
-  }, [firstOther, compareValid, defaultOffered, defaultName, setCompareBranch]);
+    defaultCompareBranch(
+      defaultOffered && defaultName ? defaultName : firstOther,
+    );
+  }, [
+    firstOther,
+    compareValid,
+    defaultOffered,
+    defaultName,
+    defaultCompareBranch,
+  ]);
 
   const comparison = useCompareBranches(repoPath, compareBranch, currentName);
 

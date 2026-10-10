@@ -1,16 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import * as api from "../api";
 import { keepPreviousDataForRepo } from "./core";
 import { useRepoMutation } from "./internal";
 
-export function useStashCount(repo: string) {
-  return useQuery({
+export function stashCountOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "stash-count"] as const,
     queryFn: () => api.gitStashCount(repo),
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useStashCount(repo: string) {
+  return useQuery(stashCountOptions(repo));
 }
 
 export function useDiscardAll(repo: string) {
@@ -182,14 +188,19 @@ export function useRestoreOrphaned(repo: string) {
 
 /** Reconcile-on-read for the interrupted-op recovery banner. Lives under the repo
  *  subtree, so a ConflictBanner Continue/Abort re-runs it and clears the banner. */
-export function useOplogCheck(repo: string, enabled = true) {
-  return useQuery({
+export function oplogCheckOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "oplog-check"] as const,
     queryFn: () => api.gitOplogCheck(repo),
-    enabled,
     staleTime: 30_000,
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** The recovery banner's journal check; the read is {@link oplogCheckOptions}. */
+export function useOplogCheck(repo: string, enabled = true) {
+  return useQuery({ ...oplogCheckOptions(repo), enabled });
 }
 
 /** The full operation journal, gated to fetch only while the history dialog is

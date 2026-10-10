@@ -514,11 +514,11 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
       deleteRepoLens(repoPath).catch(() => undefined);
       clearRepoLensCache(queryClient, repoPath);
       // Removing upstream collapses the lens to origin, so a still-
-      // selected remote number would resolve against the other repo.
-      // Same clears `useSetRepoLens` does on an explicit lens flip.
+      // selected remote number would resolve against the other repo:
+      // the same non-bumping prune a lens flip runs, and only while
+      // this repo is the open one (the selections are global).
       const ui = useUiStore.getState();
-      if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
-      if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
+      if (ui.repoPath === repoPath) ui.clearRemoteSelections();
       toast.success("Upstream remote removed");
       setConfirming(false);
     } catch (e) {

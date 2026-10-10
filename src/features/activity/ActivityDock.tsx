@@ -419,11 +419,12 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         return;
       }
       markNotificationRead(n.id);
-      // The check above covers SCHEDULING this landing; `stillValid` re-checks at
-      // the deferred apply — generation for a later notification click, epoch for
-      // any OTHER user action in that window. The epoch is comparable only because
+      // The check above covers SCHEDULING this landing; `stillValid` re-checks when
+      // the navigator applies it, which can be after the call returns (crossfaded
+      // or not) — generation for a later notification click, epoch for any OTHER
+      // user action in that window. The epoch is comparable only because
       // the navigator hands back the value its own synchronous bump produced; this
-      // landing's beforeSelect bumps too, but runs after the check.
+      // landing's beforeSelect (the lens apply) never bumps.
       const stillValid = (epochAtRequest: number) =>
         gen === clickGen &&
         useUiStore.getState().interactionEpoch === epochAtRequest;

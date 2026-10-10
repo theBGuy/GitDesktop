@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
@@ -79,12 +80,17 @@ export function useCreateBranch(repo: string) {
   );
 }
 
-export function useDefaultBranch(repo: string) {
-  return useQuery({
+export function defaultBranchOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "default-branch"] as const,
     queryFn: () => api.gitDefaultBranch(repo),
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useDefaultBranch(repo: string) {
+  return useQuery(defaultBranchOptions(repo));
 }
 
 export function useRenameBranch(repo: string) {

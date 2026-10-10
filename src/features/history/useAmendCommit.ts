@@ -15,20 +15,30 @@ import { toastError } from "@/lib/toast";
  * Loads a commit's message into the commit box and switches to the Changes
  * tab in amend mode. Shared by the history context menu and the commit
  * detail actions menu. Throws on lookup failure; callers surface the error.
+ * Resolves whether the amend landed: false when the user moved on (another
+ * navigation or repo) while the commit loaded, which is silent.
  */
 export function useAmendCommit(repoPath: string) {
-  const setCommitDraft = useUiStore((s) => s.setCommitDraft);
-  const setAmending = useUiStore((s) => s.setAmending);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);
+  const landAmend = useUiStore((s) => s.landAmend);
 
   return useCallback(
-    async (hash: string) => {
+    async (hash: string): Promise<boolean> => {
+      // The request is a navigation (to Changes), so it bumps NOW, and the bump
+      // stands even if the lookup fails: the click is the user's latest request.
+      // The landing after the await is non-bumping and only while nothing moved.
+      noteUserInteraction();
+      const { interactionEpoch: epoch, repoPath: firedOn } =
+        useUiStore.getState();
       const details = await gitCommitDetails(repoPath, hash);
-      setCommitDraft(details.subject, details.body);
-      setAmending(hash);
-      setRepoTab("changes");
+      const live = useUiStore.getState();
+      if (live.interactionEpoch !== epoch || live.repoPath !== firedOn) {
+        return false;
+      }
+      landAmend(hash, details.subject, details.body);
+      return true;
     },
-    [repoPath, setCommitDraft, setAmending, setRepoTab],
+    [repoPath, noteUserInteraction, landAmend],
   );
 }
 
@@ -104,8 +114,9 @@ export function useAmendWithConfirm(repoPath: string) {
 
   /** True once the amend has actually STARTED — the gate accepted it AND the
    *  commit loaded into the box. The dialog keys its "Don't show again" write on
-   *  this, so neither a refusal nor a failed lookup (a commit gc'd or rewritten
-   *  under the open dialog) turns off the prompt. */
+   *  this, so neither a refusal, a failed lookup (a commit gc'd or rewritten
+   *  under the open dialog), nor a landing the user navigated away from turns
+   *  off the prompt. */
   async function confirmAmend(): Promise<boolean> {
     const hash = pendingHash;
     setPendingHash(null);
@@ -114,12 +125,11 @@ export function useAmendWithConfirm(repoPath: string) {
     if (forcePushRefused()) return false;
     if (!hash) return false;
     try {
-      await amend(hash);
+      return await amend(hash);
     } catch (e) {
       toastError(e);
       return false;
     }
-    return true;
   }
 
   return {

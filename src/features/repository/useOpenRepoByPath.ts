@@ -20,6 +20,67 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { createOpenClaims } from "./open-claims";
+import { warmRepoShell } from "./repo-shell-prefetch";
+
+/** Every open this module makes, recorded or worktree, numbered against the
+ *  store's `interactionEpoch` (its settle-late contract). Direct `openRepo`
+ *  callers aren't numbered: they retire pending opens through the epoch bump. */
+const openClaims = createOpenClaims(
+  () => useUiStore.getState().interactionEpoch,
+);
+
+/** Claims an open at its REQUEST; the check fails once a newer open or any
+ *  navigation arrives. */
+export const claimRepoOpen = openClaims.claim;
+
+/** Notes the latest open without claiming one; the check fails once a newer
+ *  open or any navigation arrives. */
+export const repoOpenWatermark = openClaims.watermark;
+
+/**
+ * The shared tail for opening a repo the user picked, once its path has
+ * validated: warm the repo's shell reads, record it in recents, wait out the
+ * warm-up budget, then switch, unless a newer open or navigation arrived meanwhile
+ * (silently: that newer action is what the user sees). The paths that bypass it
+ * are the failure reopen in RepoDialogs, a promote's landing in worktree-removal
+ * (both call `openRepo` directly), {@link useOpenWorktree}, which warms without
+ * recording, and the store navigators' cross-repo arms (notification and My work
+ * jumps), which switch without warming.
+ *
+ * The recents write finishes BEFORE the switch, so the row exists when
+ * RepositoryView mounts and its open-time visibility probe persists onto it; a
+ * superseded open still records its repo. The write is best-effort, since a
+ * settings-write failure must never block opening. Resolves whether it switched.
+ * Callers whose own awaits are part of the open request (drop, Recents, the
+ * folder picker, a submodule opened as a repo) claim before those awaits and
+ * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
+ * whose pre-open await may end in something other than an open (BranchSwitcher's
+ * worktree lookups) takes {@link repoOpenWatermark} and yields to a newer open
+ * instead. Clone, create, and Explore's clone open their own result and take the
+ * default, a claim at their completion.
+ */
+export function useOpenRecordedRepo() {
+  const openRepo = useUiStore((s) => s.openRepo);
+  const { mutateAsync: addRecent } = useAddRecentRepo();
+  const queryClient = useQueryClient();
+  return useCallback(
+    async (
+      info: RepoInfo,
+      stillCurrent: () => boolean = claimRepoOpen(),
+    ): Promise<boolean> => {
+      const warmed = warmRepoShell(queryClient, info.root);
+      await addRecent({ path: info.root, name: info.name }).catch(
+        () => undefined,
+      );
+      await warmed;
+      if (!stillCurrent()) return false;
+      openRepo(info);
+      return true;
+    },
+    [addRecent, openRepo, queryClient],
+  );
+}
 
 /**
  * Opens a repository by path: validates it, records it in recents, and switches
@@ -27,32 +88,31 @@ import { toastError } from "@/lib/toast";
  * toast to **Locate…** the folder's new home (moved on disk) or **Remove** the
  * stale row; a `source: "picker"` one is a folder the user just chose rather
  * than a recents row to repair, so it only reports that it isn't a repository.
+ * Resolves whether the app switched: false on a failure (which toasts) and when a
+ * newer open or navigation superseded this one (silent).
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
  * repository from the Submodules dialog.
  */
 export function useOpenRepoByPath() {
-  const openRepo = useUiStore((s) => s.openRepo);
-  const addRecent = useAddRecentRepo();
+  const openRecorded = useOpenRecordedRepo();
   const removeRecent = useRemoveRecentRepo();
   const relocate = useRelocateRecentRepo();
   const settings = useSettings();
   const recentRepos = settings.data?.recentRepos;
   const queryClient = useQueryClient();
 
-  // Shared tail for every successful open: record in recents (best-effort — a
-  // settings-write failure must never block opening), switch to the repo, track.
-  // Awaiting the recents write means the row exists before RepositoryView mounts
-  // and its open-time visibility probe persists onto it.
   const recordOpenAndTrack = useCallback(
-    async (info: RepoInfo, source: "recent" | "picker" | "relocate") => {
-      await addRecent
-        .mutateAsync({ path: info.root, name: info.name })
-        .catch(() => undefined);
-      openRepo(info);
-      track({ name: "repo_opened", properties: { source } });
+    async (
+      info: RepoInfo,
+      source: "recent" | "picker" | "relocate",
+      stillCurrent: () => boolean,
+    ) => {
+      const opened = await openRecorded(info, stillCurrent);
+      if (opened) track({ name: "repo_opened", properties: { source } });
+      return opened;
     },
-    [addRecent, openRepo],
+    [openRecorded],
   );
 
   // A recents row whose folder moved: pick the new folder, validate it, repoint
@@ -80,6 +140,9 @@ export function useOpenRepoByPath() {
           confirmLabel: "Relocate",
         });
         if (!confirmed) return;
+        // Claimed past the prompt, which the user answers in place: the window
+        // this guards is the relocate, re-home, and open that follow.
+        const stillCurrent = claimRepoOpen();
         // Best-effort, like the addRecent write below — a settings failure must
         // never block opening. Repoint before addRecent so the follow-up write
         // finds the row at its new path and just refreshes name/order.
@@ -104,7 +167,7 @@ export function useOpenRepoByPath() {
         // their debounced autosave writes the pre-migration paths back to disk.
         usePlanStore.getState().relocateRepoPath(oldPath, info.root);
         useResearchStore.getState().relocateRepoPath(oldPath, info.root);
-        await recordOpenAndTrack(info, "relocate");
+        await recordOpenAndTrack(info, "relocate", stillCurrent);
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {
           // The picked folder isn't a repo — no Locate/Remove actions here (no
@@ -119,10 +182,18 @@ export function useOpenRepoByPath() {
   );
 
   return useCallback(
-    async (path: string, source: "recent" | "picker" = "recent") => {
+    async (
+      path: string,
+      source: "recent" | "picker" = "recent",
+      // Claimed before validating (a default evaluates at call entry), so the
+      // latest intent wins: a newer open retires this one even when that newer
+      // open then fails. A caller with awaits of its own ahead of this call
+      // claims before them and passes the claim.
+      stillCurrent: () => boolean = claimRepoOpen(),
+    ): Promise<boolean> => {
       try {
         const info = await validateRepo(path);
-        await recordOpenAndTrack(info, source);
+        return await recordOpenAndTrack(info, source, stillCurrent);
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {
           if (source === "picker") {
@@ -146,6 +217,7 @@ export function useOpenRepoByPath() {
         } else {
           toastError(e);
         }
+        return false;
       }
     },
     [recordOpenAndTrack, locateAndReopen, removeRecent],
@@ -160,36 +232,40 @@ export function useOpenRepoByPath() {
  * are child checkouts of a repo already in the switcher, not first-class repos.
  *
  * Resolves TRUE only once the app is actually in the worktree — false when the
- * open failed (which toasts), when the user switched repos meanwhile, or when
- * `stillWanted` retired it; the latter two are silent. A caller that reports the
- * navigation to the user must await this and gate on it; callers that only
- * navigate ignore the value, awaited or not. The guard reads the live repo when
- * this is CALLED, so a caller that awaits something else FIRST needs its own
- * check before calling.
+ * open failed (which toasts), when the user switched repos, navigated, or asked
+ * for another open meanwhile, or when `stillWanted` retired it; all but the
+ * failure are silent. A caller that reports the navigation to the user must
+ * await this and gate on it; callers that only navigate ignore the value,
+ * awaited or not. The guard reads the live repo when this is CALLED, so a
+ * caller that awaits something else FIRST needs its own check before calling.
  *
- * @param stillWanted Re-checked after `validateRepo`, for a caller that
- * sequences several opens: a newer one can start while this validate runs, and
- * the repo is unchanged in that case, so only the caller knows it is stale. A
- * standalone open passes nothing.
+ * @param stillWanted Re-checked after `validateRepo` and the shell warm-up, for
+ * a caller that sequences several opens: a newer one can start while those run,
+ * and the repo is unchanged in that case, so only the caller knows it is stale.
+ * A standalone open passes nothing.
  */
 export function useOpenWorktree() {
   const openRepo = useUiStore((s) => s.openRepo);
+  const queryClient = useQueryClient();
   return useCallback(
     async (path: string, stillWanted?: () => boolean) => {
       // `openRepo` writes GLOBAL navigation state, so it may only fire while the
-      // app is still on the repo this call started from — the user can switch
-      // repositories while `validateRepo` runs, and an unguarded write would yank
-      // them back into the previous repo's worktree. The toast stays
-      // unconditional: the validation failed wherever they are now.
+      // app is still where this call started — the user can switch repositories,
+      // open Settings, or start another open while the awaits below run, and an
+      // unguarded write would yank them back into the previous repo's worktree.
+      // The toast stays unconditional: the validation failed wherever they are now.
       //
-      // `stillWanted` covers what the repo check can't: a caller sequencing
+      // `stillWanted` covers what those checks can't: a caller sequencing
       // several opens (the branch switcher) can have the user pick again while
-      // THIS validate runs, and the repo is unchanged in that case. A caller
+      // THIS open is pending, and nothing global moves in that case. A caller
       // whose open stands alone passes nothing.
       const firedOn = useUiStore.getState().repoPath;
+      const stillCurrent = claimRepoOpen();
       try {
         const info = await validateRepo(path);
+        await warmRepoShell(queryClient, info.root);
         if (useUiStore.getState().repoPath !== firedOn) return false;
+        if (!stillCurrent()) return false;
         if (stillWanted && !stillWanted()) return false;
         openRepo(info);
         return true;
@@ -198,7 +274,7 @@ export function useOpenWorktree() {
         return false;
       }
     },
-    [openRepo],
+    [openRepo, queryClient],
   );
 }
 

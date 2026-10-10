@@ -444,9 +444,10 @@ async function run({
 /** Remove a worktree while keeping its branch, retrying once if the folder is
  *  momentarily still held. The app has just switched off this worktree, but its
  *  last in-flight git-status poll (or the OS) can keep the directory busy for a
- *  beat — and `openRepo`'s switch is deferred by a View Transition, so the app
- *  may not have fully let go yet. The retry covers that window; a real, lasting
- *  hold (an editor/terminal in the folder) still surfaces the actionable error. */
+ *  beat — and `openRepo` applies its switch in a View Transition callback that can
+ *  run after the call returns, so the app may not have fully let go yet. The
+ *  retry covers that window; a real, lasting hold (an editor/terminal in the
+ *  folder) still surfaces the actionable error. */
 async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
   try {
     await removeWorktree(repoPath, path, null, false);
@@ -507,7 +508,7 @@ async function runPromote(
     // worktree's folder, and nothing should keep reading git status inside it.
     // There's no fs-watcher (status is polled), so switching away stops future
     // polls; `removeWorktreeFreeingBranch` retries once for any last in-flight
-    // poll that hasn't drained (openRepo's switch is deferred by a transition).
+    // poll that hasn't drained (openRepo's switch can apply after it returns).
     useUiStore.getState().openRepo(info);
     await new Promise((resolve) => setTimeout(resolve, 80));
     // Main is the active repo now, so the removal is visible where the user is.

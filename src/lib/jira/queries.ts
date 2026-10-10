@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { keepPreviousDataForRepo } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import {
   jiraAccount,
   jiraCommentDelete,
@@ -56,15 +57,20 @@ const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 export const jiraIssuesKey = (repo: string) =>
   ["repo", repo, "jira-issues"] as const;
 
-/** This repo's Jira link (or `null` when unlinked). */
-export function useJiraLink(repo: string) {
-  return useQuery({
+export function jiraLinkOptions(repo: string) {
+  return {
     queryKey: jiraLinkKey(repo),
     queryFn: () => getJiraLink(repo),
     // Local reads (the link store, the OS keychain) must not park on react-query's
     // default "online" mode offline; the same holds for every `networkMode` here.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** This repo's Jira link (or `null` when unlinked). */
+export function useJiraLink(repo: string) {
+  return useQuery(jiraLinkOptions(repo));
 }
 
 /** Invalidate the link query AND every Jira issue-list/issue-detail query for this repo.

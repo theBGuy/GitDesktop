@@ -144,7 +144,7 @@ import { RebaseOntoDialog } from "./RebaseOntoDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
-import { useOpenWorktree } from "./useOpenRepoByPath";
+import { repoOpenWatermark, useOpenWorktree } from "./useOpenRepoByPath";
 import {
   reportAutostashOutcome,
   useStashReapplyRecovery,
@@ -910,6 +910,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       !userWorktrees.isError &&
       (userWorktrees.data === undefined || userWorktrees.isFetching)
     ) {
+      // A watermark, not a claim: the lookup usually ends in a plain checkout,
+      // and a claim here would retire a pending repo open on every cold click.
+      const noNewerOpen = repoOpenWatermark();
       try {
         // Shared options, not a second spelling: this key's `networkMode:
         // "always"` is what keeps an offline read from PARKING forever, and a
@@ -928,20 +931,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       } catch {
         // fall through
       }
-      // BELOW the try/catch, so every exit passes it — resolved, rejected, and
-      // found-nothing alike. This await outlives its render and everything past
-      // here is a global write, so every read that GATES that write is re-taken:
-      // the repo (acting would target the one the user left), the attempt (the
-      // popover reopens while a stalled lookup is out, so a later pick already
-      // started its own switch), and amend mode (entered elsewhere meanwhile; a
-      // checkout would strand it) — plus `hasChangesRef` and the removal store
-      // below, which read live. The reapply default stays the click render's
+      // BELOW the try/catch, so every exit (resolved, rejected, found-nothing)
+      // re-takes each read that gates the global writes past here: the repo (else
+      // they hit the one the user left), the attempt (a later pick started its own
+      // switch), and amend mode (a checkout would strand it); `hasChangesRef` and
+      // the removal store read live. The reapply default stays the click render's
       // value on purpose: it only seeds a checkbox the user then sees.
       const live = useUiStore.getState();
       if (
         switchRequest !== switchRequestRef.current ||
         live.repoPath !== repoPath ||
-        live.amendingHash !== null
+        live.amendingHash !== null ||
+        (wtPath !== undefined && !noNewerOpen())
       )
         return;
     }
@@ -962,12 +963,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       )
         return;
       // Awaited for its verdict: it resolves false both when the open failed
-      // (it toasts that itself) and when the user switched repos mid-validate
-      // (silent by design) — a success toast over either would claim a
-      // navigation that never happened.
-      // The attempt check rides INTO the open: `validateRepo` is a second await
-      // downstream of this function's guard, and a newer pick during it leaves
-      // the repo unchanged, so only the attempt identity can retire this one.
+      // (it toasts that itself) and, silently, when the user switched repos,
+      // navigated elsewhere, or started another open during its `validateRepo`
+      // and shell warm-up (useOpenWorktree's doc) — a success toast over any of
+      // those would claim a navigation that never happened.
+      // The attempt check rides INTO the open: those two awaits sit downstream
+      // of this function's guard, and a newer pick during them leaves the repo
+      // unchanged, so only the attempt identity can retire this one.
       const navigated = await openWorktree(
         wtPath,
         () => switchRequest === switchRequestRef.current,
@@ -1945,18 +1947,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction("operation-history", () => setOpHistoryOpen(true));
   useHotkeyAction("discard-all", () => setDiscardAllOpen(true), hasChanges);
   // Cross-worktree navigation (palette-only). They can fire while the popover is
-  // closed, so they can't rely on the open-gated `userWorktrees` cache — fetch
-  // the worktree list fresh, like the delete-branch off-switch does. Both then
-  // re-check the live repo before acting on the answer: the lookup outlives the
-  // render it started in, and acting on its answer after a repo switch would
-  // navigate to (or offer to promote) a worktree of the repo the user just left.
-  // `useOpenWorktree`'s own guard can't see this window — it captures the live
-  // repo when it is CALLED, which is already after this await.
+  // closed, so they fetch the worktree list fresh rather than read the open-gated
+  // `userWorktrees` cache, then re-check the live repo before acting: after a
+  // repo switch the answer would navigate to (or offer to promote) a worktree of
+  // the repo the user just left. `useOpenWorktree`'s own guard can't see this
+  // window — it captures the live repo when CALLED, already after this await.
   useHotkeyAction("open-main-workspace", async () => {
     setOpen(false);
+    // A watermark, not a claim: the lookup may end without an open.
+    const noNewerOpen = repoOpenWatermark();
     try {
       const wts = await listUserWorktrees(repoPath);
-      if (useUiStore.getState().repoPath !== repoPath) return;
+      if (useUiStore.getState().repoPath !== repoPath || !noNewerOpen()) return;
       const main = wts.find((w) => w.isMain);
       if (!main) {
         toast.error("Couldn't find the main workspace for this repository.");

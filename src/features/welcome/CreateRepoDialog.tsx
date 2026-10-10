@@ -10,11 +10,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useOpenRecordedRepo } from "@/features/repository/useOpenRepoByPath";
 import { required, useAppForm } from "@/lib/form";
 import { createRepo, validateRepo } from "@/lib/git/api";
 import { useGlobalDefaultBranch } from "@/lib/git/queries";
-import { useAddRecentRepo } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
@@ -42,8 +41,7 @@ export function CreateRepoDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const openRepo = useUiStore((s) => s.openRepo);
-  const addRecent = useAddRecentRepo();
+  const openRecorded = useOpenRecordedRepo();
   const globalDefaultBranch = useGlobalDefaultBranch();
 
   // The branch `git init` uses, from global git config; "main" when unset.
@@ -63,14 +61,10 @@ export function CreateRepoDialog({
           defaultBranch,
         });
         const info = await validateRepo(root);
-        // Await the recents write so the row exists before RepositoryView mounts
-        // and its open-time visibility probe persists onto it (best-effort — a
-        // settings-write failure must never block opening the repo).
-        await addRecent
-          .mutateAsync({ path: info.root, name: info.name })
-          .catch(() => undefined);
+        // Closes and confirms even when a newer navigation superseded the
+        // switch: the repository exists either way.
+        await openRecorded(info);
         onOpenChange(false);
-        openRepo(info);
         toast.success(`Created ${info.name}`);
       } catch (e) {
         toastError(e);

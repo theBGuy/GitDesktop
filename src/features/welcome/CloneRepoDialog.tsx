@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { groupByOwnerNamespace } from "@/features/explore/explore-utils";
+import { useOpenRecordedRepo } from "@/features/repository/useOpenRepoByPath";
 import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import { cloneRepo, forgeClone, validateRepo } from "@/lib/git/api";
@@ -38,7 +39,7 @@ import { useForgeRepos } from "@/lib/git/queries";
 import type { ForgeProvider, ForgeRepo } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { repoStateLabel } from "@/lib/repo-labels";
-import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
+import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -74,8 +75,7 @@ export function CloneRepoDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const openRepo = useUiStore((s) => s.openRepo);
-  const addRecent = useAddRecentRepo();
+  const openRecorded = useOpenRecordedRepo();
   const settings = useSettings();
 
   // Tab, selection, and filter are UI state; the URL and local path are form
@@ -120,14 +120,10 @@ export function CloneRepoDialog({
                 value.recurseSubmodules,
               );
         const info = await validateRepo(clonedPath);
-        // Await the recents write so the row exists before RepositoryView mounts
-        // and its open-time visibility probe persists onto it (best-effort — a
-        // settings-write failure must never block opening the repo).
-        await addRecent
-          .mutateAsync({ path: info.root, name: info.name })
-          .catch(() => undefined);
+        // Closes even when a newer navigation superseded the switch: the clone
+        // landed either way.
+        await openRecorded(info);
         onOpenChange(false);
-        openRepo(info);
       } catch (e) {
         toastError(e);
       }

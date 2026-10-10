@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { repoKeys } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs in github/actions.rs) ─────────────────────
@@ -323,6 +324,16 @@ export function useRunDetail(
   });
 }
 
+export function latestRunOptions(repo: string, branch: string | null) {
+  return {
+    queryKey: ["repo", repo, "actions", "latest", branch ?? ""] as const,
+    queryFn: async () =>
+      (await forgeCiRunList(repo, 1, branch ?? undefined))[0] ?? null,
+    staleTime: 15_000,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
 /**
  * The single most recent run on a branch, for the header CI badge. Polls fast
  * while it's active, slowly otherwise so a freshly-pushed run still shows up.
@@ -333,11 +344,8 @@ export function useLatestRun(
   branch: string | null,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "actions", "latest", branch ?? ""] as const,
-    queryFn: async () =>
-      (await forgeCiRunList(repo, 1, branch ?? undefined))[0] ?? null,
+    ...latestRunOptions(repo, branch),
     enabled: enabled && Boolean(branch),
-    staleTime: 15_000,
     refetchInterval: (query) =>
       query.state.data && isRunActive(query.state.data.status) ? 8000 : 30_000,
   });

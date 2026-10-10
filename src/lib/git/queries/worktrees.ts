@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import {
   addUserWorktree,
   listUserWorktrees,
@@ -23,8 +24,14 @@ export function userWorktreesOptions(repo: string) {
     queryKey: worktreeKey(repo),
     queryFn: () => listUserWorktrees(repo),
     networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
   };
 }
+
+/** How old a worktree list the hook (and the shell warm-up) may serve. Never in
+ *  {@link userWorktreesOptions}: the switcher's imperative fetchQuery spreads the
+ *  OPTIONS and must keep fetch-always semantics for its checkout-redirect guard. */
+export const USER_WORKTREES_STALE_TIME = 30_000;
 
 /** The repo's user-facing worktrees (session worktrees filtered out by the
  *  backend). `enabled` gates the fetch to the surface asking for it — the
@@ -34,14 +41,12 @@ export function useUserWorktrees(repo: string, enabled = true) {
   return useQuery({
     ...userWorktreesOptions(repo),
     enabled: enabled && Boolean(repo),
-    // On the HOOK only — the header observes this key on every open repo, so
-    // without a staleTime the window-focus refetch re-spawns `git worktree
-    // list` on each Alt-Tab back (mutations invalidate the key regardless).
-    // Every hook consumer shares the bound and opens on data up to 30s old,
-    // so only external git changes ride the window. The switcher's imperative
-    // fetchQuery spreads the OPTIONS and must keep fetch-always semantics for
-    // its checkout-redirect guard.
-    staleTime: 30_000,
+    // The header observes this key on every open repo, so without a staleTime
+    // the window-focus refetch re-spawns `git worktree list` on each Alt-Tab
+    // back (mutations invalidate the key regardless). Every hook consumer shares
+    // the bound and opens on data up to 30s old, so only external git changes
+    // ride the window.
+    staleTime: USER_WORKTREES_STALE_TIME,
   });
 }
 
