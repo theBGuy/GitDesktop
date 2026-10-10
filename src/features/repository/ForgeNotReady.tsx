@@ -11,6 +11,7 @@ import { type Ref, useEffect, useRef } from "react";
 import { PathText } from "@/components/path-text";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { openInTerminal } from "@/lib/git/api";
 import {
   useForgeSessionHealth,
@@ -19,10 +20,20 @@ import {
   useRemotes,
 } from "@/lib/git/queries";
 import { providerLabel, rateLimitResetTime } from "@/lib/git/types";
+import { useOfflineHold } from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
-import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
+import {
+  PUBLISH_ACCOUNTS_OFFLINE,
+  PublishRepoControl,
+  publishPendingReason,
+  usePublishProviders,
+} from "./PublishRepoControl";
+import {
+  REMOTES_FAILED_REASON,
+  REMOTES_PENDING_REASON,
+} from "./sync-controls-state";
 
 /** Where a Bitbucket / Atlassian API token is created. */
 const ATLASSIAN_TOKEN_URL =
@@ -42,8 +53,9 @@ const ATLASSIAN_TOKEN_URL =
  * Provider-aware, with the publish path taking precedence: when this repo has
  * no origin and ≥1 provider can publish it, the panel offers the shared
  * "Publish repository…" control (a menu when 2+ are ready) instead of the gh
- * setup ladder. Otherwise GitHub walks the gh setup ladder (install → sign in
- * → publish, or — if gh is ready but the repo isn't resolvable — a `gh auth
+ * setup ladder, holding it disabled with a reason while the probes are out.
+ * Otherwise GitHub walks the gh setup ladder (install → sign in → publish,
+ * or — if gh is ready but the repo isn't resolvable — a `gh auth
  * status` diagnostic); GitLab walks the analogous glab ladder (install → sign
  * in), then — if glab is ready but the repo still isn't resolvable to a GitLab
  * project — points at `glab auth status`; Bitbucket walks the connect-account
@@ -109,7 +121,10 @@ export function ForgeNotReady({
   const installed = Boolean(forge.data?.installed);
   const authed = Boolean(forge.data?.authenticated);
   const remotes = useRemotes(repoPath);
-  const noOrigin = remotes.isSuccess && !remotes.data.includes("origin");
+  // From data, like the sync bar: a failed refresh over loaded remotes keeps
+  // offering Publish there, so it must here too.
+  const noOrigin =
+    remotes.data !== undefined && !remotes.data.includes("origin");
   // A repo with no hosted remote has nothing to detect a provider from, so
   // publish targets are probed explicitly (which CLIs are installed + signed
   // in), yielding the ready providers in a stable order. This is what lets a
@@ -118,17 +133,31 @@ export function ForgeNotReady({
   // provider is ALSO null for repos whose remote gh simply can't identify (gh
   // signed out, an unrecognized host) — publishing those would create an orphan
   // project and then fail adding `origin`.
-  const { providers } = usePublishProviders(
+  const { providers, settled } = usePublishProviders(
     repoPath,
     provider == null && Boolean(forge.data) && noOrigin,
   );
+  const offlineHold = useOfflineHold();
+  // A disabled probe reads settled, so this is false whenever the probe is off.
+  const publishArm = providers.length > 0 || !settled;
+  // The publish arm's swaps unmount its focused button: a settle onto the
+  // ladder, or onto 2+ providers (the dropdown mounts its own trigger). Every
+  // root carries this ref as a silent landing spot, since other edges (an
+  // origin added, the folder vanishing) leave the publish arm too.
+  const landingRef = useRef<HTMLDivElement>(null);
+  useFocusOnControlsSwap(publishArm, landingRef);
+  useFocusOnControlsSwap(providers.length >= 2, landingRef);
 
   // The folder is gone: name that and offer the one way out. Nothing about the
   // forge is knowable from a dead path, so no provider copy runs. While the probe
   // is pending the arms below render unchanged.
   if (present.data === false) {
     return (
-      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
         <p>This repository's folder no longer exists on disk.</p>
         <PathText path={repoPath} className="font-mono text-foreground" />
         <Button
@@ -152,7 +181,11 @@ export function ForgeNotReady({
   if (provider === "gitlab") {
     if (!forge.data?.installed) {
       return (
-        <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+        <div
+          ref={landingRef}
+          tabIndex={-1}
+          className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+        >
           <p>
             The GitLab CLI (<span className="font-mono">glab</span>) isn't
             installed. GitDesktop will use it to work with {feature} on GitLab.
@@ -179,13 +212,18 @@ export function ForgeNotReady({
           feature={feature}
           resetAt={health.data?.resetAt}
           checkedAt={health.dataUpdatedAt}
+          landingRef={landingRef}
         />
       );
     }
     if (!forge.data?.authenticated) {
       const host = forge.data?.host ?? health.data?.host ?? "gitlab.com";
       return (
-        <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+        <div
+          ref={landingRef}
+          tabIndex={-1}
+          className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+        >
           <p>
             {sessionBroken
               ? `Your GitLab session${
@@ -231,7 +269,11 @@ export function ForgeNotReady({
       );
     }
     return (
-      <div className="px-3 py-4 text-xs text-muted-foreground">
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
         <p>
           GitDesktop couldn't connect this repository to GitLab, so {feature}{" "}
           aren't available here. Run{" "}
@@ -247,7 +289,11 @@ export function ForgeNotReady({
   // update it. Both deep-link to Settings → Accounts in one atomic navigation.
   if (provider === "bitbucket") {
     return (
-      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
         {!installed ? (
           <p>
             Connect your Bitbucket account with an Atlassian API token to see{" "}
@@ -285,16 +331,78 @@ export function ForgeNotReady({
     );
   }
 
+  // Until remotes answer, neither publish nor the ladder is honest for a
+  // provider-less repo; hold the frame blank (busy, with a status line) instead.
+  if (
+    provider == null &&
+    forge.data &&
+    remotes.data === undefined &&
+    remotes.errorUpdateCount === 0
+  ) {
+    return (
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
+        {/* Outside the aria-busy subtree: busy suppresses descendant live-region
+            announcements, and this arm unmounts instead of flipping. */}
+        <span role="status" className="sr-only">
+          {REMOTES_PENDING_REASON}
+        </span>
+        <div aria-busy="true" />
+      </div>
+    );
+  }
+
+  // A remotes read that failed with nothing loaded leaves the same question
+  // open; say so rather than send the user to a CLI setup step. The
+  // useRemotes error-only poll and a window focus heal it, so no Retry.
+  if (
+    provider == null &&
+    forge.data &&
+    remotes.data === undefined &&
+    remotes.errorUpdateCount > 0
+  ) {
+    return (
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
+        <p>
+          {REMOTES_FAILED_REASON}, so {feature} aren't available right now.
+        </p>
+      </div>
+    );
+  }
+
   // Publish takes precedence: a no-origin repo that any signed-in provider can
   // take is offered the shared Publish control (a menu when 2+ are ready)
-  // instead of the gh setup ladder.
-  if (providers.length > 0) {
+  // instead of the gh setup ladder. One arm from pending through settled keeps
+  // one control node, so a disabled → single-provider settle keeps its focus.
+  if (publishArm) {
     return (
-      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
         <p>
           This repository isn't published yet. Publish it to use {feature} here.
         </p>
-        <PublishRepoControl repoPath={repoPath} providers={providers} />
+        <PublishRepoControl
+          repoPath={repoPath}
+          providers={providers}
+          disabledTitle={
+            settled ? undefined : publishPendingReason(offlineHold)
+          }
+        />
+        {/* Only while the button is held: the targets probe parks offline,
+            so the accounts are checked only once the connection returns. */}
+        {!settled && offlineHold && providers.length === 0 && (
+          <p>{PUBLISH_ACCOUNTS_OFFLINE}</p>
+        )}
       </div>
     );
   }
@@ -307,6 +415,7 @@ export function ForgeNotReady({
         feature={feature}
         resetAt={health.data?.resetAt}
         checkedAt={health.dataUpdatedAt}
+        landingRef={landingRef}
       />
     );
   }
@@ -326,6 +435,7 @@ export function ForgeNotReady({
         feature={feature}
         resetAt={null}
         checkedAt={forge.dataUpdatedAt}
+        landingRef={landingRef}
       />
     );
   }
@@ -335,7 +445,11 @@ export function ForgeNotReady({
   // so this copy names no host and the ladder below would misdirect.
   if (forge.isError && forge.data === undefined) {
     return (
-      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
         <p>
           GitDesktop couldn't reach this repository's host, so {feature} aren't
           available right now. Check your network connection.
@@ -359,7 +473,11 @@ export function ForgeNotReady({
   // resolvable (an origin gh can't identify, or the targets probe found
   // nothing) — point at `gh auth status`.
   return (
-    <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+    <div
+      ref={landingRef}
+      tabIndex={-1}
+      className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+    >
       {!installed ? (
         <>
           <p>
@@ -442,6 +560,7 @@ function RateLimitedNotice({
   feature,
   resetAt,
   checkedAt,
+  landingRef,
 }: {
   repoPath: string;
   provider: "github" | "gitlab";
@@ -449,6 +568,8 @@ function RateLimitedNotice({
   resetAt: number | null | undefined;
   /** When the driving query (health, or forge-status) was last read (`dataUpdatedAt`, epoch ms). */
   checkedAt: number;
+  /** The panel's focus landing spot, shared by every root it renders. */
+  landingRef: Ref<HTMLDivElement>;
 }) {
   const queryClient = useQueryClient();
   const now = useRelativeNow();
@@ -480,7 +601,11 @@ function RateLimitedNotice({
     return () => clearTimeout(timer);
   }, [resetAt, checkedAt, repoPath, queryClient]);
   return (
-    <div className="space-y-1.5 px-3 py-4 text-xs text-muted-foreground">
+    <div
+      ref={landingRef}
+      tabIndex={-1}
+      className="space-y-1.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+    >
       <p className="font-medium text-foreground">
         {label} API rate limit reached
       </p>

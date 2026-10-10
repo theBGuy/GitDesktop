@@ -15,9 +15,14 @@ import { test } from "node:test";
 import {
   deriveSyncControls,
   PULL_OPTIONS_UNPUBLISHED_REASON,
+  REMOTES_FAILED_REASON,
+  REMOTES_PENDING_REASON,
+  STATUS_PENDING_REASON,
+  STATUS_READ_FAILED_REASON,
   SYNC_BUSY_REASON,
 } from "../src/features/repository/sync-controls-state.ts";
 
+// No `oid` key on purpose: a head without one must keep reading as born.
 const head = (over = {}) => ({
   name: "feature",
   detached: false,
@@ -32,6 +37,7 @@ const input = (over = {}) => ({
   head: head(),
   statusError: false,
   remotes: ["origin"],
+  remotesError: false,
   busy: false,
   offlineHold: undefined,
   remoteRebased: false,
@@ -69,8 +75,12 @@ test("(2) status read failed with no data: held with the read failure", () => {
   for (const h of [s.pull, s.push, s.pullOptions])
     assert.deepEqual(h, {
       disabled: true,
-      reason: "Couldn't read the branch status",
+      reason: STATUS_READ_FAILED_REASON,
     });
+  assert.equal(
+    STATUS_READ_FAILED_REASON,
+    "Couldn't read the repository status",
+  );
   assert.deepEqual(s.hotkeys, { ...NO_HOTKEYS, fetch: true });
 });
 
@@ -90,17 +100,105 @@ test("(3) remotes unknown: all four held on the remotes, whatever the status", (
     undefined,
     head({ name: null, detached: true, upstream: null }),
     head({ ahead: 2, behind: 1 }),
+    head({ oid: null, upstream: null }),
   ];
   for (const h0 of heads)
-    for (const statusError of [false, true]) {
-      const s = deriveSyncControls(
-        input({ head: h0, statusError, remotes: undefined }),
-      );
-      assert.equal(s.remotesKnown, false);
-      assert.equal(s.noOrigin, false);
-      for (const h of [s.fetch, s.pull, s.push, s.pullOptions])
-        assert.deepEqual(h, { disabled: true, reason: "Checking remotes…" });
-      assert.deepEqual(s.hotkeys, NO_HOTKEYS);
+    for (const statusError of [false, true])
+      for (const [remotesError, reason] of [
+        [false, "Checking remotes…"],
+        [true, "Couldn't read the remotes"],
+      ]) {
+        const s = deriveSyncControls(
+          input({ head: h0, statusError, remotes: undefined, remotesError }),
+        );
+        assert.equal(s.remotesKnown, false);
+        // A failed read is never coerced to "no remotes": that would offer
+        // Publish repository on a repo that may well have an origin.
+        assert.equal(s.noOrigin, false);
+        assert.equal(s.hasOrigin, false);
+        for (const h of [s.fetch, s.pull, s.push, s.pullOptions])
+          assert.deepEqual(h, { disabled: true, reason });
+        assert.deepEqual(s.hotkeys, NO_HOTKEYS);
+      }
+});
+
+test("each read's pending and failed wording is one exported constant", () => {
+  assert.equal(STATUS_PENDING_REASON, "Checking branch…");
+  assert.equal(REMOTES_PENDING_REASON, "Checking remotes…");
+  assert.equal(REMOTES_FAILED_REASON, "Couldn't read the remotes");
+  const pending = deriveSyncControls(input({ head: undefined }));
+  assert.equal(pending.push.reason, STATUS_PENDING_REASON);
+  const unread = deriveSyncControls(input({ remotes: undefined }));
+  assert.equal(unread.fetch.reason, REMOTES_PENDING_REASON);
+  const failed = deriveSyncControls(
+    input({ remotes: undefined, remotesError: true }),
+  );
+  assert.equal(failed.fetch.reason, REMOTES_FAILED_REASON);
+});
+
+test("a failed remotes read outranks every status reason, and only while unread", () => {
+  const failed = deriveSyncControls(
+    input({
+      head: undefined,
+      statusError: true,
+      remotes: undefined,
+      remotesError: true,
+    }),
+  );
+  for (const h of [failed.fetch, failed.pull, failed.push, failed.pullOptions])
+    assert.deepEqual(h, {
+      disabled: true,
+      reason: "Couldn't read the remotes",
+    });
+  // Loaded remotes ignore the flag: only the status reason remains.
+  const loaded = deriveSyncControls(
+    input({ head: undefined, statusError: true, remotesError: true }),
+  );
+  assert.equal(loaded.remotesKnown, true);
+  assert.deepEqual(loaded.fetch, { disabled: false, reason: undefined });
+  assert.deepEqual(loaded.push, {
+    disabled: true,
+    reason: STATUS_READ_FAILED_REASON,
+  });
+});
+
+test("the unknown-read reason matrix: remotes state x status state", () => {
+  const remotesStates = {
+    pending: { remotes: undefined, remotesError: false },
+    failed: { remotes: undefined, remotesError: true },
+    withOrigin: { remotes: ["origin"], remotesError: false },
+  };
+  const statusStates = {
+    pending: { head: undefined, statusError: false },
+    failed: { head: undefined, statusError: true },
+    loaded: { head: head(), statusError: false },
+  };
+  // [fetch reason, branch reason] per cell; undefined = not held.
+  const expected = {
+    pending: {
+      pending: ["Checking remotes…", "Checking remotes…"],
+      failed: ["Checking remotes…", "Checking remotes…"],
+      loaded: ["Checking remotes…", "Checking remotes…"],
+    },
+    failed: {
+      pending: ["Couldn't read the remotes", "Couldn't read the remotes"],
+      failed: ["Couldn't read the remotes", "Couldn't read the remotes"],
+      loaded: ["Couldn't read the remotes", "Couldn't read the remotes"],
+    },
+    withOrigin: {
+      pending: [undefined, "Checking branch…"],
+      failed: [undefined, STATUS_READ_FAILED_REASON],
+      loaded: [undefined, undefined],
+    },
+  };
+  for (const [rName, r] of Object.entries(remotesStates))
+    for (const [sName, st] of Object.entries(statusStates)) {
+      const s = deriveSyncControls(input({ ...r, ...st }));
+      const [fetchReason, branchReason] = expected[rName][sName];
+      const cell = `remotes ${rName}, status ${sName}`;
+      assert.equal(s.fetch.reason, fetchReason, cell);
+      for (const h of [s.pull, s.push, s.pullOptions])
+        assert.equal(h.reason, branchReason, cell);
     }
 });
 
@@ -219,6 +317,82 @@ test("(9) detached HEAD: Push and Pull held, caret explains it too", () => {
   assert.deepEqual(s.hotkeys, { ...NO_HOTKEYS, fetch: true });
 });
 
+test("(9b) a branch with no commits: Publish branch held until the first commit, and Pull says so", () => {
+  const unborn = head({ name: "main", oid: null, upstream: null });
+  const s = deriveSyncControls(input({ head: unborn }));
+  assert.equal(s.pushLabel, "Publish branch");
+  assert.deepEqual(s.push, {
+    disabled: true,
+    reason:
+      "Publish branch — main has no commits yet; make your first commit to publish it",
+  });
+  assert.equal(s.pushName, s.push.reason);
+  // Neither Pull nor the caret points at the held Publish.
+  assert.deepEqual(s.pull, {
+    disabled: true,
+    reason:
+      "Pull — main has no commits yet; make your first commit, then publish the branch",
+  });
+  assert.deepEqual(s.pullOptions, { disabled: true, reason: s.pull.reason });
+  assert.equal(s.hotkeys.push, false);
+  assert.equal(s.hotkeys.fetch, true);
+  // Offline still outranks the state's own description.
+  const offline = deriveSyncControls(
+    input({ head: unborn, offlineHold: "offline" }),
+  );
+  assert.deepEqual(offline.push, { disabled: true, reason: "offline" });
+});
+
+test("(9c) an unborn branch with an upstream: Pull never claims the remote branch's state", () => {
+  const s = deriveSyncControls(
+    input({
+      head: head({
+        name: "main",
+        oid: null,
+        upstream: "origin/main",
+        upstreamGone: true,
+      }),
+    }),
+  );
+  assert.equal(s.hasUpstream, false);
+  assert.deepEqual(s.pull, {
+    disabled: true,
+    reason:
+      "Pull — main has no commits yet, so it can't be compared with origin/main",
+  });
+  assert.deepEqual(s.push, {
+    disabled: true,
+    reason:
+      "Publish branch — main has no commits yet; make your first commit to publish it",
+  });
+  assert.equal(s.hotkeys.push, false);
+  assert.equal(s.hotkeys.pull, false);
+  assert.deepEqual(s.pullOptions, { disabled: true, reason: s.pull.reason });
+});
+
+test("(9d) unborn detection is strict: only oid === null on a branch", () => {
+  // A fixture with no oid key, and one with a real oid, both read as born.
+  for (const h0 of [head(), head({ oid: "0123abc" })]) {
+    const s = deriveSyncControls(input({ head: h0 }));
+    assert.deepEqual(s.push, { disabled: false, reason: undefined });
+    assert.equal(s.hotkeys.push, true);
+  }
+  const gone = deriveSyncControls(
+    input({ head: head({ upstreamGone: true }) }),
+  );
+  assert.match(gone.pull.reason, /was deleted on the remote/);
+  // A detached HEAD keeps its own arm, oid or not.
+  const detached = deriveSyncControls(
+    input({
+      head: head({ name: null, detached: true, upstream: null, oid: null }),
+    }),
+  );
+  assert.equal(
+    detached.push.reason,
+    "Publish branch — you're on a detached HEAD; check out a branch to push",
+  );
+});
+
 test("(10) fork with an upstream remote while status is pending: no update", () => {
   const s = deriveSyncControls(
     input({ head: undefined, remotes: ["origin", "upstream"] }),
@@ -287,18 +461,28 @@ test("every disabled control carries a reason", () => {
     head({ upstreamGone: true }),
     head({ ahead: 1, behind: 1 }),
     head({ name: null, detached: true, upstream: null }),
+    head({ oid: null, upstream: null }),
+    head({ oid: null, upstreamGone: true }),
   ];
   for (const h of heads)
     for (const remotes of [undefined, ["origin"], ["origin", "upstream"]])
       for (const statusError of [false, true])
-        for (const busy of [false, true])
-          for (const offlineHold of [undefined, "offline"]) {
-            const s = deriveSyncControls(
-              input({ head: h, remotes, statusError, busy, offlineHold }),
-            );
-            for (const hold of [s.fetch, s.pull, s.push, s.pullOptions])
-              if (hold.disabled) assert.ok(hold.reason, JSON.stringify(s));
-          }
+        for (const remotesError of [false, true])
+          for (const busy of [false, true])
+            for (const offlineHold of [undefined, "offline"]) {
+              const s = deriveSyncControls(
+                input({
+                  head: h,
+                  remotes,
+                  statusError,
+                  remotesError,
+                  busy,
+                  offlineHold,
+                }),
+              );
+              for (const hold of [s.fetch, s.pull, s.push, s.pullOptions])
+                if (hold.disabled) assert.ok(hold.reason, JSON.stringify(s));
+            }
 });
 
 test("Publish branch only for a measured, untracked, non-diverged branch", () => {

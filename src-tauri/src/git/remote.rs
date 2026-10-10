@@ -919,6 +919,9 @@ pub(crate) async fn git_push_core(
                     "remote requires an explicit branch".to_string(),
                 ));
             }
+            if set_upstream && crate::git::branches::head_is_unborn(&repo_path).await? {
+                return Err(crate::git::branches::unborn_head_error());
+            }
             let mut a = vec!["push".to_string()];
             if force {
                 // The pair refuses to clobber remote work this branch hasn't
@@ -988,6 +991,14 @@ pub(crate) async fn git_push_core(
             let Some((upstream, remotename, gone)) =
                 parse_upstream_tracking(&out.stdout_lossy(), &format!("refs/heads/{b}"))
             else {
+                if crate::git::branches::head_is_unborn(&repo_path).await?
+                    && crate::git::branches::current_branch_name(&repo_path)
+                        .await?
+                        .as_deref()
+                        == Some(b.as_str())
+                {
+                    return Err(crate::git::branches::unborn_head_error());
+                }
                 return Err(AppError::InvalidArgument(format!("no such branch: {b}")));
             };
             // The credential config must target the remote we actually push to, not
@@ -2446,6 +2457,119 @@ mod tests {
             refusal(super::publish_branch(&repo_s).await.unwrap_err()),
             "check out a branch before publishing (detached HEAD)"
         );
+    }
+
+    fn assert_unborn_push_refusal(error: AppError) {
+        let AppError::InvalidArgument(expected) = crate::git::branches::unborn_head_error() else {
+            panic!("unborn HEAD refusal must be an invalid argument");
+        };
+        match error {
+            AppError::InvalidArgument(message) => assert_eq!(message, expected),
+            other => panic!("expected the unborn HEAD refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn named_push_refuses_fresh_unborn_head() {
+        for with_origin in [false, true] {
+            let (_guard, base) = temp_base("named-push-unborn");
+            let repo_s = base.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q", "-b", "main"]).await;
+            if with_origin {
+                run(
+                    &repo_s,
+                    &["remote", "add", "origin", "./missing-origin.git"],
+                )
+                .await;
+            }
+            let state = AppState::default();
+            for set_upstream in [false, true] {
+                let error = git_push_core(
+                    &state,
+                    repo_s.clone(),
+                    set_upstream,
+                    false,
+                    Some("main".into()),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert_unborn_push_refusal(error);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn head_publish_refuses_fresh_unborn_head() {
+        for with_origin in [false, true] {
+            let (_guard, base) = temp_base("head-publish-unborn");
+            let repo_s = base.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q", "-b", "main"]).await;
+            if with_origin {
+                run(
+                    &repo_s,
+                    &["remote", "add", "origin", "./missing-origin.git"],
+                )
+                .await;
+            }
+            let state = AppState::default();
+            let error = git_push_core(&state, repo_s, true, false, None, None, None)
+                .await
+                .unwrap_err();
+            assert_unborn_push_refusal(error);
+        }
+    }
+
+    #[tokio::test]
+    async fn named_push_refuses_orphan_head() {
+        let (_guard, base) = temp_base("named-push-orphan");
+        let repo_s = base.to_string_lossy().into_owned();
+        init_repo(&repo_s, "seed.txt").await;
+        run(&repo_s, &["switch", "--orphan", "fresh"]).await;
+        let state = AppState::default();
+        let error = git_push_core(
+            &state,
+            repo_s,
+            true,
+            false,
+            Some("fresh".into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_unborn_push_refusal(error);
+    }
+
+    #[tokio::test]
+    async fn named_push_preserves_missing_branch_refusal() {
+        for with_commits in [false, true] {
+            let (_guard, base) = temp_base("named-push-missing");
+            let repo_s = base.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q", "-b", "main"]).await;
+            if with_commits {
+                init_repo(&repo_s, "seed.txt").await;
+            }
+            let state = AppState::default();
+            let error = git_push_core(
+                &state,
+                repo_s,
+                true,
+                false,
+                Some("missing".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            match error {
+                AppError::InvalidArgument(message) => {
+                    assert_eq!(message, "no such branch: missing")
+                }
+                other => panic!("expected the missing branch refusal, got {other:?}"),
+            }
+        }
     }
 
     /// A tracked branch pushes to its upstream's real branch when a tag named

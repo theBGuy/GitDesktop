@@ -11,6 +11,7 @@ import {
   GitBranchIcon,
   GitPullRequestIcon,
   TreeStructureIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -144,6 +145,10 @@ import { RebaseOntoDialog } from "./RebaseOntoDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
+import {
+  STATUS_PENDING_REASON,
+  STATUS_READ_FAILED_REASON,
+} from "./sync-controls-state";
 import { repoOpenWatermark, useOpenWorktree } from "./useOpenRepoByPath";
 import {
   reportAutostashOutcome,
@@ -1617,33 +1622,36 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // `?? 0` for the counts. Asserting the absence on that value tells a user with
   // a dirty tree on `master` that HEAD is detached and nothing is uncommitted,
   // so no arm may assert an absence until its own read has actually answered.
-  // All four are unconditional, so `isPending` is the first-answer window and
-  // nothing else. A failed first read leaves the SAME undefined value a pending
-  // one does, so it gets its own arm rather than the assertion — and it isn't
-  // even short-lived: the query client retries once, only `status` polls, so for
-  // branches/defaultBranch/stashCount the failure stands until a refocus or an
-  // invalidation. Each value below is null once its read has answered, and
-  // otherwise the honest reason it can't.
+  // All four are unconditional, so `isPending` means no answer yet, including a
+  // refetch of a read that has only ever failed, which the sticky failure arm
+  // inside `unread` outranks. A failed first read leaves the SAME undefined
+  // value a pending one does, so it gets its own arm rather than the
+  // assertion — and it isn't even short-lived: the query client retries once,
+  // only `status` polls, so for branches/defaultBranch/stashCount the failure
+  // stands until a refocus or an invalidation. Each value below is null once
+  // its read has answered, and otherwise the honest reason it can't.
   const unread = (
-    q: { isPending: boolean; isError: boolean; data: unknown },
+    q: { isPending: boolean; errorUpdateCount: number; data: unknown },
     checking: string,
     failed: string,
   ) => {
-    if (q.isPending) return checking;
+    // Sticky and checked first: a never-loaded query that errored goes back to
+    // pending on every refetch, so `isPending` would flip it back to checking.
     // An error over data that already landed is a failed REFRESH, not a missing
     // answer: the row still has something true to say, so it says it.
-    if (q.isError && q.data === undefined) return failed;
+    if (q.data === undefined && q.errorUpdateCount > 0) return failed;
+    if (q.isPending) return checking;
     return null;
   };
   const headUnread = unread(
     status,
     "Checking the current branch…",
-    "Couldn't read the repository status.",
+    `${STATUS_READ_FAILED_REASON}.`,
   );
   const changesUnread = unread(
     status,
     "Checking for uncommitted changes…",
-    "Couldn't read the repository status.",
+    `${STATUS_READ_FAILED_REASON}.`,
   );
   const defaultBranchUnread = unread(
     defaultBranch,
@@ -2714,6 +2722,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   };
 
+  // Sticky, never `isError`: a never-loaded query that errored goes back to
+  // pending on every refetch, which would flip the trigger back to its skeleton.
+  const failedRead = status.data === undefined && status.errorUpdateCount > 0;
+
   return (
     <>
       <Popover.Root
@@ -2757,13 +2769,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     return undefined;
                 }
               })()}
+              // Mouse-only by nature; the sr-only text and the popover's
+              // notice carry the same reason to keyboard, touch and AT.
+              title={failedRead ? STATUS_READ_FAILED_REASON : undefined}
               // overflow-hidden clips the box the shrink cascade squeezes; the
               // shrink undoes the vendored Button's own shrink-0, or nothing
               // truncates — without either, the icons spill out both sides
               // into the separator and the repository menu on a narrow header.
               className="min-w-0 shrink overflow-hidden"
             >
-              <GitBranchIcon data-icon="inline-start" />
+              {/* A failed read swaps the glyph, so the dash below reads as a
+                  failure by shape and never as an empty value. */}
+              {failedRead ? (
+                <WarningIcon data-icon="inline-start" />
+              ) : (
+                <GitBranchIcon data-icon="inline-start" />
+              )}
               {(() => {
                 switch (true) {
                   case status.data !== undefined:
@@ -2777,16 +2798,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         {currentLabel}
                       </span>
                     );
-                  // A failed read holds still until the poll heals it: no
-                  // endless pulse over a status that isn't coming.
-                  case status.isError:
+                  // A failed read holds still until the poll heals it, in the
+                  // skeleton's width so the caret doesn't move between them.
+                  case failedRead:
                     return (
                       <>
-                        <span aria-hidden className="text-muted-foreground">
+                        <span
+                          aria-hidden
+                          className="inline-block w-[9ch] shrink-0 text-muted-foreground"
+                        >
                           —
                         </span>
                         <span className="sr-only">
-                          Couldn't read the branch status
+                          {STATUS_READ_FAILED_REASON}
                         </span>
                       </>
                     );
@@ -2801,7 +2825,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                           aria-hidden
                           className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
                         />
-                        <span className="sr-only">Checking branch…</span>
+                        <span className="sr-only">{STATUS_PENDING_REASON}</span>
                       </>
                     );
                 }
@@ -2846,6 +2870,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 }
               }}
             >
+              {/* The trigger's title is mouse-only; this is where keyboard
+                  and touch users meet the reason. */}
+              {failedRead && (
+                <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2 text-[11px]">
+                  <span className="min-w-0 flex-1 text-muted-foreground">
+                    {STATUS_READ_FAILED_REASON}.
+                  </span>
+                </div>
+              )}
               {inLinkedWorktree && (
                 <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2 text-[11px]">
                   <TreeStructureIcon className="size-3.5 shrink-0 text-muted-foreground" />

@@ -11,20 +11,39 @@ export const SYNC_BUSY_REASON = "A sync is still running…";
 export const PULL_OPTIONS_UNPUBLISHED_REASON =
   "Publish the branch first to pull it";
 
+/** A status read that failed with nothing loaded. Shared with the branch picker's
+ *  trigger and popover, so both surfaces name the same failure the same way. */
+export const STATUS_READ_FAILED_REASON = "Couldn't read the repository status";
+
+/** A status read still in flight with nothing loaded. Shared with the branch
+ *  picker's trigger, so one read has one wording. */
+export const STATUS_PENDING_REASON = "Checking branch…";
+
+/** A remotes read still in flight with nothing loaded. Shared with the forge
+ *  tabs' not-ready panel, so one read has one wording. */
+export const REMOTES_PENDING_REASON = "Checking remotes…";
+
+/** A remotes read that failed with nothing loaded; shared with the forge tabs'
+ *  not-ready panel. */
+export const REMOTES_FAILED_REASON = "Couldn't read the remotes";
+
 /** Which read a held action is waiting on. Remotes outrank status: they decide
  *  whether this cluster is the right control at all. */
-type UnknownRead = "remotes" | "statusFailed" | "status";
+type UnknownRead = "remotesFailed" | "remotes" | "statusFailed" | "status";
 
 const UNKNOWN_READ_REASON: Record<UnknownRead, string> = {
-  remotes: "Checking remotes…",
-  statusFailed: "Couldn't read the branch status",
-  status: "Checking branch…",
+  remotesFailed: REMOTES_FAILED_REASON,
+  remotes: REMOTES_PENDING_REASON,
+  statusFailed: STATUS_READ_FAILED_REASON,
+  status: STATUS_PENDING_REASON,
 };
 
 /** The fields of `RepoStatus.branch` the sync bar reads. */
 export interface SyncHead {
   name: string | null;
   detached: boolean;
+  /** HEAD's commit; null on a branch with no commits yet. */
+  oid: string | null;
   upstream: string | null;
   ahead: number;
   behind: number;
@@ -36,10 +55,15 @@ export interface SyncControlsInput {
    *  THIS repo. Never a previous repo's placeholder — that would act on its
    *  branch. */
   head: SyncHead | undefined;
-  /** `status.isError`; only consulted while `head` is undefined. */
+  /** `status.data === undefined && status.errorUpdateCount > 0`; only consulted
+   *  while `head` is undefined. Never `isError`: a never-loaded query that
+   *  errored goes back to pending on every refetch, flipping the reason per poll. */
   statusError: boolean;
   /** `remotes.data`: undefined while the remotes read has no data. */
   remotes: readonly string[] | undefined;
+  /** `remotes.data === undefined && remotes.errorUpdateCount > 0` (sticky across
+   *  refetches, as `statusError`); only consulted while `remotes` is undefined. */
+  remotesError: boolean;
   busy: boolean;
   /** The offline hold's reason, undefined while online. */
   offlineHold: string | undefined;
@@ -86,6 +110,8 @@ export function deriveSyncControls(input: SyncControlsInput) {
   const { hasUpstream, diverged, detached } = headFacts(head);
   // Merging upstream INTO a detached HEAD would orphan the merge commit.
   const canUpdateUpstream = hasUpstreamRemote && !detached;
+  // Strict: a head without an `oid` field reads as born, never as unborn.
+  const unborn = statusKnown && !head.detached && head.oid === null;
 
   const aheadCount = head?.ahead ?? 0;
   const behindCount = head?.behind ?? 0;
@@ -125,6 +151,13 @@ export function deriveSyncControls(input: SyncControlsInput) {
     if (diverged) return divergedPullDescription;
     if (detached)
       return "Pull — you're on a detached HEAD; check out a branch to pull";
+    // git reports no ahead/behind for a branch with no commits, so its upstream
+    // reads as gone whether or not the remote branch exists; claim neither.
+    if (unborn && head.upstreamGone)
+      return `Pull — ${head.name} has no commits yet, so it can't be compared with ${upstream}`;
+    // Publish is held until the first commit, so the advice names that first.
+    if (unborn && !upstream)
+      return `Pull — ${head.name} has no commits yet; make your first commit, then publish the branch`;
     // Configured-but-dead (deleted on the remote, e.g. after a merge) is not
     // never-published; say so.
     if (head.upstreamGone)
@@ -136,6 +169,8 @@ export function deriveSyncControls(input: SyncControlsInput) {
   const pushDescription = (() => {
     if (detached)
       return `${pushLabel} — you're on a detached HEAD; check out a branch to push`;
+    if (unborn)
+      return `${pushLabel} — ${head.name} has no commits yet; make your first commit to publish it`;
     if (input.remoteRebased)
       return `${pushLabel} — ${upstream} already has your commits under different ids; force pushing would replace them with your copies`;
     return aheadLabel;
@@ -144,7 +179,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
   // Fetch reads only the remotes; the other three also act on the branch.
   const unknownRead = (needsStatus: boolean): string | undefined => {
     let read: UnknownRead | undefined;
-    if (!remotesKnown) read = "remotes";
+    if (!remotesKnown) read = input.remotesError ? "remotesFailed" : "remotes";
     else if (needsStatus && statusFailed) read = "statusFailed";
     else if (needsStatus && !statusKnown) read = "status";
     return read && UNKNOWN_READ_REASON[read];
@@ -166,7 +201,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
     !hasUpstream || diverged,
     pullDescription,
   );
-  const push = hold(unknownRead(true), detached, pushDescription);
+  const push = hold(unknownRead(true), detached || unborn, pushDescription);
   // The caret stays live offline: its items carry their own offline holds.
   const pullOptions = ((): Hold => {
     const pending = unknownRead(true);
@@ -174,7 +209,10 @@ export function deriveSyncControls(input: SyncControlsInput) {
     const disabled = busy || pending !== undefined || empty;
     if (busy) return { disabled, reason: SYNC_BUSY_REASON };
     if (pending !== undefined) return { disabled, reason: pending };
-    if (detached) return { disabled, reason: pullDescription };
+    // An unborn branch has no commits to reconcile, upstream or not, and the
+    // empty menu's reason would point at Publish, which Push holds until the
+    // first commit; the caret repeats the Pull description instead.
+    if (detached || unborn) return { disabled, reason: pullDescription };
     return {
       disabled,
       reason: empty ? PULL_OPTIONS_UNPUBLISHED_REASON : undefined,
@@ -216,7 +254,13 @@ export function deriveSyncControls(input: SyncControlsInput) {
         hasUpstream &&
         !diverged &&
         !offlineHold,
-      push: statusKnown && hasOrigin && !busy && !detached && !offlineHold,
+      push:
+        statusKnown &&
+        hasOrigin &&
+        !busy &&
+        !detached &&
+        !unborn &&
+        !offlineHold,
       updateFromUpstream:
         statusKnown && canUpdateUpstream && !busy && !offlineHold,
     },

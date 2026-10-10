@@ -15,8 +15,22 @@ export function remotesOptions(repo: string) {
   };
 }
 
+/** How often a remotes read that failed with nothing loaded retries: it is
+ *  otherwise re-read only by a repo write or a window focus, and the sync bar
+ *  and the forge panel hold until it answers. */
+const REMOTES_FAILED_RETRY_MS = 10_000;
+
+/** The error-only poll rides the hook, never `remotesOptions`: the repo-shell
+ *  warm-up spreads those, and a repo nobody observes must not keep polling. */
 export function useRemotes(repo: string) {
-  return useQuery(remotesOptions(repo));
+  return useQuery({
+    ...remotesOptions(repo),
+    refetchInterval: (query) =>
+      query.state.data === undefined && query.state.errorUpdateCount > 0
+        ? REMOTES_FAILED_RETRY_MS
+        : false,
+    refetchIntervalInBackground: false,
+  });
 }
 
 export function usePublishRepo(repo: string) {

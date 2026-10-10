@@ -18,6 +18,7 @@ import {
   projectItemsRepoKey,
 } from "./board-writes";
 import { repoKeys } from "./core";
+import { repoMutationCallbacks } from "./repo-mutation-options";
 
 /**
  * The keys a working-tree write invalidates: repo status, every working-tree file diff,
@@ -413,18 +414,6 @@ export function useRepoMutation<TArgs, TData>(
   } = {},
 ) {
   const queryClient = useQueryClient();
-  const invalidate = () =>
-    Promise.all(
-      (opts.invalidate ?? [repoKeys.all(repo)]).map((queryKey) =>
-        queryClient.invalidateQueries({ queryKey }),
-      ),
-    );
-  const invalidateAfter = () =>
-    Promise.all(
-      (opts.invalidateAfter ?? []).map((queryKey) =>
-        queryClient.invalidateQueries({ queryKey }),
-      ),
-    );
   // A caller's hook must not take the mutation down with it: a throw here would
   // otherwise skip the invalidation, or report a succeeded mutation as failed.
   const notifySuccess = (data: TData, variables: TArgs) => {
@@ -438,21 +427,15 @@ export function useRepoMutation<TArgs, TData>(
     mutationFn,
     ...(opts.identity ? { mutationKey: opts.identity } : {}),
     ...(opts.networkMode ? { networkMode: opts.networkMode } : {}),
-    ...(opts.refetchBeforeSuccess
-      ? {
-          onSuccess: async (data: TData, variables: TArgs) => {
-            notifySuccess(data, variables);
-            await invalidate();
-            void invalidateAfter();
-          },
-        }
-      : {
-          onSuccess: notifySuccess,
-          onSettled: () => {
-            void invalidate();
-            void invalidateAfter();
-          },
-        }),
+    ...repoMutationCallbacks(
+      queryClient,
+      {
+        invalidate: opts.invalidate ?? [repoKeys.all(repo)],
+        invalidateAfter: opts.invalidateAfter ?? [],
+      },
+      opts.refetchBeforeSuccess ?? false,
+      notifySuccess,
+    ),
   });
 }
 
