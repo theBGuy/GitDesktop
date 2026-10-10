@@ -208,22 +208,15 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // Hotkeys mirror the buttons' holds. Pull needs no `!detached` term: the
     // backend leaves a detached HEAD's upstream null, so `hasUpstream` is false.
     hotkeys: {
-      fetch: remotesKnown && !noOrigin && !busy && !offlineHold,
+      fetch: hasOrigin && !busy && !offlineHold,
       pull:
         statusKnown &&
-        remotesKnown &&
-        !noOrigin &&
+        hasOrigin &&
         !busy &&
         hasUpstream &&
         !diverged &&
         !offlineHold,
-      push:
-        statusKnown &&
-        remotesKnown &&
-        !noOrigin &&
-        !busy &&
-        !detached &&
-        !offlineHold,
+      push: statusKnown && hasOrigin && !busy && !detached && !offlineHold,
       updateFromUpstream:
         statusKnown && canUpdateUpstream && !busy && !offlineHold,
     },

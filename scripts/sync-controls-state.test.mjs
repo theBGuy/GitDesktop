@@ -74,6 +74,16 @@ test("(2) status read failed with no data: held with the read failure", () => {
   assert.deepEqual(s.hotkeys, { ...NO_HOTKEYS, fetch: true });
 });
 
+test("a failed refetch over measured data holds nothing", () => {
+  // The default input is a measured, clean branch tracking origin/feature.
+  const s = deriveSyncControls(input({ statusError: true }));
+  assert.equal(s.statusFailed, false);
+  for (const h of [s.fetch, s.pull, s.push, s.pullOptions])
+    assert.deepEqual(h, { disabled: false, reason: undefined });
+  assert.equal(s.hotkeys.pull, true);
+  assert.equal(s.hotkeys.push, true);
+});
+
 test("(3) remotes unknown: all four held on the remotes, whatever the status", () => {
   const heads = [
     head(),

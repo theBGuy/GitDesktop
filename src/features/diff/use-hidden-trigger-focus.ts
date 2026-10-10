@@ -36,7 +36,7 @@ export function useHiddenTriggerFocus(): {
  */
 export function useFocusOnControlsSwap(
   active: boolean,
-  controlsRef: RefObject<HTMLSpanElement | null>,
+  controlsRef: RefObject<HTMLElement | null>,
 ) {
   const prevRef = useRef(active);
   useLayoutEffect(() => {
