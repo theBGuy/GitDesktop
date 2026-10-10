@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ignoreLines } from "@/lib/ai/ignore";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import * as api from "../api";
 import {
   checkoutConflictSide,
@@ -117,6 +118,7 @@ export function opStateOptions(repo: string) {
     queryKey: repoKeys.opState(repo),
     queryFn: () => api.gitOpState(repo),
     networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
   };
 }
 

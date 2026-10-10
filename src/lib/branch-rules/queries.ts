@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { mergeBranchRules } from "./match";
 import {
   loadBranchRules,
@@ -8,21 +9,29 @@ import {
 } from "./store";
 import { type BranchRulesConfig, EMPTY_BRANCH_RULES } from "./types";
 
-const branchRulesKey = (repo: string) => ["branch-rules", repo] as const;
+const BRANCH_RULES_FAMILY = ["branch-rules"] as const;
+const SHARED_BRANCH_RULES_FAMILY = ["branch-rules-shared"] as const;
+const branchRulesKey = (repo: string) =>
+  [...BRANCH_RULES_FAMILY, repo] as const;
 const sharedBranchRulesKey = (repo: string) =>
-  ["branch-rules-shared", repo] as const;
+  [...SHARED_BRANCH_RULES_FAMILY, repo] as const;
 
 // ── Personal scope ──────────────────────────────────────────────────────────
 
-export function useBranchRules(repo: string) {
-  return useQuery({
+export function branchRulesOptions(repo: string) {
+  return {
     queryKey: branchRulesKey(repo),
     queryFn: () => loadBranchRules(repo),
     staleTime: Number.POSITIVE_INFINITY,
     // Local read: the default "online" mode parks it while the OS reports no
     // connection, which would hold every rules-settling gate closed forever.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useBranchRules(repo: string) {
+  return useQuery(branchRulesOptions(repo));
 }
 
 export function useSaveBranchRules(repo: string) {
@@ -31,23 +40,31 @@ export function useSaveBranchRules(repo: string) {
     mutationFn: (config: BranchRulesConfig) => saveBranchRules(repo, config),
     // Local write — see useBranchRules: "online" mode would park it offline.
     networkMode: "always",
+    // Every checkout's key, not just this one's: the rules are stored by repo
+    // identity, so a save here changes what each worktree of the repo reads, and
+    // a never-stale key would otherwise serve the old rules from the cache.
     onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: branchRulesKey(repo) }),
+      queryClient.invalidateQueries({ queryKey: BRANCH_RULES_FAMILY }),
   });
 }
 
 // ── Shared scope (committed `.gitdesktop/branch-rules.json`) ─────────────────
 
-export function useSharedBranchRules(repo: string) {
-  return useQuery({
+export function sharedBranchRulesOptions(repo: string) {
+  return {
     queryKey: sharedBranchRulesKey(repo),
     queryFn: () => loadSharedBranchRules(repo),
     // The file can change out from under us (pull, branch switch), so let it
     // refetch on focus rather than caching forever.
     staleTime: 30_000,
     // Local read — see useBranchRules: "online" mode would park it offline.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useSharedBranchRules(repo: string) {
+  return useQuery(sharedBranchRulesOptions(repo));
 }
 
 export function useSaveSharedBranchRules(repo: string) {
@@ -57,8 +74,9 @@ export function useSaveSharedBranchRules(repo: string) {
       saveSharedBranchRules(repo, config),
     // Local write — see useBranchRules: "online" mode would park it offline.
     networkMode: "always",
+    // Family-wide like the personal save; only mounted keys refetch.
     onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: sharedBranchRulesKey(repo) }),
+      queryClient.invalidateQueries({ queryKey: SHARED_BRANCH_RULES_FAMILY }),
   });
 }
 

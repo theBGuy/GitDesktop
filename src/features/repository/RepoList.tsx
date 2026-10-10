@@ -23,6 +23,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import { applyFrozenOrder, frozenPathKey } from "@/lib/frozen-order";
 import {
   forgeRepoUrl,
   forgeRepoVisibility,
@@ -125,6 +126,11 @@ export function RepoList({
   const [filter, setFilter] = useState("");
   const [highlight, setHighlight] = useState(-1);
   const [openingPath, setOpeningPath] = useState<string | null>(null);
+  // The row order at an open's click, held until the open resolves false: the
+  // recents write moves the opened row to the top while the switch still waits on
+  // its warm-up, and a successful open unmounts this list (popover close, the
+  // Welcome view swap) before the new order would ever paint.
+  const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
   // The repo the one shared context menu acts on, set on right-click.
   const [menuRepo, setMenuRepo] = useState<RecentRepo | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -242,7 +248,12 @@ export function RepoList({
   }, [owners.data, recents]);
 
   const q = filter.trim().toLowerCase();
-  const filtered = recents.filter(
+  // Frozen BEFORE the Recent slice and the owner grouping, so section membership
+  // holds too; rows that moved between sections would remount under new keys.
+  const ordered = applyFrozenOrder(recents, frozenOrder, (r) =>
+    frozenPathKey(r.path),
+  );
+  const filtered = ordered.filter(
     (r) =>
       !q ||
       r.name.toLowerCase().includes(q) ||
@@ -288,8 +299,9 @@ export function RepoList({
 
   async function handleOpen(path: string) {
     setOpeningPath(path);
+    setFrozenOrder(ordered.map((r) => frozenPathKey(r.path)));
     try {
-      await open(path);
+      if (!(await open(path))) setFrozenOrder(null);
       onOpened?.();
     } finally {
       setOpeningPath(null);
@@ -480,7 +492,11 @@ function RepoRow({
   hostOf,
 }: RepoRowsProps & { repo: RecentRepo }) {
   const highlighted = repo.path === highlightedPath;
-  const opening = repo.path === openingPath;
+  // Normalized: the recents write can respell the row's path (case refresh) while
+  // the open is still in flight, and the spinner must stay on it.
+  const opening =
+    openingPath !== null &&
+    frozenPathKey(repo.path) === frozenPathKey(openingPath);
   const provider = providerOf(repo);
   const host = hostOf(repo);
   const badge = visibilityBadge(repo.visibility);

@@ -6,7 +6,7 @@ const reduceMotion =
     : null;
 
 type ViewTransitionDocument = Document & {
-  startViewTransition?: (callback: () => void) => unknown;
+  startViewTransition?: (callback: () => void) => ViewTransition;
 };
 
 /**
@@ -15,13 +15,27 @@ type ViewTransitionDocument = Document & {
  * reduced motion; otherwise applies the update immediately. `flushSync` lands
  * the React update synchronously so the transition captures before/after.
  *
+ * `animate: false` drops the crossfade but keeps the ORDER: the transition is
+ * skipped at once, and its update is applied without animation in a later task,
+ * after any pending transition's update — still one atomic action. A plain
+ * synchronous update could land first and be overwritten by that pending one.
+ *
  * Only call this from event handlers — never during render or an effect.
  */
-export function startViewTransition(update: () => void): void {
+export function startViewTransition(
+  update: () => void,
+  { animate = true }: { animate?: boolean } = {},
+): void {
   const doc = document as ViewTransitionDocument;
   if (reduceMotion?.matches || typeof doc.startViewTransition !== "function") {
     update();
     return;
   }
-  doc.startViewTransition(() => flushSync(update));
+  const transition = doc.startViewTransition(() => flushSync(update));
+  // A skip (this arm, or the next transition aborting a running one) rejects
+  // `ready`, and `finished` can reject with it; both are claimed on every
+  // transition so the global unhandledrejection hook never reports a navigation.
+  transition.ready.catch(() => undefined);
+  transition.finished.catch(() => undefined);
+  if (!animate) transition.skipTransition();
 }

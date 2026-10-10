@@ -11,12 +11,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useOpenRecordedRepo } from "@/features/repository/useOpenRepoByPath";
 import { parentDir } from "@/features/welcome/clone-utils";
 import { useAppForm } from "@/lib/form";
 import { forgeClone, validateRepo } from "@/lib/git/api";
 import type { ForgeProvider } from "@/lib/git/types";
-import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
+import { useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
@@ -46,8 +46,7 @@ export function ExploreCloneDialog({
   target: ExploreCloneTarget | null;
   onOpenChange: (open: boolean) => void;
 }) {
-  const openRepo = useUiStore((s) => s.openRepo);
-  const addRecent = useAddRecentRepo();
+  const openRecorded = useOpenRecordedRepo();
   const settings = useSettings();
 
   const form = useAppForm({
@@ -64,13 +63,10 @@ export function ExploreCloneDialog({
           value.recurseSubmodules,
         );
         const info = await validateRepo(clonedPath);
-        // Await the recents write so the row exists before RepositoryView mounts
-        // (best-effort — a settings-write failure must never block opening).
-        await addRecent
-          .mutateAsync({ path: info.root, name: info.name })
-          .catch(() => undefined);
+        // Closes even when a newer navigation superseded the switch: the clone
+        // landed and is in recents either way.
+        await openRecorded(info);
         onOpenChange(false);
-        openRepo(info);
       } catch (e) {
         toastError(e);
       }

@@ -431,9 +431,9 @@ interface UiState {
     reviewId?: string | null;
     /** Store-external state this navigation depends on (the caller's repo-lens
      *  write), run inside the SAME view-transition callback as the selection.
-     *  Written outside it, it would land a render early — the transition callback
-     *  is deferred on Chromium — pairing the new lens with the old PR number and
-     *  fetching a pair the user never selected. */
+     *  Written outside it, it would land a render early — the callback applies in
+     *  a later task, crossfaded or not — pairing the new lens with the old PR
+     *  number and fetching a pair the user never selected. */
     beforeSelect?: () => void;
     /** Re-check for the deferred-apply window, run FIRST inside the transition
      *  callback: an async caller's validity can lapse between scheduling and applying,
@@ -637,8 +637,9 @@ export const useUiStore = create<UiState>()((set, get) => {
     });
 
   // Advance the epoch NOW, ahead of a transition-backed navigation's scheduling:
-  // startViewTransition applies its patch deferred, so an epoch riding inside the
-  // callback would land after a settling continuation's guard had already passed.
+  // startViewTransition applies its patch in a later task (under a crossfade, or
+  // without animation after any pending transition's update), so an epoch riding
+  // inside the callback would land after a settling continuation's guard had passed.
   // Safe outside the transition — the epoch has no visual subscribers, so this set
   // can't disturb the snapshot the transition captures. Returns the value it produced,
   // which a navigator hands to `stillValid` as the only epoch its re-check can compare
@@ -648,6 +649,13 @@ export const useUiStore = create<UiState>()((set, get) => {
     set((s) => ({ interactionEpoch: s.interactionEpoch + 1 }));
     return get().interactionEpoch;
   };
+
+  // A navigation into the repo view crossfades only when it changes the top-level
+  // view: a repo→repo swap or an in-repo landing is applied without animation in a
+  // later task, after any pending transition's update — still one atomic action —
+  // since a crossfade there double-exposes two differently laid-out headers. Read
+  // at REQUEST time.
+  const repoViewMotion = () => ({ animate: get().view !== "repo" });
 
   return {
     view: "welcome",
@@ -694,18 +702,20 @@ export const useUiStore = create<UiState>()((set, get) => {
 
     openRepo: (info) => {
       bumpEpochNow();
-      startViewTransition(() =>
-        set({
-          view: "repo",
-          previousView: "repo",
-          repoPath: info.root,
-          repoName: info.name,
-          repoTab: "changes",
-          // Clear the live fields; the previous repo's draft stays in
-          // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
-          // repo's draft once its branch is known.
-          ...CROSS_REPO_RESET,
-        }),
+      startViewTransition(
+        () =>
+          set({
+            view: "repo",
+            previousView: "repo",
+            repoPath: info.root,
+            repoName: info.name,
+            repoTab: "changes",
+            // Clear the live fields; the previous repo's draft stays in
+            // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
+            // repo's draft once its branch is known.
+            ...CROSS_REPO_RESET,
+          }),
+        repoViewMotion(),
       );
     },
     closeRepo: () => {
@@ -725,8 +735,9 @@ export const useUiStore = create<UiState>()((set, get) => {
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         // Nothing lands once the caller says the request has lapsed: the patch below
-        // applies deferred, so its preconditions are re-checked here, not at request
-        // time. The caller gets this navigation's own epoch to compare against.
+        // applies in a later task, crossfaded or not, so its preconditions are
+        // re-checked here, not at request time. The caller gets this navigation's own
+        // epoch to compare against.
         if (target.stillValid?.(epochAtRequest) === false) return;
         // Before the set, inside this callback: react-query updates an
         // observer's result synchronously, so the flush below renders the
@@ -754,7 +765,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // the PR's real state.
           pendingPrAlign: true,
         });
-      });
+      }, repoViewMotion());
     },
     openIssue: (target) => {
       bumpEpochNow();
@@ -773,7 +784,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
           selectedIssue: { kind: "remote", id: String(target.number) },
         });
-      });
+      }, repoViewMotion());
     },
     openRun: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -790,7 +801,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // After the reset (which nulls it) so the run stays selected.
           selectedRunId: target.runId,
         });
-      });
+      }, repoViewMotion());
     },
     openAgentTab: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -805,7 +816,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           repoTab: "agent",
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
-      });
+      }, repoViewMotion());
     },
     openRepoView: (target) => {
       const epochAtRequest = bumpEpochNow();
@@ -820,7 +831,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...(target.tab ? { repoTab: target.tab } : {}),
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
-      });
+      }, repoViewMotion());
     },
     setRepoTab: (tab) =>
       set((s) => ({ repoTab: tab, interactionEpoch: s.interactionEpoch + 1 })),

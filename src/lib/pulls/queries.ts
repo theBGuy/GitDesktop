@@ -6,6 +6,7 @@ import {
 import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import {
   createLocalPr,
   deleteLocalPr,
@@ -28,14 +29,19 @@ import {
  *  writer, so a surface offering a manual refresh has to reach this family. */
 export const localPrKey = (repo: string) => ["local-prs", repo] as const;
 
-export function useLocalPrs(repo: string) {
-  return useQuery({
+export function localPrsOptions(repo: string) {
+  return {
     queryKey: localPrKey(repo),
     queryFn: () => listLocalPrs(repo),
     // Local app-data reads must not park on the default "online" mode; applies
     // to every networkMode in this file (the forge-backed queries carry none).
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useLocalPrs(repo: string) {
+  return useQuery(localPrsOptions(repo));
 }
 
 /** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of

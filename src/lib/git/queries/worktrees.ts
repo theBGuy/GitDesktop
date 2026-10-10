@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import {
   addUserWorktree,
   listUserWorktrees,
@@ -23,6 +24,7 @@ export function userWorktreesOptions(repo: string) {
     queryKey: worktreeKey(repo),
     queryFn: () => listUserWorktrees(repo),
     networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
   };
 }
 

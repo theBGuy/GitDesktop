@@ -318,9 +318,20 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   carve-out: data-arrival seeds (`[open, thatQuery.data]`) and `onOpenChange`
   seeds stay bare, and each must be idempotent — never stomping a user's pick.
   The `seed-effect-on-open` guard allowlists the recorded ones.
-- Zustand + view transitions: `openRepo`/`closeRepo`/`openSettings` issue
-  deferred sets that clobber a plain `set()` right after — navigate in ONE
-  atomic action.
+- Zustand + view transitions: navigators (`openRepo`, `openPr`, `closeRepo`,
+  `openSettings`, …) apply their set in a later task — under a crossfade when the
+  top-level view changes, otherwise without animation after any pending
+  transition's update (`startViewTransition(…, { animate: false })`). Either
+  way it is still one atomic action, and a plain `set()` right after can be
+  clobbered — navigate in ONE atomic action.
+- Opening a recorded repo goes through `useOpenRecordedRepo`
+  (`src/features/repository/useOpenRepoByPath.ts`), the one tail that warms the
+  repo's shell reads (`warmRepoShell`, a 250 ms budget on cold keys), records it
+  in recents, and switches only if no newer open or navigation arrived; never a
+  hand-rolled `addRecent` → `openRepo`. The reads that paint the repo view stay
+  cached `REPO_SHELL_GC_TIME` (`src/lib/query-cache-times.ts`) through curated
+  `<thing>Options` factories the hook and the warm-up both spread, never a
+  `["repo"]` prefix default (it would catch the notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
   state go stale under it.

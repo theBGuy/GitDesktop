@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import * as api from "../api";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
 
@@ -30,6 +31,19 @@ export function useBranchAhead(
   });
 }
 
+export function branchAheadCountOptions(
+  repo: string,
+  base: string,
+  compare: string,
+) {
+  return {
+    queryKey: repoKeys.branchAheadCount(repo, base, compare),
+    queryFn: () => api.gitBranchAheadCount(repo, base, compare),
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
 /** Just how many commits `base..compare` holds, for callers that render only
  *  the number. Same enabled gate as {@link useCompareBranches}. */
 export function useBranchAheadCount(
@@ -38,10 +52,8 @@ export function useBranchAheadCount(
   compare: string | null,
 ) {
   return useQuery({
-    queryKey: repoKeys.branchAheadCount(repo, base ?? "", compare ?? ""),
-    queryFn: () => api.gitBranchAheadCount(repo, base ?? "", compare ?? ""),
+    ...branchAheadCountOptions(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
-    networkMode: "always",
   });
 }
 

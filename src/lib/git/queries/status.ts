@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import * as api from "../api";
 import { repoKeys } from "./core";
 
@@ -11,6 +12,7 @@ export function repoStatusOptions(repo: string) {
     // A local git read, so it must not park on the default "online" mode the way
     // a forge call does — gates that hold until this answers would never lift.
     networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
   };
 }
 
@@ -25,14 +27,22 @@ export function useRepoStatus(repo: string) {
 /** Per-file line counts for the Changes panel's rows. The key MUST stay a child
  *  of {@link repoKeys.status} — internal.ts's `workingTreeKeys` invalidates that
  *  key as a PREFIX, so every staging-class mutation already refreshes these counts
- *  with no extra wiring. `enabled` gates it on the Changes tab being active and the
- *  tree being dirty; a `<TabPanel>`-hidden panel still renders and would otherwise poll. */
+ *  with no extra wiring. */
+export function workingLineStatsOptions(repo: string) {
+  return {
+    queryKey: [...repoKeys.status(repo), "line-stats"] as const,
+    queryFn: () => api.gitWorkingLineStats(repo),
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** `enabled` gates it on the Changes tab being active and the tree being dirty; a
+ *  `<TabPanel>`-hidden panel still renders and would otherwise poll. */
 export function useWorkingLineStats(repo: string, enabled: boolean) {
   return useQuery({
-    queryKey: [...repoKeys.status(repo), "line-stats"],
-    queryFn: () => api.gitWorkingLineStats(repo),
+    ...workingLineStatsOptions(repo),
     enabled,
-    networkMode: "always",
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
   });
