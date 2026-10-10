@@ -22,11 +22,12 @@ export interface PublishProvider {
 /**
  * The READY publish providers for an origin-less repo, in a stable GitHub →
  * GitLab → Bitbucket order. `enabled` gates the underlying targets probe (and
- * yields `[]` when false) — pass `false` whenever the caller's branch can't
- * publish so the probe doesn't run. Hooks are called unconditionally so this is
- * safe to invoke at the top level regardless of `enabled`. `settled` is false
- * until both probes have answered (data or error): an empty list before then
- * means "not known yet", never "nobody signed in".
+ * yields `{ providers: [], settled: true }` when false) — pass `false`
+ * whenever the caller's branch can't publish so the probe doesn't run. Hooks
+ * are called unconditionally so this is safe to invoke at the top level
+ * regardless of `enabled`. `settled` is false until both probes have answered
+ * (data or error): an empty list before then means "not known yet", never
+ * "nobody signed in".
  */
 export function usePublishProviders(
   repoPath: string,
@@ -66,9 +67,10 @@ export function usePublishProviders(
  * drift. Renders a plain button when exactly one provider can publish, a caret
  * DropdownMenu when 2+ can, and — only when `disabledTitle` is supplied — a
  * disabled button carrying it as its reason when none can. The single and
- * disabled arms share one DisabledReasonButton node, so focus survives the probe
- * settling. `reserveCaret` gives every arm the dropdown's width (an invisible
- * caret where no real one shows), for a host whose neighbours must not move.
+ * disabled arms share one DisabledReasonButton node, so focus survives a
+ * disabled → single settle; the dropdown arm is its own trigger and remounts.
+ * `reserveCaret` gives every arm the dropdown's width (an invisible caret where
+ * no real one shows), for a host whose neighbours must not move.
  * Owns the publish dialog itself.
  */
 export function PublishRepoControl({

@@ -27,7 +27,6 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -2733,10 +2732,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               variant="ghost"
               size="sm"
               // The wrapper is the header's flex item, so it owns the cascade
-              // weight: in a wide header the CI name (shrink-20) yields before
-              // this label (shrink-4); in a compact one the badges are icon-only
-              // and this label takes most of the pressure (20 against the repo
-              // name's 1) down to an 8-character floor, in the text-xs `ch` the
+              // weight; shrink is weighted by width. In a wide header the badges
+              // (shrink-20) shrink at five times this label's rate (shrink-4)
+              // until their icon-wide floor; in a compact one they are
+              // icon-only and this label shrinks at 20 times the repo name's
+              // rate down to an 8-character floor, in the text-xs `ch` the
               // button renders. A label of 9 characters or fewer never shrinks,
               // so the floor can't pad it wider than its text.
               wrapperClassName={
@@ -2789,21 +2789,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       </>
                     );
                   // The bar holds the label floor's width, so the settled name
-                  // moves the header less; the span keeps the button's content
-                  // inline.
+                  // moves the header less. A span wearing the house Skeleton's
+                  // classes: the vendored Skeleton is a div, which a button's
+                  // phrasing content can't hold.
                   default:
                     return (
                       <>
-                        <span aria-hidden className="flex shrink-0">
-                          <Skeleton className="h-3 w-[9ch]" />
-                        </span>
+                        <span
+                          aria-hidden
+                          className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
+                        />
                         <span className="sr-only">Checking branch…</span>
                       </>
                     );
                 }
               })()}
+              {/* The compact header drops the badge rather than budget it in
+                  the label floor: the label already reads "detached @", and
+                  a shrink-0 badge there would squeeze the label to nothing. */}
               {head?.detached && (
-                <Badge variant="secondary" className="ml-1 shrink-0">
+                <Badge
+                  variant="secondary"
+                  className="ml-1 shrink-0 @max-4xl/repo-header:hidden"
+                >
                   detached
                 </Badge>
               )}

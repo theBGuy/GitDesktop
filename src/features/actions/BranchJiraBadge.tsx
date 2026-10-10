@@ -28,8 +28,9 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
   return (
     <button
       type="button"
-      // Same cascade tier and icon-wide floor as BranchCiBadge: the key truncates
-      // first in a wide header and hides in a compact one.
+      // Same cascade tier and icon-wide floor as BranchCiBadge: in a wide header
+      // this badge shrinks at five times the branch label's rate, weighted by
+      // width, until it is icon-wide; in a compact one the key hides.
       className="flex shrink-20 items-center @4xl/repo-header:min-w-6.5 gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       title={
         extra > 0

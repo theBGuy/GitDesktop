@@ -2,8 +2,9 @@
 // held and why, and which hotkeys fire, across the loading and settled states.
 // The contract under test: nothing that acts on the branch is offered before
 // the status has measured it ("Publish branch" sends `-u origin`), holds are
-// ranked busy > offline > unknown read > the state's own description, and every
-// disabled control carries a reason.
+// ranked busy > offline > unknown read > the state's own description (save
+// the Pull-options caret, which offline never holds: its network items carry
+// their own offline holds), and every disabled control carries a reason.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -59,7 +60,7 @@ test("(1) status unknown, origin known: Fetch live, the rest held on the branch"
   assert.deepEqual(s.hotkeys, { ...NO_HOTKEYS, fetch: true });
 });
 
-test("(2) status read failed with no data: held with the failure, not a pulse", () => {
+test("(2) status read failed with no data: held with the read failure", () => {
   const s = deriveSyncControls(input({ head: undefined, statusError: true }));
   assert.equal(s.statusFailed, true);
   assert.equal(s.pushLabel, "Push");
@@ -74,14 +75,23 @@ test("(2) status read failed with no data: held with the failure, not a pulse", 
 });
 
 test("(3) remotes unknown: all four held on the remotes, whatever the status", () => {
-  for (const h0 of [head(), undefined]) {
-    const s = deriveSyncControls(input({ head: h0, remotes: undefined }));
-    assert.equal(s.remotesKnown, false);
-    assert.equal(s.noOrigin, false);
-    for (const h of [s.fetch, s.pull, s.push, s.pullOptions])
-      assert.deepEqual(h, { disabled: true, reason: "Checking remotes…" });
-    assert.deepEqual(s.hotkeys, NO_HOTKEYS);
-  }
+  const heads = [
+    head(),
+    undefined,
+    head({ name: null, detached: true, upstream: null }),
+    head({ ahead: 2, behind: 1 }),
+  ];
+  for (const h0 of heads)
+    for (const statusError of [false, true]) {
+      const s = deriveSyncControls(
+        input({ head: h0, statusError, remotes: undefined }),
+      );
+      assert.equal(s.remotesKnown, false);
+      assert.equal(s.noOrigin, false);
+      for (const h of [s.fetch, s.pull, s.push, s.pullOptions])
+        assert.deepEqual(h, { disabled: true, reason: "Checking remotes…" });
+      assert.deepEqual(s.hotkeys, NO_HOTKEYS);
+    }
 });
 
 test("(4) synced with an upstream: Push and Pull enabled, bare names", () => {
@@ -238,6 +248,18 @@ test("hold precedence: busy > offline > unknown read > description", () => {
     { disabled: false, reason: undefined },
   );
   assert.deepEqual(offline.hotkeys, NO_HOTKEYS);
+  // An unknown read outranks the head's own description: a detached head's
+  // Pull and Push texts wait behind the remotes read.
+  const unknown = deriveSyncControls(
+    input({
+      head: head({ name: null, detached: true, upstream: null }),
+      remotes: undefined,
+    }),
+  );
+  assert.ok(unknown.pullDescription);
+  assert.ok(unknown.pushDescription);
+  for (const h of [unknown.pull, unknown.push, unknown.pullOptions])
+    assert.deepEqual(h, { disabled: true, reason: "Checking remotes…" });
 });
 
 test("no origin: the cluster yields to Publish and no sync hotkey fires", () => {

@@ -115,28 +115,48 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // form goes on `aria-keyshortcuts`. `null` = user explicitly unbound → no
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
-  const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+  // The force-push confirm, holding the branch its divergence verdict was
+  // measured on, so a HEAD move the status has seen refuses the confirm.
+  const [forceConfirm, setForceConfirm] = useState<{
+    branch: string | null;
+  } | null>(null);
   // The publish intercepted by the fork-PR guard. The branch is captured at
   // click time and travels with the match, so the dialog can only ever push the
-  // branch the detection ran for.
+  // branch the detection ran for. Each open carries its own `repo` and a
+  // `token` that keys the guard, so every open is a fresh instance whose
+  // repoPath never changes: its `usePush` stays on that repo (an in-flight
+  // mutation keeps those options through an unmount), and a closed open's late
+  // continuation can't close a newer one. A closed open stays mounted only for
+  // the dialog's exit transition and closed-state render; the next open, or
+  // the no-origin arm, unmounts it.
   const [forkGuard, setForkGuard] = useState<{
+    token: number;
+    repo: string;
     match: ForkPrMatch;
     branch: string;
+    open: boolean;
   } | null>(null);
-  // The repo the guard last opened in, kept past its close: the guard's own
-  // fork push is still in flight then, and its `usePush` must not follow a
-  // switch to the live repo.
-  const [forkGuardRepo, setForkGuardRepo] = useState(repoPath);
-  const [detecting, setDetecting] = useState(false);
+  const forkGuardSeq = useRef(0);
+  const closeForkGuard = (token: number) =>
+    setForkGuard((g) => (g?.token === token ? { ...g, open: false } : g));
+  // In-flight fork-PR detections, counted per repo: each holds its own repo's
+  // sync bar and no other, so a switch mid-probe neither holds the new repo nor
+  // releases the old one before its probe settles.
+  const [detections, setDetections] = useState<
+    Readonly<Record<string, number>>
+  >({});
+  const detecting = (detections[repoPath] ?? 0) > 0;
   // This component survives repo switches (RepoHeader mounts unkeyed), so both
-  // confirm dialogs close in the render that switches: a confirm left open
-  // would push the live repo with the old one's branch and match. Reset in
-  // render, since an effect would paint them open over the new repo first.
+  // confirm dialogs close in the render that switches. Left open, the force
+  // confirm would force-push the live HEAD on the old repo's divergence
+  // verdict, and the fork guard would offer a push for a repository the user
+  // has left (defense in depth beside its per-open pin). Reset in render: an
+  // effect would paint them open first.
   const [dialogsRepo, setDialogsRepo] = useState(repoPath);
   if (dialogsRepo !== repoPath) {
     setDialogsRepo(repoPath);
-    setForceConfirmOpen(false);
-    setForkGuard(null);
+    setForceConfirm(null);
+    setForkGuard((g) => g && { ...g, open: false });
   }
 
   // Data, never isPending/isFetching: undefined means unknown for THIS repo
@@ -477,11 +497,28 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         toast.success("Force pushed", {
           description: FORCE_PUSH_DEGRADED[guard],
         });
-      setForceConfirmOpen(false);
+      setForceConfirm(null);
     } catch (e) {
       onError(e);
-      setForceConfirmOpen(false);
+      setForceConfirm(null);
     }
+  }
+
+  // HEAD can move while the confirm sits open; the branch it opened on is the
+  // only one its divergence verdict described. `headNameRef` follows the status
+  // read, so only a move the status has already seen refuses; the push itself
+  // stays on the HEAD path.
+  function confirmForcePush() {
+    if (headNameRef.current !== forceConfirm?.branch) {
+      toast.info("HEAD moved while the dialog was open — nothing was pushed.");
+      setForceConfirm(null);
+      return;
+    }
+    void doPush(true);
+  }
+
+  function openForceConfirm() {
+    setForceConfirm({ branch: head?.name ?? null });
   }
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
@@ -498,13 +535,17 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     const pushedIn = repoPath;
-    setDetecting(true);
+    setDetections((d) => ({ ...d, [pushedIn]: (d[pushedIn] ?? 0) + 1 }));
     const match = await forgeDetectForkPrForBranch(repoPath, branch).catch(
       () => null,
     );
-    setDetecting(false);
-    // `push` follows the live repo, and this closure's `-u` was decided for the
-    // old one: a switch during the round-trip refuses rather than publish there.
+    setDetections((d) => {
+      const { [pushedIn]: n = 0, ...rest } = d;
+      return n > 1 ? { ...rest, [pushedIn]: n - 1 } : rest;
+    });
+    // `push` follows the live repo, while the branch name, the fork match and
+    // the decision to publish all belong to the old one: a switch during the
+    // round-trip refuses rather than publish there.
     const { live, away } = landedIn(pushedIn);
     if (!live) {
       toast.info(
@@ -515,8 +556,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // Every route from here pushes `branch` by name, so a HEAD that moved
     // during the round-trip changes nothing: the match still describes it.
     if (match) {
-      setForkGuardRepo(pushedIn);
-      setForkGuard({ match, branch });
+      forkGuardSeq.current += 1;
+      setForkGuard({
+        token: forkGuardSeq.current,
+        repo: pushedIn,
+        match,
+        branch,
+        open: true,
+      });
     } else void doPush(false, branch);
   }
 
@@ -526,7 +573,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "push",
     () => {
-      if (diverged) setForceConfirmOpen(true);
+      if (diverged) openForceConfirm();
       else void beginPush(false);
     },
     sync.hotkeys.push,
@@ -703,7 +750,6 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          // Same ranking as Pull's.
           disabled={sync.push.disabled}
           reason={sync.push.reason}
           title={pushTitle}
@@ -712,7 +758,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => {
             if (diverged) {
-              setForceConfirmOpen(true);
+              openForceConfirm();
             } else {
               void beginPush(false);
             }
@@ -737,7 +783,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         </DisabledReasonButton>
       </ButtonGroup>
 
-      <Dialog open={forceConfirmOpen} onOpenChange={setForceConfirmOpen}>
+      <Dialog
+        open={forceConfirm !== null}
+        onOpenChange={(o) => {
+          if (!o) setForceConfirm(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Force push?</DialogTitle>
@@ -779,17 +830,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </p>
           )}
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setForceConfirmOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setForceConfirm(null)}>
               Cancel
             </Button>
             <DisabledReasonButton
               variant="destructive"
               disabled={push.isPending || !!offlineHold}
               reason={push.isPending ? ACT_PENDING_REASON : offlineHold}
-              onClick={() => void doPush(true)}
+              onClick={confirmForcePush}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}
               Force push
@@ -798,17 +846,22 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         </DialogContent>
       </Dialog>
 
-      <ForkPrPublishGuard
-        repoPath={forkGuardRepo}
-        match={forkGuard?.match ?? null}
-        branch={forkGuard?.branch ?? ""}
-        onClose={() => setForkGuard(null)}
-        onPublishAnyway={() => {
-          const branch = forkGuard?.branch;
-          setForkGuard(null);
-          void doPush(false, branch);
-        }}
-      />
+      {forkGuard && (
+        <ForkPrPublishGuard
+          key={forkGuard.token}
+          repoPath={forkGuard.repo}
+          match={forkGuard.open ? forkGuard.match : null}
+          branch={forkGuard.branch}
+          onClose={() => closeForkGuard(forkGuard.token)}
+          onPublishAnyway={() => {
+            closeForkGuard(forkGuard.token);
+            // Only this open, in its own still-live repo: `open` covers a
+            // click during the dialog's close transition, `live` a switch.
+            if (!forkGuard.open || !landedIn(forkGuard.repo).live) return;
+            void doPush(false, forkGuard.branch);
+          }}
+        />
+      )}
 
       {recovery.dialog}
       {pullDropGuard.dialog}
