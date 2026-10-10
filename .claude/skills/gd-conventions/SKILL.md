@@ -263,6 +263,21 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   cold load doesn't shift the list as rows arrive. It carries the group's
   `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
   not a call-site component.
+- The Changes pane swaps files through a two-slot hold: `FileSlot` in
+  `src/features/diff/DiffViewer.tsx` is the reference implementation, with its
+  transitions in `diff-pane-slots.ts` and the `DiffPaneHold` context
+  (`diff-pane-hold.tsx`) carrying `interactive` and the settle reports down to
+  the surfaces. The shown slot stays in flow `inert` + `aria-busy` + dimmed
+  (`PLACEHOLDER_FADE` + `opacity-80` + `delay-100`), the target prepares
+  invisibly at full size, and it is promoted on its first settled report or a
+  400 ms bound. Every render-null loading gate inside reports through
+  `useReportPaneSettled`; an unreported gate is a hold only the bound ends.
+  Other detail panes (the History file rail, Compare) don't hold yet; they are
+  follow-ups that would adopt this. Never placeholderData across a key whose
+  response can't prove identity (`FileDiff` echoes only the path, so a
+  same-path staged/unstaged placeholder would put live buttons on the other
+  side's hunks). `inert` covers pointer, focus and AT but NOT global hotkeys
+  (gate `useHotkeyAction` on `interactive`) or portals (gate dialogs' `open`).
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already

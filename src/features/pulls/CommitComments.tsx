@@ -247,6 +247,7 @@ export function CommitComments({
   onSelectFile,
   lens,
   stale = false,
+  held = false,
   enabled = true,
   diffReady = true,
 }: {
@@ -268,6 +269,9 @@ export function CommitComments({
   /** The parent is still showing the PREVIOUS commit's content (placeholder data)
    *  while `sha` already names the new one — pass it so writes hold. */
   stale?: boolean;
+  /** `enabled` is the PREVIOUS commit's held verdict, not yet confirmed for `sha`:
+   *  the pane stays mounted, but the read and every write hold until it settles. */
+  held?: boolean;
   /** Whether this commit takes comments at all. False renders nothing, but the
    *  component STAYS MOUNTED so per-commit drafts survive a commit that doesn't
    *  (yet) support them; the read is disabled with it. */
@@ -278,7 +282,11 @@ export function CommitComments({
    *  the comment for a missing patch. */
   diffReady?: boolean;
 }) {
-  const comments = useCommitComments(repoPath, enabled ? sha : null, lens);
+  const comments = useCommitComments(
+    repoPath,
+    enabled && !held ? sha : null,
+    lens,
+  );
   const createComment = useCreateCommitComment(repoPath, lens);
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
@@ -342,13 +350,15 @@ export function CommitComments({
     ];
   }, [anchored, diffSections, selectedPath, diffReady]);
 
-  // Parents serve the previous commit's content as placeholder while arrowing
-  // through history, so hold writes until the shown commit is the addressed one.
+  // Parents serve the previous commit's content (or on-remote verdict) as
+  // placeholder while arrowing through history, so hold writes until the shown
+  // commit is the addressed one.
+  const writesHeld = stale || held;
   const busy =
     createComment.isPending ||
     editComment.isPending ||
     deleteComment.isPending ||
-    stale;
+    writesHeld;
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
   // A write pressed offline is parked, not running, until the connection returns.
@@ -361,6 +371,8 @@ export function CommitComments({
     switch (true) {
       case stale:
         return "Loading this commit…";
+      case held:
+        return "Checking whether this commit is pushed…";
       case createComment.isPending:
         return pendingWriteReason(
           createComment.isPaused,
@@ -384,7 +396,7 @@ export function CommitComments({
   // listeners — the toast and the draft restore would silently never run.
   async function submit() {
     const text = draft.value.trim();
-    if (!text || stale) return;
+    if (!text || writesHeld) return;
     // Clear the draft immediately (perceived-speed win); the hook appends the
     // synthetic comment optimistically. On error restore the draft, but only if
     // that commit's composer is still empty so newly-typed text is never clobbered.
@@ -402,7 +414,7 @@ export function CommitComments({
   async function saveEdit(commentId: string, next: string) {
     // The comment id is the previous commit's while the write addresses `sha`,
     // so a mismatched pair would edit against a commit that never showed it.
-    if (stale) return;
+    if (writesHeld) return;
     try {
       await editComment.mutateAsync({ sha, commentId, body: next });
       toast.success("Comment updated");
@@ -444,15 +456,15 @@ export function CommitComments({
                 key={c.id}
                 thread={toThread(c)}
                 onSaveEdit={
-                  c.viewerDidAuthor && !stale
+                  c.viewerDidAuthor && !writesHeld
                     ? (next) => void saveEdit(c.id, next)
                     : undefined
                 }
                 // Withholding the handler only drops the menu entry; an editor
                 // already open when the commit changed needs its Save held too.
-                editHeld={stale}
+                editHeld={writesHeld}
                 onDelete={
-                  c.viewerDidAuthor && !stale
+                  c.viewerDidAuthor && !writesHeld
                     ? () => setDeletingId(c.id)
                     : undefined
                 }
@@ -526,13 +538,13 @@ export function CommitComments({
                       <Thread
                         thread={toThread(c)}
                         onSaveEdit={
-                          c.viewerDidAuthor && !stale
+                          c.viewerDidAuthor && !writesHeld
                             ? (next) => void saveEdit(c.id, next)
                             : undefined
                         }
-                        editHeld={stale}
+                        editHeld={writesHeld}
                         onDelete={
-                          c.viewerDidAuthor && !stale
+                          c.viewerDidAuthor && !writesHeld
                             ? () => setDeletingId(c.id)
                             : undefined
                         }
@@ -550,6 +562,10 @@ export function CommitComments({
               </p>
             )}
           </>
+        )}
+        {/* The empty line's exact element, so its arrival swaps in place. */}
+        {comments.data === undefined && notice === null && (
+          <p className="text-xs text-muted-foreground">Loading comments…</p>
         )}
       </div>
 

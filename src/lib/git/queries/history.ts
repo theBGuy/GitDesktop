@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef } from "react";
 import * as api from "../api";
 import type { DiffStatEntry } from "../types";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
+import { commitOnRemoteOptions } from "./prs";
 
 export const HISTORY_PAGE_SIZE = 200;
 
@@ -106,14 +107,16 @@ export function useCommitFileDiff(
   });
 }
 
-/** Warms a commit's detail view (header + files + the first file's diff) on row hover
- *  and for rows adjacent to the selection, so keyboard arrowing stays ahead.
- *  prefetchQuery no-ops once cached, so repeats are free. */
+/** Warms a commit's detail view (header + files + the first file's diff + its
+ *  on-remote verdict) on row hover and for rows adjacent to the selection, so keyboard
+ *  arrowing stays ahead. prefetchQuery no-ops once cached, so repeats are free. */
 export function usePrefetchCommit(repo: string) {
   const queryClient = useQueryClient();
   return useCallback(
     async (hash: string) => {
       queryClient.prefetchQuery(commitDetailsOptions(repo, hash));
+      // Local read; a warm verdict means the comments pane never holds on switch.
+      queryClient.prefetchQuery(commitOnRemoteOptions(repo, hash));
       await queryClient.prefetchQuery(commitFilesOptions(repo, hash));
       const files = queryClient.getQueryData<DiffStatEntry[]>(
         repoKeys.commitFiles(repo, hash),

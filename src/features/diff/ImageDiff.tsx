@@ -6,6 +6,7 @@ import {
 } from "@/components/ui/image-lightbox";
 import type { FileBytes } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
+import { useReportPaneSettled } from "./diff-pane-hold";
 
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
@@ -148,6 +149,7 @@ export function ImagePanes({
   const pending = oldFile.isPending || newFile.isPending;
   const oldSide = oldFile.data ?? null;
   const newSide = newFile.data ?? null;
+  useReportPaneSettled(!pending);
 
   if (pending) {
     return null;

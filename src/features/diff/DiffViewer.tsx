@@ -1,13 +1,17 @@
 import {
   createDiffMultiSelectManager,
+  type DiffFile,
   DiffModeEnum,
   DiffView,
 } from "@git-diff-view/react";
 import { InfoIcon } from "@phosphor-icons/react";
 import {
+  type ReactNode,
+  type RefObject,
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -54,7 +58,7 @@ import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
-import { cn } from "@/lib/utils";
+import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
   DIFF_MAX_LINE_CHARS,
   DIFF_MEGA_LINE_CHARS,
@@ -73,6 +77,30 @@ import {
   useShikiRouting,
 } from "./DiffSurface";
 import { fileExt } from "./diff-lang";
+import {
+  DiffPaneHold,
+  type DiffPaneHoldValue,
+  useDiffPaneHold,
+  useReportPaneSettled,
+} from "./diff-pane-hold";
+import {
+  expirePane,
+  filePaneView,
+  HOLD_BOUND_MS,
+  isHolding,
+  type PaneView,
+  paneSlots,
+  paneViewKey,
+  retargetPane,
+  type SlotPhase,
+  settlePane,
+  startPaneHold,
+} from "./diff-pane-slots";
+import {
+  diffRendersRows,
+  firstHunkHasSepRow,
+  hunkStart,
+} from "./first-hunk-sep";
 import { ImagePanes } from "./ImageDiff";
 import {
   canPreviewMarkdown,
@@ -98,11 +126,61 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   // same-named conflict here is a different file, so only this tree's walk counts.
   const resolveHere = resolveScope === repoPath ? resolveActive : null;
   // Render off a deferred selection so rapidly arrowing the changes list only
-  // mounts + loads the file landed on (the row keeps WorkingTreeDiff keyed, so
-  // it remounts per file). The list highlight still uses the live selection.
+  // mounts + loads the file landed on (each file is its own keyed slot). The
+  // list highlight still uses the live selection.
   const deferredFile = useDeferredValue(selectedFile);
+  // A repo switch renders once with the new repo before the deferred selection
+  // catches up; that render shows no file, so the old path never mounts (or
+  // diffs) against the new repo.
+  const deferredRepo = useDeferredValue(repoPath);
+  const file = deferredRepo === repoPath ? deferredFile : null;
 
-  if (!deferredFile) {
+  // A conflicted file (unmerged index) gets the conflict editor instead of a
+  // diff (a combined diff git can't render): per-region + whole-file resolution,
+  // or the AI streaming view while a session is active for it. Conflicts always
+  // live on the unstaged side.
+  const liveEntry = file
+    ? status.data?.entries.find((e) => e.path === file.path)
+    : undefined;
+  const isConflicted =
+    liveEntry?.unstaged === "conflicted" || liveEntry?.staged === "conflicted";
+  const target = paneTarget(repoPath, file, isConflicted);
+
+  // The last settled view stays painted while a newly selected file prepares
+  // behind it, so a click swaps the pane once (see diff-pane-slots.ts).
+  const [storedHold, setHold] = useState(() => startPaneHold(target));
+  const hold = retargetPane(storedHold, target);
+  if (hold !== storedHold) setHold(hold);
+  const preparingKey =
+    isHolding(hold) && hold.target.kind === "file" ? hold.target.key : null;
+  useEffect(() => {
+    if (preparingKey === null) return;
+    const bound = window.setTimeout(
+      () => setHold((h) => expirePane(h, preparingKey)),
+      HOLD_BOUND_MS,
+    );
+    return () => window.clearTimeout(bound);
+  }, [preparingKey]);
+  const onSlotSettled = useCallback(
+    (key: string, repo: string) => setHold((h) => settlePane(h, key, repo)),
+    [],
+  );
+  // Focus inside a slot that turns held lands here rather than on <body>. A
+  // sibling of the slots, never an ancestor: a focusable ancestor would take
+  // focus on every click into the code and swallow keyboard scrolling.
+  const focusSinkRef = useRef<HTMLSpanElement>(null);
+
+  const renderView = (view: PaneView<SelectedFile>) => {
+    if (view.kind === "file") {
+      return <WorkingTreeDiff repoPath={view.repo} file={view.file} />;
+    }
+    if (view.kind === "conflict") {
+      return resolveHere === view.key ? (
+        <ConflictResolveView repoPath={repoPath} path={view.key} />
+      ) : (
+        <ConflictFileView repoPath={repoPath} path={view.key} />
+      );
+    }
     const treeClean =
       !status.isPending && (status.data?.entries.length ?? 0) === 0;
     return (
@@ -114,40 +192,129 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
         }
       />
     );
-  }
-
-  // A conflicted file (unmerged index) gets the conflict editor instead of a
-  // diff (a combined diff git can't render): per-region + whole-file resolution,
-  // or the AI streaming view while a session is active for it. Conflicts always
-  // live on the unstaged side.
-  const liveEntry = status.data?.entries.find(
-    (e) => e.path === deferredFile.path,
-  );
-  const isConflicted =
-    liveEntry?.unstaged === "conflicted" || liveEntry?.staged === "conflicted";
-
-  if (isConflicted) {
-    return resolveHere === deferredFile.path ? (
-      <ConflictResolveView
-        key={deferredFile.path}
-        repoPath={repoPath}
-        path={deferredFile.path}
-      />
-    ) : (
-      <ConflictFileView
-        key={deferredFile.path}
-        repoPath={repoPath}
-        path={deferredFile.path}
-      />
-    );
-  }
+  };
 
   return (
-    <WorkingTreeDiff
-      key={`${repoPath}:${deferredFile.staged}:${deferredFile.path}`}
-      repoPath={repoPath}
-      file={deferredFile}
-    />
+    <div className="relative h-full">
+      <span ref={focusSinkRef} tabIndex={-1} className="sr-only" />
+      {paneSlots(hold).map(({ view: slotView, phase }) => {
+        // A held slot paints what it settled with; the live slot takes this
+        // render's target (same key, but the selection's freshest object).
+        const view = phase === "held" ? slotView : target;
+        return view.kind === "file" ? (
+          <FileSlot
+            key={paneViewKey(view)}
+            slotKey={view.key}
+            repo={view.repo}
+            phase={phase}
+            onSettled={onSlotSettled}
+            focusRescue={focusSinkRef}
+          >
+            {renderView(view)}
+          </FileSlot>
+        ) : (
+          <PaneFrame key={paneViewKey(view)} held={phase === "held"}>
+            {renderView(view)}
+          </PaneFrame>
+        );
+      })}
+    </div>
+  );
+}
+
+function paneTarget(
+  repoPath: string,
+  file: SelectedFile | null,
+  conflicted: boolean,
+): PaneView<SelectedFile> {
+  if (file === null) return { kind: "placeholder" };
+  if (conflicted) return { kind: "conflict", key: file.path };
+  return filePaneView(repoPath, file);
+}
+
+const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {
+  shown: "h-full",
+  held: "h-full",
+  // Laid out at full size under the held slot, so container queries, the
+  // split/unified measure and row measurement are final before it shows.
+  preparing: "invisible absolute inset-0",
+};
+
+/** The no-file placeholder or a conflict view. Only the placeholder is ever
+ *  held (a first selection prepares behind it), and undimmed: it isn't content. */
+function PaneFrame({ held, children }: { held: boolean; children: ReactNode }) {
+  return (
+    <div className="h-full" inert={held} aria-busy={held || undefined}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * One file's slot. Its surfaces report their loading gates here; once every
+ * mounted gate is settled the slot reports up, which promotes it while it is
+ * the preparing target. Held and preparing slots are inert and non-interactive.
+ */
+function FileSlot({
+  slotKey,
+  repo,
+  phase,
+  onSettled,
+  focusRescue,
+  children,
+}: {
+  slotKey: string;
+  repo: string;
+  phase: SlotPhase;
+  onSettled: (key: string, repo: string) => void;
+  focusRescue: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [gates, setGates] = useState<ReadonlyMap<object, boolean>>(
+    () => new Map(),
+  );
+  // Stable on purpose: every gate's layout effect depends on it, so a fresh
+  // function per render would re-register them all in a loop.
+  const reportSettled = useCallback((settled: boolean) => {
+    const gate = {};
+    setGates((prev) => new Map(prev).set(gate, settled));
+    return () =>
+      setGates((prev) => {
+        const next = new Map(prev);
+        next.delete(gate);
+        return next;
+      });
+  }, []);
+  const settled = gates.size > 0 && Array.from(gates.values()).every(Boolean);
+  useLayoutEffect(() => {
+    if (settled) onSettled(slotKey, repo);
+  }, [settled, slotKey, repo, onSettled]);
+  // `inert` blurs a focused descendant to <body> after this commit; hand focus
+  // to the pane's sink first.
+  useLayoutEffect(() => {
+    if (phase === "held" && frameRef.current?.contains(document.activeElement))
+      focusRescue.current?.focus({ preventScroll: true });
+  }, [phase, focusRescue]);
+  // Memoized for identity: the context reaches every gate in the slot.
+  const hold = useMemo<DiffPaneHoldValue>(
+    () => ({ interactive: phase === "shown", reportSettled }),
+    [phase, reportSettled],
+  );
+  return (
+    <div
+      ref={frameRef}
+      className={cn(
+        SLOT_FRAME_CLASS[phase],
+        PLACEHOLDER_FADE,
+        // The delay keeps a fast swap from flashing a half-dimmed pane.
+        phase === "held" && "opacity-80 delay-100",
+      )}
+      inert={phase !== "shown"}
+      aria-busy={phase === "held" || undefined}
+    >
+      <DiffPaneHold value={hold}>{children}</DiffPaneHold>
+    </div>
   );
 }
 
@@ -275,6 +442,12 @@ function WorkingTreeDiff({
     hunkMode && canPreviewMarkdown(file.path, repoPath, workingRevs);
   const previewOn = canPreview && mdView === "preview";
   useFocusOnControlsSwap(previewOn, controlsRef);
+  // A held or preparing slot is inert, but hotkeys and the portaled Discard
+  // confirm reach past `inert`, so each gates on this as well.
+  const { interactive } = useDiffPaneHold();
+  // A confirm pending when the slot is held is dropped, not just hidden: a
+  // retarget back to this file must never reopen it.
+  if (!interactive && discard !== null) setDiscard(null);
   // One contextual chord: stage the selection on an unstaged file's diff,
   // unstage it on a staged one — mirroring the toolbar's primary button. Dead
   // while the Discard confirm is open (the global listener has no dialog guard)
@@ -282,12 +455,12 @@ function WorkingTreeDiff({
   useHotkeyAction(
     "stage-selected-lines",
     () => void applySelection({ cached: true, reverse: file.staged }),
-    hunkMode && selection !== null && !busy && discard === null,
+    interactive && hunkMode && selection !== null && !busy && discard === null,
   );
   useHotkeyAction(
     "clear-line-selection",
     clearSelection,
-    hunkMode && selection !== null && !busy && discard === null,
+    interactive && hunkMode && selection !== null && !busy && discard === null,
   );
   // Only this toolbar's own arm registers: outside hunk mode the fallback
   // DiffSurface below renders the picker and registers for itself, and a child's
@@ -298,14 +471,18 @@ function WorkingTreeDiff({
     "change-diff-language",
     () => setLangOpen(true),
     // In Preview the picker isn't mounted, so the action would open nothing.
-    hunkMode && selection === null && !previewOn && Boolean(fileExt(file.path)),
+    interactive &&
+      hunkMode &&
+      selection === null &&
+      !previewOn &&
+      Boolean(fileExt(file.path)),
   );
   // Inert while a selection or the Discard confirm is up — the selection arm
   // owns the cluster, and the global listener has no dialog guard.
   useHotkeyAction(
     "toggle-markdown-preview",
     () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
-    canPreview && selection === null && discard === null,
+    interactive && canPreview && selection === null && discard === null,
   );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
@@ -645,7 +822,7 @@ function WorkingTreeDiff({
       </div>
 
       <Dialog
-        open={discard !== null}
+        open={discard !== null && interactive}
         onOpenChange={(open) => {
           if (!open) setDiscard(null);
         }}
@@ -942,12 +1119,6 @@ function mergeSelection(
     merged.push(line);
   }
   return merged;
-}
-
-/** A hunk's first old/new line number, from its `@@ -a,b +c,d @@` header. */
-function hunkStart(hunk: DiffHunk, side: "old" | "new"): number {
-  const m = hunk.header.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
-  return m ? Number(side === "new" ? m[2] : m[1]) : 1;
 }
 
 /** A hunk's changed line numbers per side, walking its body from the header's
@@ -1333,15 +1504,22 @@ function StagingDiffView({
   // leading gap → no marker), so a positional map mis-places + mis-fires the
   // buttons. The overlay lives inside the scrolled content, so it tracks scroll
   // without a listener; re-measure only on rebuild/expand/collapse/resize.
-  const [anchors, setAnchors] = useState<{ top: number; sep: boolean }[]>([]);
+  // Stamped with the diffFile measured: a refetch rebuilds it, and the old
+  // rows' anchors must not answer for the new one.
+  const [measured, setMeasured] = useState<{
+    forFile: DiffFile | null;
+    list: { top: number; sep: boolean }[];
+  }>({ forFile: null, list: [] });
+  const anchors = measured.list;
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
     let raf = 0;
     const measure = () => {
       const rootTop = container.getBoundingClientRect().top;
-      setAnchors(
-        hunks.map((h) => {
+      setMeasured({
+        forFile: diffFile,
+        list: hunks.map((h) => {
           const row =
             rowForLine(container, "new", hunkStart(h, "new")) ??
             rowForLine(container, "old", hunkStart(h, "old"));
@@ -1354,7 +1532,7 @@ function StagingDiffView({
           const anchor = sep ? prev : row;
           return { top: anchor.getBoundingClientRect().top - rootTop, sep };
         }),
-      );
+      });
     };
     const schedule = () => {
       cancelAnimationFrame(raf);
@@ -1372,6 +1550,23 @@ function StagingDiffView({
     };
   }, [diffFile, hunks]);
 
+  // Hunk 0's measure, once one of THIS diffFile has found its row.
+  const firstMeasured =
+    measured.forFile === diffFile && anchors[0] !== undefined
+      ? anchors[0]
+      : undefined;
+  const firstFound = firstMeasured !== undefined && firstMeasured.top >= 0;
+  // Settled once the rows exist: the library builds them in its own passive
+  // effect, so a built diffFile can still paint rowless. A diff with no hunk
+  // lines never gets a row, so it settles at build.
+  useReportPaneSettled(
+    !contentPending &&
+      !holdForGrammar &&
+      (diffFile === null ||
+        !diffRendersRows(diffFile) ||
+        (measured.forFile === diffFile && anchors.some((a) => a.top >= 0))),
+  );
+
   // Whole-file reads still settling, or a lazy built-in Shiki grammar still
   // loading: render nothing rather than build a diff we'd immediately restructure
   // or re-highlight (the single-paint gate). Must precede the empty-state
@@ -1381,8 +1576,11 @@ function StagingDiffView({
   if (contentPending || holdForGrammar) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   // A line-1 hunk has no `@@` row to host its buttons — synthetic header instead.
+  // Predicted from the hunk so it paints with the first rows; a measure of this
+  // diffFile then wins (Expand Up to line 1 hides the row it predicted).
   const firstNeedsHeader =
-    !!anchors[0] && anchors[0].top >= 0 && !anchors[0].sep && !!hunks[0];
+    !!hunks[0] &&
+    (firstFound ? !firstMeasured.sep : !firstHunkHasSepRow(hunks[0]));
   return (
     <div
       ref={containerRef}
