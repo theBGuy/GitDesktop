@@ -2137,8 +2137,7 @@ async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec
     let dir = std::path::Path::new(holder);
     let changed = changed.stdout_lossy();
     // Diff paths are unique and, being one tree's, never a prefix of each other, so the
-    // prefix memo is the only dedupe needed: a repeat prefix is already a candidate or a
-    // known directory.
+    // prefix memo is the only dedupe needed: a repeat prefix was already classified.
     let mut probed = HashSet::new();
     let (mut files, mut folders): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
     for path in changed.split('\0').filter(|p| !p.is_empty()) {
@@ -2185,7 +2184,10 @@ async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec
         // `check-ignore` on a folder's own name misses one that is not ignored itself but
         // holds ignored files. This lists an ignored folder as `<dir>/`, else the ignored
         // files inside, and for a folder of ONLY ignored files both (measured).
-        let specs: Vec<String> = folders.iter().map(|f| format!(":(literal){f}")).collect();
+        let specs: Vec<String> = folders
+            .iter()
+            .map(|f| crate::git::pathspec::literal(f))
+            .collect();
         let mut args = vec![
             "ls-files",
             "--others",
