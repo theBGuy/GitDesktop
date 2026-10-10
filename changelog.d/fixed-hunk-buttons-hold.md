@@ -1,2 +1,3 @@
-- The **Stage hunk** and **Discard…** buttons in the Changes diff stay in place
-  while the diff refreshes.
+- The hunk buttons in the Changes diff (**Stage hunk** or **Unstage hunk**, and
+  **Discard…**) stay on their hunk while the diff refreshes, and act only on the
+  lines on screen.
