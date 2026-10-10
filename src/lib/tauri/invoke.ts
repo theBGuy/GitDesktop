@@ -1,7 +1,7 @@
 import { getTransport } from "@/lib/transport";
 
-/** The kinds whose wire shape is kind + message alone (Rust `AppError`
- *  serializes a payload only for the members below). */
+/** The kinds whose wire shape is kind + message alone; every other `AppError`
+ *  member, declared in the union below, carries a payload. */
 type PlainErrorKind =
   | "notARepo"
   | "gitNotFound"

@@ -2113,11 +2113,12 @@ async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
 /// The ignored files at `holder` a merge of `base_sha` would write over. Candidates are
 /// every base-side change since the merge base but deletions: an add, and a modify or
 /// type change of a path the holder deleted, whose conflict leaves the base's file over
-/// the ignored one (and `merge --abort` then deletes it; measured, git 2.51.1). Tracked
+/// the ignored one (and `merge --abort` then deletes it; measured, git 2.51.1). A
+/// candidate's ancestors on disk as a file or symlink count too, which the merge would
+/// replace with a directory; a directory ancestor only receives the new file. Tracked
 /// paths never qualify, as `check-ignore` skips them; an ignored directory at an added
-/// file's path does (measured). Not covered: an ignored FILE where the base adds a
-/// directory (`a` against `a/b`), a file written between this check and the merge, and a
-/// criss-cross history, whose three-dot diff takes just one of its merge bases.
+/// file's path does (measured). Not covered: a file written between this check and the
+/// merge, and a criss-cross history, whose three-dot diff takes just one merge base.
 async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec<String>> {
     let changed = run_git(
         Some(holder),
@@ -2133,12 +2134,25 @@ async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec
     )
     .await?;
     let dir = std::path::Path::new(holder);
-    let on_disk: Vec<String> = changed
-        .stdout_lossy()
-        .split('\0')
-        .filter(|p| !p.is_empty() && dir.join(p).symlink_metadata().is_ok())
-        .map(str::to_string)
-        .collect();
+    let changed = changed.stdout_lossy();
+    let mut seen = HashSet::new();
+    let mut on_disk: Vec<&str> = Vec::new();
+    for path in changed.split('\0').filter(|p| !p.is_empty()) {
+        let ancestors = path
+            .match_indices('/')
+            .map(|(at, _)| &path[..at])
+            .filter(|prefix| {
+                dir.join(prefix)
+                    .symlink_metadata()
+                    .is_ok_and(|m| !m.is_dir())
+            });
+        let itself = Some(path).filter(|p| dir.join(p).symlink_metadata().is_ok());
+        for candidate in ancestors.chain(itself) {
+            if seen.insert(candidate) {
+                on_disk.push(candidate);
+            }
+        }
+    }
     if on_disk.is_empty() {
         return Ok(Vec::new());
     }
@@ -2196,10 +2210,9 @@ async fn merge_subject(repo_path: &str, base_rev: &str, branch: &str) -> Option<
     let full = full.trim();
     let source = if let Some(name) = full.strip_prefix("refs/heads/") {
         format!("branch '{name}'")
-    } else if let Some(name) = full.strip_prefix("refs/remotes/") {
-        format!("remote-tracking branch '{name}'")
     } else {
-        return None;
+        let name = full.strip_prefix("refs/remotes/")?;
+        format!("remote-tracking branch '{name}'")
     };
     Some(format!("Merge {source} into {branch}"))
 }
@@ -5480,20 +5493,26 @@ mod tests {
     }
 
     /// Asserts the holder arm's `failed` refusal for `holder`, naming `path`, with the
-    /// unchanged-branch sentence ahead of any git text.
+    /// unchanged-branch sentence closing line 1 (the toast's summary) ahead of any git text.
     fn expect_failed_naming(err: &AppError, holder: &str, branch: &str, path: &str) {
         let AppError::BranchHeld {
             message,
             holder: named,
+            branch: held,
             reason,
-            ..
         } = err
         else {
             panic!("expected a BranchHeld refusal, got {err:?}");
         };
-        assert_eq!((reason.as_str(), named.as_str()), ("failed", holder));
+        assert_eq!(
+            (reason.as_str(), named.as_str(), held.as_str()),
+            ("failed", holder, branch)
+        );
         assert!(
-            message.contains(&format!("{branch} is unchanged.")),
+            message
+                .lines()
+                .next()
+                .is_some_and(|l| l.ends_with(&format!("{branch} is unchanged."))),
             "{message}"
         );
         assert!(
@@ -5565,6 +5584,78 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "artifact\n");
         assert_eq!(tip(&repo_s, branch).await, held_tip);
         assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
+    }
+
+    /// An ignored FILE `a` where the base adds `a/b`: the update would replace the file
+    /// with a directory, so it is refused by the ancestor's name. `diverge` picks the
+    /// merge arm over the fast-forward one.
+    #[allow(clippy::await_holding_lock)]
+    async fn assert_ignored_ancestor_survives(branch: &str, diverge: bool) {
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        if diverge {
+            commit_file(&holder, "feature.txt", "feature\n").await;
+        }
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "a\n").unwrap();
+        let ignored = holder_dir.join("a");
+        std::fs::write(&ignored, "local notes\n").unwrap();
+        std::fs::create_dir_all(std::path::Path::new(&repo_s).join("a")).unwrap();
+        commit_file(&repo_s, "a/b", "tracked under a\n").await;
+        let held_tip = tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_failed_naming(&err, &porcelain, branch, "a");
+        // `a` is too short for the helper's substring check to mean anything on its own.
+        assert!(
+            err.to_string()
+                .lines()
+                .any(|l| l.trim() == "a" || l.contains("ignored files there: a.")),
+            "the refusal names `a` itself: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&ignored).unwrap(), "local notes\n");
+        assert_eq!(tip(&repo_s, branch).await, held_tip);
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
+    }
+
+    #[tokio::test]
+    async fn a_diverged_holder_ignored_file_the_base_adds_a_directory_over_is_kept() {
+        assert_ignored_ancestor_survives("held-ignored-anc", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_holder_ignored_file_the_base_adds_a_directory_over_is_kept() {
+        assert_ignored_ancestor_survives("held-ignored-anc-ff", false).await;
+    }
+
+    /// A file the base adds INSIDE an ignored directory destroys nothing there, so a
+    /// directory ancestor never refuses the merge, and the ignored contents stay put.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_base_file_inside_an_ignored_directory_still_merges() {
+        let branch = "held-ignored-inside";
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        commit_file(&holder, "feature.txt", "feature\n").await;
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "logs/\n").unwrap();
+        std::fs::create_dir_all(holder_dir.join("logs")).unwrap();
+        let local = holder_dir.join("logs").join("run.log");
+        std::fs::write(&local, "local log\n").unwrap();
+        std::fs::create_dir_all(std::path::Path::new(&repo_s).join("logs")).unwrap();
+        commit_file(&repo_s, "logs/keep.txt", "tracked\n").await;
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .expect("a directory ancestor does not block the merge");
+        assert_eq!(outcome.outcome, "merge");
+        assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), "local log\n");
+        assert!(holder_dir.join("logs").join("keep.txt").exists());
     }
 
     /// A conflicting merge inside the holder is aborted: no MERGE_HEAD, a clean tree, the
