@@ -145,7 +145,10 @@ import { RebaseOntoDialog } from "./RebaseOntoDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
-import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
+import {
+  STATUS_PENDING_REASON,
+  STATUS_READ_FAILED_REASON,
+} from "./sync-controls-state";
 import { repoOpenWatermark, useOpenWorktree } from "./useOpenRepoByPath";
 import {
   reportAutostashOutcome,
@@ -2821,7 +2824,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                           aria-hidden
                           className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
                         />
-                        <span className="sr-only">Checking branch…</span>
+                        <span className="sr-only">{STATUS_PENDING_REASON}</span>
                       </>
                     );
                 }

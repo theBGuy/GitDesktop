@@ -5,7 +5,6 @@ import {
   CaretDownIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -138,9 +137,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useEffect(() => {
     forceConfirmRef.current = forceConfirm;
   }, [forceConfirm]);
-  // Set while a confirm's status read is in flight, so a second click is a no-op.
+  // Set while a confirm's status read is in flight: the ref makes a second click
+  // a synchronous no-op, the state holds the act button visibly.
   const forceChecking = useRef(false);
-  const queryClient = useQueryClient();
+  const [forceReading, setForceReading] = useState(false);
   // The publish intercepted by the fork-PR guard. The branch is captured at
   // click time and travels with the match, so the dialog can only ever push the
   // branch the detection ran for. Each open carries its own `repo` and a
@@ -176,7 +176,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const [dialogsRepo, setDialogsRepo] = useState(repoPath);
   if (dialogsRepo !== repoPath) {
     setDialogsRepo(repoPath);
-    setForceConfirm(null);
+    setForceConfirm((c) => c && { ...c, open: false });
     setForkGuard((g) => g && { ...g, open: false });
   }
 
@@ -532,7 +532,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
 
   // HEAD can move while the confirm sits open; the branch it opened on is the
   // only one its divergence verdict described. A move the status poll has seen
-  // refuses at once; one it hasn't is caught by a fresh status read before the
+  // refuses at once; one it hasn't is caught by a direct status read before the
   // push. The push stays on the HEAD path: a named push would bypass git's
   // pushRemote / pushDefault / push.default routing and could rewrite the
   // upstream's branch in a fork workflow.
@@ -551,21 +551,19 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const confirm = forceConfirm;
     const branch = confirm.branch;
     forceChecking.current = true;
-    let freshName: string | null;
+    setForceReading(true);
+    let readName: string | null;
     try {
-      // The shared factory keeps `networkMode: "always"`: fetchQuery options are
-      // per-call, and a bare queryFn would park offline.
-      const fresh = await queryClient.fetchQuery({
-        ...repoStatusOptions(confirmRepo),
-        staleTime: 0,
-      });
-      freshName = fresh.branch.name;
+      // The factory's queryFn straight, never fetchQuery: that joins an
+      // in-flight poll, which may have been spawned before the click.
+      readName = (await repoStatusOptions(confirmRepo).queryFn()).branch.name;
     } catch {
       toast.info("Couldn't confirm the current branch — nothing was pushed.");
       if (forceConfirmRef.current === confirm) closeForceConfirm();
       return;
     } finally {
       forceChecking.current = false;
+      setForceReading(false);
     }
     // `push` follows the live repo, so a switch during the read refuses.
     const { live, away } = landedIn(confirmRepo);
@@ -577,12 +575,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     }
     // Cancelled or reopened during the read: that click no longer stands.
     if (forceConfirmRef.current !== confirm) return;
-    if (freshName !== branch) {
+    if (readName !== branch) {
       toast.info("HEAD moved while the dialog was open — nothing was pushed.");
       closeForceConfirm();
       return;
     }
-    // A checkout in the few ms between this read and the push's spawn remains.
+    // A checkout between this read and the push's spawn remains, including any
+    // wait on the repo's network lock.
     void doPush(true);
   }
 
@@ -595,9 +594,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   }
   const forceUpstream = forceConfirm?.upstream;
   // The live verdicts describe HEAD, so they show only while HEAD is still the
-  // dialog's branch; a moved HEAD is refused by the confirm on the same test.
+  // dialog's branch (a moved HEAD is refused by the confirm on the same test),
+  // and never in the exit frames, which may already belong to another repo.
   const forceEvidence =
-    forceConfirm !== null && head?.name === forceConfirm.branch;
+    forceConfirm?.open === true && head?.name === forceConfirm.branch;
+  const forceActPending = push.isPending || forceReading;
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
@@ -673,12 +674,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           repoPath={repoPath}
           providers={publish.providers}
           reserveCaret
-          // Offline outranks both: the targets probe parks offline, so
-          // nothing is checking until the connection returns.
+          // A settled answer is already known, so it wins even offline; before
+          // that, offline says the check waits for the connection.
           disabledTitle={
             publish.settled
-              ? (offlineHold ??
-                "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish")
+              ? "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish"
               : publishPendingReason(offlineHold)
           }
         />
@@ -917,11 +917,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </Button>
             <DisabledReasonButton
               variant="destructive"
-              disabled={push.isPending || !!offlineHold}
-              reason={push.isPending ? ACT_PENDING_REASON : offlineHold}
+              disabled={forceActPending || !!offlineHold}
+              reason={forceActPending ? ACT_PENDING_REASON : offlineHold}
               onClick={() => void confirmForcePush()}
             >
-              {push.isPending && <Spinner data-icon="inline-start" />}
+              {forceActPending && <Spinner data-icon="inline-start" />}
               Force push
             </DisabledReasonButton>
           </DialogFooter>

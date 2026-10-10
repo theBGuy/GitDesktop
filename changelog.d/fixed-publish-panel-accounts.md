@@ -1,3 +1,4 @@
-- On a repository that isn't published yet, the forge tabs offer
-  **Publish repository…** as soon as your accounts are checked, and say so
-  when you're offline.
+- On a repository that isn't published yet, the forge tabs wait for your
+  accounts to be checked before showing setup steps, then offer
+  **Publish repository…** when an account can publish, and say when you're
+  offline.

@@ -15,8 +15,9 @@ export function remotesOptions(repo: string) {
   };
 }
 
-/** How often a remotes read that failed with nothing loaded retries: no
- *  invalidation is due to heal it, and every consumer holds until it answers. */
+/** How often a remotes read that failed with nothing loaded retries: it is
+ *  otherwise re-read only by a repo write or a window focus, and the sync bar
+ *  and the forge panel hold until it answers. */
 const REMOTES_FAILED_RETRY_MS = 10_000;
 
 /** The error-only poll rides the hook, never `remotesOptions`: the repo-shell

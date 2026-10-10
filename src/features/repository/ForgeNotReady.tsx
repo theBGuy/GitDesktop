@@ -25,11 +25,15 @@ import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import {
+  PUBLISH_ACCOUNTS_OFFLINE,
   PublishRepoControl,
   publishPendingReason,
   usePublishProviders,
 } from "./PublishRepoControl";
-import { REMOTES_PENDING_REASON } from "./sync-controls-state";
+import {
+  REMOTES_FAILED_REASON,
+  REMOTES_PENDING_REASON,
+} from "./sync-controls-state";
 
 /** Where a Bitbucket / Atlassian API token is created. */
 const ATLASSIAN_TOKEN_URL =
@@ -328,7 +332,7 @@ export function ForgeNotReady({
   }
 
   // Until remotes answer, neither publish nor the ladder is honest for a
-  // provider-less repo; hold the frame blank (busy, announced) instead.
+  // provider-less repo; hold the frame blank (busy, with a status line) instead.
   if (
     provider == null &&
     forge.data &&
@@ -339,12 +343,36 @@ export function ForgeNotReady({
       <div
         ref={landingRef}
         tabIndex={-1}
-        aria-busy="true"
         className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
       >
+        {/* Outside the aria-busy subtree: busy suppresses descendant live-region
+            announcements, and this arm unmounts instead of flipping. */}
         <span role="status" className="sr-only">
           {REMOTES_PENDING_REASON}
         </span>
+        <div aria-busy="true" />
+      </div>
+    );
+  }
+
+  // A remotes read that failed with nothing loaded leaves the same question
+  // open; say so rather than send the user to a CLI setup step. The
+  // useRemotes error-only poll and a window focus heal it, so no Retry.
+  if (
+    provider == null &&
+    forge.data &&
+    remotes.data === undefined &&
+    remotes.errorUpdateCount > 0
+  ) {
+    return (
+      <div
+        ref={landingRef}
+        tabIndex={-1}
+        className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground outline-none"
+      >
+        <p>
+          {REMOTES_FAILED_REASON}, so {feature} aren't available right now.
+        </p>
       </div>
     );
   }
@@ -371,9 +399,9 @@ export function ForgeNotReady({
           }
         />
         {/* Only while the button is held: the targets probe parks offline,
-            so nothing is checking until the connection returns. */}
+            so the accounts are checked only once the connection returns. */}
         {!settled && offlineHold && providers.length === 0 && (
-          <p>{offlineHold}</p>
+          <p>{PUBLISH_ACCOUNTS_OFFLINE}</p>
         )}
       </div>
     );

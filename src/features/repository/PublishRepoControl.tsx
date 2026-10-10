@@ -22,11 +22,16 @@ export interface PublishProvider {
 /** The disabled Publish's reason while the provider probes are still out. */
 export const PUBLISH_ACCOUNTS_PENDING = "Checking publish accounts…";
 
+/** The same hold while offline. Never the generic offline-write promise: the
+ *  check may settle to no account after reconnect, and Publish never comes. */
+export const PUBLISH_ACCOUNTS_OFFLINE =
+  "You're offline — publish accounts are checked once you're back online.";
+
 /** The pending reason every Publish host shows before the probes settle. Offline
  *  outranks it: the targets probe parks offline, so nothing is checking until
  *  the connection returns. */
 export function publishPendingReason(offlineHold: string | undefined): string {
-  return offlineHold ?? PUBLISH_ACCOUNTS_PENDING;
+  return offlineHold ? PUBLISH_ACCOUNTS_OFFLINE : PUBLISH_ACCOUNTS_PENDING;
 }
 
 /**
@@ -36,8 +41,10 @@ export function publishPendingReason(offlineHold: string | undefined): string {
  * whenever the caller's branch can't publish so the probe doesn't run. Hooks
  * are called unconditionally so this is safe to invoke at the top level
  * regardless of `enabled`. `settled` is false until both probes have answered
- * (data or error): an empty list before then means "not known yet", never
- * "nobody signed in".
+ * (data, or a failure with nothing loaded): an empty list before then means
+ * "not known yet", never "nobody signed in". The failure arm is sticky
+ * (`errorUpdateCount`), since a never-loaded errored query goes back to
+ * pending on every refetch.
  */
 export function usePublishProviders(
   repoPath: string,
@@ -47,8 +54,8 @@ export function usePublishProviders(
   const targets = usePublishTargets(repoPath, enabled);
   if (!enabled) return { providers: [], settled: true };
   const settled =
-    (gh.data !== undefined || gh.isError) &&
-    (targets.data !== undefined || targets.isError);
+    (gh.data !== undefined || gh.errorUpdateCount > 0) &&
+    (targets.data !== undefined || targets.errorUpdateCount > 0);
 
   // GitHub stays eligible off the (warm) CLI status while the explicit probe is
   // still in flight, matching the pre-generalized behavior — avoids a flash of

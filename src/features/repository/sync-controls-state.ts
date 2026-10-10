@@ -15,19 +15,27 @@ export const PULL_OPTIONS_UNPUBLISHED_REASON =
  *  trigger and popover, so both surfaces name the same failure the same way. */
 export const STATUS_READ_FAILED_REASON = "Couldn't read the repository status";
 
+/** A status read still in flight with nothing loaded. Shared with the branch
+ *  picker's trigger, so one read has one wording. */
+export const STATUS_PENDING_REASON = "Checking branch…";
+
 /** A remotes read still in flight with nothing loaded. Shared with the forge
  *  tabs' not-ready panel, so one read has one wording. */
 export const REMOTES_PENDING_REASON = "Checking remotes…";
+
+/** A remotes read that failed with nothing loaded; shared with the forge tabs'
+ *  not-ready panel. */
+export const REMOTES_FAILED_REASON = "Couldn't read the remotes";
 
 /** Which read a held action is waiting on. Remotes outrank status: they decide
  *  whether this cluster is the right control at all. */
 type UnknownRead = "remotesFailed" | "remotes" | "statusFailed" | "status";
 
 const UNKNOWN_READ_REASON: Record<UnknownRead, string> = {
-  remotesFailed: "Couldn't read the remotes",
+  remotesFailed: REMOTES_FAILED_REASON,
   remotes: REMOTES_PENDING_REASON,
   statusFailed: STATUS_READ_FAILED_REASON,
-  status: "Checking branch…",
+  status: STATUS_PENDING_REASON,
 };
 
 /** The fields of `RepoStatus.branch` the sync bar reads. */
@@ -143,9 +151,10 @@ export function deriveSyncControls(input: SyncControlsInput) {
     if (diverged) return divergedPullDescription;
     if (detached)
       return "Pull — you're on a detached HEAD; check out a branch to pull";
-    // An empty clone's upstream ref never existed, so nothing was deleted.
+    // git reports no ahead/behind for a branch with no commits, so its upstream
+    // reads as gone whether or not the remote branch exists; claim neither.
     if (unborn && head.upstreamGone)
-      return `Pull — ${upstream} doesn't exist on the remote yet`;
+      return `Pull — ${head.name} has no commits yet, so it can't be compared with ${upstream}`;
     // Configured-but-dead (deleted on the remote, e.g. after a merge) is not
     // never-published; say so.
     if (head.upstreamGone)

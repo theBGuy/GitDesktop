@@ -15,6 +15,9 @@ import { test } from "node:test";
 import {
   deriveSyncControls,
   PULL_OPTIONS_UNPUBLISHED_REASON,
+  REMOTES_FAILED_REASON,
+  REMOTES_PENDING_REASON,
+  STATUS_PENDING_REASON,
   STATUS_READ_FAILED_REASON,
   SYNC_BUSY_REASON,
 } from "../src/features/repository/sync-controls-state.ts";
@@ -117,6 +120,20 @@ test("(3) remotes unknown: all four held on the remotes, whatever the status", (
           assert.deepEqual(h, { disabled: true, reason });
         assert.deepEqual(s.hotkeys, NO_HOTKEYS);
       }
+});
+
+test("each read's pending and failed wording is one exported constant", () => {
+  assert.equal(STATUS_PENDING_REASON, "Checking branch…");
+  assert.equal(REMOTES_PENDING_REASON, "Checking remotes…");
+  assert.equal(REMOTES_FAILED_REASON, "Couldn't read the remotes");
+  const pending = deriveSyncControls(input({ head: undefined }));
+  assert.equal(pending.push.reason, STATUS_PENDING_REASON);
+  const unread = deriveSyncControls(input({ remotes: undefined }));
+  assert.equal(unread.fetch.reason, REMOTES_PENDING_REASON);
+  const failed = deriveSyncControls(
+    input({ remotes: undefined, remotesError: true }),
+  );
+  assert.equal(failed.fetch.reason, REMOTES_FAILED_REASON);
 });
 
 test("a failed remotes read outranks every status reason, and only while unread", () => {
@@ -319,7 +336,7 @@ test("(9b) a branch with no commits: Publish branch held until the first commit"
   assert.deepEqual(offline.push, { disabled: true, reason: "offline" });
 });
 
-test("(9c) an empty clone: Pull says the upstream doesn't exist yet, never deleted", () => {
+test("(9c) an unborn branch with an upstream: Pull never claims the remote branch's state", () => {
   const s = deriveSyncControls(
     input({
       head: head({
@@ -333,7 +350,8 @@ test("(9c) an empty clone: Pull says the upstream doesn't exist yet, never delet
   assert.equal(s.hasUpstream, false);
   assert.deepEqual(s.pull, {
     disabled: true,
-    reason: "Pull — origin/main doesn't exist on the remote yet",
+    reason:
+      "Pull — main has no commits yet, so it can't be compared with origin/main",
   });
   assert.deepEqual(s.push, {
     disabled: true,
