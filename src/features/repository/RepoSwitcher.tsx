@@ -101,15 +101,15 @@ export function RepoSwitcher() {
             <Button
               variant="ghost"
               size="sm"
-              // Deliberately NOT shrinkable (the vendored Button's shrink-0
-              // applies): the repo name holds its natural width while the
-              // branch label (shrink-20) and CI badge (shrink-4) absorb header
-              // space pressure — even a tiny flex-shrink share would swap
-              // characters for an ellipsis. max-w-56 still caps long names.
-              // The size's fixed h-7 can't hold two lines: the worktree line
-              // grows the button, which the items-center header row re-centers.
+              // A wide header never shrinks the repo name (the vendored
+              // Button's shrink-0). A compact one caps it at 12 characters and
+              // lets it shrink at weight 1 down to its chrome; shrink is
+              // proportional, so beside the branch label's 20 it can lose a
+              // character before that label reaches its floor, and it takes all
+              // the pressure after. The fixed h-7 can't hold two lines: the
+              // worktree line grows the button, which the header re-centers.
               className={cn(
-                "max-w-56 min-w-0 gap-1.5",
+                "max-w-56 min-w-0 gap-1.5 @max-4xl/repo-header:max-w-36 @max-4xl/repo-header:min-w-10.5 @max-4xl/repo-header:shrink",
                 worktreeName && "h-auto py-1",
               )}
             >

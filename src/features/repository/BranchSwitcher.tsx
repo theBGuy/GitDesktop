@@ -2733,9 +2733,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <DisabledReasonButton
               variant="ghost"
               size="sm"
-              // The wrapper is the header's flex item, so it owns the shrink-20
-              // that makes the branch label collapse before the CI badge (4).
-              wrapperClassName="min-w-0 shrink-20"
+              // The wrapper is the header's flex item, so it owns the cascade
+              // weight; shrink is weighted by width. In a wide header the badges
+              // (shrink-20) shrink at five times this label's rate (shrink-4)
+              // until their icon-wide floor; in a compact one they are
+              // icon-only and this label shrinks at 20 times the repo name's
+              // rate down to an 8-character floor, in the text-xs `ch` the
+              // button renders. A label of 9 characters or fewer never shrinks,
+              // so the floor can't pad it wider than its text.
+              wrapperClassName={
+                currentLabel.length > 9
+                  ? "min-w-[calc(9ch+3.125rem)] shrink-20 text-xs @4xl/repo-header:shrink-4"
+                  : "shrink-0"
+              }
               disabled={busy || amending}
               reason={(() => {
                 switch (true) {
@@ -2754,16 +2764,56 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               className="min-w-0 shrink overflow-hidden"
             >
               <GitBranchIcon data-icon="inline-start" />
-              <span
-                className="min-w-0 truncate"
-                // Sits under the wrapper's conditional title — a static or
-                // blanked title here would suppress that tooltip.
-                onMouseEnter={clipTitle(currentLabel)}
-              >
-                {currentLabel}
-              </span>
+              {(() => {
+                switch (true) {
+                  case status.data !== undefined:
+                    return (
+                      <span
+                        className="min-w-0 truncate"
+                        // Sits under the wrapper's conditional title — a static
+                        // or blanked title here would suppress that tooltip.
+                        onMouseEnter={clipTitle(currentLabel)}
+                      >
+                        {currentLabel}
+                      </span>
+                    );
+                  // A failed read holds still until the poll heals it: no
+                  // endless pulse over a status that isn't coming.
+                  case status.isError:
+                    return (
+                      <>
+                        <span aria-hidden className="text-muted-foreground">
+                          —
+                        </span>
+                        <span className="sr-only">
+                          Couldn't read the branch status
+                        </span>
+                      </>
+                    );
+                  // The bar holds the label floor's width, so the settled name
+                  // moves the header less. A span wearing the house Skeleton's
+                  // classes: the vendored Skeleton is a div, which a button's
+                  // phrasing content can't hold.
+                  default:
+                    return (
+                      <>
+                        <span
+                          aria-hidden
+                          className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
+                        />
+                        <span className="sr-only">Checking branch…</span>
+                      </>
+                    );
+                }
+              })()}
+              {/* The compact header drops the badge rather than budget it in
+                  the label floor: the label already reads "detached @", and
+                  a shrink-0 badge there would squeeze the label to nothing. */}
               {head?.detached && (
-                <Badge variant="secondary" className="ml-1 shrink-0">
+                <Badge
+                  variant="secondary"
+                  className="ml-1 shrink-0 @max-4xl/repo-header:hidden"
+                >
                   detached
                 </Badge>
               )}

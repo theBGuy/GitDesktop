@@ -28,9 +28,10 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
   return (
     <button
       type="button"
-      // Middle tier of the header shrink cascade, alongside BranchCiBadge — the
-      // key label stays legible while the icon carries the meaning under pressure.
-      className="flex min-w-0 shrink-4 items-center gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      // Same cascade tier and icon-wide floor as BranchCiBadge: in a wide header
+      // this badge shrinks at five times the branch label's rate, weighted by
+      // width, until it is icon-wide; in a compact one the key hides.
+      className="flex shrink-20 items-center @4xl/repo-header:min-w-6.5 gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       title={
         extra > 0
           ? `${keys.join(", ")} — referenced in the branch name, view in Issues`
@@ -42,8 +43,14 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
       }}
     >
       <KanbanIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0 truncate font-mono">{first}</span>
-      {extra > 0 && <span className="shrink-0">+{extra}</span>}
+      <span className="hidden min-w-0 truncate font-mono @4xl/repo-header:inline">
+        {first}
+      </span>
+      {extra > 0 && (
+        <span className="hidden shrink-0 @4xl/repo-header:inline">
+          +{extra}
+        </span>
+      )}
     </button>
   );
 }

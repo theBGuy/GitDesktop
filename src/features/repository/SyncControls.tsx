@@ -27,6 +27,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   forgeDetectForkPrForBranch,
   type PullMode,
@@ -61,13 +62,14 @@ import {
 } from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { originNoteFor } from "@/lib/stores/notifications";
+import { landedIn, originNoteFor } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
+import { deriveSyncControls, headFacts } from "./sync-controls-state";
 import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
 
@@ -85,10 +87,6 @@ const FORCE_PUSH_DEGRADED: Record<PushGuard, string | undefined> = {
   leaseOnlyNoReflog:
     "Protected by the lease alone: the branch has no reflog for --force-if-includes to check.",
 };
-
-/** The sync buttons' hold while any fetch, pull, push or recovery runs — none of
- *  them is necessarily the pressed button's own write. */
-const SYNC_BUSY_REASON = "A sync is still running…";
 
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
@@ -117,44 +115,54 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // form goes on `aria-keyshortcuts`. `null` = user explicitly unbound → no
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
-  const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+  // The force-push confirm, holding the branch its divergence verdict was
+  // measured on, so a HEAD move the status has seen refuses the confirm.
+  const [forceConfirm, setForceConfirm] = useState<{
+    branch: string | null;
+  } | null>(null);
   // The publish intercepted by the fork-PR guard. The branch is captured at
   // click time and travels with the match, so the dialog can only ever push the
-  // branch the detection ran for.
+  // branch the detection ran for. Each open carries its own `repo` and a
+  // `token` that keys the guard, so every open is a fresh instance whose
+  // repoPath never changes: its `usePush` stays on that repo (an in-flight
+  // mutation keeps those options through an unmount), and a closed open's late
+  // continuation can't close a newer one. A closed open stays mounted only for
+  // the dialog's exit transition and closed-state render; the next open, or
+  // the no-origin arm, unmounts it.
   const [forkGuard, setForkGuard] = useState<{
+    token: number;
+    repo: string;
     match: ForkPrMatch;
     branch: string;
+    open: boolean;
   } | null>(null);
-  const [detecting, setDetecting] = useState(false);
+  const forkGuardSeq = useRef(0);
+  const closeForkGuard = (token: number) =>
+    setForkGuard((g) => (g?.token === token ? { ...g, open: false } : g));
+  // In-flight fork-PR detections, counted per repo: each holds its own repo's
+  // sync bar and no other, so a switch mid-probe neither holds the new repo nor
+  // releases the old one before its probe settles.
+  const [detections, setDetections] = useState<
+    Readonly<Record<string, number>>
+  >({});
+  const detecting = (detections[repoPath] ?? 0) > 0;
+  // This component survives repo switches (RepoHeader mounts unkeyed), so both
+  // confirm dialogs close in the render that switches. Left open, the force
+  // confirm would force-push the live HEAD on the old repo's divergence
+  // verdict, and the fork guard would offer a push for a repository the user
+  // has left (defense in depth beside its per-open pin). Reset in render: an
+  // effect would paint them open first.
+  const [dialogsRepo, setDialogsRepo] = useState(repoPath);
+  if (dialogsRepo !== repoPath) {
+    setDialogsRepo(repoPath);
+    setForceConfirm(null);
+    setForkGuard((g) => g && { ...g, open: false });
+  }
 
-  // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
-  // offer to create the hosted repo instead. Which providers can take this
-  // origin-less repo is probed by usePublishProviders (there's no remote to
-  // detect one from), returning them in a stable GitHub → GitLab → Bitbucket
-  // order.
-  const noOrigin = remotes.isSuccess && !remotes.data.includes("origin");
-  const hasOrigin = remotes.isSuccess && remotes.data.includes("origin");
-  // A fork carries an `upstream` remote pointing at the source repo. Only then
-  // do we offer "Update from upstream" (in the Pull menu and the palette).
-  const hasUpstreamRemote =
-    remotes.isSuccess && remotes.data.includes("upstream");
-  const readyProviders = usePublishProviders(repoPath, noOrigin);
-
+  // Data, never isPending/isFetching: undefined means unknown for THIS repo
+  // (the reads carry no placeholder), and a refetch must not re-hold the bar.
   const head = status.data?.branch;
-  // A gone upstream (remote branch deleted, config lingers) reads as "no
-  // upstream": the button flips to "Publish branch" and its push sends
-  // `-u origin HEAD`, recreating the remote branch; Pull disables against the
-  // dead ref.
-  const hasUpstream = Boolean(head?.upstream) && !head?.upstreamGone;
-  // amended/rewritten local history: local and remote both have commits the
-  // other lacks, so neither pull --ff-only nor a normal push can succeed
-  const diverged = Boolean(head && head.ahead > 0 && head.behind > 0);
-  // A detached HEAD (mid-rebase, or `git checkout <sha>`) has no branch to push
-  // or publish, and merging upstream INTO it would orphan the merge commit. A
-  // push would otherwise hit the raw "refs/heads/HEAD" git error; gate both.
-  // The BranchSwitcher alongside already surfaces the detached state.
-  const detached = Boolean(head?.detached);
-  const canUpdateUpstream = hasUpstreamRemote && !detached;
+  const { diverged, detached } = headFacts(head);
   // Only a diverged branch has anything to classify, so the probe (several
   // rev-list spawns) never runs on the ordinary in-sync path.
   const rewrite = useBranchRewriteStatus(repoPath, head?.name ?? null, {
@@ -205,6 +213,34 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // the connection returns. Reset to upstream is local and stays live.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
+  const sync = deriveSyncControls({
+    head,
+    statusError: status.isError,
+    remotes: remotes.data,
+    busy,
+    offlineHold,
+    remoteRebased,
+    mixedRewrite,
+    localAtRisk,
+  });
+  const {
+    noOrigin,
+    hasOrigin,
+    hasUpstream,
+    canUpdateUpstream,
+    aheadCount,
+    behindCount,
+    pushLabel,
+    pullDescription,
+    pushDescription,
+  } = sync;
+  // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
+  // offer to create the hosted repo instead. Which providers can take it is
+  // probed by usePublishProviders (there's no remote to detect one from).
+  const publish = usePublishProviders(repoPath, noOrigin);
+  // The cluster → Publish swap unmounts whichever sync button held focus.
+  const controlsRef = useRef<HTMLDivElement>(null);
+  useFocusOnControlsSwap(noOrigin, controlsRef);
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
@@ -250,65 +286,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       ? "Fetch from origin"
       : `Last fetched ${formatRelativeTime(new Date(lastFetchedAt).toISOString(), now)}`;
 
-  // Ahead/behind counts now ride on the Push and Pull buttons themselves (the
-  // old standalone badges didn't say which button acted on them). Compute ONE
-  // description string per button and reuse it for BOTH the wrapper span's
-  // `title` and the Button's `aria-label`, so the pointer tooltip and the
-  // accessible name never drift. Each string starts with the button's visible
-  // label (WCAG 2.5.3, "label in name") and, when the button is disabled,
-  // carries the reason + remedy AND the count — the count needs a full-contrast
-  // home while the button itself sits at disabled opacity. The chains pick the
-  // first matching state; `undefined` means the visible label alone suffices
-  // (enabled + synced), so no tooltip is emitted and the aria-label falls back
-  // to that bare label — it can't fall back to the CONTENT, which is hidden
-  // below `md`.
-  const aheadCount = head?.ahead ?? 0;
-  const behindCount = head?.behind ?? 0;
-  const pushLabel = diverged
-    ? "Force push"
-    : hasUpstream
-      ? "Push"
-      : "Publish branch";
-  const aheadLabel =
-    aheadCount > 0
-      ? `${pushLabel} — ${aheadCount} commit${aheadCount === 1 ? "" : "s"} to push to ${head?.upstream}`
-      : undefined;
-  const behindLabel =
-    behindCount > 0
-      ? `Pull — ${behindCount} commit${behindCount === 1 ? "" : "s"} to pull from ${head?.upstream}`
-      : undefined;
-  // The two diverged arms are computed up front rather than folded in as extra
-  // ternary levels: an upstream that already HOLDS these commits under other ids
-  // makes the standing "rebase or merge" advice duplicate them.
-  const attachedPushDescription = remoteRebased
-    ? `${pushLabel} — ${head?.upstream} already has your commits under different ids; force pushing would replace them with your copies`
-    : aheadLabel;
-  const divergedPullDescription = (() => {
-    if (remoteRebased)
-      return `Pull — ${head?.upstream} already has your commits under different ids; use "Reset to ${head?.upstream}" from the Pull menu`;
-    // A merge here re-imports the twinned changes beside the copies already
-    // upstream, so the menu's merge item is disabled and the advice narrows.
-    if (mixedRewrite)
-      return `Pull — ${head?.upstream} already has some of your commits under different ids and you have ${localAtRisk} it doesn't; use Pull with rebase from the menu`;
-    return `Pull — branch has diverged (${behindCount} commit${behindCount === 1 ? "" : "s"} behind ${head?.upstream}); use Pull with rebase or merge from the menu`;
-  })();
   // One wording for the refusal, shared by the disabled menu item and the tooltip
   // the branch menu shows for the same shape.
   const mergeDuplicatesReason = `${head?.upstream} already carries these changes under different ids — a merge would duplicate them. Use Pull with rebase.`;
-  const pushDescription = detached
-    ? `${pushLabel} — you're on a detached HEAD; check out a branch to push`
-    : attachedPushDescription;
-  const pullDescription = diverged
-    ? divergedPullDescription
-    : detached
-      ? "Pull — you're on a detached HEAD; check out a branch to pull"
-      : head?.upstreamGone
-        ? // A gone upstream is configured-but-dead (branch deleted on the
-          // remote, e.g. after a merge) — not never-published; say so.
-          `Pull — upstream ${head?.upstream} was deleted on the remote (likely merged); use Publish branch to recreate it`
-        : !hasUpstream
-          ? "Pull — no upstream branch to pull from yet; publish the branch first"
-          : behindLabel;
 
   // Tooltip = the button's description (or its bare label when synced +
   // undefined) with the effective shortcut appended, e.g. "Push (Ctrl+P)".
@@ -325,11 +305,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const pushTitle =
     pushBinding === null
       ? pushDescription
-      : `${pushDescription ?? pushLabel} (${formatBinding(pushBinding)})`;
+      : `${sync.pushName} (${formatBinding(pushBinding)})`;
   const pullTitle =
     pullBinding === null
       ? pullDescription
-      : `${pullDescription ?? "Pull"} (${formatBinding(pullBinding)})`;
+      : `${sync.pullName} (${formatBinding(pullBinding)})`;
   const fetchHintTitle =
     fetchBinding === null
       ? fetchTitle
@@ -459,6 +439,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       aheadCount === 1
         ? `The only commit on ${branch} is already on ${upstream} under a different id`
         : `All ${aheadCount} commits on ${branch} are already on ${upstream} under different ids`;
+    const resetIn = repoPath;
     const ok = await useConfirm.getState().ask({
       title: `Reset ${branch} to ${upstream}?`,
       body: `${alreadyThere}. Resetting moves ${branch} to ${upstream}'s tip and rewrites your files to match, so no unique work is lost. Uncommitted changes block the reset — commit or stash them first.`,
@@ -466,6 +447,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       confirmVariant: "destructive",
     });
     if (!ok) return;
+    // `hardReset` follows the live repo, where a same-named branch would pass
+    // the HEAD check below; a switch under the prompt refuses instead.
+    const { live, away } = landedIn(resetIn);
+    if (!live) {
+      toast.info(
+        `You switched repositories while the dialog was open — nothing was reset${away}.`,
+      );
+      return;
+    }
     // HEAD can move while the dialog sits open; the captured branch is the only
     // one the confirmation described. Says so rather than returning quietly: the
     // user just confirmed a destructive action, and silence reads as "it worked".
@@ -486,14 +476,20 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     }
   }
 
-  async function doPush(force: boolean) {
+  // `branch` names the pushed branch outright instead of HEAD, for a push
+  // decided before an await that HEAD may have moved across. A named push
+  // leaves `-u` to the backend, which reads THAT branch's tracking (untracked
+  // or gone publishes with `-u`, tracked never retracks): `hasUpstream`
+  // describes HEAD, which may no longer be that branch.
+  async function doPush(force: boolean, branch?: string) {
     // The force confirm and the fork-PR guard can both sit open across a
     // disconnect, and each lands here.
     if (refuseWhileOffline()) return;
     try {
       const guard = await push.mutateAsync({
-        setUpstream: !hasUpstream,
+        setUpstream: branch === undefined && !hasUpstream,
         force,
+        branch,
       });
       // Only a force push has a guarantee to report, and only the two
       // degraded values say more than the plain confirmation does.
@@ -501,11 +497,30 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         toast.success("Force pushed", {
           description: FORCE_PUSH_DEGRADED[guard],
         });
-      setForceConfirmOpen(false);
+      setForceConfirm(null);
     } catch (e) {
       onError(e);
-      setForceConfirmOpen(false);
+      setForceConfirm(null);
     }
+  }
+
+  // HEAD can move while the confirm sits open; the branch it opened on is the
+  // only one its divergence verdict described. `headNameRef` follows the status
+  // read, so only a move the status has already seen refuses; the push itself
+  // stays on the HEAD path.
+  function confirmForcePush() {
+    // A click during the closing dialog's exit transition: nothing to confirm.
+    if (forceConfirm === null) return;
+    if (headNameRef.current !== forceConfirm.branch) {
+      toast.info("HEAD moved while the dialog was open — nothing was pushed.");
+      setForceConfirm(null);
+      return;
+    }
+    void doPush(true);
+  }
+
+  function openForceConfirm() {
+    setForceConfirm({ branch: head?.name ?? null });
   }
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
@@ -521,41 +536,49 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       void doPush(force);
       return;
     }
-    setDetecting(true);
+    const pushedIn = repoPath;
+    setDetections((d) => ({ ...d, [pushedIn]: (d[pushedIn] ?? 0) + 1 }));
     const match = await forgeDetectForkPrForBranch(repoPath, branch).catch(
       () => null,
     );
-    setDetecting(false);
-    // A HEAD that moved during the round-trip makes the match describe a branch
-    // we're no longer on; pushing it onto the PR head would be a legal
-    // fast-forward of the wrong work, so the moment has passed — just publish.
-    if (match && headNameRef.current === branch)
-      setForkGuard({ match, branch });
-    else void doPush(false);
+    setDetections((d) => {
+      const { [pushedIn]: n = 0, ...rest } = d;
+      return n > 1 ? { ...rest, [pushedIn]: n - 1 } : rest;
+    });
+    // `push` follows the live repo, while the branch name, the fork match and
+    // the decision to publish all belong to the old one: a switch during the
+    // round-trip refuses rather than publish there.
+    const { live, away } = landedIn(pushedIn);
+    if (!live) {
+      toast.info(
+        `Didn't publish ${branch}${away} — you switched repositories before the push started.`,
+      );
+      return;
+    }
+    // Every route from here pushes `branch` by name, so a HEAD that moved
+    // during the round-trip changes nothing: the match still describes it.
+    if (match) {
+      forkGuardSeq.current += 1;
+      setForkGuard({
+        token: forkGuardSeq.current,
+        repo: pushedIn,
+        match,
+        branch,
+        open: true,
+      });
+    } else void doPush(false, branch);
   }
 
-  // Hotkeys mirror the buttons' disabled states exactly.
-  useHotkeyAction(
-    "fetch",
-    () => void doFetch(false),
-    !noOrigin && !busy && !offlineHold,
-  );
-  // Pull needs no explicit `!detached` term: `hasUpstream` is already false on a
-  // detached HEAD (the backend leaves `head.upstream` null, mirroring git's "no
-  // upstream for a detached HEAD"), so this hotkey and the Pull button below are
-  // disabled there for free — unlike Push, which has no upstream precondition.
-  useHotkeyAction(
-    "pull",
-    () => void doPull("ffOnly"),
-    !noOrigin && !busy && hasUpstream && !diverged && !offlineHold,
-  );
+  // Hotkeys mirror the buttons' holds exactly (sync-controls-state.ts).
+  useHotkeyAction("fetch", () => void doFetch(false), sync.hotkeys.fetch);
+  useHotkeyAction("pull", () => void doPull("ffOnly"), sync.hotkeys.pull);
   useHotkeyAction(
     "push",
     () => {
-      if (diverged) setForceConfirmOpen(true);
+      if (diverged) openForceConfirm();
       else void beginPush(false);
     },
-    !noOrigin && !busy && !detached && !offlineHold,
+    sync.hotkeys.push,
   );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
@@ -563,24 +586,39 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-from-upstream",
     () => void doUpdateFromUpstream(),
-    canUpdateUpstream && !busy && !offlineHold,
+    sync.hotkeys.updateFromUpstream,
   );
 
   if (noOrigin) {
     return (
-      <PublishRepoControl
-        repoPath={repoPath}
-        providers={readyProviders}
-        disabledTitle="Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish"
-      />
+      // A silent landing spot for focus across the swap with the sync cluster.
+      <div ref={controlsRef} tabIndex={-1} className="flex outline-none">
+        <PublishRepoControl
+          repoPath={repoPath}
+          providers={publish.providers}
+          reserveCaret
+          // Offline outranks both: the targets probe parks offline, so
+          // nothing is checking until the connection returns.
+          disabledTitle={
+            offlineHold ??
+            (publish.settled
+              ? "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish"
+              : "Checking publish accounts…")
+          }
+        />
+      </div>
     );
   }
 
   return (
-    <div className="flex items-center gap-2">
-      {/* Every segment rides a wrapper span — DisabledReasonButton's own, and
-          the dropdown trigger's. Those spans have no `data-slot`, so they opt
-          out of ButtonGroup's border-collapse/rounding child selectors
+    <div
+      ref={controlsRef}
+      tabIndex={-1}
+      className="flex items-center gap-2 outline-none"
+    >
+      {/* Every segment rides DisabledReasonButton's wrapper span. Those spans
+          have no `data-slot`, so they opt out of ButtonGroup's
+          border-collapse/rounding child selectors
           (`*:data-slot:rounded-r-none` + `[&>[data-slot]~[data-slot]]`) —
           ButtonGroup then contributes only layout + `role="group"`, and THIS
           call site owns the seams explicitly on the Buttons. The vendored Button
@@ -594,11 +632,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy || !!offlineHold}
           // Every hold carries a reason, so none of the flips between them
           // drops focus by turning the button natively disabled. A running sync
           // outranks offline: it is real, and fails live if the connection drops.
-          reason={busy ? SYNC_BUSY_REASON : offlineHold}
+          disabled={sync.fetch.disabled}
+          reason={sync.fetch.reason}
           title={fetchHintTitle}
           aria-label="Fetch"
           aria-keyshortcuts={fetchKeyshortcuts}
@@ -608,8 +646,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           className="focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => void doFetch(false)}
         >
+          {/* Every spinner here takes the sm icon box (size-3.5): the Spinner's
+              own size-4 would shift the cluster 2px each time a sync starts. */}
           {fetchRemote.isPending ? (
-            <Spinner data-icon="inline-start" />
+            <Spinner data-icon="inline-start" className="size-3.5" />
           ) : (
             <ArrowsClockwiseIcon data-icon="inline-start" />
           )}
@@ -620,14 +660,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy || !hasUpstream || diverged || !!offlineHold}
-          // Every hold carries a reason so no flip between them drops focus to
-          // a native disable: a running sync, offline, else the description
-          // `aria-label` already holds (read twice by AT, the price of the
-          // mechanism). The wrapper hovers the reason, else `pullTitle`.
-          reason={busy ? SYNC_BUSY_REASON : (offlineHold ?? pullDescription)}
+          // A description-only reason repeats the `aria-label` (read twice by
+          // AT, the price of the mechanism). The wrapper hovers the reason, else
+          // `pullTitle`.
+          disabled={sync.pull.disabled}
+          reason={sync.pull.reason}
           title={pullTitle}
-          aria-label={pullDescription ?? "Pull"}
+          aria-label={sync.pullName}
           aria-keyshortcuts={pullKeyshortcuts}
           className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => void doPull("ffOnly")}
@@ -635,7 +674,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           {/* Covers the recovery compounds too: with the preference on they
               run with no dialog open to show progress. */}
           {pull.isPending || recovery.pending ? (
-            <Spinner data-icon="inline-start" />
+            <Spinner data-icon="inline-start" className="size-3.5" />
           ) : (
             <ArrowDownIcon data-icon="inline-start" />
           )}
@@ -649,91 +688,89 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </span>
           )}
         </DisabledReasonButton>
-        <span className="inline-flex">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label="Pull options"
-                  // Reachable whenever there's a menu item to show: the pull
-                  // reconcile options (need a tracking upstream) or "Update from
-                  // upstream" (needs the fork's upstream remote).
-                  disabled={busy || (!hasUpstream && !canUpdateUpstream)}
-                  className="border-l-0 px-1.5 focus-visible:relative focus-visible:z-10"
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <DisabledReasonButton
+                variant="outline"
+                size="sm"
+                aria-label="Pull options"
+                // Reachable whenever there's a menu item to show: the pull
+                // reconcile options (need a tracking upstream) or "Update from
+                // upstream" (needs the fork's upstream remote).
+                disabled={sync.pullOptions.disabled}
+                reason={sync.pullOptions.reason}
+                className="border-l-0 px-1.5 focus-visible:relative focus-visible:z-10"
+              >
+                <CaretDownIcon />
+              </DisabledReasonButton>
+            }
+          />
+          <DropdownMenuContent align="end" className="min-w-48">
+            {hasUpstream && (
+              <>
+                <DropdownMenuItem
+                  disabled={!!offlineHold}
+                  onClick={() => void doPull("rebase")}
                 >
-                  <CaretDownIcon />
-                </Button>
-              }
-            />
-            <DropdownMenuContent align="end" className="min-w-48">
-              {hasUpstream && (
-                <>
-                  <DropdownMenuItem
-                    disabled={!!offlineHold}
-                    onClick={() => void doPull("rebase")}
-                  >
-                    Pull with rebase{offlineSuffix}
+                  Pull with rebase{offlineSuffix}
+                </DropdownMenuItem>
+                {/* Disabled with the reason IN the label: a disabled menu item
+                    surfaces no tooltip, and the branch menu states the same
+                    refusal the same way. */}
+                <DropdownMenuItem
+                  disabled={mixedRewrite || !!offlineHold}
+                  title={mixedRewrite ? mergeDuplicatesReason : undefined}
+                  onClick={() => void doPull("merge")}
+                >
+                  {mixedRewrite
+                    ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
+                    : `Pull with merge${offlineSuffix}`}
+                </DropdownMenuItem>
+                {/* Offered only once the probe has measured an upstream that
+                    carries every one of these commits, with no unique local
+                    work; every other divergence keeps the two pull items
+                    alone. */}
+                {remoteRebased && (
+                  <DropdownMenuItem onClick={() => void doResetToUpstream()}>
+                    Reset to {head?.upstream}…
                   </DropdownMenuItem>
-                  {/* Disabled with the reason IN the label: a disabled menu item
-                      surfaces no tooltip, and the branch menu states the same
-                      refusal the same way. */}
-                  <DropdownMenuItem
-                    disabled={mixedRewrite || !!offlineHold}
-                    title={mixedRewrite ? mergeDuplicatesReason : undefined}
-                    onClick={() => void doPull("merge")}
-                  >
-                    {mixedRewrite
-                      ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
-                      : `Pull with merge${offlineSuffix}`}
-                  </DropdownMenuItem>
-                  {/* Offered only once the probe has measured an upstream that
-                      carries every one of these commits, with no unique local
-                      work; every other divergence keeps the two pull items
-                      alone. */}
-                  {remoteRebased && (
-                    <DropdownMenuItem onClick={() => void doResetToUpstream()}>
-                      Reset to {head?.upstream}…
-                    </DropdownMenuItem>
-                  )}
-                </>
-              )}
-              {canUpdateUpstream && (
-                <>
-                  {hasUpstream && <DropdownMenuSeparator />}
-                  {/* Base UI menu items fire on onClick, NOT onSelect. */}
-                  <DropdownMenuItem
-                    disabled={!!offlineHold}
-                    onClick={() => void doUpdateFromUpstream()}
-                  >
-                    Update from upstream{offlineSuffix}
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </span>
+                )}
+              </>
+            )}
+            {canUpdateUpstream && (
+              <>
+                {hasUpstream && <DropdownMenuSeparator />}
+                {/* Base UI menu items fire on onClick, NOT onSelect. */}
+                <DropdownMenuItem
+                  disabled={!!offlineHold}
+                  onClick={() => void doUpdateFromUpstream()}
+                >
+                  Update from upstream{offlineSuffix}
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={busy || detached || !!offlineHold}
-          // Same ranking as Pull's.
-          reason={busy ? SYNC_BUSY_REASON : (offlineHold ?? pushDescription)}
+          disabled={sync.push.disabled}
+          reason={sync.push.reason}
           title={pushTitle}
-          aria-label={pushDescription ?? pushLabel}
+          aria-label={sync.pushName}
           aria-keyshortcuts={pushKeyshortcuts}
           className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => {
             if (diverged) {
-              setForceConfirmOpen(true);
+              openForceConfirm();
             } else {
               void beginPush(false);
             }
           }}
         >
           {push.isPending || detecting ? (
-            <Spinner data-icon="inline-start" />
+            <Spinner data-icon="inline-start" className="size-3.5" />
           ) : diverged ? (
             <WarningIcon data-icon="inline-start" />
           ) : (
@@ -751,7 +788,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         </DisabledReasonButton>
       </ButtonGroup>
 
-      <Dialog open={forceConfirmOpen} onOpenChange={setForceConfirmOpen}>
+      <Dialog
+        open={forceConfirm !== null}
+        onOpenChange={(o) => {
+          if (!o) setForceConfirm(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Force push?</DialogTitle>
@@ -793,17 +835,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </p>
           )}
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setForceConfirmOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setForceConfirm(null)}>
               Cancel
             </Button>
             <DisabledReasonButton
               variant="destructive"
               disabled={push.isPending || !!offlineHold}
               reason={push.isPending ? ACT_PENDING_REASON : offlineHold}
-              onClick={() => void doPush(true)}
+              onClick={confirmForcePush}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}
               Force push
@@ -812,16 +851,22 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         </DialogContent>
       </Dialog>
 
-      <ForkPrPublishGuard
-        repoPath={repoPath}
-        match={forkGuard?.match ?? null}
-        branch={forkGuard?.branch ?? ""}
-        onClose={() => setForkGuard(null)}
-        onPublishAnyway={() => {
-          setForkGuard(null);
-          void doPush(false);
-        }}
-      />
+      {forkGuard && (
+        <ForkPrPublishGuard
+          key={forkGuard.token}
+          repoPath={forkGuard.repo}
+          match={forkGuard.open ? forkGuard.match : null}
+          branch={forkGuard.branch}
+          onClose={() => closeForkGuard(forkGuard.token)}
+          onPublishAnyway={() => {
+            closeForkGuard(forkGuard.token);
+            // Only this open, in its own still-live repo: `open` covers a
+            // click during the dialog's close transition, `live` a switch.
+            if (!forkGuard.open || !landedIn(forkGuard.repo).live) return;
+            void doPush(false, forkGuard.branch);
+          }}
+        />
+      )}
 
       {recovery.dialog}
       {pullDropGuard.dialog}
