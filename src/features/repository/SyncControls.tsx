@@ -509,7 +509,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // read, so only a move the status has already seen refuses; the push itself
   // stays on the HEAD path.
   function confirmForcePush() {
-    if (headNameRef.current !== forceConfirm?.branch) {
+    // A click during the closing dialog's exit transition: nothing to confirm.
+    if (forceConfirm === null) return;
+    if (headNameRef.current !== forceConfirm.branch) {
       toast.info("HEAD moved while the dialog was open — nothing was pushed.");
       setForceConfirm(null);
       return;
@@ -595,10 +597,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           repoPath={repoPath}
           providers={publish.providers}
           reserveCaret
+          // Offline outranks both: the targets probe parks offline, so
+          // nothing is checking until the connection returns.
           disabledTitle={
-            publish.settled
+            offlineHold ??
+            (publish.settled
               ? "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish"
-              : "Checking publish accounts…"
+              : "Checking publish accounts…")
           }
         />
       </div>
