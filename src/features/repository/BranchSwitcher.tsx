@@ -1362,13 +1362,31 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const presentation = presentError(e);
     toast.error(presentation.summary, {
       duration: 8000,
-      action: {
-        label: rowCheckoutCopy(holderEntry?.isMain).open,
-        onClick: () => {
-          setOpen(false);
-          void openWorktree(holder);
-        },
-      },
+      // A session holder is a checkout the app keeps out of view (agent sessions,
+      // update husks), so only the user's own worktrees get the open remedy.
+      action:
+        e.reason === "session"
+          ? undefined
+          : {
+              label: rowCheckoutCopy(holderEntry?.isMain).open,
+              onClick: () => {
+                // Read at FIRE time: the toast outlives the render's removal
+                // snapshot, and a removal or promote may have started since.
+                if (
+                  refuseWhileLeaving(
+                    holder,
+                    Boolean(
+                      useWorktreeRemovalStore.getState().byRepo[repoPath]?.[
+                        holder
+                      ],
+                    ),
+                  )
+                )
+                  return;
+                setOpen(false);
+                void openWorktree(holder);
+              },
+            },
       cancel: presentation.long ? errorToastAction(presentation) : undefined,
     });
     return true;
@@ -2035,6 +2053,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const renameWorktreeBlockedReason = (() => {
       if (rowWorktree?.isMain) return rowCopy.noun;
       if (rowWorktree?.isLocked) return "locked";
+      if (rowUpdating) return "updating…";
       return undefined;
     })();
     const deleteWorktreeBlockedReason = (() => {
@@ -2490,8 +2509,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               <ContextMenuSeparator />
             </>
           )}
-          <ContextMenuItem onClick={() => openRename(branch.name)}>
-            Rename branch…
+          <ContextMenuItem
+            disabled={rowUpdating}
+            onClick={() => openRename(branch.name)}
+          >
+            Rename branch…{rowUpdating ? " (updating…)" : ""}
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() => copyText(branch.name, "Branch name copied")}
@@ -2527,11 +2549,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 Copy path
               </ContextMenuItem>
               <ContextMenuItem
-                // git worktree move refuses the main worktree and a locked one.
+                // git worktree move refuses the main worktree and a locked one;
+                // it doesn't wait on an update running inside, so that holds too.
                 disabled={
                   rowWorktree.isMain ||
                   rowWorktree.isLocked ||
-                  rowWorktreeRemoving
+                  rowWorktreeRemoving ||
+                  rowUpdating
                 }
                 onClick={() => {
                   setOpen(false);

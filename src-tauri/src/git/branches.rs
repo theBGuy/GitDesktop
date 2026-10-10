@@ -1563,7 +1563,8 @@ pub(crate) async fn branch_reset_to_upstream(
 ///   and a `branch` that moved while that worktree was materializing is refused.
 /// - checked out in ANOTHER checkout → the same fast-forward or merge runs inside that
 ///   checkout, which reports back as `holder`; a session's, mid-operation, dirty or
-///   conflicting holder is refused as [`AppError::BranchHeld`] with nothing changed.
+///   conflicting holder is refused as [`AppError::BranchHeld`] with nothing changed,
+///   and one whose folder is missing as a plain `Command` error, with nothing to open.
 ///
 /// When `branch` IS the current branch there's nothing to avoid switching to, so it
 /// merges in place (conflicts surface in the changes list as usual — no abort).
@@ -1761,9 +1762,19 @@ pub(crate) async fn update_branch_from(
                 subject: merge_subject(repo_path, &base_rev, branch).await,
             }
         };
+        // The throwaway arm's marker, minted under THIS hold so the guards refusing a
+        // rename, delete or second update of a branch mid-update see this one too. Nothing
+        // is ever created at its path, so settling it always deletes the pair.
+        let tmp = update_worktree_path(repo_path).await?;
+        if let Some(root) = tmp.parent() {
+            std::fs::create_dir_all(root).map_err(AppError::Io)?;
+        }
+        let marker = crate::git::update_marker::UpdateMarker::create_for(&tmp, branch)?;
         // No task takes two locks of one domain: release this checkout's first.
         drop(guard);
-        return update_in_holder(state, &holder, branch, base, &pins.base_sha, merge).await;
+        let result = update_in_holder(state, &holder, branch, base, &pins.base_sha, merge).await;
+        settle_marker(Some(marker), &tmp.to_string_lossy());
+        return result;
     }
 
     // `fetch .` refuses a branch checked out anywhere, so it runs only for an UNHELD one:
@@ -1863,6 +1874,16 @@ async fn update_in_holder(
     merge: HolderMerge,
 ) -> AppResult<UpdateBranchOutcome> {
     validate_branch_name(branch)?;
+    // Before the lock, whose key resolution already spawns git there: a LOCKED worktree
+    // whose folder is gone still lists, and still holds its branch, since prune skips it.
+    // It pre-empts that steady state only; a folder removed after it gets the raw error.
+    if matches!(std::path::Path::new(holder).try_exists(), Ok(false)) {
+        return Err(AppError::Command(format!(
+            "The worktree at {holder} still holds {branch}, but its folder is missing. Unlock \
+             and prune that worktree (or restore its folder), then try again. {branch} is \
+             unchanged."
+        )));
+    }
     let domain = state.working_tree_lock(holder).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
 
@@ -1936,9 +1957,9 @@ async fn update_in_holder(
         return Ok(updated("up-to-date"));
     }
 
-    // Both merges pass `--no-overwrite-ignore`: an ignored file is local data its owner
-    // can't see being consumed, and the flag turns git's silent overwrite into a refusal
-    // the failure arms below already classify.
+    // An ignored file is local data its owner can't see being consumed. Both merges pass
+    // `--no-overwrite-ignore`, which turns the fast-forward's silent overwrite into a
+    // refusal; a 3-way merge ignores the flag (measured, git 2.51.1), so that arm checks.
     let subject = match merge {
         HolderMerge::FastForward => {
             let out = run_git_raw(
@@ -1965,6 +1986,35 @@ async fn update_in_holder(
         HolderMerge::Merge { subject } => subject,
     };
 
+    // Fails closed: a check that could not run refuses rather than risk the overwrite.
+    let in_the_way = match ignored_files_in_the_way(holder, base_sha).await {
+        Ok(paths) => paths,
+        Err(e) => {
+            return Err(branch_held(
+                "failed",
+                holder,
+                branch,
+                format!(
+                    "Couldn't check the checkout at {holder} for ignored files the merge \
+                     would overwrite. {branch} is unchanged.\n{e}"
+                ),
+            ))
+        }
+    };
+    if !in_the_way.is_empty() {
+        return Err(branch_held(
+            "failed",
+            holder,
+            branch,
+            format!(
+                "Merging {base} into {branch} in the checkout at {holder} would overwrite \
+                 ignored files there: {}. Move them aside, then try again. {branch} is \
+                 unchanged.",
+                name_paths(&in_the_way)
+            ),
+        ));
+    }
+
     // Raw: a conflicted merge reports entirely on stdout with stderr empty (measured,
     // git 2.51.1), the same trap the in-place arm documents.
     let mut args = vec!["merge", "--no-edit", "--no-overwrite-ignore"];
@@ -1985,10 +2035,7 @@ async fn update_in_holder(
     // git refused before starting (an untracked or ignored file in the way) has nothing
     // to abort.
     let conflicts = crate::git::ops::unmerged_paths(holder).await;
-    // An unreadable op state counts as mid-merge, so it can never pass as restored.
-    let mid_merge =
-        |probe: AppResult<crate::git::types::RepoOpState>| probe.map_or(true, |s| s.merging);
-    let abort_failure = if mid_merge(crate::git::ops::op_state(holder).await) {
+    let abort_failure = if merge_head_present(holder).await {
         match run_git_raw(Some(holder), &["merge", "--abort"], DEFAULT_TIMEOUT).await {
             Ok(out) if out.code == 0 => None,
             Ok(out) => Some(out.full_failure_text()),
@@ -1999,7 +2046,7 @@ async fn update_in_holder(
     };
     // Our own residue only: the hold serializes GitDesktop, not the user's editor, so a
     // tracked edit saved during the merge is theirs and never reads as a failed restore.
-    let restored = abort_failure.is_none() && !mid_merge(crate::git::ops::op_state(holder).await);
+    let restored = abort_failure.is_none() && !merge_head_present(holder).await;
     if !restored {
         let abort_text = abort_failure.unwrap_or_default();
         return Err(branch_held(
@@ -2023,7 +2070,7 @@ async fn update_in_holder(
             format!(
                 "{branch} has changes that conflict with {base} in {}, so the merge in the \
                  checkout at {holder} was aborted. {branch} is unchanged.",
-                name_conflicts(&conflicts)
+                name_paths(&conflicts)
             ),
         ));
     }
@@ -2038,6 +2085,20 @@ async fn update_in_holder(
     ))
 }
 
+/// Whether `dir` is mid-merge, failing closed: only git's verified-absent exit 1 says no.
+async fn merge_head_present(dir: &str) -> bool {
+    match run_git_raw(
+        Some(dir),
+        &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) => out.code != 1,
+        Err(_) => true,
+    }
+}
+
 /// Whether `dir`'s checkout has staged or unstaged changes to TRACKED files.
 async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
     let status = run_git(
@@ -2049,8 +2110,63 @@ async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
     Ok(!status.stdout_lossy().trim().is_empty())
 }
 
-/// The first three conflicting paths, then a count of the rest.
-fn name_conflicts(paths: &[String]) -> String {
+/// The ignored files at `holder` a merge of `base_sha` would write over. Candidates are
+/// every base-side change since the merge base but deletions: an add, and a modify or
+/// type change of a path the holder deleted, whose conflict leaves the base's file over
+/// the ignored one (and `merge --abort` then deletes it; measured, git 2.51.1). Tracked
+/// paths never qualify, as `check-ignore` skips them; an ignored directory at an added
+/// file's path does (measured). Not covered: an ignored FILE where the base adds a
+/// directory (`a` against `a/b`), a file written between this check and the merge, and a
+/// criss-cross history, whose three-dot diff takes just one of its merge bases.
+async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec<String>> {
+    let changed = run_git(
+        Some(holder),
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=d",
+            "-z",
+            &format!("HEAD...{base_sha}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let dir = std::path::Path::new(holder);
+    let on_disk: Vec<String> = changed
+        .stdout_lossy()
+        .split('\0')
+        .filter(|p| !p.is_empty() && dir.join(p).symlink_metadata().is_ok())
+        .map(str::to_string)
+        .collect();
+    if on_disk.is_empty() {
+        return Ok(Vec::new());
+    }
+    let checked = crate::git::runner::run_git_raw_input(
+        Some(holder),
+        &["check-ignore", "--stdin", "-z"],
+        Some(&on_disk.join("\0")),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    // Exit 1 is git's "none of these is ignored"; anything past it is a failure.
+    match checked.code {
+        0 => Ok(checked
+            .stdout_lossy()
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()),
+        1 => Ok(Vec::new()),
+        code => Err(AppError::Git {
+            code,
+            stderr: checked.full_failure_text(),
+        }),
+    }
+}
+
+/// The first three paths, then a count of the rest.
+fn name_paths(paths: &[String]) -> String {
     const NAMED: usize = 3;
     let named = paths
         .iter()
@@ -2064,9 +2180,9 @@ fn name_conflicts(paths: &[String]) -> String {
     }
 }
 
-/// The subject git gives a merge of `base_rev` by name, for a merge that takes its
-/// pinned sha instead, which git would title "Merge commit '<sha>'". `None` — git's own
-/// wording — when the rev names neither a local nor a remote-tracking branch.
+/// A fixed `Merge branch '<x>' into <branch>` subject (`remote-tracking branch` for a
+/// remote base) for the holder's merge, which takes the pinned sha and would otherwise be
+/// titled by it. `None`, leaving git's wording, when the rev names neither kind of branch.
 async fn merge_subject(repo_path: &str, base_rev: &str, branch: &str) -> Option<String> {
     let out = run_git_raw(
         Some(repo_path),
@@ -2403,7 +2519,7 @@ mod tests {
         MergePair, UpdatePins, RENAMED_CONFIG_LEFT_BEHIND, UPSTREAM_WRITE_FAILED,
     };
     use super::{
-        branch_tip_sha, current_branch_name, is_session_holder, name_conflicts, update_in_holder,
+        branch_tip_sha, current_branch_name, is_session_holder, name_paths, update_in_holder,
         worktree_holding_branch, HolderMerge, UpdateBranchOutcome,
     };
     use crate::error::AppError;
@@ -5021,6 +5137,37 @@ mod tests {
         (guard, repo_s, main, holder_s, porcelain)
     }
 
+    /// Points the marker root, where the holder arm mints its update marker, at a
+    /// `worktrees` dir beside `repo`. The guards must span the test's awaits; bound in
+    /// order, they drop override first, then the serializing lock.
+    fn holder_marker_root(
+        repo: &str,
+    ) -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::git::update_marker::TestRootOverride,
+        std::path::PathBuf,
+    ) {
+        use crate::git::update_marker as marker;
+        let root = std::path::Path::new(repo)
+            .parent()
+            .unwrap()
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let serialized = marker::test_root_lock();
+        let installed = marker::TestRootOverride::set(&root);
+        (serialized, installed, root)
+    }
+
+    /// The `gd-update-*` entries under a marker root: a settled holder update leaves none.
+    fn marker_leftovers(root: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(root)
+            .expect("the marker root is readable")
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|name| name.starts_with("gd-update-"))
+            .collect()
+    }
+
     async fn commit_file(dir: &str, file: &str, body: &str) {
         std::fs::write(std::path::Path::new(dir).join(file), body).unwrap();
         run(dir, &["add", "-A"]).await;
@@ -5059,10 +5206,12 @@ mod tests {
 
     /// The fast-forward a held branch used to die on (`fetch .` refuses it) runs inside
     /// the holder, and the holder's index and tree advance with its HEAD.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_held_branch_fast_forwards_inside_its_holder() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-ff", "held-ff").await;
+        let (_serialized, _override, root) = holder_marker_root(&repo_s);
         commit_file(&repo_s, "base.txt", "base\n").await;
         let main_tip = tip(&repo_s, &main).await;
 
@@ -5087,14 +5236,21 @@ mod tests {
         );
         assert_eq!(tip(&repo_s, &main).await, main_tip);
         assert_eq!(run(&repo_s, &["status", "--porcelain"]).await, "");
+        assert!(
+            marker_leftovers(&root).is_empty(),
+            "the update's marker is settled: {:?}",
+            marker_leftovers(&root)
+        );
     }
 
     /// A diverged held branch merges inside a clean, idle holder, titled as the unheld
     /// arms title theirs rather than by the pinned sha.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_held_diverged_branch_merges_inside_a_clean_holder() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-merge", "held-merge").await;
+        let (_serialized, _override, root) = holder_marker_root(&repo_s);
         commit_file(&holder, "feature.txt", "feature\n").await;
         commit_file(&repo_s, "base.txt", "base\n").await;
         let (held_tip, main_tip) = (tip(&repo_s, "held-merge").await, tip(&repo_s, &main).await);
@@ -5125,6 +5281,7 @@ mod tests {
         );
         assert_eq!(run(&holder, &["status", "--porcelain"]).await, "");
         assert!(std::path::Path::new(&holder).join("base.txt").exists());
+        assert!(marker_leftovers(&root).is_empty());
     }
 
     /// An agent session's worktree is never updated from outside it, matched on the
@@ -5216,10 +5373,12 @@ mod tests {
     }
 
     /// A holder paused mid-merge is refused by name and left paused.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_holder_mid_operation_is_refused() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-midop", "held-midop").await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
         commit_file(&repo_s, "base.txt", "base\n").await;
         run(&holder, &["merge", "--no-commit", "--no-ff", &main]).await;
         let held_tip = tip(&repo_s, "held-midop").await;
@@ -5235,10 +5394,12 @@ mod tests {
     }
 
     /// Tracked changes in the holder refuse the update and survive it untouched.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_holder_with_tracked_changes_is_refused() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-dirty", "held-dirty").await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
         commit_file(&repo_s, "base.txt", "base\n").await;
         let seed = std::path::Path::new(&holder).join("seed.txt");
         std::fs::write(&seed, "work in progress\n").unwrap();
@@ -5258,10 +5419,12 @@ mod tests {
 
     /// Untracked files alone don't make the holder dirty: the update proceeds and
     /// leaves them where they were.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_holder_with_only_untracked_files_still_updates() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-untracked", "held-untracked").await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
         commit_file(&repo_s, "base.txt", "base\n").await;
         let scratch = std::path::Path::new(&holder).join("scratch.txt");
         std::fs::write(&scratch, "notes\n").unwrap();
@@ -5286,62 +5449,132 @@ mod tests {
         assert!(scratch.exists());
     }
 
-    /// An IGNORED file in the holder at a path the base tracks is refused rather than
-    /// silently overwritten (git's default), and survives byte for byte.
-    #[tokio::test]
-    async fn a_holder_ignored_file_the_base_tracks_is_never_overwritten() {
-        let (_guard, repo_s, main, holder, porcelain) =
-            held_branch_repo("held-ignored", "held-ignored").await;
+    /// An IGNORED file in the holder at a path the base tracks must be refused rather than
+    /// silently overwritten (git's default), and survive byte for byte. `diverge` gives the
+    /// holder its own commit first, so the update takes the merge arm, not the ff one.
+    #[allow(clippy::await_holding_lock)]
+    async fn assert_ignored_file_survives(branch: &str, diverge: bool) {
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        if diverge {
+            commit_file(&holder, "feature.txt", "feature\n").await;
+        }
         let holder_dir = std::path::Path::new(&holder);
         std::fs::write(holder_dir.join(".gitignore"), "build.log\n").unwrap();
         let ignored = holder_dir.join("build.log");
         std::fs::write(&ignored, "local build output\n").unwrap();
         commit_file(&repo_s, "build.log", "tracked by the base\n").await;
-        let held_tip = tip(&repo_s, "held-ignored").await;
+        let held_tip = tip(&repo_s, branch).await;
 
         let state = AppState::default();
-        let err = update_branch_from(
-            &state,
-            &repo_s,
-            "held-ignored",
-            &main,
-            &HashSet::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_failed_naming(&err, &porcelain, branch, "build.log");
+        assert_eq!(
+            std::fs::read_to_string(&ignored).unwrap(),
+            "local build output\n"
+        );
+        assert_eq!(tip(&repo_s, branch).await, held_tip);
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
+    }
+
+    /// Asserts the holder arm's `failed` refusal for `holder`, naming `path`, with the
+    /// unchanged-branch sentence ahead of any git text.
+    fn expect_failed_naming(err: &AppError, holder: &str, branch: &str, path: &str) {
         let AppError::BranchHeld {
             message,
             holder: named,
             reason,
             ..
-        } = &err
+        } = err
         else {
             panic!("expected a BranchHeld refusal, got {err:?}");
         };
-        assert_eq!(
-            (reason.as_str(), named.as_str()),
-            ("failed", porcelain.as_str())
-        );
-        assert!(message.contains("held-ignored is unchanged."), "{message}");
+        assert_eq!((reason.as_str(), named.as_str()), ("failed", holder));
         assert!(
-            message.contains("build.log"),
-            "git's refusal names the file: {message}"
+            message.contains(&format!("{branch} is unchanged.")),
+            "{message}"
         );
-        assert_eq!(
-            std::fs::read_to_string(&ignored).unwrap(),
-            "local build output\n"
+        assert!(
+            message.contains(path),
+            "the refusal names the file: {message}"
         );
-        assert_eq!(tip(&repo_s, "held-ignored").await, held_tip);
+    }
+
+    #[tokio::test]
+    async fn a_holder_ignored_file_the_base_tracks_is_never_overwritten() {
+        assert_ignored_file_survives("held-ignored", false).await;
+    }
+
+    #[tokio::test]
+    async fn a_diverged_holder_ignored_file_the_base_tracks_is_never_overwritten() {
+        assert_ignored_file_survives("held-ignored-merge", true).await;
+    }
+
+    /// The holder deleted a path the base then modified, and an ignored file now sits
+    /// there: the modify/delete conflict would leave the base's version over it, and the
+    /// abort would then delete it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_holder_ignored_file_at_a_path_it_deleted_is_never_overwritten() {
+        let branch = "held-ignored-md";
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        run(&holder, &["rm", "-q", "seed.txt"]).await;
+        run(&holder, &["commit", "-qm", "holder deletes seed"]).await;
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "seed.txt\n").unwrap();
+        let ignored = holder_dir.join("seed.txt");
+        std::fs::write(&ignored, "local data\n").unwrap();
+        commit_file(&repo_s, "seed.txt", "base modified\n").await;
+        let held_tip = tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_failed_naming(&err, &porcelain, branch, "seed.txt");
+        assert_eq!(std::fs::read_to_string(&ignored).unwrap(), "local data\n");
+        assert_eq!(tip(&repo_s, branch).await, held_tip);
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
+    }
+
+    /// An ignored DIRECTORY where the base adds a file: the merge would replace the whole
+    /// directory with that file.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_holder_ignored_directory_the_base_adds_a_file_over_is_kept() {
+        let branch = "held-ignored-dir";
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        commit_file(&holder, "feature.txt", "feature\n").await;
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "build/\n").unwrap();
+        let artifact = holder_dir.join("build").join("out.txt");
+        std::fs::create_dir_all(holder_dir.join("build")).unwrap();
+        std::fs::write(&artifact, "artifact\n").unwrap();
+        commit_file(&repo_s, "build", "tracked build file\n").await;
+        let held_tip = tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_failed_naming(&err, &porcelain, branch, "build");
+        assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "artifact\n");
+        assert_eq!(tip(&repo_s, branch).await, held_tip);
         assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
     }
 
     /// A conflicting merge inside the holder is aborted: no MERGE_HEAD, a clean tree, the
     /// branch where it stood, and the conflicting file named.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_conflicting_held_merge_is_aborted_and_refused() {
         let (_guard, repo_s, main, holder, porcelain) =
             held_branch_repo("held-conflict", "held-conflict").await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
         commit_file(&holder, "seed.txt", "holder side\n").await;
         commit_file(&repo_s, "seed.txt", "main side\n").await;
         let held_tip = tip(&repo_s, "held-conflict").await;
@@ -5363,6 +5596,99 @@ mod tests {
         assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
         assert_eq!(run(&holder, &["status", "--porcelain"]).await, "");
         assert_eq!(tip(&repo_s, "held-conflict").await, held_tip);
+    }
+
+    /// A holder update holds the throwaway arm's marker for its whole run: a rename and a
+    /// second update of the branch are both turned away while it is live, and nothing is
+    /// left once it settles. Holding the holder's lock here parks the first update inside
+    /// that window.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_holder_update_holds_its_marker_against_a_rename_and_a_second_update() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo_s, main, _holder, porcelain) =
+            held_branch_repo("held-marker", "held-marker").await;
+        let (_serialized, _override, root) = holder_marker_root(&repo_s);
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let main_tip = tip(&repo_s, &main).await;
+
+        let state = AppState::default();
+        let holder_lock = acquire_repo_lock(
+            &state.working_tree_lock(&porcelain).await,
+            Duration::ZERO,
+            "a test hold",
+        )
+        .await
+        .expect("the holder's lock is free");
+        let none = HashSet::new();
+        let first = update_branch_from(&state, &repo_s, "held-marker", &main, &none, None);
+        let contenders = async {
+            // Bounded well inside the first update's 10 s wait for the holder's lock.
+            for _ in 0..500 {
+                if marker_leftovers(&root).iter().any(|n| n.ends_with(".lock")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let second = update_branch_from(&state, &repo_s, "held-marker", &main, &none, None)
+                .await
+                .expect_err("a second update of the branch is turned away");
+            let renamed = git_rename_branch_core(
+                &state,
+                repo_s.clone(),
+                "held-marker".into(),
+                "held-renamed".into(),
+            )
+            .await
+            .expect_err("a rename mid-update is refused");
+            drop(holder_lock);
+            (second.to_string(), renamed.to_string())
+        };
+        let (first, (second, renamed)) = tokio::join!(first, contenders);
+
+        let expected = marker::branch_update_refusal("held-marker").to_string();
+        assert_eq!(second, expected);
+        assert_eq!(renamed, expected);
+        let first = first.expect("the first update completes once the holder is free");
+        assert_eq!(first.outcome, "fast-forward");
+        assert_eq!(tip(&repo_s, "held-marker").await, main_tip);
+        assert!(
+            marker_leftovers(&root).is_empty(),
+            "{:?}",
+            marker_leftovers(&root)
+        );
+    }
+
+    /// A LOCKED worktree whose folder is gone still lists and still holds its branch: the
+    /// update names the missing folder instead of surfacing a raw OS error.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_locked_holder_whose_folder_is_gone_is_named() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-gone", "held-gone").await;
+        let (_serialized, _override, root) = holder_marker_root(&repo_s);
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let held_tip = tip(&repo_s, "held-gone").await;
+        run(&repo_s, &["worktree", "lock", &holder]).await;
+        std::fs::remove_dir_all(&holder).unwrap();
+        assert_eq!(
+            worktree_holding_branch(&repo_s, "held-gone").await,
+            Some(porcelain.clone()),
+            "the locked entry still holds the branch"
+        );
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, "held-gone", &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        let AppError::Command(message) = &err else {
+            panic!("expected the missing-folder refusal, got {err:?}");
+        };
+        assert!(message.contains(&porcelain), "{message}");
+        assert!(message.contains("folder is missing"), "{message}");
+        assert!(message.ends_with("held-gone is unchanged."), "{message}");
+        assert_eq!(tip(&repo_s, "held-gone").await, held_tip);
+        assert!(marker_leftovers(&root).is_empty());
     }
 
     /// A holder that switched away between the lookup and its lock is refused; driven
@@ -5395,11 +5721,11 @@ mod tests {
     }
 
     #[test]
-    fn name_conflicts_names_three_then_counts_the_rest() {
+    fn name_paths_names_three_then_counts_the_rest() {
         let paths = |n: usize| (1..=n).map(|i| format!("f{i}")).collect::<Vec<_>>();
-        assert_eq!(name_conflicts(&paths(1)), "f1");
-        assert_eq!(name_conflicts(&paths(3)), "f1, f2, f3");
-        assert_eq!(name_conflicts(&paths(5)), "f1, f2, f3 and 2 more");
+        assert_eq!(name_paths(&paths(1)), "f1");
+        assert_eq!(name_paths(&paths(3)), "f1, f2, f3");
+        assert_eq!(name_paths(&paths(5)), "f1, f2, f3 and 2 more");
     }
 
     /// The update UI reads both keys; `holder` must serialize as an explicit null on
