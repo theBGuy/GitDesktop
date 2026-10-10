@@ -5,6 +5,7 @@ import {
   CaretDownIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -39,6 +40,7 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
+  repoStatusOptions,
   useBranchRewriteStatus,
   useFetchRemote,
   useHardResetToCommit,
@@ -68,7 +70,11 @@ import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
-import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
+import {
+  PublishRepoControl,
+  publishPendingReason,
+  usePublishProviders,
+} from "./PublishRepoControl";
 import { deriveSyncControls, headFacts } from "./sync-controls-state";
 import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
@@ -116,10 +122,25 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // hint. These respect Settings → Keyboard rebindings for free.
   const bindings = useEffectiveBindings();
   // The force-push confirm, holding the branch its divergence verdict was
-  // measured on, so a HEAD move the status has seen refuses the confirm.
+  // measured on and that branch's upstream, so a HEAD move never retitles the
+  // dialog. A closed confirm keeps its capture so the exit transition still
+  // shows it.
   const [forceConfirm, setForceConfirm] = useState<{
     branch: string | null;
+    upstream: string | null;
+    open: boolean;
   } | null>(null);
+  const closeForceConfirm = () =>
+    setForceConfirm((c) => c && { ...c, open: false });
+  // The live confirm, readable after confirmForcePush's status read: a cancel or
+  // reopen during the read replaces the object, which the identity check sees.
+  const forceConfirmRef = useRef(forceConfirm);
+  useEffect(() => {
+    forceConfirmRef.current = forceConfirm;
+  }, [forceConfirm]);
+  // Set while a confirm's status read is in flight, so a second click is a no-op.
+  const forceChecking = useRef(false);
+  const queryClient = useQueryClient();
   // The publish intercepted by the fork-PR guard. The branch is captured at
   // click time and travels with the match, so the dialog can only ever push the
   // branch the detection ran for. Each open carries its own `repo` and a
@@ -213,10 +234,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // the connection returns. Reset to upstream is local and stays live.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
+  // Sticky failure predicates, never `isError`: a never-loaded query that errored
+  // goes back to pending on every refetch, which would flip the reason per poll.
   const sync = deriveSyncControls({
     head,
-    statusError: status.isError,
+    statusError: status.data === undefined && status.errorUpdateCount > 0,
     remotes: remotes.data,
+    remotesError: remotes.data === undefined && remotes.errorUpdateCount > 0,
     busy,
     offlineHold,
     remoteRebased,
@@ -238,9 +262,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // offer to create the hosted repo instead. Which providers can take it is
   // probed by usePublishProviders (there's no remote to detect one from).
   const publish = usePublishProviders(repoPath, noOrigin);
-  // The cluster → Publish swap unmounts whichever sync button held focus.
+  // The cluster → Publish swap unmounts whichever sync button held focus, and a
+  // settle onto 2+ providers swaps Publish's button for the dropdown's trigger.
   const controlsRef = useRef<HTMLDivElement>(null);
   useFocusOnControlsSwap(noOrigin, controlsRef);
+  useFocusOnControlsSwap(publish.providers.length >= 2, controlsRef);
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
@@ -497,31 +523,81 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         toast.success("Force pushed", {
           description: FORCE_PUSH_DEGRADED[guard],
         });
-      setForceConfirm(null);
+      closeForceConfirm();
     } catch (e) {
       onError(e);
-      setForceConfirm(null);
+      closeForceConfirm();
     }
   }
 
   // HEAD can move while the confirm sits open; the branch it opened on is the
-  // only one its divergence verdict described. `headNameRef` follows the status
-  // read, so only a move the status has already seen refuses; the push itself
-  // stays on the HEAD path.
-  function confirmForcePush() {
+  // only one its divergence verdict described. A move the status poll has seen
+  // refuses at once; one it hasn't is caught by a fresh status read before the
+  // push. The push stays on the HEAD path: a named push would bypass git's
+  // pushRemote / pushDefault / push.default routing and could rewrite the
+  // upstream's branch in a fork workflow.
+  async function confirmForcePush() {
     // A click during the closing dialog's exit transition: nothing to confirm.
-    if (forceConfirm === null) return;
+    if (!forceConfirm?.open) return;
     if (headNameRef.current !== forceConfirm.branch) {
       toast.info("HEAD moved while the dialog was open — nothing was pushed.");
-      setForceConfirm(null);
+      closeForceConfirm();
       return;
     }
+    if (forceChecking.current) return;
+    // Every pre-await read the continuation needs, pinned here: the repo, the
+    // branch, and the confirm object itself (its identity is the open session).
+    const confirmRepo = repoPath;
+    const confirm = forceConfirm;
+    const branch = confirm.branch;
+    forceChecking.current = true;
+    let freshName: string | null;
+    try {
+      // The shared factory keeps `networkMode: "always"`: fetchQuery options are
+      // per-call, and a bare queryFn would park offline.
+      const fresh = await queryClient.fetchQuery({
+        ...repoStatusOptions(confirmRepo),
+        staleTime: 0,
+      });
+      freshName = fresh.branch.name;
+    } catch {
+      toast.info("Couldn't confirm the current branch — nothing was pushed.");
+      if (forceConfirmRef.current === confirm) closeForceConfirm();
+      return;
+    } finally {
+      forceChecking.current = false;
+    }
+    // `push` follows the live repo, so a switch during the read refuses.
+    const { live, away } = landedIn(confirmRepo);
+    if (!live) {
+      toast.info(
+        `You switched repositories while the dialog was open — nothing was pushed${away}.`,
+      );
+      return;
+    }
+    // Cancelled or reopened during the read: that click no longer stands.
+    if (forceConfirmRef.current !== confirm) return;
+    if (freshName !== branch) {
+      toast.info("HEAD moved while the dialog was open — nothing was pushed.");
+      closeForceConfirm();
+      return;
+    }
+    // A checkout in the few ms between this read and the push's spawn remains.
     void doPush(true);
   }
 
   function openForceConfirm() {
-    setForceConfirm({ branch: head?.name ?? null });
+    setForceConfirm({
+      branch: head?.name ?? null,
+      upstream: head?.upstream ?? null,
+      open: true,
+    });
   }
+  const forceUpstream = forceConfirm?.upstream;
+  // The live verdicts describe HEAD, so they show only while HEAD is still the
+  // dialog's branch; a moved HEAD is refused by the confirm on the same test.
+  const forceEvidence =
+    forceConfirm !== null && head?.name === forceConfirm.branch;
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
@@ -600,10 +676,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           // Offline outranks both: the targets probe parks offline, so
           // nothing is checking until the connection returns.
           disabledTitle={
-            offlineHold ??
-            (publish.settled
-              ? "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish"
-              : "Checking publish accounts…")
+            publish.settled
+              ? (offlineHold ??
+                "Sign in with the GitHub CLI (gh auth login), GitLab CLI (glab auth login), or connect a Bitbucket account to publish")
+              : publishPendingReason(offlineHold)
           }
         />
       </div>
@@ -789,16 +865,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       </ButtonGroup>
 
       <Dialog
-        open={forceConfirm !== null}
+        open={forceConfirm?.open ?? false}
         onOpenChange={(o) => {
-          if (!o) setForceConfirm(null);
+          if (!o) closeForceConfirm();
         }}
       >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Force push?</DialogTitle>
             <DialogDescription>
-              Your branch and {head?.upstream} have diverged (usually after
+              Your branch and {forceUpstream} have diverged (usually after
               amending or resetting a pushed commit). Force pushing rewrites the
               remote branch to match your local one. Uses --force-with-lease
               and, where your Git can check it, --force-if-includes — the pair
@@ -810,17 +886,18 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               upstream came to look that way (a rebase, a force push and a
               cherry-pick all leave patch twins). `localAtRisk` counts the work
               only this branch has, for which a rebasing pull (not a force push)
-              is the remedy — equally true under ordinary divergence. Neither arm
-              renders while the probe is unresolved. */}
-          {remoteRebased && (
+              is the remedy — equally true under ordinary divergence. Both are
+              live, so a probe landing after the dialog opens still shows, and
+              both hide while the status shows another HEAD. */}
+          {forceEvidence && remoteRebased && (
             <p className="text-muted-foreground text-sm">
-              {head?.upstream} already carries every commit on your branch under
+              {forceUpstream} already carries every commit on your branch under
               different ids. Force pushing would replace them with your copies;
-              "Reset to {head?.upstream}" in the Pull menu keeps the same work
+              "Reset to {forceUpstream}" in the Pull menu keeps the same work
               and matches the remote instead.
             </p>
           )}
-          {localAtRisk > 0 && (
+          {forceEvidence && localAtRisk > 0 && (
             <p className="text-muted-foreground text-sm">
               {localAtRisk} commit{localAtRisk === 1 ? "" : "s"} exist
               {localAtRisk === 1 ? "s" : ""} only on your branch
@@ -828,21 +905,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   other side — an amended tip plus one new local commit leaves
                   `remoteOnly` at zero, and the clause would be false. */}
               {remoteAhead > 0
-                ? `, and ${head?.upstream} has ${remoteAhead} commit${remoteAhead === 1 ? "" : "s"} yours doesn't`
+                ? `, and ${forceUpstream} has ${remoteAhead} commit${remoteAhead === 1 ? "" : "s"} yours doesn't`
                 : ""}
               . Pull with rebase keeps yours and replays them on top of{" "}
-              {head?.upstream}.
+              {forceUpstream}.
             </p>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setForceConfirm(null)}>
+            <Button variant="outline" onClick={closeForceConfirm}>
               Cancel
             </Button>
             <DisabledReasonButton
               variant="destructive"
               disabled={push.isPending || !!offlineHold}
               reason={push.isPending ? ACT_PENDING_REASON : offlineHold}
-              onClick={confirmForcePush}
+              onClick={() => void confirmForcePush()}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}
               Force push

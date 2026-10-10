@@ -19,6 +19,16 @@ export interface PublishProvider {
   label: string;
 }
 
+/** The disabled Publish's reason while the provider probes are still out. */
+export const PUBLISH_ACCOUNTS_PENDING = "Checking publish accounts…";
+
+/** The pending reason every Publish host shows before the probes settle. Offline
+ *  outranks it: the targets probe parks offline, so nothing is checking until
+ *  the connection returns. */
+export function publishPendingReason(offlineHold: string | undefined): string {
+  return offlineHold ?? PUBLISH_ACCOUNTS_PENDING;
+}
+
 /**
  * The READY publish providers for an origin-less repo, in a stable GitHub →
  * GitLab → Bitbucket order. `enabled` gates the underlying targets probe (and
