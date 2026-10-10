@@ -962,12 +962,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       )
         return;
       // Awaited for its verdict: it resolves false both when the open failed
-      // (it toasts that itself) and when the user switched repos mid-validate
-      // (silent by design) — a success toast over either would claim a
-      // navigation that never happened.
-      // The attempt check rides INTO the open: `validateRepo` is a second await
-      // downstream of this function's guard, and a newer pick during it leaves
-      // the repo unchanged, so only the attempt identity can retire this one.
+      // (it toasts that itself) and, silently, when the user switched repos,
+      // navigated elsewhere, or started another open during its `validateRepo`
+      // and shell warm-up (useOpenWorktree's doc) — a success toast over any of
+      // those would claim a navigation that never happened.
+      // The attempt check rides INTO the open: those two awaits sit downstream
+      // of this function's guard, and a newer pick during them leaves the repo
+      // unchanged, so only the attempt identity can retire this one.
       const navigated = await openWorktree(
         wtPath,
         () => switchRequest === switchRequestRef.current,

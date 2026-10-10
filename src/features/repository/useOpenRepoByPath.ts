@@ -22,15 +22,17 @@ import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { warmRepoShell } from "./repo-shell-prefetch";
 
-/** Request order across every repo open, recorded or worktree. Recents writes
- *  serialize, so an earlier open would otherwise land first and retire the newer
- *  one through the epoch check; numbering requests keeps the latest the winner. */
+/** Request order across every open this module makes, recorded or worktree.
+ *  Recents writes serialize, so an earlier open would otherwise land first and
+ *  retire the newer one through the epoch check; numbering requests keeps the
+ *  latest the winner. Direct `openRepo` callers aren't numbered: they retire
+ *  pending opens through the epoch bump instead. */
 let latestOpenRequest = 0;
 
 /** Claims an open at its REQUEST: the returned check passes only while no newer
  *  open was requested and no other navigation moved `interactionEpoch` (the
  *  store's settle-late contract). */
-function claimRepoOpen(): () => boolean {
+export function claimRepoOpen(): () => boolean {
   const request = ++latestOpenRequest;
   const epoch = useUiStore.getState().interactionEpoch;
   return () =>
@@ -39,15 +41,24 @@ function claimRepoOpen(): () => boolean {
 }
 
 /**
- * The one tail every open of a recorded repo runs once its path has validated,
- * and the only place that switches to one: warm the repo's shell reads, record it
- * in recents, wait out the warm-up budget, then switch, unless a newer open or
- * navigation arrived meanwhile (silently: that newer action is what the user sees).
+ * The shared tail for opening a repo the user picked, once its path has
+ * validated: warm the repo's shell reads, record it in recents, wait out the
+ * warm-up budget, then switch, unless a newer open or navigation arrived meanwhile
+ * (silently: that newer action is what the user sees). The paths that bypass it
+ * are the failure reopen in RepoDialogs, a promote's landing in worktree-removal
+ * (both call `openRepo` directly), {@link useOpenWorktree}, which warms without
+ * recording, and the store navigators' cross-repo arms (notification and My work
+ * jumps), which switch without warming.
+ *
  * The recents write finishes BEFORE the switch, so the row exists when
- * RepositoryView mounts and its open-time visibility probe persists onto it; it is
- * best-effort, since a settings-write failure must never block opening. Resolves
- * whether it switched. `stillCurrent` defaults to a claim taken on entry; a caller
- * with awaits of its own claims before them.
+ * RepositoryView mounts and its open-time visibility probe persists onto it; a
+ * superseded open still records its repo. The write is best-effort, since a
+ * settings-write failure must never block opening. Resolves whether it switched.
+ * Callers whose own awaits are part of the open request (drop, Recents, the
+ * folder picker, a submodule opened as a repo) claim before those awaits and
+ * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; clone,
+ * create, and Explore's clone open their own result and take the default, a
+ * claim at their completion.
  */
 export function useOpenRecordedRepo() {
   const openRepo = useUiStore((s) => s.openRepo);
@@ -174,10 +185,12 @@ export function useOpenRepoByPath() {
     async (
       path: string,
       source: "recent" | "picker" = "recent",
+      // Claimed before validating (a default evaluates at call entry), so the
+      // latest intent wins: a newer open retires this one even when that newer
+      // open then fails. A caller with awaits of its own ahead of this call
+      // claims before them and passes the claim.
+      stillCurrent: () => boolean = claimRepoOpen(),
     ): Promise<boolean> => {
-      // Claimed before validating, so the latest intent wins: a newer open retires
-      // this one even when that newer open then fails.
-      const stillCurrent = claimRepoOpen();
       try {
         const info = await validateRepo(path);
         return await recordOpenAndTrack(info, source, stillCurrent);

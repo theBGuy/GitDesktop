@@ -424,7 +424,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       // or not) — generation for a later notification click, epoch for any OTHER
       // user action in that window. The epoch is comparable only because
       // the navigator hands back the value its own synchronous bump produced; this
-      // landing's beforeSelect bumps too, but runs after the check.
+      // landing's beforeSelect (the lens apply) never bumps.
       const stillValid = (epochAtRequest: number) =>
         gen === clickGen &&
         useUiStore.getState().interactionEpoch === epochAtRequest;

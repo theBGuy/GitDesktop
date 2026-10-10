@@ -15,6 +15,7 @@ import {
   remotesOptions,
   repoStatusOptions,
   stashCountOptions,
+  USER_WORKTREES_STALE_TIME,
   userWorktreesOptions,
   workingLineStatsOptions,
 } from "@/lib/git/queries";
@@ -25,8 +26,11 @@ import { REPO_SHELL_BUDGET_MS, settleWithin } from "./repo-shell-budget";
 
 /**
  * Warms the local reads the repo view paints first, for a repo about to open, and
- * resolves once the COLD ones land, or after {@link REPO_SHELL_BUDGET_MS}: a warm
- * key revalidates in the background without holding the switch. Every prefetch
+ * resolves once the COLD ones land, or after {@link REPO_SHELL_BUDGET_MS}. A key
+ * with cached data doesn't hold the switch, with one exception: invalidated
+ * personal branch rules hold like a missing read (see below). Otherwise a stale or
+ * invalidated key revalidates in the background, and a fresh one (the personal
+ * rules until invalidated, the 30 s reads) is served as cached. Every prefetch
  * spreads its hook's own factory — fetch options are per call, and a prefetch
  * missing the factory's `networkMode: "always"` would park offline with the
  * mounted observer joined to it. Forge reads are never prefetched here.
@@ -61,15 +65,23 @@ export function warmRepoShell(
   warm(opStateOptions(root));
   warm(oplogCheckOptions(root));
   warm(localPrsOptions(root));
-  // Only the rules hold on an invalidated read. A save from another worktree
-  // reaches this checkout as an invalidation alone, and its cached rules would
-  // paint a CommitBox notice that flips a moment later. Every `["repo", …]` key
-  // is invalidated on each window focus, so holding on those would cost every
-  // warm switch the budget.
+  // Only the personal rules hold on an invalidated read. They are stored by repo
+  // identity, so a save from another worktree reaches this checkout as an
+  // invalidation alone, and the cached rules would paint a CommitBox notice that
+  // flips a moment later. Every `["repo", …]` key is invalidated on each window
+  // focus, so holding on those would cost every warm switch the budget.
   warm(branchRulesOptions(root), { holdInvalidated: true });
-  warm(sharedBranchRulesOptions(root), { holdInvalidated: true });
+  warm(sharedBranchRulesOptions(root));
   warm(jiraLinkOptions(root));
-  warm(userWorktreesOptions(root));
+  // With the hook's staleTime, so a switch back within 30 s of the last read,
+  // with no window focus in between (each focus invalidates every `["repo", …]`
+  // key, forcing a refetch), reuses the cached list instead of respawning `git
+  // worktree list`. Still held when cold: the header's switcher reads it ungated
+  // for the worktree subtitle the moment the switch lands.
+  warm({
+    ...userWorktreesOptions(root),
+    staleTime: USER_WORKTREES_STALE_TIME,
+  });
   warm(stashCountOptions(root));
 
   // The Changes panel's reads keyed by what status and default-branch answer, under

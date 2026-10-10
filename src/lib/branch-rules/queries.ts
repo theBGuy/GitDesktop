@@ -10,11 +10,10 @@ import {
 import { type BranchRulesConfig, EMPTY_BRANCH_RULES } from "./types";
 
 const BRANCH_RULES_FAMILY = ["branch-rules"] as const;
-const SHARED_BRANCH_RULES_FAMILY = ["branch-rules-shared"] as const;
 const branchRulesKey = (repo: string) =>
   [...BRANCH_RULES_FAMILY, repo] as const;
 const sharedBranchRulesKey = (repo: string) =>
-  [...SHARED_BRANCH_RULES_FAMILY, repo] as const;
+  ["branch-rules-shared", repo] as const;
 
 // ── Personal scope ──────────────────────────────────────────────────────────
 
@@ -30,6 +29,7 @@ export function branchRulesOptions(repo: string) {
   };
 }
 
+/** This repo's personal branch rules; the read is {@link branchRulesOptions}. */
 export function useBranchRules(repo: string) {
   return useQuery(branchRulesOptions(repo));
 }
@@ -38,7 +38,7 @@ export function useSaveBranchRules(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (config: BranchRulesConfig) => saveBranchRules(repo, config),
-    // Local write — see useBranchRules: "online" mode would park it offline.
+    // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
     // Every checkout's key, not just this one's: the rules are stored by repo
     // identity, so a save here changes what each worktree of the repo reads, and
@@ -57,12 +57,13 @@ export function sharedBranchRulesOptions(repo: string) {
     // The file can change out from under us (pull, branch switch), so let it
     // refetch on focus rather than caching forever.
     staleTime: 30_000,
-    // Local read — see useBranchRules: "online" mode would park it offline.
+    // Local read — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always" as const,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }
 
+/** This checkout's shared rules; the read is {@link sharedBranchRulesOptions}. */
 export function useSharedBranchRules(repo: string) {
   return useQuery(sharedBranchRulesOptions(repo));
 }
@@ -72,11 +73,12 @@ export function useSaveSharedBranchRules(repo: string) {
   return useMutation({
     mutationFn: (config: BranchRulesConfig) =>
       saveSharedBranchRules(repo, config),
-    // Local write — see useBranchRules: "online" mode would park it offline.
+    // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
-    // Family-wide like the personal save; only mounted keys refetch.
+    // This checkout's key only, unlike the personal save: the file lives in each
+    // working tree, so no other checkout's read changed.
     onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: SHARED_BRANCH_RULES_FAMILY }),
+      queryClient.invalidateQueries({ queryKey: sharedBranchRulesKey(repo) }),
   });
 }
 

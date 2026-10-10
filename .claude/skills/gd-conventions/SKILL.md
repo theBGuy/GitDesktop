@@ -319,18 +319,28 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   seeds stay bare, and each must be idempotent — never stomping a user's pick.
   The `seed-effect-on-open` guard allowlists the recorded ones.
 - Zustand + view transitions: navigators (`openRepo`, `openPr`, `closeRepo`,
-  `openSettings`, …) apply their set in a later task — under a crossfade when the
-  top-level view changes, otherwise without animation after any pending
-  transition's update (`startViewTransition(…, { animate: false })`). Either
-  way it is still one atomic action, and a plain `set()` right after can be
-  clobbered — navigate in ONE atomic action.
-- Opening a recorded repo goes through `useOpenRecordedRepo`
-  (`src/features/repository/useOpenRepoByPath.ts`), the one tail that warms the
-  repo's shell reads (`warmRepoShell`, a 250 ms budget on cold keys), records it
-  in recents, and switches only if no newer open or navigation arrived; never a
-  hand-rolled `addRecent` → `openRepo`. The reads that paint the repo view stay
-  cached `REPO_SHELL_GC_TIME` (`src/lib/query-cache-times.ts`) through curated
-  `<thing>Options` factories the hook and the warm-up both spread, never a
+  `openSettings`, …) apply their set through `startViewTransition`, which runs
+  it in a later task wherever the View Transitions API is available (at once
+  only under reduced motion or without the API). The repo-view navigators
+  (`openRepo`, `openPr`, `openIssue`, `openRun`, `openAgentTab`, `openRepoView`)
+  crossfade only when the top-level view changes and otherwise skip the
+  animation (`{ animate: false }`), still applying after any pending
+  transition's update; the screen navigators always crossfade. A plain `set()`
+  right after a navigator can be clobbered by that later apply — navigate in
+  ONE atomic action.
+- Opening a repo the user picked goes through `useOpenRecordedRepo`
+  (`src/features/repository/useOpenRepoByPath.ts`): it warms the repo's shell
+  reads (`warmRepoShell`, a 250 ms budget on cold keys), records it in recents,
+  and switches only if no newer open or navigation arrived — never a
+  hand-rolled `addRecent` → `openRepo`. A caller whose own awaits are part of
+  the request claims first (`claimRepoOpen`). The known bypasses call `openRepo`
+  directly (RepoDialogs' failure reopen, a worktree promote's landing), warm
+  without recording (`useOpenWorktree`), or switch without warming (the store
+  navigators' cross-repo arms: notification and My work jumps). The reads that
+  paint the repo view stay cached `REPO_SHELL_GC_TIME`
+  (`src/lib/query-cache-times.ts`) through curated `<thing>Options` factories:
+  the local ones are spread by their hook and the warm-up, the network-backed
+  ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. Never a
   `["repo"]` prefix default (it would catch the notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
@@ -376,6 +386,18 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   retargets whatever repo/entity the user switched to (reference:
   `deselectIfStillHere` in `src/features/issues/RemoteIssueView.tsx`). Toasts
   stay unconditional — the operation happened regardless.
+- `interactionEpoch` bumps belong to the user's request, synchronously (the
+  store contract on `UiState.interactionEpoch`): a late bump retires whatever
+  newer action is pending, a repo open included. Automatic corrections and
+  prunes write through `clearSelectedFile`, `defaultCompareBranch` and
+  `clearRemoteSelections`, which never bump, and a navigator's `beforeSelect`
+  never bumps (`noteUserInteraction` is a no-op there; the navigator already
+  counted the gesture). A continuation that would bump after its await bumps
+  at its request instead, re-checks the epoch and live repo after the await,
+  and lands through a non-bumping write (`useAmendCommit` + `landAmend` is the
+  reference); the guarded post-await writes in the bullet above still bump
+  late, a tracked follow-up. Review-enforced, not guarded: a regex over effect
+  and continuation bodies would fail open.
 - A follow-up that needs the DOM from a state flip (focus a just-revealed
   input, re-pin a grown scroll region) never rides a bare
   `requestAnimationFrame` from the event handler: when the state lives in

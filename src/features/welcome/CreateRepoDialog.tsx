@@ -62,7 +62,7 @@ export function CreateRepoDialog({
         });
         const info = await validateRepo(root);
         // Closes and confirms even when a newer navigation superseded the
-        // switch: the repository exists and is in recents either way.
+        // switch: the repository exists either way.
         await openRecorded(info);
         onOpenChange(false);
         toast.success(`Created ${info.name}`);

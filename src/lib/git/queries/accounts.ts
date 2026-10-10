@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import type {
@@ -262,8 +261,8 @@ const NO_FORGE_STATUS: ForgeStatus = {
  * keeps the last good status in `data` (beside `error`) until a later refetch
  * succeeds.
  */
-export function forgeStatusOptions(repo: string) {
-  return {
+export function useForgeStatus(repo: string) {
+  return useQuery({
     queryKey: ["repo", repo, "forge-status"] as const,
     queryFn: COLD_START_NO_GH
       ? (): Promise<ForgeStatus> => Promise.resolve(NO_FORGE_STATUS)
@@ -275,7 +274,7 @@ export function forgeStatusOptions(repo: string) {
     // signed-out would paint the sign-in ladder over a network outage. Reconnect
     // refetch is set explicitly: query-core's defaultQueryOptions flips its
     // default to false under networkMode "always".
-    networkMode: "always" as const,
+    networkMode: "always",
     refetchOnReconnect: true,
     retry: false,
     // A mount-retry with no cached data resets the query to pending, so the panel
@@ -283,12 +282,7 @@ export function forgeStatusOptions(repo: string) {
     // remount retries again: ~6 fetches/s until the network returns. The window-focus
     // bridge's invalidation (App.tsx) stays the retry path.
     retryOnMount: false,
-    gcTime: REPO_SHELL_GC_TIME,
-  };
-}
-
-export function useForgeStatus(repo: string) {
-  return useQuery(forgeStatusOptions(repo));
+  });
 }
 
 /** Whether a repo's hosted integration is ready: tooling installed, signed in, and

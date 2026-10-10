@@ -64,7 +64,7 @@ export function ExploreCloneDialog({
         );
         const info = await validateRepo(clonedPath);
         // Closes even when a newer navigation superseded the switch: the clone
-        // landed and is in recents either way.
+        // landed either way.
         await openRecorded(info);
         onOpenChange(false);
       } catch (e) {

@@ -1,6 +1,9 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
-import { useOpenRecordedRepo } from "@/features/repository/useOpenRepoByPath";
+import {
+  claimRepoOpen,
+  useOpenRecordedRepo,
+} from "@/features/repository/useOpenRepoByPath";
 import { validateRepo } from "@/lib/git/api";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -19,9 +22,12 @@ export function useRepoDrop() {
       if (event.payload.type !== "drop") return;
       const path = event.payload.paths[0];
       if (!path) return;
+      // Claimed before validating, as a Recents click is: the drop is the request,
+      // so a later open wins over it and a slow validate can't retire that one.
+      const stillCurrent = claimRepoOpen();
       try {
         const info = await validateRepo(path);
-        await openRecordedRef.current(info);
+        await openRecordedRef.current(info, stillCurrent);
       } catch (e) {
         // Not a git repo (or a file, not a folder) — surface why.
         toastError(e);

@@ -32,9 +32,9 @@ export function startViewTransition(
     return;
   }
   const transition = doc.startViewTransition(() => flushSync(update));
-  // A skip (this arm, or the next transition aborting a running one) rejects
-  // `ready`, and `finished` can reject with it; both are claimed on every
-  // transition so the global unhandledrejection hook never reports a navigation.
+  // A skip (this arm, or the next transition aborting a running one) rejects a
+  // not-yet-resolved `ready`; `finished` rejects only when the update throws.
+  // Both are claimed so the unhandledrejection hook never reports a navigation.
   transition.ready.catch(() => undefined);
   transition.finished.catch(() => undefined);
   if (!animate) transition.skipTransition();

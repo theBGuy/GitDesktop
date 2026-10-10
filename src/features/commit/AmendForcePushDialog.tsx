@@ -26,9 +26,10 @@ export function AmendForcePushDialog({
 }: {
   open: boolean;
   upstream: string | null;
-  /** Starts the amend, resolving true once it actually began. False covers both
-   *  a gate refusal (a branch rule, or a read still settling) and a commit that
-   *  couldn't be loaded — either one holds the "Don't show again" write back. */
+  /** Starts the amend, resolving true once it actually began. False covers a
+   *  gate refusal (a branch rule, or a read still settling), a commit that
+   *  couldn't be loaded, and a user who navigated away while it loaded — each
+   *  holds the "Don't show again" write back. */
   onConfirm: () => Promise<boolean>;
   onCancel: () => void;
 }) {
@@ -39,12 +40,13 @@ export function AmendForcePushDialog({
   useSeedOnOpen(open, () => setDontShowAgain(false));
 
   function confirm() {
-    // The preference waits on the amend having STARTED: a refusal or an
-    // unresolvable commit leaves the prompt in place. `dontShowAgain` stays the
-    // click-time value (the user's answer to THIS prompt); the settings object
-    // must not — the dialog closes before the amend resolves, so Settings is
-    // reachable during the wait and a snapshot from here would write back the
-    // pre-edit object. The write is best-effort; the amend already went ahead.
+    // The preference waits on the amend having STARTED: a refusal, an
+    // unresolvable commit, or a navigation away during the lookup leaves the
+    // prompt in place. `dontShowAgain` stays the click-time value (the user's
+    // answer to THIS prompt); the settings object must not — the dialog closes
+    // before the amend resolves, so Settings is reachable during the wait and a
+    // snapshot from here would write back the pre-edit object. The write is
+    // best-effort; the amend already went ahead.
     void (async () => {
       if (!(await onConfirm())) return;
       if (!dontShowAgain) return;

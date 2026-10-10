@@ -67,6 +67,7 @@ export function publishTargetsOptions(repo: string) {
   };
 }
 
+/** The publish-button providers; the read is {@link publishTargetsOptions}. */
 export function usePublishTargets(repo: string, enabled: boolean) {
   return useQuery({ ...publishTargetsOptions(repo), enabled });
 }

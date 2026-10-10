@@ -17,7 +17,8 @@ const RECENT_COUNT = 5;
 const row = (path, owner = "acme") => ({ path, owner });
 const keyOf = (r) => frozenPathKey(r.path);
 const paths = (rows) => rows.map((r) => r.path);
-/** The snapshot RepoList takes at the click: its rendered order, normalized. */
+/** The snapshot RepoList takes at the click: its recents order before the filter
+ *  and the grouping, normalized. */
 const snapshot = (rows) => rows.map(keyOf);
 /** addRecent's effect on the live list: the opened row moves to the front, with
  *  its path respelled the way validateRepo returns the root. */
@@ -97,7 +98,11 @@ test("new rows append in live order, and rows gone from the live list drop out",
   ]);
 });
 
-test("an empty live list stays empty under any snapshot", () => {
+test("an empty live list stays empty", () => {
   assert.deepEqual(applyFrozenOrder([], ["c:/a"], keyOf), []);
-  assert.deepEqual(applyFrozenOrder([row("C:/a")], [], keyOf), [row("C:/a")]);
+});
+
+test("an empty snapshot keeps the live order", () => {
+  const live = [row("C:/b"), row("C:/a")];
+  assert.deepEqual(paths(applyFrozenOrder(live, [], keyOf)), ["C:/b", "C:/a"]);
 });

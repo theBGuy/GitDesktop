@@ -198,6 +198,7 @@ export function oplogCheckOptions(repo: string) {
   };
 }
 
+/** The recovery banner's journal check; the read is {@link oplogCheckOptions}. */
 export function useOplogCheck(repo: string, enabled = true) {
   return useQuery({ ...oplogCheckOptions(repo), enabled });
 }

@@ -2,7 +2,9 @@
 // for the new repo's cold shell reads, but never past the budget, and a read that
 // fails must neither fail the open nor hold it. Ordering is asserted against
 // generous outer timers rather than tight wall-clock windows, so a slow CI
-// machine can only make these slower, never red.
+// machine makes these slower. Two stalls could still turn one red: one past
+// those outer ceilings, or one lasting the never-settles case's whole budget
+// (the real 250 ms) before its first pending check runs.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases, so `repo-shell-budget.ts`
@@ -55,13 +57,19 @@ test("resolves at the budget when a member never settles", async () => {
   const never = new Promise(() => {});
   const started = Date.now();
   let done = false;
-  const settled = settleWithin([never, Promise.resolve()], 30).then(() => {
+  const settled = settleWithin(
+    [never, Promise.resolve()],
+    REPO_SHELL_BUDGET_MS,
+  ).then(() => {
     done = true;
   });
   await nextTask();
   assert.equal(done, false, "resolved before the budget passed");
   assert.equal(await raceAgainst(settled, 5_000), "settled");
-  assert.ok(Date.now() - started >= 20, "resolved well before the budget");
+  assert.ok(
+    Date.now() - started >= REPO_SHELL_BUDGET_MS - 50,
+    "resolved well before the budget",
+  );
 });
 
 test("never rejects when a member rejects", async () => {
