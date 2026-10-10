@@ -107,16 +107,18 @@ export function useCommitFileDiff(
   });
 }
 
-/** Warms a commit's detail view (header + files + the first file's diff + its
- *  on-remote verdict) on row hover and for rows adjacent to the selection, so keyboard
- *  arrowing stays ahead. prefetchQuery no-ops once cached, so repeats are free. */
-export function usePrefetchCommit(repo: string) {
+/** Warms a commit's detail view (header + files + the first file's diff) on row
+ *  hover; prefetchQuery skips any read still fresh in the cache. `withOnRemote`
+ *  also warms the on-remote verdict; callers pass the comment surface's own gate,
+ *  since each verdict read walks history per remote ref. */
+export function usePrefetchCommit(repo: string, withOnRemote: boolean) {
   const queryClient = useQueryClient();
   return useCallback(
     async (hash: string) => {
       queryClient.prefetchQuery(commitDetailsOptions(repo, hash));
-      // Local read; a warm verdict means the comments pane never holds on switch.
-      queryClient.prefetchQuery(commitOnRemoteOptions(repo, hash));
+      if (withOnRemote) {
+        queryClient.prefetchQuery(commitOnRemoteOptions(repo, hash));
+      }
       await queryClient.prefetchQuery(commitFilesOptions(repo, hash));
       const files = queryClient.getQueryData<DiffStatEntry[]>(
         repoKeys.commitFiles(repo, hash),
@@ -126,7 +128,7 @@ export function usePrefetchCommit(repo: string) {
         queryClient.prefetchQuery(commitFileDiffOptions(repo, hash, first));
       }
     },
-    [queryClient, repo],
+    [queryClient, repo, withOnRemote],
   );
 }
 

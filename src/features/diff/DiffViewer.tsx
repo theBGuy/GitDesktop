@@ -147,12 +147,14 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   const target = paneTarget(repoPath, file, isConflicted);
 
   // The last settled view stays painted while a newly selected file prepares
-  // behind it, so a click swaps the pane once (see diff-pane-slots.ts).
+  // out of sight, stacked invisibly over it, so a click swaps the pane once
+  // (see diff-pane-slots.ts).
   const [storedHold, setHold] = useState(() => startPaneHold(target));
   const hold = retargetPane(storedHold, target);
   if (hold !== storedHold) setHold(hold);
+  const holding = isHolding(hold);
   const preparingKey =
-    isHolding(hold) && hold.target.kind === "file" ? hold.target.key : null;
+    holding && hold.target.kind === "file" ? hold.target.key : null;
   useEffect(() => {
     if (preparingKey === null) return;
     const bound = window.setTimeout(
@@ -162,7 +164,8 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
     return () => window.clearTimeout(bound);
   }, [preparingKey]);
   const onSlotSettled = useCallback(
-    (key: string, repo: string) => setHold((h) => settlePane(h, key, repo)),
+    (key: string, repo: string, settled: boolean) =>
+      setHold((h) => settlePane(h, key, repo, settled)),
     [],
   );
   // Focus inside a slot that turns held lands here rather than on <body>. A
@@ -195,7 +198,9 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   };
 
   return (
-    <div className="relative h-full">
+    // The busy signal lives here: both slots are inert while holding, and an
+    // inert subtree is out of the accessibility tree along with its aria-busy.
+    <div className="relative h-full" aria-busy={holding || undefined}>
       <span ref={focusSinkRef} tabIndex={-1} className="sr-only" />
       {paneSlots(hold).map(({ view: slotView, phase }) => {
         // A held slot paints what it settled with; the live slot takes this
@@ -235,25 +240,30 @@ function paneTarget(
 const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {
   shown: "h-full",
   held: "h-full",
-  // Laid out at full size under the held slot, so container queries, the
-  // split/unified measure and row measurement are final before it shows.
+  // Stacked invisibly over the held slot (absolute, rendered after it) at full
+  // size, so container queries, the split/unified measure and row measurement
+  // are final before it shows.
   preparing: "invisible absolute inset-0",
 };
 
 /** The no-file placeholder or a conflict view. Only the placeholder is ever
- *  held (a first selection prepares behind it), and undimmed: it isn't content. */
+ *  held (a first selection prepares out of sight, stacked invisibly over it),
+ *  and undimmed: it isn't content. */
 function PaneFrame({ held, children }: { held: boolean; children: ReactNode }) {
   return (
-    <div className="h-full" inert={held} aria-busy={held || undefined}>
+    <div className="h-full" inert={held}>
       {children}
     </div>
   );
 }
 
 /**
- * One file's slot. Its surfaces report their loading gates here; once every
- * mounted gate is settled the slot reports up, which promotes it while it is
- * the preparing target. Held and preparing slots are inert and non-interactive.
+ * One file's slot. Its surfaces report their loading gates here; the slot is
+ * settled once at least one gate has reported and every reported gate is
+ * settled, and it reports each change of that state up: settling promotes it
+ * while it is the preparing target, and either edge updates the shown file's
+ * settle. A render-null arm that never reports is invisible to that check, so
+ * each one reports. Held and preparing slots are inert and non-interactive.
  */
 function FileSlot({
   slotKey,
@@ -266,7 +276,7 @@ function FileSlot({
   slotKey: string;
   repo: string;
   phase: SlotPhase;
-  onSettled: (key: string, repo: string) => void;
+  onSettled: (key: string, repo: string, settled: boolean) => void;
   focusRescue: RefObject<HTMLElement | null>;
   children: ReactNode;
 }) {
@@ -287,8 +297,10 @@ function FileSlot({
       });
   }, []);
   const settled = gates.size > 0 && Array.from(gates.values()).every(Boolean);
+  // Both edges: a shown slot that goes loading again (Raw to Preview, a
+  // rebuild's measure gap) must not be held by the next click.
   useLayoutEffect(() => {
-    if (settled) onSettled(slotKey, repo);
+    onSettled(slotKey, repo, settled);
   }, [settled, slotKey, repo, onSettled]);
   // `inert` blurs a focused descendant to <body> after this commit; hand focus
   // to the pane's sink first.
@@ -311,7 +323,6 @@ function FileSlot({
         phase === "held" && "opacity-80 delay-100",
       )}
       inert={phase !== "shown"}
-      aria-busy={phase === "held" || undefined}
     >
       <DiffPaneHold value={hold}>{children}</DiffPaneHold>
     </div>
@@ -1504,13 +1515,17 @@ function StagingDiffView({
   // leading gap → no marker), so a positional map mis-places + mis-fires the
   // buttons. The overlay lives inside the scrolled content, so it tracks scroll
   // without a listener; re-measure only on rebuild/expand/collapse/resize.
-  // Stamped with the diffFile measured: a refetch rebuilds it, and the old
-  // rows' anchors must not answer for the new one.
+  // Stamped with the diffFile measured, since a refetch rebuilds it.
   const [measured, setMeasured] = useState<{
     forFile: DiffFile | null;
     list: { top: number; sep: boolean }[];
   }>({ forFile: null, list: [] });
-  const anchors = measured.list;
+  // Two readers, two lists. The settle report and hunk 0's header take the
+  // stamped list, empty until a measure of the current diffFile lands. The
+  // overlay keeps the last measured list instead, so the stamp alone never
+  // unmounts its buttons; it skips hunk 0 while the header stands in for it,
+  // so a stale `@@` anchor can't double those buttons.
+  const anchors = measured.forFile === diffFile ? measured.list : [];
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
@@ -1551,10 +1566,7 @@ function StagingDiffView({
   }, [diffFile, hunks]);
 
   // Hunk 0's measure, once one of THIS diffFile has found its row.
-  const firstMeasured =
-    measured.forFile === diffFile && anchors[0] !== undefined
-      ? anchors[0]
-      : undefined;
+  const firstMeasured = anchors[0];
   const firstFound = firstMeasured !== undefined && firstMeasured.top >= 0;
   // Settled once the rows exist: the library builds them in its own passive
   // effect, so a built diffFile can still paint rowless. A diff with no hunk
@@ -1564,7 +1576,7 @@ function StagingDiffView({
       !holdForGrammar &&
       (diffFile === null ||
         !diffRendersRows(diffFile) ||
-        (measured.forFile === diffFile && anchors.some((a) => a.top >= 0))),
+        anchors.some((a) => a.top >= 0)),
   );
 
   // Whole-file reads still settling, or a lazy built-in Shiki grammar still
@@ -1641,8 +1653,8 @@ function StagingDiffView({
         diffViewWrap
         diffViewFontSize={12}
       />
-      {anchors.map((a, i) =>
-        hunks[i] && a.sep && a.top >= 0 ? (
+      {measured.list.map((a, i) =>
+        hunks[i] && a.sep && a.top >= 0 && !(i === 0 && firstNeedsHeader) ? (
           // Buttons sit ON the `@@` separator row (never on code), right-aligned
           // to clear the native expand controls. mousedown-stop so a button
           // press never starts a drag-select.

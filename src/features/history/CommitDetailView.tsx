@@ -24,6 +24,7 @@ import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import {
   CommitComments,
   CommitLineComposer,
+  useCommitCommentsGate,
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
@@ -31,7 +32,6 @@ import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
-  forgeReady,
   useCheckoutCommit,
   useCherryPick,
   useCommitAuthorAvatarIndex,
@@ -102,22 +102,21 @@ export function CommitDetailView({
   const diff = useCommitFileDiff(repoPath, hash, deferredPath, diffEnabled);
 
   // Commit-comment surface — mirrors the PR Commits drill-in (PrCommitDetail),
-  // but lights up ONLY when the repo has a ready forge, the provider supports
-  // commit comments, AND this commit actually exists on the remote. Every fetch
-  // below is gated so a local-only repo issues ZERO forge calls and this view
-  // renders byte-identically to before. All these hooks sit ABOVE the early
-  // returns to keep hook order stable across the skeleton/error frames.
+  // shown only when the repo has a ready forge whose provider takes commit
+  // comments and a commit is on the remote. During a switch it renders on the
+  // PREVIOUS commit's held verdict, but every forge fetch and write waits for
+  // this commit's own. A local-only repo issues ZERO forge calls. All these hooks
+  // sit ABOVE the early returns to keep hook order stable across skeleton frames.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const providerKey = provider ?? "github";
   const remoteLabel = providerLabel(provider);
-  const ready = forgeReady(forge.data);
   const { canCommentCommits } = usePrCapabilities(forge.data, provider);
-  const gate = ready && canCommentCommits;
+  const gate = useCommitCommentsGate(repoPath);
   const onRemote = useCommitOnRemote(repoPath, gate ? hash : null);
-  // The previous commit's verdict is held across a switch so the pane stays
-  // mounted; that held verdict drives RENDERING only. Every forge read and write
-  // reads `commentsReady`, since a held `true` can name a commit the forge lacks.
+  // The held verdict drives RENDERING only: a held `true` can name a commit the
+  // forge lacks. The settled gate is `commentsReady` here, and inside
+  // CommitComments `enabled && !held` (its read) plus `writesHeld` (its writes).
   const verdictHeld = gate && onRemote.isPlaceholderData;
   const showComments = gate && onRemote.data === true;
   const commentsReady = showComments && !onRemote.isPlaceholderData;
@@ -521,10 +520,9 @@ export function CommitDetailView({
         stale={stale}
       />
       {gate && onRemote.data === false ? (
-        // The on-remote query RESOLVED false — this commit isn't pushed yet. Shown
-        // only after resolution (never while pending), so there's no flash for a
-        // commit that is on the remote. While held it is the previous commit's
-        // verdict, so it dims (delayed, so a fast settle shows no pulse).
+        // Appears once a verdict has resolved false, so a cold load of a pushed
+        // commit shows no flash. While the next commit's verdict resolves it keeps
+        // the previous one, dimmed after a delay so a fast settle shows no pulse.
         <p
           aria-busy={verdictHeld}
           className={cn(

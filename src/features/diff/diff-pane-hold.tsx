@@ -10,7 +10,8 @@ export interface DiffPaneHoldValue {
    *  so those gate on this. */
   interactive: boolean;
   /** Records one loading gate's state for the slot and returns its release.
-   *  The slot counts as settled once every mounted gate reports settled. */
+   *  The slot is settled once at least one gate has reported and every gate
+   *  that has reported is settled; a gate that never reports goes unseen. */
   reportSettled: (settled: boolean) => () => void;
 }
 
@@ -33,8 +34,10 @@ export function useInDiffPaneSlot(): boolean {
   return useContext(DiffPaneHold) !== OUTSIDE_SLOT;
 }
 
-/** Reports a render-null loading gate. A layout effect, so a settle promotes the
- *  slot before the browser paints the frame it settled in. */
+/** Reports a loading gate: a render-null arm, or work still landing after
+ *  render (an image decode). Call it before any early return. A layout effect,
+ *  so a settle promotes the slot before the browser paints the frame it
+ *  settled in. */
 export function useReportPaneSettled(settled: boolean): void {
   const { reportSettled } = useContext(DiffPaneHold);
   useLayoutEffect(() => reportSettled(settled), [reportSettled, settled]);

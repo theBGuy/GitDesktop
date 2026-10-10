@@ -3,15 +3,17 @@
 // header paint with the first rows; `diffRendersRows` (same module), which lets
 // a rowless diff settle at build instead of waiting out the hold bound; and the
 // two-slot hold's transitions (src/features/diff/diff-pane-slots.ts), which keep
-// the last settled pane up until the next one is ready.
+// the last settled pane up while the next one prepares, for at most the 400 ms
+// bound.
 //
 // Not testable here: the settle reports themselves (layout effects across the
 // pane's surfaces) and what `inert` blocks. Those need the live app.
 //
 // The imports reach straight into `src/` under Node's type stripping, which
-// resolves no bundler aliases, so both modules must stay free of runtime
-// imports. The diff-shape suite at the end builds real diffs with
-// @git-diff-view and renders them with react-dom/server, so it skips only when
+// resolves no bundler aliases, so all three modules (the two above and
+// src/lib/git/hunks.ts) must stay free of runtime imports. The two render
+// suites at the end (diff shapes, hunk 0's row) build real diffs with
+// @git-diff-view and render them with react-dom/server, so they skip only when
 // one of those PACKAGES is unresolved (the no-install guards job);
 // GD_EXPECT_DEPS turns that skip into a failure on an installed run.
 import assert from "node:assert/strict";
@@ -32,6 +34,7 @@ import {
   diffRendersRows,
   firstHunkHasSepRow,
 } from "../src/features/diff/first-hunk-sep.ts";
+import { parseHunks } from "../src/lib/git/hunks.ts";
 
 // ---------------------------------------------------------- firstHunkHasSepRow
 
@@ -98,13 +101,15 @@ const view = (path, staged = false, repo = REPO) =>
 const PLACEHOLDER = { kind: "placeholder" };
 const phases = (hold) =>
   paneSlots(hold).map(({ view: v, phase }) => [paneViewKey(v), phase]);
+/** A file shown and settled: the state a click away from it starts from. */
+const settledOn = (v) => settlePane(startPaneHold(v), v.key, v.repo, true);
 
 test("the hold bound is 400 ms", () => {
   assert.equal(HOLD_BOUND_MS, 400);
 });
 
 test("same key: a reselect (fresh object) does not hold", () => {
-  const hold = startPaneHold(view("a.ts"));
+  const hold = settledOn(view("a.ts"));
   const next = retargetPane(hold, view("a.ts"));
   assert.equal(next, hold);
   assert.equal(isHolding(next), false);
@@ -112,7 +117,7 @@ test("same key: a reselect (fresh object) does not hold", () => {
 });
 
 test("different key, same repo: the shown file holds while the target prepares", () => {
-  const next = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
+  const next = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   assert.equal(isHolding(next), true);
   assert.deepEqual(phases(next), [
     ["file:C:/repo:false:a.ts", "held"],
@@ -121,10 +126,7 @@ test("different key, same repo: the shown file holds while the target prepares",
 });
 
 test("same path, other side: staged and unstaged are different slots", () => {
-  const next = retargetPane(
-    startPaneHold(view("a.ts", false)),
-    view("a.ts", true),
-  );
+  const next = retargetPane(settledOn(view("a.ts", false)), view("a.ts", true));
   assert.deepEqual(phases(next), [
     ["file:C:/repo:false:a.ts", "held"],
     ["file:C:/repo:true:a.ts", "preparing"],
@@ -132,12 +134,12 @@ test("same path, other side: staged and unstaged are different slots", () => {
 });
 
 test("target null: the placeholder replaces the file at once", () => {
-  const next = retargetPane(startPaneHold(view("a.ts")), PLACEHOLDER);
+  const next = retargetPane(settledOn(view("a.ts")), PLACEHOLDER);
   assert.equal(isHolding(next), false);
   assert.deepEqual(phases(next), [["placeholder", "shown"]]);
 });
 
-test("first selection: the file prepares behind the placeholder", () => {
+test("first selection: the file prepares out of sight over the placeholder", () => {
   const next = retargetPane(startPaneHold(PLACEHOLDER), view("a.ts"));
   assert.deepEqual(phases(next), [
     ["placeholder", "held"],
@@ -146,7 +148,7 @@ test("first selection: the file prepares behind the placeholder", () => {
 });
 
 test("conflicted target: swaps at once", () => {
-  const next = retargetPane(startPaneHold(view("a.ts")), {
+  const next = retargetPane(settledOn(view("a.ts")), {
     kind: "conflict",
     key: "b.ts",
   });
@@ -165,7 +167,7 @@ test("conflicted source: a file target swaps at once", () => {
 
 test("repo changed: nothing is held across repos", () => {
   const next = retargetPane(
-    startPaneHold(view("a.ts")),
+    settledOn(view("a.ts")),
     view("a.ts", false, "C:/other"),
   );
   assert.equal(isHolding(next), false);
@@ -173,7 +175,7 @@ test("repo changed: nothing is held across repos", () => {
 });
 
 test("rapid retarget: the held slot stays the last settled file", () => {
-  const holding = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   const next = retargetPane(holding, view("c.ts"));
   assert.deepEqual(phases(next), [
     ["file:C:/repo:false:a.ts", "held"],
@@ -182,35 +184,129 @@ test("rapid retarget: the held slot stays the last settled file", () => {
 });
 
 test("retarget back to the held file: it is shown again, no hold", () => {
-  const holding = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   const next = retargetPane(holding, view("a.ts"));
   assert.deepEqual(phases(next), [["file:C:/repo:false:a.ts", "shown"]]);
 });
 
-test("stale-key settle: a replaced or held slot's report is ignored", () => {
+test("stale-key settle: a replaced slot's report is ignored, either edge", () => {
   const holding = retargetPane(
-    retargetPane(startPaneHold(view("a.ts")), view("b.ts")),
+    retargetPane(settledOn(view("a.ts")), view("b.ts")),
     view("c.ts"),
   );
-  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO), holding);
-  assert.equal(settlePane(holding, "C:/repo:false:a.ts", REPO), holding);
+  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, true), holding);
+  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, false), holding);
+  // The held file is already settled: its settled report changes nothing.
+  assert.equal(settlePane(holding, "C:/repo:false:a.ts", REPO, true), holding);
 });
 
-test("settle from another repo is ignored", () => {
-  const holding = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
-  assert.equal(settlePane(holding, "C:/repo:false:b.ts", "C:/other"), holding);
+test("the preparing target's unsettled report neither promotes nor drops it", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, false), holding);
 });
 
-test("current-key settle: the target is promoted to a single slot", () => {
-  const holding = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
-  const next = settlePane(holding, "C:/repo:false:b.ts", REPO);
+test("settle, then unsettle, then retarget: the loading view swaps, not held", () => {
+  const settled = settledOn(view("a.ts"));
+  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, false);
+  assert.equal(loading.shownSettled, false);
+  assert.equal(settlePane(loading, "C:/repo:false:a.ts", REPO, false), loading);
+  const next = retargetPane(loading, view("b.ts"));
   assert.equal(isHolding(next), false);
   assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
 });
 
-test("settle while not holding changes nothing", () => {
+test("unsettle, then settle again: the view is held again", () => {
+  const settled = settledOn(view("a.ts"));
+  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, false);
+  const again = settlePane(loading, "C:/repo:false:a.ts", REPO, true);
+  assert.equal(isHolding(retargetPane(again, view("b.ts"))), true);
+});
+
+test("a held file that goes loading is dropped by the next retarget", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  const heldLoading = settlePane(holding, "C:/repo:false:a.ts", REPO, false);
+  assert.equal(isHolding(heldLoading), true);
+  const next = retargetPane(heldLoading, view("c.ts"));
+  assert.deepEqual(phases(next), [["file:C:/repo:false:c.ts", "shown"]]);
+});
+
+test("settle from another repo is ignored", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  assert.equal(
+    settlePane(holding, "C:/repo:false:b.ts", "C:/other", true),
+    holding,
+  );
+});
+
+test("current-key settle: the target is promoted to a single slot", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  const next = settlePane(holding, "C:/repo:false:b.ts", REPO, true);
+  assert.equal(isHolding(next), false);
+  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+});
+
+test("a shown file starts unsettled; its first settle marks it, a repeat is a no-op", () => {
   const hold = startPaneHold(view("a.ts"));
-  assert.equal(settlePane(hold, "C:/repo:false:a.ts", REPO), hold);
+  assert.equal(hold.shownSettled, false);
+  const settled = settlePane(hold, "C:/repo:false:a.ts", REPO, true);
+  assert.equal(settled.shownSettled, true);
+  assert.equal(isHolding(settled), false);
+  assert.equal(settlePane(settled, "C:/repo:false:a.ts", REPO, true), settled);
+});
+
+test("the placeholder and conflict views start settled", () => {
+  assert.equal(startPaneHold(PLACEHOLDER).shownSettled, true);
+  assert.equal(
+    startPaneHold({ kind: "conflict", key: "b.ts" }).shownSettled,
+    true,
+  );
+});
+
+test("an unsettled shown file is swapped out, never held", () => {
+  const next = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
+  assert.equal(isHolding(next), false);
+  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+});
+
+test("expire, then retarget: the unsettled promotion is not held", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
+  const expired = expirePane(holding, "C:/repo:false:s.ts");
+  assert.equal(expired.shownSettled, false);
+  const next = retargetPane(expired, view("f.ts"));
+  assert.equal(isHolding(next), false);
+  assert.deepEqual(phases(next), [["file:C:/repo:false:f.ts", "shown"]]);
+});
+
+test("settle, then retarget: the settled promotion is held", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
+  const settled = settlePane(holding, "C:/repo:false:s.ts", REPO, true);
+  assert.equal(settled.shownSettled, true);
+  const next = retargetPane(settled, view("f.ts"));
+  assert.deepEqual(phases(next), [
+    ["file:C:/repo:false:s.ts", "held"],
+    ["file:C:/repo:false:f.ts", "preparing"],
+  ]);
+});
+
+test("expire, then a late settle of the shown file: it holds again", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
+  const expired = expirePane(holding, "C:/repo:false:s.ts");
+  const settled = settlePane(expired, "C:/repo:false:s.ts", REPO, true);
+  assert.equal(settled.shownSettled, true);
+  assert.equal(isHolding(retargetPane(settled, view("f.ts"))), true);
+});
+
+test("retarget back to the held file keeps its settle", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  const back = retargetPane(holding, view("a.ts"));
+  assert.equal(back.shownSettled, true);
+  assert.equal(isHolding(retargetPane(back, view("c.ts"))), true);
+});
+
+test("retargeting while holding keeps the held file's settle", () => {
+  const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
+  const next = retargetPane(holding, view("c.ts"));
+  assert.equal(next.shownSettled, true);
 });
 
 test("bound expiry: the target is promoted to a single slot", () => {
@@ -221,7 +317,7 @@ test("bound expiry: the target is promoted to a single slot", () => {
 
 test("bound expiry for a replaced target is ignored", () => {
   const holding = retargetPane(
-    retargetPane(startPaneHold(view("a.ts")), view("b.ts")),
+    retargetPane(settledOn(view("a.ts")), view("b.ts")),
     view("c.ts"),
   );
   assert.equal(expirePane(holding, "C:/repo:false:b.ts"), holding);
@@ -293,8 +389,9 @@ function buildDiff(text, content) {
   });
 }
 
-/** Rows the view actually renders for a freshly built diff in `mode`. */
-function renderedRows(text, content, mode) {
+/** The rows (`<tr data-line=…>` open tags) the view renders for a freshly built
+ *  diff in `mode`, in document order. */
+function renderedRowTags(text, content, mode) {
   return quietly(() => {
     const file = buildDiff(text, content);
     file.buildUnifiedDiffLines();
@@ -307,8 +404,13 @@ function renderedRows(text, content, mode) {
         diffViewFontSize: 12,
       }),
     );
-    return (html.match(/<tr[^>]*\bdata-line=/g) ?? []).length;
+    return html.match(/<tr\b[^>]*\bdata-line="[^"]*"[^>]*>/g) ?? [];
   });
+}
+
+/** How many rows the view actually renders for a freshly built diff in `mode`. */
+function renderedRows(text, content, mode) {
+  return renderedRowTags(text, content, mode).length;
 }
 
 const gitHeader = (a, b = a) => `diff --git a/${a} b/${b}\n`;
@@ -398,6 +500,79 @@ for (const { name, text, content, rows } of rowShapes) {
           renderedRows(text, modeContent, layout) > 0,
           rows,
           `${layout} view`,
+        );
+      }
+    });
+  }
+}
+
+// Hunk 0's `@@` row, rendered: firstHunkHasSepRow decides whether the line-1
+// header paints with the first rows, so it must agree with the view's own first
+// row in both modes, or a library upgrade doubles or drops that header.
+
+/** Ten numbered lines, with `edits` (1-based line -> text) applied. */
+function tenLines(edits = {}) {
+  return Array.from(
+    { length: 10 },
+    (_, i) => `${edits[i + 1] ?? `l${i + 1}`}\n`,
+  ).join("");
+}
+
+const fileHeader = `${gitHeader("f.txt")}index 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n`;
+
+const sepShapes = [
+  {
+    name: "a hunk at line 1 with leading context",
+    hunks: "@@ -1,3 +1,3 @@\n l1\n-l2\n+x\n l3\n",
+    content: { old: tenLines(), new: tenLines({ 2: "x" }) },
+    sep: false,
+  },
+  {
+    name: "a hunk past line 1 with leading context",
+    hunks: "@@ -4,3 +4,3 @@\n l4\n-l5\n+x\n l6\n",
+    content: { old: tenLines(), new: tenLines({ 5: "x" }) },
+    sep: true,
+  },
+  {
+    name: "a context-0 hunk past line 1",
+    hunks: "@@ -5 +5 @@\n-l5\n+x\n",
+    content: { old: tenLines(), new: tenLines({ 5: "x" }) },
+    sep: false,
+  },
+  {
+    name: "two hunks, the first opening on a change at line 1",
+    hunks:
+      "@@ -1,2 +1,2 @@\n-l1\n+y\n l2\n@@ -8,3 +8,3 @@\n l8\n-l9\n+z\n l10\n",
+    content: { old: tenLines(), new: tenLines({ 1: "y", 9: "z" }) },
+    sep: false,
+  },
+  {
+    name: "two hunks, the first past line 1",
+    hunks:
+      "@@ -3,3 +3,3 @@\n l3\n-l4\n+y\n l5\n@@ -8,3 +8,3 @@\n l8\n-l9\n+z\n l10\n",
+    content: { old: tenLines(), new: tenLines({ 4: "y", 9: "z" }) },
+    sep: true,
+  },
+];
+
+for (const { name, hunks, content, sep } of sepShapes) {
+  const text = `${fileHeader}${hunks}`;
+  test(`firstHunkHasSepRow predicts ${name}`, () => {
+    assert.equal(firstHunkHasSepRow(parseHunks(text).hunks[0]), sep);
+  });
+  for (const [mode, modeContent] of [
+    ["hunk-only", undefined],
+    ["content", content],
+  ]) {
+    const title = `firstHunkHasSepRow matches the view: ${name} (${mode})`;
+    test(title, { skip }, () => {
+      for (const layout of ["Unified", "Split"]) {
+        const [first] = renderedRowTags(text, modeContent, layout);
+        assert.ok(first, `${layout} view renders rows`);
+        assert.equal(
+          /\bdata-state="hunk"/.test(first),
+          sep,
+          `${layout} view's first row`,
         );
       }
     });

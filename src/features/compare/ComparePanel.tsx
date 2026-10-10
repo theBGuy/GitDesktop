@@ -40,6 +40,7 @@ import {
   CreateRefFromCommitDialog,
   createRefFromCommitFormOpts,
 } from "@/features/history/HistoryDialogs";
+import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
@@ -82,7 +83,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const compareCommitHash = useUiStore((s) => s.compareCommitHash);
   const selectCompareCommit = useUiStore((s) => s.selectCompareCommit);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
-  const prefetchCommit = usePrefetchCommit(repoPath);
+  const commentsGate = useCommitCommentsGate(repoPath);
+  const prefetchCommit = usePrefetchCommit(repoPath, commentsGate);
   const hoverPrefetch = useHoverPrefetch();
   const onHoverCommit = (hash: string) =>
     hoverPrefetch(() => prefetchCommit(hash));

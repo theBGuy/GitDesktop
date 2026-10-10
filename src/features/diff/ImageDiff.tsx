@@ -52,6 +52,7 @@ function ImageSide({
   src,
   onOpen,
   onMeasure,
+  onFail,
 }: {
   label: string;
   /** The parent's record of this side's measurement — the caption's only
@@ -60,6 +61,8 @@ function ImageSide({
   src: string;
   onOpen: () => void;
   onMeasure: (size: Size) => void;
+  /** The image failed to decode: it will never measure. */
+  onFail: () => void;
 }) {
   return (
     <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
@@ -84,6 +87,7 @@ function ImageSide({
           <img
             alt={label}
             className="max-h-[60vh] max-w-full"
+            onError={onFail}
             onLoad={(e) =>
               onMeasure({
                 w: e.currentTarget.naturalWidth,
@@ -124,6 +128,8 @@ interface PanesState {
   id: string;
   old?: Size;
   new?: Size;
+  /** Sides whose image fired `error`, so they will never measure. */
+  failed?: Partial<Record<PaneKey, true>>;
   viewing?: number;
 }
 
@@ -149,11 +155,6 @@ export function ImagePanes({
   const pending = oldFile.isPending || newFile.isPending;
   const oldSide = oldFile.data ?? null;
   const newSide = newFile.data ?? null;
-  useReportPaneSettled(!pending);
-
-  if (pending) {
-    return null;
-  }
 
   const id = [filePath, revs.old, revs.new].join("|");
   const current = state.id === id ? state : null;
@@ -161,6 +162,12 @@ export function ImagePanes({
     setState((prev) =>
       prev.id === id ? { ...prev, ...next } : { id, ...next },
     );
+  // Merged inside the update: both sides can fail in one tick.
+  const markFailed = (key: PaneKey) =>
+    setState((prev) => {
+      const base: PanesState = prev.id === id ? prev : { id };
+      return { ...base, failed: { ...base.failed, [key]: true } };
+    });
 
   // The sniffed type wins over the extension, which any commit spells freely;
   // it's per-side because the two revisions can hold different formats.
@@ -190,6 +197,21 @@ export function ImagePanes({
   const shown = panes.filter(
     (pane): pane is Pane & { src: string } => pane.src !== null,
   );
+  // A data: URL decodes after the bytes land, and the box sizes (and the w × h
+  // caption appears) only then, so settle waits for every shown image of THIS
+  // pair to load or fail. Refused sides and the no-image line are final.
+  useReportPaneSettled(
+    !pending &&
+      shown.every(
+        (pane) =>
+          current?.[pane.key] !== undefined || current?.failed?.[pane.key],
+      ),
+  );
+
+  if (pending) {
+    return null;
+  }
+
   const images: LightboxImage[] = shown.map((pane) => ({
     src: pane.src,
     alt: pane.label,
@@ -211,6 +233,7 @@ export function ImagePanes({
             key={`${id}|${pane.key}`}
             label={pane.label}
             onMeasure={(size) => patch({ [pane.key]: size })}
+            onFail={() => markFailed(pane.key)}
             onOpen={() =>
               patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
             }

@@ -12,9 +12,11 @@ import { sectionReadNotice } from "@/features/conversations/remote-section-state
 import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
+  forgeReady,
   useCommitComments,
   useCreateCommitComment,
   useDeleteCommitComment,
@@ -36,6 +38,18 @@ import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
+
+/** Whether a repo's commit-comment surface can light up at all: a ready forge
+ *  whose provider takes commit comments. The on-remote verdict is read, and
+ *  prefetched, only under it: each read spawns a `for-each-ref --contains`. */
+export function useCommitCommentsGate(repoPath: string): boolean {
+  const forge = useForgeStatus(repoPath);
+  const { canCommentCommits } = usePrCapabilities(
+    forge.data,
+    forge.data?.provider,
+  );
+  return forgeReady(forge.data) && canCommentCommits;
+}
 
 /**
  * Derive the new-side (right) line a GitHub commit comment anchors to from its

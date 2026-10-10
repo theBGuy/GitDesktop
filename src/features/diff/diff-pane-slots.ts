@@ -8,10 +8,15 @@ export type PaneView<F> =
   | { kind: "conflict"; key: string }
   | { kind: "file"; key: string; repo: string; file: F };
 
-/** `shown` differs from `target` only while a file prepares behind it. */
+/** `shown` differs from `target` only while a file prepares out of sight,
+ *  stacked invisibly over the shown view. */
 export interface PaneHold<F> {
   shown: PaneView<F>;
   target: PaneView<F>;
+  /** Whether `shown` is settled now. A shown file that isn't (one the bound
+   *  promoted, or one loading again) is replaced outright by the next click,
+   *  never held, and is held again once it settles. */
+  shownSettled: boolean;
 }
 
 export type SlotPhase = "shown" | "held" | "preparing";
@@ -39,24 +44,35 @@ export function filePaneView<F extends { path: string; staged: boolean }>(
   };
 }
 
-/** A view's identity: equal keys paint the same thing (also the React key). */
+/** A view's identity, also its React key. Equal keys are the same view, not
+ *  necessarily the same paint: a conflict's resolve mode and the placeholder's
+ *  message follow live state. */
 export function paneViewKey<F>(view: PaneView<F>): string {
   return view.kind === "placeholder"
     ? "placeholder"
     : `${view.kind}:${view.key}`;
 }
 
+/** A view painted at once. Only a file slot reports its settle, so only a file
+ *  starts unsettled; the placeholder never loads, and a conflict view is never
+ *  held, so its own loading never matters here. */
 export function startPaneHold<F>(target: PaneView<F>): PaneHold<F> {
-  return { shown: target, target };
+  return { shown: target, target, shownSettled: target.kind !== "file" };
 }
 
 export function isHolding<F>(hold: PaneHold<F>): boolean {
   return paneViewKey(hold.shown) !== paneViewKey(hold.target);
 }
 
-/** A file prepares behind the placeholder or another file of the same repo.
- *  Conflict views keep their own lifecycle, and a slot never crosses repos. */
-function preparesBehind<F>(shown: PaneView<F>, target: PaneView<F>): boolean {
+/** A file prepares out of sight, stacked invisibly over the placeholder or
+ *  another SETTLED file of the same repo. Conflict views keep their own
+ *  lifecycle, a slot never crosses repos, and a file still loading is replaced,
+ *  since holding it would paint it in before the target swaps over it. */
+function preparesOutOfSight<F>(
+  hold: PaneHold<F>,
+  target: PaneView<F>,
+): boolean {
+  const shown = hold.shown;
   if (target.kind !== "file") return false;
   switch (shown.kind) {
     case "placeholder":
@@ -64,7 +80,11 @@ function preparesBehind<F>(shown: PaneView<F>, target: PaneView<F>): boolean {
     case "conflict":
       return false;
     case "file":
-      return shown.repo === target.repo && shown.key !== target.key;
+      return (
+        hold.shownSettled &&
+        shown.repo === target.repo &&
+        shown.key !== target.key
+      );
   }
 }
 
@@ -75,33 +95,39 @@ export function retargetPane<F>(
   target: PaneView<F>,
 ): PaneHold<F> {
   if (paneViewKey(hold.target) === paneViewKey(target)) return hold;
-  return preparesBehind(hold.shown, target)
-    ? { shown: hold.shown, target }
+  // Back to the view already painted (the held one): its settle stands.
+  if (paneViewKey(hold.shown) === paneViewKey(target))
+    return { shown: target, target, shownSettled: hold.shownSettled };
+  return preparesOutOfSight(hold, target)
+    ? { ...hold, target }
     : startPaneHold(target);
 }
 
-function promote<F>(hold: PaneHold<F>, key: string): PaneHold<F> {
-  const target = hold.target;
-  if (!isHolding(hold) || target.kind !== "file" || target.key !== key)
-    return hold;
-  return startPaneHold(target);
-}
-
-/** A slot's settled report: promotes only the current target in the repo it was
- *  prepared for, so a replaced slot's late report is ignored. */
+/** A slot's settle report, either edge. The preparing target's first settled
+ *  report promotes it. A report for the shown view (held or not) sets whether
+ *  it is settled now, both ways. Any other slot's report (a replaced target's,
+ *  or another repo's) is ignored. */
 export function settlePane<F>(
   hold: PaneHold<F>,
   key: string,
   repo: string,
+  settled: boolean,
 ): PaneHold<F> {
-  return hold.target.kind === "file" && hold.target.repo === repo
-    ? promote(hold, key)
-    : hold;
+  const { shown, target } = hold;
+  const isView = (view: PaneView<F>) =>
+    view.kind === "file" && view.key === key && view.repo === repo;
+  if (isHolding(hold) && isView(target))
+    return settled ? { shown: target, target, shownSettled: true } : hold;
+  if (!isView(shown) || hold.shownSettled === settled) return hold;
+  return { ...hold, shownSettled: settled };
 }
 
-/** The bound's expiry for the target it was armed for. */
+/** The bound's expiry for the target it was armed for: promoted unsettled. */
 export function expirePane<F>(hold: PaneHold<F>, key: string): PaneHold<F> {
-  return promote(hold, key);
+  const target = hold.target;
+  if (!isHolding(hold) || target.kind !== "file" || target.key !== key)
+    return hold;
+  return startPaneHold(target);
 }
 
 /** The slots to render, in paint order: a held view stays in flow while the

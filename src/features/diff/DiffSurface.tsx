@@ -1388,8 +1388,10 @@ export function DiffContent({
     interactive && canPreview,
   );
   // The two arms below that render nothing: a pending read (a parked one says
-  // so instead) and another key's retained data. Every other arm is final here,
-  // and the image and text arms' own children report what they still load.
+  // so instead) and another key's retained data. Every other arm's own markup
+  // is final. The children report their own gates: ImagePanes its reads and
+  // image decodes, MarkdownDocPreview its file read, RenderedDiff its inputs
+  // and first row.
   useReportPaneSettled(
     !(isPending && !isPaused) &&
       !(data !== undefined && data.filePath !== filePath),
