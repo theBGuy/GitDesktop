@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
@@ -1259,6 +1260,10 @@ function StagingDiffView({
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
   const deferredText = useDeferredValue(diffText);
   const deferredPath = useDeferredValue(filePath);
+  // The hunks parsed from `deferredText`: both resolve in the same deferred
+  // render, so the overlay and its buttons pair with the rows on screen, never
+  // with a newer parse the rows haven't caught up to.
+  const viewHunks = useDeferredValue(hunks);
   // Hard-shorten over-long lines before rendering so a file with lines in the
   // 4K–20K band can't freeze the un-virtualized renderer here either (past the
   // mega threshold it falls back to the whole-file surface). DISPLAY-ONLY:
@@ -1510,58 +1515,87 @@ function StagingDiffView({
   // those rows mark collapsed gaps, not hunks 1:1 (a change at line 1 has no
   // leading gap → no marker), so a positional map mis-places + mis-fires the
   // buttons. The overlay lives inside the scrolled content, so it tracks scroll
-  // without a listener; re-measure only on rebuild/expand/collapse/resize.
+  // without a listener; re-measure only on rebuild/expand/collapse/resize. A
+  // mutation's measure commits in the same task as the rows it moved (see the
+  // MutationObserver below), so no frame paints rows apart from their buttons.
   const [measured, setMeasured] = useState<{
     forFile: DiffFile | null;
     forHunks: DiffHunk[] | null;
     list: { top: number; sep: boolean }[];
   }>({ forFile: null, forHunks: null, list: [] });
   // The settle report, hunk 0's header and the overlay all read this list,
-  // stamped with the diffFile and hunks measured: other positions paired with
-  // these hunks put live buttons on wrong rows, so they hide until re-measure.
+  // stamped with the diffFile and hunks measured: positions measured for other
+  // rows put live buttons on wrong lines, so they hide until a re-measure.
   const anchors =
-    measured.forFile === diffFile && measured.forHunks === hunks
+    measured.forFile === diffFile && measured.forHunks === viewHunks
       ? measured.list
       : [];
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
     let raf = 0;
+    // The library builds its rows in a passive effect plus a later sync commit,
+    // so this effect's own measure can run rowless; a rowless measure never
+    // stamps, and the mutation that inserts the rows measures again.
     const measure = () => {
       const rootTop = container.getBoundingClientRect().top;
-      setMeasured({
-        forFile: diffFile,
-        forHunks: hunks,
-        list: hunks.map((h) => {
-          const row =
-            rowForLine(container, "new", hunkStart(h, "new")) ??
-            rowForLine(container, "old", hunkStart(h, "old"));
-          if (!row) return { top: -1, sep: false };
-          // A hunk normally has a `@@` separator row right above it (host the
-          // buttons there); a hunk at line 1 has none (sep=false) and instead
-          // gets a synthetic header bar.
-          const prev = row.previousElementSibling;
-          const sep = prev?.getAttribute("data-state") === "hunk";
-          const anchor = sep ? prev : row;
-          return { top: anchor.getBoundingClientRect().top - rootTop, sep };
-        }),
+      const list = viewHunks.map((h) => {
+        const row =
+          rowForLine(container, "new", hunkStart(h, "new")) ??
+          rowForLine(container, "old", hunkStart(h, "old"));
+        if (!row) return { top: -1, sep: false };
+        // A hunk normally has a `@@` separator row right above it (host the
+        // buttons there); a hunk at line 1 has none (sep=false) and instead
+        // gets a synthetic header bar.
+        const prev = row.previousElementSibling;
+        const sep = prev?.getAttribute("data-state") === "hunk";
+        const anchor = sep ? prev : row;
+        return { top: anchor.getBoundingClientRect().top - rootTop, sep };
       });
+      if (
+        diffRendersRows(diffFile) &&
+        list.length > 0 &&
+        list.every((a) => a.top < 0)
+      ) {
+        return;
+      }
+      // An unchanged measure keeps the previous state so React bails out: the
+      // overlay's own insertion is a mutation that measures again.
+      setMeasured((prev) =>
+        prev.forFile === diffFile &&
+        prev.forHunks === viewHunks &&
+        prev.list.length === list.length &&
+        prev.list.every(
+          (a, i) => a.top === list[i].top && a.sep === list[i].sep,
+        )
+          ? prev
+          : { forFile: diffFile, forHunks: viewHunks, list },
+      );
     };
     const schedule = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(measure);
     };
     measure();
+    // Resize fires during the rendering steps and continuously, so it measures
+    // on the next frame.
     const ro = new ResizeObserver(schedule);
     ro.observe(container);
-    const mo = new MutationObserver(schedule);
+    // Mutation callbacks run as a microtask after the commit that changed the
+    // rows (a rebuild, an expand, the Collapse bar mounting), outside React's
+    // render and commit, so a measure flushed here paints with those rows; a rAF
+    // measure would land a frame after them.
+    const mo = new MutationObserver(() => {
+      cancelAnimationFrame(raf);
+      flushSync(measure);
+    });
     mo.observe(container, { childList: true, subtree: true });
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
       mo.disconnect();
     };
-  }, [diffFile, hunks]);
+  }, [diffFile, viewHunks]);
 
   // Hunk 0's measure, once one of THIS diffFile has found its row.
   const firstMeasured = anchors[0];
@@ -1589,8 +1623,8 @@ function StagingDiffView({
   // Predicted from the hunk so it paints with the first rows; a measure of this
   // diffFile then wins (Expand Up to line 1 hides the row it predicted).
   const firstNeedsHeader =
-    !!hunks[0] &&
-    (firstFound ? !firstMeasured.sep : !firstHunkHasSepRow(hunks[0]));
+    !!viewHunks[0] &&
+    (firstFound ? !firstMeasured.sep : !firstHunkHasSepRow(viewHunks[0]));
   return (
     <div
       ref={containerRef}
@@ -1626,12 +1660,12 @@ function StagingDiffView({
         >
           <code
             className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
-            title={hunks[0].header}
+            title={viewHunks[0].header}
           >
-            {hunks[0].header}
+            {viewHunks[0].header}
           </code>
           <HunkActionButtons
-            hunk={hunks[0]}
+            hunk={viewHunks[0]}
             staged={staged}
             busy={busy}
             onHunkAction={onHunkAction}
@@ -1652,18 +1686,18 @@ function StagingDiffView({
         diffViewFontSize={12}
       />
       {anchors.map((a, i) =>
-        hunks[i] && a.sep && a.top >= 0 ? (
+        viewHunks[i] && a.sep && a.top >= 0 ? (
           // Buttons sit ON the `@@` separator row (never on code), right-aligned
           // to clear the native expand controls. mousedown-stop so a button
           // press never starts a drag-select.
           <div
-            key={`${i}:${hunks[i].header}`}
+            key={`${i}:${viewHunks[i].header}`}
             className="absolute right-3 z-10 flex -translate-y-px gap-1"
             style={{ top: a.top }}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <HunkActionButtons
-              hunk={hunks[i]}
+              hunk={viewHunks[i]}
               staged={staged}
               busy={busy}
               onHunkAction={onHunkAction}
