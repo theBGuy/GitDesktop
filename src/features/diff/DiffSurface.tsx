@@ -54,7 +54,13 @@ import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang, fileExt } from "./diff-lang";
+import {
+  useDiffPaneHold,
+  useInDiffPaneSlot,
+  useReportPaneSettled,
+} from "./diff-pane-hold";
 import "./code-highlight.css";
+import { diffRendersRows } from "./diff-rows";
 import { HUNK_SCOPED_MAX_LINES, hunkScopedProcessAST } from "./gap-isolation";
 import { djb2 } from "./highlight-worker-shared";
 import {
@@ -1079,6 +1085,42 @@ function RenderedDiff({
     [lineWidget, resolveWidgetRange, syncPreselect],
   );
 
+  // Inside a diff-pane slot, settle waits for THIS diffFile's first row: the
+  // library builds rows in its own passive effect, so a built diffFile can
+  // still paint rowless. A diff with no hunk lines never gets a row, so it
+  // settles at build. The probe (a sibling just before the view) and its
+  // observer exist only in a slot, leaving every other host's tree as it was.
+  const inSlot = useInDiffPaneSlot();
+  const rowsProbeRef = useRef<HTMLSpanElement>(null);
+  const [rowsFor, setRowsFor] = useState<DiffFile | null>(null);
+  useEffect(() => {
+    const probe = rowsProbeRef.current;
+    const host = probe?.parentElement;
+    if (!probe || !host || !diffFile || !diffRendersRows(diffFile)) return;
+    const hasRow = () =>
+      probe.nextElementSibling?.querySelector("tr[data-line]") != null;
+    if (hasRow()) {
+      setRowsFor(diffFile);
+      return;
+    }
+    const mo = new MutationObserver(() => {
+      if (!hasRow()) return;
+      mo.disconnect();
+      setRowsFor(diffFile);
+    });
+    mo.observe(host, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, [diffFile]);
+  // The blocked placeholder is final; the pending arm below renders nothing.
+  useReportPaneSettled(
+    blocked ||
+      (!contentPending &&
+        !holdForGrammar &&
+        (diffFile === null ||
+          !diffRendersRows(diffFile) ||
+          rowsFor === diffFile)),
+  );
+
   // A generated/minified file (one enormous line) would freeze the renderer:
   // placeholder + one-click opt-in. FIRST, so a blocked mega file never flashes
   // null while an irrelevant grammar loads.
@@ -1107,6 +1149,7 @@ function RenderedDiff({
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
     <>
+      {inSlot && <span ref={rowsProbeRef} hidden />}
       {lineWidget?.enabled ? (
         // Line-comment mode: the multi-select variant adds clickable line numbers
         // and drag-to-select, opening the composer below the line. Opt-in only.
@@ -1330,16 +1373,28 @@ export function DiffContent({
     showsToolbar && canPreviewMarkdown(filePath, repoPath, previewRevs);
   const previewOn = canPreview && mdView === "preview";
   useFocusOnControlsSwap(previewOn, controlsRef);
+  // False only inside a held or preparing diff-pane slot, which `inert` can't
+  // shield from global hotkeys.
+  const { interactive } = useDiffPaneHold();
   useHotkeyAction(
     "change-diff-language",
     () => setLangOpen(true),
     // In Preview the picker isn't mounted, so the action would open nothing.
-    showsToolbar && !previewOn && Boolean(fileExt(filePath)),
+    interactive && showsToolbar && !previewOn && Boolean(fileExt(filePath)),
   );
   useHotkeyAction(
     "toggle-markdown-preview",
     () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
-    canPreview,
+    interactive && canPreview,
+  );
+  // The two arms below that render nothing: a pending read (a parked one says
+  // so instead) and another key's retained data. Every other arm's own markup
+  // is final. The children report their own gates: ImagePanes its reads and
+  // image decodes, MarkdownDocPreview its file read, RenderedDiff its inputs
+  // and first row.
+  useReportPaneSettled(
+    !(isPending && !isPaused) &&
+      !(data !== undefined && data.filePath !== filePath),
   );
 
   // Diffs load near-instantly from local git, so a skeleton only adds a flash

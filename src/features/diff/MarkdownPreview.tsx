@@ -7,6 +7,7 @@ import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import type { DiffContentRevs } from "./DiffSurface";
+import { useReportPaneSettled } from "./diff-pane-hold";
 import {
   cleanMarkdownForPreview,
   isMarkdownPath,
@@ -124,6 +125,9 @@ export function MarkdownDocPreview({
         : null,
     [text, filePath],
   );
+  // Gates the file read only: the pending arm below renders nothing. A lazy
+  // fence grammar or an embedded image can still repaint after it settles.
+  useReportPaneSettled((!hasNew && !hasOld) || !activeQ.isPending);
 
   if (!hasNew && !hasOld) {
     return <DiffPlaceholder message="Nothing to preview" />;

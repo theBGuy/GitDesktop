@@ -28,6 +28,7 @@ import { remoteListFilterKey } from "../types";
 import {
   invalidateRepoAfterWrite,
   keepPreviousDataForKeyAxes,
+  keepPreviousDataForRepo,
   repoKeys,
 } from "./core";
 import {
@@ -634,17 +635,26 @@ export function useCommitComments(
   });
 }
 
-/** Whether a commit lives on any remote — gates the History-tab commit-comment surface
- *  (you can only comment on a commit the forge already has). A push flips it, hence the
- *  short stale window; pass `sha: null` when no commit is selected. */
-export function useCommitOnRemote(repo: string, sha: string | null) {
-  return useQuery({
+/** Shared by {@link useCommitOnRemote} and the commit prefetch so the two can't
+ *  drift. A push flips the verdict, hence the short stale window. */
+export const commitOnRemoteOptions = (repo: string, sha: string) =>
+  queryOptions({
     queryKey: ["repo", repo, "commit", sha, "on-remote"] as const,
-    queryFn: () => api.commitOnRemote(repo, sha ?? ""),
-    enabled: sha !== null,
+    queryFn: () => api.commitOnRemote(repo, sha),
     staleTime: 30_000,
     // A local `git for-each-ref` read: the default "online" mode would park it.
     networkMode: "always",
+  });
+
+/** Whether a commit lives on any remote — gates the History-tab commit-comment surface
+ *  (you can only comment on a commit the forge already has); pass `sha: null` when no
+ *  commit is selected. The previous commit's verdict is held while the next resolves,
+ *  so callers must gate forge reads/writes on `!isPlaceholderData`. */
+export function useCommitOnRemote(repo: string, sha: string | null) {
+  return useQuery({
+    ...commitOnRemoteOptions(repo, sha ?? ""),
+    enabled: sha !== null,
+    placeholderData: keepPreviousDataForRepo(repo),
   });
 }
 

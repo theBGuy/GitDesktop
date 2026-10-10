@@ -24,6 +24,7 @@ import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import {
   CommitComments,
   CommitLineComposer,
+  useCommitCommentsGate,
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
@@ -31,7 +32,6 @@ import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
-  forgeReady,
   useCheckoutCommit,
   useCherryPick,
   useCommitAuthorAvatarIndex,
@@ -102,25 +102,29 @@ export function CommitDetailView({
   const diff = useCommitFileDiff(repoPath, hash, deferredPath, diffEnabled);
 
   // Commit-comment surface — mirrors the PR Commits drill-in (PrCommitDetail),
-  // but lights up ONLY when the repo has a ready forge, the provider supports
-  // commit comments, AND this commit actually exists on the remote. Every fetch
-  // below is gated so a local-only repo issues ZERO forge calls and this view
-  // renders byte-identically to before. All these hooks sit ABOVE the early
-  // returns to keep hook order stable across the skeleton/error frames.
+  // shown only when the repo has a ready forge whose provider takes commit
+  // comments and a commit is on the remote. During a switch it renders on the
+  // PREVIOUS commit's held verdict, but every forge fetch and write waits for
+  // this commit's own. A local-only repo issues ZERO forge calls. All these hooks
+  // sit ABOVE the early returns to keep hook order stable across skeleton frames.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const providerKey = provider ?? "github";
   const remoteLabel = providerLabel(provider);
-  const ready = forgeReady(forge.data);
   const { canCommentCommits } = usePrCapabilities(forge.data, provider);
-  const gate = ready && canCommentCommits;
+  const gate = useCommitCommentsGate(repoPath);
   const onRemote = useCommitOnRemote(repoPath, gate ? hash : null);
-  const commentsEnabled = gate && onRemote.data === true;
+  // The held verdict drives RENDERING only: a held `true` can name a commit the
+  // forge lacks. The settled gate is `commentsReady` here, and inside
+  // CommitComments `enabled && !held` (its read) plus `writesHeld` (its writes).
+  const verdictHeld = gate && onRemote.isPlaceholderData;
+  const showComments = gate && onRemote.data === true;
+  const commentsReady = showComments && !onRemote.isPlaceholderData;
   // Origin lens: the History surface reads a repo's OWN commits (the fork's
   // origin); the fork/upstream lens is a PR/Issues-tab affordance.
   const comments = useCommitComments(
     repoPath,
-    commentsEnabled ? hash : null,
+    commentsReady ? hash : null,
     "origin",
   );
   // GitHub commit-comment `position` mapping must walk GitHub's OWN patch (local
@@ -128,7 +132,7 @@ export function CommitDetailView({
   // diff only for GitHub. GitLab/Bitbucket anchor by plain line and need none.
   const remoteDiff = useRemoteCommitDiff(
     repoPath,
-    providerKey === "github" && commentsEnabled ? hash : null,
+    providerKey === "github" && commentsReady ? hash : null,
   );
   const remoteSections = useMemo(
     () => splitUnifiedDiff(remoteDiff.data ?? ""),
@@ -147,7 +151,7 @@ export function CommitDetailView({
   const lineAnchors = useCommitLineAnchors(
     comments.data,
     providerKey === "github" ? remoteSections : undefined,
-    commentsEnabled ? deferredPath : null,
+    commentsReady ? deferredPath : null,
     commentRefs,
   );
   // Both commit queries keep serving the PREVIOUS commit while the selected one
@@ -157,7 +161,7 @@ export function CommitDetailView({
   // rendered lines can belong to another file or commit than `hash`+`deferredPath`.
   const diffStale = stale || diff.isPlaceholderData;
   const lineWidget = useMemo<LineWidget | undefined>(() => {
-    if (!commentsEnabled || !deferredPath) return undefined;
+    if (!commentsReady || !deferredPath) return undefined;
     // A line click while stale would address `hash` — the newly selected commit —
     // with a path and line read off the previous one's diff.
     if (diffStale) return undefined;
@@ -191,7 +195,7 @@ export function CommitDetailView({
       ),
     };
   }, [
-    commentsEnabled,
+    commentsReady,
     diffStale,
     deferredPath,
     repoPath,
@@ -499,7 +503,8 @@ export function CommitDetailView({
       {/* Mounted for every commit, rendering only where comments are supported:
           arrowing through history must not tear down its per-commit drafts. */}
       <CommitComments
-        enabled={commentsEnabled}
+        enabled={showComments}
+        held={verdictHeld}
         repoPath={repoPath}
         sha={hash}
         canComment={canCommentCommits}
@@ -515,10 +520,17 @@ export function CommitDetailView({
         stale={stale}
       />
       {gate && onRemote.data === false ? (
-        // The forge query RESOLVED false — this commit isn't pushed yet. Shown
-        // only after resolution (never while pending), so there's no flash for a
-        // commit that is on the remote.
-        <p className="border-t px-4 py-2 text-xs text-muted-foreground">
+        // Appears once a verdict has resolved false, so a cold load of a pushed
+        // commit shows no flash. While the next commit's verdict resolves it keeps
+        // the previous one, dimmed after a delay so a fast settle shows no pulse.
+        <p
+          aria-busy={verdictHeld}
+          className={cn(
+            "border-t px-4 py-2 text-xs text-muted-foreground",
+            PLACEHOLDER_FADE,
+            verdictHeld && "opacity-80 delay-100",
+          )}
+        >
           This commit isn't on {remoteLabel} yet — push it to comment.
         </p>
       ) : null}

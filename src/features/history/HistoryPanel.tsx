@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
+import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
@@ -104,7 +105,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const undoCommit = useUndoCommit(repoPath);
   const selectedCommitHash = useUiStore((s) => s.selectedCommitHash);
   const selectCommit = useUiStore((s) => s.selectCommit);
-  const prefetchCommit = usePrefetchCommit(repoPath);
+  const commentsGate = useCommitCommentsGate(repoPath);
+  const prefetchCommit = usePrefetchCommit(repoPath, commentsGate);
   const hoverPrefetch = useHoverPrefetch();
   const setCommitDraft = useUiStore((s) => s.setCommitDraft);
   const setRepoTab = useUiStore((s) => s.setRepoTab);

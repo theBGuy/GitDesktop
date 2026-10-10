@@ -263,6 +263,32 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   cold load doesn't shift the list as rows arrive. It carries the group's
   `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
   not a call-site component.
+- The Changes pane swaps files through a two-slot hold: `FileSlot` in
+  `src/features/diff/DiffViewer.tsx` is the reference implementation, with its
+  transitions in `diff-pane-slots.ts` and the `DiffPaneHold` context
+  (`diff-pane-hold.tsx`) carrying `interactive` and the settle reports down to
+  the surfaces. The held view (the last settled one) stays in flow and
+  `inert`; a held FILE slot is also dimmed (`PLACEHOLDER_FADE` +
+  `opacity-80` + `delay-100`), while a held placeholder stays undimmed. The
+  target prepares out of sight, stacked invisibly over the held view at full
+  size, and is promoted on its first settled report or a 400 ms bound. A slot
+  reports both edges of its settle, so a shown file that is not settled right
+  now (one the bound promoted, or one loading again after Raw to Preview or a
+  rebuild) is replaced outright on the next click, never held; it is held
+  again once it settles. `aria-busy` sits on the non-inert pane root while
+  holding, since an inert subtree is out of the accessibility tree. A slot
+  counts as settled once it has at least one reporting gate and every gate
+  that HAS reported is settled, so a render-null arm that never reports lets
+  the slot promote early onto blank content: every such arm under a slot calls
+  `useReportPaneSettled` before its early return. Other detail panes (the
+  History file rail, Compare) don't hold yet; they are follow-ups that would
+  adopt this. A placeholder across a key whose response can't prove identity
+  may drive RENDERING only, with every interactive or forge consumer gated on
+  `!isPlaceholderData` (commit-on-remote is the example); the Changes diff
+  takes none, since `FileDiff` echoes only the path and a same-path
+  staged/unstaged placeholder would put live buttons on the other side's
+  hunks. `inert` covers pointer, focus and AT but NOT global hotkeys (gate
+  `useHotkeyAction` on `interactive`) or portals (gate dialogs' `open`).
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already
