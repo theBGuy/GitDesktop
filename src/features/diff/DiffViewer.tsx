@@ -327,9 +327,11 @@ function FileSlot({
   );
 }
 
+type HunkActionKind = "stage" | "unstage" | "discard";
+
 // A hunk click refused because the live diff moved past the text it was shown
 // from: the house refusal shape, per kind.
-const STALE_HUNK_ACTION: Record<"stage" | "unstage" | "discard", string> = {
+const STALE_HUNK_ACTION: Record<HunkActionKind, string> = {
   stage: "The diff just updated — nothing was staged.",
   unstage: "The diff just updated — nothing was unstaged.",
   discard: "The diff just updated — nothing was discarded.",
@@ -594,11 +596,7 @@ function WorkingTreeDiff({
 
   // A whole-hunk action, fired by the per-hunk overlay buttons with the diff
   // text that hunk was parsed from.
-  function onHunkAction(
-    hunk: DiffHunk,
-    kind: "stage" | "unstage" | "discard",
-    forText: string,
-  ) {
+  function onHunkAction(hunk: DiffHunk, kind: HunkActionKind, forText: string) {
     // A hunk from a stale display would patch lines the user never saw.
     if (forText !== (diff.data?.text ?? "")) {
       toast.info(STALE_HUNK_ACTION[kind]);
@@ -1202,7 +1200,7 @@ interface HunkActionProps {
   hunk: DiffHunk;
   staged: boolean;
   busy: boolean;
-  onHunkAction: (hunk: DiffHunk, kind: "stage" | "unstage" | "discard") => void;
+  onHunkAction: (hunk: DiffHunk, kind: HunkActionKind) => void;
 }
 
 /** Stage/Unstage + Discard for one hunk — used both overlaid on a `@@` row and
@@ -1272,11 +1270,7 @@ function StagingDiffView({
   busy: boolean;
   selection: SelectedLine[] | null;
   onSelect: (lines: SelectedLine[] | null, forText: string) => void;
-  onHunkAction: (
-    hunk: DiffHunk,
-    kind: "stage" | "unstage" | "discard",
-    forText: string,
-  ) => void;
+  onHunkAction: (hunk: DiffHunk, kind: HunkActionKind, forText: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRepo = useUiStore((s) => s.repoPath);
@@ -1288,10 +1282,8 @@ function StagingDiffView({
   // click carries `deferredText`, and the parent refuses it once the live text
   // has moved past the display.
   const viewHunks = useDeferredValue(hunks);
-  const onDisplayedHunkAction = (
-    hunk: DiffHunk,
-    kind: "stage" | "unstage" | "discard",
-  ) => onHunkAction(hunk, kind, deferredText);
+  const onDisplayedHunkAction = (hunk: DiffHunk, kind: HunkActionKind) =>
+    onHunkAction(hunk, kind, deferredText);
   // Hard-shorten over-long lines before rendering so a file with lines in the
   // 4K–20K band can't freeze the un-virtualized renderer here either (past the
   // mega threshold it falls back to the whole-file surface). DISPLAY-ONLY:
@@ -1545,7 +1537,7 @@ function StagingDiffView({
   // buttons. The overlay lives inside the scrolled content, so it tracks scroll
   // without a listener; re-measure only on rebuild/expand/collapse/resize. A
   // mutation's measure commits in the same task as the rows it moved (see the
-  // MutationObserver below), so no frame paints rows apart from their buttons.
+  // MutationObserver below), so its rows never paint apart from their buttons.
   const [measured, setMeasured] = useState<{
     forFile: DiffFile | null;
     forHunks: DiffHunk[] | null;
@@ -1553,7 +1545,9 @@ function StagingDiffView({
   }>({ forFile: null, forHunks: null, list: [] });
   // The settle report, hunk 0's header and the overlay all read this list,
   // stamped with the diffFile and hunks measured: positions measured for other
-  // rows put live buttons on wrong lines, so they hide until a re-measure.
+  // rows put live buttons on wrong lines, so they hide until a re-measure. A
+  // superseded effect's observer can still measure before its cleanup runs,
+  // but it stamps only its own old identity, which this check rejects.
   const anchors =
     measured.forFile === diffFile && measured.forHunks === viewHunks
       ? measured.list
@@ -1562,14 +1556,10 @@ function StagingDiffView({
     const container = containerRef.current;
     if (!container || !diffFile) return;
     let raf = 0;
-    // A superseded effect's observer still sees the commit that replaced it, and
-    // its old hunks must not measure the new rows.
-    let live = true;
     // The library builds its rows in a passive effect plus a later sync commit,
     // so this effect's own measure can run before they exist; the mutation that
     // inserts them measures again.
     const measure = () => {
-      if (!live) return;
       const rootTop = container.getBoundingClientRect().top;
       const list = viewHunks.map((h) => {
         const row =
@@ -1624,7 +1614,6 @@ function StagingDiffView({
     });
     mo.observe(container, { childList: true, subtree: true });
     return () => {
-      live = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
       mo.disconnect();
