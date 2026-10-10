@@ -2116,9 +2116,10 @@ async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
 /// the ignored one (and `merge --abort` then deletes it; measured, git 2.51.1). A
 /// candidate's ancestors on disk as a file or symlink count too, which the merge would
 /// replace with a directory; a directory ancestor only receives the new file. Tracked
-/// paths never qualify, as `check-ignore` skips them; an ignored directory at an added
-/// file's path does (measured). Not covered: a file written between this check and the
-/// merge, and a criss-cross history, whose three-dot diff takes just one merge base.
+/// paths never qualify, as `check-ignore` skips them. A directory at a candidate's path,
+/// which the merge would remove whole, counts when it is ignored itself or holds ignored
+/// files (measured). Not covered: a file written between this check and the merge, and a
+/// criss-cross history, whose three-dot diff takes just one merge base.
 async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec<String>> {
     let changed = run_git(
         Some(holder),
@@ -2135,48 +2136,92 @@ async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec
     .await?;
     let dir = std::path::Path::new(holder);
     let changed = changed.stdout_lossy();
-    let mut seen = HashSet::new();
-    let mut on_disk: Vec<&str> = Vec::new();
+    // Diff paths are unique and, being one tree's, never a prefix of each other, so the
+    // prefix memo is the only dedupe needed: a repeat prefix is already a candidate or a
+    // known directory.
+    let mut probed = HashSet::new();
+    let (mut files, mut folders): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
     for path in changed.split('\0').filter(|p| !p.is_empty()) {
-        let ancestors = path
-            .match_indices('/')
-            .map(|(at, _)| &path[..at])
-            .filter(|prefix| {
+        for (at, _) in path.match_indices('/') {
+            let prefix = &path[..at];
+            let file = || {
                 dir.join(prefix)
                     .symlink_metadata()
                     .is_ok_and(|m| !m.is_dir())
-            });
-        let itself = Some(path).filter(|p| dir.join(p).symlink_metadata().is_ok());
-        for candidate in ancestors.chain(itself) {
-            if seen.insert(candidate) {
-                on_disk.push(candidate);
+            };
+            if probed.insert(prefix) && file() {
+                files.push(prefix);
+            }
+        }
+        match dir.join(path).symlink_metadata() {
+            Ok(meta) if meta.is_dir() => folders.push(path),
+            Ok(_) => files.push(path),
+            Err(_) => {}
+        }
+    }
+
+    let mut in_the_way = Vec::new();
+    if !files.is_empty() {
+        let checked = crate::git::runner::run_git_raw_input(
+            Some(holder),
+            &["check-ignore", "--stdin", "-z"],
+            Some(&files.join("\0")),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        // Exit 1 is git's "none of these is ignored"; anything past it is a failure.
+        match checked.code {
+            0 => in_the_way.extend(nul_separated(&checked.stdout_lossy())),
+            1 => {}
+            code => {
+                return Err(AppError::Git {
+                    code,
+                    stderr: checked.full_failure_text(),
+                })
             }
         }
     }
-    if on_disk.is_empty() {
-        return Ok(Vec::new());
+    if !folders.is_empty() {
+        // `check-ignore` on a folder's own name misses one that is not ignored itself but
+        // holds ignored files. This lists an ignored folder as `<dir>/`, else the ignored
+        // files inside, and for a folder of ONLY ignored files both (measured).
+        let specs: Vec<String> = folders.iter().map(|f| format!(":(literal){f}")).collect();
+        let mut args = vec![
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+            "--",
+        ];
+        args.extend(specs.iter().map(String::as_str));
+        let listed = run_git_raw(Some(holder), &args, DEFAULT_TIMEOUT).await?;
+        if listed.code != 0 {
+            return Err(AppError::Git {
+                code: listed.code,
+                stderr: listed.full_failure_text(),
+            });
+        }
+        let listed = nul_separated(&listed.stdout_lossy());
+        // A `<dir>/` entry with its own contents listed beside it names nothing new.
+        let covered = |p: &String| {
+            p.ends_with('/')
+                && listed
+                    .iter()
+                    .any(|q| q.len() > p.len() && q.starts_with(p.as_str()))
+        };
+        in_the_way.extend(listed.iter().filter(|p| !covered(p)).cloned());
     }
-    let checked = crate::git::runner::run_git_raw_input(
-        Some(holder),
-        &["check-ignore", "--stdin", "-z"],
-        Some(&on_disk.join("\0")),
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    // Exit 1 is git's "none of these is ignored"; anything past it is a failure.
-    match checked.code {
-        0 => Ok(checked
-            .stdout_lossy()
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect()),
-        1 => Ok(Vec::new()),
-        code => Err(AppError::Git {
-            code,
-            stderr: checked.full_failure_text(),
-        }),
-    }
+    Ok(in_the_way)
+}
+
+/// The non-empty entries of git's `-z` output.
+fn nul_separated(text: &str) -> Vec<String> {
+    text.split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The first three paths, then a count of the rest.
@@ -5580,7 +5625,7 @@ mod tests {
         let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
             .await
             .unwrap_err();
-        expect_failed_naming(&err, &porcelain, branch, "build");
+        expect_failed_naming(&err, &porcelain, branch, "build/");
         assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "artifact\n");
         assert_eq!(tip(&repo_s, branch).await, held_tip);
         assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
@@ -5629,6 +5674,34 @@ mod tests {
     #[tokio::test]
     async fn a_holder_ignored_file_the_base_adds_a_directory_over_is_kept() {
         assert_ignored_ancestor_survives("held-ignored-anc-ff", false).await;
+    }
+
+    /// A folder that is not ignored itself but holds only ignored files, where the base
+    /// adds a file of the folder's name: the merge would remove the folder, ignored
+    /// contents and all.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_holder_folder_of_ignored_files_the_base_adds_a_file_over_is_kept() {
+        let branch = "held-ignored-folder";
+        let (_guard, repo_s, main, holder, porcelain) = held_branch_repo(branch, branch).await;
+        let (_serialized, _override, _root) = holder_marker_root(&repo_s);
+        commit_file(&holder, "feature.txt", "feature\n").await;
+        let holder_dir = std::path::Path::new(&holder);
+        std::fs::write(holder_dir.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::create_dir_all(holder_dir.join("logs")).unwrap();
+        let local = holder_dir.join("logs").join("run.log");
+        std::fs::write(&local, "local log\n").unwrap();
+        commit_file(&repo_s, "logs", "tracked logs file\n").await;
+        let held_tip = tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, branch, &main, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        expect_failed_naming(&err, &porcelain, branch, "logs/run.log");
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), "local log\n");
+        assert_eq!(tip(&repo_s, branch).await, held_tip);
+        assert!(!crate::git::ops::op_state(&holder).await.unwrap().merging);
     }
 
     /// A file the base adds INSIDE an ignored directory destroys nothing there, so a
