@@ -1,5 +1,6 @@
-// React-free with type-only imports, so scripts/diff-pane-hold.test.mjs loads it
-// under Node's type stripping.
+// Which rows @git-diff-view renders for a diff: hunk starts, hunk 0's `@@` row,
+// and whether any rows render at all. React-free with type-only imports, so
+// scripts/diff-pane-hold.test.mjs loads it under Node's type stripping.
 import type { DiffHunk } from "@/lib/git/hunks";
 
 /** A hunk's first old/new line number, from its `@@ -a,b +c,d @@` header. */

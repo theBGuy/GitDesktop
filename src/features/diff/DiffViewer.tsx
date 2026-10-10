@@ -96,11 +96,7 @@ import {
   settlePane,
   startPaneHold,
 } from "./diff-pane-slots";
-import {
-  diffRendersRows,
-  firstHunkHasSepRow,
-  hunkStart,
-} from "./first-hunk-sep";
+import { diffRendersRows, firstHunkHasSepRow, hunkStart } from "./diff-rows";
 import { ImagePanes } from "./ImageDiff";
 import {
   canPreviewMarkdown,

@@ -454,7 +454,10 @@ export function CommitComments({
 
   return (
     <div className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t">
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+      <div
+        className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3"
+        aria-busy={held || undefined}
+      >
         <DegradedListNotice
           noun="comments"
           degraded={notice !== null}

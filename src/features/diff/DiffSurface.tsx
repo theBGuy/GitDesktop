@@ -60,7 +60,7 @@ import {
   useReportPaneSettled,
 } from "./diff-pane-hold";
 import "./code-highlight.css";
-import { diffRendersRows } from "./first-hunk-sep";
+import { diffRendersRows } from "./diff-rows";
 import { HUNK_SCOPED_MAX_LINES, hunkScopedProcessAST } from "./gap-isolation";
 import { djb2 } from "./highlight-worker-shared";
 import {

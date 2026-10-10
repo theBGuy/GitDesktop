@@ -1,5 +1,5 @@
 // Pins the Changes pane's single-swap pieces: the first hunk's `@@`-row
-// prediction (src/features/diff/first-hunk-sep.ts), which lets the line-1
+// prediction (src/features/diff/diff-rows.ts), which lets the line-1
 // header paint with the first rows; `diffRendersRows` (same module), which lets
 // a rowless diff settle at build instead of waiting out the hold bound; and the
 // two-slot hold's transitions (src/features/diff/diff-pane-slots.ts), which keep
@@ -33,7 +33,7 @@ import {
 import {
   diffRendersRows,
   firstHunkHasSepRow,
-} from "../src/features/diff/first-hunk-sep.ts";
+} from "../src/features/diff/diff-rows.ts";
 import { parseHunks } from "../src/lib/git/hunks.ts";
 
 // ---------------------------------------------------------- firstHunkHasSepRow
