@@ -18,7 +18,9 @@ export function RepoHeader({ repoPath }: { repoPath: string }) {
   const updateAvailable = Boolean(useUpdateCheck().data);
 
   return (
-    <header className="flex items-center gap-2 border-b px-3 py-2">
+    // The named container drives the compact layout of the branch, badges and
+    // repo switcher below 56rem of header content.
+    <header className="@container/repo-header flex items-center gap-2 border-b px-3 py-2">
       <Button
         variant="ghost"
         size="icon-sm"

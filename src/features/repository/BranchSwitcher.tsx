@@ -27,6 +27,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -2731,9 +2732,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <DisabledReasonButton
               variant="ghost"
               size="sm"
-              // The wrapper is the header's flex item, so it owns the shrink-20
-              // that makes the branch label collapse before the CI badge (4).
-              wrapperClassName="min-w-0 shrink-20"
+              // The wrapper is the header's flex item, so it owns the cascade
+              // weight: in a wide header the CI name (shrink-20) yields before
+              // this label (shrink-4); in a compact one the badges are icon-only
+              // and this label takes most of the pressure (20 against the repo
+              // name's 1) down to an 8-character floor, in the text-xs `ch` the
+              // button renders. A label of 9 characters or fewer never shrinks,
+              // so the floor can't pad it wider than its text.
+              wrapperClassName={
+                currentLabel.length > 9
+                  ? "min-w-[calc(9ch+3.125rem)] shrink-20 text-xs @4xl/repo-header:shrink-4"
+                  : "shrink-0"
+              }
               disabled={busy || amending}
               reason={(() => {
                 switch (true) {
@@ -2752,14 +2762,46 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               className="min-w-0 shrink overflow-hidden"
             >
               <GitBranchIcon data-icon="inline-start" />
-              <span
-                className="min-w-0 truncate"
-                // Sits under the wrapper's conditional title — a static or
-                // blanked title here would suppress that tooltip.
-                onMouseEnter={clipTitle(currentLabel)}
-              >
-                {currentLabel}
-              </span>
+              {(() => {
+                switch (true) {
+                  case status.data !== undefined:
+                    return (
+                      <span
+                        className="min-w-0 truncate"
+                        // Sits under the wrapper's conditional title — a static
+                        // or blanked title here would suppress that tooltip.
+                        onMouseEnter={clipTitle(currentLabel)}
+                      >
+                        {currentLabel}
+                      </span>
+                    );
+                  // A failed read holds still until the poll heals it: no
+                  // endless pulse over a status that isn't coming.
+                  case status.isError:
+                    return (
+                      <>
+                        <span aria-hidden className="text-muted-foreground">
+                          —
+                        </span>
+                        <span className="sr-only">
+                          Couldn't read the branch status
+                        </span>
+                      </>
+                    );
+                  // The bar holds the label floor's width, so the settled name
+                  // moves the header less; the span keeps the button's content
+                  // inline.
+                  default:
+                    return (
+                      <>
+                        <span aria-hidden className="flex shrink-0">
+                          <Skeleton className="h-3 w-[9ch]" />
+                        </span>
+                        <span className="sr-only">Checking branch…</span>
+                      </>
+                    );
+                }
+              })()}
               {head?.detached && (
                 <Badge variant="secondary" className="ml-1 shrink-0">
                   detached

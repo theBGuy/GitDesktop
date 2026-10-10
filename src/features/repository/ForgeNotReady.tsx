@@ -118,7 +118,7 @@ export function ForgeNotReady({
   // provider is ALSO null for repos whose remote gh simply can't identify (gh
   // signed out, an unrecognized host) — publishing those would create an orphan
   // project and then fail adding `origin`.
-  const providers = usePublishProviders(
+  const { providers } = usePublishProviders(
     repoPath,
     provider == null && Boolean(forge.data) && noOrigin,
   );
