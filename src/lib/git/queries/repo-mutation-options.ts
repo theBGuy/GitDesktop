@@ -5,7 +5,8 @@ import type { QueryClient } from "@tanstack/react-query";
 
 type QueryKeys = readonly (readonly unknown[])[];
 
-/** The key lists a `useRepoMutation` call invalidates, captured when it starts. */
+/** A `useRepoMutation` render's invalidation lists; `onMutate` returns the
+ *  starting render's as its context. */
 export interface RepoMutationKeys {
   invalidate: QueryKeys;
   invalidateAfter: QueryKeys;
