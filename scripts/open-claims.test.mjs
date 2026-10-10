@@ -36,6 +36,11 @@ test("checking a claim consumes nothing", () => {
   const a = claims.claim();
   const b = claims.claim();
   assert.equal(a(), false);
+  assert.equal(a(), false);
+  assert.equal(b(), true);
+  assert.equal(b(), true);
+  // Nor does taking a watermark in between.
+  claims.watermark();
   assert.equal(b(), true);
 });
 

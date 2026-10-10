@@ -931,17 +931,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       } catch {
         // fall through
       }
-      // BELOW the try/catch, so every exit passes it — resolved, rejected, and
-      // found-nothing alike. This await outlives its render and everything past
-      // here is a global write, so every read that GATES that write is re-taken:
-      // the repo (acting would target the one the user left), the attempt (the
-      // popover reopens while a stalled lookup is out, so a later pick already
-      // started its own switch), and amend mode (entered elsewhere meanwhile; a
-      // checkout would strand it) — plus `hasChangesRef` and the removal store
-      // below, which read live. The reapply default stays the click render's
-      // value on purpose: it only seeds a checkbox the user then sees. A lookup
-      // that turned this click into a worktree OPEN also yields to a newer open
-      // or navigation made during it; one ending in a checkout doesn't.
+      // BELOW the try/catch, so every exit (resolved, rejected, found-nothing)
+      // re-takes each read that gates the global writes past here: the repo (else
+      // they hit the one the user left), the attempt (a later pick started its own
+      // switch), and amend mode (a checkout would strand it); `hasChangesRef` and
+      // the removal store read live. The reapply default stays the click render's
+      // value on purpose: it only seeds a checkbox the user then sees.
       const live = useUiStore.getState();
       if (
         switchRequest !== switchRequestRef.current ||
@@ -1952,17 +1947,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction("operation-history", () => setOpHistoryOpen(true));
   useHotkeyAction("discard-all", () => setDiscardAllOpen(true), hasChanges);
   // Cross-worktree navigation (palette-only). They can fire while the popover is
-  // closed, so they can't rely on the open-gated `userWorktrees` cache — fetch
-  // the worktree list fresh, like the delete-branch off-switch does. Both then
-  // re-check the live repo before acting on the answer: the lookup outlives the
-  // render it started in, and acting on its answer after a repo switch would
-  // navigate to (or offer to promote) a worktree of the repo the user just left.
-  // `useOpenWorktree`'s own guard can't see this window — it captures the live
-  // repo when it is CALLED, which is already after this await. Opening the main
-  // workspace also yields to a newer open or navigation made during the lookup,
-  // through a watermark rather than a claim (the lookup may end without an open).
+  // closed, so they fetch the worktree list fresh rather than read the open-gated
+  // `userWorktrees` cache, then re-check the live repo before acting: after a
+  // repo switch the answer would navigate to (or offer to promote) a worktree of
+  // the repo the user just left. `useOpenWorktree`'s own guard can't see this
+  // window — it captures the live repo when CALLED, already after this await.
   useHotkeyAction("open-main-workspace", async () => {
     setOpen(false);
+    // A watermark, not a claim: the lookup may end without an open.
     const noNewerOpen = repoOpenWatermark();
     try {
       const wts = await listUserWorktrees(repoPath);
