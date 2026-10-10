@@ -1,8 +1,11 @@
-// Pins `useRepoMutation`'s invalidation target: a mutation refreshes the repo it
-// RAN on, even when its mounted observer is re-rendered for another repo before it
-// settles. react-query replaces a pending mutation's whole options object on that
-// re-render, so keys read from the settle-time closure land on the live repo; the
-// builder captures them in `onMutate`'s context instead.
+// Pins `useRepoMutation`'s invalidation target: whatever a mutation invalidates,
+// it invalidates for the repo it started on, plus the current repo when that
+// differs, even when its mounted observer is re-rendered for another repo before
+// it settles. react-query replaces a pending mutation's whole options object on
+// that re-render, so keys read from the settle-time closure alone land on the
+// live repo; the builder captures them in `onMutate`'s context and settles the
+// union. The current repo is in the union because a write that parked offline
+// runs the RETARGETED mutationFn on reconnect.
 //
 // The builder lives in an import-free module so Node's type stripping can load it
 // directly. The import is DYNAMIC because this file also pulls
@@ -19,11 +22,13 @@ try {
     ...(await import("../src/lib/git/queries/repo-mutation-options.ts")),
     QueryClient: rq.QueryClient,
     MutationObserver: rq.MutationObserver,
+    onlineManager: rq.onlineManager,
   };
 } catch (e) {
   if (process.env.GD_EXPECT_DEPS) throw e;
 }
-const { QueryClient, MutationObserver, repoMutationCallbacks } = deps ?? {};
+const { QueryClient, MutationObserver, onlineManager, repoMutationCallbacks } =
+  deps ?? {};
 
 const NEEDS_DEPS =
   "needs node_modules — an installed run with GD_EXPECT_DEPS enforces this";
@@ -102,37 +107,86 @@ test("premise: a retargeted observer runs the NEW options' callbacks", async (t)
   gate.resolve("ok");
   await settled;
   // If this ever reads ["A"], react-query stopped retargeting pending mutations
-  // and the context capture below is no longer what protects the target.
+  // and the union below is no longer needed to protect the target.
   assert.deepEqual(ran, ["B"]);
 });
 
-test("default arm: a retargeted success invalidates exactly the starting repo's keys", async (t) => {
+/** The starting repo's keys, then the current repo's, each list in turn. */
+const BOTH = [
+  "repo/A/status",
+  "repo/B/status",
+  "repo/A/history",
+  "repo/B/history",
+];
+
+test("default arm: a retargeted success invalidates the starting repo's keys and the current ones", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const invalidated = await retargetedRun({
     refetchBeforeSuccess: false,
     fail: false,
   });
-  // NEGATIVE CONTROL: reading the keys from the settle-time closure instead of
-  // the onMutate context turns this into repo B's keys.
-  assert.deepEqual(named(invalidated), ["repo/A/status", "repo/A/history"]);
+  // NEGATIVE CONTROL: reading the keys from the settle-time closure alone, instead
+  // of the union with the onMutate context, drops repo A's keys.
+  assert.deepEqual(named(invalidated), BOTH);
 });
 
-test("default arm: a retargeted failure still invalidates the starting repo's keys", async (t) => {
+test("default arm: a retargeted failure invalidates both repos' keys too", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const invalidated = await retargetedRun({
     refetchBeforeSuccess: false,
     fail: true,
   });
-  assert.deepEqual(named(invalidated), ["repo/A/status", "repo/A/history"]);
+  assert.deepEqual(named(invalidated), BOTH);
 });
 
-test("refetchBeforeSuccess arm: a retargeted success awaits A's keys, then defers A's", async (t) => {
+test("refetchBeforeSuccess arm: a retargeted success awaits both repos' keys, then defers both", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const invalidated = await retargetedRun({
     refetchBeforeSuccess: true,
     fail: false,
   });
-  assert.deepEqual(named(invalidated), ["repo/A/status", "repo/A/history"]);
+  assert.deepEqual(named(invalidated), BOTH);
+});
+
+// The timeout makes a react-query that stops resuming paused mutations fail
+// here instead of stalling the run.
+test("a write parked offline runs the retargeted mutationFn and refreshes both repos once each", {
+  timeout: 10_000,
+}, async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const { qc, invalidated } = spyClient();
+  // Mounted, so a reconnect resumes paused mutations the way the app's client does.
+  qc.mount();
+  const ran = [];
+  // The default "online" networkMode: the write parks while offline.
+  const optionsOn = (repo) => ({
+    mutationFn: async () => {
+      ran.push(repo);
+      return "ok";
+    },
+    ...repoMutationCallbacks(qc, keysFor(repo), false, () => {}),
+  });
+  onlineManager.setOnline(false);
+  try {
+    const observer = new MutationObserver(qc, optionsOn("A"));
+    const settled = observer.mutate(undefined);
+    await sleep(0);
+    assert.equal(observer.getCurrentResult().isPaused, true);
+    const [mutation] = qc.getMutationCache().getAll();
+    // onMutate ran before the write parked: the context holds A's keys.
+    assert.deepEqual(mutation.state.context, keysFor("A"));
+    observer.setOptions(optionsOn("B"));
+    onlineManager.setOnline(true);
+    await settled;
+    await sleep(0);
+    // Pre-existing react-query behavior, pinned as a named fact: the retargeted
+    // mutationFn is the one that runs on reconnect.
+    assert.deepEqual(ran, ["B"]);
+    assert.deepEqual(named(invalidated), BOTH);
+  } finally {
+    onlineManager.setOnline(true);
+    qc.unmount();
+  }
 });
 
 test("refetchBeforeSuccess arm: a failure invalidates nothing, in either repo", async (t) => {
@@ -146,8 +200,8 @@ test("refetchBeforeSuccess arm: a failure invalidates nothing, in either repo", 
 
 test("a settle with no captured context falls back to the current keys", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
-  // A mutation restored from dehydrated state skips onMutate, so its context
-  // is undefined at settle.
+  // Called with an undefined context, as for a mutation that settles without
+  // an `onMutate` context.
   const { qc, invalidated } = spyClient();
   const settle = repoMutationCallbacks(qc, keysFor("C"), false, () => {});
   settle.onSettled("ok", null, undefined, undefined);

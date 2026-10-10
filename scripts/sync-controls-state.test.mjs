@@ -317,7 +317,7 @@ test("(9) detached HEAD: Push and Pull held, caret explains it too", () => {
   assert.deepEqual(s.hotkeys, { ...NO_HOTKEYS, fetch: true });
 });
 
-test("(9b) a branch with no commits: Publish branch held until the first commit", () => {
+test("(9b) a branch with no commits: Publish branch held until the first commit, and Pull says so", () => {
   const unborn = head({ name: "main", oid: null, upstream: null });
   const s = deriveSyncControls(input({ head: unborn }));
   assert.equal(s.pushLabel, "Publish branch");
@@ -327,6 +327,13 @@ test("(9b) a branch with no commits: Publish branch held until the first commit"
       "Publish branch — main has no commits yet; make your first commit to publish it",
   });
   assert.equal(s.pushName, s.push.reason);
+  // Neither Pull nor the caret points at the held Publish.
+  assert.deepEqual(s.pull, {
+    disabled: true,
+    reason:
+      "Pull — main has no commits yet; make your first commit, then publish the branch",
+  });
+  assert.deepEqual(s.pullOptions, { disabled: true, reason: s.pull.reason });
   assert.equal(s.hotkeys.push, false);
   assert.equal(s.hotkeys.fetch, true);
   // Offline still outranks the state's own description.
@@ -360,6 +367,7 @@ test("(9c) an unborn branch with an upstream: Pull never claims the remote branc
   });
   assert.equal(s.hotkeys.push, false);
   assert.equal(s.hotkeys.pull, false);
+  assert.deepEqual(s.pullOptions, { disabled: true, reason: s.pull.reason });
 });
 
 test("(9d) unborn detection is strict: only oid === null on a branch", () => {

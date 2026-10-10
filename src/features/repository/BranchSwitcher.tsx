@@ -1622,13 +1622,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // `?? 0` for the counts. Asserting the absence on that value tells a user with
   // a dirty tree on `master` that HEAD is detached and nothing is uncommitted,
   // so no arm may assert an absence until its own read has actually answered.
-  // All four are unconditional, so `isPending` is the first-answer window and
-  // nothing else. A failed first read leaves the SAME undefined value a pending
-  // one does, so it gets its own arm rather than the assertion — and it isn't
-  // even short-lived: the query client retries once, only `status` polls, so for
-  // branches/defaultBranch/stashCount the failure stands until a refocus or an
-  // invalidation. Each value below is null once its read has answered, and
-  // otherwise the honest reason it can't.
+  // All four are unconditional, so `isPending` means no answer yet, including a
+  // refetch of a read that has only ever failed, which the sticky failure arm
+  // inside `unread` outranks. A failed first read leaves the SAME undefined
+  // value a pending one does, so it gets its own arm rather than the
+  // assertion — and it isn't even short-lived: the query client retries once,
+  // only `status` polls, so for branches/defaultBranch/stashCount the failure
+  // stands until a refocus or an invalidation. Each value below is null once
+  // its read has answered, and otherwise the honest reason it can't.
   const unread = (
     q: { isPending: boolean; errorUpdateCount: number; data: unknown },
     checking: string,

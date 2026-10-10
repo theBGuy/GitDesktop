@@ -155,6 +155,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // reads as gone whether or not the remote branch exists; claim neither.
     if (unborn && head.upstreamGone)
       return `Pull — ${head.name} has no commits yet, so it can't be compared with ${upstream}`;
+    // Publish is held until the first commit, so the advice names that first.
+    if (unborn && !upstream)
+      return `Pull — ${head.name} has no commits yet; make your first commit, then publish the branch`;
     // Configured-but-dead (deleted on the remote, e.g. after a merge) is not
     // never-published; say so.
     if (head.upstreamGone)
@@ -206,7 +209,10 @@ export function deriveSyncControls(input: SyncControlsInput) {
     const disabled = busy || pending !== undefined || empty;
     if (busy) return { disabled, reason: SYNC_BUSY_REASON };
     if (pending !== undefined) return { disabled, reason: pending };
-    if (detached) return { disabled, reason: pullDescription };
+    // An unborn branch has no commits to reconcile, upstream or not, and the
+    // empty menu's reason would point at Publish, which Push holds until the
+    // first commit; the caret repeats the Pull description instead.
+    if (detached || unborn) return { disabled, reason: pullDescription };
     return {
       disabled,
       reason: empty ? PULL_OPTIONS_UNPUBLISHED_REASON : undefined,
