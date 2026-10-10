@@ -75,10 +75,13 @@ export function useSaveSharedBranchRules(repo: string) {
       saveSharedBranchRules(repo, config),
     // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
+    // Built at mutate time and read back from the context: the settle callbacks
+    // run off the current render's options, and the dialog survives a repo switch.
+    onMutate: () => ({ key: sharedBranchRulesKey(repo) }),
     // This checkout's key only, unlike the personal save: the file lives in each
     // working tree, so no other checkout's read changed.
-    onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: sharedBranchRulesKey(repo) }),
+    onSettled: (_d, _e, _config, ctx) =>
+      ctx && queryClient.invalidateQueries({ queryKey: ctx.key }),
   });
 }
 
