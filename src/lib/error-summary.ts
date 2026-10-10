@@ -24,6 +24,7 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   conflict: "Merge conflict",
   pullRebaseWouldDrop: "Pull blocked",
   busy: "Operation in progress",
+  branchHeld: "Branch in use",
   notARepo: "Not a Git repository",
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",
@@ -803,6 +804,18 @@ export function presentError(e: unknown): ErrorPresentation {
     if (e.kind === "pullRebaseWouldDrop") {
       const message = e.message ?? "";
       return { label, summary: message, fullText: message, long: false };
+    }
+
+    // Its first line is the app's own sentence; git's merge output may follow it
+    // from ANOTHER checkout, so the conflict scan below must never read it.
+    if (e.kind === "branchHeld") {
+      const message = e.message ?? "";
+      return {
+        label,
+        summary: firstMeaningfulLine(message),
+        fullText: message,
+        long: nonEmptyLineCount(message) > 1,
+      };
     }
 
     // The structured variant first: the Rust layer already named the paused

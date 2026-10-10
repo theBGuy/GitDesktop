@@ -4,6 +4,7 @@ import {
   ArrowUpIcon,
   CaretDownIcon,
   CheckIcon,
+  CircleNotchIcon,
   CloudArrowDownIcon,
   CloudSlashIcon,
   CloudXIcon,
@@ -38,7 +39,7 @@ import {
 } from "@/lib/branch-rules/queries";
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
-import { isDirtyTreeRefusal } from "@/lib/error-summary";
+import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import { forgeDetectForkPrForBranch } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import {
@@ -58,6 +59,7 @@ import {
   useForgeStatus,
   useHardResetToCommit,
   useMergeBranch,
+  usePendingLocalPrWrites,
   usePrList,
   usePush,
   useRebaseBranch,
@@ -110,7 +112,8 @@ import {
   useWorktreeRemovals,
   WORKTREE_PROMOTING_MESSAGE,
 } from "@/lib/stores/worktree-removal";
-import { toastError } from "@/lib/toast";
+import { isAppError } from "@/lib/tauri/invoke";
+import { errorToastAction, toastError } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -188,6 +191,21 @@ const PR_STATE_LABEL: Record<PrAuditState, string> = {
   merged: "Merged",
   closed: "Closed",
 };
+
+/** `branches` (already sorted) reordered by a snapshot of names: snapshot names in
+ *  snapshot order, then branches the snapshot lacks in their sorted order. Names
+ *  gone from `branches` drop out; a null snapshot keeps the sorted order. */
+function applyFrozenOrder(
+  branches: Branch[],
+  frozen: readonly string[] | null,
+): Branch[] {
+  if (frozen === null) return branches;
+  const rank = new Map(frozen.map((name, i) => [name, i] as const));
+  const known = branches
+    .filter((b) => rank.has(b.name))
+    .sort((a, b) => (rank.get(a.name) ?? 0) - (rank.get(b.name) ?? 0));
+  return [...known, ...branches.filter((b) => !rank.has(b.name))];
+}
 
 function MenuRow({
   disabled,
@@ -606,20 +624,30 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }),
     [allBranches, defaultName],
   );
+  // Row ORDER freezes while the list is open, so an update that moves a branch's
+  // commit date doesn't reorder rows under the pointer; row data stays live.
+  // Snapshotted IN the open transition, so the first open frame already paints
+  // it — `onOpenChange` and the show-branches hotkey are the only ways in.
+  const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
+  const snapshotOrder = () => setFrozenOrder(sortedBranches.map((b) => b.name));
+  const orderedBranches = useMemo(
+    () => applyFrozenOrder(sortedBranches, frozenOrder),
+    [sortedBranches, frozenOrder],
+  );
   const bq = branchFilter.trim().toLowerCase();
   const visibleBranches = useMemo(
     () =>
-      sortedBranches.filter(
+      orderedBranches.filter(
         (b) => !b.archived && (!bq || b.name.toLowerCase().includes(bq)),
       ),
-    [sortedBranches, bq],
+    [orderedBranches, bq],
   );
   const archivedBranches = useMemo(
     () =>
-      sortedBranches.filter(
+      orderedBranches.filter(
         (b) => b.archived && (!bq || b.name.toLowerCase().includes(bq)),
       ),
-    [sortedBranches, bq],
+    [orderedBranches, bq],
   );
   // Both dialogs stay mounted, so the name-generation queries gate on one being
   // open AND on AI being usable at all — otherwise a Hide-AI or unconfigured
@@ -1322,6 +1350,59 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     });
   }
 
+  // Another checkout holds the branch and the update couldn't run there: the
+  // remedy is opening that checkout, so the refusal toasts with it as the action
+  // and any git output behind the first line rides Details in the cancel slot.
+  function toastBranchHeld(e: unknown) {
+    if (!isAppError(e) || e.kind !== "branchHeld") return false;
+    const holder = e.holder;
+    const holderEntry = (userWorktrees.data ?? []).find(
+      (w) => normPath(w.path) === normPath(holder),
+    );
+    const presentation = presentError(e);
+    toast.error(presentation.summary, {
+      duration: 8000,
+      // A session holder is a checkout the app keeps out of view (agent sessions,
+      // update husks), so only the user's own worktrees get the open remedy.
+      action:
+        e.reason === "session"
+          ? undefined
+          : {
+              label: rowCheckoutCopy(holderEntry?.isMain).open,
+              onClick: () => {
+                // Read at FIRE time: the toast outlives the render's removal
+                // snapshot, and a removal or promote may have started since.
+                if (
+                  refuseWhileLeaving(
+                    holder,
+                    Boolean(
+                      useWorktreeRemovalStore.getState().byRepo[repoPath]?.[
+                        holder
+                      ],
+                    ),
+                  )
+                )
+                  return;
+                setOpen(false);
+                void openWorktree(holder);
+              },
+            },
+      cancel: presentation.long ? errorToastAction(presentation) : undefined,
+    });
+    return true;
+  }
+
+  // The menu can outlive the state that disabled its update items, and a
+  // promote's claim never re-renders it. A worktree removal doesn't wait on the
+  // working-tree lock a holder update takes, so the two must never overlap.
+  function refuseUpdateWhileHolderLeaving(target: string) {
+    const holder = worktreeByBranch.get(target);
+    return (
+      holder !== undefined &&
+      refuseWhileLeaving(holder, removingPaths.has(holder))
+    );
+  }
+
   // Pull the latest from the default branch into `target` without switching to
   // it (unless it's already current): fast-forwards when possible, otherwise
   // merges via a throwaway worktree so the working tree — and its watchers —
@@ -1329,7 +1410,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   async function doUpdateFromDefault(target: string) {
     if (!defaultName || target === defaultName) return;
     const base = defaultName;
-    setOpen(false);
+    // Only an in-place update can open the recovery dialog over the list; every
+    // other row updates with the popover open and refreshes in place.
+    if (target === currentName) setOpen(false);
     // The guard below reads not-a-promotion from the stand-in config while the
     // rules are still loading, so it would pass vacuously — refuse instead of
     // inverting a flow a settled rule names as promotion.
@@ -1350,17 +1433,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseUpdateWhileHolderLeaving(target)) return;
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
         base,
       });
       toast.success(
-        outcome === "up-to-date"
+        outcome.outcome === "up-to-date"
           ? `${target} is already up to date with ${base}`
           : `Updated ${target} from ${base}`,
       );
     } catch (e) {
+      if (toastBranchHeld(e)) return;
       if (!beginUpdateRecovery(e, target, base)) onError(e);
     }
   }
@@ -1369,22 +1454,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // it out — the "just merged a PR, bring master current before I switch back"
   // flow. Merges in place when `target` is current, fast-forwards otherwise.
   async function doUpdateFromUpstream(target: string, base: string) {
-    setOpen(false);
+    if (target === currentName) setOpen(false);
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseUpdateWhileHolderLeaving(target)) return;
     try {
       const outcome = await updateBranchFrom.mutateAsync({
         branch: target,
         base,
       });
       toast.success(
-        outcome === "up-to-date"
+        outcome.outcome === "up-to-date"
           ? `${target} is already up to date with ${base}`
           : `Updated ${target} from ${base}`,
       );
     } catch (e) {
+      if (toastBranchHeld(e)) return;
       if (!beginUpdateRecovery(e, target, base)) onError(e);
     }
   }
@@ -1495,6 +1582,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   }
 
+  // Every in-flight branch update in this repo, branch → base, read from the
+  // mutation cache: the observer tracks only its latest call, and updates on
+  // different rows run in parallel.
+  const localWrites = usePendingLocalPrWrites(repoPath);
+  const updatingBase = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const w of localWrites)
+      if (w.kind === "update-from" && w.head !== null)
+        map.set(w.head, w.base ?? "");
+    return map;
+  }, [localWrites]);
+  // Stamped by the update items, read by the popup's click-capture handler.
+  const fallThroughGuardUntil = useRef(0);
   const busy =
     detecting ||
     checkout.isPending ||
@@ -1503,7 +1603,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     rebaseBranch.isPending ||
     rebaseOnto.isPending ||
     push.isPending ||
-    updateBranchFrom.isPending ||
+    // Only an in-place update holds the surface; other rows update in parallel.
+    (currentName !== null && updatingBase.has(currentName)) ||
     resetToUpstream.isPending ||
     hardReset.isPending ||
     switchAutostash.isPending ||
@@ -1638,7 +1739,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // Hotkey handlers reuse the menu's own flows, so every gate (clean tree,
   // stash count, picker availability) and confirm dialog applies equally.
-  useHotkeyAction("show-branches", () => setOpen(true), !amending);
+  useHotkeyAction(
+    "show-branches",
+    () => {
+      if (!open) snapshotOrder();
+      setOpen(true);
+    },
+    !amending,
+  );
   // Push-to-origin: ONE open-aware handler drives both shapes, because the popup
   // is non-modal — a two-handler split lets a focus-outside press act on the
   // wrong branch. The action is ORIGIN-scoped everywhere (label, help text,
@@ -1794,7 +1902,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     () => void updateDefaultFromUpstream(),
     Boolean(defaultBranchRow?.upstream) &&
       !defaultBranchRow?.upstreamGone &&
-      !busy,
+      !busy &&
+      // `busy` holds only the current branch's update; this one holds on the
+      // same per-branch read the row items use.
+      !(defaultBranchRow && updatingBase.has(defaultBranchRow.name)),
   );
   useHotkeyAction(
     "merge-into-current",
@@ -1901,6 +2012,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // A promotion branch takes its changes through promotions, so the one-click
     // update from the default branch is withheld.
     const rowPromotion = isPromotionBranch(rulesConfig, branch.name);
+    // An update in flight on THIS row holds only its own update items.
+    const rowUpdateBase = updatingBase.get(branch.name);
+    const rowUpdating = rowUpdateBase !== undefined;
     // Archiving hides a branch from the branch surfaces, so it's refused for a
     // branch that is somewhere in use: the one you're on, the default, and one
     // another worktree has checked out. Unarchiving is never refused — an
@@ -1922,6 +2036,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // alone holds carry the reason in the label. A structural reason always
     // wins — this arm shows only where nothing else explains the dimming.
     const busySuffix = busy ? " (operation in progress)" : "";
+    // The update items hold on their own row's update, and on the CURRENT row
+    // also on `busy`: an in-place merge must not start under another HEAD-moving
+    // op. Other rows stay free of `busy` so updates run in parallel.
+    const rowUpdateHeld = rowUpdating || (branch.isCurrent && busy);
+    const updateHeldReason = (() => {
+      if (rowUpdating) return "updating…";
+      if (branch.isCurrent && busy) return "operation in progress";
+      return undefined;
+    })();
     const rowWorktreeRemoving = Boolean(
       rowWorktree && removingPaths.has(rowWorktree.path),
     );
@@ -1930,6 +2053,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const renameWorktreeBlockedReason = (() => {
       if (rowWorktree?.isMain) return rowCopy.noun;
       if (rowWorktree?.isLocked) return "locked";
+      if (rowUpdating) return "updating…";
+      return undefined;
+    })();
+    const deleteWorktreeBlockedReason = (() => {
+      if (rowWorktree?.isMain) return rowCopy.noun;
+      if (rowUpdating) return "updating…";
+      return undefined;
+    })();
+    // A promote also removes this worktree, so it races an in-flight update the
+    // same way a removal does.
+    const promoteBlockedReason = (() => {
+      if (rowWorktree?.isLocked) return "locked";
+      if (rowUpdating) return "updating…";
       return undefined;
     })();
     // Best-effort by design: a null `defaultName` (still loading, or unresolvable)
@@ -2229,8 +2365,25 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       </span>
                     );
                   })()}
+                {/* The spinner takes the date's auto margin so the two sit
+                    together in the row's right cluster. */}
+                {rowUpdating && (
+                  <span
+                    role="img"
+                    aria-label={`Updating from ${rowUpdateBase}`}
+                    className="ml-auto flex shrink-0 items-center text-muted-foreground"
+                    title={`Updating from ${rowUpdateBase}`}
+                  >
+                    <CircleNotchIcon className="size-3 animate-spin" />
+                  </span>
+                )}
                 {branch.lastCommitDate && (
-                  <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+                  <span
+                    className={cn(
+                      "shrink-0 text-[11px] text-muted-foreground",
+                      !rowUpdating && "ml-auto",
+                    )}
+                  >
                     <RelativeTime date={branch.lastCommitDate} />
                   </span>
                 )}
@@ -2246,11 +2399,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <>
               {canUpdate && (
                 <ContextMenuItem
-                  disabled={busy || rowPromotion}
-                  onClick={() => void doUpdateFromDefault(branch.name)}
+                  disabled={
+                    rowUpdateHeld || rowPromotion || rowWorktreeRemoving
+                  }
+                  onClick={() => {
+                    fallThroughGuardUntil.current = Date.now() + 300;
+                    void doUpdateFromDefault(branch.name);
+                  }}
                 >
-                  Update from {defaultName}
-                  {rowPromotion ? " (promotion branch)" : busySuffix}
+                  {rowPromotion
+                    ? `Update from ${defaultName} (promotion branch)`
+                    : wtLabel(`Update from ${defaultName}`, updateHeldReason)}
                 </ContextMenuItem>
               )}
               {/* Pull the branch's own upstream in without switching — the star
@@ -2296,13 +2455,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }
                   return (
                     <ContextMenuItem
-                      disabled={busy}
-                      onClick={() =>
-                        void doUpdateFromUpstream(branch.name, base)
-                      }
+                      disabled={rowUpdateHeld || rowWorktreeRemoving}
+                      onClick={() => {
+                        fallThroughGuardUntil.current = Date.now() + 300;
+                        void doUpdateFromUpstream(branch.name, base);
+                      }}
                     >
-                      Update from {base}
-                      {busySuffix}
+                      {wtLabel(`Update from ${base}`, updateHeldReason)}
                     </ContextMenuItem>
                   );
                 })()}
@@ -2350,8 +2509,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               <ContextMenuSeparator />
             </>
           )}
-          <ContextMenuItem onClick={() => openRename(branch.name)}>
-            Rename branch…
+          <ContextMenuItem
+            disabled={rowUpdating}
+            onClick={() => openRename(branch.name)}
+          >
+            Rename branch…{rowUpdating ? " (updating…)" : ""}
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() => copyText(branch.name, "Branch name copied")}
@@ -2387,11 +2549,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 Copy path
               </ContextMenuItem>
               <ContextMenuItem
-                // git worktree move refuses the main worktree and a locked one.
+                // git worktree move refuses the main worktree and a locked one;
+                // it doesn't wait on an update running inside, so that holds too.
                 disabled={
                   rowWorktree.isMain ||
                   rowWorktree.isLocked ||
-                  rowWorktreeRemoving
+                  rowWorktreeRemoving ||
+                  rowUpdating
                 }
                 onClick={() => {
                   setOpen(false);
@@ -2436,29 +2600,28 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   so it needs a linked worktree with a branch. */}
               {!rowWorktree.isMain && !rowWorktree.isDetached && (
                 <ContextMenuItem
-                  disabled={rowWorktree.isLocked || rowWorktreeRemoving}
+                  disabled={
+                    rowWorktree.isLocked || rowWorktreeRemoving || rowUpdating
+                  }
                   onClick={() => {
                     setOpen(false);
                     setPromoteTarget(rowWorktree);
                   }}
                 >
-                  {wtLabel(
-                    "Promote to main workspace…",
-                    rowWorktree.isLocked ? "locked" : undefined,
-                  )}
+                  {wtLabel("Promote to main workspace…", promoteBlockedReason)}
                 </ContextMenuItem>
               )}
               <ContextMenuItem
-                disabled={rowWorktree.isMain || rowWorktreeRemoving}
+                // A removal mid-update races it: removal doesn't wait on the update's lock.
+                disabled={
+                  rowWorktree.isMain || rowWorktreeRemoving || rowUpdating
+                }
                 onClick={() => {
                   setOpen(false);
                   setRemoveWorktreeTarget(rowWorktree);
                 }}
               >
-                {wtLabel(
-                  "Delete worktree…",
-                  rowWorktree.isMain ? rowCopy.noun : undefined,
-                )}
+                {wtLabel("Delete worktree…", deleteWorktreeBlockedReason)}
               </ContextMenuItem>
               <ContextMenuSeparator />
             </>
@@ -2554,10 +2717,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       <Popover.Root
         open={open}
         onOpenChange={(o) => {
+          if (o && !open) snapshotOrder();
           setOpen(o);
           if (!o) {
             setBranchFilter("");
             setActiveBranch(null);
+            setFrozenOrder(null);
           }
         }}
       >
@@ -2615,6 +2780,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               // Arrow keys move through the branch rows whether focus is on the
               // filter input, a row, or the popup itself (Esc/Tab pass through).
               onKeyDown={onBranchKeyDown}
+              // The closing context menu ignores pointer events for its ~100ms fade,
+              // so a click meant for an update item lands on popup content beneath it
+              // (any row, the bottom actions); 300ms of capture swallows it. DOM
+              // descendants only: the portaled menu is a React child here too.
+              onClickCapture={(e) => {
+                if (
+                  Date.now() < fallThroughGuardUntil.current &&
+                  e.currentTarget.contains(e.target as Node)
+                ) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }
+              }}
             >
               {inLinkedWorktree && (
                 <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2 text-[11px]">

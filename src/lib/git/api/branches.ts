@@ -138,12 +138,24 @@ export interface BranchMergeState {
 export const gitBranchMergeStates = (repoPath: string, pairs: MergePair[]) =>
   invoke<BranchMergeState[]>("git_branch_merge_states", { repoPath, pairs });
 
-/** Resolves to "up-to-date" | "fast-forward" | "merge". */
+/** What an update did. `holder` is the other checkout the update ran inside (the
+ *  `worktree list --porcelain` path spelling) when another checkout holds the
+ *  branch, else null. */
+export type UpdateBranchOutcome = {
+  outcome: "merge" | "up-to-date" | "fast-forward";
+  holder: string | null;
+};
+
 export const gitUpdateBranchFrom = (
   repoPath: string,
   branch: string,
   base: string,
-) => invoke<string>("git_update_branch_from", { repoPath, branch, base });
+) =>
+  invoke<UpdateBranchOutcome>("git_update_branch_from", {
+    repoPath,
+    branch,
+    base,
+  });
 
 /** Current tip SHA of each requested local branch (one for-each-ref call).
  *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */

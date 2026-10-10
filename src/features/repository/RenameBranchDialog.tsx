@@ -89,7 +89,8 @@ export function RenameBranchDialog({
     },
   };
   // The open session a rename settles against: minted by the [target] seed (each
-  // open and hotkey retarget), dropped by every close. A name compare can't tell
+  // open and hotkey retarget), dropped by every close this dialog makes (a
+  // host-side close is re-minted over by the next seed). A name compare can't tell
   // a same-named branch reopened in the next repo (this dialog outlives repo
   // switches), and a repo compare would leave a dialog open across the switch.
   const sessionRef = useRef<object | null>(null);
