@@ -333,11 +333,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   reads (`warmRepoShell`, a 250 ms budget on cold keys), records it in recents,
   and switches only if no newer open or navigation arrived — never a
   hand-rolled `addRecent` → `openRepo`. A caller whose own awaits are part of
-  the request claims first (`claimRepoOpen`). The known bypasses call `openRepo`
-  directly (RepoDialogs' failure reopen, a worktree promote's landing), warm
-  without recording (`useOpenWorktree`), or switch without warming (the store
-  navigators' cross-repo arms: notification and My work jumps). The reads that
-  paint the repo view stay cached `REPO_SHELL_GC_TIME`
+  the request claims first (`claimRepoOpen`); one whose pre-open await may end
+  in something other than an open (BranchSwitcher's worktree lookups) takes
+  `repoOpenWatermark()` and yields to a newer open instead. The known bypasses
+  call `openRepo` directly (RepoDialogs' failure reopen, a worktree promote's
+  landing), warm without recording (`useOpenWorktree`), or switch without
+  warming (the store navigators' cross-repo arms: notification and My work
+  jumps). The reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
   (`src/lib/query-cache-times.ts`) through curated `<thing>Options` factories:
   the local ones are spread by their hook and the warm-up, the network-backed
   ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. Never a

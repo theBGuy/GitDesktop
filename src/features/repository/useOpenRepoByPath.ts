@@ -20,25 +20,23 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { createOpenClaims } from "./open-claims";
 import { warmRepoShell } from "./repo-shell-prefetch";
 
-/** Request order across every open this module makes, recorded or worktree.
- *  Recents writes serialize, so an earlier open would otherwise land first and
- *  retire the newer one through the epoch check; numbering requests keeps the
- *  latest the winner. Direct `openRepo` callers aren't numbered: they retire
- *  pending opens through the epoch bump instead. */
-let latestOpenRequest = 0;
+/** Every open this module makes, recorded or worktree, numbered against the
+ *  store's `interactionEpoch` (its settle-late contract). Direct `openRepo`
+ *  callers aren't numbered: they retire pending opens through the epoch bump. */
+const openClaims = createOpenClaims(
+  () => useUiStore.getState().interactionEpoch,
+);
 
-/** Claims an open at its REQUEST: the returned check passes only while no newer
- *  open was requested and no other navigation moved `interactionEpoch` (the
- *  store's settle-late contract). */
-export function claimRepoOpen(): () => boolean {
-  const request = ++latestOpenRequest;
-  const epoch = useUiStore.getState().interactionEpoch;
-  return () =>
-    request === latestOpenRequest &&
-    useUiStore.getState().interactionEpoch === epoch;
-}
+/** Claims an open at its REQUEST; the check fails once a newer open or any
+ *  navigation arrives. */
+export const claimRepoOpen = openClaims.claim;
+
+/** Notes the latest open without claiming one; the check fails once a newer
+ *  open or any navigation arrives. */
+export const repoOpenWatermark = openClaims.watermark;
 
 /**
  * The shared tail for opening a repo the user picked, once its path has
@@ -56,9 +54,11 @@ export function claimRepoOpen(): () => boolean {
  * settings-write failure must never block opening. Resolves whether it switched.
  * Callers whose own awaits are part of the open request (drop, Recents, the
  * folder picker, a submodule opened as a repo) claim before those awaits and
- * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; clone,
- * create, and Explore's clone open their own result and take the default, a
- * claim at their completion.
+ * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
+ * whose pre-open await may end in something other than an open (BranchSwitcher's
+ * worktree lookups) takes {@link repoOpenWatermark} and yields to a newer open
+ * instead. Clone, create, and Explore's clone open their own result and take the
+ * default, a claim at their completion.
  */
 export function useOpenRecordedRepo() {
   const openRepo = useUiStore((s) => s.openRepo);

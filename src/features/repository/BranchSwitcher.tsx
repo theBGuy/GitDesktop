@@ -144,7 +144,7 @@ import { RebaseOntoDialog } from "./RebaseOntoDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
-import { useOpenWorktree } from "./useOpenRepoByPath";
+import { repoOpenWatermark, useOpenWorktree } from "./useOpenRepoByPath";
 import {
   reportAutostashOutcome,
   useStashReapplyRecovery,
@@ -910,6 +910,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       !userWorktrees.isError &&
       (userWorktrees.data === undefined || userWorktrees.isFetching)
     ) {
+      // A watermark, not a claim: the lookup usually ends in a plain checkout,
+      // and a claim here would retire a pending repo open on every cold click.
+      const noNewerOpen = repoOpenWatermark();
       try {
         // Shared options, not a second spelling: this key's `networkMode:
         // "always"` is what keeps an offline read from PARKING forever, and a
@@ -936,12 +939,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // started its own switch), and amend mode (entered elsewhere meanwhile; a
       // checkout would strand it) — plus `hasChangesRef` and the removal store
       // below, which read live. The reapply default stays the click render's
-      // value on purpose: it only seeds a checkbox the user then sees.
+      // value on purpose: it only seeds a checkbox the user then sees. A lookup
+      // that turned this click into a worktree OPEN also yields to a newer open
+      // or navigation made during it; one ending in a checkout doesn't.
       const live = useUiStore.getState();
       if (
         switchRequest !== switchRequestRef.current ||
         live.repoPath !== repoPath ||
-        live.amendingHash !== null
+        live.amendingHash !== null ||
+        (wtPath !== undefined && !noNewerOpen())
       )
         return;
     }
@@ -1952,12 +1958,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // render it started in, and acting on its answer after a repo switch would
   // navigate to (or offer to promote) a worktree of the repo the user just left.
   // `useOpenWorktree`'s own guard can't see this window — it captures the live
-  // repo when it is CALLED, which is already after this await.
+  // repo when it is CALLED, which is already after this await. Opening the main
+  // workspace also yields to a newer open or navigation made during the lookup,
+  // through a watermark rather than a claim (the lookup may end without an open).
   useHotkeyAction("open-main-workspace", async () => {
     setOpen(false);
+    const noNewerOpen = repoOpenWatermark();
     try {
       const wts = await listUserWorktrees(repoPath);
-      if (useUiStore.getState().repoPath !== repoPath) return;
+      if (useUiStore.getState().repoPath !== repoPath || !noNewerOpen()) return;
       const main = wts.find((w) => w.isMain);
       if (!main) {
         toast.error("Couldn't find the main workspace for this repository.");
