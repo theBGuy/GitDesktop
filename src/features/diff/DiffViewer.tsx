@@ -1511,17 +1511,18 @@ function StagingDiffView({
   // leading gap → no marker), so a positional map mis-places + mis-fires the
   // buttons. The overlay lives inside the scrolled content, so it tracks scroll
   // without a listener; re-measure only on rebuild/expand/collapse/resize.
-  // Stamped with the diffFile measured, since a refetch rebuilds it.
   const [measured, setMeasured] = useState<{
     forFile: DiffFile | null;
+    forHunks: DiffHunk[] | null;
     list: { top: number; sep: boolean }[];
-  }>({ forFile: null, list: [] });
-  // Two readers, two lists. The settle report and hunk 0's header take the
-  // stamped list, empty until a measure of the current diffFile lands. The
-  // overlay keeps the last measured list instead, so the stamp alone never
-  // unmounts its buttons; it skips hunk 0 while the header stands in for it,
-  // so a stale `@@` anchor can't double those buttons.
-  const anchors = measured.forFile === diffFile ? measured.list : [];
+  }>({ forFile: null, forHunks: null, list: [] });
+  // The settle report, hunk 0's header and the overlay all read this list,
+  // stamped with the diffFile and hunks measured: other positions paired with
+  // these hunks put live buttons on wrong rows, so they hide until re-measure.
+  const anchors =
+    measured.forFile === diffFile && measured.forHunks === hunks
+      ? measured.list
+      : [];
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
@@ -1530,6 +1531,7 @@ function StagingDiffView({
       const rootTop = container.getBoundingClientRect().top;
       setMeasured({
         forFile: diffFile,
+        forHunks: hunks,
         list: hunks.map((h) => {
           const row =
             rowForLine(container, "new", hunkStart(h, "new")) ??
@@ -1649,8 +1651,8 @@ function StagingDiffView({
         diffViewWrap
         diffViewFontSize={12}
       />
-      {measured.list.map((a, i) =>
-        hunks[i] && a.sep && a.top >= 0 && !(i === 0 && firstNeedsHeader) ? (
+      {anchors.map((a, i) =>
+        hunks[i] && a.sep && a.top >= 0 ? (
           // Buttons sit ON the `@@` separator row (never on code), right-aligned
           // to clear the native expand controls. mousedown-stop so a button
           // press never starts a drag-select.
