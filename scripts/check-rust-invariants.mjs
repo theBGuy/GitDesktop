@@ -31,26 +31,29 @@
 //      rev-taking argv) resolves to a same-named tag first. A branch-first
 //      resolver (`git::branches::branch_first_rev`) or the measured tip sha
 //      (`git::branches::branch_tip_sha`) is the replacement.
-//
 //   H. merge into a checkout without the ignored-file guard — merge-ort ignores
 //      --no-overwrite-ignore on 3-way merges, so checkout merges check first.
 //
-// Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
-// RULE: the lists only shrink by default. Adding an entry is a reviewed change —
-// it needs a rationale naming the guard that makes the site safe (a validator
-// call, a trusted producer), and it lands in review like any other diff. A
-// (file, fn) entry covers every site in that function, so entries are pruned
-// when their site goes away rather than left behind to pre-authorize whatever
-// the function grows next. The one exception is an entry carrying `retiring`
-// (why its site is about to go): once nothing matches it, it prints a NOTE
-// instead of failing, so a parallel change removing the site stays green.
+// Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
+// H's rows may add `builder: true` (the function's own argv sites are allowed,
+// and every caller or reference of it must guard instead), `item: true` (`fn`
+// names a const/static whose argv-shaped value is not a git command) or
+// `guard: true` (`fn` wraps the guard: its calls count as guard calls, and the
+// check fails unless that function's own body calls ignored_files_in_the_way).
+// RATCHET RULE: the lists only shrink by default. Adding an entry is a
+// reviewed change — it needs a rationale naming the guard that makes the
+// site safe (a validator call, a trusted producer), and it lands in review
+// like any other diff. A (file, fn) entry covers every site in that
+// function, so entries are pruned when their site goes away rather than left
+// behind to pre-authorize whatever the function grows next. The one
+// exception is an entry carrying `retiring` (why its site is about to go):
+// once nothing matches it, it prints a NOTE instead of failing, so a
+// parallel change removing the site stays green.
 //
 // Run: node scripts/check-rust-invariants.mjs
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { stripComments } from "./check-banned-patterns.mjs";
 
 const SRC = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -809,8 +812,8 @@ function stderrValueVerdict(value, lines, ctorIdx) {
 }
 
 export function checkStderrOnlyGitError(file, _src, lines, hits) {
-  const code = stripComments(lines);
-  const codeSrc = code.join("\n");
+  const codeSrc = lexRust(lines.join("\n")).code;
+  const code = codeSrc.split("\n");
   const spans = testModuleSpans(codeSrc);
   GIT_CTOR_RE.lastIndex = 0;
   for (let m = GIT_CTOR_RE.exec(codeSrc); m; m = GIT_CTOR_RE.exec(codeSrc)) {
@@ -853,7 +856,7 @@ const SHORT_REF_FIX =
   "allowlist a deliberate REV use with rationale";
 
 export function checkShortRefNames(file, _src, lines, hits) {
-  const codeSrc = stripComments(lines).join("\n");
+  const codeSrc = lexRust(lines.join("\n")).code;
   const spans = testModuleSpans(codeSrc);
   SHORT_REF_RE.lastIndex = 0;
   for (let m = SHORT_REF_RE.exec(codeSrc); m; m = SHORT_REF_RE.exec(codeSrc)) {
@@ -933,8 +936,8 @@ function argvElements(body) {
 }
 
 export function checkBareBranchRevs(file, _src, lines, hits) {
-  const code = stripComments(lines);
-  const codeSrc = code.join("\n");
+  const codeSrc = lexRust(lines.join("\n")).code;
+  const code = codeSrc.split("\n");
   const spans = testModuleSpans(codeSrc);
   const inTest = (idx) => spans.some(([s, e]) => idx > s && idx < e);
   const report = (idx, name) => {
@@ -987,10 +990,145 @@ export function checkBareBranchRevs(file, _src, lines, hits) {
   }
 }
 
-// The initial argv literal owns the verdict; flags pushed later do not grant
-// the ff-only exemption. Function spans and literal masking keep a neighbor's,
-// nested function's, comment's or string's guard from authorizing this merge.
+// ----------------------------------------------------------------- rust lexer
+
+const WORD = /[\p{ID_Continue}]/u;
+
+/** A Rust source's two scan views, each exactly the input's length with every
+ *  newline kept, so offsets and line numbers carry across both. `code` blanks
+ *  comments (line, block, and NESTED block) and keeps literals; `masked` also
+ *  blanks every literal (strings across lines and escapes, raw `r#"…"#`, byte
+ *  and C strings, char literals) and lifetime ticks. A line-based stripper is
+ *  not enough: a `/*` on a multi-line string's continuation line opens a
+ *  comment that never closes, blanking the rest of the file — a pass on all of
+ *  it — and a lifetime read as an open quote revives the comment after it.
+ *  `unterminated` is the offset of a literal or comment that runs off the end
+ *  (everything after it is unreadable), or -1. Callers only read the views,
+ *  so checks D, F, G and H share one lexing of each file. */
+let lexed = { text: null, views: null };
+export function lexRust(text) {
+  if (lexed.text === text) return lexed.views;
+  const code = text.split("");
+  const masked = text.split("");
+  let unterminated = -1;
+  const blank = (view, from, to) => {
+    for (let k = from; k < to; k++) if (text[k] !== "\n") view[k] = " ";
+  };
+  const runsOff = (from) => {
+    if (unterminated < 0) unterminated = from;
+    return text.length;
+  };
+  // Past the closing quote of the escape-aware string opening at `open`.
+  const quoted = (open) => {
+    for (let j = open + 1; j < text.length; j++) {
+      if (text[j] === "\\") j++;
+      else if (text[j] === '"') return j + 1;
+    }
+    return runsOff(open);
+  };
+  // Past a char literal's closing quote, or -1 when the tick opens a lifetime
+  // or label (`'a`, `'_`, `'static`, `'outer:`).
+  const charEnd = (open) => {
+    const escaped = /^'\\(?:u\{[0-9a-fA-F_]*\}|x[0-9a-fA-F]{2}|[\s\S])'/.exec(
+      text.slice(open, open + 16),
+    );
+    if (escaped) return open + escaped[0].length;
+    const point = text.codePointAt(open + 1);
+    if (point === undefined || text[open + 1] === "'") return -1;
+    const width = point > 0xffff ? 2 : 1;
+    return text[open + 1 + width] === "'" ? open + 2 + width : -1;
+  };
+  for (let i = 0; i < text.length; ) {
+    const c = text[i];
+    if (c === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i);
+      const end = nl < 0 ? text.length : nl;
+      blank(code, i, end);
+      blank(masked, i, end);
+      i = end;
+    } else if (c === "/" && text[i + 1] === "*") {
+      let depth = 0;
+      let j = i;
+      while (j < text.length) {
+        if (text[j] === "/" && text[j + 1] === "*") {
+          depth++;
+          j += 2;
+        } else if (text[j] === "*" && text[j + 1] === "/") {
+          j += 2;
+          if (--depth === 0) break;
+        } else j++;
+      }
+      if (depth > 0) runsOff(i);
+      blank(code, i, j);
+      blank(masked, i, j);
+      i = j;
+    } else if (c === '"') {
+      const end = quoted(i);
+      blank(masked, i, end);
+      i = end;
+    } else if (c === "'") {
+      const end = charEnd(i);
+      if (end < 0) {
+        masked[i] = " ";
+        i++;
+      } else {
+        blank(masked, i, end);
+        i = end;
+      }
+    } else if (WORD.test(c)) {
+      // Literal prefixes are only prefixes at a token start, which this is.
+      const raw = /^(?:b|c)?r(#*)"/.exec(text.slice(i, i + 260));
+      let end = -1;
+      if (raw) {
+        const close = `"${raw[1]}`;
+        const at = text.indexOf(close, i + raw[0].length);
+        end = at < 0 ? runsOff(i) : at + close.length;
+      } else if ((c === "b" || c === "c") && text[i + 1] === '"') {
+        end = quoted(i + 1);
+      } else if (c === "b" && text[i + 1] === "'") {
+        end = charEnd(i + 1);
+      }
+      if (end > 0) {
+        blank(masked, i, end);
+        i = end;
+      } else {
+        while (i < text.length && WORD.test(text[i])) i++;
+      }
+    } else i++;
+  }
+  const views = { code: code.join(""), masked: masked.join(""), unterminated };
+  lexed = { text, views };
+  return views;
+}
+
+// ------------------------------------------------------------------- check H
+
+// Rows key on (file, fn) like every other list, with two extensions. A
+// `builder` row allowlists the argv sites inside that function and turns every
+// MENTION of its name (a call, or a function reference like `.map(f)`) into a
+// site that must be guarded where it sits. An `item` row names a const/static
+// whose argv-shaped value is not a git command line; every other const argv is
+// checked at each in-file use, and at its definition when `pub` or unused. A
+// `guard` row names a wrapper around ignored_files_in_the_way: a call to it
+// counts as a guard call anywhere, and the row is verified (its function must
+// exist in `file` and call ignored_files_in_the_way itself).
+//
+// Known false positives, each remedied by a reviewed row rather than a parser:
+// a non-argv string list led by "merge"/"pull" (`for op in ["merge", …]`,
+// `[…].contains(x)`) — an `item` or fn row; a non-git receiver taking the word
+// (`PathBuf::push("merge")`, `path_segments_mut().push("merge")`,
+// `Arg::new("merge")`); safe ff-only shapes outside one array literal (a
+// `.args([…])` chain, error text naming --overwrite-ignore, `-c merge.ff=only`);
+// `#[cfg(any(test, …))]` items and `#![cfg(test)]` files, scanned as
+// production; a const TABLE of argvs, whose inner arrays report `<unresolved>`.
 export const MERGE_GUARD_ALLOWLIST = [
+  {
+    file: "forge/gitlab.rs",
+    fn: "MERGE_METHODS",
+    item: true,
+    rationale:
+      "GitLab merge-method names an MR input is validated against, never a git argv",
+  },
   {
     file: "git/branches.rs",
     fn: "verify_pin_and_merge",
@@ -1015,41 +1153,289 @@ export const MERGE_GUARD_ALLOWLIST = [
   },
 ];
 
-function mergeArgLiteral(text) {
-  const from = /^String\s*::\s*from\s*\(([\s\S]*)\)$/.exec(text.trim());
-  const value = (from?.[1] ?? text).trim();
-  const literal = /^"([^"\\]*)"(?:\s*\.\s*(?:to_string|into)\s*\(\s*\))?$/.exec(
-    value,
+const MERGE_GUARD_FIX =
+  "merge/pull into a checkout must call ignored_files_in_the_way under its " +
+  "working-tree hold before writing. Scope is the FUNCTION, with no dominance " +
+  "check: a guard call anywhere in it covers every merge in it, so a merge " +
+  "added to an already-guarded function passes, and an allowlisted (file, fn) " +
+  "pre-authorizes any merge that function grows";
+
+/** What check H cannot see, printed with its verdict so a green run is read for
+ *  what it covers. */
+export const MERGE_GUARD_NOTE =
+  "Not seen: a verb or leading global option held in a parameter, a function " +
+  "result, another file's const, or a variable reassigned after its `let`; an " +
+  "if/match arm that is neither a value nor a diverging return/panic; a verb " +
+  "handed to a helper as its own argument rather than inside the argv; argv " +
+  "assembled across functions or by iterator adapters (`once`, `chain` over " +
+  "non-literal parts), VecDeque push_front/push_back, a non-zero insert " +
+  "index, extend(Some(…)), index assignment (`a[0] = …`), smallvec!, or a " +
+  'labeled-break array; verb spellings `&"merge"[..]`, from_str/from_bytes, ' +
+  "stringify!, format! with arguments, `as &str`, Into::into, a `{ … }` block, " +
+  "tuple destructuring; argv split out of one string or built by concat! or a " +
+  "macro_rules! expansion; a merge option's VALUE (-m, -F, -s, -X, " +
+  "--into-name) spelling --no-overwrite-ignore or a control op; an " +
+  "--overwrite-ignore held in a variable the resolver cannot read; a builder " +
+  "re-exported under another name and called from a third file; git run " +
+  "through a shell command string";
+
+// git's global options that take their value as the NEXT element (git.c
+// handle_options, git 2.51.1); every other leading `-…` element is a flag or
+// carries its value after `=`.
+const GIT_VALUE_OPTIONS = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--config-env",
+  "--attr-source",
+  "--shallow-file",
+]);
+const CONTROL_FLAGS = ["--abort", "--continue", "--quit"];
+const OVERWRITE_IGNORE_RE = /(?<![\w-])--overwrite-ignore(?![\w-])/;
+// Words after which a `[` opens an array rather than indexing. Not `let`: a
+// `[` after `let`, `if let` or `while let` is always a slice pattern.
+const EXPR_KEYWORDS = new Set([
+  "box",
+  "break",
+  "else",
+  "if",
+  "in",
+  "match",
+  "move",
+  "mut",
+  "return",
+  "while",
+  "yield",
+]);
+
+/** The string a Rust literal token spells, or undefined when `t` is not
+ *  exactly one string literal. */
+function literalValue(t) {
+  const raw = /^(?:b|c)?r(#*)"([\s\S]*)"\1$/.exec(t);
+  if (raw) return raw[2].includes(`"${raw[1]}`) ? undefined : raw[2];
+  const str = /^(?:b|c)?"((?:[^"\\]|\\[\s\S])*)"$/.exec(t);
+  if (!str) return undefined;
+  const simple = { n: "\n", t: "\t", r: "\r", 0: "\0" };
+  return str[1].replace(
+    /\\(?:\n\s*|u\{([0-9a-fA-F_]+)\}|x([0-9a-fA-F]{2})|([\s\S]))/g,
+    (_, u, x, ch) => {
+      if (u)
+        return String.fromCodePoint(Number.parseInt(u.replace(/_/g, ""), 16));
+      if (x) return String.fromCharCode(Number.parseInt(x, 16));
+      return ch === undefined ? "" : (simple[ch] ?? ch);
+    },
   );
-  return literal?.[1];
 }
 
-function mergeArrayArgs(text, open) {
-  return argvElements(bracketBody(text, open)).map((el) =>
-    mergeArgLiteral(el.text),
-  );
-}
-
-export function checkMergeIgnoredGuard(file, _src, lines, hits) {
-  const src = stripComments(lines).join("\n");
-  const masked = src.split("");
-  for (let i = 0; i < src.length; i++) {
-    const end = literalEnd(src, i);
-    if (end < 0) continue;
-    for (let j = i; j <= end; j++) {
-      if (src[j] !== "\n") masked[j] = " ";
+// The expression after the last top-level `;` of a block body (its value).
+function tailExpr(text) {
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    const lit = literalEnd(text, i);
+    if (lit >= 0) {
+      i = lit;
+      continue;
     }
-    i = end;
+    if ("([{".includes(text[i])) depth++;
+    else if (")]}".includes(text[i])) depth--;
+    else if (depth === 0 && text[i] === ";") from = i + 1;
   }
-  const code = masked.join("");
-  const tests = testModuleSpans(code);
+  return text.slice(from).trim();
+}
+
+// Index of the first `{` outside brackets in `t` from `from`, skipping literals.
+function openBrace(t, from) {
+  let depth = 0;
+  for (let i = from; i < t.length; i++) {
+    const lit = literalEnd(t, i);
+    if (lit >= 0) {
+      i = lit;
+      continue;
+    }
+    if ("([".includes(t[i])) depth++;
+    else if (")]".includes(t[i])) depth--;
+    else if (t[i] === "{" && depth === 0) return i;
+  }
+  return -1;
+}
+
+/** Each arm's expression text in a `match` body. */
+function matchArms(body) {
+  const arms = [];
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const lit = literalEnd(body, i);
+    if (lit >= 0) {
+      i = lit;
+      continue;
+    }
+    const c = body[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0 && c === "=" && body[i + 1] === ">") {
+      let j = i + 2;
+      while (j < body.length && /\s/.test(body[j])) j++;
+      let end = j;
+      if (body[j] === "{") end = j + braceBody(body, j).length + 2;
+      else {
+        for (let d = 0; end < body.length; end++) {
+          const l = literalEnd(body, end);
+          if (l >= 0) end = l;
+          else if ("([{".includes(body[end])) d++;
+          else if (")]}".includes(body[end])) d--;
+          else if (d === 0 && body[end] === ",") break;
+        }
+      }
+      arms.push(body.slice(j, end));
+      i = end;
+    }
+  }
+  return arms;
+}
+
+const DIVERGES_RE =
+  /^(?:return\b|break\b|continue\b|(?:panic|unreachable|todo|unimplemented)\s*!)/;
+
+/** An if/else or match arm's possible values: [] for an arm that diverges. */
+function armValues(text, resolve) {
+  let t = text.trim();
+  if (t.startsWith("{")) {
+    const body = braceBody(t, 0);
+    if (t.slice(body.length + 2).trim() !== "") return undefined;
+    t = tailExpr(body);
+  }
+  return DIVERGES_RE.test(t) ? [] : argValues(t, resolve);
+}
+
+/** The union of an `if`/`else` or `match` expression's arm values when every
+ *  arm resolves, undefined when one does not, null when `t` is neither. */
+function branchValues(t, resolve) {
+  const head = /^(if|match)\b/.exec(t);
+  if (!head) return null;
+  const open = openBrace(t, head[0].length);
+  if (open < 0) return undefined;
+  const body = braceBody(t, open);
+  const rest = t.slice(open + body.length + 2).trim();
+  let arms;
+  if (head[1] === "match") {
+    if (rest !== "") return undefined;
+    arms = matchArms(body).map((arm) => armValues(arm, resolve));
+  } else {
+    const otherwise = /^else\b\s*/.exec(rest);
+    if (!otherwise) return undefined;
+    const tail = rest.slice(otherwise[0].length);
+    const other = tail.startsWith("{")
+      ? armValues(tail, resolve)
+      : (branchValues(tail, resolve) ?? undefined);
+    arms = [armValues(`{${body}}`, resolve), other];
+  }
+  if (arms.length === 0 || arms.some((arm) => arm === undefined))
+    return undefined;
+  return [...new Set(arms.flat())];
+}
+
+/** The strings an argv element expression can evaluate to, as far as the text
+ *  shows: a literal through borrows, zero-argument conversions (`.to_owned()`,
+ *  `.into()`), `…::from` / `…::new` / `Cow` wrappers and a placeholder-free
+ *  `format!`; the union of an if/else or match whose arms all resolve; or a
+ *  name through `resolve`. A `format!` with placeholders keeps its template
+ *  only when option-shaped (`--git-dir={dir}`). undefined = opaque. */
+function argValues(text, resolve) {
+  let t = text.trim();
+  for (;;) {
+    const before = t;
+    t = t.replace(/^(?:&\s*(?:mut\s+)?|\*\s*)/, "").trim();
+    const call =
+      /^([\s\S]*?)\s*\.\s*[A-Za-z_]\w*\s*(?:::\s*<[^()]*>\s*)?\(\s*\)$/.exec(
+        t,
+      ) ??
+      /^(?:[A-Za-z_]\w*\s*::\s*)*(?:from|new|Borrowed|Owned)\s*\(([\s\S]*)\)$/.exec(
+        t,
+      ) ??
+      /^\(([\s\S]*)\)$/.exec(t);
+    if (call) t = call[1].trim();
+    if (t === before) break;
+  }
+  const branches = branchValues(t, resolve);
+  if (branches !== null) return branches;
+  const format =
+    /^format\s*!\s*[([{]\s*((?:b|c)?r(#*)"[\s\S]*?"\2|"(?:[^"\\]|\\[\s\S])*")/.exec(
+      t,
+    );
+  if (format) {
+    const template = literalValue(format[1]);
+    if (template === undefined) return undefined;
+    if (!template.replace(/\{\{|\}\}/g, "").includes("{"))
+      return [template.replace(/\{\{/g, "{").replace(/\}\}/g, "}")];
+    return template.startsWith("-") ? [template] : undefined;
+  }
+  const literal = literalValue(t);
+  if (literal !== undefined) return [literal];
+  const path = /^(?:(?:[A-Za-z_]\w*|<[^<>]*>)\s*::\s*)*([A-Za-z_]\w*)$/.exec(t);
+  return path ? resolve(path[1]) : undefined;
+}
+
+/** Index of the argv VERB in `elements`: the first element past git's leading
+ *  global options, or null when that slot is opaque (a variable, a call).
+ *  Opaque splices (`.args(prefix)`) are passed over as options-only; an
+ *  element that may be a non-option (one arm of an if) is the verb slot. */
+function argvVerb(elements) {
+  for (let k = 0; k < elements.length; k++) {
+    const el = elements[k];
+    if (el.opaque) continue;
+    if (el.values === undefined) return null;
+    if (!el.values.every((v) => v.startsWith("-"))) return k;
+    if (el.values.some((v) => GIT_VALUE_OPTIONS.has(v))) k++;
+  }
+  return null;
+}
+
+// An element's one possible value, or undefined. Exemptions are granted only
+// by a definite flag; anything that may void one counts on any arm.
+const definite = (el) =>
+  !el.opaque && el.values?.length === 1 ? el.values[0] : undefined;
+
+/** Start of the postfix expression (`args`, `self.cmd`, `Command::new("git")`,
+ *  `f(x).y`) that ends just before `end` in `masked`. */
+function exprStart(masked, end) {
+  let p = end;
+  for (;;) {
+    let q = p - 1;
+    while (q >= 0 && /\s/.test(masked[q])) q--;
+    if (q < 0) return p;
+    if (masked[q] === ")" || masked[q] === "]") {
+      let depth = 0;
+      for (; q >= 0; q--) {
+        if (")]}".includes(masked[q])) depth++;
+        else if ("([{".includes(masked[q]) && --depth === 0) break;
+      }
+      if (q < 0) return p;
+      p = q;
+      continue;
+    }
+    if (!WORD.test(masked[q])) return p;
+    while (q >= 0 && WORD.test(masked[q])) q--;
+    p = q + 1;
+    let r = q;
+    while (r >= 0 && /\s/.test(masked[r])) r--;
+    if (masked[r] === ".") p = r;
+    else if (masked[r] === ":" && masked[r - 1] === ":") p = r - 1;
+    else return p;
+  }
+}
+
+/** Every `fn` with a body: name, signature start and brace span. */
+function rustFunctions(masked) {
   const functions = [];
   const signature = /\bfn\s+(\w+)/g;
-  for (let m = signature.exec(code); m; m = signature.exec(code)) {
+  for (let m = signature.exec(masked); m; m = signature.exec(masked)) {
     let depth = 0;
     let open = -1;
-    for (let i = m.index + m[0].length; i < code.length; i++) {
-      const char = code[i];
+    for (let i = m.index + m[0].length; i < masked.length; i++) {
+      const char = masked[i];
       if (depth === 0 && char === ";") break;
       if (depth === 0 && char === "{") {
         open = i;
@@ -1059,112 +1445,460 @@ export function checkMergeIgnoredGuard(file, _src, lines, hits) {
       else if (")]".includes(char)) depth--;
     }
     if (open < 0) continue;
-    const close = open + 1 + braceBody(code, open).length;
+    const close = open + 1 + braceBody(masked, open).length;
     functions.push({ name: m[1], start: m.index, open, close });
   }
+  return functions;
+}
 
-  const record = (at, builderCall = false) => {
-    if (tests.some(([s, e]) => at > s && at < e)) return;
-    const enclosing = functions
-      .filter((fn) => at > fn.open && at < fn.close)
-      .at(-1);
-    if (enclosing) {
-      let body = code.slice(enclosing.open + 1, enclosing.close);
-      // A nested function is another operation, not a check in its caller.
-      for (const nested of functions) {
-        if (nested.start <= enclosing.open || nested.close >= enclosing.close)
-          continue;
-        const start = nested.start - enclosing.open - 1;
-        const end = nested.close - enclosing.open;
-        body = body.slice(0, start) + " ".repeat(end - start) + body.slice(end);
-      }
-      // A guard anywhere in the body counts; there is no dominance analysis.
-      if (/\bignored_files_in_the_way\s*\(/.test(body)) return;
-    }
-    const fn = enclosing?.name ?? "<unresolved>";
+// An argv is any SEQUENCE of elements that can reach git: an array literal
+// (`[…]`, `&[…]`, `vec!` with any delimiter) wherever it sits, or a receiver's
+// elements in source order — its `let`/assignment initializer, then each
+// `.push`/`.insert`/`.extend`/`.extend_from_slice`/`.arg`/`.args`. The verb is
+// the first element past git's global options; a `merge`/`pull` verb makes a
+// site. Control-op flags exempt only from inside the verb's own UNIT (its
+// literal or its one chained call expression), since a separate push may be
+// conditional; the ff-only pair exempts only from inside the verb's literal.
+export function checkMergeIgnoredGuard(
+  file,
+  _src,
+  lines,
+  hits,
+  allowlist = MERGE_GUARD_ALLOWLIST,
+) {
+  const { code, masked, unterminated } = lexRust(lines.join("\n"));
+  if (unterminated >= 0) {
     hits.push({
       file,
-      line: src.slice(0, at).split("\n").length,
-      fn,
-      allowlisted: !builderCall && allowed(MERGE_GUARD_ALLOWLIST, file, fn),
-      fix:
-        "merge/pull into a checkout must call ignored_files_in_the_way " +
-        "under its working-tree hold before writing",
+      line: code.slice(0, unterminated).split("\n").length,
+      fn: "<unreadable>",
+      allowlisted: false,
+      fix: "a literal or comment opening here never closes, so the rest of the file is unreadable to this check — fix the source, or the lexer in scripts/check-rust-invariants.mjs",
     });
+  }
+  const tests = testModuleSpans(masked);
+  const inTest = (at) => tests.some(([s, e]) => at > s && at < e);
+  const functions = rustFunctions(masked);
+  const innermost = (at) =>
+    functions.filter((fn) => at > fn.open && at < fn.close).at(-1);
+  const fnKey = (at) => functions.indexOf(innermost(at));
+  const lineOf = (at) => code.slice(0, at).split("\n").length;
+  const useSpans = [...masked.matchAll(/\buse\b[^;]*;/g)].map((m) => [
+    m.index,
+    m.index + m[0].length,
+  ]);
+  const inUse = (at) => useSpans.some(([s, e]) => at >= s && at < e);
+
+  // A function's own text, nested functions blanked: another operation's guard
+  // is not a check in its caller.
+  const ownBody = (fn) => {
+    let body = masked.slice(fn.open + 1, fn.close);
+    for (const nested of functions) {
+      if (nested.start <= fn.open || nested.close >= fn.close) continue;
+      const start = nested.start - fn.open - 1;
+      const end = nested.close - fn.open;
+      body = body.slice(0, start) + " ".repeat(end - start) + body.slice(end);
+    }
+    return body;
+  };
+  const rowAllowed = (name, item) =>
+    allowlist.some(
+      (e) =>
+        e.file === file &&
+        e.fn === name &&
+        Boolean(e.item) === item &&
+        !e.guard,
+    );
+  const guardRows = allowlist.filter((e) => e.guard);
+  const guardCall = new RegExp(
+    String.raw`\b(?:${["ignored_files_in_the_way", ...guardRows.map((e) => e.fn)].join("|")})\s*\(`,
+  );
+  const push = (at, fn, allowlisted) =>
+    hits.push({
+      file,
+      line: lineOf(at),
+      fn,
+      allowlisted,
+      fix: MERGE_GUARD_FIX,
+    });
+  const record = (at, builder = false) => {
+    if (inTest(at)) return;
+    const fn = innermost(at);
+    if (fn && guardCall.test(ownBody(fn))) return;
+    const name = fn?.name ?? "<unresolved>";
+    push(at, name, !builder && rowAllowed(name, false));
+  };
+  // A guard row must name a function here whose own body runs the real guard;
+  // a missing one leaves the row stale, which main() fails.
+  for (const row of guardRows.filter((e) => e.file === file)) {
+    for (const fn of functions.filter((f) => f.name === row.fn)) {
+      const real = /\bignored_files_in_the_way\s*\(/.test(ownBody(fn));
+      hits.push({
+        file,
+        line: lineOf(fn.start),
+        fn: row.fn,
+        allowlisted: real,
+        fix: real
+          ? MERGE_GUARD_FIX
+          : "a `guard: true` row names this function, but its own body never calls ignored_files_in_the_way — call it there, or drop the row",
+      });
+    }
+  }
+  const overwritesIgnored = (at) => {
+    const fn = innermost(at);
+    return OVERWRITE_IGNORE_RE.test(fn ? code.slice(fn.open, fn.close) : code);
   };
 
-  const sites = [];
-  const arrayStart = new RegExp(
-    [
-      "(?:&\\s*|\\bvec\\s*!\\s*|\\.\\s*args\\s*\\(\\s*)\\[",
-      "\\blet\\s+(?:mut\\s+)?\\w+(?:\\s*:\\s*[^={}]+)?\\s*=\\s*\\[",
-    ].join("|"),
-    "g",
-  );
-  for (let m = arrayStart.exec(code); m; m = arrayStart.exec(code)) {
-    const open = m.index + m[0].length - 1;
-    const item = /\b(?:const|static)\s+(?:mut\s+)?\w+[^{}=]*=\s*$/;
-    const prefix = code.slice(0, open).replace(/(?:&|vec\s*!)\s*$/, "");
-    if (item.test(prefix)) continue;
-    sites.push({ at: open, argv: mergeArrayArgs(src, open), literal: true });
+  // const/static items, anchored at a statement start so the `static` of a
+  // `&'static str` annotation is never read as one.
+  const items = [];
+  const consts = new Map();
+  const itemRe =
+    /\b(?:const|static)\s+(?:mut\s+|ref\s+)?([A-Za-z_]\w*)\s*:(?!:)/g;
+  for (let m = itemRe.exec(masked); m; m = itemRe.exec(masked)) {
+    const lead = masked.slice(Math.max(0, m.index - 40), m.index);
+    const vis = /pub(?:\s*\([^)]*\))?\s+$/.exec(lead);
+    const start = vis ? m.index - vis[0].length : m.index;
+    let p = start - 1;
+    while (p >= 0 && /\s/.test(masked[p])) p--;
+    if (p >= 0 && !";{}]".includes(masked[p])) continue;
+    let depth = 0;
+    let eq = -1;
+    let semi = -1;
+    for (let k = m.index + m[0].length; k < masked.length; k++) {
+      const ch = masked[k];
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) {
+        if (--depth < 0) break;
+      } else if (depth === 0 && ch === ";") {
+        semi = k;
+        break;
+      } else if (
+        depth === 0 &&
+        eq < 0 &&
+        ch === "=" &&
+        !"=>".includes(masked[k + 1]) &&
+        !"=<>!".includes(masked[k - 1])
+      )
+        eq = k;
+    }
+    if (eq < 0 || semi < 0) continue;
+    items.push({
+      name: m[1],
+      pub: Boolean(vis),
+      at: m.index,
+      start,
+      eq,
+      end: semi,
+    });
+    consts.set(m[1], { text: code.slice(eq + 1, semi), at: start });
   }
 
-  const argStart = /\.\s*arg\s*\(/g;
-  for (let m = argStart.exec(code); m; m = argStart.exec(code)) {
-    const argv = [];
-    let open = m.index + m[0].length - 1;
-    let method = "arg";
-    let end;
-    for (;;) {
-      const body = bracketBody(src, open);
-      if (method === "arg") {
-        argv.push(mergeArgLiteral(body));
-      } else {
-        const array = /^\s*(?:&\s*|vec\s*!\s*)?\[/.exec(body);
-        argv.push(
-          ...(array ? mergeArrayArgs(body, array[0].length - 1) : [undefined]),
+  // A name's value at `pos`: the nearest `let` of it before `pos` in the same
+  // function, else an in-file const. A name inside an initializer resolves from
+  // that `let`'s own position, so `let v = v.clone();` reaches the earlier `v`;
+  // the hop cap ends a const cycle.
+  const MAX_HOPS = 16;
+  const resolveName = (name, pos, hops) => {
+    if (hops > MAX_HOPS) return undefined;
+    const fn = innermost(pos);
+    if (fn) {
+      const letRe = new RegExp(
+        String.raw`\blet\s+(?:mut\s+)?${name}\s*(?::[^=;]*)?=(?![=>])`,
+        "g",
+      );
+      letRe.lastIndex = fn.open;
+      let last;
+      let lastEnd = -1;
+      for (
+        let m = letRe.exec(masked);
+        m && m.index < pos;
+        m = letRe.exec(masked)
+      ) {
+        // The initializer runs to the `;` at bracket depth 0: an if/match arm
+        // block may hold statements of its own.
+        let depth = 0;
+        let end = m.index + m[0].length;
+        for (; end < pos; end++) {
+          if ("([{".includes(masked[end])) depth++;
+          else if (")]}".includes(masked[end])) depth--;
+          else if (depth === 0 && masked[end] === ";") break;
+        }
+        if (end < pos) [last, lastEnd] = [m, end];
+      }
+      if (last) {
+        const from = last.index + last[0].length;
+        return argValues(code.slice(from, lastEnd), (n) =>
+          resolveName(n, last.index, hops + 1),
         );
       }
-      end = open + body.length + 2;
-      const next = /^\s*\.\s*(arg|args)\s*\(/.exec(code.slice(end));
-      if (!next) break;
-      method = next[1];
-      open = end + next[0].length - 1;
     }
-    // A chained args array belongs to this command, not a second argv site.
-    for (let i = sites.length - 1; i >= 0; i--) {
-      if (sites[i].at >= m.index && sites[i].at < end) sites.splice(i, 1);
+    const item = consts.get(name);
+    return item
+      ? argValues(item.text, (n) => resolveName(n, item.at, hops + 1))
+      : undefined;
+  };
+  const resolverAt = (at) => (name) => resolveName(name, at, 0);
+  // Split on the masked view (a literal's comma is no separator), read on the
+  // code view (where the literal still is).
+  const elementsOf = (open, close) =>
+    argvElements(masked.slice(open + 1, close))
+      .map((el) => {
+        const from = open + 1 + el.at;
+        const text = code.slice(from, from + el.text.length);
+        const at = from + text.length - text.trimStart().length;
+        return { at, text };
+      })
+      .filter((el) => el.text.trim() !== "")
+      .map(({ at, text }) => ({
+        at,
+        values: argValues(text, resolverAt(at)),
+      }));
+
+  // Slice patterns are not arrays: a `matches!` pattern argument, and a `[…]`
+  // followed by `=>`, `|`, `@` or a guard `if` (a match arm).
+  const patternSpans = [];
+  for (const m of masked.matchAll(/\bmatches\s*!\s*\(/g)) {
+    const open = m.index + m[0].length - 1;
+    const body = bracketBody(masked, open);
+    const pattern = argvElements(body)[1];
+    if (pattern) patternSpans.push([open + 1 + pattern.at, open + body.length]);
+  }
+  const isPattern = (open, close) =>
+    patternSpans.some(([s, e]) => open >= s && open <= e) ||
+    /^\s*(?:=>|\|(?!\|)|@|if\b)/.test(masked.slice(close + 1, close + 64));
+
+  // Array-literal units: every `[` that is not an attribute or an index.
+  const units = [];
+  const unitByOpen = new Map();
+  const addUnit = (open) => {
+    const close = open + 1 + bracketBody(masked, open).length;
+    if (isPattern(open, close)) return;
+    const unit = { at: open, literal: true, elements: elementsOf(open, close) };
+    for (const el of unit.elements) el.unit = unit;
+    units.push(unit);
+    unitByOpen.set(open, unit);
+  };
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== "[") continue;
+    let p = i - 1;
+    while (p >= 0 && /\s/.test(masked[p])) p--;
+    const prev = masked[p];
+    let q = p - 1;
+    if (prev === "!") while (q >= 0 && /\s/.test(masked[q])) q--;
+    if (prev === "#" || (prev === "!" && masked[q] === "#")) continue;
+    if (prev === ")" || prev === "]" || prev === "?") continue;
+    if (prev !== undefined && WORD.test(prev)) {
+      while (q >= 0 && WORD.test(masked[q])) q--;
+      if (!EXPR_KEYWORDS.has(masked.slice(q + 1, p + 1))) continue;
     }
-    sites.push({ at: m.index, argv, literal: false });
-    argStart.lastIndex = end;
+    addUnit(i);
+  }
+  for (const m of masked.matchAll(/\bvec\s*!\s*[({]/g)) {
+    addUnit(m.index + m[0].length - 1);
+  }
+  const unitStartingAt = (pos) => {
+    const lead = /^\s*(?:&\s*(?:mut\s+)?)?(?:vec\s*!\s*)?/.exec(
+      masked.slice(pos),
+    );
+    return unitByOpen.get(pos + lead[0].length);
+  };
+  const itemUnits = new Map();
+  for (const item of items) {
+    const unit = unitStartingAt(item.eq + 1);
+    if (unit) itemUnits.set(unit, item);
   }
 
-  for (const { at, argv, literal } of sites) {
-    let command = 0;
-    while (argv[command] === "-c" && command + 1 < argv.length) command += 2;
-    const verb = argv[command];
-    if (verb !== "merge" && verb !== "pull") continue;
-    const flags = argv.slice(command + 1);
-    if (
-      flags.some((flag) => ["--abort", "--continue", "--quit"].includes(flag))
-    )
-      continue;
-    if (
-      verb === "merge" &&
-      literal &&
-      flags.includes("--ff-only") &&
-      flags.includes("--no-overwrite-ignore")
-    )
-      continue;
-    record(at);
+  // Receiver events, folded into sequences per (function, receiver) in source
+  // order; a `let` or plain assignment starts a fresh sequence, argv-shaped
+  // when it starts from a literal, `vec!` or `Vec::new`/`with_capacity`.
+  const events = [];
+  const attached = new Set();
+  const VEC_INIT_RE =
+    /^\s*(?:(?:std\s*::\s*)?(?:vec\s*::\s*)?Vec\s*(?:::\s*<[^>]*>\s*)?::\s*(?:new|with_capacity)\s*\()/;
+  const letRe = /\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=;]*)?=(?![=>])/g;
+  const assignRe = /(?<=^|[;{}])\s*([A-Za-z_]\w*)\s*=(?![=>])/g;
+  for (const re of [letRe, assignRe]) {
+    for (const m of masked.matchAll(re)) {
+      const from = m.index + m[0].length;
+      const unit = unitStartingAt(from);
+      if (unit) attached.add(unit);
+      events.push({
+        key: `${fnKey(m.index)}:${m[1]}`,
+        pos: m.index,
+        reset: true,
+        argvInit:
+          Boolean(unit) || VEC_INIT_RE.test(masked.slice(from, from + 120)),
+        elements: unit ? unit.elements : [],
+      });
+    }
+  }
+  const chainEnds = new Map();
+  const mutatorRe =
+    /\.\s*(push|insert|args|arg|extend_from_slice|extend)\s*\(/g;
+  for (const m of masked.matchAll(mutatorRe)) {
+    const open = m.index + m[0].length - 1;
+    const close = open + 1 + bracketBody(masked, open).length;
+    let elements;
+    let prepend = false;
+    let needsArgvInit = false;
+    if (m[1] === "push" || m[1] === "arg") {
+      const text = code.slice(open + 1, close);
+      const at = open + 1 + text.length - text.trimStart().length;
+      elements = [{ at, values: argValues(text, resolverAt(at)) }];
+    } else if (m[1] === "insert") {
+      // A map's `insert(key, value)` is no argv: only an integer index, or a
+      // receiver that started argv-shaped, makes one.
+      const [index] = argvElements(masked.slice(open + 1, close));
+      const from = open + 1 + (index?.at ?? 0);
+      const indexText = code
+        .slice(from, from + (index?.text.length ?? 0))
+        .trim();
+      prepend = indexText === "0";
+      needsArgvInit = !/^\d[\d_]*(?:[iu](?:8|16|32|64|128|size))?$/.test(
+        indexText,
+      );
+      elements = elementsOf(open, close).slice(1, 2);
+    } else {
+      const unit = unitStartingAt(open + 1);
+      if (unit) attached.add(unit);
+      elements = unit
+        ? unit.elements.map((el) => ({ ...el }))
+        : [{ at: open + 1, opaque: true }];
+    }
+    // A call chained onto the previous mutator joins that call's unit and
+    // receiver: `cmd.arg("merge").arg("--abort")` is one expression.
+    let gap = m.index;
+    while (gap > 0 && /\s/.test(masked[gap - 1])) gap--;
+    let event = chainEnds.get(gap);
+    if (!event) {
+      const start = exprStart(masked, m.index);
+      const base = masked.slice(start, m.index).replace(/\s+/g, "");
+      const key = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(base)
+        ? `${fnKey(m.index)}:${base}`
+        : `@${start}`;
+      event = {
+        key,
+        pos: m.index,
+        needsArgvInit,
+        elements: [],
+        unit: { at: m.index },
+      };
+      events.push(event);
+    }
+    for (const el of elements) el.unit = event.unit;
+    if (prepend) event.prepend = elements;
+    else event.elements.push(...elements);
+    chainEnds.set(close + 1, event);
   }
 
-  for (const row of MERGE_GUARD_ALLOWLIST.filter((entry) => entry.builder)) {
-    const call = new RegExp("\\b" + row.fn + "\\s*\\(", "g");
-    for (let m = call.exec(code); m; m = call.exec(code)) {
-      if (functions.some((fn) => m.index >= fn.start && m.index <= fn.open))
-        continue;
-      record(m.index, true);
+  const sequences = [];
+  const current = new Map();
+  for (const event of events.sort((a, b) => a.pos - b.pos)) {
+    let seq = current.get(event.key);
+    if (!seq || event.reset) {
+      seq = [];
+      seq.argvInit = Boolean(event.argvInit);
+      sequences.push(seq);
+      current.set(event.key, seq);
+    }
+    if (event.needsArgvInit && !seq.argvInit) continue;
+    if (event.prepend) seq.unshift(...event.prepend);
+    seq.push(...event.elements);
+  }
+  for (const unit of units) {
+    if (!attached.has(unit) && !itemUnits.has(unit))
+      sequences.push(unit.elements);
+  }
+
+  // Whether the ff-only pair in the verb's own literal still holds: git takes
+  // the LAST fast-forward flag and the last overwrite flag, so a later --ff or
+  // --no-ff, an opaque splice after --ff-only, or an --overwrite-ignore after
+  // the last --no-overwrite-ignore (resolved, or anywhere in the function's
+  // text) turns the run back into a strategy merge.
+  const ffOnlyHolds = (seq, k) => {
+    const own = (el, i) => i > k && el.unit === seq[k].unit;
+    const ff = seq.findIndex(
+      (el, i) => own(el, i) && definite(el) === "--ff-only",
+    );
+    if (
+      ff < 0 ||
+      !seq.some(
+        (el, i) => own(el, i) && definite(el) === "--no-overwrite-ignore",
+      )
+    )
+      return false;
+    const keep = seq.findLastIndex(
+      (el) => definite(el) === "--no-overwrite-ignore",
+    );
+    for (let i = ff + 1; i < seq.length; i++) {
+      const el = seq[i];
+      if (el.opaque || el.values?.some((v) => v === "--ff" || v === "--no-ff"))
+        return false;
+    }
+    for (let i = keep + 1; i < seq.length; i++) {
+      if (seq[i].values?.includes("--overwrite-ignore")) return false;
+    }
+    return !overwritesIgnored(seq[k].at);
+  };
+  // The verb's index when `seq` runs merge/pull with no exemption, else -1.
+  const mergeVerb = (seq) => {
+    const k = argvVerb(seq);
+    if (k === null) return -1;
+    if (!seq[k].values.some((v) => v === "merge" || v === "pull")) return -1;
+    const own = seq
+      .slice(k + 1)
+      .filter((el) => el.unit === seq[k].unit)
+      .map(definite);
+    if (own.some((flag) => CONTROL_FLAGS.includes(flag))) return -1;
+    if (
+      definite(seq[k]) === "merge" &&
+      seq[k].unit.literal &&
+      ffOnlyHolds(seq, k)
+    )
+      return -1;
+    return k;
+  };
+  for (const seq of sequences) {
+    const k = mergeVerb(seq);
+    if (k >= 0) record(seq[k].at);
+  }
+
+  for (const [unit, item] of itemUnits) {
+    if (inTest(item.at) || mergeVerb(unit.elements) < 0) continue;
+    if (rowAllowed(item.name, true)) {
+      push(item.at, item.name, true);
+      continue;
+    }
+    const uses = [
+      ...masked.matchAll(new RegExp(String.raw`\b${item.name}\b`, "g")),
+    ]
+      .map((m) => m.index)
+      .filter((at) => (at < item.start || at > item.end) && !inUse(at));
+    for (const at of uses) record(at);
+    if (item.pub || uses.length === 0) {
+      if (innermost(item.at)) record(item.at);
+      else push(item.at, item.name, false);
+    }
+  }
+
+  for (const row of allowlist.filter((entry) => entry.builder)) {
+    const names = new Set([row.fn]);
+    const alias = new RegExp(
+      String.raw`\b${row.fn}\s+as\s+([A-Za-z_]\w*)`,
+      "g",
+    );
+    for (const m of masked.matchAll(alias)) names.add(m[1]);
+    for (const name of names) {
+      for (const m of masked.matchAll(
+        new RegExp(String.raw`\b${name}\b`, "g"),
+      )) {
+        if (inUse(m.index)) continue;
+        const declaration = functions.some(
+          (fn) => fn.name === name && m.index >= fn.start && m.index <= fn.open,
+        );
+        if (!declaration) record(m.index, true);
+      }
     }
   }
 }
@@ -1219,6 +1953,7 @@ function main() {
       name: "H. merge into a checkout without the ignored-file guard",
       run: checkMergeIgnoredGuard,
       allowlist: MERGE_GUARD_ALLOWLIST,
+      note: MERGE_GUARD_NOTE,
       hits: [],
     },
   ];
@@ -1246,9 +1981,10 @@ function main() {
         `${check.name}: NOTE src-tauri/src/${e.file} fn ${e.fn} no longer matches (${e.retiring}) — remove its allowlist entry\n`,
       );
     }
+    const note = check.note ? `  ${check.note}\n` : "";
     if (violations.length === 0 && stale.length === 0) {
       process.stdout.write(
-        `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n`,
+        `${check.name}: OK (${files.length} files, ${allowlisted} allowlisted)\n${note}`,
       );
       continue;
     }
@@ -1264,6 +2000,7 @@ function main() {
       process.stderr.write(`  src-tauri/src/${e.file}  fn ${e.fn}\n`);
       process.stderr.write(`    ${STALE_FIX}\n`);
     }
+    process.stderr.write(note);
   }
 
   // Not `process.exit`: it can truncate a pending pipe write, losing the very

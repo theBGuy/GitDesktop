@@ -11096,7 +11096,20 @@ detached
             .unwrap_err();
         f.assert_unchanged(&err).await;
         if held {
-            assert!(err.to_string().contains(&f.repo.replace('\\', "/")));
+            // The holder's path comes from git's worktree porcelain, which prints long
+            // names where a Windows runner's temp dir is an 8.3 short name.
+            use crate::git::worktree::canonical_wt_path;
+            let message = err.to_string();
+            let named = message
+                .split_once(" is checked out at ")
+                .and_then(|(_, rest)| rest.split_once(", where "))
+                .map(|(path, _)| path)
+                .unwrap_or_else(|| panic!("refusal names no holder: {message}"));
+            assert_eq!(
+                canonical_wt_path(named),
+                canonical_wt_path(&f.repo),
+                "{message}"
+            );
         }
         f.remove_ignored();
         super::finalize_base(&state, &repo, "local", &f.target, current, Some(&f.head))

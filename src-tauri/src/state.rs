@@ -279,6 +279,8 @@ impl AppState {
 
     /// The **network** domain: fetch, push, set-head and pull transfers, serialized
     /// so a user pull's fetch can't race the background auto-fetch at the ref level.
+    /// Merges into a checkout hold it too, with no transfer, so a fetch can't move
+    /// the ref between the ignored-file check and the merge that reads it.
     /// May be taken while holding the working-tree lock, never the reverse (see
     /// [`working_tree_lock`](Self::working_tree_lock)).
     ///

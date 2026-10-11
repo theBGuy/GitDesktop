@@ -672,11 +672,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and
   merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git
-  2.51.1). Every merge or merge-mode pull into a user checkout calls
+  2.51.1). Every merge or non-rebase pull into a user checkout calls
   `git::ignored_guard::ignored_files_in_the_way` under its working-tree hold,
-  before any stash push, and refuses on a hit with copy free of the
-  frontend's dirty-tree and conflict markers; fresh throwaway checkouts are
-  exempt (guard: check-rust-invariants check H).
+  before any stash push, and refuses on a hit with fixed copy free of the
+  frontend's dirty-tree and conflict markers. It may step aside where git
+  refuses on its own (unmerged entries, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, an
+  unresolvable target). Exempt: a literal `--ff-only --no-overwrite-ignore`
+  argv (git refuses natively) and fresh throwaway checkouts. A caller of an
+  argv builder runs the guard itself (guard: check-rust-invariants check H,
+  per function).
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order

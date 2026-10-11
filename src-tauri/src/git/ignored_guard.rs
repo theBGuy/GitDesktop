@@ -291,16 +291,20 @@ pub(crate) async fn pull_can_merge(
 }
 
 /// Bare pull can only check the upstream already present before its own transfer.
-pub(crate) async fn upstream_commit(repo: &str) -> Option<String> {
-    run_git_raw(
+/// A failed probe refuses like every other guard step; only a non-zero exit means none.
+pub(crate) async fn upstream_commit(repo: &str) -> AppResult<Option<String>> {
+    upstream_commit_within(repo, crate::git::runner::WORKTREE_OP_TIMEOUT).await
+}
+
+async fn upstream_commit_within(repo: &str, timeout: Duration) -> AppResult<Option<String>> {
+    let out = run_git_raw(
         Some(repo),
         &["rev-parse", "--verify", "--quiet", "@{upstream}^{commit}"],
-        crate::git::runner::WORKTREE_OP_TIMEOUT,
+        timeout,
     )
     .await
-    .ok()
-    .filter(|out| out.code == 0)
-    .map(|out| out.stdout_lossy().trim().to_string())
+    .map_err(|e| check_failed("Pull", e))?;
+    Ok((out.code == 0).then(|| out.stdout_lossy().trim().to_string()))
 }
 
 #[cfg(test)]
@@ -615,6 +619,24 @@ pub(crate) mod tests {
                 SENTINEL
             );
         }
+    }
+
+    #[tokio::test]
+    async fn upstream_probe_failure_refuses_but_no_upstream_does_not() {
+        let f = Fixture::new(Shape::IgnoredFile, false).await;
+        assert_eq!(upstream_commit(&f.repo).await.unwrap(), None);
+        let err = upstream_commit_within(&f.repo, Duration::ZERO)
+            .await
+            .unwrap_err();
+        let AppError::Command(message) = err else {
+            panic!("expected Command, got {err:?}");
+        };
+        assert!(message.starts_with("Pull stopped: "), "{message}");
+        f.with_remote().await;
+        assert_eq!(
+            upstream_commit(&f.repo).await.unwrap(),
+            Some(f.head.clone())
+        );
     }
 
     #[tokio::test]

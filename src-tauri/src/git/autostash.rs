@@ -229,7 +229,7 @@ pub(crate) async fn git_pull_autostash_core(
 
     // Commits the pull's own transfer brings are not checked.
     if mode != "rebase" {
-        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await {
+        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await? {
             if ignored_guard::pull_can_merge(&repo_path, &target, mode != "merge").await? {
                 let paths = ignored_files_in_the_way(&repo_path, &target, WORKTREE_OP_TIMEOUT)
                     .await

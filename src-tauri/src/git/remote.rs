@@ -827,7 +827,7 @@ pub(crate) async fn git_pull_core(
             .await
             .map_err(|e| ignored_guard::check_failed("Pull", e))?
     {
-        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await {
+        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await? {
             if ignored_guard::pull_can_merge(&repo_path, &target, mode != "merge").await? {
                 let paths = ignored_files_in_the_way(&repo_path, &target, WORKTREE_OP_TIMEOUT)
                     .await
