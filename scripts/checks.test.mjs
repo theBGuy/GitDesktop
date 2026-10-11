@@ -3940,10 +3940,19 @@ test("merge guard opens no pattern span at a raw identifier", () => {
     'r#match! { run(&["merge", sha]) => go() }',
     'let v = r#move | run(&["merge", sha]) | 1;',
     'let v = \u00e5let(&["merge", sha]);',
+    'let ok = xmatches!(argv, ["merge", sha]);',
+    'let ok = amatches!(argv, ["merge", sha]);',
   ]) {
     const hits = mergeGuardHits(unguarded(body));
     assert.equal(hits.length, 1, body);
     assert.equal(hits[0].fn, "unsafe_merge", body);
+  }
+  // `matches` is a macro name, not a keyword: its raw spelling is the macro.
+  for (const body of [
+    'let ok = r#matches!(argv, ["merge", ..]);',
+    'r#assert_matches!(args, ["merge", ..]);',
+  ]) {
+    assert.deepEqual(mergeGuardHits(unguarded(body)), [], body);
   }
 });
 

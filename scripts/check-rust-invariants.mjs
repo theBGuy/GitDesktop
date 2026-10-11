@@ -1800,8 +1800,9 @@ export function checkMergeIgnoredGuard(
       from = arrow + 2;
     }
   }
+  // A macro NAME, not a keyword: `r#matches!` invokes the same macro.
   for (const m of masked.matchAll(
-    keywordRe("(?:assert_)?matches", String.raw`\s*!\s*\(`),
+    keywordRe("(?:r#)?(?:assert_)?matches", String.raw`\s*!\s*\(`),
   )) {
     const open = m.index + m[0].length - 1;
     const pattern = argvElements(bracketBody(masked, open))[1];
