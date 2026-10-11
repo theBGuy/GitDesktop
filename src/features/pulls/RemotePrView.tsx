@@ -765,7 +765,14 @@ export function RemotePrView({
   const resolveMergePending = writePending("resolve-merge");
   // A stack create or add holds the offer of every PR it names, whichever PR fired it.
   const stackWritePending = isStackWritePendingFor(pendingWrites, number, lens);
-  const stackWritePaused = isStackWritePendingFor(pausedWrites, number, lens);
+  // Parked only when ALL matching stack writes are: one running means in-flight.
+  const stackWritePaused =
+    stackWritePending &&
+    !isStackWritePendingFor(
+      pendingWrites.filter((w) => !w.paused),
+      number,
+      lens,
+    );
   // Repo-wide by design: checkout writes the working tree, and a discard deletes a
   // resolve worktree whose variables name no PR. Only checkout's own PR spins.
   const runningCheckout = pendingWriteOfKind(pendingWrites, "checkout");

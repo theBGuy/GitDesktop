@@ -151,12 +151,16 @@ export function SubmitReviewDialog({
     number,
     lens,
   );
-  const submitPaused = isPendingFor(
-    pendingWrites.filter((w) => w.paused),
-    "submit-review",
-    number,
-    lens,
-  );
+  // Parked only when ALL matching submits are: a running one means work is
+  // happening, so the hold says in-flight.
+  const submitPaused =
+    submitInFlight &&
+    !isPendingFor(
+      pendingWrites.filter((w) => !w.paused),
+      "submit-review",
+      number,
+      lens,
+    );
   const submitHeld = pending || submitInFlight;
   // Submit holds offline rather than park: a parked post keeps `pending` set,
   // which locks this dialog open until the connection returns.

@@ -71,7 +71,7 @@ export function PendingWriteNote({ reason }: { reason: string | undefined }) {
 export type RowPending = { reason: string; paused: boolean };
 
 /** A pending write's {@link RowPending}, worded `inFlight` while it runs. */
-function rowPending(
+export function rowPending(
   pending: { paused: boolean } | undefined,
   inFlight: string,
 ): RowPending | undefined {
