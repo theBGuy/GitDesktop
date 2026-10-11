@@ -91,8 +91,9 @@ export function useCreateDiscussion(repo: string) {
         args.body,
       ),
     {
-      // Pinned: the call and its invalidation close over `repo`, and the dialog host
-      // survives a repo switch — without the key a switch retargets the pending create.
+      // Pinned: the call and its invalidation close over `repo`, and the dialog
+      // host survives a repo switch — without the key the newly-live repo's
+      // controls would read the pending create as busy.
       identity: ["create-discussion", repo],
     },
   );
@@ -138,9 +139,9 @@ const UPVOTE_KEY = "toggle-discussion-upvote";
 /** Optimistic upvote toggle on a discussion or its comments, with rollback. Per call,
  *  `number` is the containing discussion and `subjectId` its body or a comment. */
 export function useToggleDiscussionUpvote(repo: string) {
-  // The discussion rides the variables, never the hook: its host stays mounted across
-  // a discussion switch, and a pending or paused toggle takes each render's options,
-  // so a closed-over one would send its settle refetch to the wrong discussion.
+  // The discussion rides the variables, never the hook: one host serves the body and
+  // every comment of a discussion, and the pending-upvote reads match each toggle by
+  // its variables, so the target is fixed per call.
   return useOptimisticCacheMutation<
     DiscussionUpvoteVars,
     void,

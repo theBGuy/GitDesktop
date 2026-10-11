@@ -1,12 +1,12 @@
 import {
   type MutationCache,
   type QueryKey,
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
+import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import type {
   ForgeUserRef,
@@ -120,9 +120,9 @@ export const prTasksKey = (repo: string, number: number) =>
 export function useCreatePrTask(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the call and the tasks-key invalidation close over `repo`, and the PR
-    // panel survives a repo switch — without the key a switch retargets the pending
-    // create.
+    // Pinned: the call and the tasks-key invalidation close over `repo`, and the
+    // PR panel survives a repo switch — without the key the newly-live repo's
+    // controls would read the pending create as busy.
     mutationKey: ["create-pr-task", repo],
     mutationFn: (args: { number: number; text: string }) =>
       api.forgeBbPrTaskCreate(repo, args.number, args.text),

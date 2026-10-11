@@ -7,13 +7,13 @@ import {
   type QueryClient,
   type QueryKey,
   useInfiniteQuery,
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { presentError } from "@/lib/error-summary";
+import { useMutation } from "@/lib/started-mutation";
 import {
   errorToastAction,
   toastComposedError,
@@ -234,10 +234,9 @@ export function useEditItemProjects(
         args.adds.map((p) => p.id),
         args.removes,
       ),
-    // Every key the settle touches is built HERE and read back from the context:
-    // the rail hosting this survives an entity switch, and the settle callbacks run
-    // off the current render's options, so closure keys would roll back and
-    // re-read the item the user switched TO.
+    // Every key the settle touches is built HERE and read back from the context,
+    // so the rollback and re-read name the item the write fired on whatever render
+    // they settle through: the rail hosting this survives an entity switch.
     onMutate: async (args) => {
       const key = itemProjectsKey(repo, lens, kind, number);
       const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
@@ -1222,11 +1221,9 @@ function dropBoardItem(
  * neither the board nor GitHub promises, and a late rollback would put a card back
  * in a column a later write already moved it out of.
  *
- * The write TARGET rides the variables, never this hook's scope. A pending mutation
- * runs on the latest render's options — query-core re-applies them on every
- * re-render, and an offline move PAUSES before `mutationFn` and resumes through
- * whatever closure is current — so a repo or board switch mid-flight would
- * otherwise submit the old card against the new board.
+ * The write TARGET rides the variables, never this hook's scope: they are the one
+ * record of it fixed at fire time, which the board's pending-write holds match on
+ * ({@link usePendingBoardWrites}).
  */
 export function useMoveBoardCard() {
   const queryClient = useQueryClient();
@@ -1296,10 +1293,8 @@ export function useMoveBoardCard() {
               withGroupValue(before, args.field, args.bucket),
             ),
         );
-      // The settle handlers read these, never their own scope: they too run on the
-      // latest render's options, so a mid-flight switch would otherwise roll the
-      // old board's values into the new board's key and invalidate the wrong repo's
-      // boards.
+      // The settle handlers read these rather than rebuilding them, so the rollback
+      // and the re-read address exactly the board this patch wrote.
       return { before, itemId: args.itemId, key, railKey, repo: args.repo };
     },
     // Reporting and rollback live here, not in the caller's `mutate` options: the
@@ -1681,9 +1676,7 @@ function deferRepositionToast(
  * pressed through may never be written at all.
  *
  * The write target rides the variables, never a render closure, for the reason
- * {@link useMoveBoardCard} states: query-core re-applies a pending mutation's
- * options on every render and resumes an offline-paused write through whatever
- * closure is current by then.
+ * {@link useMoveBoardCard} states.
  *
  * A refused burst's restore is one card wide — the id it previously followed —
  * rather than a tree snapshot, which would revert a concurrent write to a sibling
@@ -1867,9 +1860,8 @@ export function useReorderBoardCard() {
           key,
           (data) => reorderBoardItem(data, args.itemId, args.afterId),
         );
-      // The settle handlers read these rather than their own scope: they run on
-      // the latest render's options, so a mid-flight repo or board switch would
-      // otherwise patch the new board's cache with the old board's answer.
+      // The settle handlers read these rather than rebuilding them, so they patch
+      // exactly the board this write patched.
       return {
         key,
         itemId: args.itemId,
@@ -2328,9 +2320,7 @@ export function useBoardCandidates(
 /**
  * The board's add/convert/archive/remove writes. Each carries its target in the
  * call-time VARIABLES rather than this hook's scope, for the reason
- * {@link useMoveBoardCard} states: query-core re-applies a pending mutation's
- * options on every re-render, and an offline write pauses before `mutationFn` and
- * resumes through whatever closure is current.
+ * {@link useMoveBoardCard} states.
  *
  * The writes that MINT or REWRITE a card settle through {@link writeThroughBoards}:
  * each answers with the card itself, and that answer is the only reading of it
@@ -3404,10 +3394,10 @@ function unwrittenNote(unwritten: number): string | null {
  * definitions — can say what those ids render as.
  *
  * The item this writes — repo, lens, kind, number — rides the VARIABLES, the rule
- * {@link useMoveBoardCard} states: a pending or paused write runs on the latest
- * render's options, and the editor's per-board chain fires each later board from
- * them, so a host re-rendered onto another item would otherwise retarget the write,
- * its patch and its rollback. Deliberately NOT in the board-write family (no
+ * {@link useMoveBoardCard} states: the editor's per-board chain starts each later
+ * board's write after an await, from whatever render is current then, so a host
+ * re-rendered onto another item would otherwise retarget that write, its patch
+ * and its rollback. Deliberately NOT in the board-write family (no
  * `mutationKey`): the chain would flip the board's holds link by link.
  */
 export function useSetItemFieldValues() {
@@ -3546,7 +3536,7 @@ export function isOptimisticStatusUpdate(update: ProjectStatusUpdate): boolean {
 
 /** What every status write addresses: the repo it runs from and the project whose
  *  cache it patches. Call-time VARIABLES rather than hook scope, as the board writes
- *  keep them, so a repo switch mid-flight can't retarget the write or its patch. */
+ *  keep them: one record of the target, fixed at fire time. */
 interface StatusWriteScope {
   repo: string;
   projectId: string;
@@ -3765,8 +3755,8 @@ export function useDeleteProjectStatusUpdate() {
 }
 
 /** What a project write addresses: the repo it runs from and the catalog LENS a
- *  create lands in. Call-time VARIABLES, as the status writes keep them, so a repo
- *  switch mid-flight can't retarget the write or its patch. */
+ *  create lands in. Call-time VARIABLES, as the status writes keep them: one record
+ *  of the target, fixed at fire time. */
 interface ProjectWriteScope {
   repo: string;
   lens: RemoteLens;

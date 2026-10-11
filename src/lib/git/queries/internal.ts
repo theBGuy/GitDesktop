@@ -8,10 +8,10 @@ import {
   type QueryClient,
   type QueryKey,
   replaceEqualDeep,
-  useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useRef, useSyncExternalStore } from "react";
+import { useMutation } from "@/lib/started-mutation";
 import {
   BOARD_WRITES_KEY,
   pausedBoardWriteOn,
@@ -394,13 +394,12 @@ export function useRepoMutation<TArgs, TData>(
     onSuccess?: (data: TData, variables: TArgs) => void;
     /**
      * Identity axes this mutation's `mutationFn` and callbacks close over (repo,
-     * lens, …). Opt in wherever a mid-flight change of those would misdirect the
-     * work: a MOUNTED observer re-rendered with new props retargets its PENDING
-     * mutation's whole options object, so the call lands — and any cache patch
-     * writes — under the new identity. A changed mutation-key hash detaches the
-     * pending mutation instead, freezing its options; `mutateAsync` still settles,
-     * but the observer's own `isPending`/`data` go idle at the switch, so only
-     * award this to sites whose callers await the promise.
+     * lens, …), filed as its mutation key. The work already runs on the options
+     * in effect when it started (`@/lib/started-mutation`); the key scopes the
+     * HOLD: a changed key hash detaches the pending mutation at a switch, so the
+     * new identity's controls don't read the old write as busy. `mutateAsync` still
+     * settles, but the observer's own `isPending`/`data` go idle at the switch,
+     * so only award this to sites whose callers await the promise.
      */
     identity?: readonly unknown[];
     /** Opt-in per site, for a mutationFn that writes only local state: the default

@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import type {
   BbEnvironment,
@@ -25,8 +26,9 @@ export function useUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the PATCH and the invalidation close over `repo`, and the settings
-    // dialog survives a repo switch — without the key a switch retargets both. The
-    // seed's key is captured at mutate time instead, like every settle-time write.
+    // dialog survives a repo switch — without the key the newly-live repo's
+    // controls would read the pending save as busy. The seed's key is captured at
+    // mutate time instead, like every settle-time write.
     mutationKey: ["update-repo-settings", repo],
     mutationFn: (input: RepoSettingsInput) =>
       api.ghRepoSettingsUpdate(repo, input),
@@ -58,8 +60,9 @@ export function useUpdateGlRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the PUT and the invalidation close over `repo`, and the settings
-    // dialog survives a repo switch — without the key a switch retargets both. The
-    // seed's key is captured at mutate time instead, like every settle-time write.
+    // dialog survives a repo switch — without the key the newly-live repo's
+    // controls would read the pending save as busy. The seed's key is captured at
+    // mutate time instead, like every settle-time write.
     mutationKey: ["update-gl-repo-settings", repo],
     mutationFn: (input: GitLabRepoSettingsInput) =>
       api.forgeGlRepoSettingsUpdate(repo, input),
@@ -134,8 +137,8 @@ export function useGlCreateHook(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the call and the hooks-list invalidation close over `repo`, and the
-    // settings dialog survives a repo switch — without the key a switch retargets
-    // the pending create.
+    // settings dialog survives a repo switch — without the key the newly-live
+    // repo's controls would read the pending create as busy.
     mutationKey: ["gl-create-hook", repo],
     mutationFn: (input: GitLabHookInput) => api.forgeGlHookCreate(repo, input),
     onSettled: () =>
@@ -361,8 +364,9 @@ export function useBbUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the PUT and the invalidation close over `repo`, and the settings
-    // dialog survives a repo switch — without the key a switch retargets both. The
-    // seed's key is captured at mutate time instead, like every settle-time write.
+    // dialog survives a repo switch — without the key the newly-live repo's
+    // controls would read the pending save as busy. The seed's key is captured at
+    // mutate time instead, like every settle-time write.
     mutationKey: ["bb-update-repo-settings", repo],
     mutationFn: (input: BitbucketRepoSettingsInput) =>
       api.forgeBbRepoSettingsUpdate(repo, input),
@@ -439,8 +443,8 @@ export function useBbCreateBranchRestriction(repo: string) {
     {
       invalidate: [bbBranchRestrictionsKey(repo)],
       // Pinned: the call and the narrowed invalidation close over `repo`, and the
-      // settings dialog survives a repo switch — without the key a switch retargets
-      // the pending create.
+      // settings dialog survives a repo switch — without the key the newly-live
+      // repo's controls would read the pending create as busy.
       identity: ["bb-create-branch-restriction", repo],
     },
   );
@@ -510,9 +514,9 @@ export function useBbVariables(repo: string, enabled: boolean) {
 // reconcile the real server row/uuid. Delete keeps its immediate invalidate below.
 export function useBbCreateVariable(repo: string) {
   return useMutation({
-    // Pinned: the call closes over `repo` and the variables section survives a repo
-    // switch — without the key a switch retargets the pending create, writing the
-    // variable to the newly-live repo.
+    // Pinned: the call closes over `repo` and the variables section survives a
+    // repo switch — without the key the newly-live repo's controls would read the
+    // pending create as busy.
     mutationKey: ["bb-create-variable", repo],
     mutationFn: (a: { key: string; value: string; secured: boolean }) =>
       api.forgeBbPipelineVariableCreate(repo, a.key, a.value, a.secured),
@@ -553,9 +557,9 @@ export function useBbSchedules(repo: string, enabled: boolean) {
 // Toggle/delete keep their immediate invalidate below.
 export function useBbCreateSchedule(repo: string) {
   return useMutation({
-    // Pinned: the call closes over `repo` and the schedules section survives a repo
-    // switch — without the key a switch retargets the pending create, scheduling
-    // against the newly-live repo.
+    // Pinned: the call closes over `repo` and the schedules section survives a
+    // repo switch — without the key the newly-live repo's controls would read the
+    // pending create as busy.
     mutationKey: ["bb-create-schedule", repo],
     mutationFn: (a: {
       refName: string;
@@ -607,8 +611,8 @@ export function useBbCreateHook(repo: string) {
     {
       invalidate: [bbHooksKey(repo)],
       // Pinned: the call and the narrowed invalidation close over `repo`, and the
-      // settings dialog survives a repo switch — without the key a switch retargets
-      // the pending create.
+      // settings dialog survives a repo switch — without the key the newly-live
+      // repo's controls would read the pending create as busy.
       identity: ["bb-create-hook", repo],
     },
   );

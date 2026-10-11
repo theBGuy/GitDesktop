@@ -2,11 +2,11 @@ import {
   type QueryClient,
   type QueryKey,
   queryOptions,
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
@@ -185,9 +185,9 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
       ),
     {
       // Both the create call and the insert below close over `repo`/`lens`, and the
-      // dialog family stays mounted across a repo switch — pinning them as the
-      // mutation key is what detaches a pending create instead of retargeting it,
-      // so a switch mid-create can't post to, or write a row into, another repo.
+      // dialog family stays mounted across a repo switch — pinned as the mutation
+      // key, a pending create detaches at the switch, so the newly-live repo's
+      // dialog doesn't read it as busy.
       identity: ["create-issue", repo, lens],
       // Runs before the invalidation fires, so the insert is what paints and the
       // refetch reconciles it. `author` stays null rather than guessing a login —
@@ -432,14 +432,15 @@ function useTimeTrackingMutation(
     onError: (e) => toastError(e),
     mutationFn,
     // The repo is captured at mutate time and the seed reads it back from the
-    // context: onSuccess runs off the current render's options, so after a repo
-    // switch a closure `repo` would seed the newly-live repo's stats. No mutation
-    // key instead — the time-tracking controls read `isPending`, which a detach
-    // would idle.
+    // context, so the seed names the repo the write fired on whatever render it
+    // settles through. No mutation key — the time-tracking controls read
+    // `isPending`, which a detach would idle.
     onMutate: () => ({ repo }),
     onSuccess: (stats, args, ctx) => {
-      // A re-pushed observer (the repo switched mid-flight) may have resumed the
-      // write against the new repo, so neither repo can take the answer as truth.
+      // Equal on every current path, since the started-mutation snapshot keeps the
+      // closure the one in effect at the start. Kept as defense in depth: were a
+      // settle ever to run through other callbacks than the starting ones, neither
+      // repo could take the answer as truth.
       if (repo !== ctx.repo) {
         for (const r of [ctx.repo, repo])
           for (const queryKey of [
@@ -713,8 +714,9 @@ function patchReactionList(
  * comment id).
  */
 export function useToggleReaction(repo: string, target: api.ReactionTarget) {
-  // The entity rides the variables, never the hook: its hosts stay mounted across an
-  // entity switch, so a closed-over one would retarget a pending or paused toggle.
+  // The entity rides the variables, never the hook: one host toggles reactions on
+  // the body and every comment of an entity, each with its own reactions key and
+  // subject id, so the target can only be a per-call value.
   return useOptimisticCacheMutation<
     {
       reactionsKey: QueryKey;
@@ -919,9 +921,9 @@ export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
     (args: { issueId: string; name: string }) =>
       api.ghIssueCreateLinkedBranch(repo, args.issueId, args.name, lens),
     {
-      // Pinned: the call closes over `repo`/`lens` and its invalidation over `repo`,
-      // and the issue panel survives a repo switch — without the key a switch
-      // retargets the pending create.
+      // Pinned: the call closes over `repo`/`lens` and its invalidation over
+      // `repo`, and the issue panel survives a repo switch — without the key the
+      // newly-live repo's controls would read the pending create as busy.
       identity: ["create-linked-branch", repo, lens],
     },
   );

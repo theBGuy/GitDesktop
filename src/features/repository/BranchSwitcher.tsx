@@ -104,7 +104,11 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { repoNameFromPath } from "@/lib/stores/notifications";
+import {
+  landedIn,
+  refuseIfSwitched,
+  repoNameFromPath,
+} from "@/lib/stores/notifications";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
@@ -307,13 +311,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const shownDeleteTarget = useRetained(deleteTarget);
-  // The delete confirm's open session: minted by openDelete, dropped by every
-  // close. The confirm is dismissible mid-delete and this switcher outlives repo
-  // switches, so a settle closes only the confirm it was fired from, never one
-  // reopened on a same-named branch here or in another repo.
-  const deleteSessionRef = useRef<object | null>(null);
+  // The delete confirm's open session: minted by openDelete with the repo it
+  // opened in, dropped by every close. The confirm is dismissible mid-delete and
+  // this switcher outlives repo switches, so a settle closes only the confirm it
+  // was fired from, never one reopened on a same-named branch here or in another
+  // repo, and a confirm answered after a switch refuses.
+  const deleteSessionRef = useRef<{ repo: string } | null>(null);
   function openDelete(branch: string) {
-    deleteSessionRef.current = {};
+    deleteSessionRef.current = { repo: repoPath };
     setDeleteTarget(branch);
   }
   function closeDelete() {
@@ -323,15 +328,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // The worktree a branch row offers to remove (resolved from `userWorktrees`).
   const [removeWorktreeTarget, setRemoveWorktreeTarget] =
     useState<UserWorktree | null>(null);
-  // The remote-only branch pending a server-side delete confirm.
+  // The remote-only branch pending a server-side delete confirm. Every confirm
+  // below records the repo it opened in (`repo`, or the `…In` value itself): a
+  // confirm answered after a switch away from it refuses.
   const [remoteDeleteTarget, setRemoteDeleteTarget] = useState<{
     remote: string;
     name: string;
+    repo: string;
   } | null>(null);
   const shownRemoteDeleteTarget = useRetained(remoteDeleteTarget);
-  const [discardAllOpen, setDiscardAllOpen] = useState(false);
-  const [stashAllOpen, setStashAllOpen] = useState(false);
-  const [stashPopOpen, setStashPopOpen] = useState(false);
+  const [discardAllIn, setDiscardAllIn] = useState<string | null>(null);
+  const [stashAllIn, setStashAllIn] = useState<string | null>(null);
+  const [stashPopIn, setStashPopIn] = useState<string | null>(null);
   const [stashesOpen, setStashesOpen] = useState(false);
   // Which view the Stashes dialog opens to — "recoverable" for "Recover lost
   // work…" and its palette action, "stashes" otherwise.
@@ -340,14 +348,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   );
   const [opHistoryOpen, setOpHistoryOpen] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
-  const [pickerMode, setPickerMode] = useState<PickerMode | null>(null);
-  const [rebaseOntoOpen, setRebaseOntoOpen] = useState(false);
+  const [picker, setPicker] = useState<{
+    mode: PickerMode;
+    repo: string;
+  } | null>(null);
+  const [rebaseOntoIn, setRebaseOntoIn] = useState<string | null>(null);
   // The publish intercepted by the fork-PR guard, with everything needed to
   // resume it verbatim if the user publishes anyway.
   const [forkGuard, setForkGuard] = useState<{
     match: ForkPrMatch;
     branch: Branch;
     remote?: string;
+    repo: string;
   } | null>(null);
   // A fork-PR detection in flight — rides `busy`, so the menu items that started
   // it can't fire twice.
@@ -358,6 +370,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [switchTarget, setSwitchTarget] = useState<{
     name: string;
     remote: string | null;
+    repo: string;
   } | null>(null);
   // "Reapply after switching" — seeded from the saved preference each time the
   // dialog opens fresh, and persisted back when the user changes it.
@@ -945,9 +958,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       const live = useUiStore.getState();
       if (
         switchRequest !== switchRequestRef.current ||
-        live.repoPath !== repoPath ||
         live.amendingHash !== null ||
         (wtPath !== undefined && !noNewerOpen())
+      )
+        return;
+      if (
+        refuseIfSwitched(
+          repoPath,
+          "no branch was checked out",
+          "before the switch started",
+        )
       )
         return;
     }
@@ -991,7 +1011,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       setSwitchHint(null);
       setReapplyOnSwitch(settings.data?.reapplyStashOnSwitch ?? false);
       reapplyTouchedRef.current = false;
-      setSwitchTarget({ name, remote });
+      setSwitchTarget({ name, remote, repo: repoPath });
       return;
     }
     void runCheckout({ name, remote }, { onError });
@@ -999,6 +1019,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   function bringAndSwitch() {
     if (!switchTarget) return;
+    if (refuseIfSwitched(switchTarget.repo, "no branch was checked out")) {
+      setSwitchTarget(null);
+      return;
+    }
     // Ahead of closing the dialog, so a refusal keeps it; `runCheckout` re-checks.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1018,6 +1042,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // persist below stays gated on an explicit toggle) so the changes still
         // come along — unless the user unticked it here, which stands.
         if (isDirtyTreeRefusal(e)) {
+          // This lands after the checkout's await: a choice reopened in a repo
+          // the user has left could only refuse, so say what happened instead.
+          if (
+            refuseIfSwitched(
+              target.repo,
+              "no branch was checked out",
+              "before the checkout finished",
+            )
+          )
+            return;
           if (!touched) setReapplyOnSwitch(true);
           setSwitchHint(
             "Bringing changes didn't work — git would overwrite them. Stash and switch instead.",
@@ -1034,6 +1068,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // for both checkbox states — the unchecked path just skips the pop.
   async function stashAndSwitch() {
     if (!switchTarget) return;
+    if (refuseIfSwitched(switchTarget.repo, "no branch was checked out")) {
+      setSwitchTarget(null);
+      return;
+    }
     // Ahead of every state write, so a refusal keeps the dialog and its choices.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1086,13 +1124,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
 
   async function doDelete() {
-    if (!deleteTarget) return;
     // Session-checked clears below an await: by the settle the confirm may have
     // been reopened on another branch, or the same name in another repo.
     const session = deleteSessionRef.current;
+    if (!deleteTarget || !session) return;
+    const deleteIn = session.repo;
     const clearTarget = () => {
       if (deleteSessionRef.current === session) closeDelete();
     };
+    if (refuseIfSwitched(deleteIn, "nothing was deleted")) {
+      closeDelete();
+      return;
+    }
     // The guard below reads not-blocked from the stand-in config while the rules
     // are still loading, so it would pass vacuously — refuse instead of deleting
     // a branch a settled rule protects.
@@ -1136,6 +1179,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         } catch {
           occupied = new Set(worktreeByBranch.keys());
         }
+        // A mutate past an await builds from the observer's CURRENT options, so
+        // the checkout and delete below would act on whichever repo is live now;
+        // a switch during the lookup refuses instead.
+        if (
+          refuseIfSwitched(
+            deleteIn,
+            "nothing was deleted",
+            "before the delete started",
+          )
+        )
+          return;
         const free = (b: string | null | undefined): b is string =>
           Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
         const fallback = free(defaultName)
@@ -1155,6 +1209,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           return;
         }
         await checkout.mutateAsync(fallback);
+        // The same for the delete, which starts only after the checkout lands.
+        const moved = landedIn(deleteIn);
+        if (!moved.live) {
+          toast.info(
+            `You switched repositories before ${deleteTarget} was deleted — ${fallback} is checked out and ${deleteTarget} was kept${moved.away}.`,
+          );
+          return;
+        }
       }
       await deleteBranch.mutateAsync(deleteTarget);
       toast.success(`Deleted ${deleteTarget}`);
@@ -1167,11 +1229,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDeleteRemoteBranch() {
     if (!remoteDeleteTarget) return;
+    const target = remoteDeleteTarget;
+    if (refuseIfSwitched(target.repo, "nothing was deleted")) {
+      setRemoteDeleteTarget(null);
+      return;
+    }
     // The confirm can sit open across a disconnect; refusing keeps it open.
     if (refuseWhileOffline()) return;
-    const target = remoteDeleteTarget;
     try {
-      await deleteRemoteBranch.mutateAsync(target);
+      await deleteRemoteBranch.mutateAsync({
+        remote: target.remote,
+        name: target.name,
+      });
       toast.success(`Deleted ${target.name} on ${target.remote}`);
     } catch (e) {
       onError(e);
@@ -1184,34 +1253,43 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDiscardAll() {
     try {
+      if (
+        !discardAllIn ||
+        refuseIfSwitched(discardAllIn, "nothing was discarded")
+      )
+        return;
       await discardAll.mutateAsync(undefined);
       toast.success("All changes discarded");
     } catch (e) {
       onError(e);
     } finally {
-      setDiscardAllOpen(false);
+      setDiscardAllIn(null);
     }
   }
 
   async function doStashAll() {
     try {
+      if (!stashAllIn || refuseIfSwitched(stashAllIn, "nothing was stashed"))
+        return;
       await stashAll.mutateAsync(undefined);
       toast.success("Changes stashed");
     } catch (e) {
       onError(e);
     } finally {
-      setStashAllOpen(false);
+      setStashAllIn(null);
     }
   }
 
   async function doStashPop() {
     try {
+      if (!stashPopIn || refuseIfSwitched(stashPopIn, "no stash was popped"))
+        return;
       await stashPop.mutateAsync(undefined);
       toast.success("Stash restored");
     } catch (e) {
       onError(e);
     } finally {
-      setStashPopOpen(false);
+      setStashPopIn(null);
     }
   }
 
@@ -1219,7 +1297,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // flags which mode is active.
   function openPicker(mode: PickerMode) {
     setOpen(false);
-    setPickerMode(mode);
+    setPicker({ mode, repo: repoPath });
   }
 
   // A merge into the current branch touches the working tree, so git refuses it
@@ -1257,7 +1335,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     branch: string,
     options: MergeRunOptions,
   ) {
-    setPickerMode(null);
+    const pickedIn = picker?.repo;
+    setPicker(null);
+    const nothing =
+      mode === "rebase" ? "nothing was rebased" : "nothing was merged";
+    if (!pickedIn || refuseIfSwitched(pickedIn, nothing)) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -1302,7 +1384,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   function openRebaseOnto() {
     setOpen(false);
-    setRebaseOntoOpen(true);
+    setRebaseOntoIn(repoPath);
   }
 
   // The dialog collects the two branches; the switcher owns the mutation (it
@@ -1313,7 +1395,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // dirty, and git would refuse before touching anything, so offering the
   // compound up front beats a round-trip that can only fail.
   async function runRebaseOnto(newBase: string, oldBase: string) {
-    setRebaseOntoOpen(false);
+    const pickedIn = rebaseOntoIn;
+    setRebaseOntoIn(null);
+    if (!pickedIn || refuseIfSwitched(pickedIn, "nothing was rebased")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -1501,6 +1585,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       n === 1
         ? `The only commit on ${branch.name} is already on ${base} under a different id`
         : `All ${n} commits on ${branch.name} are already on ${base} under different ids`;
+    const resetIn = repoPath;
     const ok = await useConfirm.getState().ask({
       title: `Reset ${branch.name} to ${base}?`,
       body: `${alreadyThere}, so no unique work is lost. ${branch.name} moves to ${base}'s tip.${treeNote}`,
@@ -1508,6 +1593,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       confirmVariant: "destructive",
     });
     if (!ok) return;
+    // Both resets build from the observer's CURRENT options once the prompt
+    // resolves, so they would act on whichever repo is live then: the hard
+    // reset's HEAD check below passes on a same-named branch there, and the ref
+    // move's `expectedTip` refuses only when that branch sits elsewhere. A switch
+    // under the prompt refuses instead.
+    if (refuseIfSwitched(resetIn, "nothing was reset")) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1560,12 +1651,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // first, and let the guard offer the fork instead. Advisory: a detection
   // failure is indistinguishable from no match and just publishes.
   async function beginPublishBranch(branch: Branch, remote?: string) {
+    const publishIn = repoPath;
     setDetecting(true);
     const match = await forgeDetectForkPrForBranch(repoPath, branch.name).catch(
       () => null,
     );
     setDetecting(false);
-    if (match) setForkGuard({ match, branch, remote });
+    // `push` builds from the live repo's options once the detection resolves,
+    // while the branch and the fork match belong to this one: a switch during
+    // the round-trip refuses rather than publish there.
+    const { live, away } = landedIn(publishIn);
+    if (!live) {
+      toast.info(
+        `Didn't publish ${branch.name}${away} — you switched repositories before the push started.`,
+      );
+      return;
+    }
+    if (match) setForkGuard({ match, branch, remote, repo: publishIn });
     else void runPushBranch(branch, remote);
   }
 
@@ -1883,9 +1985,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const row = defaultBranchRow;
     if (!row?.upstream || row.upstreamGone) return;
     if (row.upstreamAhead > 0 && row.upstreamBehind > 0) {
+      const updateIn = repoPath;
       const status = await queryClient
         .fetchQuery(branchRewriteStatusOptions(repoPath, row.name))
         .catch(() => null);
+      // The update builds from the live repo's options once the probe resolves,
+      // while the row belongs to this one: a switch during it refuses instead.
+      const { live, away } = landedIn(updateIn);
+      if (!live) {
+        toast.info(
+          `Didn't update ${row.name}${away} — you switched repositories before the update started.`,
+        );
+        return;
+      }
       // `patchEqual > 0` is strong evidence, not proof — two sides can apply the
       // same patch independently. It only WITHHOLDS the merge, so a false read
       // costs an explained no-op, never a duplicated history.
@@ -1937,8 +2049,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     openRebaseOnto,
     Boolean(currentName) && otherBranches.length >= 2 && !lockCurrent && !busy,
   );
-  useHotkeyAction("stash-all", () => setStashAllOpen(true), hasChanges);
-  useHotkeyAction("pop-stash", () => setStashPopOpen(true), stashes > 0);
+  useHotkeyAction("stash-all", () => setStashAllIn(repoPath), hasChanges);
+  useHotkeyAction("pop-stash", () => setStashPopIn(repoPath), stashes > 0);
   useHotkeyAction(
     "view-stashes",
     () => {
@@ -1953,7 +2065,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setStashesOpen(true);
   });
   useHotkeyAction("operation-history", () => setOpHistoryOpen(true));
-  useHotkeyAction("discard-all", () => setDiscardAllOpen(true), hasChanges);
+  useHotkeyAction("discard-all", () => setDiscardAllIn(repoPath), hasChanges);
   // Cross-worktree navigation (palette-only). They can fire while the popover is
   // closed, so they fetch the worktree list fresh rather than read the open-gated
   // `userWorktrees` cache, then re-check the live repo before acting: after a
@@ -2710,6 +2822,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               setRemoteDeleteTarget({
                 remote: branch.remote,
                 name: branch.name,
+                repo: repoPath,
               });
             }}
           >
@@ -3021,7 +3134,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   reason={noChangesBlockedReason}
                   onClick={() => {
                     setOpen(false);
-                    setDiscardAllOpen(true);
+                    setDiscardAllIn(repoPath);
                   }}
                 >
                   Discard all changes…
@@ -3031,7 +3144,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   reason={noChangesBlockedReason}
                   onClick={() => {
                     setOpen(false);
-                    setStashAllOpen(true);
+                    setStashAllIn(repoPath);
                   }}
                 >
                   Stash all changes…
@@ -3041,7 +3154,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   reason={popStashBlockedReason}
                   onClick={() => {
                     setOpen(false);
-                    setStashPopOpen(true);
+                    setStashPopIn(repoPath);
                   }}
                 >
                   Pop latest stash{stashes > 0 ? ` (${stashes})` : ""}…
@@ -3272,8 +3385,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       />
 
       <ConfirmDialog
-        open={discardAllOpen}
-        onCancel={() => setDiscardAllOpen(false)}
+        open={discardAllIn !== null}
+        onCancel={() => setDiscardAllIn(null)}
         title="Discard all changes?"
         body="All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin."
         confirmLabel="Discard all"
@@ -3283,8 +3396,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       />
 
       <ConfirmDialog
-        open={stashAllOpen}
-        onCancel={() => setStashAllOpen(false)}
+        open={stashAllIn !== null}
+        onCancel={() => setStashAllIn(null)}
         title="Stash all changes?"
         body={
           'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'
@@ -3295,8 +3408,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       />
 
       <ConfirmDialog
-        open={stashPopOpen}
-        onCancel={() => setStashPopOpen(false)}
+        open={stashPopIn !== null}
+        onCancel={() => setStashPopIn(null)}
         title="Pop latest stash?"
         body="Applies the most recent stash to your working tree and removes it from the stash list. If applying conflicts, the stash is kept."
         confirmLabel="Pop stash"
@@ -3306,8 +3419,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
       <BranchMergePickerDialog
         repoPath={repoPath}
-        mode={pickerMode}
-        onClose={() => setPickerMode(null)}
+        mode={picker?.mode ?? null}
+        onClose={() => setPicker(null)}
         onRun={runPicker}
         otherBranches={otherBranches}
         currentLabel={currentLabel}
@@ -3315,8 +3428,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
       <RebaseOntoDialog
         repoPath={repoPath}
-        open={rebaseOntoOpen}
-        onClose={() => setRebaseOntoOpen(false)}
+        open={rebaseOntoIn !== null}
+        onClose={() => setRebaseOntoIn(null)}
         onRun={runRebaseOnto}
         otherBranches={otherBranches}
         currentLabel={currentLabel}
@@ -3325,14 +3438,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       />
 
       <ForkPrPublishGuard
-        repoPath={repoPath}
+        // The repo the match was detected in, which its fork push targets.
+        repoPath={forkGuard?.repo ?? repoPath}
         match={forkGuard?.match ?? null}
         branch={forkGuard?.branch.name ?? ""}
         destination={forkGuard?.remote ?? "origin"}
         onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
           setForkGuard(null);
-          if (forkGuard) void runPushBranch(forkGuard.branch, forkGuard.remote);
+          if (
+            forkGuard &&
+            !refuseIfSwitched(forkGuard.repo, "nothing was published")
+          )
+            void runPushBranch(forkGuard.branch, forkGuard.remote);
         }}
       />
 

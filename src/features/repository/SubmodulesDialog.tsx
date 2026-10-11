@@ -46,6 +46,7 @@ import {
 import type { Submodule } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -236,6 +237,11 @@ function SubmoduleList({
   }
 
   async function handleRemove(s: Submodule) {
+    const removeIn = repoPath;
+    // Each removal builds from the observer's CURRENT options once its prompt
+    // resolves, so a switch under a prompt refuses instead.
+    const switchedAway = () =>
+      refuseIfSwitched(removeIn, "nothing was removed");
     const first = await useConfirm.getState().askChecked({
       title: `Remove ${s.path}?`,
       body: "The removal is staged for you to commit. Its cached repository data under .git/modules is kept, so the submodule can be restored, unless you delete it here.",
@@ -243,7 +249,7 @@ function SubmoduleList({
       confirmVariant: "destructive",
       checkboxLabel: "Also delete cached repository data",
     });
-    if (!first.ok) return;
+    if (!first.ok || switchedAway()) return;
 
     setActing(s.path);
     try {
@@ -262,7 +268,7 @@ function SubmoduleList({
           confirmLabel: "Discard and remove",
           confirmVariant: "destructive",
         });
-        if (!forced) return;
+        if (!forced || switchedAway()) return;
         outcome = await remove.mutateAsync({
           path: s.path,
           force: true,

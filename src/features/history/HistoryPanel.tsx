@@ -69,6 +69,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
@@ -130,7 +131,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const pushingTagKey = (tag: string) => `${repoPath}\n${tag}`;
   const branches = useBranches(repoPath);
 
-  const [resetHash, setResetHash] = useState<string | null>(null);
+  // The reset, delete-tag and pick-onto confirms record the repo they opened in:
+  // this panel outlives a repo switch, and a confirm answered after one refuses.
+  const [reset, setReset] = useState<{ hash: string; repo: string } | null>(
+    null,
+  );
   const [branchHash, setBranchHash] = useState<string | null>(null);
   const [tagHash, setTagHash] = useState<string | null>(null);
   // Each dialog's open session: minted by every opener, dropped by its close. A
@@ -146,7 +151,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
   // Hashes to copy, oldest-first, and the chosen destination branch.
-  const [pickOntoHashes, setPickOntoHashes] = useState<string[] | null>(null);
+  const [pickOnto, setPickOnto] = useState<{
+    hashes: string[];
+    repo: string;
+  } | null>(null);
   const [pickOntoBranch, setPickOntoBranch] = useState("");
   const [filterText, setFilterText] = useState("");
   // "Search all history" mode: server-side message grep across every commit,
@@ -162,7 +170,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // callback-ref wiring on its own Base-UI ContextMenuTrigger render element.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   // Tag pending deletion, plus whether to delete it from origin too.
-  const [deleteTagName, setDeleteTagName] = useState<string | null>(null);
+  const [deleteTag, setDeleteTag] = useState<{
+    name: string;
+    repo: string;
+  } | null>(null);
   const [deleteTagRemote, setDeleteTagRemote] = useState(false);
   // History rewriting (quick squash + the Edit-history editor), unpushed only.
   const [squashCtx, setSquashCtx] = useState<{
@@ -269,6 +280,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   async function undoLast() {
     if (!lastCommit) return;
+    const undoIn = repoPath;
     // Only the root case is lossy enough to ask about: an ordinary undo is gated
     // to unpushed commits and leaves everything staged.
     if (
@@ -294,6 +306,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       }
       // Read the message BEFORE the undo removes the commit it belongs to.
       details = await gitCommitDetails(repoPath, lastCommit.hash);
+      // The undo builds from the observer's options when it is called, which
+      // follow the live repo: a switch during the prompt or the reads above
+      // refuses instead.
+      if (
+        refuseIfSwitched(
+          undoIn,
+          "nothing was undone",
+          "before the undo started",
+        )
+      )
+        return;
       await undoCommit.mutateAsync(undefined);
     } catch (e) {
       onError(e);
@@ -314,7 +337,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // The confirm sits here rather than on the menu items, so the search menu and
   // the single-commit menu can't diverge on whether they ask.
   async function doCheckoutCommit(hash: string) {
+    const checkoutIn = repoPath;
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -330,7 +355,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   async function doRevertCommit(hash: string) {
+    const revertIn = repoPath;
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -340,10 +367,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   // `alreadyApplied` is the one thing the two menus word differently.
   async function doCherryPick(hash: string, alreadyApplied: string) {
+    const pickIn = repoPath;
     const ok = await useConfirm
       .getState()
       .ask(cherryPickCommitConfirm(hash, currentBranch));
-    if (!ok) return;
+    if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -649,7 +677,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const editBase = commits[Math.max(editLen, 0)]?.hash ?? "";
 
   function openCherryPickOnto(hash: string) {
-    setPickOntoHashes(effectiveSelection(hash));
+    setPickOnto({ hashes: effectiveSelection(hash), repo: repoPath });
     setPickOntoBranch(targetBranches[0]?.name ?? "");
   }
 
@@ -755,7 +783,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         </ContextMenuItem>
         <ContextMenuItem
           disabled={index === 0}
-          onClick={() => setResetHash(commit.hash)}
+          onClick={() => setReset({ hash: commit.hash, repo: repoPath })}
         >
           Reset to commit…
         </ContextMenuItem>
@@ -827,7 +855,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             key={`delete:${tag}`}
             onClick={() => {
               setDeleteTagRemote(false);
-              setDeleteTagName(tag);
+              setDeleteTag({ name: tag, repo: repoPath });
             }}
           >
             Delete tag {tag}…
@@ -1011,16 +1039,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
       <DeleteTagDialog
         repoPath={repoPath}
-        name={deleteTagName}
+        name={deleteTag?.name ?? null}
+        openedIn={deleteTag?.repo ?? null}
         remote={deleteTagRemote}
         onRemoteChange={setDeleteTagRemote}
-        onClose={() => setDeleteTagName(null)}
+        onClose={() => setDeleteTag(null)}
       />
 
       <ResetCommitDialog
         repoPath={repoPath}
-        hash={resetHash}
-        onClose={() => setResetHash(null)}
+        hash={reset?.hash ?? null}
+        openedIn={reset?.repo ?? null}
+        onClose={() => setReset(null)}
       />
 
       <CreateRefFromCommitDialog
@@ -1053,12 +1083,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
       <CherryPickOntoDialog
         repoPath={repoPath}
-        hashes={pickOntoHashes}
+        hashes={pickOnto?.hashes ?? null}
+        openedIn={pickOnto?.repo ?? null}
         branch={pickOntoBranch}
         onBranchChange={setPickOntoBranch}
         branches={targetBranches}
         currentBranch={currentBranch}
-        onClose={() => setPickOntoHashes(null)}
+        onClose={() => setPickOnto(null)}
         onDone={() => setSelected(new Set())}
       />
     </>

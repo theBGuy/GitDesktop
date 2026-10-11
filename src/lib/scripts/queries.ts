@@ -1,6 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
+import { useMutation } from "@/lib/started-mutation";
 import { invoke } from "@/lib/tauri/invoke";
 import {
   addTask,

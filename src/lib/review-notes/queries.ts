@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import { deleteReviewNote, getReviewNote } from "./store";
 
 export const reviewNoteKey = (repo: string, branch: string) =>

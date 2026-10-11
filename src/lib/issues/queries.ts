@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import {
   createLocalIssue,
   deleteLocalIssue,
@@ -20,9 +21,10 @@ export function useLocalIssues(repo: string) {
   });
 }
 
-/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of
- *  retargeting it and its invalidation (gd-conventions). The detached observer goes
- *  idle, so callers never rely on `isPending` alone for re-entry protection. */
+/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write and the
+ *  newly-live repo's controls don't read it as busy (gd-conventions). The detached
+ *  observer goes idle, so callers never rely on `isPending` alone for re-entry
+ *  protection. */
 function useLocalIssueMutation<TArgs, TData>(
   repo: string,
   op: "create" | "update" | "delete",

@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import { loadAutomations, saveAutomations, saveRepoAutomations } from "./store";
 import type { AutomationsConfigV2, RepoOverride } from "./types";
 

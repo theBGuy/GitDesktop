@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import type { WebhookInput } from "../types";
 
@@ -23,9 +24,9 @@ function useWebhookMutation<TArgs, TData>(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the call and the list invalidation close over `repo`, and the settings
-    // dialog survives a repo switch — without the key a switch retargets the pending
-    // write and refreshes the wrong repo's hooks.
+    // Pinned: the call and the list invalidation close over `repo`, and the
+    // settings dialog survives a repo switch — without the key the newly-live
+    // repo's controls would read the pending write as busy.
     mutationKey: ["webhook", op, repo],
     mutationFn,
     // Refetch the list so created/edited hooks and ping/test delivery results
@@ -103,9 +104,10 @@ export function useWebhookDelivery(
 export function useRedeliverWebhook(repo: string, hookId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    // Pinned: the call and the deliveries invalidation close over `repo`/`hookId`,
-    // and the settings dialog survives a repo switch — without the key a switch
-    // retargets the pending redelivery.
+    // Pinned: the call and the deliveries invalidation close over
+    // `repo`/`hookId`, and the settings dialog survives a repo switch — without
+    // the key the newly-live repo's controls would read the pending redelivery as
+    // busy.
     mutationKey: ["webhook-redeliver", repo, hookId],
     mutationFn: (deliveryId: string) =>
       api.ghHookRedeliver(repo, hookId, deliveryId),

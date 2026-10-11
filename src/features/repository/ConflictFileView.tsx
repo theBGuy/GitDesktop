@@ -1,5 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { type AppError, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { markerStagePrompt } from "./conflict-confirms";
 
 const baseName = (path: string) => path.split("/").pop() || path;
@@ -272,6 +273,34 @@ export function ConflictFileView({
   const resolve = useResolveConflict(repoPath);
   const checkoutSide = useCheckoutConflictSide(repoPath);
   const markResolve = useMarkConflictResolved(repoPath);
+  // This view's repo, read live after an await: its mutations follow the prop,
+  // and a PR's resolve worktree hosts it as well as the open repo, so the live
+  // repo is not the one to compare against.
+  const repoPathRef = useLatestRef(repoPath);
+  // Cleared on unmount (and an <Activity> hide), when the ref above keeps its
+  // last value: a prompt answered after that belongs to a view that is gone.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // Whether the view moved to another repo, or went away, while a prompt was
+  // open, saying so: a mutate called then builds from options this view no
+  // longer describes. Not the shared `refuseIfSwitched`, which compares against
+  // the live repo, never a worktree.
+  const refuseIfMoved = (startedIn: string, outcome: string) => {
+    if (!mountedRef.current) {
+      toast.info(`You left this file while the dialog was open — ${outcome}.`);
+      return true;
+    }
+    if (repoPathRef.current === startedIn) return false;
+    toast.info(
+      `You switched repositories while the dialog was open — ${outcome}.`,
+    );
+    return true;
+  };
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   const startResolveAi = useConflictResolve((s) => s.startOne);
@@ -340,13 +369,14 @@ export function ConflictFileView({
           return "keepsFile";
       }
     })();
+    const acceptIn = repoPath;
     const ok = await useConfirm.getState().ask({
       title: `Accept all ${copy.side} in ${name}?`,
       body: ACCEPT_ALL_BODY[arm](name, copy.side, copy.other),
       confirmLabel: `Accept all ${copy.side}`,
       confirmVariant: "destructive",
     });
-    if (!ok) return;
+    if (!ok || refuseIfMoved(acceptIn, "nothing was resolved")) return;
     try {
       await checkoutSide.mutateAsync({ path, side });
       toast.success(
@@ -372,11 +402,12 @@ export function ConflictFileView({
   // It asks the generic stage routes' question, from their shared builder.
   async function markResolved() {
     if (file.data && markNeedsConfirm(file.data)) {
+      const markIn = repoPath;
       const flag = { name: baseName(path), unchecked: false };
       const ok = await useConfirm
         .getState()
         .ask(markerStagePrompt([flag], false));
-      if (!ok) return;
+      if (!ok || refuseIfMoved(markIn, "nothing was marked resolved")) return;
     }
     try {
       await markResolve.mutateAsync(path);

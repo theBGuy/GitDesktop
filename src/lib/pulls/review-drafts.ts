@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   identityKeyFor,
   mergeById,
@@ -6,6 +6,7 @@ import {
 } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
 import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 
 /** One pending draft comment in a not-yet-submitted batch review. `id` is a local

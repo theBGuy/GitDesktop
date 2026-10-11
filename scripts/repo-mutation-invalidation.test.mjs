@@ -1,11 +1,11 @@
-// Pins `useRepoMutation`'s invalidation target: whatever a mutation invalidates,
-// it invalidates for the repo it started on, plus the current repo when that
-// differs, even when its mounted observer is re-rendered for another repo before
-// it settles. react-query replaces a pending mutation's whole options object on
-// that re-render, so keys read from the settle-time closure alone land on the
-// live repo; the builder captures them in `onMutate`'s context and settles the
-// union. The current repo is in the union because a write that parked offline
-// runs the RETARGETED mutationFn on reconnect.
+// Pins `repoMutationCallbacks` against RAW react-query: options passed straight
+// to a MutationObserver, so a re-render for another repo replaces a pending
+// mutation's whole options object and the settle callbacks and mutationFn that
+// run are the new ones. The app path goes through `@/lib/started-mutation`,
+// whose snapshot keeps both lists the starting repo's
+// (scripts/started-mutation.test.mjs pins that); these tests pin the union the
+// builder settles as defense in depth: the keys `onMutate` captured plus the
+// settle-time ones, so the starting repo is refreshed whichever options settle.
 //
 // The builder lives in an import-free module so Node's type stripping can load it
 // directly. The import is DYNAMIC because this file also pulls
@@ -107,7 +107,7 @@ test("premise: a retargeted observer runs the NEW options' callbacks", async (t)
   gate.resolve("ok");
   await settled;
   // If this ever reads ["A"], react-query stopped retargeting pending mutations
-  // and the union below is no longer needed to protect the target.
+  // and the raw-observer arms below no longer exercise the union.
   assert.deepEqual(ran, ["B"]);
 });
 
@@ -179,8 +179,9 @@ test("a write parked offline runs the retargeted mutationFn and refreshes both r
     onlineManager.setOnline(true);
     await settled;
     await sleep(0);
-    // Pre-existing react-query behavior, pinned as a named fact: the retargeted
-    // mutationFn is the one that runs on reconnect.
+    // RAW react-query behavior, pinned as a named fact: with options passed
+    // straight to the observer, the retargeted mutationFn runs on reconnect. The
+    // app's helper runs the starting one (scripts/started-mutation.test.mjs).
     assert.deepEqual(ran, ["B"]);
     assert.deepEqual(named(invalidated), BOTH);
   } finally {

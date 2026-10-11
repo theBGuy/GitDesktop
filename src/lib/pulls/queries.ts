@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   externalReviewerNames,
   fetchExternalFindings,
@@ -7,6 +7,7 @@ import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import { useMutation } from "@/lib/started-mutation";
 import {
   createLocalPr,
   deleteLocalPr,
@@ -44,9 +45,10 @@ export function useLocalPrs(repo: string) {
   return useQuery(localPrsOptions(repo));
 }
 
-/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write instead of
- *  retargeting it and its invalidation (gd-conventions). The detached observer goes
- *  idle, so callers never rely on `isPending` alone for re-entry protection. */
+/** Pinned to `op` + repo, so a repo switch mid-flight detaches the write and the
+ *  newly-live repo's controls don't read it as busy (gd-conventions). The detached
+ *  observer goes idle, so callers never rely on `isPending` alone for re-entry
+ *  protection. */
 function useLocalPrMutation<TArgs, TData>(
   repo: string,
   op: "create" | "update" | "delete",

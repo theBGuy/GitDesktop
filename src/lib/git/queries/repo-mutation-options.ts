@@ -6,7 +6,7 @@ import type { QueryClient } from "@tanstack/react-query";
 type QueryKeys = readonly (readonly unknown[])[];
 
 /** A `useRepoMutation` render's invalidation lists; `onMutate` returns the
- *  starting render's as its context. */
+ *  ones in effect when the write started as its context. */
 export interface RepoMutationKeys {
   invalidate: QueryKeys;
   invalidateAfter: QueryKeys;
@@ -24,18 +24,17 @@ function union(captured: QueryKeys, current: QueryKeys): QueryKeys {
 }
 
 /**
- * The invalidation callbacks behind `useRepoMutation`. A mounted observer
- * re-rendered with new props replaces its PENDING mutation's options, so the
- * settle-time closure may describe another repo than the call started on.
- * Settle invalidates the UNION of the lists `onMutate` captured and the current
- * ones: a write that ran before a switch refreshes the repo it started on, and
- * one parked offline runs the retargeted `mutationFn` on reconnect, writing the
- * repo current then, which the current lists cover. If the view switches again
- * while that write runs, the repo it wrote is NOT refreshed. With no switch the
- * lists are equal and dedupe to one, at no extra cost. A mutation that settles
- * without an `onMutate` context uses the current lists. `notifySuccess` stays
- * the latest render's on purpose; a site whose write, refresh or callback must
- * stay on the render that started it opts into `useRepoMutation`'s `identity`.
+ * The invalidation callbacks behind `useRepoMutation`. Settle invalidates the
+ * UNION of the lists `onMutate` captured and the settle-time ones. Built through
+ * `@/lib/started-mutation`, both are the ones in effect when the write started,
+ * so the union dedupes to them and `notifySuccess` is that render's too: a write
+ * refreshes the repo it started on however the view switches meanwhile. The union
+ * is defense in depth: it would keep the starting repo refreshed if a settle ever
+ * ran through other callbacks than the ones `onMutate` ran with. No path does:
+ * react-query re-executes a mutation outside its original execution only after
+ * hydration, and builds that one from mutation defaults, never a render's
+ * options; nothing here hydrates. A mutation that settles without an `onMutate`
+ * context uses the settle-time lists.
  */
 export function repoMutationCallbacks<TData, TArgs>(
   queryClient: QueryClient,

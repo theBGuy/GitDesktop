@@ -1,9 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { PROVIDERS_REQUIRING_KEY } from "@/lib/ai/providers";
 import type { AiProviderId } from "@/lib/ai/types";
 import { getSecret } from "@/lib/git/api";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
+import { useMutation } from "@/lib/started-mutation";
 import { commitTheme, type ThemeSetting } from "@/lib/theme";
 import {
   type AppSettings,

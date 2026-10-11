@@ -1,6 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { useSettings } from "@/lib/settings/queries";
+import { useMutation } from "@/lib/started-mutation";
 import {
   EMPTY_SYNTAX,
   loadSharedSyntax,

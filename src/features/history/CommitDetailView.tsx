@@ -50,6 +50,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -257,7 +258,9 @@ export function CommitDetailView({
   // Each of these asks before it runs, in the same words as the History list's
   // menu. All three act on the `hash` PROP for the same reason `copyHash` does.
   async function doCheckoutCommit() {
+    const checkoutIn = repoPath;
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -273,7 +276,9 @@ export function CommitDetailView({
   }
 
   async function doRevertCommit() {
+    const revertIn = repoPath;
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -284,10 +289,11 @@ export function CommitDetailView({
   // No branch name: this view doesn't subscribe to repo status, and doing so for
   // one prompt's wording would re-render the diff pane on every status poll.
   async function doCherryPick() {
+    const pickIn = repoPath;
     const ok = await useConfirm
       .getState()
       .ask(cherryPickCommitConfirm(hash, null));
-    if (!ok) return;
+    if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;

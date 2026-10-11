@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { create } from "zustand";
 import { normPath } from "@/lib/git/path";
 import type { RemoteLens } from "@/lib/git/types";
@@ -412,6 +413,23 @@ export function originNoteFor(repoPath: string): string | undefined {
 export function landedIn(repoPath: string): { live: boolean; away: string } {
   const live = originNoteFor(repoPath) === undefined;
   return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };
+}
+
+/** Whether an action begun in `startedIn` stops because the user has since
+ *  switched repositories, saying so: "You switched repositories <when> —
+ *  <outcome> in <repo>." A mutate called after an await, or from a dialog that
+ *  outlived the switch, builds from the live repo's options, not the ones the
+ *  action started under. Reads {@link landedIn} once, so call it at the point the
+ *  write would start. */
+export function refuseIfSwitched(
+  startedIn: string,
+  outcome: string,
+  when = "while the dialog was open",
+): boolean {
+  const { live, away } = landedIn(startedIn);
+  if (!live)
+    toast.info(`You switched repositories ${when} — ${outcome}${away}.`);
+  return !live;
 }
 
 export const markNotificationRead = (id: string): void =>

@@ -21,6 +21,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 
 /**
@@ -38,6 +39,8 @@ export function ForkPrPublishGuard({
   onClose,
   onPublishAnyway,
 }: {
+  /** The repo the match was detected in, never the live one: the dialog can
+   *  outlive a switch away from it. */
   repoPath: string;
   match: ForkPrMatch | null;
   /** The local branch being published — the push source, whose name may differ
@@ -72,13 +75,21 @@ export function ForkPrPublishGuard({
     ? `${match.aheadCount} commit${match.aheadCount === 1 ? "" : "s"}`
     : "";
 
+  // The push answers to `repoPath`, so it runs only while that repo is the one on
+  // screen: the dialog describes it, and a switch away refuses and closes it.
+  function switchedAway(): boolean {
+    if (!refuseIfSwitched(repoPath, "nothing was pushed")) return false;
+    onClose();
+    return true;
+  }
+
   // Add the fork remote (idempotent) and push the local branch onto the PR's
   // head ref — no fetch first: the match is ancestry-verified locally, so this
   // fast-forwards unless the contributor pushed meanwhile, which surfaces as a
   // normal push error. The push mutation invalidates the whole repo subtree,
   // which is where the PR list and details live.
   async function pushToFork() {
-    if (!match || refuseWhileOffline()) return;
+    if (!match || refuseWhileOffline() || switchedAway()) return;
     setEnsuring(true);
     let remote: string;
     try {
@@ -93,8 +104,9 @@ export function ForkPrPublishGuard({
       return;
     }
     setEnsuring(false);
-    // Again below the remote setup, an await the connection can drop during.
-    if (refuseWhileOffline()) return;
+    // Again below the remote setup, an await the connection can drop and the
+    // user can switch repositories during.
+    if (refuseWhileOffline() || switchedAway()) return;
     try {
       await push.mutateAsync({
         setUpstream: false,

@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { useMutation } from "@/lib/started-mutation";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { toastErrorWithNote } from "@/lib/toast";
 import {
@@ -110,10 +111,12 @@ export function useConversationFilterPrefs(repo: string) {
   });
 }
 
-/** A save's payload. Both fields are pinned AT MUTATE TIME, which is the whole
- *  point: nothing in this mutation's lifecycle may read the hook's `repo` closure
- *  after the call, since react-query hands an in-flight mutation each later
- *  render's options — a repo switch mid-save would otherwise redirect the write. */
+/** A save's payload. Both fields are pinned AT MUTATE TIME, so the save carries
+ *  its own target: the write and its error note read these, never the hook's
+ *  `repo` closure, and stay on the repo the save was made in even for a mutation
+ *  resumed without its execution context (defense in depth beside
+ *  `@/lib/started-mutation`, which already keeps the closure the one in effect
+ *  when the save started). */
 interface SavePrefsVars {
   prefs: ConversationFilterPrefs;
   /** The originating checkout path. The store re-resolves its identity; pinning
@@ -140,9 +143,9 @@ export function useSaveConversationFilterPrefs(repo: string) {
     // this CONTEXT carries the identity for the settle's counter. Both are read
     // from the same render, so they name one repo by construction.
     //
-    // Reading the `key` CLOSURE is safe in this callback and only in this one:
-    // onMutate runs synchronously at mutate time, whereas every later callback gets
-    // whatever options the newest render pushed onto the mutation.
+    // Reading the `key` CLOSURE is safe here: onMutate runs at mutate time. The
+    // later callbacks read the context it returns instead, which names the same
+    // record whatever options they settle through.
     onMutate: async ({ prefs }: SavePrefsVars) => {
       if (!key) return;
       const settleKey = key;
@@ -166,10 +169,10 @@ export function useSaveConversationFilterPrefs(repo: string) {
         e,
         `Your filter choice for ${repoNameFromPath(vars.repo)} wasn't saved. The list falls back to your saved filters — or to the defaults, if those can't be read either.`,
       ),
-    // Counts against the CONTEXT, never the closure — see onMutate: this runs at
-    // settle time, when the closure names whatever repo is open by then. Switching
-    // repos mid-save would otherwise decrement the new repo's counter and leave the
-    // originating one permanently positive, so THAT repo never reconciles again.
+    // Counts against the CONTEXT, never the closure — see onMutate: the context is
+    // the identity this save incremented. A decrement landing on any other repo's
+    // counter would leave the originating one permanently positive, so THAT repo
+    // would never reconcile again.
     //
     // The invalidation reaches this record's own addresses only: a lookup that heals
     // mid-write moves it from the raw path to the identity, and a settle aimed at the

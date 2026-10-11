@@ -67,6 +67,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { parseableDate } from "@/lib/time";
@@ -267,9 +268,11 @@ export function TagDetailView({
   // its <Activity> tab while a write is still in flight.
   async function onUpload() {
     if (refuseWhileOffline()) return;
+    const uploadIn = repoPath;
     const file = await openDialog({ multiple: false });
     // Again below the picker: the connection can drop while it is open.
     if (typeof file !== "string" || refuseWhileOffline()) return;
+    if (refuseIfSwitched(uploadIn, "nothing was uploaded")) return;
     try {
       await uploadAsset.mutateAsync({ tag, filePath: file });
     } catch (e) {
@@ -283,8 +286,10 @@ export function TagDetailView({
     // Fresh `tag`, placeholder-derived name: two releases sharing an asset name
     // would silently fetch the wrong file.
     if (relStale) return;
+    const downloadIn = repoPath;
     const dir = await openDialog({ directory: true });
     if (typeof dir !== "string") return;
+    if (refuseIfSwitched(downloadIn, "nothing was downloaded")) return;
     try {
       await downloadAsset.mutateAsync({ tag, assetName, dir });
     } catch (e) {
@@ -300,6 +305,7 @@ export function TagDetailView({
     // The name comes off the rendered release, which is the previous tag's
     // during a switch — refuse before the confirm can name the wrong asset.
     if (relStale) return;
+    const deleteIn = repoPath;
     const ok = await useConfirm.getState().ask({
       title: `Delete ${assetName}?`,
       body:
@@ -311,6 +317,7 @@ export function TagDetailView({
       holdOffline: true,
     });
     if (!ok || refuseWhileOffline()) return;
+    if (refuseIfSwitched(deleteIn, "nothing was deleted")) return;
     try {
       await deleteAsset.mutateAsync({ tag, assetName });
     } catch (e) {
@@ -327,10 +334,11 @@ export function TagDetailView({
   async function onCheckout() {
     const target = tagInfo?.target;
     if (!target) return;
+    const checkoutIn = repoPath;
     const ok = await useConfirm
       .getState()
       .ask(checkoutDetachedConfirm("tag", tag));
-    if (!ok) return;
+    if (!ok || refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -435,6 +443,7 @@ export function TagDetailView({
       // two-phase save may be armed by then, and dropping its latch mid-flight
       // would let that dialog close between the phases.
       const startedFor = tagKey;
+      const saveIn = repoPath;
       const submitted = editSessionRef.current;
       const disarm = () => {
         if (isLiveTag(startedFor)) setSyncArmed(false);
@@ -480,6 +489,13 @@ export function TagDetailView({
         if (isOfflineNow())
           throw new Error(
             "You were offline, so the manifest wasn't uploaded. Save the release again once you're back online to update it.",
+          );
+        // The upload builds from the live repo's options once the edit lands;
+        // a switch during it takes the same partial-state path.
+        const { live, away } = landedIn(saveIn);
+        if (!live)
+          throw new Error(
+            `You switched repositories, so the manifest wasn't uploaded${away}. Save the release again to update it.`,
           );
         await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
       } catch (err) {

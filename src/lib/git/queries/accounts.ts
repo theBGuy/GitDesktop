@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { useMutation } from "@/lib/started-mutation";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import type {

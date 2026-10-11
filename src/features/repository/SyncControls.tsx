@@ -63,7 +63,11 @@ import {
 } from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { landedIn, originNoteFor } from "@/lib/stores/notifications";
+import {
+  landedIn,
+  originNoteFor,
+  refuseIfSwitched,
+} from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -475,13 +479,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     if (!ok) return;
     // `hardReset` follows the live repo, where a same-named branch would pass
     // the HEAD check below; a switch under the prompt refuses instead.
-    const { live, away } = landedIn(resetIn);
-    if (!live) {
-      toast.info(
-        `You switched repositories while the dialog was open — nothing was reset${away}.`,
-      );
-      return;
-    }
+    if (refuseIfSwitched(resetIn, "nothing was reset")) return;
     // HEAD can move while the dialog sits open; the captured branch is the only
     // one the confirmation described. Says so rather than returning quietly: the
     // user just confirmed a destructive action, and silence reads as "it worked".
@@ -566,13 +564,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       setForceReading(false);
     }
     // `push` follows the live repo, so a switch during the read refuses.
-    const { live, away } = landedIn(confirmRepo);
-    if (!live) {
-      toast.info(
-        `You switched repositories while the dialog was open — nothing was pushed${away}.`,
-      );
-      return;
-    }
+    if (refuseIfSwitched(confirmRepo, "nothing was pushed")) return;
     // Cancelled or reopened during the read: that click no longer stands.
     if (forceConfirmRef.current !== confirm) return;
     if (readName !== branch) {
@@ -938,8 +930,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           onPublishAnyway={() => {
             closeForkGuard(forkGuard.token);
             // Only this open, in its own still-live repo: `open` covers a
-            // click during the dialog's close transition, `live` a switch.
-            if (!forkGuard.open || !landedIn(forkGuard.repo).live) return;
+            // click during the dialog's close transition (silently), the
+            // repo check a switch.
+            if (
+              !forkGuard.open ||
+              refuseIfSwitched(forkGuard.repo, "nothing was published")
+            )
+              return;
             void doPush(false, forkGuard.branch);
           }}
         />

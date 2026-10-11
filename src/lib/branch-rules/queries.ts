@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import { useMutation } from "@/lib/started-mutation";
 import { mergeBranchRules } from "./match";
 import {
   loadBranchRules,
@@ -75,8 +76,8 @@ export function useSaveSharedBranchRules(repo: string) {
       saveSharedBranchRules(repo, config),
     // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
-    // Built at mutate time and read back from the context: the settle callbacks
-    // run off the current render's options, and the dialog survives a repo switch.
+    // Built at mutate time and read back from the context, so the settle names
+    // the repo the write fired on whatever render it settles through.
     onMutate: () => ({ key: sharedBranchRulesKey(repo) }),
     // This checkout's key only, unlike the personal save: the file lives in each
     // working tree, so no other checkout's read changed.

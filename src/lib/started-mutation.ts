@@ -1,0 +1,92 @@
+// Bare specifiers only: scripts/started-mutation.test.mjs loads this module under
+// Node's type stripping, which resolves no "@/" aliases.
+import {
+  type DefaultError,
+  type MutationFunctionContext,
+  type QueryClient,
+  type UseMutationOptions,
+  type UseMutationResult,
+  useMutation as useReactQueryMutation,
+} from "@tanstack/react-query";
+import { useMemo } from "react";
+
+/** The `meta` key holding the options a mutation started with. Reserved: no
+ *  caller's own `meta` may use it. A string, since `MutationMeta` is a
+ *  string-keyed record. */
+export const STARTED_KEY = "gitdesktop.started";
+
+/**
+ * `options` with its `mutationFn` and lifecycle callbacks taken from the options
+ * in effect when each mutation STARTED (the observer's at the `mutate` call). A
+ * mounted observer re-rendered with new options replaces its pending mutation's
+ * options, but query-core builds the `MutationFunctionContext` once per execution
+ * and hands that same object to the `mutationFn` and every callback; the snapshot
+ * rides its `meta`, so no later render can change what a running or parked write
+ * calls. Every trampoline is installed even when `options` lacks that callback,
+ * so a later render cannot add or drop one mid-flight. Each returns its target's
+ * result unchanged: `onMutate`'s is the mutation context, and a promise from
+ * `onSuccess` is awaited before the mutation settles. They shadow any
+ * `defaultOptions.mutations` callback or `setMutationDefaults` mutationFn, which
+ * the `mutation-defaults` check in scripts/check-banned-patterns.mjs bans.
+ */
+export function startedMutationOptions<
+  TData = unknown,
+  TError = DefaultError,
+  TVariables = void,
+  TOnMutateResult = unknown,
+>(
+  options: UseMutationOptions<TData, TError, TVariables, TOnMutateResult>,
+): UseMutationOptions<TData, TError, TVariables, TOnMutateResult> {
+  const startedOf = (context: MutationFunctionContext) => {
+    const started = context.meta?.[STARTED_KEY];
+    if (started === undefined)
+      throw new Error(
+        "This mutation has no started-options snapshot in its meta: build mutations only through @/lib/started-mutation, without replacing their meta",
+      );
+    return started as typeof options;
+  };
+  return {
+    ...options,
+    meta: { ...options.meta, [STARTED_KEY]: options },
+    mutationFn: (variables, context) => {
+      const { mutationFn } = startedOf(context);
+      // query-core's own rejection for options that carry no mutationFn.
+      return mutationFn
+        ? mutationFn(variables, context)
+        : Promise.reject(new Error("No mutationFn found"));
+    },
+    onMutate: (variables, context) =>
+      startedOf(context).onMutate?.(variables, context) as
+        | Promise<TOnMutateResult>
+        | TOnMutateResult,
+    onSuccess: (data, variables, onMutateResult, context) =>
+      startedOf(context).onSuccess?.(data, variables, onMutateResult, context),
+    onError: (error, variables, onMutateResult, context) =>
+      startedOf(context).onError?.(error, variables, onMutateResult, context),
+    onSettled: (data, error, variables, onMutateResult, context) =>
+      startedOf(context).onSettled?.(
+        data,
+        error,
+        variables,
+        onMutateResult,
+        context,
+      ),
+  };
+}
+
+/** react-query's `useMutation` through {@link startedMutationOptions}: the only
+ *  way this app constructs a mutation. Memoized on the `options` identity, so the
+ *  observer's `setOptions` effect fires exactly as often as it would for
+ *  `options` itself. */
+export function useMutation<
+  TData = unknown,
+  TError = DefaultError,
+  TVariables = void,
+  TOnMutateResult = unknown,
+>(
+  options: UseMutationOptions<TData, TError, TVariables, TOnMutateResult>,
+  queryClient?: QueryClient,
+): UseMutationResult<TData, TError, TVariables, TOnMutateResult> {
+  const started = useMemo(() => startedMutationOptions(options), [options]);
+  return useReactQueryMutation(started, queryClient);
+}

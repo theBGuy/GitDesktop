@@ -242,6 +242,7 @@ const queriesInternalImport = scanner("queries-internal-import");
 const queriesBarrelInternal = scanner("queries-barrel-internal-reference");
 const queriesInternalReexport = scanner("queries-internal-reexport");
 const unpinnedMutationIdentity = scanner("mutation-identity-pinning");
+const rawReactQueryMutation = scanner("raw-react-query-mutation");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -2492,7 +2493,7 @@ test("mutation-identity-pinning flags an unpinned repo-scoped create", () => {
   ].join("\n");
   assert.deepEqual(unpinnedMutationIdentity(viaHelper), [2]);
   // The seed arm: not create-named, but a response written into a hook-scope key
-  // on success — the settings-seed defect, which a retarget cannot roll back.
+  // on success — an exported repo-scoped seed, which keeps its pin for hold scoping.
   const seed = [
     "export function useUpdateGlRepoSettings(repo: string) {",
     "  const queryClient = useQueryClient();",
@@ -2845,8 +2846,9 @@ const settleCacheWrite = (source) =>
   scanner("settle-cache-write-identity")(source);
 
 test("settle-cache-write-identity flags a settle write keyed from hook scope", () => {
-  // A bare `repo` in a success seed: the settle runs with the CURRENT render's
-  // closure, so after a switch the response lands on the newly-live repo.
+  // A bare `repo` in a success seed: hook scope, which names the right repo only
+  // while the settle runs on the options in effect at the start; the context
+  // keeps the key on the mutation's own state either way.
   const bareRepo = [
     "export function useUpdateGlRepoSettings(repo: string) {",
     "  const queryClient = useQueryClient();",
@@ -3030,6 +3032,162 @@ test("settle-cache-write-identity is scoped like mutation-identity-pinning, with
   const { violations, stale } = runCheck(check, files, views);
   assert.deepEqual(violations, ["src/lib/git/queries/repo-settings.ts:3"]);
   assert.deepEqual(stale, []);
+});
+
+test("raw-react-query-mutation flags every value route to react-query's constructors", () => {
+  const RQ = '"@tanstack/react-query"';
+  const cases = {
+    "a named import": `import { useMutation, useQuery } from ${RQ};`,
+    "a wrapped named import": `import {\n  type QueryKey,\n  useMutation,\n} from ${RQ};`,
+    "an aliased import": `import { useMutation as useM } from ${RQ};`,
+    "a string-named alias": `import { "useMutation" as useM } from ${RQ};`,
+    "a MutationObserver value import": `import { MutationObserver } from ${RQ};`,
+    "a value beside an inline type": `import { type UseMutationResult, useMutation } from ${RQ};`,
+    "the core package":
+      'import { MutationObserver } from "@tanstack/query-core";',
+    "a subpath": `import { useMutation } from "@tanstack/react-query/build/modern/useMutation.js";`,
+    "a re-export": `export { useMutation } from ${RQ};`,
+    "an aliased re-export": `export { MutationObserver as Observer } from ${RQ};`,
+    "an export star": `export * from ${RQ};`,
+    "a namespace re-export": `export * as rq from ${RQ};`,
+    "a dynamic import": `const rq = await import(${RQ});`,
+  };
+  for (const [name, source] of Object.entries(cases))
+    assert.deepEqual(rawReactQueryMutation(source), [1], name);
+  // A namespace import flags at the use that reaches a constructor.
+  const ns = `import * as rq from ${RQ};`;
+  for (const [name, use] of Object.entries({
+    "a namespace call": "const m = rq.useMutation({ mutationFn });",
+    "a namespace construction":
+      "const o = new rq.MutationObserver(client, {});",
+    "an optional member": "const f = rq?.useMutation;",
+    "a namespace destructure": "const { useMutation } = rq;",
+    "a namespace passed on": "wrap(rq);",
+  }))
+    assert.deepEqual(rawReactQueryMutation(`${ns}\n${use}`), [2], name);
+});
+
+test("raw-react-query-mutation leaves types, other hooks and the DOM's observer alone", () => {
+  const RQ = '"@tanstack/react-query"';
+  for (const [name, source] of Object.entries({
+    "a type-only import": `import type { MutationObserver, UseMutationResult } from ${RQ};`,
+    "inline type specifiers": `import { type MutationObserver, useQuery } from ${RQ};`,
+    "a type-only namespace": `import type * as rq from ${RQ};\ntype O = rq.MutationObserver;`,
+    "a type-only re-export": `export type { UseMutationOptions } from ${RQ};`,
+    "the mutation-state hooks": `import { useIsMutating, useMutationState } from ${RQ};`,
+    "a DOM MutationObserver": "const mo = new MutationObserver(() => {});",
+    "the helper's export":
+      'import { useMutation } from "@/lib/started-mutation";\nuseMutation({ mutationFn });',
+    "a namespace read of another member": `import * as rq from ${RQ};\nconst c = rq.useQueryClient();`,
+    "a commented import": `// import { useMutation } from ${RQ};`,
+  }))
+    assert.deepEqual(rawReactQueryMutation(source), [], name);
+});
+
+test("raw-react-query-mutation exempts the helper alone, and its pin notices a rename", () => {
+  const check = CHECKS.find((c) => c.name === "raw-react-query-mutation");
+  const helper = "src/lib/started-mutation.ts";
+  assert.equal(check.appliesTo(helper), false);
+  for (const file of [
+    "src/lib/git/queries/internal.ts",
+    "src/features/repository/BranchSwitcher.tsx",
+    "src/components/ui/button.tsx",
+    "src/lib/started-mutation.test.ts",
+  ])
+    assert.equal(check.appliesTo(file), true, file);
+  assert.deepEqual(check.allowlist, []);
+  assert.ok(check.expectScanned.atLeast >= 500);
+  // The exemption is what passes the helper: its own source reads as a raw
+  // construction, so a copy anywhere else would flag.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const helperView = view(readFileSync(join(root, helper), "utf8"));
+  assert.notDeepEqual(check.scan(helperView), []);
+  const views = new Map([
+    [helper, helperView],
+    ["src/lib/copy.ts", helperView],
+  ]);
+  const { violations } = runCheck(check, [helper, "src/lib/copy.ts"], views);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0], /^src\/lib\/copy\.ts:\d+$/);
+
+  const present = CHECKS.find((c) => c.name === "started-mutation-present");
+  assert.equal(present.appliesTo(helper), true);
+  assert.equal(present.appliesTo("src/lib/git/queries/internal.ts"), false);
+  assert.deepEqual(present.scan(helperView), []);
+  assert.equal(scopePinFailure(present, 1), null);
+  const renamed = scopePinFailure(present, 0);
+  assert.match(renamed, /SCOPE PIN FAILED/);
+  assert.match(renamed, /src\/lib\/started-mutation\.ts/);
+});
+
+test("mutation-defaults flags every way to give mutations a client default", () => {
+  const mutationDefaults = scanner("mutation-defaults");
+  for (const [name, source] of Object.entries({
+    "a keyed default":
+      'queryClient.setMutationDefaults(["save"], { mutationFn: save });',
+    "a mutations entry":
+      "new QueryClient({ defaultOptions: { mutations: { onError } } });",
+    "a shorthand entry":
+      "const c = { defaultOptions: { queries, mutations } };",
+    "a method entry":
+      "const c = { defaultOptions: { mutations() { return {}; } } };",
+    "a runtime default":
+      "queryClient.setDefaultOptions({ mutations: { retry: 1 } });",
+    "an unreadable value": "new QueryClient({ defaultOptions: base });",
+    "a spread": "new QueryClient({ defaultOptions: { ...base } });",
+    "a shorthand defaults key": "new QueryClient({ defaultOptions });",
+    "a shorthand among others":
+      "const config = { queryCache, defaultOptions, logger };",
+    "a defaults binding": "const defaultOptions = { mutations: { retry: 0 } };",
+    "an unreadable binding": "const defaultOptions = makeDefaults();",
+    "a double-quoted key":
+      'new QueryClient({ "defaultOptions": { mutations: {} } });',
+    "a single-quoted unreadable key": "const c = { 'defaultOptions': base };",
+    "a quoted member call":
+      'queryClient["setMutationDefaults"](["save"], { mutationFn: save });',
+    // Documented fail-closed: an annotated parameter followed by another one
+    // can't be told from an object entry.
+    "an annotated parameter before another":
+      "function make(defaultOptions: DefaultOptions, n: number) {}",
+  }))
+    assert.deepEqual(mutationDefaults(source), [1], name);
+  // Wrapped across lines, it reports the line the defaults start on.
+  assert.deepEqual(
+    mutationDefaults(
+      "new QueryClient({\n  defaultOptions: {\n    queries: { retry: 1 },\n    mutations: { retry: 0 },\n  },\n});",
+    ),
+    [2],
+  );
+});
+
+test("mutation-defaults leaves query defaults and other mutations alone", () => {
+  const check = CHECKS.find((c) => c.name === "mutation-defaults");
+  for (const [name, source] of Object.entries({
+    "query defaults":
+      "new QueryClient({\n  defaultOptions: {\n    queries: {\n      retry: 1,\n      refetchOnWindowFocus: true,\n    },\n  },\n});",
+    "a defaults read": 'const d = queryClient.getMutationDefaults(["save"]);',
+    "a property read": "const o = queryClient.defaultOptions;",
+    "an unrelated name": "const mutations = [];\nmutations.push(1);",
+    "a comment": "// queryClient.setMutationDefaults(key, opts)",
+    "a type member": "interface Config {\n  defaultOptions: DefaultOptions;\n}",
+    "an optional type member":
+      "type Config = { defaultOptions?: DefaultOptions };",
+    "a generic type member":
+      "interface Config {\n  defaultOptions: Partial<DefaultOptions>;\n}",
+    "a lone annotated parameter":
+      "function make(defaultOptions: DefaultOptions) {}",
+    "an annotated parameter with a default":
+      "function make(defaultOptions: DefaultOptions = {}) {}",
+    "a destructuring rename": "const { defaultOptions: opts } = config;",
+    "a shorthand destructure": "const { queryCache, defaultOptions } = config;",
+    "an annotated query-only binding":
+      "const defaultOptions: DefaultOptions = { queries: { retry: 1 } };",
+  }))
+    assert.deepEqual(check.scan(view(source)), [], name);
+  assert.equal(check.appliesTo("src/lib/query-client.ts"), true);
+  assert.equal(check.appliesTo("src/lib/started-mutation.ts"), true);
+  assert.deepEqual(check.allowlist, []);
+  assert.ok(check.expectScanned.atLeast >= 500);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

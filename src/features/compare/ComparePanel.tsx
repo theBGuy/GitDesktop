@@ -67,6 +67,7 @@ import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
@@ -241,7 +242,9 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // The commit-level confirms are the shared ones History asks, so no route can
   // pose a different question than its twin.
   async function doCheckoutCommit(hash: string) {
+    const checkoutIn = repoPath;
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -257,7 +260,9 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   }
 
   async function doRevertCommit(hash: string) {
+    const revertIn = repoPath;
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -270,10 +275,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   }
 
   async function doCherryPick(hash: string) {
+    const pickIn = repoPath;
     const ok = await useConfirm
       .getState()
       .ask(cherryPickCommitConfirm(hash, currentName));
-    if (!ok) return;
+    if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;

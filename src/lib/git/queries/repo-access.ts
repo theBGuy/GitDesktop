@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
+import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import { primeCommitAuthorIndex } from "../commit-avatar";
 import type { ForgeRepoWriteAccess, RemoteLens } from "../types";
@@ -34,8 +35,8 @@ export function useSetRepoStar(repo: string) {
   return useMutation({
     mutationFn: (starred: boolean) => api.forgeRepoSetStar(repo, starred),
     // The key is built HERE, at mutate time, and the settle callbacks read it back
-    // from the context: they run off the current render's options, so a repo
-    // switch mid-flight would otherwise roll back the newly-live repo's star.
+    // from the context, so the rollback names the repo the write fired on whatever
+    // render it settles through.
     onMutate: async (starred: boolean) => {
       const key = ["repo", repo, "star-status"] as const;
       await queryClient.cancelQueries({ queryKey: key });

@@ -1,12 +1,12 @@
 import {
   useInfiniteQuery,
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { repoKeys } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import { useMutation } from "@/lib/started-mutation";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs in github/actions.rs) ─────────────────────

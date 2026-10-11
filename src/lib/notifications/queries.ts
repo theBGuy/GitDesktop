@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRepoIdentity } from "@/lib/git/queries";
+import { useMutation } from "@/lib/started-mutation";
 import {
   clearNotificationOverride,
   loadNotificationOverrides,

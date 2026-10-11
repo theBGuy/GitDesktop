@@ -70,9 +70,9 @@ export function useCreateBranch(repo: string) {
         args.noTrack,
       ),
     {
-      // Pinned: the call and its invalidation close over `repo`, and the dialog and
-      // panel hosts survive a repo switch — without the key a switch retargets the
-      // pending create, branching the wrong repo.
+      // Pinned: the call and its invalidation close over `repo`, and the dialog
+      // and panel hosts survive a repo switch — without the key the newly-live
+      // repo's controls would read the pending create as busy.
       identity: ["create-branch", repo],
       // Local branch write — never park it offline.
       networkMode: "always",

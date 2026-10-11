@@ -71,9 +71,9 @@ export function useCreateTag(repo: string) {
     (args: { name: string; hash: string }) =>
       api.gitTag(repo, args.name, args.hash),
     {
-      // Pinned: the call and its invalidation close over `repo`, and the history/tags
-      // hosts survive a repo switch — without the key a switch retargets the pending
-      // create, tagging the wrong repo.
+      // Pinned: the call and its invalidation close over `repo`, and the
+      // history/tags hosts survive a repo switch — without the key the newly-live
+      // repo's controls would read the pending create as busy.
       identity: ["create-tag", repo],
       // Local history write — never park it offline.
       networkMode: "always",

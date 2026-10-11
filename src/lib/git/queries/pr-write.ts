@@ -1,8 +1,5 @@
-import {
-  type QueryKey,
-  useMutation,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { type QueryKey, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
@@ -162,9 +159,10 @@ export function useCreatePr(repo: string) {
         args.lens ?? "origin",
       ),
     {
-      // Pinned: the call and its invalidation close over `repo`, and the dialog host
-      // survives a repo switch — without the key a switch retargets the pending create
-      // and its pr-list refresh. `args.lens` is per-call, already frozen in the vars.
+      // Pinned: the call and its invalidation close over `repo`, and the dialog
+      // host survives a repo switch — without the key the newly-live repo's
+      // controls would read the pending create as busy. `args.lens` is per-call,
+      // already frozen in the vars.
       identity: ["create-pr", repo],
     },
   );

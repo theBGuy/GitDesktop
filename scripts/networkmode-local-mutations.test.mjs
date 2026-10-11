@@ -242,8 +242,16 @@ const NETWORK_COMMANDS = [];
 
 /** Justified exceptions, keyed on the file and the hook that constructs the mutation
  *  (most mutations carry no key to name them by), each with its reason. An entry
- *  matching no failing site fails. */
-const EXEMPT = [];
+ *  matching no failing site fails. An import-level finding carries no hook, so its
+ *  row names none and pins the finding's own `why` instead. */
+const EXEMPT = [
+  {
+    file: "src/lib/started-mutation.ts",
+    why: "renames the mutation construction `useMutation` to `useReactQueryMutation`",
+    reason:
+      "the app's useMutation wraps react-query's under an alias it can't avoid (the two share a name), and passes on its caller's options whole; every app site constructs through it by name, where this scan classifies them",
+  },
+];
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(REPO_ROOT, "src");
@@ -1409,7 +1417,10 @@ function* sourceFiles(dir) {
 /** Splits `offenders` and `ambiguities` into what EXEMPT (`exempt`) covers and the
  *  failures left over, plus the entries that covered nothing. */
 function applyExemptions(offenders, ambiguities, exempt) {
-  const covers = (e, f) => e.file === f.file && e.hook === f.hook;
+  const covers = (e, f) =>
+    e.file === f.file &&
+    e.hook === f.hook &&
+    (e.why === undefined || f.why.startsWith(e.why));
   const all = [...offenders, ...ambiguities];
   return {
     failures: all.filter((f) => !exempt.some((e) => covers(e, f))),
@@ -1982,6 +1993,35 @@ test("EXEMPT covers its hook's failures only, and a stale entry fails", () => {
     method.sites.map((s) => s.hook),
     ["(module scope)"],
     "a word starting with `function` was indexed as a declaration",
+  );
+});
+
+test("the helper's EXEMPT row covers its one rename finding and nothing added beside it", () => {
+  const file = "src/lib/started-mutation.ts";
+  const source = readFileSync(join(REPO_ROOT, file), "utf8");
+  const real = scanSource(source, file);
+  assert.equal(
+    real.offenders.length + real.ambiguities.length,
+    1,
+    "the helper should carry exactly its one rename finding",
+  );
+  assert.deepEqual(
+    applyExemptions(real.offenders, real.ambiguities, EXEMPT).failures,
+    [],
+  );
+  // A namespace import is a hook-less finding too, and must still fail.
+  const grown = scanSource(
+    `${source}\nimport * as rq from "@tanstack/react-query";\nexport const m = () => rq.useMutation({ mutationFn: () => saveThing() });\n`,
+    file,
+  );
+  const { failures } = applyExemptions(
+    grown.offenders,
+    grown.ambiguities,
+    EXEMPT,
+  );
+  assert.ok(
+    failures.some((f) => /namespace/.test(f.why)),
+    "a namespace import added to the helper was swallowed by its EXEMPT row",
   );
 });
 

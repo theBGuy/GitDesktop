@@ -1,12 +1,12 @@
 import {
   keepPreviousData,
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { keepPreviousDataForRepo } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import { useMutation } from "@/lib/started-mutation";
 import {
   jiraAccount,
   jiraCommentDelete,
@@ -329,8 +329,8 @@ export function useJiraComment(
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the call and the settle invalidation close over `repo`/the link's
-    // site, and the issue view survives a repo switch — without the key a switch
-    // retargets the pending comment.
+    // site, and the issue view survives a repo switch — without the key the
+    // newly-live repo's controls would read the pending comment as busy.
     mutationKey: ["jira-comment", repo, link?.siteHost ?? null],
     mutationFn: (args: { issueKey: string; bodyMd: string }) =>
       jiraIssueComment((link as JiraLink).siteHost, args.issueKey, args.bodyMd),
@@ -441,8 +441,8 @@ function rollbackOptimisticStatus(
 
 /** Land the server's REAL status name + category onto the detail cache (success),
  *  so the chip reads e.g. "Done" not the generic optimistic guess. `ctx` is the
- *  optimistic patch's context: its key was built at mutate time, where a settle
- *  callback's closure `repo`/`link` are the CURRENT render's. */
+ *  optimistic patch's context: its key was built at mutate time, so it names the
+ *  issue the write fired on whatever render the settle runs from. */
 function landRealStatus(
   queryClient: ReturnType<typeof useQueryClient>,
   ctx: StatusPatchCtx | undefined,
@@ -778,8 +778,9 @@ export function useJiraCommentEdit(
   const queryClient = useQueryClient();
   return useMutation({
     // Pinned: the call and the settle invalidation close over `repo`/the link's
-    // site, and the issue view survives a repo switch — without the key a switch
-    // retargets the pending edit. The rollback and the seed read the context.
+    // site, and the issue view survives a repo switch — without the key the
+    // newly-live repo's controls would read the pending edit as busy. The
+    // rollback and the seed read the context.
     mutationKey: ["jira-comment-edit", repo, link?.siteHost ?? null],
     mutationFn: (args: {
       issueKey: string;
@@ -880,7 +881,7 @@ export function useJiraCreateIssue(
   return useMutation({
     // Pinned: the call closes over the link's site/project and the invalidation over
     // `repo`, and the dialog hosts survive a repo switch — without the key a switch
-    // (or a relink) retargets the pending create to another project.
+    // (or a relink) leaves the pending create holding the new project's dialog busy.
     mutationKey: [
       "jira-create-issue",
       repo,

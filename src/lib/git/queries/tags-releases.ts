@@ -1,10 +1,6 @@
-import {
-  queryOptions,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import { keepPreviousDataForRepo } from "./core";
 import { useRepoMutation } from "./internal";
@@ -119,8 +115,9 @@ export function useCreateRelease(repo: string) {
         args.latest,
       ),
     {
-      // Pinned: the call and its invalidation close over `repo`, and the dialog host
-      // survives a repo switch — without the key a switch retargets the pending create.
+      // Pinned: the call and its invalidation close over `repo`, and the dialog
+      // host survives a repo switch — without the key the newly-live repo's
+      // controls would read the pending create as busy.
       identity: ["create-release", repo],
     },
   );
