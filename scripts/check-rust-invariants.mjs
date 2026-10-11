@@ -1110,17 +1110,24 @@ export function lexRust(text) {
 // whose argv-shaped value is not a git command line; every other const argv is
 // checked at each in-file use, and at its definition when `pub` or unused. A
 // `guard` row names a wrapper around ignored_files_in_the_way: a call to it
-// counts as a guard call anywhere, and the row is verified (its function must
-// exist in `file` and call ignored_files_in_the_way itself).
+// counts as a guard call anywhere (never as a `.name(` method call), and the
+// row is verified: its function must exist in `file`, and every same-named
+// `fn` in any scanned file must call ignored_files_in_the_way itself.
 //
 // Known false positives, each remedied by a reviewed row rather than a parser:
-// a non-argv string list led by "merge"/"pull" (`for op in ["merge", …]`,
-// `[…].contains(x)`) — an `item` or fn row; a non-git receiver taking the word
-// (`PathBuf::push("merge")`, `path_segments_mut().push("merge")`,
+// a non-argv list led by "merge"/"pull", or by a label that may be one
+// (`for op in ["merge", …]`, `[…].contains(x)`, `[op, "in progress"].join(" ")`
+// with `op` chosen by if/else) — an `item` or fn row; a non-git receiver
+// taking the word (`PathBuf::push("merge")`, `path_segments_mut().push(…)`,
 // `Arg::new("merge")`); safe ff-only shapes outside one array literal (a
 // `.args([…])` chain, error text naming --overwrite-ignore, `-c merge.ff=only`);
 // `#[cfg(any(test, …))]` items and `#![cfg(test)]` files, scanned as
-// production; a const TABLE of argvs, whose inner arrays report `<unresolved>`.
+// production; a const TABLE of argvs, whose inner arrays report `<unresolved>`;
+// a closure parameter shadowing an outer `let` of the verb's name; a union of
+// two control flags (`if a { "--abort" } else { "--quit" }`), which grants no
+// exemption; an integer-keyed map's `insert(0, "merge")`; `insert(1, "--ff")`
+// on an argv, modelled as an append; a merge/pull-led literal spliced in after
+// another verb (`vec!["log"]` then `.extend(["merge", x])`), a site by design.
 export const MERGE_GUARD_ALLOWLIST = [
   {
     file: "forge/gitlab.rs",
@@ -1164,18 +1171,23 @@ const MERGE_GUARD_FIX =
  *  what it covers. */
 export const MERGE_GUARD_NOTE =
   "Not seen: a verb or leading global option held in a parameter, a function " +
-  "result, another file's const, or a variable reassigned after its `let`; an " +
-  "if/match arm that is neither a value nor a diverging return/panic; a verb " +
-  "handed to a helper as its own argument rather than inside the argv; argv " +
-  "assembled across functions or by iterator adapters (`once`, `chain` over " +
-  "non-literal parts), VecDeque push_front/push_back, a non-zero insert " +
-  "index, extend(Some(…)), index assignment (`a[0] = …`), smallvec!, or a " +
+  "result, another file's const, or a variable reassigned after its `let`; a " +
+  "verb shadowed inside a nested block or fn before an outer use; an if/match " +
+  "arm that is neither a value nor a diverging return/panic; a verb handed to " +
+  "a helper as its own argument rather than inside the argv; argv assembled " +
+  "across functions or by iterator adapters (`once`, `chain` over non-literal " +
+  "parts), VecDeque push_front/push_back, an insert at a VARIABLE index on a " +
+  "receiver not seen starting argv-shaped (a literal non-zero index is " +
+  "modelled as an append), extend(Some(…)), index assignment (`a[0] = …`), " +
+  "smallvec!, or a " +
   'labeled-break array; verb spellings `&"merge"[..]`, from_str/from_bytes, ' +
   "stringify!, format! with arguments, `as &str`, Into::into, a `{ … }` block, " +
   "tuple destructuring; argv split out of one string or built by concat! or a " +
   "macro_rules! expansion; a merge option's VALUE (-m, -F, -s, -X, " +
   "--into-name) spelling --no-overwrite-ignore or a control op; an " +
-  "--overwrite-ignore held in a variable the resolver cannot read; a builder " +
+  "--overwrite-ignore, --ff or --no-ff held in a variable the resolver cannot " +
+  "read, or an opaque single push/arg after --ff-only; a long option " +
+  "abbreviated (`--overwrite-ignor`, `--ff-onl`); a builder " +
   "re-exported under another name and called from a third file; git run " +
   "through a shell command string";
 
@@ -1229,10 +1241,11 @@ function literalValue(t) {
   );
 }
 
-// The expression after the last top-level `;` of a block body (its value).
-function tailExpr(text) {
+// A block body's tail expression (its value, "" when it ends in `;`) and its
+// last top-level statement.
+function blockTail(text) {
   let depth = 0;
-  let from = 0;
+  const cuts = [0];
   for (let i = 0; i < text.length; i++) {
     const lit = literalEnd(text, i);
     if (lit >= 0) {
@@ -1241,9 +1254,13 @@ function tailExpr(text) {
     }
     if ("([{".includes(text[i])) depth++;
     else if (")]}".includes(text[i])) depth--;
-    else if (depth === 0 && text[i] === ";") from = i + 1;
+    else if (depth === 0 && text[i] === ";") cuts.push(i + 1);
   }
-  return text.slice(from).trim();
+  const from = cuts.at(-1);
+  return {
+    tail: text.slice(from).trim(),
+    last: text.slice(cuts.at(-2) ?? 0, from - 1).trim(),
+  };
 }
 
 // Index of the first `{` outside brackets in `t` from `from`, skipping literals.
@@ -1296,16 +1313,22 @@ function matchArms(body) {
   return arms;
 }
 
+// Thrown through a resolution that ran past check H's hop cap.
+const CAPPED = Symbol("resolution capped");
+
 const DIVERGES_RE =
   /^(?:return\b|break\b|continue\b|(?:panic|unreachable|todo|unimplemented)\s*!)/;
 
-/** An if/else or match arm's possible values: [] for an arm that diverges. */
+/** An if/else or match arm's possible values: [] for an arm that diverges,
+ *  including a block whose last statement does (`{ log(); return Ok(()); }`). */
 function armValues(text, resolve) {
   let t = text.trim();
   if (t.startsWith("{")) {
     const body = braceBody(t, 0);
     if (t.slice(body.length + 2).trim() !== "") return undefined;
-    t = tailExpr(body);
+    const { tail, last } = blockTail(body);
+    if (tail === "") return DIVERGES_RE.test(last) ? [] : undefined;
+    t = tail;
   }
   return DIVERGES_RE.test(t) ? [] : argValues(t, resolve);
 }
@@ -1459,6 +1482,9 @@ function rustFunctions(masked) {
 // site. Control-op flags exempt only from inside the verb's own UNIT (its
 // literal or its one chained call expression), since a separate push may be
 // conditional; the ff-only pair exempts only from inside the verb's literal.
+// Every pass can only ADD sites (fail closed): each literal alone, each
+// receiver's whole fold, and each receiver event against just the elements
+// that dominate it.
 export function checkMergeIgnoredGuard(
   file,
   _src,
@@ -1510,8 +1536,10 @@ export function checkMergeIgnoredGuard(
         !e.guard,
     );
   const guardRows = allowlist.filter((e) => e.guard);
+  // A wrapper counts as a call, never as a `.name(` method of the same name.
+  const wrappers = guardRows.map((e) => e.fn).join("|") || "(?!)";
   const guardCall = new RegExp(
-    String.raw`\b(?:${["ignored_files_in_the_way", ...guardRows.map((e) => e.fn)].join("|")})\s*\(`,
+    String.raw`(?:\bignored_files_in_the_way|(?<!\.\s*)\b(?:${wrappers}))\s*\(`,
   );
   const push = (at, fn, allowlisted) =>
     hits.push({
@@ -1521,18 +1549,24 @@ export function checkMergeIgnoredGuard(
       allowlisted,
       fix: MERGE_GUARD_FIX,
     });
+  // One site is judged once, whichever of the overlapping passes reaches it.
+  const recorded = new Set();
   const record = (at, builder = false) => {
+    if (recorded.has(at)) return;
+    recorded.add(at);
     if (inTest(at)) return;
     const fn = innermost(at);
     if (fn && guardCall.test(ownBody(fn))) return;
     const name = fn?.name ?? "<unresolved>";
     push(at, name, !builder && rowAllowed(name, false));
   };
-  // A guard row must name a function here whose own body runs the real guard;
-  // a missing one leaves the row stale, which main() fails.
-  for (const row of guardRows.filter((e) => e.file === file)) {
+  // Every `fn` a guard row names, in any file, must run the real guard in its
+  // own body. In the row's file a missing one leaves the row stale, which
+  // main() fails; elsewhere only a hollow namesake is reported.
+  for (const row of guardRows) {
     for (const fn of functions.filter((f) => f.name === row.fn)) {
       const real = /\bignored_files_in_the_way\s*\(/.test(ownBody(fn));
+      if (real && row.file !== file) continue;
       hits.push({
         file,
         line: lineOf(fn.start),
@@ -1596,11 +1630,32 @@ export function checkMergeIgnoredGuard(
 
   // A name's value at `pos`: the nearest `let` of it before `pos` in the same
   // function, else an in-file const. A name inside an initializer resolves from
-  // that `let`'s own position, so `let v = v.clone();` reaches the earlier `v`;
-  // the hop cap ends a const cycle.
-  const MAX_HOPS = 16;
+  // that `let`'s own position, so `let v = v.clone();` reaches the earlier `v`.
+  // Memoized per (name, position) and seeded unresolved while in progress, so
+  // a cycle or a re-visited arm costs O(1) instead of an exponential walk.
+  // Past MAX_HOPS the element is UNREADABLE and reported, never passed.
+  const MAX_HOPS = 512;
+  const memo = new Map();
+  const capped = new Set();
   const resolveName = (name, pos, hops) => {
-    if (hops > MAX_HOPS) return undefined;
+    const key = `${name}@${pos}`;
+    if (memo.get(key) === CAPPED) throw CAPPED;
+    if (memo.has(key)) return memo.get(key);
+    if (hops > MAX_HOPS) {
+      memo.set(key, CAPPED);
+      throw CAPPED;
+    }
+    memo.set(key, undefined);
+    try {
+      const value = lookupName(name, pos, hops);
+      memo.set(key, value);
+      return value;
+    } catch (e) {
+      if (e === CAPPED) memo.set(key, CAPPED);
+      throw e;
+    }
+  };
+  const lookupName = (name, pos, hops) => {
     const fn = innermost(pos);
     if (fn) {
       const letRe = new RegExp(
@@ -1638,7 +1693,15 @@ export function checkMergeIgnoredGuard(
       ? argValues(item.text, (n) => resolveName(n, item.at, hops + 1))
       : undefined;
   };
-  const resolverAt = (at) => (name) => resolveName(name, at, 0);
+  const resolverAt = (at) => (name) => {
+    try {
+      return resolveName(name, at, 0);
+    } catch (e) {
+      if (e !== CAPPED) throw e;
+      capped.add(at);
+      return undefined;
+    }
+  };
   // Split on the masked view (a literal's comma is no separator), read on the
   // code view (where the literal still is).
   const elementsOf = (open, close) =>
@@ -1655,18 +1718,38 @@ export function checkMergeIgnoredGuard(
         values: argValues(text, resolverAt(at)),
       }));
 
-  // Slice patterns are not arrays: a `matches!` pattern argument, and a `[…]`
-  // followed by `=>`, `|`, `@` or a guard `if` (a match arm).
+  // Slice patterns are not arrays: a `matches!` / `assert_matches!` pattern
+  // argument, and a `[…]` that — itself or through any enclosing `(…)` / `[…]`
+  // group up to its statement — is followed by `=>`, a single `=` (`if let`),
+  // a single `|`, `@`, a guard `if`, or a `:` type ascription (a parameter).
+  // A real argv's group is never followed by any of those.
   const patternSpans = [];
-  for (const m of masked.matchAll(/\bmatches\s*!\s*\(/g)) {
+  for (const m of masked.matchAll(/\b(?:assert_)?matches\s*!\s*\(/g)) {
     const open = m.index + m[0].length - 1;
     const body = bracketBody(masked, open);
     const pattern = argvElements(body)[1];
     if (pattern) patternSpans.push([open + 1 + pattern.at, open + body.length]);
   }
-  const isPattern = (open, close) =>
-    patternSpans.some(([s, e]) => open >= s && open <= e) ||
-    /^\s*(?:=>|\|(?!\|)|@|if\b)/.test(masked.slice(close + 1, close + 64));
+  const PATTERN_TAIL_RE = /^\s*(?:=>|=(?![=>])|\|(?!\|)|@|if\b|:(?!:))/;
+  const isPattern = (open, close) => {
+    if (patternSpans.some(([s, e]) => open >= s && open <= e)) return true;
+    for (let o = open, c = close; ; ) {
+      if (PATTERN_TAIL_RE.test(masked.slice(c + 1, c + 64))) return true;
+      let depth = 0;
+      let p = o - 1;
+      for (; p >= 0; p--) {
+        const ch = masked[p];
+        if (")]}".includes(ch)) depth++;
+        else if ("([{".includes(ch)) {
+          if (depth === 0) break;
+          depth--;
+        } else if (ch === ";" && depth === 0) return false;
+      }
+      if (p < 0 || masked[p] === "{") return false;
+      o = p;
+      c = p + 1 + bracketBody(masked, p).length;
+    }
+  };
 
   // Array-literal units: every `[` that is not an attribute or an index.
   const units = [];
@@ -1713,16 +1796,14 @@ export function checkMergeIgnoredGuard(
   // order; a `let` or plain assignment starts a fresh sequence, argv-shaped
   // when it starts from a literal, `vec!` or `Vec::new`/`with_capacity`.
   const events = [];
-  const attached = new Set();
   const VEC_INIT_RE =
-    /^\s*(?:(?:std\s*::\s*)?(?:vec\s*::\s*)?Vec\s*(?:::\s*<[^>]*>\s*)?::\s*(?:new|with_capacity)\s*\()/;
+    /^\s*(?:(?:std\s*::\s*)?(?:vec\s*::\s*)?Vec\s*(?:::\s*<[^>]*>\s*)?::\s*(?:new|with_capacity|default|from)\s*\()/;
   const letRe = /\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=;]*)?=(?![=>])/g;
   const assignRe = /(?<=^|[;{}])\s*([A-Za-z_]\w*)\s*=(?![=>])/g;
   for (const re of [letRe, assignRe]) {
     for (const m of masked.matchAll(re)) {
       const from = m.index + m[0].length;
       const unit = unitStartingAt(from);
-      if (unit) attached.add(unit);
       events.push({
         key: `${fnKey(m.index)}:${m[1]}`,
         pos: m.index,
@@ -1761,7 +1842,6 @@ export function checkMergeIgnoredGuard(
       elements = elementsOf(open, close).slice(1, 2);
     } else {
       const unit = unitStartingAt(open + 1);
-      if (unit) attached.add(unit);
       elements = unit
         ? unit.elements.map((el) => ({ ...el }))
         : [{ at: open + 1, opaque: true }];
@@ -1791,10 +1871,27 @@ export function checkMergeIgnoredGuard(
     else event.elements.push(...elements);
     chainEnds.set(close + 1, event);
   }
+  // A collection-removal call breaks the receiver's run: what was there no
+  // longer fills the verb slot of anything pushed after it.
+  const removalRe =
+    /\.\s*(?:clear|truncate|drain|retain(?:_mut)?|remove|swap_remove|split_off|pop|dedup(?:_by(?:_key)?)?|resize(?:_with)?|set_len)\s*\(/g;
+  for (const m of masked.matchAll(removalRe)) {
+    const base = masked
+      .slice(exprStart(masked, m.index), m.index)
+      .replace(/\s+/g, "");
+    if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(base)) continue;
+    events.push({
+      key: `${fnKey(m.index)}:${base}`,
+      pos: m.index,
+      removal: true,
+      elements: [],
+    });
+  }
 
   const sequences = [];
   const current = new Map();
   for (const event of events.sort((a, b) => a.pos - b.pos)) {
+    if (event.removal) continue;
     let seq = current.get(event.key);
     if (!seq || event.reset) {
       seq = [];
@@ -1806,9 +1903,10 @@ export function checkMergeIgnoredGuard(
     if (event.prepend) seq.unshift(...event.prepend);
     seq.push(...event.elements);
   }
+  // Every array literal is also judged on its own: a receiver's earlier verb
+  // must not dismiss a merge/pull-led literal spliced in after it.
   for (const unit of units) {
-    if (!attached.has(unit) && !itemUnits.has(unit))
-      sequences.push(unit.elements);
+    if (!itemUnits.has(unit)) sequences.push(unit.elements);
   }
 
   // Whether the ff-only pair in the verb's own literal still holds: git takes
@@ -1864,6 +1962,88 @@ export function checkMergeIgnoredGuard(
     if (k >= 0) record(seq[k].at);
   }
 
+  // Bracket structure for dominance: each position's innermost enclosing
+  // group, each group's close, and the top-level `=>` of each match body.
+  const inner = new Int32Array(masked.length).fill(-1);
+  const closeOf = new Map();
+  const stack = [];
+  for (let i = 0; i < masked.length; i++) {
+    inner[i] = stack.length ? stack[stack.length - 1] : -1;
+    if ("([{".includes(masked[i])) stack.push(i);
+    else if (")]}".includes(masked[i]) && stack.length)
+      closeOf.set(stack.pop(), i);
+  }
+  const arrows = new Map();
+  for (const m of masked.matchAll(/\bmatch\b/g)) {
+    let depth = 0;
+    for (let i = m.index + 5; i < masked.length; i++) {
+      const ch = masked[i];
+      if ("([".includes(ch)) depth++;
+      else if (")]".includes(ch)) depth--;
+      else if (ch === "{" && depth === 0) {
+        arrows.set(i, []);
+        break;
+      } else if (ch === ";" || ch === "}") break;
+    }
+  }
+  for (const m of masked.matchAll(/=>/g))
+    arrows.get(inner[m.index])?.push(m.index);
+  // An earlier position runs before a later one on every path only when each
+  // group around it (if/else block, loop body, closure, call argument) also
+  // holds the later one, and no match arm boundary falls between them.
+  const dominates = (earlier, later) => {
+    for (let g = inner[earlier]; g >= 0; g = inner[g]) {
+      if (!(later > g && later < (closeOf.get(g) ?? masked.length)))
+        return false;
+      if (arrows.get(g)?.some((p) => p > earlier && p < later)) return false;
+    }
+    return true;
+  };
+
+  // Context only ADDS sites. Each receiver event is judged again against just
+  // the earlier elements that dominate it since the last reset or removal, so
+  // a sibling branch's verb or a cleared receiver can't dismiss what it adds.
+  // Later elements all stay in view: they can only void an exemption.
+  const byKey = new Map();
+  for (const event of events) {
+    if (!byKey.has(event.key)) byKey.set(event.key, []);
+    byKey.get(event.key).push(event);
+  }
+  for (const list of byKey.values()) {
+    let argvInit = false;
+    let run = [];
+    list.forEach((event, i) => {
+      if (event.reset || event.removal) run = [];
+      if (event.reset) argvInit = Boolean(event.argvInit);
+      if (event.removal || (event.needsArgvInit && !argvInit)) return;
+      const all = (e) => [...(e.prepend ?? []), ...e.elements];
+      const verbs = all(event).some((el) =>
+        el.values?.some((v) => v === "merge" || v === "pull"),
+      );
+      if (!verbs) {
+        run.push(event);
+        return;
+      }
+      const prefix = run
+        .filter((e) => dominates(e.pos, event.pos))
+        .flatMap(all);
+      const later = list
+        .slice(i + 1)
+        .filter((e) => !e.removal)
+        .flatMap(all);
+      const seq = [
+        ...(event.prepend ?? []),
+        ...prefix,
+        ...event.elements,
+        ...later,
+      ];
+      const own = new Set(all(event));
+      const k = mergeVerb(seq);
+      if (k >= 0 && own.has(seq[k])) record(seq[k].at);
+      run.push(event);
+    });
+  }
+
   for (const [unit, item] of itemUnits) {
     if (inTest(item.at) || mergeVerb(unit.elements) < 0) continue;
     if (rowAllowed(item.name, true)) {
@@ -1880,6 +2060,17 @@ export function checkMergeIgnoredGuard(
       if (innermost(item.at)) record(item.at);
       else push(item.at, item.name, false);
     }
+  }
+
+  for (const at of capped) {
+    if (inTest(at)) continue;
+    hits.push({
+      file,
+      line: lineOf(at),
+      fn: "<unreadable>",
+      allowlisted: false,
+      fix: `resolving this element's value ran past ${MAX_HOPS} let/const hops, so check H cannot read it — shorten the binding chain, or raise MAX_HOPS in scripts/check-rust-invariants.mjs`,
+    });
   }
 
   for (const row of allowlist.filter((entry) => entry.builder)) {

@@ -947,9 +947,10 @@ uncommitted changes would otherwise block the operation.
 
 Ignored files are handled differently. When a pull that merges or fast-forwards, a merge,
 or an update of the branch you're on would replace a file Git ignores (a private config
-or local build output, say), GitDesktop stops before changing anything and names the
-files: move them aside, then run it again. No stash prompt appears for this, because a
-stash never takes ignored files.
+or local build output, say), GitDesktop stops before touching your branch or files and
+names the files in the way (the first few, with a count of the rest): move them aside,
+then run it again. No stash prompt appears for this, because the stash GitDesktop makes
+leaves ignored files where they are.
 
 ## Safer pull with rebase
 
