@@ -4,18 +4,21 @@
 // a rowless diff settle at build instead of waiting out the hold bound; and the
 // two-slot hold's transitions (src/features/diff/diff-pane-slots.ts), which keep
 // the last settled pane up while the next one prepares, for at most the 400 ms
-// bound.
+// bound. Also the hunk buttons' hosts (same diff-rows.ts): what expanding does
+// to the `@@` rows, the inline headers' extend-row feed, and the react-query
+// behavior the post-write hold is released by.
 //
 // Not testable here: the settle reports themselves (layout effects across the
-// pane's surfaces) and what `inert` blocks. Those need the live app.
+// pane's surfaces), what `inert` blocks, and the hold's release commit. Those
+// need the live app.
 //
 // The imports reach straight into `src/` under Node's type stripping, which
 // resolves no bundler aliases, so all three modules (the two above and
-// src/lib/git/hunks.ts) must stay free of runtime imports. The two render
-// suites at the end (diff shapes, hunk 0's row) build real diffs with
-// @git-diff-view and render them with react-dom/server, so they skip only when
-// one of those PACKAGES is unresolved (the no-install guards job);
-// GD_EXPECT_DEPS turns that skip into a failure on an installed run.
+// src/lib/git/hunks.ts) must stay free of runtime imports. The render suites at
+// the end build real diffs with @git-diff-view and render them with
+// react-dom/server, and the hold premises run react-query's own client, so they
+// skip only when one of those PACKAGES is unresolved (the no-install guards
+// job); GD_EXPECT_DEPS turns that skip into a failure on an installed run.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -31,8 +34,14 @@ import {
   startPaneHold,
 } from "../src/features/diff/diff-pane-slots.ts";
 import {
+  collapseAllContext,
   diffRendersRows,
   firstHunkHasSepRow,
+  headerAnchorLine,
+  hunkHeaderExtendData,
+  hunkHost,
+  hunkRange,
+  hunkRangeText,
 } from "../src/features/diff/diff-rows.ts";
 import { parseHunks } from "../src/lib/git/hunks.ts";
 
@@ -91,6 +100,91 @@ for (const { name, hunk: h, expected } of sepRows) {
     assert.equal(firstHunkHasSepRow(h), expected);
   });
 }
+
+// ------------------------------------------------------------ hunk button hosts
+
+test("hunkRange: both ranges, an omitted count meaning one line", () => {
+  assert.deepEqual(hunkRange(hunk("@@ -47,7 +48,9 @@ fn x() {", " a")), {
+    oldStart: 47,
+    oldLines: 7,
+    newStart: 48,
+    newLines: 9,
+  });
+  assert.deepEqual(hunkRange(hunk("@@ -0,0 +1 @@", "+a")), {
+    oldStart: 0,
+    oldLines: 0,
+    newStart: 1,
+    newLines: 1,
+  });
+});
+
+test("hunkRangeText: the new range, en-dashed", () => {
+  assert.equal(hunkRangeText(hunk("@@ -47,7 +47,9 @@", " a")), "lines 47–55");
+});
+
+test("hunkRangeText: a one-line range reads as one line", () => {
+  assert.equal(hunkRangeText(hunk("@@ -0,0 +1 @@", "+a")), "line 1");
+});
+
+test("hunkRangeText: a deletion-only hunk names its old range", () => {
+  assert.equal(
+    hunkRangeText(hunk("@@ -1,3 +0,0 @@", "-a", "-b", "-c")),
+    "lines 1–3",
+  );
+});
+
+test("headerAnchorLine: the new line directly above the hunk", () => {
+  assert.equal(headerAnchorLine(hunk("@@ -47,7 +48,7 @@", " a")), 47);
+  assert.equal(headerAnchorLine(hunk("@@ -1,4 +2,4 @@", " a")), 1);
+});
+
+test("headerAnchorLine: none for a hunk on new line 1 or an emptied file", () => {
+  assert.equal(headerAnchorLine(hunk("@@ -1,4 +1,5 @@", " a")), null);
+  assert.equal(headerAnchorLine(hunk("@@ -0,0 +1,3 @@", "+a")), null);
+  assert.equal(headerAnchorLine(hunk("@@ -1,3 +0,0 @@", "-a")), null);
+});
+
+test("hunkHost: the row above the hunk's first row decides", () => {
+  assert.equal(hunkHost("hunk", 0), "row");
+  assert.equal(hunkHost("hunk", 3), "row");
+  assert.equal(hunkHost("extend", 0), "inline");
+  assert.equal(hunkHost("extend", 2), "inline");
+  // A content row (a detached `@@` row's expanded context) or no row at all.
+  assert.equal(hunkHost("diff", 0), "top");
+  assert.equal(hunkHost(null, 0), "top");
+  assert.equal(hunkHost(undefined, 0), "top");
+  assert.equal(hunkHost("diff", 1), "none");
+  assert.equal(hunkHost(null, 1), "none");
+});
+
+test("hunkHeaderExtendData: unified feeds the new side only, truthy data", () => {
+  const hunks = [
+    hunk("@@ -1,4 +1,5 @@", " a"),
+    hunk("@@ -17,7 +18,7 @@", " a"),
+    hunk("@@ -47,7 +48,7 @@", " a"),
+  ];
+  assert.deepEqual(hunkHeaderExtendData(hunks, false), {
+    oldFile: {},
+    newFile: { 17: { data: { hunk: 1 } }, 47: { data: { hunk: 2 } } },
+  });
+});
+
+test("hunkHeaderExtendData: split adds the old column's half", () => {
+  const hunks = [hunk("@@ -17,7 +18,7 @@", " a")];
+  assert.deepEqual(hunkHeaderExtendData(hunks, true), {
+    oldFile: { 16: { data: { hunk: 0, side: "old" } } },
+    newFile: { 17: { data: { hunk: 0 } } },
+  });
+});
+
+test("hunkHeaderExtendData: hunk 0's data is an object, never a bare 0", () => {
+  const { newFile } = hunkHeaderExtendData(
+    [hunk("@@ -17,7 +17,7 @@", " a")],
+    false,
+  );
+  assert.ok(newFile[16].data);
+  assert.equal(typeof newFile[16].data, "object");
+});
 
 // ----------------------------------------------------------------- pane slots
 
@@ -332,12 +426,13 @@ test("diffRendersRows: no parsed hunk lines means no rows", () => {
 });
 
 const DEP_PACKAGES =
-  /Cannot find package '(@git-diff-view\/(core|react)|react|react-dom)'/;
+  /Cannot find package '(@git-diff-view\/(core|react)|react|react-dom|@tanstack\/react-query)'/;
 
 let core;
 let viewLib;
 let React;
 let server;
+let rq;
 let skip = false;
 // Settled, not raced: EVERY failure must be a missing dep package.
 const loads = await Promise.allSettled([
@@ -345,10 +440,11 @@ const loads = await Promise.allSettled([
   import("@git-diff-view/react"),
   import("react"),
   import("react-dom/server"),
+  import("@tanstack/react-query"),
 ]);
 const failures = loads.filter((l) => l.status === "rejected");
 if (failures.length === 0) {
-  [core, viewLib, React, server] = loads.map((l) => l.value);
+  [core, viewLib, React, server, rq] = loads.map((l) => l.value);
 } else {
   for (const { reason } of failures) {
     if (
@@ -359,8 +455,9 @@ if (failures.length === 0) {
       throw reason;
   }
   skip =
-    "@git-diff-view / react are not installed — the guards job runs with no " +
-    "install step; an installed run with GD_EXPECT_DEPS enforces this";
+    "@git-diff-view / react / react-query are not installed — the guards job " +
+    "runs with no install step; an installed run with GD_EXPECT_DEPS enforces " +
+    "this";
 }
 
 /** Runs `fn` with the library's dev-mode console notices muted. */
@@ -578,3 +675,386 @@ for (const { name, hunks, content, sep } of sepShapes) {
     });
   }
 }
+
+// Where a hunk's buttons can live once context is expanded. A content-mode diff
+// of a 200-line file with one-line edits at 20, 50 and 150: hunk A (lines
+// 17-23) sits under a 16-line gap that its Expand Up opens to line 1, hunk B
+// (47-53) under a 23-line gap that one Expand All empties, and hunk C (147-153)
+// under a 93-line gap that Expand Up opens only 40 lines of. (The view offers a
+// first gap only Up, a middle gap under 40 lines only All, and a longer one Up
+// and Down by 40.) Expansion runs on the built file before the render: the
+// view renders a clone, but the clone shares the file's line and gap maps, so
+// the static markup shows the expanded state.
+
+const LONG_LINES = 200;
+const EDITED = [20, 50, 150];
+
+/** The 200-line file before and after one-line edits at `edited`. */
+function longFile(edited = EDITED) {
+  const old = Array.from({ length: LONG_LINES }, (_, i) => `l${i + 1}`);
+  const next = old.map((l, i) => (edited.includes(i + 1) ? `x${i + 1}` : l));
+  return { old: `${old.join("\n")}\n`, new: `${next.join("\n")}\n` };
+}
+
+/** git's three-line-context hunk around one replaced line. */
+function editHunk(line) {
+  const body = [];
+  for (let n = line - 3; n <= line + 3; n++) {
+    if (n === line) body.push(`-l${n}`, `+x${n}`);
+    else body.push(` l${n}`);
+  }
+  return `@@ -${line - 3},7 +${line - 3},7 @@\n${body.join("\n")}\n`;
+}
+
+const longText = (edited = EDITED) =>
+  `${fileHeader}${edited.map(editHunk).join("")}`;
+const longHunks = (edited = EDITED) => parseHunks(longText(edited)).hunks;
+const FIRST = { A: 17, B: 47, C: 147 };
+
+/** A built, unexpanded content-mode DiffFile of the long diff. */
+function longDiff(edited = EDITED) {
+  return quietly(() => {
+    const file = buildDiff(longText(edited), longFile(edited));
+    file.buildUnifiedDiffLines();
+    file.buildSplitDiffLines();
+    return file;
+  });
+}
+
+/** Expands the gap above the hunk whose first new line is `line`, the way the
+ *  view's own expand controls do: `all`, or `up` / `down` by the library's 40
+ *  lines. */
+function expandAbove(file, layout, dir, line) {
+  quietly(() => {
+    if (layout === "Unified") {
+      const index = file.getUnifiedLineIndexByLineNumber(
+        line,
+        core.SplitSide.new,
+      );
+      file.onUnifiedHunkExpand(dir, index);
+    } else {
+      const index = file.getSplitLineIndexByLineNumber(
+        line,
+        core.SplitSide.new,
+      );
+      file.onSplitHunkExpand(dir, index);
+    }
+  });
+}
+
+/** Test stand-in for the pane's header renderer: a marker per rendered half. */
+const markExtend = ({ data }) =>
+  React.createElement("span", {
+    "data-hdr": `${data.hunk}:${data.side ?? "new"}`,
+  });
+
+/** Every `<tr>` the view renders for `file` in `layout`, whole. */
+function renderedRowsOf(file, layout, extendData) {
+  return quietly(() => {
+    const html = server.renderToStaticMarkup(
+      React.createElement(viewLib.DiffView, {
+        diffFile: file,
+        diffViewMode: viewLib.DiffModeEnum[layout],
+        diffViewWrap: true,
+        diffViewFontSize: 12,
+        ...(extendData ? { extendData, renderExtendLine: markExtend } : {}),
+      }),
+    );
+    return html.match(/<tr\b[\s\S]*?<\/tr>/g) ?? [];
+  });
+}
+
+const rowState = (row) => row.match(/^<tr\b[^>]*\bdata-state="([^"]*)"/)?.[1];
+
+/** The index of the row showing new line `line`. */
+function rowOfLine(rows, layout, line) {
+  const re =
+    layout === "Unified"
+      ? new RegExp(`data-line-new-num="${line}"`)
+      : new RegExp(`data-side="new"[^>]*><span data-line-num="${line}"`);
+  const i = rows.findIndex((r) => re.test(r));
+  assert.ok(i > 0, `${layout} renders new line ${line} below another row`);
+  return i;
+}
+
+const headerMarks = (row) => row.match(/data-hdr="[^"]*"/g) ?? [];
+
+for (const layout of ["Unified", "Split"]) {
+  test(`premise: collapsed, each hunk sits under its \`@@\` row (${layout})`, {
+    skip,
+  }, () => {
+    const rows = renderedRowsOf(longDiff(), layout);
+    for (const line of Object.values(FIRST))
+      assert.equal(rowState(rows[rowOfLine(rows, layout, line) - 1]), "hunk");
+  });
+
+  test(`premise: Expand All empties hunk B's gap and its \`@@\` row goes (${layout})`, {
+    skip,
+  }, () => {
+    const file = longDiff();
+    expandAbove(file, layout, "all", FIRST.B);
+    const rows = renderedRowsOf(file, layout);
+    const b = rowOfLine(rows, layout, FIRST.B);
+    assert.notEqual(rowState(rows[b - 1]), "hunk");
+    // Nothing but code rows from hunk A's last line down to hunk B.
+    const aEnd = rowOfLine(rows, layout, FIRST.A + 6);
+    assert.ok(rows.slice(aEnd, b).every((r) => rowState(r) !== "hunk"));
+    // The model agrees: the gap's hidden span is empty.
+    const index =
+      layout === "Unified"
+        ? file.getUnifiedLineIndexByLineNumber(FIRST.B, core.SplitSide.new)
+        : file.getSplitLineIndexByLineNumber(FIRST.B, core.SplitSide.new);
+    const gap =
+      layout === "Unified"
+        ? file.getUnifiedHunkLine(index).unifiedInfo
+        : file.getSplitHunkLine(index).splitInfo;
+    assert.equal(gap.startHiddenIndex, gap.endHiddenIndex);
+  });
+
+  test(`premise: Expand Up detaches hunk C's \`@@\` row 40 rows above it (${layout})`, {
+    skip,
+  }, () => {
+    const file = longDiff();
+    expandAbove(file, layout, "up", FIRST.C);
+    const rows = renderedRowsOf(file, layout);
+    const c = rowOfLine(rows, layout, FIRST.C);
+    assert.notEqual(rowState(rows[c - 1]), "hunk");
+    const sep = rows.slice(0, c).findLastIndex((r) => rowState(r) === "hunk");
+    assert.ok(sep >= 0, "the gap's `@@` row is still rendered");
+    assert.equal(c - sep - 1, 40);
+  });
+
+  test(`inline headers: absent collapsed, directly above each hunk once its line above shows (${layout})`, {
+    skip,
+  }, () => {
+    const split = layout === "Split";
+    const extendData = hunkHeaderExtendData(longHunks(), split);
+    const file = longDiff();
+    const collapsed = renderedRowsOf(file, layout, extendData);
+    assert.equal(collapsed.filter((r) => rowState(r) === "extend").length, 0);
+    expandAbove(file, layout, "up", FIRST.A); // hunk 0, to line 1
+    expandAbove(file, layout, "all", FIRST.B);
+    expandAbove(file, layout, "up", FIRST.C); // partial: its `@@` row detaches
+    const rows = renderedRowsOf(file, layout, extendData);
+    for (const [i, line] of Object.values(FIRST).entries()) {
+      const above = rows[rowOfLine(rows, layout, line) - 1];
+      assert.equal(rowState(above), "extend", `hunk ${i}'s header`);
+      assert.deepEqual(
+        headerMarks(above),
+        split
+          ? [`data-hdr="${i}:old"`, `data-hdr="${i}:new"`]
+          : [`data-hdr="${i}:new"`],
+        `hunk ${i}'s header halves`,
+      );
+    }
+    assert.equal(rows.filter((r) => rowState(r) === "extend").length, 3);
+  });
+
+  test(`inline headers: an Expand Down that empties a gap swaps its \`@@\` row for the header (${layout})`, {
+    skip,
+  }, () => {
+    // Edits at 20 and 67 leave exactly 40 hidden lines between the hunks: too
+    // many for Expand All, so the view offers Down, and one Down empties it.
+    const edited = [20, 67];
+    const extendData = hunkHeaderExtendData(
+      longHunks(edited),
+      layout === "Split",
+    );
+    const file = longDiff(edited);
+    const before = renderedRowsOf(file, layout, extendData);
+    assert.equal(rowState(before[rowOfLine(before, layout, 64) - 1]), "hunk");
+    expandAbove(file, layout, "down", 64);
+    const rows = renderedRowsOf(file, layout, extendData);
+    const b = rowOfLine(rows, layout, 64);
+    assert.equal(rowState(rows[b - 1]), "extend");
+    assert.ok(headerMarks(rows[b - 1]).includes(`data-hdr="1:new"`));
+    const aEnd = rowOfLine(rows, layout, 23);
+    assert.ok(rows.slice(aEnd, b).every((r) => rowState(r) !== "hunk"));
+  });
+
+  test(`inline headers: a partial Expand Up on hunk 0 detaches its row and heads the hunk (${layout})`, {
+    skip,
+  }, () => {
+    const edited = [150];
+    const extendData = hunkHeaderExtendData(
+      longHunks(edited),
+      layout === "Split",
+    );
+    const file = longDiff(edited);
+    const before = renderedRowsOf(file, layout, extendData);
+    assert.equal(rowState(before[rowOfLine(before, layout, 147) - 1]), "hunk");
+    assert.equal(before.filter((r) => rowState(r) === "extend").length, 0);
+    expandAbove(file, layout, "up", 147);
+    const rows = renderedRowsOf(file, layout, extendData);
+    const h = rowOfLine(rows, layout, 147);
+    assert.equal(rowState(rows[h - 1]), "extend");
+    assert.ok(headerMarks(rows[h - 1]).includes(`data-hdr="0:new"`));
+    // The detached `@@` row sits above the 40 revealed lines and the header.
+    const sep = rows.slice(0, h).findLastIndex((r) => rowState(r) === "hunk");
+    assert.equal(h - sep - 1, 41);
+  });
+}
+
+test("premise: each layout keeps its own expansion, so collapsing one leaves the other", {
+  skip,
+}, () => {
+  const file = longDiff();
+  expandAbove(file, "Unified", "all", FIRST.B);
+  quietly(() => file.onAllCollapse("split"));
+  const rows = renderedRowsOf(file, "Unified");
+  assert.notEqual(
+    rowState(rows[rowOfLine(rows, "Unified", FIRST.B) - 1]),
+    "hunk",
+  );
+});
+
+test("collapseAllContext restores every `@@` row in both layouts", {
+  skip,
+}, () => {
+  const file = longDiff();
+  expandAbove(file, "Unified", "up", FIRST.A);
+  expandAbove(file, "Unified", "all", FIRST.B);
+  expandAbove(file, "Unified", "up", FIRST.C);
+  expandAbove(file, "Split", "all", FIRST.B);
+  expandAbove(file, "Split", "up", FIRST.C);
+  quietly(() => collapseAllContext(file));
+  for (const layout of ["Unified", "Split"]) {
+    const extendData = hunkHeaderExtendData(longHunks(), layout === "Split");
+    const rows = renderedRowsOf(file, layout, extendData);
+    for (const line of Object.values(FIRST))
+      assert.equal(
+        rowState(rows[rowOfLine(rows, layout, line) - 1]),
+        "hunk",
+        `${layout}: the row above new line ${line}`,
+      );
+    assert.equal(rows.filter((r) => rowState(r) === "extend").length, 0);
+  }
+});
+
+test("inline headers: unified must feed one side, or the header renders twice", {
+  skip,
+}, () => {
+  const file = longDiff();
+  expandAbove(file, "Unified", "all", FIRST.B);
+  // The anchor is a context line, so a unified row matches it on both sides.
+  const both = renderedRowsOf(file, "Unified", {
+    oldFile: { [FIRST.B - 1]: { data: { hunk: 1, side: "old" } } },
+    newFile: { [FIRST.B - 1]: { data: { hunk: 1 } } },
+  });
+  const above = both[rowOfLine(both, "Unified", FIRST.B) - 1];
+  assert.equal(headerMarks(above).length, 2);
+});
+
+test("inline headers: a falsy `data` renders no row, which is why hunk 0's is an object", {
+  skip,
+}, () => {
+  const file = longDiff();
+  expandAbove(file, "Unified", "all", FIRST.B);
+  const feed = (data) =>
+    renderedRowsOf(file, "Unified", {
+      oldFile: {},
+      newFile: { [FIRST.B - 1]: { data } },
+    }).filter((r) => rowState(r) === "extend").length;
+  assert.equal(feed(0), 0);
+  assert.equal(feed({ hunk: 0 }), 1);
+});
+
+// The post-write hold releases on the diff (and, for an untracked file, the
+// status) answering after the write settled: its data stamp or error count
+// moving off the values the cache held at the settle. These pin the
+// react-query behaviors that relies on.
+
+const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** An observed query whose every fetch waits on a promise the test resolves. */
+function heldQuery() {
+  const client = new rq.QueryClient();
+  const queryKey = ["repo", "r", "diff", "f.txt", false, false];
+  const fetches = [];
+  const observer = new rq.QueryObserver(client, {
+    queryKey,
+    queryFn: () =>
+      new Promise((resolve) => {
+        fetches.push(resolve);
+      }),
+    networkMode: "always",
+    retry: false,
+  });
+  const unsubscribe = observer.subscribe(() => undefined);
+  const state = () => client.getQueryCache().find({ queryKey }).state;
+  return { client, queryKey, fetches, observer, unsubscribe, state };
+}
+
+test("hold premise: a refetch of unchanged data still advances dataUpdatedAt", {
+  skip,
+}, async () => {
+  const q = heldQuery();
+  await tick();
+  q.fetches[0]({ text: "same" });
+  await tick(5);
+  const before = q.state();
+  const refetch = q.observer.refetch();
+  await tick(2);
+  q.fetches[1]({ text: "same" });
+  await refetch;
+  const after = q.state();
+  assert.equal(after.data, before.data, "structural sharing kept the object");
+  assert.ok(after.dataUpdatedAt > before.dataUpdatedAt);
+  q.unsubscribe();
+});
+
+test("hold premise: an invalidation mid-fetch restarts it, and only the restart advances dataUpdatedAt", {
+  skip,
+}, async () => {
+  const q = heldQuery();
+  await tick();
+  q.fetches[0]({ text: "before" });
+  await tick(5);
+  const settled = q.state().dataUpdatedAt;
+  await tick(2);
+  void q.observer.refetch();
+  await tick();
+  assert.equal(q.fetches.length, 2);
+  // Another surface's write invalidates with the default cancelRefetch: true.
+  void q.client.invalidateQueries({ queryKey: q.queryKey });
+  await tick();
+  assert.equal(q.fetches.length, 3, "the in-flight fetch restarted");
+  // The cancelled fetch answering changes nothing.
+  q.fetches[1]({ text: "cancelled" });
+  await tick(5);
+  assert.equal(q.state().dataUpdatedAt, settled);
+  assert.deepEqual(q.state().data, { text: "before" });
+  q.fetches[2]({ text: "after" });
+  await tick(5);
+  assert.ok(q.state().dataUpdatedAt > settled);
+  assert.deepEqual(q.state().data, { text: "after" });
+  q.unsubscribe();
+});
+
+test("hold premise: a failed refetch moves the error count and keeps the data", {
+  skip,
+}, async () => {
+  const client = new rq.QueryClient();
+  let calls = 0;
+  const observer = new rq.QueryObserver(client, {
+    queryKey: ["repo", "r", "diff", "f.txt", false, false],
+    queryFn: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("git failed");
+      return { text: "before" };
+    },
+    networkMode: "always",
+    retry: false,
+  });
+  const unsubscribe = observer.subscribe(() => undefined);
+  await tick(5);
+  const before = observer.getCurrentResult();
+  await observer.refetch();
+  const after = observer.getCurrentResult();
+  // What the pane's observer result carries, and so what the hold reads.
+  assert.equal(after.errorUpdateCount, before.errorUpdateCount + 1);
+  assert.equal(after.dataUpdatedAt, before.dataUpdatedAt);
+  assert.deepEqual(after.data, { text: "before" });
+  assert.equal("dataUpdateCount" in after, false);
+  unsubscribe();
+});
