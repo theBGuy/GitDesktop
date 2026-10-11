@@ -211,17 +211,40 @@ export function usePendingDiscussionUpvote(
   return useMutationCacheSnapshot(select, NO_PENDING_UPVOTE);
 }
 
+/** The discussion writes whose pending state a view reads back from the cache. */
+export type DiscussionWriteKind = "lock" | "unlock";
+
+/** Each discussion write's variables, shared by the mutation's generic and the
+ *  pending scan's cast. */
+export type DiscussionWriteVars = {
+  lock: { discussionId: string; reason: api.DiscussionLockReason | null };
+  /** The discussion's node id, bare. */
+  unlock: string;
+};
+
+/** Filter prefix for EVERY discussion write ({@link discussionWriteKey}). */
+export const DISCUSSION_WRITES_FAMILY = "discussion-write";
+
+/** A discussion write's mutation key. Static per repo, so it never detaches a
+ *  pending write across a discussion switch; the discussion rides the variables. */
+export const discussionWriteKey = (kind: DiscussionWriteKind, repo: string) =>
+  [DISCUSSION_WRITES_FAMILY, kind, repo] as const;
+
 export function useLockDiscussion(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { discussionId: string; reason: api.DiscussionLockReason | null }) =>
+    (args: DiscussionWriteVars["lock"]) =>
       api.ghDiscussionLock(repo, args.discussionId, args.reason),
+    { identity: discussionWriteKey("lock", repo) },
   );
 }
 
 export function useUnlockDiscussion(repo: string) {
-  return useRepoMutation(repo, (discussionId: string) =>
-    api.ghDiscussionUnlock(repo, discussionId),
+  return useRepoMutation(
+    repo,
+    (discussionId: DiscussionWriteVars["unlock"]) =>
+      api.ghDiscussionUnlock(repo, discussionId),
+    { identity: discussionWriteKey("unlock", repo) },
   );
 }
 

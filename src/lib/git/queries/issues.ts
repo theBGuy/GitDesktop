@@ -52,7 +52,10 @@ export type IssueWriteKind =
   | "unlink"
   | "add-sub-issue"
   | "remove-sub-issue"
-  | "dependency";
+  | "dependency"
+  | "pin"
+  | "lock"
+  | "unlock";
 
 /** Each issue write's variables. One type for the mutations' generics AND the
  *  pending scan's casts, so a drifted field fails to compile instead of silently
@@ -77,6 +80,10 @@ export type IssueWriteVars = {
     target: number;
     add: boolean;
   };
+  pin: { number: number; pinned: boolean };
+  lock: { number: number; reason: api.LockReason | null };
+  /** The issue number, bare. */
+  unlock: number;
 };
 
 /** Filter prefix for EVERY issue write ({@link issueWriteKey}). */
@@ -766,9 +773,13 @@ function useIssueLifecycleMutation<TArgs, TData>(
    *  change a card's state glyph, title, or presence, while pin and lock/unlock
    *  change nothing a card shows. */
   boardCards = false,
+  /** Files the write under {@link issueWriteKey} for a menu that reads its
+   *  pending state back from the cache, per issue. */
+  mutationKey?: ReturnType<typeof issueWriteKey>,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey,
     mutationFn,
     onSettled: (_d, _e, args) => {
       if (boardCards) invalidateProjectBoards(queryClient, repo);
@@ -788,11 +799,13 @@ export function usePinIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (args: { number: number; pinned: boolean }) =>
+    (args: IssueWriteVars["pin"]) =>
       args.pinned
         ? api.ghIssuePin(repo, args.number, lens)
         : api.ghIssueUnpin(repo, args.number, lens),
     (args) => args.number,
+    false,
+    issueWriteKey("pin", repo),
   );
 }
 
@@ -800,9 +813,11 @@ export function useLockIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (args: { number: number; reason: api.LockReason | null }) =>
+    (args: IssueWriteVars["lock"]) =>
       api.forgeIssueLock(repo, args.number, args.reason, lens),
     (args) => args.number,
+    false,
+    issueWriteKey("lock", repo),
   );
 }
 
@@ -810,8 +825,11 @@ export function useUnlockIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (number: number) => api.forgeIssueUnlock(repo, number, lens),
+    (number: IssueWriteVars["unlock"]) =>
+      api.forgeIssueUnlock(repo, number, lens),
     (number) => number,
+    false,
+    issueWriteKey("unlock", repo),
   );
 }
 

@@ -185,7 +185,11 @@ export function IssuePicker({
       items={candidates}
       itemToStringLabel={(i: IssueInfo) => `#${i.number} ${i.title}`}
       value={null}
-      onValueChange={(item: IssueInfo | null) => item && onPick(item.number)}
+      // The input disables while pending, but a popup already open could still
+      // pick; a held pick would start a second write.
+      onValueChange={(item: IssueInfo | null) =>
+        item && !pending && onPick(item.number)
+      }
       openOnInputClick
     >
       <ComboboxInput

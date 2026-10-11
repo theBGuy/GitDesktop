@@ -65,6 +65,7 @@ import type { LockReason, MinimizeReason } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
+  pendingIssueWrite,
   repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
@@ -82,6 +83,7 @@ import {
   useIssueTimeline,
   useLockIssue,
   useMinimizeComment,
+  usePendingIssueWrites,
   usePinIssue,
   useReopenIssue,
   useRepoWriteAccess,
@@ -243,15 +245,38 @@ export function RemoteIssueView({
   // Pin and lock hold rather than park, like close: a parked one would change
   // the issue whenever the connection returns. Each menu item names its hold in
   // the label; the access axis outranks both, being the one no wait clears.
-  // This view outlives an issue switch, so a pending write holds only the issue
-  // its variables name; another issue's write leaves these items alone.
+  // Read per issue from the cache, not the observers: this view outlives an
+  // issue switch, and an observer tracks only its latest call, so a second
+  // issue's write would hide the first's and let it send again.
+  const pendingWrites = usePendingIssueWrites(repoPath);
+  const pinning = pendingIssueWrite(
+    pendingWrites,
+    "pin",
+    (v) => v.number === number && v.pinned,
+  );
+  const unpinning = pendingIssueWrite(
+    pendingWrites,
+    "pin",
+    (v) => v.number === number && !v.pinned,
+  );
+  const locking = pendingIssueWrite(
+    pendingWrites,
+    "lock",
+    (v) => v.number === number,
+  );
+  const unlocking = pendingIssueWrite(
+    pendingWrites,
+    "unlock",
+    (v) => v === number,
+  );
+  const pinPending = pinning !== undefined || unpinning !== undefined;
+  const lockPending = locking !== undefined || unlocking !== undefined;
   const pinHeld = (() => {
     switch (true) {
-      case pinIssue.isPending && pinIssue.variables?.number === number:
-        return pendingItemReason(
-          pinIssue.isPaused,
-          pinIssue.variables?.pinned ? "pinning…" : "unpinning…",
-        );
+      case pinning !== undefined:
+        return pendingItemReason(pinning.paused, "pinning…");
+      case unpinning !== undefined:
+        return pendingItemReason(unpinning.paused, "unpinning…");
       case !!offlineHold:
         return OFFLINE_ITEM_REASON;
       default:
@@ -260,10 +285,10 @@ export function RemoteIssueView({
   })();
   const lockHeld = (() => {
     switch (true) {
-      case lockIssue.isPending && lockIssue.variables?.number === number:
-        return pendingItemReason(lockIssue.isPaused, "locking…");
-      case unlockIssue.isPending && unlockIssue.variables === number:
-        return pendingItemReason(unlockIssue.isPaused, "unlocking…");
+      case locking !== undefined:
+        return pendingItemReason(locking.paused, "locking…");
+      case unlocking !== undefined:
+        return pendingItemReason(unlocking.paused, "unlocking…");
       case !!offlineHold:
         return OFFLINE_ITEM_REASON;
       default:
@@ -746,7 +771,7 @@ export function RemoteIssueView({
   /** `wasPinned` comes from the render the click landed on: the refetch that
    *  follows already carries the new state, so the verb has to be captured. */
   async function togglePin(wasPinned: boolean) {
-    if (refuseWhileOffline()) return;
+    if (pinPending || refuseWhileOffline()) return;
     try {
       await pinIssue.mutateAsync({ number, pinned: !wasPinned });
     } catch (e) {
@@ -757,7 +782,7 @@ export function RemoteIssueView({
   }
 
   async function doLock(reason: LockReason | null) {
-    if (refuseWhileOffline()) return;
+    if (lockPending || refuseWhileOffline()) return;
     try {
       await lockIssue.mutateAsync({ number, reason });
     } catch (e) {
@@ -768,7 +793,7 @@ export function RemoteIssueView({
   }
 
   async function doUnlock() {
-    if (refuseWhileOffline()) return;
+    if (lockPending || refuseWhileOffline()) return;
     try {
       await unlockIssue.mutateAsync(number);
     } catch (e) {

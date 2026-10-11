@@ -58,6 +58,9 @@ import type {
   MinimizeReason,
 } from "@/lib/git/api";
 import {
+  DISCUSSION_WRITES_FAMILY,
+  type DiscussionWriteVars,
+  pendingWriteMatching,
   repoKeys,
   useAddDiscussionComment,
   useCloseDiscussion,
@@ -69,6 +72,7 @@ import {
   useMarkDiscussionAnswer,
   useMinimizeComment,
   usePendingDiscussionUpvote,
+  usePendingRepoWrites,
   useReopenDiscussion,
   useToggleDiscussionUpvote,
   useToggleReaction,
@@ -239,6 +243,12 @@ export function DiscussionView({
   const toggleReactionMutation = useToggleReaction(repoPath, "discussion");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
+  // Lock/unlock pending state per discussion, from the cache: this view outlives
+  // a discussion switch, and an observer tracks only its latest call.
+  const discussionWrites = usePendingRepoWrites(
+    DISCUSSION_WRITES_FAMILY,
+    repoPath,
+  );
   const closeDiscussion = useCloseDiscussion(repoPath);
   const reopenDiscussion = useReopenDiscussion(repoPath);
   const deleteDiscussion = useDeleteDiscussion(repoPath);
@@ -377,15 +387,25 @@ export function DiscussionView({
     (offlineHold ? ` — ${OFFLINE_ITEM_REASON}` : "") ||
     draftSuffix;
   // Lock and unlock hold rather than park, like close: a parked one would change
-  // the discussion whenever the connection returns. This view outlives a
-  // discussion switch, so a pending write holds only the discussion it names.
+  // the discussion whenever the connection returns. Only this discussion's own
+  // writes hold it.
+  const locking = pendingWriteMatching<DiscussionWriteVars["lock"]>(
+    discussionWrites,
+    "lock",
+    (v) => v.discussionId === d.id,
+  );
+  const unlocking = pendingWriteMatching<DiscussionWriteVars["unlock"]>(
+    discussionWrites,
+    "unlock",
+    (v) => v === d.id,
+  );
+  const lockPending = locking !== undefined || unlocking !== undefined;
   const lockHeld = (() => {
     switch (true) {
-      case lockDiscussion.isPending &&
-        lockDiscussion.variables?.discussionId === d?.id:
-        return pendingItemReason(lockDiscussion.isPaused, "locking…");
-      case unlockDiscussion.isPending && unlockDiscussion.variables === d?.id:
-        return pendingItemReason(unlockDiscussion.isPaused, "unlocking…");
+      case locking !== undefined:
+        return pendingItemReason(locking.paused, "locking…");
+      case unlocking !== undefined:
+        return pendingItemReason(unlocking.paused, "unlocking…");
       case !!offlineHold:
         return OFFLINE_ITEM_REASON;
       default:
@@ -526,7 +546,7 @@ export function DiscussionView({
   // Each of these addresses the rendered discussion's id while the menu belongs to
   // the selected one; the items disable too, and these arms back them up.
   async function doLock(reason: DiscussionLockReason | null) {
-    if (!d || detailsStale || refuseWhileOffline()) return;
+    if (!d || detailsStale || lockPending || refuseWhileOffline()) return;
     try {
       await lockDiscussion.mutateAsync({ discussionId: d.id, reason });
     } catch (e) {
@@ -537,7 +557,7 @@ export function DiscussionView({
   }
 
   async function doUnlock() {
-    if (!d || detailsStale || refuseWhileOffline()) return;
+    if (!d || detailsStale || lockPending || refuseWhileOffline()) return;
     try {
       await unlockDiscussion.mutateAsync(d.id);
     } catch (e) {

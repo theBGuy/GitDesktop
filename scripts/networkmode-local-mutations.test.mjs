@@ -12,6 +12,8 @@
 // vocabulary (or NEUTRAL_CALLEES), and one network callee makes the whole site network.
 // A direct site mixing local and network callees must be a SEQUENTIAL_COMPOUND;
 // independent local and network writes belong in separate hooks.
+// Only direct mutationFn callees expose a mix: a local-verb-named helper's body
+// is not followed, so a mix inside that helper stays invisible.
 // Classification is total: a callee in no vocabulary, a site with no callee, a raw
 // `invoke` of an unlisted command, and a shape the scan can't read all FAIL, naming the
 // site. A mutationFn passed through a parameter resolves at the enclosing hook's call
@@ -31,7 +33,9 @@
 // Blind spots, by design: I/O behind a method call on an object other than `api`
 // (`store.save()`) is invisible, as are options spread in from elsewhere and a
 // function handed off uncalled (through `.bind()`, as an argument such as
-// `helper(api.gitPush)`, or as `(0, f)()`). Pass-through resolution assumes the
+// `helper(api.gitPush)`, or as `(0, f)()`). Unusual call spellings can hide the
+// network half: `.call`/`.apply`, parenthesized callees, object optional-chain
+// calls (`api?.gitPush()`), and bracket access. Pass-through resolution assumes the
 // parameter is not reassigned before the use (`=`, a compound or `??=` assignment,
 // a destructuring-assignment target): a reassigned parameter resolves from the call
 // site. A future unprefixed network helper named like a local verb
@@ -273,6 +277,7 @@ const SEQUENTIAL_COMPOUND = [
   {
     file: "src/lib/git/queries/sync.ts",
     hook: "useUpdateFromUpstream",
+    callees: ["api.gitFetchRemote", "api.gitRemoteDefaultBranch", "api.gitMerge"],
     reason:
       "the fetch feeds the merge sequentially (merge needs the fetched upstream ref); the default online mode parks the whole operation offline, which is right — neither arm should run without a connection",
   },
@@ -281,6 +286,16 @@ const SEQUENTIAL_COMPOUND = [
 /** One row per file; pending wave triage rows are pruned at integration, and any
  *  retained row names its HOLD/QUEUE bucket and the reason/indicator's home. */
 const OFFLINE_VOCABULARY_EXEMPT = [
+  {
+    file: "src/features/pulls/RemotePrViewParts.tsx",
+    bucket:
+      "QUEUE (MR time tracking): busy state rides the observer; the pause-aware reason is recorded class debt alongside the deliberately unkeyed MR twins (offline topic) — lands when that pair is keyed",
+  },
+  {
+    file: "src/features/repo-settings/BitbucketEnvironmentsSection.tsx",
+    bucket:
+      "HOLD rendered by PipelinesDisabledBanner in BitbucketVariablesSection; useBbSetPipelinesEnabled is reached through its offline-disabled button, shown only when pipelines are disabled",
+  },
   {
     file: "src/features/pulls/ReviewComposer.tsx",
     bucket:
@@ -305,7 +320,6 @@ const OFFLINE_VOCABULARY = [
   "useOnline",
   "pendingWriteReason",
   "pendingItemReason",
-  "isPaused",
   "holdOffline",
   "OFFLINE_WRITE_REASON",
   "OFFLINE_ITEM_REASON",
@@ -1214,6 +1228,9 @@ function applyExemptions(offenders, ambiguities, exempt) {
   const covers = (e, f) =>
     e.file === f.file &&
     e.hook === f.hook &&
+    (e.callees === undefined ||
+      (new Set(e.callees).size === new Set(f.callees ?? []).size &&
+        e.callees.every((callee) => f.callees?.includes(callee)))) &&
     (e.why === undefined || f.why.startsWith(e.why));
   const all = [...offenders, ...ambiguities];
   return {
@@ -1222,13 +1239,47 @@ function applyExemptions(offenders, ambiguities, exempt) {
   };
 }
 
-/** Hook names inherit the construction verdicts, including multiple sites per hook. */
-function hookClasses(sites) {
+/** Same-file use* callers inherit construction classes to a fixpoint. */
+function hookClasses(sites, sources = []) {
   const classes = new Map();
+  const add = (map, hook, cls) => {
+    if (!map.has(hook)) map.set(hook, new Set());
+    const known = map.get(hook);
+    if (known.has(cls)) return false;
+    known.add(cls);
+    return true;
+  };
   for (const { hook, cls } of sites) {
     if (!/^use[A-Z]/.test(hook)) continue;
-    if (!classes.has(hook)) classes.set(hook, new Set());
-    classes.get(hook).add(cls);
+    add(classes, hook, cls);
+  }
+  for (const { file, source } of sources) {
+    const local = new Map();
+    for (const site of sites.filter((s) => s.file === file))
+      if (/^use[A-Z]/.test(site.hook)) add(local, site.hook, site.cls);
+    if (local.size === 0) continue;
+    const masked = maskNonCode(source, file.endsWith(".tsx"));
+    const fns = functionsIn(masked);
+    const hooks = fns.filter((f) => /^use[A-Z]/.test(f.name ?? ""));
+    const edges = hooks.map((hook) => ({
+      hook,
+      calls: [...masked.slice(hook.bodyOpen + 1, hook.bodyClose).matchAll(CALL_RE)]
+        .filter((m) =>
+          !m[0].startsWith("api.") &&
+          enclosingFn(fns, hook.bodyOpen + 1 + m.index) === hook,
+        )
+        .map((m) => m[1]),
+    }));
+    let changed;
+    do {
+      changed = false;
+      for (const { hook, calls } of edges)
+        for (const call of calls)
+          for (const cls of local.get(call) ?? [])
+            if (add(local, hook.name, cls)) changed = true;
+    } while (changed);
+    for (const hook of hooks.filter((f) => f.exported))
+      for (const cls of local.get(hook.name) ?? []) add(classes, hook.name, cls);
   }
   return classes;
 }
@@ -1254,7 +1305,12 @@ function offlineVocabularyFindings(sources, classes, exempt) {
     );
     if (bindings.length === 0) continue;
     boundFiles++;
-    if (!vocabulary.test(masked))
+    const paused = bindings.some((m) =>
+      new RegExp(
+        String.raw`(?<![\w$.])${escapeRe(m[1])}\s*\.\s*isPaused\b`,
+      ).test(masked),
+    );
+    if (!vocabulary.test(masked) && !paused)
       missing.push({ file, hooks: [...new Set(bindings.map((m) => m[2]))] });
   }
   return {
@@ -1277,6 +1333,7 @@ test("a direct mixed mutationFn fails unless its sequential compound is recorded
     {
       file: "src/fixture.ts",
       hook: "useMixed",
+      callees: ["api.gitStage", "api.gitPush"],
       why: MIXED_WRITE_REASON,
       reason: "fixture sequential dependency",
     },
@@ -1304,6 +1361,59 @@ test("a direct mixed mutationFn fails unless its sequential compound is recorded
     "function useW(fn) { return useMutation({ mutationFn: fn }); } useW(() => remote ? api.gitPush(r) : api.gitStage(r));",
   );
   assert.match(passed.ambiguities[0].why, /mix local and network/);
+  const two = scan(source.replace(
+    "return useMutation",
+    "useMutation({ mutationFn: () => remote ? api.gitPush(r) : api.gitCommit(r) }); return useMutation",
+  ));
+  const remaining = applyExemptions(two.offenders, [], exempt);
+  assert.deepEqual(remaining.stale, []);
+  assert.equal(remaining.failures.length, 1);
+  assert.ok(remaining.failures[0].callees.includes("api.gitCommit"));
+  const changed = scan(source.replace("api.gitStage", "api.gitCommit"));
+  assert.deepEqual(applyExemptions(changed.offenders, [], exempt).stale, exempt);
+});
+
+test("offline vocabulary follows same-file factory callers to a fixpoint", () => {
+  const sources = [
+    {
+      file: "src/lib/factory.ts",
+      source: `
+        export function useOuter(r) { return useMiddle(r); }
+        function useMiddle(r) { return useCloseIssue(r); }
+        export function useCloseIssue(r, lens) {
+          return useIssueLifecycleMutation(() => api.forgeIssueClose(r, lens));
+        }
+        function useIssueLifecycleMutation(fn) {
+          return useMutation({ mutationFn: fn });
+        }
+        export function useLocal(r) { return useLocalFactory(() => api.gitStage(r)); }
+        function useLocalFactory(fn) {
+          return useMutation({ mutationFn: fn, networkMode: "always" });
+        }
+        export function useReference() { return useCloseIssue; }
+        export function useComment() { /* useCloseIssue(r) */ }
+      `,
+    },
+    {
+      file: "src/lib/other.ts",
+      source: "export function useCrossModule(r) { return useCloseIssue(r); }",
+    },
+  ];
+  const verdicts = sources.map(({ file, source }) => scan(source, file));
+  assert.deepEqual(verdicts.flatMap((v) => v.ambiguities), []);
+  const classes = hookClasses(verdicts.flatMap((v) => v.sites), sources);
+  for (const hook of ["useCloseIssue", "useOuter"]) {
+    assert.deepEqual([...classes.get(hook)], ["network"]);
+    const found = offlineVocabularyFindings([{
+      file: "src/features/fixture.tsx",
+      source: `const close = ${hook}(r, lens); close.mutate(v);`,
+    }], classes, []);
+    assert.equal(found.boundFiles, 1);
+    assert.equal(found.failures.length, 1);
+  }
+  assert.deepEqual([...classes.get("useLocal")], ["local"]);
+  for (const hook of ["useReference", "useComment", "useCrossModule"])
+    assert.equal(classes.has(hook), false);
 });
 
 test("offline vocabulary flags bound network writes and stale file exemptions", () => {
@@ -1318,6 +1428,15 @@ test("offline vocabulary flags bound network writes and stale file exemptions", 
     offlineVocabularyFindings([{ file: path, source }], classes, exempt);
   assert.equal(check(source).failures.length, 1);
   assert.equal(check(source.replace(".mutate(", ".mutateAsync(")).failures.length, 1);
+  assert.deepEqual(check(`${source}\nwrite.isPaused;`).failures, []);
+  for (const decoy of [
+    "config.isPaused;",
+    'import { isPaused } from "./state";',
+    "type State = { isPaused?: boolean };",
+    "write.isPausedSuffix;",
+    "other.write.isPaused;",
+    "// write.isPaused",
+  ]) assert.equal(check(`${source}\n${decoy}`).failures.length, 1);
   for (const token of OFFLINE_VOCABULARY) {
     assert.deepEqual(check(`${source}\nconst reason = ${token};`).failures, []);
     assert.equal(check(`${source}\nconst reason = ${token}Suffix;`).failures.length, 1);
@@ -2012,6 +2131,11 @@ test('every local mutation in src/ sets networkMode: "always", and no network on
 // hooks are out of scope. Vocabulary may belong to a different control in the file.
 // This inherits every classifier blind spot; hook and binding names are matched
 // without import resolution or lexical scope tracking. Comments/text do not count.
+// Factory propagation walks same-file use* bodies only; cross-module wrappers
+// remain unseen. isPaused counts only on a bound network mutation.
+// Hand-offs without binding.mutate( / binding.mutateAsync( are unseen: prop passes
+// (<Child m={save}/>), method references (onConfirm={save.mutate}), and stored
+// methods (const run = save.mutateAsync).
 test("UI files binding and calling network mutation hooks carry offline vocabulary", (t) => {
   const sources = [...sourceFiles(SRC)].map((full) => ({
     file: relative(REPO_ROOT, full).split(/[\\/]/).join("/"),
@@ -2028,9 +2152,18 @@ test("UI files binding and calling network mutation hooks carry offline vocabula
     sites.length >= SITE_FLOOR,
     "offline vocabulary construction scan went inert",
   );
+  const directClasses = hookClasses(sites);
+  const classes = hookClasses(sites, sources);
+  const addedClasses = new Map(
+    [...classes].filter(([hook]) => !directClasses.has(hook)),
+  );
+  t.diagnostic(`${addedClasses.size} same-file caller hooks added to the class map`);
+  t.diagnostic(
+    `${offlineVocabularyFindings(sources, addedClasses, []).boundFiles} UI files bind and call newly mapped hooks (may overlap previously counted files)`,
+  );
   const { failures, stale, boundFiles } = offlineVocabularyFindings(
     sources,
-    hookClasses(sites),
+    classes,
     OFFLINE_VOCABULARY_EXEMPT,
   );
   assert.ok(boundFiles > 0, "offline vocabulary binding scan went inert");

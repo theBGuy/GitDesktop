@@ -640,3 +640,39 @@ test("issue and Jira rail writes scope by repo KEY and keep kind, pause and vari
     [],
   );
 });
+
+test("discussion lock writes hold each discussion by its own pending write", () => {
+  // Both keys stay live in the cache at once, which an observer (tracking only
+  // its latest call) can't show: A's lock must survive B's starting.
+  const read = (kind, vars, paused) => ({ kind, vars, paused });
+  const writes = pendingWritesFor(
+    pendingMutationEntries([
+      mutation(
+        91,
+        ["discussion-write", "lock", "C:/a"],
+        { discussionId: "D_A", reason: null },
+        true,
+      ),
+      mutation(92, ["discussion-write", "unlock", "C:/a"], "D_B"),
+      mutation(93, ["discussion-write", "lock", "C:/b"], {
+        discussionId: "D_C",
+        reason: null,
+      }),
+    ]),
+    "C:/a",
+    read,
+  );
+  // The menu's suffix state per discussion, as DiscussionView reads it.
+  const stateFor = (id) => ({
+    locking: writes
+      .filter((w) => w.kind === "lock" && w.vars.discussionId === id)
+      .map((w) => w.paused),
+    unlocking: writes
+      .filter((w) => w.kind === "unlock" && w.vars === id)
+      .map((w) => w.paused),
+  });
+  assert.deepEqual(stateFor("D_A"), { locking: [true], unlocking: [] });
+  assert.deepEqual(stateFor("D_B"), { locking: [], unlocking: [false] });
+  // Another repo's lock never holds this one's discussions.
+  assert.deepEqual(stateFor("D_C"), { locking: [], unlocking: [] });
+});

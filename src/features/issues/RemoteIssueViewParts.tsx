@@ -489,6 +489,7 @@ export function DueDateRow({
 }) {
   const pastDue = open && value !== null && isPastDue(value);
   const blocked = !!disabledReason;
+  const held = blocked || pendingReason !== undefined;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -516,9 +517,11 @@ export function DueDateRow({
       </div>
       {/* Uncontrolled while focused (key remounts on external change) so the
           segment editing never fights a controlled re-render; blur commits. */}
+      {/* Held while its own write is pending too, so no second date can start;
+          the note below the input carries that reason. */}
       <span
-        title={disabledReason}
-        className={blocked ? "block cursor-not-allowed" : "block"}
+        title={disabledReason ?? pendingReason}
+        className={held ? "block cursor-not-allowed" : "block"}
       >
         <Input
           key={value ?? ""}
@@ -526,7 +529,7 @@ export function DueDateRow({
           type="date"
           defaultValue={value ?? ""}
           className="h-7"
-          disabled={blocked}
+          disabled={held}
           onBlur={(e) => {
             const next = e.target.value;
             if (next && next !== value) onChange(next);
