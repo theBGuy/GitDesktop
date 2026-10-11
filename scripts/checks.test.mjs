@@ -3110,6 +3110,21 @@ test("raw-react-query-mutation flags every value route to react-query's construc
       'const m = import.meta.glob("/node_modules/@tanstack/react-query/**");',
     "a glob list":
       'const m = import.meta.glob(["./a/*.ts", "/node_modules/@tanstack/query-core/**"]);',
+    "a generic glob":
+      'const m = import.meta.glob<Mod>("/node_modules/@tanstack/react-query/**");',
+    "a glob over the package segment":
+      'const m = import.meta.glob("/node_modules/@tanstack/*/build/**");',
+    "a glob brace set":
+      'const m = import.meta.glob("@tanstack/{react-query,x}/**");',
+    "a glob through any node_modules":
+      'const m = import.meta.glob("/node_modules/**/useMutation.js");',
+    "a glob over the pnpm store":
+      'const m = import.meta.glob("/node_modules/.pnpm/@tanstack+query-core*/**");',
+    "a string-named alias with no space": `import {"useMutation"as m} from ${RQ};`,
+    "a dynamic import in a ternary":
+      'const m = flag ? await import("@tanstack/react-query") : null;',
+    "a local template head naming the package":
+      "const m = await import(`./${dir}/@tanstack/react-query`);",
   };
   for (const [name, source] of Object.entries(cases))
     assert.deepEqual(rawReactQueryMutation(source), [1], name);
@@ -3156,6 +3171,41 @@ test("raw-react-query-mutation leaves types, other hooks and the DOM's observer 
     "a local require": 'const x = require("./local");',
   }))
     assert.deepEqual(rawReactQueryMutation(source), [], name);
+  // In a file that does hold a react-query string, a method named `import` or
+  // `require`, prose, and a local template head still aren't module calls.
+  const HELD = 'const pkg = "@tanstack/react-query";\n';
+  for (const [name, source] of Object.entries({
+    "a method named import":
+      "class Importer { import(path: string) { return path; } }",
+    "an object method named import": "const o = { import(x) { return x; } };",
+    "a method named require":
+      "class Policy { require(flag: string) { return flag; } }",
+    "a typed async method named import":
+      "class I { async import(p: string): Promise<void> {} }",
+    "prose in JSX":
+      "const e = <p>Pushing will require (re)authentication.</p>;",
+    "prose in a string":
+      'const s = "This will require (at least) one reviewer";',
+    "a local template head":
+      "const m = await import(`./locales/${lang}.json`);",
+  }))
+    assert.deepEqual(rawReactQueryMutation(HELD + source), [], name);
+  // A file's own react-query import is judged by its own arm, so it doesn't
+  // make the file's non-literal module calls read as a reach.
+  const RQ_IMPORT = `import { useQuery } from ${RQ};\n`;
+  for (const [name, call] of Object.entries({
+    "a local template": "const m = await import(`./locales/${lang}.json`);",
+    "an aliased template":
+      "const m = await import(`@/features/${name}/index.ts`);",
+    "a variable path": "const m = await import(path);",
+  }))
+    assert.deepEqual(rawReactQueryMutation(RQ_IMPORT + call), [], name);
+  assert.deepEqual(
+    rawReactQueryMutation(
+      `import type { QueryKey } from ${RQ};\nconst m = await import(path);`,
+    ),
+    [],
+  );
 });
 
 test("raw-react-query-mutation exempts the helper alone, and its pin notices a rename", () => {
@@ -3214,6 +3264,11 @@ test("mutation-cache-access passes only a call followed by a read", () => {
     "a read member not called":
       "const f = queryClient.getMutationCache().getAll;",
     "an escaped method": "queryClient.getMutation\\u0043ache().build(qc, o);",
+    "an internal remove": "queryClient.getMutationCache().remove(mutation);",
+    "an internal resume":
+      "queryClient.getMutationCache().resumePausedMutations();",
+    "the holder statement outside its file":
+      "const cache = useQueryClient().getMutationCache();",
   }))
     assert.deepEqual(cacheAccess(source), [1], name);
   for (const [name, source] of Object.entries({
@@ -3225,22 +3280,28 @@ test("mutation-cache-access passes only a call followed by a read", () => {
     clear: "queryClient.getMutationCache().clear();",
     "a wrapped chain":
       "queryClient\n  .getMutationCache()\n  .subscribe(() => push());",
+    "a generic find":
+      "qc.getMutationCache().find<Data, Error, Vars>({ mutationKey });",
+    hasListeners: "const busy = qc.getMutationCache().hasListeners();",
   }))
     assert.deepEqual(cacheAccess(source), [], name);
-  // The one allowlisted holder still holds the cache, so its row isn't stale.
+  // The holder's exemption is its exact statement, once, in its own file: the
+  // real file passes by that statement alone, and any other reach added there
+  // still fails.
   const check = CHECKS.find((c) => c.name === "mutation-cache-access");
-  assert.deepEqual(check.allowlist, ["src/lib/git/queries/internal.ts"]);
+  assert.deepEqual(check.allowlist, []);
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const internal = "src/lib/git/queries/internal.ts";
-  const internalView = view(readFileSync(join(root, internal), "utf8"));
-  assert.notDeepEqual(check.scan(internalView), []);
-  const { violations, stale } = runCheck(
-    check,
-    [internal],
-    new Map([[internal, internalView]]),
-  );
-  assert.deepEqual(violations, []);
-  assert.deepEqual(stale, []);
+  const source = readFileSync(join(root, internal), "utf8");
+  const holder = "const cache = useQueryClient().getMutationCache();";
+  assert.equal(source.split(holder).length, 2, "the holder statement moved");
+  const run = (text) =>
+    runCheck(check, [internal], new Map([[internal, view(text)]])).violations;
+  assert.notDeepEqual(check.scan(view(source)), []);
+  assert.deepEqual(run(source), []);
+  const grown = `${source}\nexport function useRawBuild() { const qc = useQueryClient(); return qc.getMutationCache().build(qc, { mutationFn: save }); }\n`;
+  assert.equal(run(grown).length, 1);
+  assert.equal(run(`${source}\n${holder}\n`).length, 1);
   assert.ok(check.expectScanned.atLeast >= 500);
 });
 
@@ -3257,6 +3318,10 @@ test("unscannedScripts names every src/ script the walk can't read", () => {
       "src/h.cts",
       "src/i.js",
       "src/j.css",
+      "src/k.JS",
+      "src/l.TSX",
+      "src/m.Ts",
+      "src/n.tsX",
     ]),
     [
       "src/b.mjs",
@@ -3265,6 +3330,10 @@ test("unscannedScripts names every src/ script the walk can't read", () => {
       "src/g.mts",
       "src/h.cts",
       "src/i.js",
+      "src/k.JS",
+      "src/l.TSX",
+      "src/m.Ts",
+      "src/n.tsX",
     ],
   );
   assert.deepEqual(unscannedScripts(["src/b.mjs"], ["src/b.mjs"]), []);
@@ -3440,6 +3509,7 @@ test("mutation-defaults passes query defaults and type positions only", () => {
       "interface Config { readonly defaultOptions?: DefaultOptions; }",
     "a private readonly field":
       "class C { private readonly defaultOptions: DefaultOptions; }",
+    "an accessor field": "class C { accessor defaultOptions: DefaultOptions; }",
     "a protected abstract field":
       "abstract class C { protected abstract defaultOptions: DefaultOptions; }",
     "a generic type member":

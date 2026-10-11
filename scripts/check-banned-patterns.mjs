@@ -1519,9 +1519,14 @@ const IMPORT_FROM_RE =
 const EXPORT_FROM_RE =
   /\bexport\b((?:(?!\b(?:import|export)\b)[^;])*?)\bfrom\s*(["'`])((?:\\[\s\S]|(?!\2)[^\\])*)\2/g;
 /** A call whose argument names a module: `import(…)`, `require(…)` (TS
- *  `import x = require(…)` included), and Vite's `import.meta.glob(…)`. */
+ *  `import x = require(…)` included), and Vite's `import.meta.glob(…)` with its
+ *  optional type argument. No space before the paren, as the formatter writes a
+ *  call and Vite's own glob pattern reads one, so prose ("will require (…)")
+ *  never matches. */
 const MODULE_CALL_RE =
-  /(?<![\w$.])(import|require|import\s*\.\s*meta\s*\.\s*glob(?:Eager)?)\s*\(/g;
+  /(?<![\w$.])(import|require|import\.meta\.glob(?:Eager)?(?:<\w+>)?)\(/g;
+/** A template's static head that stays inside the app: `./` or the `@/` alias. */
+const LOCAL_TEMPLATE_HEAD_RE = /^(?:\.\/|@\/)/;
 /** `import type …` / `export type { … }`: erased, so it binds no value. A bare
  *  `type` default binding (`import type from`, `import type, {`) is not one. */
 const TYPE_ONLY_CLAUSE_RE = /^type(?:\s*[{*]|\s+[\p{ID_Start}$_])/u;
@@ -1557,7 +1562,8 @@ function bindsRawConstructor(braces) {
   return braces.split(",").some((raw) => {
     const entry = raw.trim();
     if (!entry || /^type\s/.test(entry)) return false;
-    const name = entry.split(/\s+as\s+/)[0];
+    // `as` needs whitespace before it, or a string name's closing quote.
+    const name = entry.split(/(?<=["'`]|\s)as\s+/)[0].trim();
     const quoted = /^(["'`])([\s\S]*)\1$/.exec(name);
     const exported = quoted ? cookStringBody(quoted[2]) : name;
     return exported === "default" || RAW_MUTATION_NAMES.has(exported);
@@ -1565,14 +1571,20 @@ function bindsRawConstructor(braces) {
 }
 
 /** Whether a module call's argument text reaches react-query. A single plain
- *  string literal (parentheses unwrapped) is read; anything else fails when it
- *  mentions `tanstack` or the file holds a react-query specifier string, since a
- *  concatenation, a `${}` or a variable can assemble one unseen. A glob reads
- *  every string literal in its pattern list. */
+ *  string literal (parentheses unwrapped) is read, and so is a template whose
+ *  static head is local (`./`, `@/`); anything else fails when it mentions
+ *  `tanstack` or the file holds a react-query string outside its import and
+ *  export specifiers, since a concatenation, a `${}` or a variable can assemble
+ *  one unseen. A glob fails on any pattern that reaches the package or mentions
+ *  `node_modules` or `tanstack`, so a wildcard over the package segment counts. */
 function moduleCallReaches(kind, args, fileReaches) {
   if (/glob/.test(kind)) {
     for (const m of args.matchAll(STRING_LITERAL_RE))
-      if (reachesReactQuery(m[2])) return true;
+      if (
+        reachesReactQuery(m[2]) ||
+        /node_modules|tanstack/i.test(cookStringBody(m[2]))
+      )
+        return true;
     return false;
   }
   const pieces = topLevelPieces(args);
@@ -1580,10 +1592,35 @@ function moduleCallReaches(kind, args, fileReaches) {
   let first = pieces[0];
   while (first.startsWith("(") && literalEnd(first, 0) === first.length - 1)
     first = first.slice(1, -1).trim();
-  const plain = /^(["'`])((?:\\[\s\S]|(?!\1)[^\\])*)\1$/.exec(first);
-  if (plain && !(plain[1] === "`" && plain[2].includes("${")))
-    return reachesReactQuery(plain[2]);
-  return /tanstack/i.test(cookStringBody(first)) || fileReaches();
+  if (/tanstack/i.test(cookStringBody(first))) return true;
+  const literal = /^(["'`])((?:\\[\s\S]|(?!\1)[^\\])*)\1$/.exec(first);
+  if (literal && !(literal[1] === "`" && literal[2].includes("${")))
+    return reachesReactQuery(literal[2]);
+  if (
+    literal &&
+    LOCAL_TEMPLATE_HEAD_RE.test(
+      cookStringBody(literal[2].slice(0, literal[2].indexOf("${"))),
+    )
+  )
+    return false;
+  return fileReaches();
+}
+
+/** What may precede a method definition's name: a member's start (`{` `;` `,`
+ *  `}`), a generator star, or a modifier. */
+const METHOD_HEAD_RE =
+  /(?:^|[{;,}*]|(?<![\w$])(?:async|static|public|private|protected|override|get|set))\s*$/;
+
+/** Whether a module-call match is a method named `import`/`require` instead: its
+ *  parameter list is followed by a body, or by a return type with the name at a
+ *  member's start. A call in a ternary (`? import(…) :`) is not one. */
+function isMethodDefinition(text, match, close) {
+  const next = /^\s*([{:])/.exec(text.slice(close + 1, close + 40));
+  if (!next) return false;
+  return (
+    next[1] === "{" ||
+    METHOD_HEAD_RE.test(text.slice(Math.max(0, match.index - 40), match.index))
+  );
 }
 
 /** Scanner: react-query's mutation constructors bound as a value — imported named
@@ -1596,10 +1633,16 @@ const rawReactQueryMutation = (fileView) => {
   const { text, at } = cookSource(fileView.text);
   const hit = (index) => lineAt(fileView.starts, at[index]);
   const hits = new Set();
+  // Where each import and export specifier's opening quote sits: those strings
+  // are judged by their own arms, so they don't make a file "hold" a reach.
+  const specifierAt = new Set();
+  for (const re of [IMPORT_FROM_RE, EXPORT_FROM_RE])
+    for (const m of text.matchAll(re))
+      specifierAt.add(m.index + m[0].length - m[3].length - 2);
   let reaches;
   const fileReaches = () => {
-    reaches ??= [...text.matchAll(STRING_LITERAL_RE)].some((m) =>
-      reachesReactQuery(m[2]),
+    reaches ??= [...text.matchAll(STRING_LITERAL_RE)].some(
+      (m) => !specifierAt.has(m.index) && reachesReactQuery(m[2]),
     );
     return reaches;
   };
@@ -1627,6 +1670,12 @@ const rawReactQueryMutation = (fileView) => {
     const open = m.index + m[0].length - 1;
     const close = literalEnd(text, open);
     if (
+      close !== -1 &&
+      !/glob/.test(m[1]) &&
+      isMethodDefinition(text, m, close)
+    )
+      continue;
+    if (
       close === -1 ||
       moduleCallReaches(m[1], text.slice(open + 1, close), fileReaches)
     )
@@ -1639,26 +1688,51 @@ const rawReactQueryMutation = (fileView) => {
 // otherwise indirect reach can hand `build(…)` a mutation the helper never saw.
 const MUTATION_CACHE_RE =
   /(?<![\p{ID_Continue}$])getMutationCache(?![\p{ID_Continue}$])/gu;
-/** What may follow a `getMutationCache` mention: its call, then a read member's
- *  call. `clear` empties the cache without making a mutation. */
+/** What may follow a `getMutationCache` mention: its call, then a public read
+ *  member's call, type arguments allowed (`find<TData, …>(…)`). `clear` empties
+ *  the cache without making a mutation; `remove` and `resumePausedMutations` are
+ *  query-core internals and stay out. */
 const MUTATION_CACHE_READ_RE =
-  /^\s*\(\s*\)\s*\??\.\s*(?:getAll|find|findAll|subscribe|clear)\s*\(/;
+  /^\s*\(\s*\)\s*\??\.\s*(?:getAll|find|findAll|subscribe|clear|hasListeners)\s*(?:<[^()]*>)?\s*\(/;
+/** The one held reference the app needs: `useMutationCacheSnapshot` keeps the
+ *  cache to subscribe to it and hand it to its callers' read-only selects. The
+ *  exemption is this exact statement, once, in this file; any other mention
+ *  there still fails, so a new reach can't hide behind the old one. */
+const CACHE_HOLDER = {
+  file: "src/lib/git/queries/internal.ts",
+  lead: "const cache = useQueryClient().",
+  statement: "const cache = useQueryClient().getMutationCache();",
+};
 
-/** Scanner: every `getMutationCache` mention not proven a read. */
-const mutationCacheAccess = (fileView) => {
+/** Scanner: every `getMutationCache` mention not proven a read, but for
+ *  CACHE_HOLDER's statement in its own file. */
+const mutationCacheAccess = (fileView, file) => {
   const { text, at } = cookSource(fileView.text);
   const hits = new Set();
+  let held = false;
   for (const m of text.matchAll(MUTATION_CACHE_RE)) {
     const after = m.index + m[0].length;
-    if (!MUTATION_CACHE_READ_RE.test(text.slice(after, after + 80)))
-      hits.add(lineAt(fileView.starts, at[m.index]));
+    if (MUTATION_CACHE_READ_RE.test(text.slice(after, after + 120))) continue;
+    const start = m.index - CACHE_HOLDER.lead.length;
+    if (
+      file === CACHE_HOLDER.file &&
+      !held &&
+      text.slice(start, start + CACHE_HOLDER.statement.length) ===
+        CACHE_HOLDER.statement
+    ) {
+      held = true;
+      continue;
+    }
+    hits.add(lineAt(fileView.starts, at[m.index]));
   }
   return [...hits];
 };
 
-/** Script extensions the walk never reads (it reads `.ts`/`.tsx` alone), so a
- *  file under src/ ending in one escapes every check here. */
-const UNSCANNED_SCRIPT_RE = /\.(?:[cm]?js|jsx|[cm]ts)$/;
+/** Script extensions the walk never reads (it reads lowercase `.ts`/`.tsx`
+ *  alone), so a file under src/ ending in one escapes every check here: any
+ *  script extension in any case, and `.ts`/`.tsx` spelled in another case. */
+const UNSCANNED_SCRIPT_RE = /\.(?:[cm]?js|jsx|[cm]ts)$/i;
+const MIXED_CASE_TS_RE = /\.tsx?$/i;
 /** Justified exceptions, each a src/ path with its reason in a comment. */
 const UNSCANNED_SCRIPT_ALLOWLIST = [];
 
@@ -1668,7 +1742,10 @@ export function unscannedScripts(
   allowlist = UNSCANNED_SCRIPT_ALLOWLIST,
 ) {
   return paths.filter(
-    (p) => UNSCANNED_SCRIPT_RE.test(p) && !allowlist.includes(p),
+    (p) =>
+      (UNSCANNED_SCRIPT_RE.test(p) ||
+        (MIXED_CASE_TS_RE.test(p) && !/\.tsx?$/.test(p))) &&
+      !allowlist.includes(p),
   );
 }
 
@@ -1686,7 +1763,7 @@ const CLIENT_DEFAULTS_API_RE =
 const DEFAULT_OPTIONS_TOKEN_RE = /(?<![\w$])defaultOptions(?![\w$])/g;
 /** Member modifiers that may sit before a key without making it a value. */
 const MEMBER_MODIFIER_RE =
-  /(?<![\w$])(?:readonly|declare|public|private|protected|static|override|abstract)\s*$/;
+  /(?<![\w$])(?:readonly|declare|public|private|protected|static|override|abstract|accessor)\s*$/;
 
 /** Index of the bracket closing the one opened at `open` (`{`, `(`, `[` or `<`
  *  for a type argument list), skipping string and template literals and nested
@@ -2429,7 +2506,7 @@ export const CHECKS = [
       hint: `every .ts/.tsx under src/ except ${STARTED_MUTATION}`,
     },
     message:
-      "construct every mutation with `useMutation` from @/lib/started-mutation (gd-conventions, 'Mutation identity pinning') — react-query's own constructor lets a mounted observer re-rendered with new options replace its PENDING mutation's options, so after a repo, PR, lens or link switch the write runs the new render's mutationFn and callbacks: a write parked offline lands on whichever repo is open at reconnect, and its refresh and cache patches follow it; the helper runs each mutation's mutationFn and callbacks from the options in effect when it started (the observer's at the `mutate` call). This flags, outside the helper: react-query's `useMutation`, `MutationObserver`, `MutationCache`, `Mutation`, `hydrate` or `HydrationBoundary` (from @tanstack/react-query or @tanstack/query-core, through any path or subpath; specifiers are cooked as JS strings, case-folded and read with `\\` as `/`) bound as a value, whether imported named or aliased (escaped names decoded first), re-exported (`export *` included), or reached through `import()`, `require()` (TS `import x = require()` too) or `import.meta.glob()`; ANY namespace or default import of either package, a `{ default }` entry included, since a namespace can be spread, destructured or passed on with no member name to see; and a module call whose argument is not one plain string literal when it mentions `tanstack` or its file holds a react-query specifier string. The client's mutation cache is mutation-cache-access's. Type-only imports, `useMutationState`, `useIsMutating` and the DOM's `MutationObserver` stay legal. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a re-export alias spelled as a reserved word or a string holding `;` or `,` (`export { useMutation as import }`); a semicolon-less import chain (the formatter adds the semicolons CI checks); `setOptions` on a mutation reached from the cache or `useMutationState`, which replaces rather than constructs; a construction inside another package; and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): `typeof import(\"@tanstack/react-query\")` and an inline `import(\"@tanstack/react-query\").Type` in a type position, and a non-literal module call in a file that also holds a react-query specifier string",
+      "construct every mutation with `useMutation` from @/lib/started-mutation (gd-conventions, 'Mutation identity pinning') — react-query's own constructor lets a mounted observer re-rendered with new options replace its PENDING mutation's options, so after a repo, PR, lens or link switch the write runs the new render's mutationFn and callbacks: a write parked offline lands on whichever repo is open at reconnect, and its refresh and cache patches follow it; the helper runs each mutation's mutationFn and callbacks from the options in effect when it started (the observer's at the `mutate` call). This flags, outside the helper: react-query's `useMutation`, `MutationObserver`, `MutationCache`, `Mutation`, `hydrate` or `HydrationBoundary` (from @tanstack/react-query or @tanstack/query-core, through any path or subpath; specifiers are cooked as JS strings, case-folded and read with `\\` as `/`) bound as a value, whether imported named or aliased (escaped names decoded first), re-exported (`export *` included), or reached through `import()`, `require()` (TS `import x = require()` too) or `import.meta.glob()` (written with no space before the paren, as the formatter writes a call; a method named `import` or `require` is not one); ANY namespace or default import of either package, a `{ default }` entry included, since a namespace can be spread, destructured or passed on with no member name to see; a module call whose argument is not one plain string literal (or a template with a local `./` or `@/` head) when it mentions `tanstack` or its file holds a react-query string outside its import and export specifiers; and a glob pattern that mentions `node_modules` or `tanstack`. The client's mutation cache is mutation-cache-access's. Type-only imports, `useMutationState`, `useIsMutating` and the DOM's `MutationObserver` stay legal. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: an import or re-export alias spelled as a reserved word or a string holding `;`, `,` or `}` (`export { useMutation as import }`); a semicolon-less import chain (the formatter adds the semicolons CI checks); `setOptions` on a mutation reached from the cache or `useMutationState`, which replaces rather than constructs; a construction inside another package; a package name split mid-word (`\"@tan\" + \"stack/…\"`, `.join(\"/\")`) in a file holding no other react-query string; indirect require (`createRequire(import.meta.url)`, `module.require`, `globalThis.require`, `require?.(…)`), which the Tauri webview doesn't provide anyway; a `./` template head that climbs out through its substitution; and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): `typeof import(\"@tanstack/react-query\")` and an inline `import(\"@tanstack/react-query\").Type` in a type position, a type-only `import type rq = require(…)`, and a non-literal module call in a file that also holds a react-query string outside its specifiers",
   },
   {
     name: "started-mutation-present",
@@ -2445,18 +2522,16 @@ export const CHECKS = [
   },
   {
     name: "mutation-cache-access",
-    // Repo-wide: any module can reach the client's cache.
+    // Repo-wide: any module can reach the client's cache. The one held
+    // reference the app needs is CACHE_HOLDER's exact statement, exempted in
+    // the scan itself rather than by a file-level row, which would mask any
+    // second reach in that file.
     appliesTo: () => true,
     scan: mutationCacheAccess,
-    allowlist: [
-      // useMutationCacheSnapshot holds the cache to subscribe to it and hands it
-      // to its callers' selects, which only read it (findAll); a build through
-      // that reference is review-enforced.
-      "src/lib/git/queries/internal.ts",
-    ],
+    allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "the client's mutation cache is reached only to read it (gd-conventions, 'Mutation identity pinning') — `MutationCache.build(…)` makes a mutation @/lib/started-mutation never saw, so every `getMutationCache` mention must be its call followed directly by a `.getAll`, `.find`, `.findAll`, `.subscribe` or `.clear` call (`?.` too). A held reference, a quoted, optional, asserted, generic, bound, parenthesized or prototype reach, and anything else fails; a module that must hold the cache takes an allowlist entry with rationale. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a cache reference handed in from elsewhere (a select callback's parameter), and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line)",
+      "the client's mutation cache is reached only to read it (gd-conventions, 'Mutation identity pinning') — `MutationCache.build(…)` makes a mutation @/lib/started-mutation never saw, so every `getMutationCache` mention must be its call followed directly by a `.getAll`, `.find`, `.findAll`, `.subscribe` or `.clear` call (`?.` and type arguments too, `find<TData, …>(…)`; `hasListeners` reads as well, while query-core's internal `remove` and `resumePausedMutations` don't). A held reference, a quoted, optional, asserted, generic, bound, parenthesized or prototype reach, and anything else fails. The app's one held reference, `useMutationCacheSnapshot`'s statement in src/lib/git/queries/internal.ts (CACHE_HOLDER), is exempted as that exact statement, once, so any other mention in that file still fails. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a cache reference handed in from elsewhere (a select callback's parameter), a member assembled at runtime (`qc[\"getMutation\" + \"Cache\"]()`), and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): a mention that isn't a call, such as `ReturnType<QueryClient[\"getMutationCache\"]>`, `typeof queryClient.getMutationCache`, or a string or JSX naming it",
   },
   {
     name: "mutation-defaults",
@@ -2466,7 +2541,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "react-query mutation defaults are banned (gd-conventions, 'Mutation identity pinning') — @/lib/started-mutation installs mutationFn/onMutate/onSuccess/onError/onSettled trampolines on every construction, and react-query spreads a construction's own options over the client's defaults, so a default mutationFn or callback would be shadowed without a sound. The check passes only what it can prove harmless. Any mention of `setDefaultOptions`, `getDefaultOptions`, `setMutationDefaults`, `getMutationDefaults` or `defaultMutationOptions` fails, quoted, optional, escaped or bound alike (`getDefaultOptions()` hands out the live defaults object, and `defaultMutationOptions` is query-core's merge point, which a subclass or patch could override). Every `defaultOptions` mention fails unless it is a type position with no value (`defaultOptions?: T` ending at `;` `,` `)` or `}`, or `defaultOptions: T` ending a member with `;` or a parameter list with `)`, member modifiers skipped, with no `=` and no `/` in the annotation) or an object-entry key whose value is a literal holding only a bare `queries` entry and closing its entry (`,` `}` `;` or `)` next, past any `as T` / `satisfies T`). So shorthands, bindings, assignments, member reads and writes, getters, methods, parameter defaults, class-field initializers, non-literal values, a literal read after it closes (`.constructor(…)`, `['queries']`) and any other entry (`mutations`, a spread, a quoted or computed key) fail. Put the behavior in the construction, or teach the helper to merge the defaults first. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: keys or members assembled at runtime (`qc[\"set\" + name]`), reach through `Object.values` / `Object.entries`, prototype pollution, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives, an allowlist entry with rationale is the remedy): an annotated parameter followed by another parameter, which can't be told from an object entry; an interface member ending without `;`; JSX `defaultOptions={…}`; type-level references (`QueryClientConfig['defaultOptions']`, a `Pick`/`Omit` of it); and a nested `defaultOptions` key inside `queries`",
+      "react-query mutation defaults are banned (gd-conventions, 'Mutation identity pinning') — @/lib/started-mutation installs mutationFn/onMutate/onSuccess/onError/onSettled trampolines on every construction, and react-query spreads a construction's own options over the client's defaults, so a default mutationFn or callback would be shadowed without a sound. The check passes only what it can prove harmless. Any mention of `setDefaultOptions`, `getDefaultOptions`, `setMutationDefaults`, `getMutationDefaults` or `defaultMutationOptions` fails, quoted, optional, escaped or bound alike (`getDefaultOptions()` hands out the live defaults object, and `defaultMutationOptions` is query-core's merge point, which a subclass or patch could override). Every `defaultOptions` mention fails unless it is a type position with no value (`defaultOptions?: T` ending at `;` `,` `)` or `}`, or `defaultOptions: T` ending a member with `;` or a parameter list with `)`, member modifiers skipped, with no `=` and no `/` in the annotation) or an object-entry key whose value is a literal holding only a bare `queries` entry and closing its entry (`,` `}` `;` or `)` next, past any `as T` / `satisfies T`). So shorthands, bindings, assignments, member reads and writes, getters, methods, parameter defaults, class-field initializers, non-literal values, a literal read after it closes (`.constructor(…)`, `['queries']`) and any other entry (`mutations`, a spread, a quoted or computed key) fail. Put the behavior in the construction, or teach the helper to merge the defaults first. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: keys or members assembled at runtime (`qc[\"set\" + name]`), reach through `Object.values` / `Object.entries`, prototype pollution, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives, an allowlist entry with rationale is the remedy): an annotated parameter followed by another parameter, which can't be told from an object entry; an interface member ending without `;`; JSX `defaultOptions={…}`; type-level references (`QueryClientConfig['defaultOptions']`, a `Pick`/`Omit` of it); a nested `defaultOptions` key inside `queries`; a `/` inside a string within an annotation (`Foo<\"a/b\">`); and a getter, method or quoted `queries` entry",
   },
 ];
 
@@ -2521,7 +2596,8 @@ export function runCheck(check, files, views) {
   const violations = [];
   const seen = new Set();
   for (const file of scanned) {
-    const lines = check.scan(views.get(file)).sort((a, b) => a - b);
+    // The path rides along for a scan that pins an exemption to one file.
+    const lines = check.scan(views.get(file), file).sort((a, b) => a - b);
     if (lines.length === 0) continue;
     if (check.allowlist.includes(file)) {
       seen.add(file);
