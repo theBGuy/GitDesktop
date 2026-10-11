@@ -3900,6 +3900,38 @@ test("merge guard reads compound slice patterns as patterns", () => {
   }
 });
 
+test("merge guard keeps an argv whose expression is followed by a pattern token", () => {
+  for (const body of [
+    'results[run(&["merge", sha])] = true;',
+    'let code = run(&["merge", sha]) | 1;',
+    'match mode { _ if run(&["merge", sha]) => go(), _ => stop() }',
+    'match mode { Some(x) if check(run(&["merge", x])) => go(), _ => stop() }',
+    'let ok = matches!(mode, _ if run(&["merge", sha]));',
+    'let f = |x| run(&["merge", x]) | 1;',
+    'match m { A => run(&["merge", sha]) | 1, _ => 0 };',
+  ]) {
+    const hits = mergeGuardHits(unguarded(body));
+    assert.equal(hits.length, 1, body);
+    assert.equal(hits[0].fn, "unsafe_merge", body);
+  }
+  for (const body of [
+    'match argv { x | ["merge", ..] => a(), _ => b() }',
+    'match m { A => { go(); } ["merge", ..] => b(), _ => c() }',
+    'let ok = matches!(argv, ["merge", ..] if ready);',
+    'match argv { ["merge", ..] if run(&["log"]).is_ok() => a(), _ => b() }',
+  ]) {
+    assert.deepEqual(mergeGuardHits(unguarded(body)), [], body);
+  }
+  // Accepted false positive: an arm pattern starts after the last top-level
+  // `}`, so a slice inside a struct pattern's braces reads as an expression.
+  assert.equal(
+    mergeGuardHits(
+      unguarded('match m { Job { argv: ["merge", ..] } => a(), _ => b() }'),
+    ).length,
+    1,
+  );
+});
+
 test("merge guard verifies every namesake of a guard wrapper", () => {
   const rows = [
     {
@@ -3992,6 +4024,29 @@ test("merge guard resets a receiver at a collection-removal call", () => {
       const body = 'let mut args = vec!["status"];\n' + removal + "\n" + add;
       assert.equal(mergeGuardHits(unguarded(body)).length, 1, body);
     }
+  }
+});
+
+test("merge guard bounds later flags at a reset that runs first", () => {
+  const safe =
+    'let mut a = vec!["merge", "--ff-only", "--no-overwrite-ignore", sha];\nrun(&a);\n';
+  for (const body of [
+    safe + 'a = vec!["log"];\na.push("--no-ff");',
+    'let mut a = vec!["merge", "--ff-only", "--no-overwrite-ignore"];\nrun(&a);\na = vec!["status"];\na.push("--ff");',
+    safe + 'a.clear();\na.push("--no-ff");',
+    safe + 'let a = vec!["log", "--no-ff"];\nrun(&a);',
+    safe + 'a = vec!["log", "--no-ff"];',
+  ]) {
+    assert.deepEqual(mergeGuardHits(unguarded(body)), [], body);
+  }
+  // A bound that may not run, or a partial removal, ends nothing.
+  for (const body of [
+    safe + 'if x { a = vec!["log"]; }\na.push("--no-ff");\nrun(&a);',
+    safe + 'if x { a.clear(); }\na.push("--no-ff");\nrun(&a);',
+    safe + 'a.pop();\na.push("--no-ff");',
+    safe + 'a.push("--no-ff");\na = vec!["log"];',
+  ]) {
+    assert.equal(mergeGuardHits(unguarded(body)).length, 1, body);
   }
 });
 

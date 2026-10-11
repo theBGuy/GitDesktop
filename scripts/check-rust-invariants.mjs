@@ -1179,7 +1179,8 @@ export const MERGE_GUARD_NOTE =
   "parts), VecDeque push_front/push_back, an insert at a VARIABLE index on a " +
   "receiver not seen starting argv-shaped (a literal non-zero index is " +
   "modelled as an append), extend(Some(…)), index assignment (`a[0] = …`), " +
-  "smallvec!, or a " +
+  "a reassignment whose value re-reads the receiver " +
+  "(`a = [a.as_slice(), …].concat()`), smallvec!, or a " +
   'labeled-break array; verb spellings `&"merge"[..]`, from_str/from_bytes, ' +
   "stringify!, format! with arguments, `as &str`, Into::into, a `{ … }` block, " +
   "tuple destructuring; argv split out of one string or built by concat! or a " +
@@ -1718,45 +1719,142 @@ export function checkMergeIgnoredGuard(
         values: argValues(text, resolverAt(at)),
       }));
 
-  // Slice patterns are not arrays: a `matches!` / `assert_matches!` pattern
-  // argument, and a `[…]` that — itself or through any enclosing `(…)` / `[…]`
-  // group up to its statement — is followed by `=>`, a single `=` (`if let`),
-  // a single `|`, `@`, a guard `if`, or a `:` type ascription (a parameter).
-  // A real argv's group is never followed by any of those.
+  // Bracket structure, shared by the pattern spans and dominance: each
+  // position's innermost enclosing group (a close's own open, for a close),
+  // each group's close, and the top-level `=>` of each match body.
+  const inner = new Int32Array(masked.length).fill(-1);
+  const closeOf = new Map();
+  const stack = [];
+  for (let i = 0; i < masked.length; i++) {
+    inner[i] = stack.length ? stack[stack.length - 1] : -1;
+    if ("([{".includes(masked[i])) stack.push(i);
+    else if (")]}".includes(masked[i]) && stack.length)
+      closeOf.set(stack.pop(), i);
+  }
+  const arrows = new Map();
+  for (const m of masked.matchAll(/\bmatch\b/g)) {
+    let depth = 0;
+    for (let i = m.index + 5; i < masked.length; i++) {
+      const ch = masked[i];
+      if ("([".includes(ch)) depth++;
+      else if (")]".includes(ch)) depth--;
+      else if (ch === "{" && depth === 0) {
+        arrows.set(i, []);
+        break;
+      } else if (ch === ";" || ch === "}") break;
+    }
+  }
+  for (const m of masked.matchAll(/=>/g))
+    arrows.get(inner[m.index])?.push(m.index);
+
+  // A `[` is a slice pattern only by POSITION, inside a span a pattern
+  // introducer opens: a `let` up to its first `=` (or `;`), a match arm or
+  // `matches!` pattern up to its guard `if`, a closure's `|…|` and a fn's
+  // `(…)` parameters. A `[` anywhere else is an expression, and an
+  // unrecognized pattern spelling stays a site: fail closed.
   const patternSpans = [];
+  // Where a pattern in [start, end) of `group` ends: its first guard `if`.
+  const guardEnd = (start, end, group) => {
+    for (let p = start; p < end; p++) {
+      if (
+        inner[p] === group &&
+        masked.startsWith("if", p) &&
+        !WORD.test(masked[p - 1] ?? "") &&
+        !WORD.test(masked[p + 2] ?? "")
+      )
+        return p;
+    }
+    return end;
+  };
+  for (const m of masked.matchAll(/\blet\b/g)) {
+    const group = inner[m.index];
+    let end = m.index + 3;
+    while (
+      end < masked.length &&
+      !(inner[end] === group && "=;)]}".includes(masked[end]))
+    )
+      end++;
+    patternSpans.push([m.index, end]);
+  }
+  for (const [body, list] of arrows) {
+    let from = body + 1;
+    for (const arrow of list) {
+      let start = from;
+      for (let p = from; p < arrow; p++) {
+        if (masked[p] === "," && inner[p] === body) start = p + 1;
+        else if (masked[p] === "}" && inner[inner[p]] === body) start = p + 1;
+      }
+      patternSpans.push([start, guardEnd(start, arrow, body)]);
+      from = arrow + 2;
+    }
+  }
   for (const m of masked.matchAll(/\b(?:assert_)?matches\s*!\s*\(/g)) {
     const open = m.index + m[0].length - 1;
-    const body = bracketBody(masked, open);
-    const pattern = argvElements(body)[1];
-    if (pattern) patternSpans.push([open + 1 + pattern.at, open + body.length]);
+    const pattern = argvElements(bracketBody(masked, open))[1];
+    if (!pattern) continue;
+    const start = open + 1 + pattern.at;
+    patternSpans.push([
+      start,
+      guardEnd(start, start + pattern.text.length, open),
+    ]);
   }
-  const PATTERN_TAIL_RE = /^\s*(?:=>|=(?![=>])|\|(?!\|)|@|if\b|:(?!:))/;
-  const isPattern = (open, close) => {
-    if (patternSpans.some(([s, e]) => open >= s && open <= e)) return true;
-    for (let o = open, c = close; ; ) {
-      if (PATTERN_TAIL_RE.test(masked.slice(c + 1, c + 64))) return true;
-      let depth = 0;
-      let p = o - 1;
-      for (; p >= 0; p--) {
-        const ch = masked[p];
-        if (")]}".includes(ch)) depth++;
-        else if ("([{".includes(ch)) {
-          if (depth === 0) break;
-          depth--;
-        } else if (ch === ";" && depth === 0) return false;
-      }
-      if (p < 0 || masked[p] === "{") return false;
-      o = p;
-      c = p + 1 + bracketBody(masked, p).length;
+  // A closure opens where an expression can start, so never after a name, a
+  // literal, a close or `?`; its list ends at the next `|` of its own group,
+  // and a `=` or `;` there first means it was no parameter list.
+  const CLOSURE_KEYWORDS = new Set([
+    "async",
+    "break",
+    "move",
+    "return",
+    "yield",
+  ]);
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== "|") continue;
+    if (masked[i + 1] === "|" || masked[i + 1] === "=") {
+      i++;
+      continue;
     }
-  };
+    let q = i - 1;
+    while (q >= 0 && /\s/.test(code[q])) q--;
+    if (q >= 0 && ")]}?\"'#".includes(code[q])) continue;
+    if (q >= 0 && WORD.test(code[q])) {
+      let w = q;
+      while (w >= 0 && WORD.test(code[w])) w--;
+      if (!CLOSURE_KEYWORDS.has(code.slice(w + 1, q + 1))) continue;
+    }
+    const group = inner[i];
+    let j = i + 1;
+    while (
+      j < masked.length &&
+      !(inner[j] === group && "|=;)]}".includes(masked[j]))
+    )
+      j++;
+    if (masked[j] !== "|") continue;
+    patternSpans.push([i, j]);
+    i = j;
+  }
+  for (const m of masked.matchAll(/\bfn\s+[A-Za-z_]\w*\s*/g)) {
+    let p = m.index + m[0].length;
+    if (masked[p] === "<") {
+      for (let depth = 0; p < masked.length; p++) {
+        if (masked[p] === "<") depth++;
+        else if (masked[p] === ">" && masked[p - 1] !== "-" && --depth === 0)
+          break;
+      }
+      p++;
+      while (p < masked.length && /\s/.test(masked[p])) p++;
+    }
+    if (masked[p] === "(") patternSpans.push([p, closeOf.get(p) ?? p]);
+  }
+  const isPattern = (open) =>
+    patternSpans.some(([s, e]) => open >= s && open < e);
 
   // Array-literal units: every `[` that is not an attribute or an index.
   const units = [];
   const unitByOpen = new Map();
   const addUnit = (open) => {
+    if (isPattern(open)) return;
     const close = open + 1 + bracketBody(masked, open).length;
-    if (isPattern(open, close)) return;
     const unit = { at: open, literal: true, elements: elementsOf(open, close) };
     for (const el of unit.elements) el.unit = unit;
     units.push(unit);
@@ -1872,9 +1970,10 @@ export function checkMergeIgnoredGuard(
     chainEnds.set(close + 1, event);
   }
   // A collection-removal call breaks the receiver's run: what was there no
-  // longer fills the verb slot of anything pushed after it.
+  // longer fills the verb slot of anything pushed after it. Only `.clear()`
+  // empties it outright; the argv survives a partial removal.
   const removalRe =
-    /\.\s*(?:clear|truncate|drain|retain(?:_mut)?|remove|swap_remove|split_off|pop|dedup(?:_by(?:_key)?)?|resize(?:_with)?|set_len)\s*\(/g;
+    /\.\s*(clear|truncate|drain|retain(?:_mut)?|remove|swap_remove|split_off|pop|dedup(?:_by(?:_key)?)?|resize(?:_with)?|set_len)\s*\(/g;
   for (const m of masked.matchAll(removalRe)) {
     const base = masked
       .slice(exprStart(masked, m.index), m.index)
@@ -1884,6 +1983,7 @@ export function checkMergeIgnoredGuard(
       key: `${fnKey(m.index)}:${base}`,
       pos: m.index,
       removal: true,
+      clear: m[1] === "clear",
       elements: [],
     });
   }
@@ -1891,8 +1991,17 @@ export function checkMergeIgnoredGuard(
   const sequences = [];
   const current = new Map();
   for (const event of events.sort((a, b) => a.pos - b.pos)) {
-    if (event.removal) continue;
     let seq = current.get(event.key);
+    // A `.clear()` ends the fold even where it may not run: the dominance pass
+    // still judges an earlier merge against what follows a conditional one.
+    if (event.clear && seq) {
+      const { argvInit } = seq;
+      seq = [];
+      seq.argvInit = argvInit;
+      sequences.push(seq);
+      current.set(event.key, seq);
+    }
+    if (event.removal) continue;
     if (!seq || event.reset) {
       seq = [];
       seq.argvInit = Boolean(event.argvInit);
@@ -1962,32 +2071,6 @@ export function checkMergeIgnoredGuard(
     if (k >= 0) record(seq[k].at);
   }
 
-  // Bracket structure for dominance: each position's innermost enclosing
-  // group, each group's close, and the top-level `=>` of each match body.
-  const inner = new Int32Array(masked.length).fill(-1);
-  const closeOf = new Map();
-  const stack = [];
-  for (let i = 0; i < masked.length; i++) {
-    inner[i] = stack.length ? stack[stack.length - 1] : -1;
-    if ("([{".includes(masked[i])) stack.push(i);
-    else if (")]}".includes(masked[i]) && stack.length)
-      closeOf.set(stack.pop(), i);
-  }
-  const arrows = new Map();
-  for (const m of masked.matchAll(/\bmatch\b/g)) {
-    let depth = 0;
-    for (let i = m.index + 5; i < masked.length; i++) {
-      const ch = masked[i];
-      if ("([".includes(ch)) depth++;
-      else if (")]".includes(ch)) depth--;
-      else if (ch === "{" && depth === 0) {
-        arrows.set(i, []);
-        break;
-      } else if (ch === ";" || ch === "}") break;
-    }
-  }
-  for (const m of masked.matchAll(/=>/g))
-    arrows.get(inner[m.index])?.push(m.index);
   // An earlier position runs before a later one on every path only when each
   // group around it (if/else block, loop body, closure, call argument) also
   // holds the later one, and no match arm boundary falls between them.
@@ -2003,7 +2086,9 @@ export function checkMergeIgnoredGuard(
   // Context only ADDS sites. Each receiver event is judged again against just
   // the earlier elements that dominate it since the last reset or removal, so
   // a sibling branch's verb or a cleared receiver can't dismiss what it adds.
-  // Later elements all stay in view: they can only void an exemption.
+  // Later elements stay in view, since they can only void an exemption, until
+  // the receiver's lifetime ends: a reset's own elements and whatever a reset
+  // or `.clear()` dominates build another argv.
   const byKey = new Map();
   for (const event of events) {
     if (!byKey.has(event.key)) byKey.set(event.key, []);
@@ -2027,9 +2112,15 @@ export function checkMergeIgnoredGuard(
       const prefix = run
         .filter((e) => dominates(e.pos, event.pos))
         .flatMap(all);
-      const later = list
-        .slice(i + 1)
-        .filter((e) => !e.removal)
+      const after = list.slice(i + 1);
+      const bounds = after.filter((e) => e.reset || e.clear);
+      const later = after
+        .filter(
+          (e) =>
+            !e.removal &&
+            !e.reset &&
+            !bounds.some((b) => b.pos < e.pos && dominates(b.pos, e.pos)),
+        )
         .flatMap(all);
       const seq = [
         ...(event.prepend ?? []),
