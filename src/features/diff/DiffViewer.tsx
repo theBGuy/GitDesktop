@@ -93,6 +93,8 @@ import {
   useReportPaneSettled,
 } from "./diff-pane-hold";
 import {
+  answeredSince,
+  answerMark,
   expirePane,
   filePaneView,
   HOLD_BOUND_MS,
@@ -377,19 +379,6 @@ interface HunkFocus {
   /** Fired through the Discard confirm, whose close returns focus later. */
   viaConfirm: boolean;
 }
-
-/** What changes each time a query answers: its data stamp and error count.
- *  Compared for identity, never order, so a clock stepping backwards between
- *  two answers still reads as a new one. */
-const answerMark = (s: { dataUpdatedAt: number; errorUpdateCount: number }) =>
-  `${s.dataUpdatedAt}:${s.errorUpdateCount}`;
-
-/** The shown query has answered since the settle that captured `before` (the
- *  marks of every cache entry the read could be showing then). */
-const answeredSince = (
-  q: { isFetched: boolean; dataUpdatedAt: number; errorUpdateCount: number },
-  before: ReadonlySet<string>,
-) => q.isFetched && !before.has(answerMark(q));
 
 /** keydown for the hunk buttons and their Discard confirm: an auto-repeat of a
  *  held Enter or Space activates nothing, so one physical press acts once even
@@ -1518,8 +1507,10 @@ function HunkHeaderBar({
 /**
  * The working-tree diff as ONE whole-file view: content-mode highlighting with
  * collapsible expand, drag the line-number gutter to select lines to stage
- * across the whole file, and per-hunk Stage/Unstage/Discard buttons OVERLAID on
- * each hunk header (the library exposes no hunk-header slot). The library's
+ * across the whole file, and per-hunk Stage/Unstage/Discard buttons with
+ * one host per hunk (`hunkHost`): overlaid on the `@@` row while the
+ * gap above it is collapsed, inline in the library's extend row once the line
+ * above shows, or the pane-top bar for a hunk starting on line 1. The library's
  * selection manager drives the drag, but the selection comes from our own row
  * anchors (its range is single-sided by model, and in split can retarget across
  * panes); only a unified Shift drag, which its range already models exactly,

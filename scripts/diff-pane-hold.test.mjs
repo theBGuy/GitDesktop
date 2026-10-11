@@ -5,8 +5,9 @@
 // two-slot hold's transitions (src/features/diff/diff-pane-slots.ts), which keep
 // the last settled pane up while the next one prepares, for at most the 400 ms
 // bound. Also the hunk buttons' hosts (same diff-rows.ts): what expanding does
-// to the `@@` rows, the inline headers' extend-row feed, and the react-query
-// behavior the post-write hold is released by.
+// to the `@@` rows, the inline headers' extend-row feed, and the post-write
+// hold's release test (`answeredSince`, diff-pane-slots.ts) with the
+// react-query behavior it reads.
 //
 // Not testable here: the settle reports themselves (layout effects across the
 // pane's surfaces), what `inert` blocks, and the hold's release commit. Those
@@ -23,6 +24,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  answeredSince,
+  answerMark,
   expirePane,
   filePaneView,
   HOLD_BOUND_MS,
@@ -1057,4 +1060,108 @@ test("hold premise: a failed refetch moves the error count and keeps the data", 
   assert.deepEqual(after.data, { text: "before" });
   assert.equal("dataUpdateCount" in after, false);
   unsubscribe();
+});
+
+// answeredSince over marks taken the way the pane's write helper takes them at
+// the settle: every diff entry under the file's prefix (both untracked-axis
+// keys), the status entry by exact key.
+
+/** A diff query key for f.txt on the unstaged side, `untracked` last. */
+const diffPrefix = ["repo", "r", "diff", "f.txt", false];
+const diffKeyFor = (untracked) => [...diffPrefix, untracked];
+
+/** The marks the write helper records at the settle. */
+function settleMarks(client, queryKey, exact) {
+  return new Set(
+    client
+      .getQueryCache()
+      .findAll({ queryKey, exact })
+      .map((q) => answerMark(q.state)),
+  );
+}
+
+/** A client holding both untracked-axis diff entries with distinct answers. */
+function seededClient() {
+  const client = new rq.QueryClient();
+  const at = (updatedAt) => ({ updatedAt });
+  client.setQueryData(diffKeyFor(true), { text: "all new" }, at(1000));
+  client.setQueryData(diffKeyFor(false), { text: "older" }, at(2000));
+  return client;
+}
+
+/** An observer on `queryKey` whose fetches the test settles by hand. */
+function observe(client, queryKey) {
+  const fetches = [];
+  const observer = new rq.QueryObserver(client, {
+    queryKey,
+    queryFn: () =>
+      new Promise((resolve, reject) => {
+        fetches.push({ resolve, reject });
+      }),
+    networkMode: "always",
+    retry: false,
+  });
+  const unsubscribe = observer.subscribe(() => undefined);
+  return { observer, fetches, unsubscribe };
+}
+
+test("answeredSince: the diff marks cover both untracked-axis keys", {
+  skip,
+}, () => {
+  const marks = settleMarks(seededClient(), diffPrefix, false);
+  assert.deepEqual([...marks].sort(), ["1000:0", "2000:0"]);
+});
+
+test("answeredSince: a sibling key the hold moves to waits for its own answer", {
+  skip,
+}, async () => {
+  const client = seededClient();
+  const marks = settleMarks(client, diffPrefix, false);
+  // Status re-keyed the diff to the tracked sibling, whose cached answer
+  // predates the settle.
+  const { observer, fetches, unsubscribe } = observe(client, diffKeyFor(false));
+  await tick();
+  assert.equal(answeredSince(observer.getCurrentResult(), marks), false);
+  assert.equal(fetches.length, 1, "the stale sibling refetches on mount");
+  fetches[0].resolve({ text: "remainder" });
+  await tick(5);
+  assert.equal(answeredSince(observer.getCurrentResult(), marks), true);
+  unsubscribe();
+});
+
+test("answeredSince: an error answer releases too", { skip }, async () => {
+  const client = seededClient();
+  const marks = settleMarks(client, diffPrefix, false);
+  const { observer, fetches, unsubscribe } = observe(client, diffKeyFor(true));
+  await tick();
+  assert.equal(answeredSince(observer.getCurrentResult(), marks), false);
+  fetches[0].reject(new Error("git failed"));
+  await tick(5);
+  const after = observer.getCurrentResult();
+  assert.equal(after.dataUpdatedAt, 1000, "the data stamp did not move");
+  assert.equal(after.errorUpdateCount, 1);
+  assert.equal(answeredSince(after, marks), true);
+  unsubscribe();
+});
+
+test("answeredSince: a key with no answer yet never counts as answered", {
+  skip,
+}, () => {
+  assert.equal(
+    answeredSince(
+      { isFetched: false, dataUpdatedAt: 0, errorUpdateCount: 0 },
+      new Set(),
+    ),
+    false,
+  );
+});
+
+test("answeredSince: the status marks are the status entry alone", {
+  skip,
+}, () => {
+  const client = new rq.QueryClient();
+  const status = ["repo", "r", "status"];
+  client.setQueryData(status, { entries: [] }, { updatedAt: 3000 });
+  client.setQueryData([...status, "line-stats"], {}, { updatedAt: 4000 });
+  assert.deepEqual([...settleMarks(client, status, true)], ["3000:0"]);
 });

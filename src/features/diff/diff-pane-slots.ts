@@ -1,5 +1,6 @@
 // The Changes pane's two-slot hold, as pure transitions over what is painted
-// (`shown`) and what the selection asks for (`target`). React-free so
+// (`shown`) and what the selection asks for (`target`), and the post-write
+// hold's release test over the reads' answer marks. React-free so
 // scripts/diff-pane-hold.test.mjs loads it under Node's type stripping.
 
 /** One thing the pane can paint. `F` is the selected file's own shape. */
@@ -140,3 +141,19 @@ export function paneSlots<F>(hold: PaneHold<F>): PaneSlot<F>[] {
       ]
     : [{ view: hold.target, phase: "shown" }];
 }
+
+/** What changes each time a query answers: its data stamp and error count.
+ *  Compared for identity, never order, so a clock stepping backwards between
+ *  two answers still reads as a new one. */
+export const answerMark = (s: {
+  dataUpdatedAt: number;
+  errorUpdateCount: number;
+}) => `${s.dataUpdatedAt}:${s.errorUpdateCount}`;
+
+/** The shown query has answered since the settle that captured `before` (the
+ *  marks of every cache entry the read could be showing then), so the
+ *  post-write hold can release. */
+export const answeredSince = (
+  q: { isFetched: boolean; dataUpdatedAt: number; errorUpdateCount: number },
+  before: ReadonlySet<string>,
+) => q.isFetched && !before.has(answerMark(q));
