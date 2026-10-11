@@ -3,8 +3,9 @@
 //! from default/upstream, fork Update from upstream, and stash-and-reapply retries.
 //!
 //! Local-PR finalization and MCP merge_branch/pull in merge modes share these checks.
-//! A merge waits up to 60 s for a running fetch. Candidate and ignore probes add 1–3
-//! git spawns, plus worktree-root, HEAD, merge-base and target resolution.
+//! A merge that runs the check waits up to `NETWORK_LOCK_WAIT_TIMEOUT` for a running fetch.
+//! Candidate and ignore probes add 1–3 git spawns, plus worktree-root, HEAD, merge-base and
+//! target resolution.
 //!
 //! Checkout/switch, rebase/cherry-pick/revert, rebase-mode pulls, MCP rebase/decision
 //! modes, stash operations and the deliberate reset --hard paths remain outside this guard.
@@ -183,7 +184,7 @@ pub(crate) fn name_paths(paths: &[String]) -> String {
 
 pub(crate) fn check_failed(op: &str, e: AppError) -> AppError {
     AppError::Command(format!(
-        "{op} stopped: couldn't check for ignored files it would replace, so nothing was changed. Try again in a moment.\n{e}"
+        "{op} stopped: couldn't check for ignored files it would replace, so your branch and files are unchanged. Try again in a moment.\n{e}"
     ))
 }
 

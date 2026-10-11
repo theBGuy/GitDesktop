@@ -2377,8 +2377,19 @@ pub(crate) async fn git_merge_core(
     validate_branch_arg(&branch)?;
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
+    // Let git retain its own refusal for operations that already prevent a merge. A fetch
+    // can't change this verdict, so a blocked merge skips the network wait that only the
+    // ignored-file check needs.
+    let blocked = ignored_guard::merge_is_blocked(&repo_path, &already_unmerged)
+        .await
+        .map_err(|e| ignored_guard::check_failed("Merge", e))?;
     let network = state.network_lock(&repo_path).await;
-    let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a merge").await?;
+    let _net_guard = if blocked {
+        None
+    } else {
+        Some(acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a merge").await?)
+    };
     let mut args: Vec<&str> = vec!["merge", "--no-overwrite-ignore"];
     if squash {
         args.push("--squash");
@@ -2395,12 +2406,7 @@ pub(crate) async fn git_merge_core(
     }
     let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     args.push(&rev);
-    let already_unmerged = unmerged_paths(&repo_path).await;
-    // Let git retain its own refusal for operations that already prevent a merge.
-    if !ignored_guard::merge_is_blocked(&repo_path, &already_unmerged)
-        .await
-        .map_err(|e| ignored_guard::check_failed("Merge", e))?
-    {
+    if !blocked {
         if let Some(incoming_sha) =
             ignored_guard::target_commit(&repo_path, &rev, DEFAULT_TIMEOUT, "Merge").await?
         {
@@ -3096,25 +3102,20 @@ async fn finalize_base(
                 &paths,
             ));
         }
-        return async {
-            let out = run_git_raw_index_retry(
-                &worktree,
-                &["merge", "--ff-only", "--no-overwrite-ignore", new_sha],
-                DEFAULT_TIMEOUT,
-            ).await?;
-            if out.code != 0 {
-                return Err(AppError::Git { code: out.code, stderr: out.full_failure_text() });
-            }
-            Ok(())
-        }
-        .await
-        .map_err(|e| match e {
-            AppError::Git { stderr, .. } => AppError::Command(format!(
+        let out = run_git_raw_index_retry(
+            &worktree,
+            &["merge", "--ff-only", "--no-overwrite-ignore", new_sha],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if out.code != 0 {
+            return Err(AppError::Command(format!(
                 "{base} is checked out at {worktree}; couldn't fast-forward it there \
-                 (its working tree may be dirty, or its history has diverged). {base} is unchanged.\n{stderr}"
-            )),
-            other => other,
-        });
+                 (its working tree may be dirty, or its history has diverged). {base} is unchanged.\n{}",
+                out.full_failure_text()
+            )));
+        }
+        return Ok(());
     }
 
     // Not checked out anywhere — move the ref directly, no working tree touched.
@@ -11161,6 +11162,47 @@ detached
                 f.assert_unchanged(&err).await;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn merge_blocked_by_native_state_does_not_wait_for_fetch() {
+        use crate::git::ignored_guard::tests::{Fixture, MergeState, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        MergeState::MergeHead.install(&f).await;
+        let expected = run_git_raw(
+            Some(&f.repo),
+            &["merge", "--no-overwrite-ignore", "--no-edit", "incoming"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(expected.code, 0);
+        let state = AppState::default();
+        let network = state.network_lock(&f.repo).await;
+        let _held = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch")
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            git_merge_core(
+                &state,
+                f.repo.clone(),
+                "incoming".into(),
+                false,
+                false,
+                "".into(),
+            ),
+        )
+        .await
+        .expect("git's own refusal must precede the network wait")
+        .unwrap_err();
+        let AppError::Git { code, stderr } = err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(code, expected.code);
+        assert_eq!(stderr, expected.full_failure_text());
+        assert!(stderr.contains("MERGE_HEAD exists"), "{stderr}");
+        f.assert_snapshot().await;
     }
 
     #[tokio::test]

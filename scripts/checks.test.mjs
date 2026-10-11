@@ -72,12 +72,16 @@ import {
 import {
   checkBareBranchRevs,
   checkCompareEndpoints,
+  checkMergeIgnoredGuard,
   checkRefspecTemplates,
   checkSecretArgv,
   checkShortRefNames,
   checkStderrOnlyGitError,
   checkSyncCommands,
   enclosingFn,
+  lexRust,
+  MERGE_GUARD_ALLOWLIST,
+  MERGE_GUARD_NOTE,
   splitStaleEntries,
   staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
@@ -3096,13 +3100,6 @@ test("stripComments blanks comments but not comment-shaped strings", () => {
 });
 
 // -------------------------------------------------------- check-rust-invariants
-
-import {
-  checkMergeIgnoredGuard,
-  lexRust,
-  MERGE_GUARD_ALLOWLIST,
-  MERGE_GUARD_NOTE,
-} from "./check-rust-invariants.mjs";
 
 function mergeGuardHits(src, file = "fixture.rs", allowlist = undefined) {
   const hits = [];

@@ -1664,14 +1664,19 @@ pub(crate) async fn update_branch_from(
 
     // The current branch is already checked out, so just merge in place.
     if current.as_deref() == Some(branch) {
-        let network = state.network_lock(repo_path).await;
-        let _net_guard =
-            acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a branch update").await?;
         let already_unmerged = crate::git::ops::unmerged_paths(repo_path).await;
-        if !ignored_guard::merge_is_blocked(repo_path, &already_unmerged)
+        // A fetch can't change git's own refusal verdict, so a blocked merge skips the
+        // network wait that only the ignored-file check needs.
+        let blocked = ignored_guard::merge_is_blocked(repo_path, &already_unmerged)
             .await
-            .map_err(|e| ignored_guard::check_failed("Update", e))?
-        {
+            .map_err(|e| ignored_guard::check_failed("Update", e))?;
+        let network = state.network_lock(repo_path).await;
+        let _net_guard = if blocked {
+            None
+        } else {
+            Some(acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a branch update").await?)
+        };
+        if !blocked {
             if let Some(incoming_sha) =
                 ignored_guard::target_commit(repo_path, &base_rev, DEFAULT_TIMEOUT, "Update")
                     .await?
@@ -6683,6 +6688,43 @@ mod tests {
                 f.assert_unchanged(&err).await;
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_branch_from_blocked_by_native_state_does_not_wait_for_fetch() {
+        use crate::git::ignored_guard::tests::{Fixture, MergeState, Shape};
+        use crate::git::runner::NETWORK_LOCK_WAIT_TIMEOUT;
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let (_serialized, _override, _root) = holder_marker_root(&f.repo);
+        MergeState::MergeHead.install(&f).await;
+        let expected = run_git_raw(
+            Some(&f.repo),
+            &["merge", "--no-edit", "--no-overwrite-ignore", "incoming"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(expected.code, 0);
+        let state = AppState::default();
+        let network = state.network_lock(&f.repo).await;
+        let _held = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch")
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            update_branch_from(&state, &f.repo, "local", "incoming", &HashSet::new(), None),
+        )
+        .await
+        .expect("git's own refusal must precede the network wait")
+        .unwrap_err();
+        let AppError::Git { code, stderr } = err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(code, expected.code);
+        assert_eq!(stderr, expected.full_failure_text());
+        assert!(stderr.contains("MERGE_HEAD exists"), "{stderr}");
+        f.assert_snapshot().await;
     }
 
     #[tokio::test]
