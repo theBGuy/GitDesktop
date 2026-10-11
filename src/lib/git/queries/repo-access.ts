@@ -74,13 +74,16 @@ export function useRepoWriteAccess(
 ) {
   // Signed out the probe can't answer — every caller waits for sign-in.
   const signedIn = Boolean(useForgeStatus(repo).data?.authenticated);
-  return useQuery({
+  const query = useQuery({
     queryKey: ["repo", repo, "write-access", lens ?? "origin"] as const,
     queryFn: () => api.forgeRepoWriteAccess(repo, lens),
     enabled: enabled && signedIn,
     staleTime: 5 * 60_000,
     retry: false,
   });
+  // Signed out, cached access is another account's truth — masked; the sign-out
+  // cache reset itself is the account-change-reset-residuals backlog item.
+  return signedIn ? query : { ...query, data: undefined };
 }
 
 /** The compact reasons appended to a disabled MENU ITEM's label: a disabled item
