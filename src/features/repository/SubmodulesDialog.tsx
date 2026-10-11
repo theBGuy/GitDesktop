@@ -239,7 +239,8 @@ function SubmoduleList({
   async function handleRemove(s: Submodule) {
     const removeIn = repoPath;
     // Each removal builds from the observer's CURRENT options once its prompt
-    // resolves, so a switch under a prompt refuses instead.
+    // resolves, so a switch refuses instead: after each prompt, and before the
+    // escalation prompt asks a destructive question about the old repo's path.
     const switchedAway = () =>
       refuseIfSwitched(removeIn, "nothing was removed");
     const first = await useConfirm.getState().askChecked({
@@ -259,6 +260,14 @@ function SubmoduleList({
         deleteModuleData: first.checked,
       });
       if (outcome.refusedDirty) {
+        if (
+          refuseIfSwitched(
+            removeIn,
+            "nothing was removed",
+            "before the removal finished",
+          )
+        )
+          return;
         // Nothing was mutated — escalate rather than report a failure. The
         // refusal is one bool covering both a dirty worktree and a checkout
         // that has moved off the recorded commit, so the copy names both.

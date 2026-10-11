@@ -3832,10 +3832,9 @@ export function ProjectsBoardPanel({
     if (moveHeldFor(item) !== undefined) return;
     const bucket = moveBucketFor(bucketField, column.id);
     setChase(item.itemId);
-    // The board AND the lens this move belongs to travel WITH it: an offline move
-    // parks before the write and resumes on whatever render is current by then,
-    // and `onMutate` pins this lens's key into the context its rollback and its
-    // settle read — so switching views mid-flight needs no hold of its own.
+    // The board AND the lens this move belongs to travel WITH it, and `onMutate`
+    // pins this lens's key into the context its rollback and its settle read — so
+    // switching views mid-flight needs no hold of its own.
     move.mutate({
       repo: repoPath,
       projectId,

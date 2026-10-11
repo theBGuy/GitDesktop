@@ -112,8 +112,8 @@ const SIDES_READ_CHUNK = 4;
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
  *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
  *  cached read can predate the markers; a failed read asks rather than staging
- *  silently or refusing. Resolves false without asking if the active repo
- *  changed during the reads. Never rejects. */
+ *  silently or refusing. Refuses (resolving false, with a notice) without
+ *  asking if the active repo changed during the reads. Never rejects. */
 async function confirmMarkerStage(
   repoPath: string,
   conflicted: FileEntry[],
@@ -136,7 +136,14 @@ async function confirmMarkerStage(
     return markNeedsConfirm(read.value) ? [{ name, unchecked: false }] : [];
   });
   if (flags.length === 0) return true;
-  if (useUiStore.getState().repoPath !== repoPath) return false;
+  if (
+    refuseIfSwitched(
+      repoPath,
+      "nothing was staged",
+      "before the marker check finished",
+    )
+  )
+    return false;
   return useConfirm.getState().ask(markerStagePrompt(flags, bulk));
 }
 
@@ -854,7 +861,7 @@ export function ChangesPanel({
   /** Every stage route's one `git add` (no await unless a target is conflicted);
    *  a file still holding markers asks first, and a decline stages NOTHING. Only
    *  the captured targets and repo are used past the prompt, and a repo switch
-   *  meanwhile drops the stage, since the mutation would retarget. Resolves
+   *  meanwhile refuses the stage, since the mutation would retarget. Resolves
    *  whether it staged. */
   async function stageGuarded(targets: FileEntry[]): Promise<boolean> {
     const pathspecs = targets.map((e) => literalPathspec(e.path));
@@ -882,7 +889,15 @@ export function ChangesPanel({
         conflicted,
         targets.length > 1,
       );
-      if (!ok || useUiStore.getState().repoPath !== firedOn) return false;
+      if (
+        !ok ||
+        refuseIfSwitched(
+          firedOn,
+          "nothing was staged",
+          "before the stage started",
+        )
+      )
+        return false;
       staging = stage.mutateAsync(pathspecs);
     } finally {
       checkingRef.current = false;

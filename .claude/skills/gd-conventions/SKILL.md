@@ -533,8 +533,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   offline lands on, refreshes and patches the repo/PR/lens/link it started on.
   `scope` and `gcTime` are not snapshotted (query-core reads them off the live
   options), so a `scope.id` derived from render state would follow a switch.
-  Its `meta` key (`STARTED_KEY`) is reserved, and client mutation defaults are
-  banned, since its trampolines shadow them: the `mutation-defaults` guard fails
+  The helper's `meta` key (`STARTED_KEY`) is reserved (wrapping throws on
+  any other options carrying it), and client mutation defaults are banned,
+  since its trampolines shadow them: the `mutation-defaults` guard fails
   any use of the client's defaults API and any `defaultOptions` beyond a
   `queries`-only literal. Every `getMutationCache()` call leads straight into a
   member that makes no mutation (`getAll`, `find`, `findAll`, `subscribe`,
@@ -543,8 +544,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `useMutationCacheSnapshot` holds in `queries/internal.ts`, pinned to its exact
   statement). The snapshot can't reach a mutation not yet started: a
   handler that calls `mutate` after an await, or from a confirm whose state
-  outlives a switch, builds from the observer's CURRENT options, so it records
-  the repo when it starts (a dialog: when it opens) and refuses through
+  outlives a switch, builds from the observer's CURRENT options, so it must
+  record the repo when it starts (a dialog: when it opens) and refuse through
   `refuseIfSwitched` (`@/lib/stores/notifications`, beside `landedIn`) at the
   point the write would start, passing its outcome and, once the prompt is gone,
   a `when` lead (the reference is `doResetToUpstream` in SyncControls.tsx). Copy

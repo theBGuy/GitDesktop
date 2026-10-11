@@ -51,9 +51,10 @@ const onError = (e: unknown) => toastError(e);
 // their write runs, and the host (one panel across repo switches) may reopen one
 // on another subject or repo before the settle: a settle closes only while the
 // dialog still shows its subject in the repo it fired in, both read off live
-// props. A selection clear has its own rule, at its site; the create-from-commit
-// dialogs settle by open session in their host. Each takes `openedIn`, the repo
-// its host opened it in, and refuses (closing) when answered after a switch.
+// props. Each of these three takes `openedIn`, the repo its host opened it in,
+// and refuses (closing) when answered after a switch. A selection clear has its
+// own rule, at its site; the create-from-commit dialogs settle by open session in
+// their host.
 
 /** Confirm-and-delete a tag, optionally on origin too. Owns its mutation; the
  *  parent keeps the open + "delete on origin" state (reset on each open). */

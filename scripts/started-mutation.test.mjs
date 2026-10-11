@@ -362,6 +362,45 @@ test("a trampoline whose snapshot is missing names the cause", async (t) => {
   );
 });
 
+test("wrapping wrapped options returns them unchanged and runs the mutationFn once", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const log = [];
+  const once = startedMutationOptions(always(recording("A", log)));
+  const twice = startedMutationOptions(once);
+  assert.equal(twice, once);
+  await new MutationObserver(qc, twice).mutate(1);
+  assert.deepEqual(log, [
+    "A:onMutate",
+    "A:mutationFn",
+    "A:onSuccess",
+    "A:onSettled",
+  ]);
+});
+
+const RESERVED = /is reserved for @\/lib\/started-mutation/;
+
+test("wrapping a copy of wrapped options throws", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const wrapped = startedMutationOptions(always(recording("A", [])));
+  assert.throws(
+    () => startedMutationOptions({ ...wrapped, onSuccess: () => {} }),
+    RESERVED,
+  );
+});
+
+test("a caller meta carrying the reserved key throws", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  assert.throws(
+    () =>
+      startedMutationOptions({
+        mutationFn: async () => "ok",
+        meta: { [STARTED_KEY]: {} },
+      }),
+    RESERVED,
+  );
+});
+
 /** A client whose `invalidateQueries` records each key instead of refetching. */
 function spyClient() {
   const qc = new QueryClient();

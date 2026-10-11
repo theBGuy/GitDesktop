@@ -1992,13 +1992,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         .catch(() => null);
       // The update builds from the live repo's options once the probe resolves,
       // while the row belongs to this one: a switch during it refuses instead.
-      const { live, away } = landedIn(updateIn);
-      if (!live) {
-        toast.info(
-          `Didn't update ${row.name}${away} — you switched repositories before the update started.`,
-        );
+      if (
+        refuseIfSwitched(
+          updateIn,
+          `${row.name} wasn't updated`,
+          "before the update started",
+        )
+      )
         return;
-      }
       // `patchEqual > 0` is strong evidence, not proof — two sides can apply the
       // same patch independently. It only WITHHOLDS the merge, so a false read
       // costs an explained no-op, never a duplicated history.

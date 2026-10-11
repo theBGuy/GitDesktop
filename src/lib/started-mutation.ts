@@ -10,10 +10,19 @@ import {
 } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-/** The `meta` key holding the options a mutation started with. Reserved: no
- *  caller's own `meta` may use it. A string, since `MutationMeta` is a
- *  string-keyed record. */
+/** The `meta` key holding the options a mutation started with. Reserved:
+ *  wrapping throws on any caller's own `meta` that uses it. A string, since
+ *  `MutationMeta` is a string-keyed record. */
 export const STARTED_KEY = "gitdesktop.started";
+
+/** Options {@link startedMutationOptions} returned, handed back unchanged when
+ *  wrapped again: a re-wrap would snapshot a trampoline that reads its own
+ *  snapshot and recurses until the stack overflows. */
+const wrapped = new WeakSet<object>();
+const remember = <T extends object>(options: T): T => {
+  wrapped.add(options);
+  return options;
+};
 
 /**
  * `options` with its `mutationFn` and lifecycle callbacks taken from the options
@@ -42,6 +51,13 @@ export function startedMutationOptions<
 >(
   options: UseMutationOptions<TData, TError, TVariables, TOnMutateResult>,
 ): UseMutationOptions<TData, TError, TVariables, TOnMutateResult> {
+  if (wrapped.has(options)) return options;
+  // A copy of wrapped options (spread, then edited) carries the key too, and
+  // would recurse the same way.
+  if (options.meta?.[STARTED_KEY] !== undefined)
+    throw new Error(
+      `meta key "${STARTED_KEY}" is reserved for @/lib/started-mutation: pass the original options, not a copy of wrapped ones`,
+    );
   const startedOf = (context: MutationFunctionContext) => {
     const started = context.meta?.[STARTED_KEY];
     if (started === undefined)
@@ -50,7 +66,7 @@ export function startedMutationOptions<
       );
     return started as typeof options;
   };
-  return {
+  return remember({
     ...options,
     meta: { ...options.meta, [STARTED_KEY]: options },
     mutationFn: (variables, context) => {
@@ -76,7 +92,7 @@ export function startedMutationOptions<
         onMutateResult,
         context,
       ),
-  };
+  });
 }
 
 /** react-query's `useMutation` through {@link startedMutationOptions}: the only

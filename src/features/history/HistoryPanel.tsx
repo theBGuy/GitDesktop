@@ -283,11 +283,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     const undoIn = repoPath;
     // Only the root case is lossy enough to ask about: an ordinary undo is gated
     // to unpushed commits and leaves everything staged.
-    if (
-      headIsRoot &&
-      !(await useConfirm.getState().ask(UNDO_ROOT_COMMIT_CONFIRM))
-    ) {
-      return;
+    if (headIsRoot) {
+      if (!(await useConfirm.getState().ask(UNDO_ROOT_COMMIT_CONFIRM))) return;
+      // Ahead of the promotion check, which reads the start repo: a switch
+      // during the prompt refuses before anything reports on a repo off screen.
+      if (refuseIfSwitched(undoIn, "nothing was undone")) return;
     }
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -307,8 +307,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       // Read the message BEFORE the undo removes the commit it belongs to.
       details = await gitCommitDetails(repoPath, lastCommit.hash);
       // The undo builds from the observer's options when it is called, which
-      // follow the live repo: a switch during the prompt or the reads above
-      // refuses instead.
+      // follow the live repo: a switch during the reads above refuses instead.
       if (
         refuseIfSwitched(
           undoIn,

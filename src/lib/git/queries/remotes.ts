@@ -58,8 +58,8 @@ export function usePublishRepo(repo: string) {
       ),
     {
       // Pinned: the publish and its repo-subtree invalidation close over `repo`, and
-      // the dialog survives a repo switch — without the key a switch mid-publish
-      // refreshes the newly-live repo and leaves the fresh remote unseen.
+      // the dialog survives a repo switch — without the key the newly-live repo's
+      // controls would read the pending publish as busy.
       identity: ["publish-repo", repo],
     },
   );

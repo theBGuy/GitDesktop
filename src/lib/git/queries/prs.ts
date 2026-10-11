@@ -900,9 +900,8 @@ export function useSubmitReview(repo: string, lens: RemoteLens) {
   );
 }
 
-// The PR rides the variables and the key pins `repo`: the thread lists' host survives
-// PR and repo switches, so a closed-over identity would resume a paused reply or
-// resolve against another PR's thread and reconcile the wrong threads key.
+// The PR rides the variables, which `pendingThreadWritesFor` matches the thread
+// holds on, and the key pins `repo`, so a hold never crosses repos.
 export function useThreadReply(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({

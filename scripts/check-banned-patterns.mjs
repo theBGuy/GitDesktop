@@ -2535,7 +2535,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "the client's mutation cache is reached only to read it (gd-conventions, 'Mutation identity pinning') — `MutationCache.build(…)` makes a mutation @/lib/started-mutation never saw, so every `getMutationCache` mention must be its call followed directly by a `.getAll`, `.find`, `.findAll`, `.subscribe` or `.clear` call (`?.` and type arguments too, `find<TData, …>(…)`; `hasListeners` reads as well, while query-core's internal `remove` and `resumePausedMutations` don't). A held reference, a quoted, optional, asserted, generic, bound, parenthesized or prototype reach, and anything else fails. The app's one held reference, `useMutationCacheSnapshot`'s statement in src/lib/git/queries/internal.ts (CACHE_HOLDER), is exempted as that exact statement, once, so any other mention in that file still fails. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a cache reference handed in from elsewhere (a select callback's parameter), a member assembled at runtime (`qc[\"getMutation\" + \"Cache\"]()`), and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): a mention that isn't a call, such as `ReturnType<QueryClient[\"getMutationCache\"]>`, `typeof queryClient.getMutationCache`, or a string or JSX naming it",
+      "the client's mutation cache is reached only to read it (gd-conventions, 'Mutation identity pinning') — `MutationCache.build(…)` makes a mutation @/lib/started-mutation never saw, so every `getMutationCache` mention must be its call followed directly by a `.getAll`, `.find`, `.findAll`, `.subscribe` or `.clear` call (`?.` and type arguments too, `find<TData, …>(…)`; `hasListeners` reads as well, while query-core's internal `remove` and `resumePausedMutations` don't). A held reference, or `getMutationCache` itself reached quoted, optionally (`?.()`), asserted, generically (`<…>()`), bound, parenthesized or through the prototype, fails, and so does anything else. The app's one held reference, `useMutationCacheSnapshot`'s statement in src/lib/git/queries/internal.ts (CACHE_HOLDER), is exempted as that exact statement, once, so any other mention in that file still fails. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a cache reference handed in from elsewhere (a select callback's parameter), a member assembled at runtime (`qc[\"getMutation\" + \"Cache\"]()`), and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): a mention that isn't a call, such as `ReturnType<QueryClient[\"getMutationCache\"]>`, `typeof queryClient.getMutationCache`, or a string or JSX naming it",
   },
   {
     name: "mutation-defaults",
@@ -2583,6 +2583,11 @@ function walkAll(dir, out = []) {
   }
   return out;
 }
+
+// src-script-extensions' own stale condition: an allowlist row naming no file.
+const STALE_SCRIPT_FIX =
+  "stale allowlist entry — no such file under src/ any more; remove the entry " +
+  "(an exception left behind pre-authorizes whatever lands at that path next)";
 
 const STALE_FIX =
   "stale allowlist entry — nothing in this file trips the check any more " +
@@ -2671,7 +2676,9 @@ function main() {
         `src-script-extensions: ${f} is never scanned (the checks read .ts/.tsx only) — convert it to TypeScript, or add it to UNSCANNED_SCRIPT_ALLOWLIST with rationale\n`,
       );
     for (const f of staleScripts)
-      process.stderr.write(`src-script-extensions: ${f}\n  → ${STALE_FIX}\n`);
+      process.stderr.write(
+        `src-script-extensions: ${f}\n  → ${STALE_SCRIPT_FIX}\n`,
+      );
   } else {
     process.stdout.write(
       `src-script-extensions: OK (${everything.length} files checked)\n`,
