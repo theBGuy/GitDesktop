@@ -9,11 +9,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
+import { NO_CHANGES_REASON } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
-  NO_CHANGES_REASON,
   RemoteFormSection,
   useConfirmSwapFocus,
 } from "./parts";

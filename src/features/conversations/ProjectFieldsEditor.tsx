@@ -42,6 +42,7 @@ import {
 } from "@/lib/git/project-field-routing";
 import {
   useGhScopes,
+  usePendingItemFieldsWrite,
   useProjectFields,
   useSetItemFieldValues,
 } from "@/lib/git/queries";
@@ -301,6 +302,14 @@ export function ProjectFieldsEditor({
   >({});
   const portalContainer = usePanelPortalContainer();
   const setFields = useSetItemFieldValues();
+  // From the cache, not the observer, for the reason ProjectsPopover reads its
+  // write there: a remount onto the same item must still hold.
+  const fieldsWrite = usePendingItemFieldsWrite({
+    repo: repoPath,
+    lens,
+    kind,
+    number,
+  });
   const issueHost: IssueFieldHost =
     kind === "issue"
       ? { issueId, canSetFields: viewerCanSetFields === true }
@@ -316,9 +325,9 @@ export function ProjectFieldsEditor({
       // optimistic patch whose real values only the settle refetch supplies, and
       // that refetch is what a fresh draft would have to seed from. The mutation's
       // `onSettled` returns its invalidate promise, so this hold spans it.
-      case setFields.isPending:
+      case fieldsWrite.pending:
         return pendingWriteReason(
-          setFields.isPaused,
+          fieldsWrite.paused,
           SAVING_LAST_CHANGE_REASON,
         );
       case unsettledReason !== undefined:
@@ -547,7 +556,7 @@ export function ProjectFieldsEditor({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized element,
             and a 16px swap would widen the label column mid-write. */}
-        {setFields.isPending && !setFields.isPaused ? (
+        {fieldsWrite.pending && !fieldsWrite.paused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <SlidersHorizontalIcon data-icon="inline-start" />

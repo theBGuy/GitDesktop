@@ -2,14 +2,14 @@
  * The pure pieces of the PR-write bookkeeping, remote and local: the key every PR
  * write is filed under, how a write's variables name what it targets, and the
  * matches a PR view holds its controls by. Also the reading every cache-scan hold
- * shares (a cache mutation as a {@link PendingMutationEntry}), and the review-thread
- * and discussion-upvote projections over it.
+ * shares (a cache mutation as a {@link PendingMutationEntry}), and the review-thread,
+ * discussion-upvote, label-edit, fork and tag-push projections over it.
  *
  * Import-free at runtime on purpose (types only, erased): `scripts/pr-writes.test.mjs`
  * loads it straight from `src/` under Node's type stripping, which resolves no
  * bundler aliases. A runtime import added here fails that test.
  */
-import type { RemoteLens } from "../types";
+import type { ForgeProvider, RemoteLens } from "../types";
 import type { PendingThreadWrites } from "./prs";
 
 /** The PR writes whose in-flight state a PR view holds its controls on. */
@@ -31,7 +31,9 @@ export type PrWriteKind =
   | "checkout"
   | "update-branch"
   | "resolve-merge"
-  | "abort-resolve";
+  | "abort-resolve"
+  | "labels"
+  | "submit-review";
 
 /** Filter prefix for EVERY PR write ({@link prWriteKey}). */
 export const PR_WRITES_KEY = ["pr-write"] as const;
@@ -287,10 +289,126 @@ export function pendingDiscussionUpvoteFor(
       e.key?.[1] === repo &&
       (e.vars as DiscussionUpvoteVars | undefined)?.number === number,
   );
+  return pendingAndPaused(matching);
+}
+
+/** Whether any of `matching` is in flight, and whether any is parked offline. */
+function pendingAndPaused(matching: readonly PendingMutationEntry[]): {
+  pending: boolean;
+  paused: boolean;
+} {
   return {
     pending: matching.length > 0,
     paused: matching.some((e) => e.paused ?? false),
   };
+}
+
+/** A label edit's variables. One type for the mutation's generic AND the pending
+ *  scan's cast: a drifted `kind` or `number` then fails to compile instead of
+ *  silently matching nothing. `kind` names the surface, so an issue and a PR at the
+ *  same number hold apart. */
+export type EditLabelsVars = {
+  kind: "issue" | "mr" | "discussion";
+  number: number;
+  labelableId: string;
+  addIds: string[];
+  removeIds: string[];
+  addNames?: string[];
+  removeNames?: string[];
+};
+
+/** Whether a label edit on the `kind` entity `number` in `repo` is among `entries`
+ *  (keyed {@link prWriteKey}`("labels", repo)`), and whether any is parked offline. */
+export function pendingLabelEditFor(
+  entries: readonly PendingMutationEntry[],
+  repo: string,
+  kind: EditLabelsVars["kind"],
+  number: number,
+): { pending: boolean; paused: boolean } {
+  return pendingAndPaused(
+    entries.filter((e) => {
+      const [prefix, keyKind, keyRepo] = e.key ?? [];
+      const vars = e.vars as EditLabelsVars | undefined;
+      return (
+        prefix === PR_WRITES_KEY[0] &&
+        keyKind === "labels" &&
+        keyRepo === repo &&
+        vars?.kind === kind &&
+        vars.number === number
+      );
+    }),
+  );
+}
+
+/** Filter prefix for every fork-by-name write ({@link forkByNameKey}). */
+export const FORK_BY_NAME_KEY = ["fork-by-name"] as const;
+
+/** A fork-by-name's mutation key: per provider, so the repo it forks rides the
+ *  variables and a detail switch never detaches the write. */
+export const forkByNameKey = (provider: ForgeProvider) =>
+  [...FORK_BY_NAME_KEY, provider] as const;
+
+/** A fork-by-name's variables, shared by the mutation's generic and the scan's cast. */
+export type ForkByNameVars = {
+  provider: ForgeProvider;
+  owner: string;
+  name: string;
+};
+
+/** Whether a fork of `owner/name` on `provider` is among `entries`, and whether any
+ *  such fork is parked offline. */
+export function pendingForkFor(
+  entries: readonly PendingMutationEntry[],
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+): { pending: boolean; paused: boolean } {
+  return pendingAndPaused(
+    entries.filter((e) => {
+      const [prefix, keyProvider] = e.key ?? [];
+      const vars = e.vars as ForkByNameVars | undefined;
+      return (
+        prefix === FORK_BY_NAME_KEY[0] &&
+        keyProvider === provider &&
+        vars?.owner === owner &&
+        vars.name === name
+      );
+    }),
+  );
+}
+
+/** Filter prefix for every tag push ({@link tagPushKey}). */
+export const TAG_PUSH_KEY = ["tag-push"] as const;
+
+/** A tag push's mutation key; the tag rides the variables. */
+export const tagPushKey = (repo: string) => [...TAG_PUSH_KEY, repo] as const;
+
+/** One tag with a push in flight; `paused` when any push of it is parked offline. */
+export interface TagPushState {
+  tag: string;
+  paused: boolean;
+}
+
+/** The tags among `entries` with a push to `repo` in flight, one entry per tag in
+ *  first-seen order. An array, not a Set or a tag-keyed record: the snapshot's
+ *  structural sharing keeps only plain values, and a tag named like an
+ *  `Object.prototype` member would read as present on a record. */
+export function pendingTagPushesFor(
+  entries: readonly PendingMutationEntry[],
+  repo: string,
+): TagPushState[] {
+  const out: TagPushState[] = [];
+  for (const e of entries) {
+    const [prefix, keyRepo] = e.key ?? [];
+    if (prefix !== TAG_PUSH_KEY[0] || keyRepo !== repo) continue;
+    if (typeof e.vars !== "string") continue;
+    const tag = e.vars;
+    const paused = e.paused ?? false;
+    const prev = out.find((p) => p.tag === tag);
+    if (prev) prev.paused ||= paused;
+    else out.push({ tag, paused });
+  }
+  return out;
 }
 
 /** The local-PR writes whose in-flight state a local PR view holds its controls on. */

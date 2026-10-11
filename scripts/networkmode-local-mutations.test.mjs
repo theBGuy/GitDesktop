@@ -10,6 +10,8 @@
 // Each site is classified by what its mutationFn CALLS, never by where it lives:
 // every bare or `api.`-qualified callee must be named in the local or the network
 // vocabulary (or NEUTRAL_CALLEES), and one network callee makes the whole site network.
+// A direct site mixing local and network callees must be a SEQUENTIAL_COMPOUND;
+// independent local and network writes belong in separate hooks.
 // Classification is total: a callee in no vocabulary, a site with no callee, a raw
 // `invoke` of an unlisted command, and a shape the scan can't read all FAIL, naming the
 // site. A mutationFn passed through a parameter resolves at the enclosing hook's call
@@ -42,14 +44,24 @@
 //
 // Deliberately separate from networkmode-local-queries.test.mjs: that scan keys on
 // `queryFn:` spelling, and a read's vocabulary (git|list|load|get|read|detect) is not
-// a write's. The masker and bracket walkers are copies of that guard's.
+// a write's. Both guards share the masker and bracket walker in lib/ts-mask.mjs.
 //
 // Runs in CI's installless `guards` job, so node built-ins ONLY.
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+  CLOSE,
+  escapeRe,
+  lineOf,
+  maskNonCode,
+  matchBrace,
+  OPEN,
+  ScanError,
+  sourceFiles,
+} from "./lib/ts-mask.mjs";
 
 /** Mutation constructions: the argument holding the mutationFn (`fnKey` names it
  *  inside an options object), the argument holding the options, and the arity. */
@@ -253,6 +265,52 @@ const EXEMPT = [
   },
 ];
 
+const MIXED_WRITE_REASON =
+  "mixes local and network writes — split the hook, or record it as a sequential compound";
+
+/** Sequential dependencies may park together; rows must still match a mixed site. */
+const SEQUENTIAL_COMPOUND = [
+  {
+    file: "src/lib/git/queries/sync.ts",
+    hook: "useUpdateFromUpstream",
+    reason:
+      "the fetch feeds the merge sequentially (merge needs the fetched upstream ref); the default online mode parks the whole operation offline, which is right — neither arm should run without a connection",
+  },
+];
+
+/** One row per file; pending wave triage rows are pruned at integration, and any
+ *  retained row names its HOLD/QUEUE bucket and the reason/indicator's home. */
+const OFFLINE_VOCABULARY_EXEMPT = [
+  {
+    file: "src/features/pulls/ReviewComposer.tsx",
+    bucket:
+      "QUEUE (comment-class review thread): pending busy-disables with the draft kept; parks offline per the comment-composer design — the pause-aware reason is recorded class debt in the offline topic",
+  },
+  {
+    file: "src/features/repository/SubmodulesDialog.tsx",
+    bucket:
+      "network git op (submodule clone/fetch), not a forge write, so outside the HOLD/QUEUE ruling; busy reasons present; an offline press parking is accepted",
+  },
+  {
+    file: "src/features/settings/AccountsSection.tsx",
+    bucket:
+      "settings token save: validation needs the network, and disable reasons render as the adjacent visible warning by design (comments at the submit sites); offline parking accepted",
+  },
+];
+
+const OFFLINE_VOCABULARY = [
+  "refuseWhileOffline",
+  "useOfflineHold",
+  "isOfflineNow",
+  "useOnline",
+  "pendingWriteReason",
+  "pendingItemReason",
+  "isPaused",
+  "holdOffline",
+  "OFFLINE_WRITE_REASON",
+  "OFFLINE_ITEM_REASON",
+];
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(REPO_ROOT, "src");
 
@@ -264,268 +322,6 @@ const FILE_FLOOR = 500;
 const SITE_FLOOR = 285;
 const LOCAL_SITE_FLOOR = 104;
 
-class ScanError extends Error {}
-
-const lineOf = (src, index) => src.slice(0, index).split("\n").length;
-
-/** Punctuation after which an expression starts, so a `/` opens a regex literal
- *  and, in .tsx, a `<` opens a JSX element. */
-const EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
-/** Keywords after which an expression starts. */
-const EXPR_KEYWORDS = new Set([
-  "return",
-  "throw",
-  "case",
-  "typeof",
-  "instanceof",
-  "in",
-  "of",
-  "new",
-  "delete",
-  "void",
-  "yield",
-  "await",
-  "else",
-  "do",
-]);
-
-/** `src` with comment bodies, string / template / regex text, and JSX text blanked
- *  to spaces, every offset and newline kept, so braces or keys inside text can't steer
- *  the scan. JSX (`jsx`, for .tsx) is walked as markup with its `{…}` expressions
- *  lexed as code. An unreadable construct throws: a scan that can't tell code from
- *  text refuses rather than guesses. */
-function maskNonCode(src, jsx) {
-  const out = src.split("");
-  const blank = (from, to) => {
-    for (let k = from; k < to; k++)
-      if (out[k] !== "\n" && out[k] !== "\r") out[k] = " ";
-  };
-  const fail = (what, at) => {
-    throw new ScanError(`${what} at line ${lineOf(src, at)}`);
-  };
-  // Reads the already-masked text backwards, so comments and string bodies
-  // before `i` can't pose as the previous token.
-  const exprStartAt = (i) => {
-    let k = i - 1;
-    while (k >= 0 && /\s/.test(out[k])) k--;
-    if (k < 0) return true;
-    if (/[\w$]/.test(out[k])) {
-      let s = k;
-      while (s > 0 && /[\w$]/.test(out[s - 1])) s--;
-      return EXPR_KEYWORDS.has(out.slice(s, k + 1).join(""));
-    }
-    return EXPR_OPENERS.has(out[k]);
-  };
-
-  const quoted = (start, multiline) => {
-    const q = src[start];
-    for (let j = start + 1; j < src.length; j++) {
-      if (src[j] === "\\" && !multiline) {
-        j++;
-        continue;
-      }
-      if (src[j] === q) {
-        blank(start + 1, j);
-        return j + 1;
-      }
-      if (src[j] === "\n" && !multiline) break;
-    }
-    return fail("unterminated string", start);
-  };
-
-  const regex = (start) => {
-    let inClass = false;
-    for (let j = start + 1; j < src.length; j++) {
-      const c = src[j];
-      if (c === "\\") {
-        j++;
-        continue;
-      }
-      if (c === "\n") break;
-      if (c === "[") inClass = true;
-      else if (c === "]") inClass = false;
-      else if (c === "/" && !inClass) {
-        blank(start + 1, j);
-        let k = j + 1;
-        while (k < src.length && /[a-z]/i.test(src[k])) k++;
-        return k;
-      }
-    }
-    return fail("unterminated regex literal", start);
-  };
-
-  const template = (start) => {
-    let i = start + 1;
-    while (i < src.length) {
-      const c = src[i];
-      if (c === "\\") {
-        blank(i, i + 2);
-        i += 2;
-      } else if (c === "`") {
-        return i + 1;
-      } else if (c === "$" && src[i + 1] === "{") {
-        i = code(i + 2, true) + 1;
-      } else {
-        blank(i, i + 1);
-        i++;
-      }
-    }
-    return fail("unterminated template literal", start);
-  };
-
-  const skipWs = (i) => {
-    while (i < src.length && /\s/.test(src[i])) i++;
-    return i;
-  };
-
-  /** Skips whitespace and comments between JSX attributes. */
-  const skipGap = (i) => {
-    for (;;) {
-      i = skipWs(i);
-      if (src[i] === "/" && src[i + 1] === "/") {
-        const end = src.indexOf("\n", i);
-        blank(i, end === -1 ? src.length : end);
-        i = end === -1 ? src.length : end;
-      } else if (src[i] === "/" && src[i + 1] === "*") {
-        const end = src.indexOf("*/", i + 2);
-        if (end === -1) return fail("unterminated block comment", i);
-        blank(i, end + 2);
-        i = end + 2;
-      } else return i;
-    }
-  };
-
-  /** A JSX element or fragment opening at `start` (a `<`); returns the index past
-   *  it. A TS generic arrow's type parameters (`<T,>` / `<T extends X>`) are not
-   *  JSX: those return `start + 1` so the caller reads them on as code. */
-  const element = (start) => {
-    let i = skipWs(start + 1);
-    const name = /^[\w$.:-]*/.exec(src.slice(i))[0];
-    i += name.length;
-    if (name && /^\s*(,|extends\b)/.test(src.slice(i))) return start + 1;
-    // Type arguments on the tag (`<Select<Item, true>`); an arrow's `=>` inside
-    // them is not a closing angle.
-    if (name && src[i] === "<") {
-      let depth = 0;
-      for (; i < src.length; i++) {
-        if (src[i] === "<") depth++;
-        else if (src[i] === ">" && src[i - 1] !== "=" && --depth === 0) break;
-      }
-      if (depth !== 0) return fail("unreadable JSX type arguments", start);
-      i++;
-    }
-    // Attributes, then `/>` or `>`; a fragment has no name and no attributes.
-    for (;;) {
-      i = skipGap(i);
-      const c = src[i];
-      if (c === "/" && src[i + 1] === ">") return i + 2;
-      if (c === ">") break;
-      if (!name || i >= src.length) return fail("unreadable JSX tag", start);
-      if (c === "{") {
-        i = code(i + 1, true) + 1;
-        continue;
-      }
-      const attr = /^[\w$:-]+/.exec(src.slice(i));
-      if (!attr) return fail("unreadable JSX attribute", i);
-      i = skipWs(i + attr[0].length);
-      if (src[i] !== "=") continue;
-      i = skipWs(i + 1);
-      if (src[i] === '"' || src[i] === "'") i = quoted(i, true);
-      else if (src[i] === "{") i = code(i + 1, true) + 1;
-      else if (src[i] === "<") i = element(i);
-      else return fail("unreadable JSX attribute value", i);
-    }
-    // Children: text is blanked, `{…}` is code, `<` opens a child or the close tag.
-    i++;
-    while (i < src.length) {
-      const c = src[i];
-      if (c === "{") {
-        i = code(i + 1, true) + 1;
-      } else if (c === "<") {
-        const next = skipWs(i + 1);
-        if (src[next] === "/") {
-          const end = src.indexOf(">", next);
-          if (end === -1) return fail("unterminated JSX closing tag", i);
-          return end + 1;
-        }
-        i = element(i);
-      } else {
-        blank(i, i + 1);
-        i++;
-      }
-    }
-    return fail("unterminated JSX element", start);
-  };
-
-  /** Walks code from `i`; with `inExpr` (a template `${…}` or JSX `{…}`) it returns
-   *  the index of the `}` that closes the expression. */
-  function code(i, inExpr) {
-    const opened = i;
-    let depth = 0;
-    while (i < src.length) {
-      const c = src[i];
-      const n = src[i + 1];
-      if (c === "/" && n === "/") {
-        const end = src.indexOf("\n", i);
-        const stop = end === -1 ? src.length : end;
-        blank(i, stop);
-        i = stop;
-        continue;
-      }
-      if (c === "/" && n === "*") {
-        const end = src.indexOf("*/", i + 2);
-        if (end === -1) fail("unterminated block comment", i);
-        blank(i, end + 2);
-        i = end + 2;
-        continue;
-      }
-      if (c === '"' || c === "'") {
-        i = quoted(i, false);
-        continue;
-      }
-      if (c === "`") {
-        i = template(i);
-        continue;
-      }
-      if (c === "/" && exprStartAt(i)) {
-        i = regex(i);
-        continue;
-      }
-      if (jsx && c === "<" && exprStartAt(i)) {
-        i = element(i);
-        continue;
-      }
-      if (inExpr) {
-        if (c === "{") depth++;
-        else if (c === "}") {
-          if (depth === 0) return i;
-          depth--;
-        }
-      }
-      i++;
-    }
-    if (inExpr) fail("unterminated `{…}` expression", opened);
-    return i;
-  }
-
-  code(0, false);
-  return out.join("");
-}
-
-const OPEN = new Set(["(", "[", "{"]);
-const CLOSE = new Set([")", "]", "}"]);
-
-/** Index of the `}` matching the `{` at `open`, or -1. */
-function matchBrace(masked, open) {
-  let depth = 0;
-  for (let i = open; i < masked.length; i++) {
-    if (OPEN.has(masked[i])) depth++;
-    else if (CLOSE.has(masked[i]) && --depth === 0) return i;
-  }
-  return -1;
-}
-
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const familyRe = (families) =>
   new RegExp(`^(?:${families.map(escapeRe).join("|")})(?=[A-Z])`);
 const LOCAL_FAMILY_RE = familyRe(LOCAL_CALLEE_FAMILIES);
@@ -1034,7 +830,8 @@ const aliasAmbiguity = (name) => ({
 /**
  * Classifies the mutationFn expression `part`: `{ cls }` with cls "local",
  * "network" or "delegated" (a WRAPPERS definition passing its own parameter on), and
- * `callees`; or `{ ambiguity }` naming why it can't be read. `nested` marks a call
+ * `callees` and whether it is `mixed`; or `{ ambiguity }` naming why it can't be
+ * read. `nested` marks a call
  * site reached through a pass-through, which may not pass through again.
  */
 function classifyValue(ctx, part, nested = false) {
@@ -1118,6 +915,9 @@ function classifyValue(ctx, part, nested = false) {
     };
   return {
     cls: callees.some((c) => c.cls === "network") ? "network" : "local",
+    mixed:
+      callees.some((c) => c.cls === "local") &&
+      callees.some((c) => c.cls === "network"),
     callees: [...new Set(callees.map((c) => c.name))],
   };
 }
@@ -1186,7 +986,7 @@ function passThrough(ctx, fn, name, nested) {
       ambiguity: `mutationFn passes through \`${fn.name}\`, whose calls can't be read: ${bad.join("; ")}`,
     };
   const classes = new Set(verdicts.map((v) => v.cls));
-  if (classes.size > 1)
+  if (classes.size > 1 || verdicts.some((v) => v.mixed))
     return {
       ambiguity: `mutationFn passes through \`${fn.name}\`, whose calls mix local and network writes — split the hook`,
     };
@@ -1242,7 +1042,7 @@ function threadsNetworkMode(source) {
 /**
  * One file's verdict: `sites` lists every construction with its class and whether
  * it carries `networkMode: "always"`, `offenders` the local sites without it and the
- * network sites with it, and `ambiguities` the shapes the scan can't read.
+ * network sites with it, plus mixed sites; `ambiguities` are unreadable shapes.
  */
 function scanSource(source, file) {
   const sites = [];
@@ -1384,6 +1184,8 @@ function scanSource(source, file) {
       mode,
     };
     sites.push(record);
+    if (verdict.mixed)
+      offenders.push({ ...record, why: MIXED_WRITE_REASON });
     if (verdict.cls === "local" && mode !== "always")
       offenders.push({
         ...record,
@@ -1406,14 +1208,6 @@ function scanSource(source, file) {
   return { sites, offenders, ambiguities };
 }
 
-function* sourceFiles(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) yield* sourceFiles(full);
-    else if (/\.tsx?$/.test(entry.name)) yield full;
-  }
-}
-
 /** Splits `offenders` and `ambiguities` into what EXEMPT (`exempt`) covers and the
  *  failures left over, plus the entries that covered nothing. */
 function applyExemptions(offenders, ambiguities, exempt) {
@@ -1428,7 +1222,133 @@ function applyExemptions(offenders, ambiguities, exempt) {
   };
 }
 
+/** Hook names inherit the construction verdicts, including multiple sites per hook. */
+function hookClasses(sites) {
+  const classes = new Map();
+  for (const { hook, cls } of sites) {
+    if (!/^use[A-Z]/.test(hook)) continue;
+    if (!classes.has(hook)) classes.set(hook, new Set());
+    classes.get(hook).add(cls);
+  }
+  return classes;
+}
+
+function offlineVocabularyFindings(sources, classes, exempt) {
+  const missing = [];
+  let boundFiles = 0;
+  const vocabulary = new RegExp(`\\b(?:${OFFLINE_VOCABULARY.join("|")})\\b`);
+  for (const { file, source } of sources) {
+    if (!/^src\/(?:features|components)\//.test(file)) continue;
+    const masked = maskNonCode(source, file.endsWith(".tsx"));
+    const bindings = [
+      ...masked.matchAll(
+        /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(use[A-Z][\w$]*)\b/g,
+      ),
+    ].filter(
+      (m) =>
+        classes.get(m[2])?.has("network") &&
+        callParen(masked, m.index + m[0].length) !== -1 &&
+        new RegExp(
+          String.raw`(?<![\w$.])${escapeRe(m[1])}\s*\.\s*mutate(?:Async)?\s*\(`,
+        ).test(masked),
+    );
+    if (bindings.length === 0) continue;
+    boundFiles++;
+    if (!vocabulary.test(masked))
+      missing.push({ file, hooks: [...new Set(bindings.map((m) => m[2]))] });
+  }
+  return {
+    boundFiles,
+    failures: missing.filter((f) => !exempt.some((e) => e.file === f.file)),
+    stale: exempt.filter((e) => !missing.some((f) => e.file === f.file)),
+  };
+}
+
 const scan = (src, file = "src/fixture.ts") => scanSource(src, file);
+
+test("a direct mixed mutationFn fails unless its sequential compound is recorded", () => {
+  const source =
+    "function useMixed() { return useMutation({ mutationFn: () => remote ? api.gitPush(r) : api.gitStage(r) }); }";
+  const r = scan(source);
+  assert.deepEqual(r.ambiguities, []);
+  assert.equal(r.sites[0].cls, "network");
+  assert.deepEqual(r.offenders.map((f) => f.why), [MIXED_WRITE_REASON]);
+  const exempt = [
+    {
+      file: "src/fixture.ts",
+      hook: "useMixed",
+      why: MIXED_WRITE_REASON,
+      reason: "fixture sequential dependency",
+    },
+  ];
+  assert.deepEqual(applyExemptions(r.offenders, [], exempt), {
+    failures: [],
+    stale: [],
+  });
+  for (const source of [
+    "",
+    "function useMixed() { return useMutation({ mutationFn: () => api.gitPush(r) }); }",
+  ]) {
+    const clean = scan(source);
+    assert.deepEqual(applyExemptions(clean.offenders, [], exempt).stale, exempt);
+  }
+  const otherHook = scan(source.replaceAll("useMixed", "useOther"));
+  assert.equal(applyExemptions(otherHook.offenders, [], exempt).failures.length, 1);
+  const otherFile = scan(source, "src/other.ts");
+  assert.equal(applyExemptions(otherFile.offenders, [], exempt).failures.length, 1);
+  const always = scan(
+    source.replace("mutationFn:", 'networkMode: "always", mutationFn:'),
+  );
+  assert.equal(applyExemptions(always.offenders, [], exempt).failures.length, 1);
+  const passed = scan(
+    "function useW(fn) { return useMutation({ mutationFn: fn }); } useW(() => remote ? api.gitPush(r) : api.gitStage(r));",
+  );
+  assert.match(passed.ambiguities[0].why, /mix local and network/);
+});
+
+test("offline vocabulary flags bound network writes and stale file exemptions", () => {
+  const classes = hookClasses(
+    scan(
+      "function useRemote() { return useMutation({ mutationFn: api.gitPush }); } function useLocal() { return useMutation({ mutationFn: api.gitStage, networkMode: 'always' }); }",
+    ).sites,
+  );
+  const file = "src/features/fixture.tsx";
+  const source = "const write = useRemote(r); write.mutate(value);";
+  const check = (source, exempt = [], path = file) =>
+    offlineVocabularyFindings([{ file: path, source }], classes, exempt);
+  assert.equal(check(source).failures.length, 1);
+  assert.equal(check(source.replace(".mutate(", ".mutateAsync(")).failures.length, 1);
+  for (const token of OFFLINE_VOCABULARY) {
+    assert.deepEqual(check(`${source}\nconst reason = ${token};`).failures, []);
+    assert.equal(check(`${source}\nconst reason = ${token}Suffix;`).failures.length, 1);
+    assert.equal(check(`${source}\n// ${token}`).failures.length, 1);
+    assert.equal(check(`${source}\nconst reason = "${token}";`).failures.length, 1);
+  }
+  for (const clean of [
+    source.replace("useRemote", "useLocal"),
+    "const write = useRemote(r);",
+    "// const write = useRemote(r); write.mutate(value);",
+    'const text = "const write = useRemote(r); write.mutate(value);";',
+    "const { mutate } = useRemote(r); mutate(value);",
+    "const alias = useRemote; const write = alias(r); write.mutate(value);",
+  ])
+    assert.deepEqual(check(clean).failures, []);
+  assert.deepEqual(check(source, [], "src/lib/fixture.ts").failures, []);
+  assert.equal(check(source, [], "src/components/fixture.tsx").failures.length, 1);
+  const exempt = [{ file, bucket: "pending wave triage" }];
+  assert.deepEqual(check(source, exempt), {
+    boundFiles: 1, failures: [], stale: [],
+  });
+  for (const clean of [
+    "",
+    "const write = useRemote(r);",
+    source.replace("useRemote", "useLocal"),
+    `${source}\nuseOnline();`,
+  ])
+    assert.deepEqual(check(clean, exempt).stale, exempt);
+  assert.deepEqual(offlineVocabularyFindings([], classes, exempt).stale, exempt);
+});
+
 const verdictOf = (src, file) => {
   const r = scan(src, file);
   return {
@@ -1526,7 +1446,7 @@ test("every network callee makes a network site, flagged when annotated", () => 
     ["network"],
     "one network callee left a site local",
   );
-  assert.equal(mixed.flagged, 1, "a mixed site carrying always passed");
+  assert.equal(mixed.flagged, 2, "a mixed site carrying always must flag both rules");
   // A non-null-asserted call is a call.
   const asserted = verdictOf(
     'useMutation({ mutationFn: async () => { saveThing(r); api.gitPush!(r); }, networkMode: "always" });',
@@ -1534,8 +1454,8 @@ test("every network callee makes a network site, flagged when annotated", () => 
   assert.deepEqual(asserted.classes, ["network"], "`api.gitPush!(…)` unseen");
   assert.equal(
     asserted.flagged,
-    1,
-    "an asserted network call carrying always passed",
+    2,
+    "an asserted mixed site carrying always must flag both rules",
   );
 });
 
@@ -2025,7 +1945,7 @@ test("the helper's EXEMPT row covers its one rename finding and nothing added be
   );
 });
 
-test('every local mutation in src/ sets networkMode: "always", and no network one does', () => {
+test('every local mutation in src/ sets networkMode: "always", and no network one does', (t) => {
   const files = [...sourceFiles(SRC)];
   assert.ok(
     files.length >= FILE_FLOOR,
@@ -2047,6 +1967,9 @@ test('every local mutation in src/ sets networkMode: "always", and no network on
     `SCOPE PIN FAILED — ${total} mutation constructions, below the floor ${SITE_FLOOR}; the construction match went inert`,
   );
   const local = sites.filter((s) => s.cls === "local");
+  t.diagnostic(
+    `${files.length} files, ${total} mutation constructions, ${local.length} local sites`,
+  );
   assert.ok(
     local.length >= LOCAL_SITE_FLOOR,
     `SCOPE PIN FAILED — ${local.length} local sites, below the floor ${LOCAL_SITE_FLOOR}; the local vocabulary went inert`,
@@ -2064,11 +1987,14 @@ test('every local mutation in src/ sets networkMode: "always", and no network on
       `${hook} is no longer classified network`,
     );
   }
-  const { failures, stale } = applyExemptions(offenders, ambiguities, EXEMPT);
+  const { failures, stale } = applyExemptions(offenders, ambiguities, [
+    ...EXEMPT,
+    ...SEQUENTIAL_COMPOUND.map((e) => ({ ...e, why: MIXED_WRITE_REASON })),
+  ]);
   assert.deepEqual(
     stale.map((e) => `${e.file}: ${e.hook}`),
     [],
-    "Stale EXEMPT entries (they match no failing site — drop them)",
+    "Stale EXEMPT or SEQUENTIAL_COMPOUND entries (they match no failing site — drop them)",
   );
   assert.deepEqual(
     failures.map((f) =>
@@ -2078,5 +2004,54 @@ test('every local mutation in src/ sets networkMode: "always", and no network on
     ),
     [],
     "Mutations whose networkMode contradicts what they write",
+  );
+});
+
+// File-level vocabulary presence only, never per-handler or per-control coverage.
+// Destructured, aliased and typed bindings are unseen; writes driven from src/lib
+// hooks are out of scope. Vocabulary may belong to a different control in the file.
+// This inherits every classifier blind spot; hook and binding names are matched
+// without import resolution or lexical scope tracking. Comments/text do not count.
+test("UI files binding and calling network mutation hooks carry offline vocabulary", (t) => {
+  const sources = [...sourceFiles(SRC)].map((full) => ({
+    file: relative(REPO_ROOT, full).split(/[\\/]/).join("/"),
+    source: readFileSync(full, "utf8"),
+  }));
+  const sites = sources.flatMap(
+    ({ file, source }) => scanSource(source, file).sites,
+  );
+  assert.ok(
+    sources.length >= FILE_FLOOR,
+    "offline vocabulary source walk went inert",
+  );
+  assert.ok(
+    sites.length >= SITE_FLOOR,
+    "offline vocabulary construction scan went inert",
+  );
+  const { failures, stale, boundFiles } = offlineVocabularyFindings(
+    sources,
+    hookClasses(sites),
+    OFFLINE_VOCABULARY_EXEMPT,
+  );
+  assert.ok(boundFiles > 0, "offline vocabulary binding scan went inert");
+  t.diagnostic(`${boundFiles} UI files bind and call network mutation hooks`);
+  assert.equal(
+    new Set(OFFLINE_VOCABULARY_EXEMPT.map((e) => e.file)).size,
+    OFFLINE_VOCABULARY_EXEMPT.length,
+    "duplicate offline vocabulary file exemption",
+  );
+  assert.ok(
+    OFFLINE_VOCABULARY_EXEMPT.every((e) => e.bucket?.trim()),
+    "offline vocabulary exemptions need a bucket statement",
+  );
+  assert.deepEqual(
+    stale.map((e) => e.file),
+    [],
+    "Stale OFFLINE_VOCABULARY_EXEMPT entries (file has vocabulary, no longer binds/calls a network hook, or is gone — drop them)",
+  );
+  assert.deepEqual(
+    failures,
+    [],
+    "UI files binding and calling network mutation hooks need offline vocabulary or a named HOLD/QUEUE bucket",
   );
 });

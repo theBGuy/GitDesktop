@@ -65,6 +65,7 @@ import type {
 } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
   ARIA_DISABLED_CLASS,
@@ -612,6 +613,7 @@ function StatusDateField({
 export function ProjectStatusUpdateDialog({
   editor,
   pending,
+  paused,
   onOpenChange,
   onSave,
 }: {
@@ -620,6 +622,9 @@ export function ProjectStatusUpdateDialog({
    *  Single-flight, the board dialogs' contract: this dialog outlives its own
    *  submissions, so its form can't be what knows one is still going. */
   pending: boolean;
+  /** Every such write is parked offline. Status writes queue rather than hold —
+   *  they post on reconnect — so this only words the wait. */
+  paused: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (
     status: string | null,
@@ -708,7 +713,7 @@ export function ProjectStatusUpdateDialog({
   const heldReason = (() => {
     switch (true) {
       case pending || submitting:
-        return "Saving your update…";
+        return pendingWriteReason(paused, "Saving your update…");
       // A post writes one of the statuses this build names — the value its save
       // path accepts — so anything else holds here rather than failing silently.
       case status === "" || (editing === null && !isKnownStatus(status)):
@@ -987,6 +992,12 @@ export function ProjectStatusSection({
       <ProjectStatusUpdateDialog
         editor={editor}
         pending={createUpdate.isPending || updateUpdate.isPending}
+        paused={
+          (createUpdate.isPending || updateUpdate.isPending) &&
+          [createUpdate, updateUpdate]
+            .filter((m) => m.isPending)
+            .every((m) => m.isPaused)
+        }
         onOpenChange={(o) => {
           if (!o) setEditor(null);
         }}

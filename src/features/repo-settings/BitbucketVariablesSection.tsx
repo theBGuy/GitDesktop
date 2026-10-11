@@ -21,13 +21,13 @@ import {
   useBbVariables,
 } from "@/lib/git/queries";
 import type { BitbucketPipelineVariable } from "@/lib/git/types";
+import { NO_CHANGES_REASON } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
   AsyncErrorCard,
   InlineConfirm,
-  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   useConfirmSwapFocus,
@@ -298,7 +298,7 @@ function VariableRow({
       case !online:
         return OFFLINE_WRITE_REASON;
       // Each row owns its update mutation (GitLab's rows share one, so theirs
-      // says SAVING_REASON): a pending hold here is always this row's write.
+      // says SAVING_LAST_CHANGE_REASON): a pending hold here is always this row's write.
       case update.isPending:
         return ACT_PENDING_REASON;
       case !dirty:

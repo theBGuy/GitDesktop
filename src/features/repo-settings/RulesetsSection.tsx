@@ -28,6 +28,7 @@ import {
   useUpdateRuleset,
 } from "@/lib/git/queries";
 import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
+import { SAVING_LAST_CHANGE_REASON } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
@@ -40,7 +41,6 @@ import {
   RemoteFormSection,
   RemoteListSection,
   rowFormSwapKey,
-  SAVING_REASON,
   type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
@@ -398,7 +398,8 @@ function RulesetList({
   const online = useOnline();
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const enforcementHeld =
-    offlineReason ?? (setEnforcement.isPending ? SAVING_REASON : undefined);
+    offlineReason ??
+    (setEnforcement.isPending ? SAVING_LAST_CHANGE_REASON : undefined);
 
   // Awaited, not per-call callbacks: react-query drops those when this subtree
   // unmounts mid-flight — closing the dialog or switching the rail's section —
@@ -819,7 +820,7 @@ function RulesetForm({
           variant="outline"
           onClick={onDone}
           disabled={pending}
-          reason={pending ? SAVING_REASON : undefined}
+          reason={pending ? SAVING_LAST_CHANGE_REASON : undefined}
         >
           Cancel
         </DisabledReasonButton>

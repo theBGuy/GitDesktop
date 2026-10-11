@@ -35,6 +35,23 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
+import {
+  type ApproveRunVars,
+  NO_PENDING_RUN_WRITES,
+  type PendingRunWrites,
+  pendingRunWritesFor,
+  RUN_WRITES_KEY,
+  runWriteKey,
+} from "./run-writes";
+
+// The run-write lookups the CI surfaces read beside `usePendingRunWrites`,
+// published through the barrel with it.
+export {
+  type PendingRunWrites,
+  pendingJobState,
+  pendingRunState,
+  rerunFamilyState,
+} from "./run-writes";
 
 /**
  * Every write filed under `prefix` against `repo` that is in flight, one entry per
@@ -74,6 +91,26 @@ export function usePendingLocalPrWrites(repo: string): PendingLocalPrWrite[] {
     repo,
     readPendingLocalPrWrite,
   );
+}
+
+/**
+ * Every CI run write against `repo` that is in flight, folded per run and per job
+ * from the writes' own variables — never an observer's, which track only their
+ * latest call and die with a remount, so a run's cancel or re-run fired from one
+ * surface holds that run on every surface showing it.
+ */
+export function usePendingRunWrites(repo: string): PendingRunWrites {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingRunWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: RUN_WRITES_KEY, status: "pending" }),
+        ),
+        repo,
+      ),
+    [repo],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_RUN_WRITES);
 }
 
 /** A merge/pull request's approval state — the approve/unapprove toggle's driver
@@ -516,9 +553,8 @@ export function usePrUpdateBranch(repo: string) {
 export function useApproveWorkflowRun(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    // `lens` is optional because the Actions tab is origin-scoped by design;
-    // the PR checks strip renders under either lens and must pass its own.
-    mutationFn: (args: { runId: number; lens?: RemoteLens }) =>
+    mutationKey: runWriteKey("approve-run", repo),
+    mutationFn: (args: ApproveRunVars) =>
       api.forgeCiRunApprove(repo, args.runId, args.lens),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });

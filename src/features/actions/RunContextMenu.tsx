@@ -1,4 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
+import { useRelativeNow } from "@/components/relative-time";
 import {
   ContextMenuItem,
   ContextMenuSeparator,
@@ -14,6 +16,7 @@ import {
   isPipelineProvider,
   RERUN_TITLES,
   rerunOffers,
+  rerunWindowReason,
 } from "./status";
 
 /** Sentence-initial noun for the copy toast; the item's own label carries it
@@ -61,11 +64,12 @@ export function RunContextMenuItems({
   canRunAgain: boolean;
   writeBlocked: boolean;
   writeReason?: string;
-  /** Set while this run's cancel is pending: holds the Cancel item with this
-   *  compact parenthetical, below a push block's. */
+  /** Set while this run's cancel is pending on any surface: holds the Cancel
+   *  item with this compact parenthetical, below a push block's. */
   cancelHeld?: string;
-  /** Set while a re-run of this run is pending: holds every re-run item with
-   *  this compact parenthetical, below a push block's. */
+  /** Set while a re-run of this run or one of its jobs is pending on any
+   *  surface: holds every re-run item with this compact parenthetical, below a
+   *  push block's. */
   rerunHeld?: string;
 }) {
   // Destructured so each callback closes over a const binding rather than a
@@ -84,30 +88,37 @@ export function RunContextMenuItems({
     canRunAgain && (isPipelines || run.workflowDatabaseId > 0);
   const hasWriteItems = offers.length > 0 || showCancel || showRunAgain;
   const blockedHint = writeBlocked && writeReason ? ` (${writeReason})` : "";
+  // Held below a push block and a pending re-run, never hidden: the run is still
+  // there, GitHub just refuses to restart it.
+  const now = useRelativeNow();
+  const rerunAgedOut = rerunWindowReason(provider, run.createdAt, now);
+  const rerunHint = rerunHeld ?? rerunAgedOut;
 
   return (
     <>
       {offers.map((offer) => (
         <ContextMenuItem
           key={offer.kind}
-          disabled={writeBlocked || rerunHeld !== undefined}
+          className={MENU_HELD_ROW_CLASS}
+          disabled={writeBlocked || rerunHint !== undefined}
           // A disabled item's tooltip never shows, so a blocked item explains
           // itself through the label parenthetical instead.
           title={
-            writeBlocked || rerunHeld !== undefined
+            writeBlocked || rerunHint !== undefined
               ? undefined
               : RERUN_TITLES[offer.kind]
           }
           onClick={() => rerun(run.id, offer.kind === "failed")}
         >
           {offer.label}
-          {blockedHint || (rerunHeld === undefined ? "" : ` (${rerunHeld})`)}
+          {blockedHint || (rerunHint === undefined ? "" : ` (${rerunHint})`)}
         </ContextMenuItem>
       ))}
       {showCancel && (
         <>
           {offers.length > 0 && <ContextMenuSeparator />}
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={writeBlocked || cancelHeld !== undefined}
             onClick={() => cancel(run.id)}
           >
@@ -121,6 +132,7 @@ export function RunContextMenuItems({
         <>
           {(offers.length > 0 || showCancel) && <ContextMenuSeparator />}
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={writeBlocked}
             onClick={() =>
               runAgain(isPipelines ? null : run.workflowDatabaseId)

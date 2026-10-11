@@ -21,6 +21,7 @@ import {
   useEditItemProjects,
   useGhScopes,
   useItemProjects,
+  usePendingItemProjectsWrite,
 } from "@/lib/git/queries";
 import type {
   GhScopes,
@@ -155,7 +156,15 @@ export function ProjectsPopover({
 
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
   const available = useAvailableProjects(repoPath, canRead && hasOpened, lens);
-  const editProjects = useEditItemProjects(repoPath, kind, number, lens);
+  const editProjects = useEditItemProjects();
+  // From the cache, not the observer: this mounts per item, and a remount onto
+  // the same one must still hold on the write its previous mount started.
+  const editWrite = usePendingItemProjectsWrite({
+    repo: repoPath,
+    lens,
+    kind,
+    number,
+  });
   // Gated on `canRead` so a disabled query — the missing-scope path, whose whole
   // point is the popup's Reconnect button — can't hold the trigger shut forever.
   // An ERRORED read likewise mustn't hold it: the popup owns the Retry. A first
@@ -174,11 +183,8 @@ export function ProjectsPopover({
       // address. The mutation's `onSettled` returns its invalidate promise, so
       // this hold spans the settle REFETCH too — the placeholders are always
       // gone by the time it frees.
-      case editProjects.isPending:
-        return pendingWriteReason(
-          editProjects.isPaused,
-          SAVING_LAST_CHANGE_REASON,
-        );
+      case editWrite.pending:
+        return pendingWriteReason(editWrite.paused, SAVING_LAST_CHANGE_REASON);
       case membershipsParked:
         return offlinePendingMessage("projects");
       case loadingMemberships:
@@ -311,7 +317,15 @@ export function ProjectsPopover({
       removes.push({ projectId: id, itemId });
     }
     if (adds.length > 0 || removes.length > 0) {
-      editProjects.mutate({ contentId, adds, removes });
+      editProjects.mutate({
+        repo: repoPath,
+        lens,
+        kind,
+        number,
+        contentId,
+        adds,
+        removes,
+      });
     }
   }
 
@@ -343,7 +357,7 @@ export function ProjectsPopover({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized
             element, and a 16px swap would widen the label column mid-write. */}
-        {editProjects.isPending && !editProjects.isPaused ? (
+        {editWrite.pending && !editWrite.paused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <KanbanIcon data-icon="inline-start" />

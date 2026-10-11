@@ -40,7 +40,10 @@ import {
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
+  pendingRunState,
+  rerunFamilyState,
   useForgeStatus,
+  usePendingRunWrites,
   useRepoStatus,
   useRepoWriteAccess,
   writeAccessReason,
@@ -162,6 +165,14 @@ export function ActionsPanel({
   const filterRef = useRef<HTMLInputElement>(null);
   const rerun = useRerunRun(repoPath);
   const cancel = useCancelRun(repoPath);
+  // The menu's holds read every surface's writes to the run, matched by the
+  // writes' own variables: the observers above track only their latest call.
+  const runWrites = usePendingRunWrites(repoPath);
+  const menuRunWrites = menuRun
+    ? pendingRunState(runWrites, menuRun.id)
+    : undefined;
+  const menuCancel = menuRunWrites?.cancel;
+  const menuRerun = rerunFamilyState(menuRunWrites);
 
   const branchFilter = branchOnly && currentBranch ? currentBranch : undefined;
   const runs = useWorkflowRunPages(repoPath, ghReady, active, branchFilter);
@@ -507,13 +518,13 @@ export function ActionsPanel({
                   writeBlocked={writeBlocked}
                   writeReason={writeReason}
                   cancelHeld={
-                    cancel.isPending && cancel.variables === menuRun.id
-                      ? pendingItemReason(cancel.isPaused, "cancelling…")
+                    menuCancel
+                      ? pendingItemReason(menuCancel.paused, "cancelling…")
                       : undefined
                   }
                   rerunHeld={
-                    rerun.isPending && rerun.variables?.runId === menuRun.id
-                      ? pendingItemReason(rerun.isPaused, "re-running…")
+                    menuRerun
+                      ? pendingItemReason(menuRerun.paused, "re-running…")
                       : undefined
                   }
                   actions={{

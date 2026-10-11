@@ -19,6 +19,7 @@ import {
 } from "@/lib/git/queries";
 import type { RepoRole } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { SAVING_LAST_CHANGE_REASON } from "@/lib/offline-writes";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
@@ -28,7 +29,6 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -103,7 +103,7 @@ export function CollaboratorsSection({
       // `add` also carries row role changes, and its variables can't tell an
       // invite from one, so the in-flight write may not be Invite's own.
       case add.isPending:
-        return SAVING_REASON;
+        return SAVING_LAST_CHANGE_REASON;
       case username.trim() === "":
         return "Enter a GitHub username";
       case !validUsername(username.trim()):
@@ -117,11 +117,11 @@ export function CollaboratorsSection({
   const collabRoleHeld =
     rolesUnknownReason ??
     offlineReason ??
-    (add.isPending ? SAVING_REASON : undefined);
+    (add.isPending ? SAVING_LAST_CHANGE_REASON : undefined);
   const inviteRoleHeld =
     rolesUnknownReason ??
     offlineReason ??
-    (updateInvite.isPending ? SAVING_REASON : undefined);
+    (updateInvite.isPending ? SAVING_LAST_CHANGE_REASON : undefined);
 
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];

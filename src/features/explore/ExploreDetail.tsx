@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   useForkRepoByName,
+  usePendingFork,
   useRepoReadme,
   useRepoStarred,
   useStarRepo,
@@ -123,12 +124,15 @@ function ExploreDetailBody({
 
   const starred = useRepoStarred(provider, repo.owner, repo.name, canStar);
   const starMutation = useStarRepo();
-  const fork = useForkRepoByName();
+  const fork = useForkRepoByName(provider);
+  // The cache, not `fork`: this pane is keyed per repo, so switching away and back
+  // remounts it on a fresh observer that would re-enable Fork mid-write.
+  const forkPending = usePendingFork(provider, repo.owner, repo.name);
   // A fork creates a repository, so it holds offline rather than park: a parked
   // one lands whenever the connection returns, and a second press mints another.
   const offlineHold = useOfflineHold();
-  const forkHeldReason = fork.isPending
-    ? pendingWriteReason(fork.isPaused, ACT_PENDING_REASON)
+  const forkHeldReason = forkPending.pending
+    ? pendingWriteReason(forkPending.paused, ACT_PENDING_REASON)
     : offlineHold;
   const [forked, setForked] = useState<ForgeForkResult | null>(null);
   // The fork card below is the in-pane confirmation, but this pane is keyed per
@@ -282,7 +286,7 @@ function ExploreDetailBody({
             disabled={forkHeldReason !== undefined}
             reason={forkHeldReason}
           >
-            {fork.isPending && !fork.isPaused ? (
+            {forkPending.pending && !forkPending.paused ? (
               <>
                 <Spinner />
                 Forking…

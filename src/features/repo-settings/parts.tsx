@@ -1,11 +1,4 @@
-import {
-  type ComponentProps,
-  Fragment,
-  type ReactNode,
-  type Ref,
-  useMemo,
-  useState,
-} from "react";
+import { Fragment, type ReactNode, type Ref, useMemo, useState } from "react";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -18,7 +11,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -42,7 +34,6 @@ import {
   ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
   OFFLINE_WRITE_REASON,
-  SAVING_LAST_CHANGE_REASON,
 } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import {
@@ -111,18 +102,13 @@ export function AsyncErrorCard({
   );
 }
 
+// Re-exported so the settings sections keep importing HeldSwitch from here; it
+// lives outside this module because parts.tsx pulls Shiki into any chunk that
+// imports it.
+export { HeldSwitch, heldSwitchReason } from "@/components/held-switch";
 // Re-exported so the settings sections keep importing their whole hold
 // vocabulary from one place.
 export { ACT_PENDING_REASON, AI_DRAFT_PENDING_REASON, OFFLINE_WRITE_REASON };
-
-/** The hold reason while a row's last change is still saving. */
-export const SAVING_REASON = SAVING_LAST_CHANGE_REASON;
-
-/** The hold reason on a save or update whose form matches what's saved. */
-export const NO_CHANGES_REASON = "No changes to save";
-
-/** The hold reason on a Discard whose form matches what's saved. */
-export const NO_CHANGES_TO_DISCARD_REASON = "No changes to discard";
 
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
 function formNoticeMessage(noun: string, failed: boolean): string {
@@ -476,71 +462,6 @@ export function HeldRoleSelect({
           {reason.blockedReason}
         </span>
       )}
-    </span>
-  );
-}
-
-/** Why a {@link HeldSwitch} is held. The site reason (offline, inherited, a
- *  dependency, a pending certificate) outranks `saving`, as the row pickers'
- *  `offlineReason ?? SAVING_REASON` does: a save parked offline lands only on
- *  reconnect, which is what that reason says. */
-export function heldSwitchReason(
-  heldReason: string | undefined,
-  saving: boolean,
-): string | undefined {
-  return heldReason ?? (saving ? SAVING_REASON : undefined);
-}
-
-/**
- * A switch held with a reason ({@link heldSwitchReason}). Held by `readOnly`,
- * never Base UI's `disabled`, which sets tabIndex -1: the switch stays one
- * mounted, focusable node across every hold edge, Space and Enter flip
- * nothing, and the reason reaches hover, keyboard, and AT alike.
- */
-export function HeldSwitch({
-  heldReason,
-  saving = false,
-  inLabel = false,
-  className,
-  ...props
-}: Omit<ComponentProps<typeof Switch>, "disabled" | "readOnly"> & {
-  heldReason?: string;
-  /** The switch's own change is still saving. */
-  saving?: boolean;
-  /** Named by a wrapping `<label>`, which then carries the hover title itself:
-   *  Chromium reads a titled descendant's title into the label's text, and so
-   *  into the switch's name. */
-  inLabel?: boolean;
-}) {
-  const reason = heldSwitchReason(heldReason, saving);
-  const held = reason !== undefined;
-  const hold = useDisabledReason({
-    disabled: held,
-    reason,
-    describedBy: props["aria-describedby"],
-  });
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0",
-        hold.blockedReason !== null && "cursor-not-allowed",
-      )}
-      title={inLabel ? undefined : hold.wrapperTitle}
-    >
-      {/* `hidden`, as in HeldRoleSelect: a wrapping <label> names the switch
-          from its content, which skips hidden text but would read sr-only. */}
-      {hold.blockedReason !== null && (
-        <span id={hold.reasonId} hidden>
-          {hold.blockedReason}
-        </span>
-      )}
-      <Switch
-        {...props}
-        readOnly={held}
-        aria-disabled={held || undefined}
-        aria-describedby={hold.describedBy}
-        className={cn(ARIA_DISABLED_CLASS, className)}
-      />
     </span>
   );
 }

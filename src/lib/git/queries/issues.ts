@@ -1,4 +1,5 @@
 import {
+  type MutationCache,
   type QueryClient,
   type QueryKey,
   queryOptions,
@@ -30,9 +31,147 @@ import {
 } from "./core";
 import {
   invalidateProjectBoards,
+  useMutationCacheSnapshot,
   useOptimisticCacheMutation,
   useRepoMutation,
 } from "./internal";
+import {
+  type PendingMutationEntry,
+  pendingMutationEntries,
+  pendingWritesFor,
+} from "./pr-writes";
+
+/** The issue-rail writes whose pending state a row reads back from the cache, so it
+ *  survives the row's remount on an issue switch. */
+export type IssueWriteKind =
+  | "due-date"
+  | "confidential"
+  | "time-estimate"
+  | "spent-time"
+  | "link"
+  | "unlink"
+  | "add-sub-issue"
+  | "remove-sub-issue"
+  | "dependency";
+
+/** Each issue write's variables. One type for the mutations' generics AND the
+ *  pending scan's casts, so a drifted field fails to compile instead of silently
+ *  matching nothing. */
+export type IssueWriteVars = {
+  "due-date": { number: number; dueDate: string | null };
+  confidential: { number: number; confidential: boolean };
+  "time-estimate": { number: number; duration: string | null };
+  "spent-time": { number: number; duration: string | null };
+  link: { number: number; targetNumber: number };
+  unlink: { number: number; linkId: string };
+  "add-sub-issue": {
+    repo: string;
+    parentId: string;
+    subNumber: number;
+    lens: RemoteLens;
+  };
+  "remove-sub-issue": { parentId: string; subId: string };
+  dependency: {
+    number: number;
+    relation: IssueRelation;
+    target: number;
+    add: boolean;
+  };
+};
+
+/** Filter prefix for EVERY issue write ({@link issueWriteKey}). */
+export const ISSUE_WRITES_KEY = ["issue-write"] as const;
+
+/** An issue write's mutation key. Static per repo, so it never detaches a pending
+ *  write across an issue switch; the issue rides the variables. */
+export const issueWriteKey = (kind: IssueWriteKind, repo: string) =>
+  [...ISSUE_WRITES_KEY, kind, repo] as const;
+
+/** One pending write of a `[family, kind, repo]`-keyed family, with the cache
+ *  entry's own `isPaused` so a hold and its reason come from the same entry. */
+export interface PendingRepoWrite {
+  kind: string;
+  vars: unknown;
+  paused: boolean;
+}
+
+const readRepoWrite = (
+  kind: string,
+  vars: unknown,
+  paused: boolean,
+): PendingRepoWrite => ({ kind, vars, paused });
+
+const NO_REPO_WRITES: PendingRepoWrite[] = [];
+
+/** The pending writes of `family` filed against `repo`, read from the mutation
+ *  cache so a host's remount (an entity switch) can't lose them. Exported for the
+ *  families outside this package (the Jira writes), which can't reach the
+ *  snapshot primitive themselves. */
+export function usePendingRepoWrites(
+  family: string,
+  repo: string,
+): PendingRepoWrite[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: [family], status: "pending" }),
+        ),
+        repo,
+        readRepoWrite,
+      ),
+    [family, repo],
+  );
+  return useMutationCacheSnapshot(select, NO_REPO_WRITES);
+}
+
+/** The `kind` writes among `writes` whose variables `match`, as one hold:
+ *  undefined when none is pending, else paused only when every one is parked —
+ *  a running request means work is happening, so its in-flight copy is honest. */
+export function pendingWriteMatching<V>(
+  writes: readonly PendingRepoWrite[],
+  kind: string,
+  match: (vars: V) => boolean,
+): { paused: boolean } | undefined {
+  const hits = writes.filter(
+    (w) => w.kind === kind && w.vars != null && match(w.vars as V),
+  );
+  return hits.length === 0
+    ? undefined
+    : { paused: hits.every((w) => w.paused) };
+}
+
+/** {@link pendingWriteMatching} over the issue family, typed per kind. */
+export const pendingIssueWrite = <K extends IssueWriteKind>(
+  writes: readonly PendingRepoWrite[],
+  kind: K,
+  match: (vars: IssueWriteVars[K]) => boolean,
+) => pendingWriteMatching(writes, kind, match);
+
+/** A sub-issue add's repo rides its variables (see {@link useAddSubIssue}), so its
+ *  entry takes that repo into the key slot the repo scan reads. */
+function withVarsRepo(e: PendingMutationEntry): PendingMutationEntry {
+  if (e.key?.[1] !== "add-sub-issue" || e.key.length > 2) return e;
+  const vars = e.vars as IssueWriteVars["add-sub-issue"] | undefined;
+  return { ...e, key: [...e.key, vars?.repo] };
+}
+
+/** The pending issue-rail writes in `repo`, every issue's: rows pick theirs out
+ *  with {@link pendingIssueWrite}. */
+export function usePendingIssueWrites(repo: string): PendingRepoWrite[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: ISSUE_WRITES_KEY, status: "pending" }),
+        ).map(withVarsRepo),
+        repo,
+        readRepoWrite,
+      ),
+    [repo],
+  );
+  return useMutationCacheSnapshot(select, NO_REPO_WRITES);
+}
 
 export function useIssueList(
   repo: string,
@@ -263,9 +402,13 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
    *  rather than assumed for the whole helper: assignees ride a card, while
    *  milestone, issue type, due date and confidentiality do not. */
   boardCards = false,
+  /** Files the write under {@link issueWriteKey} for a row that reads its pending
+   *  state back from the cache; unkeyed rows read the observer. */
+  mutationKey?: ReturnType<typeof issueWriteKey>,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey,
     mutationFn,
     onMutate: async (args: TArgs) => {
       const key = ["repo", repo, "issue", lens, args.number] as const;
@@ -359,9 +502,12 @@ export function useSetIssueConfidential(repo: string) {
   return useOptimisticIssueMutation(
     repo,
     "origin",
-    (args: { number: number; confidential: boolean }) =>
+    (args: IssueWriteVars["confidential"]) =>
       api.forgeGlIssueSetConfidential(repo, args.number, args.confidential),
     (issue, args) => ({ ...issue, confidential: args.confidential }),
+    [],
+    false,
+    issueWriteKey("confidential", repo),
   );
 }
 
@@ -371,9 +517,12 @@ export function useSetIssueDueDate(repo: string) {
   return useOptimisticIssueMutation(
     repo,
     "origin",
-    (args: { number: number; dueDate: string | null }) =>
+    (args: IssueWriteVars["due-date"]) =>
       api.forgeGlIssueSetDueDate(repo, args.number, args.dueDate),
     (issue, args) => ({ ...issue, dueDate: args.dueDate }),
+    [],
+    false,
+    issueWriteKey("due-date", repo),
   );
 }
 
@@ -423,9 +572,14 @@ function useTimeTrackingMutation(
     number: number;
     duration: string | null;
   }) => Promise<GitLabTimeStats>,
+  /** The issue rail's writes are keyed: its controls read their pending state
+   *  from the cache. The MR popover's stay unkeyed, since it reads `isPending`,
+   *  which a detach at a repo switch would idle. */
+  mutationKey: ReturnType<typeof issueWriteKey> | undefined,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey,
     // Mutation-level so the report survives the caller unmounting mid-flight (the
     // views re-key their rail per entity, and mutate-scoped callbacks stop firing
     // once the observer loses its listeners).
@@ -433,8 +587,7 @@ function useTimeTrackingMutation(
     mutationFn,
     // The repo is captured at mutate time and the seed reads it back from the
     // context, so the seed names the repo the write fired on whatever render it
-    // settles through. No mutation key — the time-tracking controls read
-    // `isPending`, which a detach would idle.
+    // settles through.
     onMutate: () => ({ repo }),
     onSuccess: (stats, args, ctx) => {
       // Equal on every current path, since the started-mutation snapshot keeps the
@@ -476,7 +629,9 @@ export function useSetIssueTimeEstimate(repo: string) {
     repo,
     issueTimeStatsKey,
     issueViewKey,
-    (args) => api.forgeGlIssueSetTimeEstimate(repo, args.number, args.duration),
+    (args: IssueWriteVars["time-estimate"]) =>
+      api.forgeGlIssueSetTimeEstimate(repo, args.number, args.duration),
+    issueWriteKey("time-estimate", repo),
   );
 }
 
@@ -485,19 +640,29 @@ export function useAddIssueSpentTime(repo: string) {
     repo,
     issueTimeStatsKey,
     issueViewKey,
-    (args) => api.forgeGlIssueAddSpentTime(repo, args.number, args.duration),
+    (args: IssueWriteVars["spent-time"]) =>
+      api.forgeGlIssueAddSpentTime(repo, args.number, args.duration),
+    issueWriteKey("spent-time", repo),
   );
 }
 
 export function useSetMrTimeEstimate(repo: string) {
-  return useTimeTrackingMutation(repo, mrTimeStatsKey, mrViewKey, (args) =>
-    api.forgeGlMrSetTimeEstimate(repo, args.number, args.duration),
+  return useTimeTrackingMutation(
+    repo,
+    mrTimeStatsKey,
+    mrViewKey,
+    (args) => api.forgeGlMrSetTimeEstimate(repo, args.number, args.duration),
+    undefined,
   );
 }
 
 export function useAddMrSpentTime(repo: string) {
-  return useTimeTrackingMutation(repo, mrTimeStatsKey, mrViewKey, (args) =>
-    api.forgeGlMrAddSpentTime(repo, args.number, args.duration),
+  return useTimeTrackingMutation(
+    repo,
+    mrTimeStatsKey,
+    mrViewKey,
+    (args) => api.forgeGlMrAddSpentTime(repo, args.number, args.duration),
+    undefined,
   );
 }
 
@@ -522,7 +687,8 @@ export function useGlIssueLinks(repo: string, number: number | null) {
 export function useLinkIssue(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { number: number; targetNumber: number }) =>
+    mutationKey: issueWriteKey("link", repo),
+    mutationFn: (args: IssueWriteVars["link"]) =>
       api.forgeGlIssueLink(repo, args.number, args.targetNumber),
     // Mutation-level: see useTimeTrackingMutation.
     onError: (e) => toastError(e),
@@ -542,7 +708,8 @@ export function useLinkIssue(repo: string) {
 export function useUnlinkIssue(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { number: number; linkId: string }) =>
+    mutationKey: issueWriteKey("unlink", repo),
+    mutationFn: (args: IssueWriteVars["unlink"]) =>
       api.forgeGlIssueUnlink(repo, args.number, args.linkId),
     // Mutation-level: see useTimeTrackingMutation.
     onError: (e) => toastError(e),
@@ -850,16 +1017,14 @@ export function useIssueRelations(
 /** The link target rides the VARIABLES, never this hook's scope: the create dialog
  *  fires it after an await, so a switch in that window would retarget the write —
  *  and node ids are global, so the parent would still resolve while `subNumber`
- *  picked the newly-live repo's unrelated issue and adopted it. */
+ *  picked the newly-live repo's unrelated issue and adopted it. The key carries
+ *  no repo for the same reason; {@link usePendingIssueWrites} reads it from the
+ *  variables. */
 export function useAddSubIssue() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      repo: string;
-      parentId: string;
-      subNumber: number;
-      lens: RemoteLens;
-    }) =>
+    mutationKey: [...ISSUE_WRITES_KEY, "add-sub-issue"],
+    mutationFn: (args: IssueWriteVars["add-sub-issue"]) =>
       api.ghIssueAddSubIssue(
         args.repo,
         args.parentId,
@@ -932,12 +1097,8 @@ export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
 export function useSetIssueDependency(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      number: number;
-      relation: IssueRelation;
-      target: number;
-      add: boolean;
-    }) =>
+    mutationKey: issueWriteKey("dependency", repo),
+    mutationFn: (args: IssueWriteVars["dependency"]) =>
       api.ghIssueSetDependency(
         repo,
         args.number,
@@ -961,7 +1122,10 @@ export function useSetIssueDependency(repo: string, lens: RemoteLens) {
 }
 
 export function useRemoveSubIssue(repo: string) {
-  return useRepoMutation(repo, (args: { parentId: string; subId: string }) =>
-    api.ghIssueRemoveSubIssue(repo, args.parentId, args.subId),
+  return useRepoMutation(
+    repo,
+    (args: IssueWriteVars["remove-sub-issue"]) =>
+      api.ghIssueRemoveSubIssue(repo, args.parentId, args.subId),
+    { identity: issueWriteKey("remove-sub-issue", repo) },
   );
 }

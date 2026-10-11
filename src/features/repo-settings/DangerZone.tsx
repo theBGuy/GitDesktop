@@ -40,6 +40,7 @@ import {
   useTransferRepo,
 } from "@/lib/git/queries";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import { refuseWhileOffline } from "@/lib/offline-writes";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
@@ -102,9 +103,10 @@ function DangerDialog({
   useSeedOnOpen(open, () => setTyped(""));
 
   const matches = typed.trim() === confirmPhrase;
+  // A running write outranks the offline hold, the ConfirmDialog contract.
   const confirmHeldReason =
-    heldReason ??
     (pending ? ACT_PENDING_REASON : undefined) ??
+    heldReason ??
     disabledReason ??
     (matches ? undefined : `Type ${confirmPhrase} to confirm`);
 
@@ -378,6 +380,7 @@ function RenameAction({
   // so the outcome would never reach the user. The sent name is recorded before
   // the await: the refetch can land the new name before the call resolves.
   async function handleRename() {
+    if (refuseWhileOffline()) return;
     const next = name.trim();
     setSentName(next);
     try {
@@ -439,6 +442,7 @@ function ArchiveAction({
   const nounCap = isGitLab ? "Project" : "Repository";
 
   async function handleArchive() {
+    if (refuseWhileOffline()) return;
     try {
       await setArchived.mutateAsync(!archived);
       toast.success(archived ? `${nounCap} unarchived` : `${nounCap} archived`);
@@ -617,6 +621,7 @@ function LeaveForkNetworkAction({
   };
 
   const handleRemoveFork = async () => {
+    if (refuseWhileOffline()) return;
     try {
       await removeFork.mutateAsync(undefined);
       toast.success("Fork relationship removed");
@@ -729,6 +734,7 @@ function VisibilityAction({
   const visibilities = isBitbucket ? BB_VISIBILITIES : VISIBILITIES;
 
   async function handleChangeVisibility() {
+    if (refuseWhileOffline()) return;
     try {
       await setVisibility.mutateAsync(target);
       toast.success(copy.toast(target));
@@ -815,6 +821,7 @@ function TransferAction({
   const copy = DANGER_COPY[provider].transfer;
 
   async function handleTransfer() {
+    if (refuseWhileOffline()) return;
     try {
       await transfer.mutateAsync({ newOwner: newOwner.trim(), newName: null });
       toast.success(copy.toast);
@@ -907,6 +914,7 @@ function DeleteAction({
   const noun = isGitLab ? "project" : "repository";
 
   async function handleDelete() {
+    if (refuseWhileOffline()) return;
     try {
       await del.mutateAsync(undefined);
       toast.success(copy.toast);

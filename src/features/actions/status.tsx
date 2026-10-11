@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ForgeProvider } from "@/lib/git/types";
 import { isRunActive } from "@/lib/github/actions";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** Whether a completed conclusion counts as a failure (drives "Re-run failed"). */
@@ -86,6 +87,30 @@ export function rerunOffers(
     offers.push({ kind: "failed", label: RERUN_LABELS.failed });
   }
   return offers;
+}
+
+/** GitHub re-runs a workflow run for 30 days after its creation (GitHub Actions
+ *  docs), measured from the run's creation, not its latest attempt. */
+const GITHUB_RERUN_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Why a run's re-runs are held for age, or undefined while the forge still takes
+ * them. `anchor` is the run's creation time, or any time the run is known to
+ * predate (a check's start); an absent or unparseable anchor never holds. Only
+ * a settled GitHub provider holds: the pipeline forges' windows are unverified,
+ * and a pending probe may still resolve to one of them. `now` is the shared
+ * ticker's.
+ */
+export function rerunWindowReason(
+  provider: ForgeProvider | null | undefined,
+  anchor: string | undefined,
+  now: number,
+): string | undefined {
+  if (provider !== "github" || !anchor || !parseableDate(anchor))
+    return undefined;
+  return now - new Date(anchor).getTime() > GITHUB_RERUN_WINDOW_MS
+    ? "GitHub can't re-run runs older than 30 days"
+    : undefined;
 }
 
 /** The single re-run the PR checks rollup offers when failed or cancelled runs

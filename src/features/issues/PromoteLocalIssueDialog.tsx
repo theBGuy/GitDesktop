@@ -29,7 +29,11 @@ import {
   useJiraLink,
   useJiraPermissions,
 } from "@/lib/jira/queries";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -43,10 +47,12 @@ const JIRA_VIEW_LABEL = "View in Jira";
 
 /**
  * Publishes a local issue to a real tracker — the repo's forge (GitHub or
- * GitLab) or the linked Jira project — opening a real issue with the same
- * title/description, **re-posting its comments** (so nothing is lost), then
- * closing the local issue with a link to its successor. When both destinations
- * are available the user picks one; when only one is, that's the whole flow.
+ * GitLab) or the linked Jira project. It closes the local issue FIRST, then
+ * opens a real issue with the same title/description, links the local issue to
+ * its successor and **re-posts its comments** (so nothing is lost). Closing
+ * first means a dropped connection can't leave both copies open; a create that
+ * fails reopens it. When both destinations are available the user picks one;
+ * when only one is, that's the whole flow.
  * Deliberately fires no automations — the local issue's creation was the trigger
  * point, not this.
  */
@@ -119,11 +125,31 @@ export function PromoteLocalIssueDialog({
     });
   }, [canPublishForge, canPublishJira]);
 
-  const [pending, setPending] = useState(false);
+  // The destination of the promote in flight, so its hold reason can't follow a
+  // force-switched toggle.
+  const [pendingTo, setPendingTo] = useState<Destination | null>(null);
+  const pending = pendingTo !== null;
   // The forge publish holds offline rather than park: a parked create keeps
-  // `pending` set, locking Cancel until reconnect. The Jira arm is left as is.
+  // `pending` set, locking Cancel until reconnect. The Jira arm isn't held, so
+  // pressed offline it parks with the local issue already closed; the reason
+  // below is how its controls say so while the dialog stays up.
   const offlineHold = useOfflineHold();
   const forgeHold = destination === "forge" ? offlineHold : undefined;
+  const destinationLabel: Record<Destination, string> = {
+    forge: remoteLabel,
+    jira: "Jira",
+  };
+  const createPaused: Record<Destination, boolean> = {
+    forge: createIssue.isPaused,
+    jira: jiraCreate.isPaused,
+  };
+  const pendingReason =
+    pendingTo === null
+      ? undefined
+      : pendingWriteReason(
+          createPaused[pendingTo],
+          `Creating the ${destinationLabel[pendingTo]} issue…`,
+        );
 
   const carried = issue.comments.filter((c) => c.body.trim());
 
@@ -139,7 +165,7 @@ export function PromoteLocalIssueDialog({
     );
   }
 
-  const targetLabel = destination === "jira" ? "Jira" : remoteLabel;
+  const targetLabel = destinationLabel[destination];
   // The auto-resolved Jira type; absent until types load. Its absence disables
   // the Jira submit so we never fire a create with no type.
   const jiraTypeId = creatableTypes[0]?.id ?? null;
@@ -155,12 +181,21 @@ export function PromoteLocalIssueDialog({
     creatableTypes.length === 0;
 
   async function promoteForge() {
-    // Once the remote issue exists, later steps (comment carry-over, closing the
-    // local issue) failing must NOT re-arm the submit — retrying would open a
+    // The host offers Publish only on an open issue; this is what a failed
+    // create restores, and `closedAt` stays null until the local close landed.
+    const prior = { status: issue.status, closedAt: issue.closedAt };
+    let closedAt: string | null = null;
+    // Once the remote issue exists, later steps (the back-link, comment
+    // carry-over) failing must NOT re-arm the submit — retrying would open a
     // duplicate. Track it so the catch can disclose instead of re-running.
     let created: { number: number; url: string } | null = null;
-    let failedStep = "finishing up";
+    let failedStep = "linking the local issue";
     try {
+      // Closed before the create: the local close lands even offline, so a
+      // connection lost mid-flow can't leave this issue open beside its successor.
+      const stamp = new Date().toISOString();
+      await closeLocal(stamp);
+      closedAt = stamp;
       const { number, url } = await createIssue.mutateAsync({
         title: issue.title,
         body: issue.body,
@@ -171,14 +206,12 @@ export function PromoteLocalIssueDialog({
         type: null,
       });
       created = { number, url };
+      // The back-link before the carry, so a carry failure still leaves it.
+      await linkLocal(`Promoted to ${remoteLabel} issue [#${number}](${url}).`);
       failedStep = "carrying over comments";
       for (const c of carried) {
         await forgeIssueComment(repoPath, number, c.body, "origin");
       }
-      failedStep = "closing the local issue";
-      await closeLocalWithBackLink(
-        `Promoted to ${remoteLabel} issue [#${number}](${url}).`,
-      );
       // One read for both halves: the toast is unconditional and names the repo
       // when it isn't the one on screen, while the navigation below only lands
       // while this repo and this local issue still are — landed elsewhere it
@@ -201,15 +234,16 @@ export function PromoteLocalIssueDialog({
       }
     } catch (e) {
       if (created === null) {
-        // The create itself failed — retrying is correct, keep the dialog open.
-        toastError(e);
+        // Nothing remote exists, so retrying is correct: keep the dialog open.
+        await failBeforeCreate(e, closedAt, prior, `${remoteLabel} issue`);
         return;
       }
-      // The remote issue already exists. Close the dialog (leaving it open on this
-      // issue is a duplicate factory — the local issue wasn't closed, so it still
-      // reads as promotable) and disclose what was created and what failed. The
-      // close names its subject as well as its repo, while the toast names only
-      // the REPO, since that is the part the user can't see for themselves.
+      // The remote issue already exists and the local issue is already closed.
+      // Close the dialog anyway (a retry from it would open a duplicate) and
+      // disclose what was created and what failed; a missing back-link or comment
+      // is left for the user to reconcile. The close names its subject as well as
+      // its repo, while the toast names only the REPO, since that is the part the
+      // user can't see for themselves.
       const { number, url } = created;
       const { live, away } = landedIn(repoPath);
       if (stillOnThisIssue(live)) onOpenChange(false);
@@ -227,21 +261,28 @@ export function PromoteLocalIssueDialog({
     // Same retry-safety invariant as the forge path, tracked independently per
     // destination: once the Jira issue exists, a failure in a later step must
     // disclose rather than re-run (a retry would create a duplicate).
+    const prior = { status: issue.status, closedAt: issue.closedAt };
+    let closedAt: string | null = null;
     let created: { key: string; url: string } | null = null;
-    let failedStep = "finishing up";
+    let failedStep = "linking the local issue";
     try {
+      // Closed first, as on the forge path. This arm isn't held offline, so a
+      // create pressed offline parks with the local issue already closed and
+      // finishes on reconnect.
+      const stamp = new Date().toISOString();
+      await closeLocal(stamp);
+      closedAt = stamp;
       const { key, url } = await jiraCreate.mutateAsync({
         issueTypeId: jiraTypeId,
         summary: issue.title,
         descriptionMd: issue.body.trim() || undefined,
       });
       created = { key, url };
+      await linkLocal(`Promoted to Jira issue [${key}](${url}).`);
       failedStep = "carrying over comments";
       for (const c of carried) {
         await jiraIssueComment(link.siteHost, key, c.body);
       }
-      failedStep = "closing the local issue";
-      await closeLocalWithBackLink(`Promoted to Jira issue [${key}](${url}).`);
       // Same one read as the forge path: the toast names its repo either way, the
       // selection and close only land while that repo and this local issue are
       // the ones on screen. The pinned `useJiraCreateIssue` means this
@@ -258,7 +299,7 @@ export function PromoteLocalIssueDialog({
       }
     } catch (e) {
       if (created === null) {
-        toastError(e);
+        await failBeforeCreate(e, closedAt, prior, "Jira issue");
         return;
       }
       // Same subject-and-repo close as the forge path.
@@ -274,20 +315,26 @@ export function PromoteLocalIssueDialog({
     }
   }
 
-  // Provider-agnostic final step: close the local issue with a back-link comment
-  // to its successor. Shared by both destinations, unchanged from the original.
-  async function closeLocalWithBackLink(backLink: string) {
-    await update.mutateAsync({
+  // The provider-agnostic local writes both destinations make, one per step.
+  // Each is a functional update, so a concurrent MCP edit to the same record
+  // survives it.
+  function closeLocal(closedAt: string) {
+    return update.mutateAsync({
+      id: issue.id,
+      mutate: (cur) => ({ ...cur, status: "closed", closedAt }),
+    });
+  }
+
+  function linkLocal(body: string) {
+    return update.mutateAsync({
       id: issue.id,
       mutate: (cur) => ({
         ...cur,
-        status: "closed",
-        closedAt: new Date().toISOString(),
         comments: [
           ...cur.comments,
           {
             id: crypto.randomUUID(),
-            body: backLink,
+            body,
             createdAt: new Date().toISOString(),
           },
         ],
@@ -295,14 +342,49 @@ export function PromoteLocalIssueDialog({
     });
   }
 
+  /** The failure path of a create that produced nothing remote: undoes
+   *  {@link closeLocal} BEFORE toasting, so the retry-capable dialog sits over a
+   *  record that reads open again. The undo touches only status/closedAt, and
+   *  only while the record still carries this flow's close: anything else
+   *  changed it since, and that change wins. A null `closedAt` means the close
+   *  itself failed and no create was attempted. */
+  async function failBeforeCreate(
+    e: unknown,
+    closedAt: string | null,
+    prior: Pick<LocalIssue, "status" | "closedAt">,
+    noun: string,
+  ) {
+    if (closedAt !== null) {
+      try {
+        await update.mutateAsync({
+          id: issue.id,
+          mutate: (cur) =>
+            cur.status === "closed" && cur.closedAt === closedAt
+              ? { ...cur, status: prior.status, closedAt: prior.closedAt }
+              : cur,
+        });
+      } catch (reopenError) {
+        toastComposedError({
+          title: `Couldn't create the ${noun}: ${presentError(e).summary}`,
+          description:
+            "The local issue couldn't be reopened — reopen it from its view.",
+          errors: [e, reopenError],
+          headings: [`Creating the ${noun}`, "Reopening the local issue"],
+        });
+        return;
+      }
+    }
+    toastError(e);
+  }
+
   async function promote() {
     if (destination === "forge" && refuseWhileOffline()) return;
-    setPending(true);
+    setPendingTo(destination);
     try {
       if (destination === "jira") await promoteJira();
       else await promoteForge();
     } finally {
-      setPending(false);
+      setPendingTo(null);
     }
   }
 
@@ -318,8 +400,8 @@ export function PromoteLocalIssueDialog({
                   carried.length === 1 ? "" : "s"
                 }`
               : ""}
-            . The local issue is then closed with a link to its replacement.
-            Free-form local labels aren't carried over.
+            . The local issue is closed first, then linked to its replacement
+            once it's created. Free-form local labels aren't carried over.
           </DialogDescription>
         </DialogHeader>
 
@@ -332,10 +414,11 @@ export function PromoteLocalIssueDialog({
                 matching the app's existing segmented-tab idiom (each is its own
                 tab stop; Enter/Space toggles). */}
             <div className="flex gap-2" aria-label="Publish destination">
-              <Button
+              <DisabledReasonButton
                 variant={destination === "forge" ? "secondary" : "outline"}
+                wrapperClassName="flex-1"
                 className={cn(
-                  "flex-1",
+                  "w-full",
                   destination === "forge" && "font-medium",
                 )}
                 aria-pressed={destination === "forge"}
@@ -344,13 +427,15 @@ export function PromoteLocalIssueDialog({
                   setDestination("forge");
                 }}
                 disabled={pending}
+                reason={pendingReason}
               >
                 {remoteLabel}
-              </Button>
-              <Button
+              </DisabledReasonButton>
+              <DisabledReasonButton
                 variant={destination === "jira" ? "secondary" : "outline"}
+                wrapperClassName="flex-1"
                 className={cn(
-                  "flex-1",
+                  "w-full",
                   destination === "jira" && "font-medium",
                 )}
                 aria-pressed={destination === "jira"}
@@ -359,10 +444,11 @@ export function PromoteLocalIssueDialog({
                   setDestination("jira");
                 }}
                 disabled={pending}
+                reason={pendingReason}
               >
                 <KanbanIcon data-icon="inline-start" />
                 Jira
-              </Button>
+              </DisabledReasonButton>
             </div>
           </div>
         )}
@@ -394,17 +480,18 @@ export function PromoteLocalIssueDialog({
         )}
 
         <DialogFooter>
-          <Button
+          <DisabledReasonButton
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={pending}
+            reason={pendingReason}
           >
             Cancel
-          </Button>
+          </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
             disabled={pending || !jiraReady || !!forgeHold}
-            reason={pending ? undefined : forgeHold}
+            reason={pending ? pendingReason : forgeHold}
           >
             {pending && <Spinner data-icon="inline-start" />}
             Publish to {targetLabel}

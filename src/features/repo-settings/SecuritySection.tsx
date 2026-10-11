@@ -33,6 +33,11 @@ import {
   useSetDependabot,
 } from "@/lib/git/queries";
 import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
+import {
+  NO_CHANGES_REASON,
+  NO_CHANGES_TO_DISCARD_REASON,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
@@ -41,11 +46,8 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
-  NO_CHANGES_REASON,
-  NO_CHANGES_TO_DISCARD_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 import {
@@ -512,7 +514,7 @@ function SecurityForm({
   const discardHeldReason = (() => {
     switch (true) {
       case apply.isPending:
-        return SAVING_REASON;
+        return SAVING_LAST_CHANGE_REASON;
       case !dirty:
         return NO_CHANGES_TO_DISCARD_REASON;
       default:

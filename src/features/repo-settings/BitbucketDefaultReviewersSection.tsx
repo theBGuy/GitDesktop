@@ -15,6 +15,7 @@ import {
 } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { SAVING_LAST_CHANGE_REASON } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
@@ -23,7 +24,6 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -219,7 +219,7 @@ function AddReviewerPopover({
   const heldReason = !online
     ? OFFLINE_WRITE_REASON
     : pending
-      ? SAVING_REASON
+      ? SAVING_LAST_CHANGE_REASON
       : undefined;
   // A pick made offline would park silently, so a picker open when the
   // connection drops closes with its trigger held. Reset, not derived into

@@ -6,7 +6,11 @@ import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
-import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
+import {
+  useEditPrLabels,
+  usePendingLabelEdit,
+  useRepoLabels,
+} from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import {
@@ -64,6 +68,9 @@ export function LabelsPopover({
 }) {
   const repoLabels = useRepoLabels(repoPath, enabled, lens);
   const editLabels = useEditPrLabels(repoPath, lens);
+  // The cache, not `editLabels`: a remount on this entity would read its own fresh
+  // observer as idle while an earlier mount's edit is still saving.
+  const labelEdit = usePendingLabelEdit(repoPath, target, number);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
   const portalContainer = usePanelPortalContainer();
@@ -76,11 +83,8 @@ export function LabelsPopover({
       // the labels optimistically, so a draft opened now would seed from the
       // pre-write labels. The hook's `onSettled` returns its invalidation, so
       // this hold lasts until the invalidated reads have refetched.
-      case editLabels.isPending:
-        return pendingWriteReason(
-          editLabels.isPaused,
-          SAVING_LAST_CHANGE_REASON,
-        );
+      case labelEdit.pending:
+        return pendingWriteReason(labelEdit.paused, SAVING_LAST_CHANGE_REASON);
       default:
         return undefined;
     }
@@ -153,7 +157,7 @@ export function LabelsPopover({
       >
         {/* size-3 explicitly: the Button's own icon rule skips a sized
             element, and a 16px swap would widen the label column mid-write. */}
-        {editLabels.isPending && !editLabels.isPaused ? (
+        {labelEdit.pending && !labelEdit.paused ? (
           <Spinner className="size-3" data-icon="inline-start" />
         ) : (
           <TagIcon data-icon="inline-start" />

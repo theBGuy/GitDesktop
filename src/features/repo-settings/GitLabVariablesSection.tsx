@@ -15,15 +15,17 @@ import {
   useGlVariables,
 } from "@/lib/git/queries";
 import type { GitLabVariable } from "@/lib/git/types";
+import {
+  NO_CHANGES_REASON,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
   ACT_PENDING_REASON,
   InlineConfirm,
-  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -73,7 +75,7 @@ export function GitLabVariablesSection({
       case setVariable.isPending:
         return setVariable.variables?.create
           ? ACT_PENDING_REASON
-          : SAVING_REASON;
+          : SAVING_LAST_CHANGE_REASON;
       case !key.trim():
         return "Enter a variable key";
       case keyWarning !== null:
@@ -311,7 +313,7 @@ function VariableRow({
           disabled={!dirty || saving || writeHeld !== undefined}
           reason={
             writeHeld ??
-            (saving ? SAVING_REASON : undefined) ??
+            (saving ? SAVING_LAST_CHANGE_REASON : undefined) ??
             (dirty ? undefined : NO_CHANGES_REASON)
           }
           onClick={() => onSave(draft)}

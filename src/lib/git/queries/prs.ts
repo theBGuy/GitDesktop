@@ -897,6 +897,9 @@ export function useSubmitReview(repo: string, lens: RemoteLens) {
       summary?: string;
       comments: DraftCommentIn[];
     }) => api.forgePrReviewSubmit(repo, args, lens),
+    // The PR rides the variables, so the dialog reopened on it after a switch
+    // still finds this submit in the cache and holds Submit.
+    { identity: prWriteKey("submit-review", repo) },
   );
 }
 

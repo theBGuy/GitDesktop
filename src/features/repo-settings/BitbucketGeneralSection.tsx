@@ -27,6 +27,7 @@ import type {
   Branch,
 } from "@/lib/git/types";
 import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
+import { NO_CHANGES_REASON } from "@/lib/offline-writes";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
@@ -45,7 +46,6 @@ import { DescriptionField } from "./DescriptionField";
 import {
   ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
-  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";

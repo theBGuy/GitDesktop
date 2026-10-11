@@ -3,7 +3,6 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -19,7 +18,11 @@ import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
-import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import {
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
@@ -38,11 +41,12 @@ import { toastComposedError, toastError } from "@/lib/toast";
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
- * pushes the head branch, opens a real PR/MR with the same title/description,
- * **re-posts its comments** (so nothing is lost), then closes the local PR with
- * a link to its successor. Fires no automations — the local PR's creation was
- * the pr-open trigger point (see CreateLocalPrDialog), so promoting it would
- * double-run them.
+ * closes the local PR FIRST, then pushes the head branch, opens a real PR/MR with
+ * the same title/description, links the local PR to its successor and
+ * **re-posts its comments** (so nothing is lost). Closing first means a dropped
+ * connection can't leave both copies open; a create that fails reopens it. Fires
+ * no automations — the local PR's creation was the pr-open trigger point (see
+ * CreateLocalPrDialog), so promoting it would double-run them.
  */
 export function PromoteLocalPrDialog({
   repoPath,
@@ -92,6 +96,12 @@ export function PromoteLocalPrDialog({
   // Publish pushes and opens a PR, so it holds offline rather than park — a
   // parked create would keep `pending` set, locking Cancel until reconnect.
   const offlineHold = useOfflineHold();
+  // Why Cancel holds during this dialog's own run: a create that parks anyway
+  // (the connection dropped after the press) says it is waiting, not running.
+  const pendingReason = pendingWriteReason(
+    createPr.isPaused,
+    `Creating the ${prNoun}…`,
+  );
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
@@ -104,6 +114,48 @@ export function PromoteLocalPrDialog({
   function stillOnThisPr(live: boolean): boolean {
     const { selectedPr } = useUiStore.getState();
     return live && selectedPr?.kind === "local" && selectedPr.id === pr.id;
+  }
+
+  // The local writes promotion makes, one per step. Each is a functional update,
+  // so a concurrent MCP edit to the same record survives it.
+  function closeLocal(closedAt: string) {
+    return update.mutateAsync({
+      id: pr.id,
+      mutate: (cur) => ({ ...cur, status: "closed", closedAt }),
+    });
+  }
+
+  function linkLocal(body: string) {
+    return update.mutateAsync({
+      id: pr.id,
+      mutate: (cur) => ({
+        ...cur,
+        comments: [
+          ...cur.comments,
+          {
+            id: crypto.randomUUID(),
+            body,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+  }
+
+  /** Undoes {@link closeLocal} after a create that produced nothing remote. It
+   *  touches only status/closedAt, and only while the record still carries this
+   *  flow's close: anything else changed it since, and that change wins. */
+  function reopenLocal(
+    closedAt: string,
+    prior: Pick<LocalPr, "status" | "closedAt">,
+  ) {
+    return update.mutateAsync({
+      id: pr.id,
+      mutate: (cur) =>
+        cur.status === "closed" && cur.closedAt === closedAt
+          ? { ...cur, status: prior.status, closedAt: prior.closedAt }
+          : cur,
+    });
   }
 
   async function promote() {
@@ -127,12 +179,21 @@ export function PromoteLocalPrDialog({
     // "release", not "error": a failed promote produced no draft, so it frees
     // the lane without latching over a real create failure for this branch.
     let outcome: "success" | "release" = "release";
-    // Once the remote PR exists, later steps (comment carry-over, closing the
-    // local PR) failing must NOT re-arm the submit — retrying would open a
-    // duplicate. Track it so the catch can disclose instead of re-running.
+    // The host offers Publish only on an open PR; this is what a failed create
+    // restores, and `closedAt` stays null until the local close has landed.
+    const prior = { status: pr.status, closedAt: pr.closedAt };
+    let closedAt: string | null = null;
+    // Once the remote PR exists, later steps (the back-link, comment carry-over)
+    // failing must NOT re-arm the submit — retrying would open a duplicate.
+    // Track it so the catch can disclose instead of re-running.
     let created: { number: number; url: string } | null = null;
-    let failedStep = "finishing up";
+    let failedStep = "linking the local pull request";
     try {
+      // Closed before the create: the local close lands even offline, so a
+      // connection lost mid-flow can't leave this PR open beside its successor.
+      const stamp = new Date().toISOString();
+      await closeLocal(stamp);
+      closedAt = stamp;
       const { number, url } = await createPr.mutateAsync({
         base: pr.base,
         head: pr.head,
@@ -146,6 +207,10 @@ export function PromoteLocalPrDialog({
       // run long, and the strip would sit on "creating" with the number already
       // known. The watcher itself arms in the finally, once those steps are done.
       markPrCreated(repoPath, pr.head, { number, url });
+      // The back-link before the carry, so a carry failure still leaves it.
+      await linkLocal(
+        `Promoted to ${remoteLabel} ${prNoun} [#${number}](${url}).`,
+      );
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
       setPosting(true);
@@ -156,22 +221,6 @@ export function PromoteLocalPrDialog({
       } finally {
         setPosting(false);
       }
-      failedStep = "closing the local pull request";
-      await update.mutateAsync({
-        id: pr.id,
-        mutate: (cur) => ({
-          ...cur,
-          status: "closed",
-          comments: [
-            ...cur.comments,
-            {
-              id: crypto.randomUUID(),
-              body: `Promoted to ${remoteLabel} ${prNoun} [#${number}](${url}).`,
-              createdAt: new Date().toISOString(),
-            },
-          ],
-        }),
-      });
       // One read for both halves: the toast is unconditional and names the repo
       // when it isn't the one on screen, while the navigation below only lands
       // while this repo and this local PR still are. That navigation is the lens
@@ -195,8 +244,29 @@ export function PromoteLocalPrDialog({
       }
     } catch (e) {
       if (created === null) {
-        // The create itself failed — retrying is correct, keep the dialog open.
-        toastError(e);
+        // Nothing remote exists, so retrying is correct: keep the dialog open.
+        // A failed local close attempted no create, so there's nothing to undo.
+        if (closedAt === null) {
+          toastError(e);
+          return;
+        }
+        // Reopened BEFORE the toast, so the retry-capable dialog sits over a
+        // record that reads open again.
+        let reopenError: unknown = null;
+        try {
+          await reopenLocal(closedAt, prior);
+        } catch (err) {
+          reopenError = err;
+        }
+        if (reopenError === null) toastError(e);
+        else
+          toastComposedError({
+            title: `Couldn't create the ${prNoun}: ${presentError(e).summary}`,
+            description:
+              "The local PR couldn't be reopened — reopen it from its view.",
+            errors: [e, reopenError],
+            headings: [`Creating the ${prNoun}`, "Reopening the local PR"],
+          });
         // The toast fades in seconds; this outlives it for a user who moved on.
         notifyPrCreateFailed({
           repoPath,
@@ -206,13 +276,12 @@ export function PromoteLocalPrDialog({
         });
         return;
       }
-      // The remote PR already exists. Close the dialog (leaving it open on this
-      // pull request is a duplicate factory — the local PR wasn't closed, so it
-      // still reads as promotable) and disclose what was created and what
-      // failed. The local PR is left untouched so the user can reconcile
-      // manually. The close names its subject as well as its repo, while the
-      // toast names only the REPO, since that is the part the user can't see
-      // for themselves.
+      // The remote PR already exists and the local PR is already closed. Close
+      // the dialog anyway (a retry from it would open a duplicate) and disclose
+      // what was created and what failed; a missing back-link or comment is left
+      // for the user to reconcile. The close names its subject as well as its
+      // repo, while the toast names only the REPO, since that is the part the
+      // user can't see for themselves.
       const { number, url } = created;
       const { live, away } = landedIn(repoPath);
       if (stillOnThisPr(live)) onOpenChange(false);
@@ -257,7 +326,8 @@ export function PromoteLocalPrDialog({
                   carried.length === 1 ? "" : "s"
                 }`
               : ""}
-            . The local PR is then closed with a link to its replacement.
+            . The local PR is closed first, then linked to its replacement once
+            it's created.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
@@ -273,13 +343,14 @@ export function PromoteLocalPrDialog({
             />
             Create as draft
           </label>
-          <Button
+          <DisabledReasonButton
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={pending}
+            reason={pendingReason}
           >
             Cancel
-          </Button>
+          </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
             disabled={pending || creatingElsewhere || !!offlineHold}

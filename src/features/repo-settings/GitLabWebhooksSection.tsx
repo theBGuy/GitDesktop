@@ -28,6 +28,7 @@ import {
   useGlUpdateHook,
 } from "@/lib/git/queries";
 import type { GitLabHook, GitLabHookDelivery } from "@/lib/git/types";
+import { SAVING_LAST_CHANGE_REASON } from "@/lib/offline-writes";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
@@ -40,7 +41,6 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteListSection,
   rowFormSwapKey,
-  SAVING_REASON,
   type SwapFocusRef,
   useConfirmSwapFocus,
 } from "./parts";
@@ -110,7 +110,7 @@ export function GitLabWebhooksSection({
       case testHook.isPending && testHook.variables?.hookId === hookId:
         return ACT_PENDING_REASON;
       case testHook.isPending:
-        return SAVING_REASON;
+        return SAVING_LAST_CHANGE_REASON;
       default:
         return undefined;
     }
@@ -462,7 +462,7 @@ function HookDeliveries({
       case resend.isPending && resend.variables === eventId:
         return ACT_PENDING_REASON;
       case resend.isPending:
-        return SAVING_REASON;
+        return SAVING_LAST_CHANGE_REASON;
       default:
         return undefined;
     }

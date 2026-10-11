@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -14,10 +13,15 @@ import {
 } from "@/components/ui/dialog";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import type { ReviewVerdict } from "@/lib/git/api";
-import { useSubmitReview } from "@/lib/git/queries";
+import {
+  isPendingFor,
+  usePendingPrWrites,
+  useSubmitReview,
+} from "@/lib/git/queries";
 import type { DraftCommentIn, RemoteLens } from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
+  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -134,7 +138,26 @@ export function SubmitReviewDialog({
   // Request changes must say why — GitHub/GitLab reject an empty-body one.
   const summaryRequired = effectiveVerdict === "request_changes";
   const summaryMissing = summaryRequired && summary.trim() === "";
+  // Locks the dialog open, so it reads this mount's own writes: a submit an
+  // earlier mount started (before a PR switch) must not trap a reopened dialog.
   const pending = submitReview.isPending || clearDrafts.isPending;
+  // Holds Submit, so it reads the cache: the parent remounts this dialog per PR,
+  // and a fresh observer would re-arm Submit beside a submit still posting. The
+  // variables carry no lens, so the same number in the other lens holds too.
+  const pendingWrites = usePendingPrWrites(repoPath);
+  const submitInFlight = isPendingFor(
+    pendingWrites,
+    "submit-review",
+    number,
+    lens,
+  );
+  const submitPaused = isPendingFor(
+    pendingWrites.filter((w) => w.paused),
+    "submit-review",
+    number,
+    lens,
+  );
+  const submitHeld = pending || submitInFlight;
   // Submit holds offline rather than park: a parked post keeps `pending` set,
   // which locks this dialog open until the connection returns.
   const offlineHold = useOfflineHold();
@@ -160,7 +183,7 @@ export function SubmitReviewDialog({
   }
 
   async function submit() {
-    if (summaryMissing || pending || refuseWhileOffline()) return;
+    if (summaryMissing || submitHeld || refuseWhileOffline()) return;
     setError(null);
     const comments: DraftCommentIn[] = draftList.map((d) => ({
       path: d.path,
@@ -266,21 +289,29 @@ export function SubmitReviewDialog({
         </div>
 
         <DialogFooter>
-          <Button
+          <DisabledReasonButton
             variant="outline"
             disabled={pending}
+            // Paused from the same observer as the lock it explains.
+            reason={
+              pending
+                ? pendingWriteReason(submitReview.isPaused, ACT_PENDING_REASON)
+                : undefined
+            }
             onClick={() => handleOpenChange(false)}
           >
             Cancel
-          </Button>
+          </DisabledReasonButton>
           <DisabledReasonButton
-            disabled={summaryMissing || pending || !!offlineHold}
+            disabled={summaryMissing || submitHeld || !!offlineHold}
             // The running submit outranks the offline hold; giving it a reason
             // keeps the button aria-disabled through either flip.
             reason={(() => {
               switch (true) {
                 case summaryMissing:
                   return "A summary is required to request changes.";
+                case submitInFlight:
+                  return pendingWriteReason(submitPaused, ACT_PENDING_REASON);
                 case pending:
                   return ACT_PENDING_REASON;
                 default:

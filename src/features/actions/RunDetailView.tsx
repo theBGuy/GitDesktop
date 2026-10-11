@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
-import { RelativeTime } from "@/components/relative-time";
+import { RelativeTime, useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -35,8 +35,12 @@ import { APPROVE_RUN_CONFIRM } from "@/features/pulls/ChecksRollup";
 import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
+  pendingJobState,
+  pendingRunState,
+  rerunFamilyState,
   useApproveWorkflowRun,
   useForgeStatus,
+  usePendingRunWrites,
   useRepoWriteAccess,
   writeAccessReason,
 } from "@/lib/git/queries";
@@ -76,6 +80,7 @@ import {
   RERUN_TITLES,
   rerunOffers,
   rerunSuccessMessage,
+  rerunWindowReason,
   StatusIcon,
   statusLabel,
 } from "./status";
@@ -547,21 +552,31 @@ export function RunDetailView({
   // forge's mid-run refusal. Play, cancel and approve are different operations
   // and keep their own. The running control holds with its own in-flight reason,
   // never none: a disabled control without a reason drops focus.
-  const rerunFamilyBusy = rerun.isPending || rerunJob.isPending;
-  const rerunFamilyPaused = rerun.isPaused || rerunJob.isPaused;
+  // Read from the mutation cache by this run's id, so a write started on another
+  // surface, or by an earlier mount of this view, holds here too. Its `paused`
+  // explains the same entry its presence holds by.
+  const runWrites = usePendingRunWrites(repoPath);
+  const runState = pendingRunState(runWrites, runId);
+  const rerunFamily = rerunFamilyState(runState);
+  const rerunFamilyBusy = rerunFamily !== undefined;
+  const cancelPending = runState?.cancel;
+  // GitHub refuses a re-run once the run is past its window; the run-level and
+  // per-job offers stay up, held with the reason.
+  const now = useRelativeNow();
+  const rerunAgedOut = rerunWindowReason(provider, run?.createdAt, now);
   const rerunHeldReason = (() => {
     switch (true) {
       case writeReason !== undefined:
         return writeReason;
-      case rerunFamilyBusy:
+      case rerunFamily !== undefined:
         return pendingWriteReason(
-          rerunFamilyPaused,
+          rerunFamily.paused,
           "A re-run is already in flight…",
         );
       case runLatched:
         return "Re-run already started — waiting for the new attempt…";
       default:
-        return undefined;
+        return rerunAgedOut;
     }
   })();
   // Which re-runs this provider offers for this run, and whether Cancel applies
@@ -583,16 +598,19 @@ export function RunDetailView({
   // Approving starts the contributor's code, so it holds offline as its prompt
   // does; cancel and the re-runs may park, and say so on their controls.
   const offlineHold = useOfflineHold();
+  // From the cache like cancel's, so an approval started on the PR checks or by
+  // an earlier mount of this view holds Approve here too.
+  const approvePending = runState?.approve;
   const canApprove =
     tabActive &&
     approvalPending &&
     !writeBlocked &&
-    !approveRun.isPending &&
+    approvePending === undefined &&
     !offlineHold;
   const approveHeldReason =
     writeReason ??
-    (approveRun.isPending
-      ? pendingWriteReason(approveRun.isPaused, ACT_PENDING_REASON)
+    (approvePending
+      ? pendingWriteReason(approvePending.paused, ACT_PENDING_REASON)
       : offlineHold);
 
   // Awaited, not per-call callbacks: this view is keyed per run and unmounts the
@@ -657,7 +675,7 @@ export function RunDetailView({
     const fromButton = document.activeElement === buttonEl;
     try {
       // No lens: this is the repo-wide CI surface, like the run-level re-run.
-      await rerunJob.mutateAsync({ jobId: job.id });
+      await rerunJob.mutateAsync({ jobId: job.id, runId });
       toast.success(offer.toast);
       setRecentlyRerunJobs((prev) =>
         new Map(prev).set(job.id, job.completedAt),
@@ -694,12 +712,17 @@ export function RunDetailView({
       canRerun &&
       rerunChoices.length > 0 &&
       !rerunFamilyBusy &&
-      !runLatched,
+      !runLatched &&
+      rerunAgedOut === undefined,
   );
   useHotkeyAction(
     "cancel-run",
     () => void doCancel(),
-    tabActive && !writeBlocked && canCancel && showCancel && !cancel.isPending,
+    tabActive &&
+      !writeBlocked &&
+      canCancel &&
+      showCancel &&
+      cancelPending === undefined,
   );
 
   // A manual GitLab job arrives as completed + action_required; with the flag
@@ -819,16 +842,19 @@ export function RunDetailView({
                 <DisabledReasonButton
                   variant="outline"
                   size="sm"
-                  disabled={cancel.isPending || writeBlocked}
+                  disabled={cancelPending !== undefined || writeBlocked}
                   reason={
                     writeReason ??
-                    (cancel.isPending
-                      ? pendingWriteReason(cancel.isPaused, ACT_PENDING_REASON)
+                    (cancelPending
+                      ? pendingWriteReason(
+                          cancelPending.paused,
+                          ACT_PENDING_REASON,
+                        )
                       : undefined)
                   }
                   onClick={doCancel}
                 >
-                  {cancel.isPending && !cancel.isPaused ? (
+                  {cancelPending && !cancelPending.paused ? (
                     <Spinner data-icon="inline-start" />
                   ) : (
                     <ProhibitIcon data-icon="inline-start" />
@@ -838,23 +864,28 @@ export function RunDetailView({
               )
             : canRerun &&
               rerunChoices.map((offer) => {
-                // Which of the offers is the one running: the guards serialize
-                // the family, so at most one mutation is ever in flight and its
-                // `variables` still describe it.
+                // Which of the offers is the one in flight, by the mode its
+                // pending write carries.
+                const runRerun = runState?.rerun;
                 const thisRerunning =
-                  rerun.isPending &&
-                  rerun.variables?.failed === (offer.kind === "failed");
+                  runRerun !== undefined &&
+                  (offer.kind === "failed" ? runRerun.failed : runRerun.whole);
                 return (
                   <DisabledReasonButton
                     key={offer.kind}
                     variant="outline"
                     size="sm"
-                    disabled={rerunFamilyBusy || runLatched || writeBlocked}
+                    disabled={
+                      rerunFamilyBusy ||
+                      runLatched ||
+                      writeBlocked ||
+                      rerunAgedOut !== undefined
+                    }
                     reason={
                       thisRerunning
                         ? (writeReason ??
                           pendingWriteReason(
-                            rerun.isPaused,
+                            runRerun.paused,
                             ACT_PENDING_REASON,
                           ))
                         : rerunHeldReason
@@ -862,7 +893,7 @@ export function RunDetailView({
                     title={RERUN_TITLES[offer.kind]}
                     onClick={() => doRerun(offer.kind === "failed")}
                   >
-                    {thisRerunning && !rerun.isPaused ? (
+                    {thisRerunning && !runRerun.paused ? (
                       <Spinner data-icon="inline-start" />
                     ) : (
                       <ArrowClockwiseIcon data-icon="inline-start" />
@@ -900,11 +931,13 @@ export function RunDetailView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={approveRun.isPending || writeBlocked || !!offlineHold}
+            disabled={
+              approvePending !== undefined || writeBlocked || !!offlineHold
+            }
             reason={approveHeldReason}
             onClick={() => void doApprove()}
           >
-            {approveRun.isPending && !approveRun.isPaused ? (
+            {approvePending && !approvePending.paused ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlayIcon data-icon="inline-start" />
@@ -930,12 +963,10 @@ export function RunDetailView({
           ) : (
             <div className="border">
               {run.jobs.map((job) => {
-                // The row's own re-run, if it's the family's in-flight one —
-                // the guards serialize, so `variables` still describe it.
-                const thisJobRerunning =
-                  rerunJob.isPending && rerunJob.variables?.jobId === job.id;
-                const thisJobPlaying =
-                  playJob.isPending && playJob.variables === job.id;
+                // The row's own re-run and play in flight, from any surface.
+                const jobWrites = pendingJobState(runWrites, job.id);
+                const jobRerun = jobWrites?.rerun;
+                const jobPlay = jobWrites?.play;
                 return (
                   <JobRow
                     key={job.id}
@@ -956,14 +987,11 @@ export function RunDetailView({
                         ? (buttonEl) => void doPlay(job.id, buttonEl)
                         : undefined
                     }
-                    playing={thisJobPlaying && !playJob.isPaused}
+                    playing={jobPlay !== undefined && !jobPlay.paused}
                     playDisabledReason={
                       writeReason ??
-                      (thisJobPlaying
-                        ? pendingWriteReason(
-                            playJob.isPaused,
-                            ACT_PENDING_REASON,
-                          )
+                      (jobPlay
+                        ? pendingWriteReason(jobPlay.paused, ACT_PENDING_REASON)
                         : undefined)
                     }
                     onRerun={
@@ -982,12 +1010,12 @@ export function RunDetailView({
                         : undefined
                     }
                     rerunOffer={jobOffer ?? undefined}
-                    rerunning={thisJobRerunning && !rerunJob.isPaused}
+                    rerunning={jobRerun !== undefined && !jobRerun.paused}
                     rerunDisabledReason={
-                      thisJobRerunning
+                      jobRerun
                         ? (writeReason ??
                           pendingWriteReason(
-                            rerunJob.isPaused,
+                            jobRerun.paused,
                             ACT_PENDING_REASON,
                           ))
                         : rerunHeldReason

@@ -3,7 +3,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { keepPreviousDataForRepo } from "@/lib/git/queries";
+import {
+  keepPreviousDataForRepo,
+  type PendingRepoWrite,
+  usePendingRepoWrites,
+} from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
@@ -50,6 +54,29 @@ import type {
 } from "./types";
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
+
+/** The Jira writes whose pending state a rail row reads back from the cache. */
+export type JiraWriteKind = "due-date";
+
+/** Each Jira write's variables, shared by the mutation's generic and the pending
+ *  scan's cast. */
+export type JiraWriteVars = {
+  "due-date": { issueKey: string; dueDate: string | null };
+};
+
+/** Filter prefix for EVERY Jira write ({@link jiraWriteKey}); disjoint from the
+ *  forge issue writes' prefix. */
+const JIRA_WRITES_FAMILY = "jira-write";
+
+/** A Jira write's mutation key. Static per repo, so it never detaches a pending
+ *  write across an issue switch; the issue key rides the variables. */
+export const jiraWriteKey = (kind: JiraWriteKind, repo: string) =>
+  [JIRA_WRITES_FAMILY, kind, repo] as const;
+
+/** The pending Jira writes in `repo`, every issue's. */
+export function usePendingJiraWrites(repo: string): PendingRepoWrite[] {
+  return usePendingRepoWrites(JIRA_WRITES_FAMILY, repo);
+}
 
 /** The family PREFIX for a repo's Jira issue lists: the list query and the prefix
  *  invalidations share it, so those can't drift. The segment predicates below still
@@ -683,7 +710,8 @@ export function useJiraSetDueDate(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; dueDate: string | null }) =>
+    mutationKey: jiraWriteKey("due-date", repo),
+    mutationFn: (args: JiraWriteVars["due-date"]) =>
       jiraIssueSetDueDate(
         (link as JiraLink).siteHost,
         args.issueKey,

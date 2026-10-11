@@ -4,6 +4,15 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { repoKeys } from "@/lib/git/queries";
+import {
+  type CancelRunVars,
+  type DispatchVars,
+  type PlayJobVars,
+  type RerunJobVars,
+  type RerunRunVars,
+  type RunWriteKind,
+  runWriteKey,
+} from "@/lib/git/queries/run-writes";
 import type { RemoteLens } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
@@ -438,12 +447,17 @@ export function useJobLogs(
 
 // ── Mutations ────────────────────────────────────────────────────────────────
 
+/** `kind` files the write under {@link runWriteKey}, which the CI surfaces'
+ *  pending scan reads: the run or job it targets rides the variables, so every
+ *  surface showing that run holds on it, whichever one fired it. */
 function useActionsMutation<TArgs>(
   repo: string,
   mutationFn: (args: TArgs) => Promise<void>,
+  kind: RunWriteKind,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: runWriteKey(kind, repo),
     mutationFn,
     // The awaited refresh is Actions' own; re-run/cancel/dispatch don't touch git
     // state. The two CI surfaces the `actions` prefix can't reach (a PR's own
@@ -462,14 +476,17 @@ function useActionsMutation<TArgs>(
 export function useRerunRun(repo: string) {
   return useActionsMutation(
     repo,
-    (args: { runId: number | string; failed: boolean; lens?: RemoteLens }) =>
+    (args: RerunRunVars) =>
       forgeCiRunRerun(repo, args.runId, args.failed, args.lens),
+    "rerun-run",
   );
 }
 
 export function useCancelRun(repo: string) {
-  return useActionsMutation(repo, (runId: number) =>
-    forgeCiRunCancel(repo, runId),
+  return useActionsMutation(
+    repo,
+    (runId: CancelRunVars) => forgeCiRunCancel(repo, runId),
+    "cancel-run",
   );
 }
 
@@ -479,8 +496,8 @@ export function useCancelRun(repo: string) {
 export function useRerunJob(repo: string) {
   return useActionsMutation(
     repo,
-    (args: { jobId: string; lens?: RemoteLens }) =>
-      forgeCiJobRerun(repo, args.jobId, args.lens),
+    (args: RerunJobVars) => forgeCiJobRerun(repo, args.jobId, args.lens),
+    "rerun-job",
   );
 }
 
@@ -488,18 +505,18 @@ export function useRerunJob(repo: string) {
  *  refreshes the run detail + list; the job goes active and the existing 5s
  *  poll takes over. */
 export function usePlayCiJob(repo: string) {
-  return useActionsMutation(repo, (jobId: string) =>
-    forgeGlCiPlayJob(repo, jobId),
+  return useActionsMutation(
+    repo,
+    (jobId: PlayJobVars) => forgeGlCiPlayJob(repo, jobId),
+    "play-job",
   );
 }
 
 export function useRunWorkflow(repo: string) {
   return useActionsMutation(
     repo,
-    (args: {
-      workflow: string;
-      gitRef: string;
-      inputs: Record<string, string>;
-    }) => forgeCiDispatch(repo, args.workflow, args.gitRef, args.inputs),
+    (args: DispatchVars) =>
+      forgeCiDispatch(repo, args.workflow, args.gitRef, args.inputs),
+    "dispatch",
   );
 }

@@ -6,6 +6,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Fragment, type ReactNode, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { HeldSwitch } from "@/components/held-switch";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,16 +19,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues";
 import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import {
+  pendingIssueWrite,
   useAddIssueSpentTime,
   useGlIssueLinks,
   useGlIssueTimeStats,
   useLinkIssue,
+  usePendingIssueWrites,
   useSetIssueAssignees,
   useSetIssueConfidential,
   useSetIssueDueDate,
@@ -42,7 +44,11 @@ import type {
   IssueDetails,
   RemoteLens,
 } from "@/lib/git/types";
-import { ACT_PENDING_REASON } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { IssueDevelopment } from "./IssueDevelopment";
@@ -51,7 +57,20 @@ import {
   IssueTypeMenu,
   MilestoneMenu,
 } from "./IssueMetaPickers";
-import { IssuePicker, IssueRelationships, RelatedRow } from "./IssueRelations";
+import {
+  IssuePicker,
+  IssueRelationships,
+  PendingWriteNote,
+  RelatedRow,
+} from "./IssueRelations";
+
+/** A rail row's hold while its own write is pending: parked offline or saving. */
+function rowPendingReason(
+  pending: { paused: boolean } | undefined,
+  inFlight = SAVING_LAST_CHANGE_REASON,
+): string | undefined {
+  return pending ? pendingWriteReason(pending.paused, inFlight) : undefined;
+}
 
 /** One row of an issue's metadata rail. Two shapes, because the shared pickers
  *  label themselves inside their trigger ("Assignees"/"Milestone"/"Type") and a
@@ -205,6 +224,19 @@ export function IssueSidebar({
   const setType = useSetIssueType(repoPath, lens);
   const setConfidential = useSetIssueConfidential(repoPath);
   const setDueDate = useSetIssueDueDate(repoPath);
+  // From the cache, not the observers: the rail remounts per issue, and a write
+  // still pending on the issue switched back to must still show.
+  const pendingWrites = usePendingIssueWrites(repoPath);
+  const dueDateReason = rowPendingReason(
+    pendingIssueWrite(pendingWrites, "due-date", (v) => v.number === number),
+  );
+  const confidentialReason = rowPendingReason(
+    pendingIssueWrite(
+      pendingWrites,
+      "confidential",
+      (v) => v.number === number,
+    ),
+  );
 
   // A provider we can only read from (Bitbucket, or a not-ready repo): static rail.
   if (
@@ -363,7 +395,7 @@ export function IssueSidebar({
         <DueDateRow
           value={issue.dueDate}
           open={issue.state === "OPEN"}
-          pending={setDueDate.isPending}
+          pendingReason={dueDateReason}
           disabledReason={pickerDisabledReason}
           onChange={(dueDate) => setDueDate.mutate({ number, dueDate })}
         />
@@ -375,7 +407,7 @@ export function IssueSidebar({
       render: () => (
         <ConfidentialRow
           value={issue.confidential}
-          pending={setConfidential.isPending}
+          pendingReason={confidentialReason}
           disabledReason={pickerDisabledReason}
           onChange={(confidential) =>
             setConfidential.mutate({ number, confidential })
@@ -438,7 +470,7 @@ function isPastDue(dueDate: string): boolean {
 export function DueDateRow({
   value,
   open,
-  pending,
+  pendingReason,
   onChange,
   disabledReason,
 }: {
@@ -446,7 +478,9 @@ export function DueDateRow({
   value: string | null;
   /** Whether the issue is open — only then does a past date read "past due". */
   open: boolean;
-  pending: boolean;
+  /** Set while this row's own write is pending, worded for whether it's saving or
+   *  parked offline: Clear holds on it and the row shows it. */
+  pendingReason?: string;
   onChange: (date: string | null) => void;
   /** Set when this row can't be edited right now — the viewer lacks the tier it
    *  needs, or the surface is still loading the entity. The input and Clear stay
@@ -472,8 +506,8 @@ export function DueDateRow({
             variant="ghost"
             size="xs"
             className="text-muted-foreground"
-            disabled={pending || blocked}
-            reason={disabledReason}
+            disabled={pendingReason !== undefined || blocked}
+            reason={disabledReason ?? pendingReason}
             onClick={() => onChange(null)}
           >
             Clear
@@ -503,6 +537,7 @@ export function DueDateRow({
         />
       </span>
       {pastDue && <p className="text-[11px] text-destructive">Past due</p>}
+      <PendingWriteNote reason={pendingReason} />
     </div>
   );
 }
@@ -510,16 +545,17 @@ export function DueDateRow({
 /** The GitLab-only confidential rail row — hides the issue from non-members. */
 function ConfidentialRow({
   value,
-  pending,
+  pendingReason,
   onChange,
   disabledReason,
 }: {
   value: boolean;
-  pending: boolean;
+  /** Set while this row's own write is pending; the switch holds on it. */
+  pendingReason?: string;
   onChange: (confidential: boolean) => void;
   /** Set when this row can't be edited right now — the viewer lacks the tier it
    *  needs, or the surface is still loading the entity. The switch stays visible
-   *  but disabled, with this text as its hint. */
+   *  but held, with this text as its hint. */
   disabledReason?: string;
 }) {
   return (
@@ -531,26 +567,19 @@ function ConfidentialRow({
         >
           Confidential
         </Label>
-        {/* A disabled switch swallows `title`, so the hint rides its wrapper. */}
-        <span
-          title={disabledReason}
-          className={
-            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
-          }
-        >
-          <Switch
-            id="issue-confidential"
-            checked={value}
-            disabled={pending || !!disabledReason}
-            onCheckedChange={onChange}
-          />
-        </span>
+        <HeldSwitch
+          id="issue-confidential"
+          checked={value}
+          heldReason={disabledReason ?? pendingReason}
+          onCheckedChange={onChange}
+        />
       </div>
       {value && (
         <p className="text-[11px] text-muted-foreground">
           Only visible to project members.
         </p>
       )}
+      <PendingWriteNote reason={pendingReason} />
     </div>
   );
 }
@@ -571,10 +600,14 @@ export function TimeTrackingControls({
   onAddSpent,
   idPrefix,
   disabledReason,
+  pendingReason,
 }: {
   stats: GitLabTimeStats | undefined;
   editable: boolean;
   pending: boolean;
+  /** Words `pending` (saving, or parked offline) for the group's hint and a
+   *  visible note; absent leaves the hold unexplained, as the MR popover does. */
+  pendingReason?: string;
   /** null resets the estimate. */
   onSetEstimate: (duration: string | null) => void;
   /** null resets spent time; a negative duration ("-15m") subtracts. */
@@ -644,7 +677,7 @@ export function TimeTrackingControls({
             "space-y-1.5 pt-0.5",
             disabledReason && "cursor-not-allowed",
           )}
-          title={disabledReason}
+          title={disabledReason ?? (pending ? pendingReason : undefined)}
         >
           <div className="flex items-center gap-1.5">
             <Input
@@ -708,6 +741,7 @@ export function TimeTrackingControls({
           </div>
         </div>
       )}
+      <PendingWriteNote reason={pending ? pendingReason : undefined} />
     </div>
   );
 }
@@ -740,6 +774,26 @@ function IssueTimeTrackingSection({
   const stats = useGlIssueTimeStats(repoPath, number);
   const setEstimate = useSetIssueTimeEstimate(repoPath);
   const addSpent = useAddIssueSpentTime(repoPath);
+  const pendingWrites = usePendingIssueWrites(repoPath);
+  const estimatePending = pendingIssueWrite(
+    pendingWrites,
+    "time-estimate",
+    (v) => v.number === number,
+  );
+  const spentPending = pendingIssueWrite(
+    pendingWrites,
+    "spent-time",
+    (v) => v.number === number,
+  );
+  // Parked only when every pending time write is: one still running is saving.
+  const timePending = [estimatePending, spentPending].filter(
+    (p) => p !== undefined,
+  );
+  const pendingReason = rowPendingReason(
+    timePending.length > 0
+      ? { paused: timePending.every((p) => p.paused) }
+      : undefined,
+  );
 
   return (
     <div className="space-y-1.5">
@@ -750,7 +804,8 @@ function IssueTimeTrackingSection({
         <TimeTrackingControls
           stats={stats.data}
           editable={editable}
-          pending={setEstimate.isPending || addSpent.isPending}
+          pending={pendingReason !== undefined}
+          pendingReason={pendingReason}
           disabledReason={disabledReason}
           idPrefix="issue"
           onSetEstimate={(duration) => setEstimate.mutate({ number, duration })}
@@ -786,6 +841,23 @@ function IssueLinksSection({
   const unlinkIssue = useUnlinkIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [adding, setAdding] = useState(false);
+  // From the cache, so a link still pending survives this section's remount.
+  const pendingWrites = usePendingIssueWrites(repoPath);
+  const linkReason = rowPendingReason(
+    pendingIssueWrite(pendingWrites, "link", (v) => v.number === number),
+    "Linking the issue…",
+  );
+  const unlinkReason = (linkId: string) =>
+    rowPendingReason(
+      pendingIssueWrite(
+        pendingWrites,
+        "unlink",
+        (v) => v.number === number && v.linkId === linkId,
+      ),
+      "Removing this link…",
+    );
+  // A second link while one is pending could name the same issue twice.
+  const addReason = disabledReason ?? linkReason;
 
   const data = links.data ?? [];
   const exclude = new Set<number>([number, ...data.map((l) => l.number)]);
@@ -817,8 +889,8 @@ function IssueLinksSection({
             variant="ghost"
             size="xs"
             aria-label="Link a related issue"
-            disabled={!!disabledReason}
-            reason={disabledReason}
+            disabled={addReason !== undefined}
+            reason={addReason}
             onClick={() => setAdding(true)}
           >
             <PlusIcon data-icon="inline-start" />
@@ -834,9 +906,11 @@ function IssueLinksSection({
           issue={toRelated(l)}
           onOpen={open}
           removeDisabledReason={disabledReason}
+          pendingReason={unlinkReason(l.linkId)}
           onRemove={() => unlinkIssue.mutate({ number, linkId: l.linkId })}
         />
       ))}
+      <PendingWriteNote reason={linkReason} />
 
       {links.isPending ? (
         <p className="text-[11px] text-muted-foreground">Loading…</p>
@@ -855,7 +929,7 @@ function IssueLinksSection({
             <IssuePicker
               repoPath={repoPath}
               exclude={exclude}
-              pending={linkIssue.isPending}
+              pending={linkReason !== undefined}
               lens={lens}
               onPick={(target) => void link(target)}
             />

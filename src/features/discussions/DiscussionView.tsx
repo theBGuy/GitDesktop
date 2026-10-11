@@ -13,6 +13,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -81,7 +82,9 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
   COMMENT_DELETE_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
   OFFLINE_ITEM_REASON,
+  pendingItemReason,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -243,8 +246,8 @@ export function DiscussionView({
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
   const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
-  // Set while offline. Close and delete hold on it at the press; the composer,
-  // answer and upvote writes are left to park, and their reasons say so.
+  // Set while offline. Close, lock and delete hold on it at the press; the
+  // composer, answer and upvote writes are left to park, and their reasons say so.
   const offlineHold = useOfflineHold();
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
@@ -333,7 +336,10 @@ export function DiscussionView({
       case detailsStale:
         return staleReason;
       case addComment.isPending:
-        return pendingWriteReason(addComment.isPaused, "Posting your comment…");
+        return pendingWriteReason(
+          addComment.isPaused,
+          COMMENT_POST_PENDING_REASON,
+        );
       case markAnswer.isPending:
         return pendingWriteReason(markAnswer.isPaused, "Updating the answer…");
       case deleteComment.isPending:
@@ -370,6 +376,24 @@ export function DiscussionView({
     staleSuffix ||
     (offlineHold ? ` — ${OFFLINE_ITEM_REASON}` : "") ||
     draftSuffix;
+  // Lock and unlock hold rather than park, like close: a parked one would change
+  // the discussion whenever the connection returns. This view outlives a
+  // discussion switch, so a pending write holds only the discussion it names.
+  const lockHeld = (() => {
+    switch (true) {
+      case lockDiscussion.isPending &&
+        lockDiscussion.variables?.discussionId === d?.id:
+        return pendingItemReason(lockDiscussion.isPaused, "locking…");
+      case unlockDiscussion.isPending && unlockDiscussion.variables === d?.id:
+        return pendingItemReason(unlockDiscussion.isPaused, "unlocking…");
+      case !!offlineHold:
+        return OFFLINE_ITEM_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  const lockBlocked = detailsStale || lockHeld !== undefined;
+  const lockSuffix = staleSuffix || (lockHeld ? ` — ${lockHeld}` : "");
 
   // Every write below awaits `mutateAsync` (or detaches with a `.catch`):
   // react-query drops per-call callbacks once the observer loses its listeners,
@@ -502,7 +526,7 @@ export function DiscussionView({
   // Each of these addresses the rendered discussion's id while the menu belongs to
   // the selected one; the items disable too, and these arms back them up.
   async function doLock(reason: DiscussionLockReason | null) {
-    if (!d || detailsStale) return;
+    if (!d || detailsStale || refuseWhileOffline()) return;
     try {
       await lockDiscussion.mutateAsync({ discussionId: d.id, reason });
     } catch (e) {
@@ -513,7 +537,7 @@ export function DiscussionView({
   }
 
   async function doUnlock() {
-    if (!d || detailsStale) return;
+    if (!d || detailsStale || refuseWhileOffline()) return;
     try {
       await unlockDiscussion.mutateAsync(d.id);
     } catch (e) {
@@ -693,6 +717,7 @@ export function DiscussionView({
               </DropdownMenuItem>
               {d.closed ? (
                 <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={reopenDiscussion.isPending || detailsStale}
                   onClick={() => void doReopen()}
                 >
@@ -714,6 +739,7 @@ export function DiscussionView({
                     {CLOSE_REASONS.map(([label, reason]) => (
                       <DropdownMenuItem
                         key={reason}
+                        className={MENU_HELD_ROW_CLASS}
                         disabled={
                           closeDiscussion.isPending ||
                           detailsStale ||
@@ -729,24 +755,26 @@ export function DiscussionView({
               )}
               {d.locked ? (
                 <DropdownMenuItem
-                  disabled={unlockDiscussion.isPending || detailsStale}
+                  className={MENU_HELD_ROW_CLASS}
+                  disabled={lockBlocked}
                   onClick={() => void doUnlock()}
                 >
-                  Unlock conversation{staleSuffix}
+                  Unlock conversation{lockSuffix}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
-                    disabled={lockDiscussion.isPending || detailsStale}
+                    disabled={lockBlocked}
                     className="data-disabled:opacity-50"
                   >
-                    Lock conversation…{staleSuffix}
+                    Lock conversation…{lockSuffix}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     {LOCK_REASONS.map(([label, reason]) => (
                       <DropdownMenuItem
                         key={reason ?? "none"}
-                        disabled={lockDiscussion.isPending || detailsStale}
+                        className={MENU_HELD_ROW_CLASS}
+                        disabled={lockBlocked}
                         onClick={() => void doLock(reason)}
                       >
                         {label}

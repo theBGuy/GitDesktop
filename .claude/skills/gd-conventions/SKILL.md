@@ -492,10 +492,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Offline remote writes** — a repo-settings control that fires a remote
   write (add, save, delete, role, toggle) gates on `useOnline()`
   (`src/lib/use-online.ts`) with the shared `OFFLINE_WRITE_REASON`
-  (repo-settings/parts), disabled with reason, never hidden: a mutation
-  pressed offline parks silently and fires on reconnect. Confirms take
-  `InlineConfirm`'s / `DangerDialog`'s `heldReason`, pickers
-  `HeldRoleSelect`'s, switches `HeldSwitch`'s (readOnly, never `disabled`:
+  (`@/lib/offline-writes` — the hold reason; its parked-write sibling is
+  `OFFLINE_QUEUED_REASON` via `pendingWriteReason`), disabled with reason,
+  never hidden: a mutation pressed offline parks silently and fires on
+  reconnect. Confirms take `InlineConfirm`'s / `DangerDialog`'s `heldReason`,
+  pickers `HeldRoleSelect`'s, switches `HeldSwitch`'s
+  (`@/components/held-switch`; readOnly, never `disabled`:
   one node that keeps its tab stop and gives keyboard and AT its reason;
   inside a wrapping `<label>` pass `inLabel` and title the label). Openers
   that only reveal a form or confirm stay enabled, as do local writes
@@ -504,6 +506,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   saving or offline rides `HeldRoleSelect` (repo-settings/parts): readOnly +
   gated open, never Base UI's `disabled`, which drops the trigger and its
   reason from the tab order.
+- **Flip-capable menu rows** — a menu item whose `disabled` can change while
+  the menu is open (an offline flip, a pending write starting or settling)
+  carries `MENU_HELD_ROW_CLASS` (`@/components/menu-held-row`): the vendored
+  `data-disabled:pointer-events-none` otherwise makes the hovered row stop
+  being a hit target, and the resulting `pointerleave` drops focus to the
+  menu popup (keyboard navigation is unaffected). The override keeps the row
+  hit-testable; Base UI's `useButton` still gates clicks on disabled rows.
 - **Confirm-swap focus** — a control that swaps with an inline confirm hands
   focus across the swap via `useConfirmSwapFocus` (repo-settings/parts): the
   same ref on the trigger and on `InlineConfirm`'s `swapFocusRef`, keyed per
@@ -568,10 +577,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   parameter would oblige its delegating call to pass one) — a repo-scoped create
   written anywhere else is unratcheted, and the wider class stays a review
   concern. The creates `useAddRemote`, `useAddCollaborator`, `useAddSubmodule`,
-  `useAddUserWorktree`, `useAddDiscussionComment`, `useAddIssueSpentTime`,
-  `useAddMrSpentTime`, `useSubmitReview` and `useForkRepo` stay unpinned BY
-  DECISION: their callers read `isPending` as a re-entry guard, which a pin
-  idles, so the isPending → local-flag migration comes first. A cache WRITE
+  `useAddUserWorktree`, `useAddDiscussionComment`, `useAddMrSpentTime` and
+  `useForkRepo` (repo-access.ts — RepositoryMenu reads its observer as the
+  re-entry guard) stay unpinned BY DECISION: their callers read `isPending` as
+  a re-entry guard, which a pin idles, so the isPending → cache-reader
+  migration comes first. (`useSubmitReview` and `useAddIssueSpentTime` left
+  this list when the offline round-4 wave keyed them and moved their re-entry
+  guards to mutation-cache readers; `useForkRepoByName` — a different hook
+  from `useForkRepo` — was keyed in the same wave.) A cache WRITE
   (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/`onSettled` keys
   from the callback's own parameters, never hook scope. The snapshot already
   runs the settle callbacks in effect at the start, so this is defense in depth:

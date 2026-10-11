@@ -44,6 +44,10 @@ import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
+import {
+  AI_DRAFT_PENDING_REASON,
+  pendingWriteReason,
+} from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -178,6 +182,9 @@ export function CreateJiraIssueDialog({
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
     if (surface.shouldSkipSeed(generating)) return;
+    // A create still pending (or parked offline) owns the draft on screen: a
+    // reseed would offer a blank form to file the same issue again.
+    if (create.isPending) return;
     seedGenRef.current += 1;
     form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
   });
@@ -208,12 +215,26 @@ export function CreateJiraIssueDialog({
     types.isPaused && (types.data === undefined || emptyUnknown);
   // Either Retry unmounts on press: the field's box takes the focus.
   const typesRescue = useRetryFocusRescue(typesRefreshFailed);
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  // An offline create queues rather than refuses: the dialog stays open on the
+  // waiting draft and sends it once the connection returns. `isSubmitting` covers
+  // the submit's lead-in before the mutation reports pending.
+  const creating = create.isPending || isSubmitting;
   // Why the submit is held, for both the hover wrapper and the sr-only node.
-  const submitReason = generating
-    ? "Wait for the AI draft to finish"
-    : !issueTypeId
-      ? "Select an issue type to create the issue"
-      : null;
+  const submitReason = (() => {
+    switch (true) {
+      case generating:
+        return AI_DRAFT_PENDING_REASON;
+      case create.isPending:
+        return pendingWriteReason(create.isPaused, "Creating the issue…");
+      case isSubmitting:
+        return "Creating the issue…";
+      case !issueTypeId:
+        return "Select an issue type to create the issue";
+      default:
+        return null;
+    }
+  })();
 
   // Shared by the Draft-with-AI button and the generate chord below.
   async function runGenerate() {
@@ -244,14 +265,14 @@ export function CreateJiraIssueDialog({
   // can't run behind the dialog; while generating it swallows but DOESN'T
   // cancel. A running create holds it like the button: the draft it would
   // revise has already been sent.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
   });
   // The one submit gate, shared by the button and the form's native submit:
-  // Enter must submit exactly when the button would.
-  const submitBlocked = generating || !issueTypeId;
+  // Enter must submit exactly when the button would. A pending create rides it
+  // so the held button keeps focus and names the wait.
+  const submitBlocked = generating || creating || !issueTypeId;
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({ disabled: submitBlocked, reason: submitReason });
 
@@ -288,6 +309,7 @@ export function CreateJiraIssueDialog({
                 <field.TextField
                   label="Summary"
                   placeholder="Summarize the issue"
+                  disabled={creating}
                   warning={(v) =>
                     v.trim() ? null : "Enter a summary to create the issue"
                   }
@@ -328,7 +350,7 @@ export function CreateJiraIssueDialog({
                   onValueChange={(v) => {
                     if (v) setIssueTypeId(v);
                   }}
-                  disabled={types.isPending}
+                  disabled={types.isPending || creating}
                 >
                   <SelectTrigger id={issueTypeSelectId} className="w-full">
                     <SelectValue
@@ -372,6 +394,7 @@ export function CreateJiraIssueDialog({
                 <field.MarkdownField
                   label="Description"
                   placeholder="Jot down rough notes, then draft with AI"
+                  disabled={creating}
                   rows={8}
                   textareaClassName="max-h-72 min-h-24 resize-y font-mono"
                   actions={

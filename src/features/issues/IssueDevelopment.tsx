@@ -6,6 +6,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,6 +26,11 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import {
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { prPill } from "@/lib/pulls/pr-state";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -96,9 +102,30 @@ export function IssueDevelopment({
     });
   }
 
+  // The create holds rather than parks: a parked one would push a branch to
+  // GitHub whenever the connection returns. Ranked: the running write, then
+  // offline, then the form's own precondition.
+  const offlineHold = useOfflineHold();
+  const submitReason = (() => {
+    switch (true) {
+      case createBranch.isPending:
+        return pendingWriteReason(
+          createBranch.isPaused,
+          "Creating the branch…",
+        );
+      case !!offlineHold:
+        return offlineHold;
+      case !branchName.trim():
+        return "Enter a branch name";
+      default:
+        return undefined;
+    }
+  })();
+
   async function submitBranch() {
     const name = branchName.trim();
-    if (!name) return;
+    // The input's Enter submits past the held button, which stays focusable.
+    if (!name || createBranch.isPending || refuseWhileOffline()) return;
     try {
       await createBranch.mutateAsync({ issueId, name });
     } catch (e) {
@@ -216,13 +243,14 @@ export function IssueDevelopment({
               >
                 Cancel
               </Button>
-              <Button
+              <DisabledReasonButton
                 type="submit"
-                disabled={!branchName.trim() || createBranch.isPending}
+                disabled={submitReason !== undefined}
+                reason={submitReason}
               >
                 {createBranch.isPending && <Spinner data-icon="inline-start" />}
                 Create branch
-              </Button>
+              </DisabledReasonButton>
             </DialogFooter>
           </form>
         </DialogContent>

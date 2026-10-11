@@ -1,8 +1,17 @@
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { DueDateRow } from "@/features/issues/RemoteIssueViewParts";
-import { useJiraSetDueDate } from "@/lib/jira/queries";
+import { pendingWriteMatching } from "@/lib/git/queries";
+import {
+  type JiraWriteVars,
+  useJiraSetDueDate,
+  usePendingJiraWrites,
+} from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import { formatStoryPoints, type JiraIssueDetails } from "@/lib/jira/types";
+import {
+  pendingWriteReason,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -67,6 +76,14 @@ export function JiraIssueSidebar({
 }) {
   const setDueDate = useJiraSetDueDate(repoPath, link);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  // From the cache, not the observer: this rail remounts per issue, and a due
+  // date still pending on the issue switched back to must still show.
+  const pendingWrites = usePendingJiraWrites(repoPath);
+  const dueDatePending = pendingWriteMatching<JiraWriteVars["due-date"]>(
+    pendingWrites,
+    "due-date",
+    (v) => v.issueKey === issueKey,
+  );
 
   return (
     <aside
@@ -153,7 +170,14 @@ export function JiraIssueSidebar({
         <DueDateRow
           value={issue.dueDate}
           open={issue.statusCategory !== "done"}
-          pending={setDueDate.isPending}
+          pendingReason={
+            dueDatePending
+              ? pendingWriteReason(
+                  dueDatePending.paused,
+                  SAVING_LAST_CHANGE_REASON,
+                )
+              : undefined
+          }
           onChange={(dueDate) =>
             void setDueDate.mutateAsync({ issueKey, dueDate }).catch(toastError)
           }

@@ -1,12 +1,47 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type MutationCache,
+  queryOptions,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import { keepPreviousDataForRepo } from "./core";
-import { useRepoMutation } from "./internal";
+import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import {
+  pendingMutationEntries,
+  pendingTagPushesFor,
+  type TagPushState,
+  tagPushKey,
+} from "./pr-writes";
 
+/** Pushes a tag to origin, so it keeps the default and pauses offline. Keyed per
+ *  repo with the tag in the variables: {@link usePendingTagPushes} reads every
+ *  push in flight, whichever mount fired it. */
 export function usePushTag(repo: string) {
-  return useRepoMutation(repo, (name: string) => api.gitPushTag(repo, name));
+  return useRepoMutation(repo, (name: string) => api.gitPushTag(repo, name), {
+    identity: tagPushKey(repo),
+  });
+}
+
+const NO_PENDING_TAG_PUSHES: TagPushState[] = [];
+
+/** The tags of `repo` with a push in flight, read from the mutation cache: the
+ *  history rows and the tag detail hold on it, so a remount or a switch back
+ *  still sees a push an earlier mount started. */
+export function usePendingTagPushes(repo: string): TagPushState[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingTagPushesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: tagPushKey(repo), status: "pending" }),
+        ),
+        repo,
+      ),
+    [repo],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_TAG_PUSHES);
 }
 
 export function useDeleteLocalTag(repo: string) {

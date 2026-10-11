@@ -32,6 +32,7 @@ import type {
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import {
   COMMENT_DELETE_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
 } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
@@ -390,7 +391,7 @@ export function CommitComments({
       case createComment.isPending:
         return pendingWriteReason(
           createComment.isPaused,
-          "Posting your comment…",
+          COMMENT_POST_PENDING_REASON,
         );
       case editComment.isPending:
         return pendingWriteReason(

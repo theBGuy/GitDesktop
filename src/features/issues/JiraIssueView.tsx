@@ -18,6 +18,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
@@ -91,7 +92,12 @@ import {
   type JiraTransitionResult,
   type JiraWorklog,
 } from "@/lib/jira/types";
-import { pendingWriteReason } from "@/lib/offline-writes";
+import {
+  COMMENT_POST_PENDING_REASON,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -144,7 +150,7 @@ function StatusMenu({
   issueKey,
   category,
   name,
-  busy,
+  heldReason,
   transitionTo,
 }: {
   repoPath: string;
@@ -152,7 +158,9 @@ function StatusMenu({
   issueKey: string;
   category: JiraStatusCategory;
   name: string;
-  busy: boolean;
+  /** Why the picker is held (a write in flight or parked, offline, or the issue
+   *  still loading); the trigger stays focusable and says so. */
+  heldReason: string | undefined;
   transitionTo: ReturnType<typeof useJiraTransitionTo>;
 }) {
   const [open, setOpen] = useState(false);
@@ -163,6 +171,9 @@ function StatusMenu({
     toStatusName: string;
     toStatusCategory: JiraStatusCategory;
   }) {
+    // A transition held rather than parked, like a forge close: a parked one
+    // would move the issue whenever the connection returns.
+    if (refuseWhileOffline()) return;
     let result: JiraTransitionResult;
     try {
       result = await transitionTo.mutateAsync({
@@ -181,9 +192,16 @@ function StatusMenu({
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger
-        disabled={busy}
         aria-label={`Status: ${name}. Change status`}
-        className="cursor-pointer rounded-none disabled:cursor-default disabled:opacity-60"
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            disabled={heldReason !== undefined}
+            reason={heldReason}
+            // Strips the button chrome: the chip is the whole affordance.
+            className="h-auto cursor-pointer p-0 font-normal hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent"
+          />
+        }
       >
         <StatusChip category={category} name={name} interactive />
       </DropdownMenuTrigger>
@@ -1569,6 +1587,9 @@ export function JiraIssueView({
   const comment = useJiraComment(repoPath, link.data);
   const transition = useJiraTransition(repoPath, link.data);
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
+  // Set while offline: the status transitions hold on it at the press, while
+  // the composer's comment is left to park and `composerReason` says so.
+  const offlineHold = useOfflineHold();
   const composerRef = useRef<MarkdownEditorHandle>(null);
   // The repo is part of the identity because two repos linked to DIFFERENT Jira
   // sites can share an issue key. The same identity keys the sidebar below,
@@ -1639,8 +1660,6 @@ export function JiraIssueView({
 
   const issue: JiraIssueDetails = details.data;
   const isDone = issue.statusCategory === "done";
-  const busy =
-    comment.isPending || transition.isPending || transitionTo.isPending;
   // Rebuild Jira's canonical browse path from the current `issueKey`: `issue.url`
   // belongs to the LOADED issue, which is the previous one during a placeholder.
   const browseUrl = link.data
@@ -1664,9 +1683,34 @@ export function JiraIssueView({
       case detailsStale:
         return "Loading this issue…";
       case comment.isPending:
-        return pendingWriteReason(comment.isPaused, "Posting your comment…");
+        return pendingWriteReason(
+          comment.isPaused,
+          COMMENT_POST_PENDING_REASON,
+        );
       default:
         return undefined;
+    }
+  })();
+  // Which hold the status controls name, ranked like `composerReason`; a
+  // transition is held offline rather than parked, so offline ranks last.
+  const transitionReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return "Loading this issue…";
+      case transition.isPending:
+        return pendingWriteReason(transition.isPaused, "Changing the status…");
+      case transitionTo.isPending:
+        return pendingWriteReason(
+          transitionTo.isPaused,
+          "Changing the status…",
+        );
+      case comment.isPending:
+        return pendingWriteReason(
+          comment.isPaused,
+          COMMENT_POST_PENDING_REASON,
+        );
+      default:
+        return offlineHold;
     }
   })();
 
@@ -1684,6 +1728,7 @@ export function JiraIssueView({
   }
 
   async function doTransition(direction: "close" | "reopen") {
+    if (refuseWhileOffline()) return;
     let result: JiraTransitionResult;
     try {
       result = await transition.mutateAsync({ issueKey, direction });
@@ -1736,27 +1781,29 @@ export function JiraIssueView({
           {canTransition &&
             !detailsStale &&
             (isDone ? (
-              <Button
+              <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={busy}
+                disabled={transitionReason !== undefined}
+                reason={transitionReason}
                 onClick={() => void doTransition("reopen")}
                 title="Reopen this issue"
               >
                 <ArrowCounterClockwiseIcon data-icon="inline-start" />
                 Reopen
-              </Button>
+              </DisabledReasonButton>
             ) : (
-              <Button
+              <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={busy}
+                disabled={transitionReason !== undefined}
+                reason={transitionReason}
                 onClick={() => void doTransition("close")}
                 title="Close this issue"
               >
                 <CheckCircleIcon data-icon="inline-start" />
                 Close
-              </Button>
+              </DisabledReasonButton>
             ))}
           <Button
             variant="outline"
@@ -1789,7 +1836,7 @@ export function JiraIssueView({
               // The menu marks its current row by matching the rendered status,
               // which mid-switch is the previous issue's — hold it shut until the
               // selected issue is on screen. Its targets are already key-addressed.
-              busy={busy || detailsStale}
+              heldReason={transitionReason}
               transitionTo={transitionTo}
             />
           ) : (

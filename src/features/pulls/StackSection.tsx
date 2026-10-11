@@ -7,7 +7,6 @@ import {
   useState,
 } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
@@ -344,6 +343,7 @@ export function StackOffer({
   offer,
   rows,
   pending,
+  pendingReason,
   error,
   onConfirm,
   onCancel,
@@ -358,6 +358,9 @@ export function StackOffer({
    *  member's view or before a remount, so the preview renders expanded and held
    *  whatever this mount's own expansion says. */
   pending: boolean;
+  /** Why `pending` holds Confirm and Cancel: running, or parked offline. A reason
+   *  keeps the held Confirm focusable, so focus survives the write's start. */
+  pendingReason: string;
   /** The write's failure message, shown verbatim: the forge's 422s name the
    *  exact rule that was broken, which no rewrite of ours would improve. */
   error: string | null;
@@ -489,25 +492,25 @@ export function StackOffer({
           size="xs"
           className="cursor-pointer"
           disabled={pending || disabled}
-          // The spinner already says a write is running.
-          reason={pending ? undefined : reason}
+          reason={pending ? pendingReason : reason}
           onClick={onConfirm}
         >
           {pending && <Spinner data-icon="inline-start" />}
           {confirmLabel}
         </DisabledReasonButton>
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="xs"
           className="cursor-pointer"
           disabled={pending}
+          reason={pending ? pendingReason : undefined}
           onClick={() => {
             setExpanded(false);
             onCancel();
           }}
         >
           Cancel
-        </Button>
+        </DisabledReasonButton>
       </div>
       {error && (
         <p role="alert" className="mt-1.5 text-xs text-destructive">

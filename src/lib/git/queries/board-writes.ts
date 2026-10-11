@@ -10,7 +10,14 @@
  */
 import type { InvalidateQueryFilters } from "@tanstack/react-query";
 import type { PendingMutationEntry } from "./pr-writes";
-import type { BoardWriteKind, PendingBoardWrite } from "./projects";
+import type {
+  BoardWriteKind,
+  ItemWriteTarget,
+  PendingBoardWrite,
+  PendingItemWrite,
+  PendingProjectWrite,
+  PendingProjectWriteKind,
+} from "./projects";
 
 /** EVERY cached board read in one repo — every board, every lens of each. The
  *  scope a board write settles against: a write changes what an item IS, which no
@@ -75,9 +82,120 @@ export function pendingBoardWritesFor(
         itemId: vars.itemId,
         number: vars.number,
         count: vars.count,
+        isPaused: e.paused ?? false,
       },
     ];
   });
+}
+
+/** The write a project or view write's key kind and patch say it is. One update
+ *  hook serves several verbs (close and edit; rename, layout and fields), so its
+ *  PATCH names which; a patch this build can't read stays the generic edit. */
+function projectWriteKind(
+  family: "project" | "view",
+  keyKind: unknown,
+  vars: Record<string, unknown>,
+): PendingProjectWriteKind | null {
+  const patch =
+    typeof vars.patch === "object" && vars.patch !== null
+      ? (vars.patch as Record<string, unknown>)
+      : {};
+  if (family === "project") {
+    switch (keyKind) {
+      case "create":
+        return "project-create";
+      case "delete":
+        return "project-delete";
+      case "update":
+        if (patch.closed === true) return "project-close";
+        if (patch.closed === false) return "project-reopen";
+        return "project-edit";
+      default:
+        return null;
+    }
+  }
+  switch (keyKind) {
+    case "create":
+      return "view-create";
+    case "duplicate":
+      return "view-duplicate";
+    case "delete":
+      return "view-delete";
+    case "update":
+      if (patch.layout !== undefined) return "view-layout";
+      if (patch.name !== undefined) return "view-rename";
+      if (patch.visibleFieldIds !== undefined) return "view-fields";
+      return "view-edit";
+    default:
+      return null;
+  }
+}
+
+/** The project writes (keyed `["project-write", kind]`) and view writes (keyed
+ *  `["project-view-write", kind]`) against `repo` and, when given, `projectId` (a
+ *  create, which names no project, matches on the repo alone) — one per invocation, matched on VARIABLES for the reason
+ *  {@link pendingBoardWritesFor} gives. An unknown key shape keeps the write with a
+ *  null kind, as a board write's does. */
+export function pendingProjectWritesFor(
+  projectEntries: readonly PendingMutationEntry[],
+  viewEntries: readonly PendingMutationEntry[],
+  repo: string,
+  projectId: string | null,
+): PendingProjectWrite[] {
+  const read =
+    (family: "project" | "view") =>
+    (e: PendingMutationEntry): PendingProjectWrite[] => {
+      const vars = e.vars;
+      if (
+        typeof vars !== "object" ||
+        vars === null ||
+        e.mutationId === undefined
+      )
+        return [];
+      const scope = vars as Record<string, unknown>;
+      if (scope.repo !== repo) return [];
+      // A project create names no project yet, so it stays visible repo-wide;
+      // every other project write, and every view write, names the one it edits.
+      const scoped = family === "view" || typeof scope.projectId === "string";
+      if (projectId !== null && scoped && scope.projectId !== projectId)
+        return [];
+      return [
+        {
+          mutationId: e.mutationId,
+          kind: projectWriteKind(family, e.key?.[1], scope),
+          isPaused: e.paused ?? false,
+        },
+      ];
+    };
+  return [
+    ...projectEntries.flatMap(read("project")),
+    ...viewEntries.flatMap(read("view")),
+  ];
+}
+
+/** Whether a write to one issue's or pull request's project rail is pending on
+ *  `target`, and whether every such write is parked offline. Matched on the write's
+ *  VARIABLES (repo, lens, kind, number), so a rail remounted on the same item finds
+ *  a write its previous mount started. */
+export function pendingItemWriteFor(
+  entries: readonly PendingMutationEntry[],
+  target: ItemWriteTarget,
+): PendingItemWrite {
+  const matched = entries.filter((e) => {
+    const vars = e.vars;
+    if (typeof vars !== "object" || vars === null) return false;
+    const { repo, lens, kind, number } = vars as Record<string, unknown>;
+    return (
+      repo === target.repo &&
+      lens === target.lens &&
+      kind === target.kind &&
+      number === target.number
+    );
+  });
+  return {
+    pending: matched.length > 0,
+    paused: matched.length > 0 && matched.every((e) => e.paused === true),
+  };
 }
 
 /**

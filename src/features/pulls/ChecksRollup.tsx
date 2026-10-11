@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
+import { useRelativeNow } from "@/components/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -32,6 +33,7 @@ import {
   jobRerunOffer,
   RERUN_TITLES,
   rerunSuccessMessage,
+  rerunWindowReason,
   StatusIcon,
   statusLabel,
 } from "@/features/actions/status";
@@ -44,9 +46,13 @@ import { clipTitle } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
+  pendingJobState,
+  pendingRunState,
   repoKeys,
+  rerunFamilyState,
   useApproveWorkflowRun,
   useForgeStatus,
+  usePendingRunWrites,
   useRepoWriteAccess,
   writeAccessReason,
 } from "@/lib/git/queries";
@@ -341,9 +347,10 @@ function CheckRow({
   /** Whether the re-run mutation is running for THIS row's job, which shows the
    *  spinner; a parked one holds by its reason alone. */
   jobRerunBusy: boolean;
-  /** Whether anything outside this row holds the button: a read-only viewer, a
-   *  write probe still answering, or another row's re-run in flight (the handler
-   *  serializes, so an enabled-looking sibling would click into a no-op). */
+  /** Whether anything holds the button: a read-only viewer, a write probe still
+   *  answering, a re-run of this job or its run in flight from any surface, or
+   *  another row's (the handler serializes, so an enabled-looking sibling would
+   *  click into a no-op), or a run past GitHub's re-run window. */
   jobRerunDisabled: boolean;
   jobRerunReason: string | undefined;
   /** Takes the button element: the parent reads whether it held focus before its
@@ -803,15 +810,47 @@ export function ChecksRollup({
   const mountedWatchIds = open
     ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
     : [...recentlyRerun.keys()];
+  // In-flight run writes (re-runs, approvals) per run, wherever they started
+  // (the run view, the runs list, this rollup), read from the mutation cache by
+  // the writes' own run ids.
+  const runWrites = usePendingRunWrites(repoPath);
+  const familyOf = (runId: string | undefined) =>
+    runId ? rerunFamilyState(pendingRunState(runWrites, runId)) : undefined;
+  // GitHub refuses a re-run past its window. A check starts after its run is
+  // created, so a start older than the window proves the run is; a check with no
+  // start never holds its run.
+  const now = useRelativeNow();
+  const agedOutRuns = new Map(
+    checks.flatMap((c) => {
+      const reason = rerunWindowReason(rerunProvider, c.startedAt, now);
+      return c.runId && reason ? [[c.runId, reason] as const] : [];
+    }),
+  );
   // The whole offer chain — signatures, the GitHub activity gate, the latch —
-  // lives in its own pure module so the rules can be pinned by test.
-  const rerunnable = rerunnableRuns({
-    checks,
+  // lives in its own pure module so the rules can be pinned by test. Aged-out
+  // runs leave BEFORE it, since its GitHub mode choice (failed outranks
+  // cancelled-only) would otherwise let a dead failed run hide a cancelled one
+  // that can still fire. The batch fires only these.
+  const rerunInput = {
     bucketOf,
     runningRunIds,
     latched: recentlyRerun,
     provider: rerunProvider,
+  };
+  const firableRuns = rerunnableRuns({
+    ...rerunInput,
+    checks: checks.filter((c) => !c.runId || !agedOutRuns.has(c.runId)),
   });
+  // With nothing firable the aged-out offer stays up, held with the reason:
+  // every candidate then is aged out, since a firable one would have survived.
+  const rerunnable =
+    firableRuns.length > 0
+      ? firableRuns
+      : rerunnableRuns({ ...rerunInput, checks });
+  const batchAgedOut =
+    firableRuns.length === 0 && rerunnable.length > 0
+      ? agedOutRuns.get(rerunnable[0][0])
+      : undefined;
   // The runs this rollup re-ran whose latch still STANDS — never the latch
   // KEYS, which persist for the mount and would suppress a second failed
   // attempt forever. The per-job arm subtracts these on every provider: a
@@ -867,12 +906,23 @@ export function ChecksRollup({
   // Approve holds offline, as its prompt does. A running batch keeps a reason
   // of its own, so the button holds focus through the disable.
   const offlineHold = useOfflineHold();
+  // Approvals of these runs in flight from any surface or an earlier mount: the
+  // `approving` flag spans only this mount's batch.
+  const approvals = blockedRunIds.flatMap(
+    (id) => pendingRunState(runWrites, id)?.approve ?? [],
+  );
+  const approvePending =
+    approvals.length > 0
+      ? { paused: approvals.some((a) => a.paused) }
+      : undefined;
   const approveHeldReason = (() => {
     switch (true) {
       case heldReason !== undefined:
         return heldReason;
       case approving:
         return pendingWriteReason(approveRun.isPaused, ACT_PENDING_REASON);
+      case approvePending !== undefined:
+        return pendingWriteReason(approvePending.paused, ACT_PENDING_REASON);
       default:
         return offlineHold;
     }
@@ -901,6 +951,13 @@ export function ChecksRollup({
         return undefined;
     }
   })();
+  // A re-run of an offered run already in flight holds the batch, which would
+  // otherwise submit that run a second time.
+  const batchFamilies = rerunnable.flatMap(([id]) => familyOf(id) ?? []);
+  const batchPending =
+    batchFamilies.length > 0
+      ? { paused: batchFamilies.some((f) => f.paused) }
+      : undefined;
 
   /** Re-read the PR's checks once the started attempts have transitioned. Both
    *  re-run paths schedule through here, and the ids union across calls so a
@@ -933,7 +990,7 @@ export function ChecksRollup({
   }
 
   async function approveBlockedRuns() {
-    if (writeBlocked || stale) return;
+    if (writeBlocked || stale || approvePending) return;
     const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
     setApproving(true);
@@ -965,7 +1022,7 @@ export function ChecksRollup({
   }
 
   async function rerunOfferedRuns() {
-    if (writeBlocked || stale || rerunBusy) return;
+    if (writeBlocked || stale || rerunBusy || batchPending) return;
     // Read before the first await: the button may be gone by the end of the
     // batch, and `activeElement` then reads `<body>` for a palette run and a
     // button run alike.
@@ -977,7 +1034,7 @@ export function ChecksRollup({
     try {
       // Sequential, and each failure is reported on its own: one run raced to
       // "in progress" by the forge must not strand the rest of the batch.
-      for (const [id, signature, mode] of rerunnable) {
+      for (const [id, signature, mode] of firableRuns) {
         try {
           // A cancelled-only run has no failed job, so it re-runs whole.
           await rerun.mutateAsync({
@@ -998,15 +1055,16 @@ export function ChecksRollup({
     } finally {
       setRerunning(false);
     }
-    // Hand off only when every id of THIS batch latched: that retires the batch's
-    // offer, so the button may unmount (or return naming the next one, the
-    // cancelled runs behind GitHub's failed batch), while a partial batch keeps it
-    // up for the retry. Only while focus is still unclaimed: restore what the
-    // activation would otherwise lose, never override a move made during the await.
+    // Hand off only when every run THIS batch fired latched: that retires the
+    // firable offer, so the button may unmount (or return naming the next one:
+    // the cancelled runs behind GitHub's failed batch, or aged-out runs held with
+    // their reason), while a partial batch keeps it up for the retry. Only while
+    // focus is still unclaimed: restore what the activation would otherwise lose,
+    // never override a move made during the await.
     const unclaimed =
       document.activeElement === document.body ||
       document.activeElement === rerunButtonRef.current;
-    if (fromButton && startedIds.length === rerunnable.length && unclaimed)
+    if (fromButton && startedIds.length === firableRuns.length && unclaimed)
       summaryRef.current?.focus();
   }
 
@@ -1015,14 +1073,14 @@ export function ChecksRollup({
     buttonEl: HTMLElement,
   ) {
     if (writeBlocked || stale || rerunBusy || writeAccess.isPending) return;
-    if (!jobOffer) return;
+    if (!jobOffer || familyOf(runId) || agedOutRuns.has(runId)) return;
     // Read before the first await: this row is keyed by its job id, and a new
     // attempt mints a new one, so the button can be gone by the time the
     // mutation settles — `activeElement` then reads `<body>`.
     const fromButton = document.activeElement === buttonEl;
     setRerunningJob(jobId);
     try {
-      await rerunJobMutation.mutateAsync({ jobId, lens });
+      await rerunJobMutation.mutateAsync({ jobId, runId, lens });
       toast.success(jobOffer.toast);
       setRecentlyRerunJobs((prev) => new Map(prev).set(jobId, completedAt));
       // Latch the RUN too, at the signature its failed checks carry right now:
@@ -1061,7 +1119,9 @@ export function ChecksRollup({
     rerunOffer !== null &&
       !writeBlocked &&
       !writeAccess.isPending &&
-      !rerunBusy,
+      !rerunBusy &&
+      batchPending === undefined &&
+      firableRuns.length > 0,
   );
 
   // Failures first, then the required contexts still holding the merge, then
@@ -1181,11 +1241,18 @@ export function ChecksRollup({
               <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={approving || writeBlocked || stale || !!offlineHold}
+                disabled={
+                  approving ||
+                  approvePending !== undefined ||
+                  writeBlocked ||
+                  stale ||
+                  !!offlineHold
+                }
                 reason={approveHeldReason}
                 onClick={() => void approveBlockedRuns()}
               >
-                {approving && !approveRun.isPaused ? (
+                {(approving && !approveRun.isPaused) ||
+                (approvePending && !approvePending.paused) ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
                   <PlayIcon data-icon="inline-start" />
@@ -1232,13 +1299,29 @@ export function ChecksRollup({
                 ref={rerunButtonRef}
                 variant="outline"
                 size="xs"
-                disabled={rerunHeld}
-                reason={
-                  rerunning
-                    ? (writeReason ??
-                      pendingWriteReason(rerun.isPaused, ACT_PENDING_REASON))
-                    : rerunHeldReason
+                disabled={
+                  rerunHeld ||
+                  batchPending !== undefined ||
+                  batchAgedOut !== undefined
                 }
+                reason={(() => {
+                  switch (true) {
+                    case rerunning:
+                      return (
+                        writeReason ??
+                        pendingWriteReason(rerun.isPaused, ACT_PENDING_REASON)
+                      );
+                    case rerunHeldReason !== undefined:
+                      return rerunHeldReason;
+                    case batchPending !== undefined:
+                      return pendingWriteReason(
+                        batchPending.paused,
+                        "A re-run is already in flight…",
+                      );
+                    default:
+                      return batchAgedOut;
+                  }
+                })()}
                 title={RERUN_TITLES[rerunOffer.kind]}
                 onClick={() => void rerunOfferedRuns()}
               >
@@ -1270,6 +1353,20 @@ export function ChecksRollup({
                 const candidate = c.jobId
                   ? jobCandidateById.get(c.jobId)
                   : undefined;
+                // This job's re-run in flight from any surface, or this rollup's
+                // own before its write reaches the cache; each arm's pause comes
+                // from the source that set it.
+                const ownJobRerun =
+                  (c.jobId
+                    ? pendingJobState(runWrites, c.jobId)?.rerun
+                    : undefined) ??
+                  (rerunningJob !== null && rerunningJob === c.jobId
+                    ? { paused: rerunJobMutation.isPaused }
+                    : undefined);
+                const rowFamily = familyOf(c.runId);
+                const rowAgedOut = c.runId
+                  ? agedOutRuns.get(c.runId)
+                  : undefined;
                 return (
                   <CheckRow
                     key={orderKey.get(c)}
@@ -1290,18 +1387,35 @@ export function ChecksRollup({
                         : null
                     }
                     jobRerunBusy={
-                      rerunningJob === c.jobId && !rerunJobMutation.isPaused
+                      ownJobRerun !== undefined && !ownJobRerun.paused
                     }
-                    jobRerunDisabled={rerunHeld}
-                    jobRerunReason={
-                      rerunningJob === c.jobId
-                        ? (writeReason ??
-                          pendingWriteReason(
-                            rerunJobMutation.isPaused,
-                            ACT_PENDING_REASON,
-                          ))
-                        : rerunHeldReason
+                    jobRerunDisabled={
+                      rerunHeld ||
+                      ownJobRerun !== undefined ||
+                      rowFamily !== undefined ||
+                      rowAgedOut !== undefined
                     }
+                    jobRerunReason={(() => {
+                      switch (true) {
+                        case ownJobRerun !== undefined:
+                          return (
+                            writeReason ??
+                            pendingWriteReason(
+                              ownJobRerun.paused,
+                              ACT_PENDING_REASON,
+                            )
+                          );
+                        case rerunHeldReason !== undefined:
+                          return rerunHeldReason;
+                        case rowFamily !== undefined:
+                          return pendingWriteReason(
+                            rowFamily.paused,
+                            "A re-run is already in flight…",
+                          );
+                        default:
+                          return rowAgedOut;
+                      }
+                    })()}
                     onJobRerun={
                       candidate
                         ? (buttonEl) => void rerunOneJob(candidate, buttonEl)

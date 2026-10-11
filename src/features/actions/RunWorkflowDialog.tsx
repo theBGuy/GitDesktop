@@ -1,6 +1,7 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +35,12 @@ import {
   useWorkflowDispatchable,
   useWorkflows,
 } from "@/lib/github/actions";
+import {
+  ACT_PENDING_REASON,
+  pendingWriteReason,
+  refuseWhileOffline,
+  useOfflineHold,
+} from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
@@ -258,6 +265,7 @@ export function RunWorkflowDialog({
           return workflow;
       }
     })();
+    if (refuseWhileOffline()) return;
     try {
       await runWorkflow.mutateAsync({
         workflow: workflowArg,
@@ -306,6 +314,35 @@ export function RunWorkflowDialog({
   const workflowHintId = `${idBase}-workflow-hint`;
   const selectedNoTrigger =
     !isPipelines && workflow !== "" && hasNoManualTrigger(probed, workflow);
+  // Starting CI holds offline rather than park: a parked dispatch would start a
+  // run whenever the connection returns, long after the user left the dialog.
+  // Every hold carries a reason, ranked running-first, so a flip between them
+  // never drops focus to a native disable.
+  const offlineHold = useOfflineHold();
+  const runHeldReason = (() => {
+    switch (true) {
+      case runWorkflow.isPending:
+        return pendingWriteReason(runWorkflow.isPaused, ACT_PENDING_REASON);
+      case offlineHold !== undefined:
+        return offlineHold;
+      // Only a read that succeeded may say there is nothing to run; a failed one
+      // says so, matching the field's own notice.
+      case !isPipelines && !workflow && workflowsLoading:
+        return "Loading workflows…";
+      case !isPipelines && !workflow && workflowsFailed:
+        return "Couldn't load workflows";
+      case !isPipelines && !workflow && noneDispatchable:
+        return "No active workflows to run here";
+      case !isPipelines && !workflow:
+        return "Choose a workflow";
+      case selectedNoTrigger:
+        return "This workflow has no manual trigger on this branch or tag";
+      case !gitRef.trim():
+        return "Enter a branch or tag";
+      default:
+        return undefined;
+    }
+  })();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -549,17 +586,13 @@ export function RunWorkflowDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            disabled={
-              (!isPipelines && !workflow) ||
-              selectedNoTrigger ||
-              !gitRef.trim() ||
-              runWorkflow.isPending
-            }
+          <DisabledReasonButton
+            disabled={runHeldReason !== undefined}
+            reason={runHeldReason}
             onClick={submit}
           >
             {isPipelines ? "Run pipeline" : "Run workflow"}
-          </Button>
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

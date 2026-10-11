@@ -10,6 +10,7 @@ import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,6 +49,7 @@ import {
   useHoverPrefetch,
   useLog,
   useOpState,
+  usePendingTagPushes,
   usePrefetchCommit,
   usePushTag,
   useRepoStatus,
@@ -65,6 +67,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
+  pendingItemReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -127,13 +130,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // whenever the connection returns.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
-  // Tag pushes in flight, keyed by repo + tag: the panel survives repo switches,
-  // so an unkeyed `pushTag.isPending` would hold the next repo's items with a
-  // false reason. State rather than a ref, since `disabled` is read in render.
-  const [pushingTags, setPushingTags] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const pushingTagKey = (tag: string) => `${repoPath}\n${tag}`;
+  // This repo's tag pushes in flight, read from the mutation cache: the panel
+  // survives repo switches and a remount, and neither may release a hold.
+  const pendingTagPushes = usePendingTagPushes(repoPath);
+  const pendingTagPush = (tag: string) =>
+    pendingTagPushes.find((p) => p.tag === tag);
   const branches = useBranches(repoPath);
 
   // The reset, delete-tag and pick-onto confirms record the repo they opened in:
@@ -413,20 +414,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   async function pushTagToOrigin(tag: string) {
-    const key = pushingTagKey(tag);
-    if (pushingTags.has(key) || refuseWhileOffline()) return;
-    setPushingTags((cur) => new Set(cur).add(key));
+    if (pendingTagPush(tag) || refuseWhileOffline()) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
       onError(e);
       return;
-    } finally {
-      setPushingTags((cur) => {
-        const next = new Set(cur);
-        next.delete(key);
-        return next;
-      });
     }
     toast.success(`Pushed tag ${tag} to origin`);
   }
@@ -876,15 +869,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         </ContextMenuItem>
         {commit.tags.length > 0 && <ContextMenuSeparator />}
         {commit.tags.map((tag) => {
-          const pushing = pushingTags.has(pushingTagKey(tag));
+          const pushing = pendingTagPush(tag);
           return (
             <ContextMenuItem
               key={`push:${tag}`}
-              disabled={!!offlineHold || pushing}
+              className={MENU_HELD_ROW_CLASS}
+              disabled={!!offlineHold || !!pushing}
               onClick={() => void pushTagToOrigin(tag)}
             >
               Push tag {tag} to origin
-              {pushing ? " (pushing…)" : offlineSuffix}
+              {pushing
+                ? ` (${pendingItemReason(pushing.paused, "pushing…")})`
+                : offlineSuffix}
             </ContextMenuItem>
           );
         })}

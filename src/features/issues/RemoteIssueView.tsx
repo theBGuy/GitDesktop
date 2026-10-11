@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -95,6 +96,9 @@ import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   COMMENT_DELETE_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
+  OFFLINE_ITEM_REASON,
+  pendingItemReason,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -177,8 +181,9 @@ export function RemoteIssueView({
   // label; each suffix is empty whenever its axis allows the action.
   const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
   const writeItemReason = writeReason ? WRITE_ACCESS_ITEM_REASON : undefined;
-  // Set while offline. Close and the transfer/delete confirms hold on it at the
-  // press; the composer's writes are left to park, and `composerReason` says so.
+  // Set while offline. Close, pin, lock and the transfer/delete confirms hold on
+  // it at the press; the composer's writes are left to park, and
+  // `composerReason` says so.
   const offlineHold = useOfflineHold();
   const itemSuffix = writeItemReason ? ` — ${writeItemReason}` : "";
   const triageSuffix = triageItemReason ? ` — ${triageItemReason}` : "";
@@ -235,6 +240,38 @@ export function RemoteIssueView({
   const unlockIssue = useUnlockIssue(repoPath, lens);
   const transferIssue = useTransferIssue(repoPath, lens);
   const deleteIssue = useDeleteIssue(repoPath, lens);
+  // Pin and lock hold rather than park, like close: a parked one would change
+  // the issue whenever the connection returns. Each menu item names its hold in
+  // the label; the access axis outranks both, being the one no wait clears.
+  // This view outlives an issue switch, so a pending write holds only the issue
+  // its variables name; another issue's write leaves these items alone.
+  const pinHeld = (() => {
+    switch (true) {
+      case pinIssue.isPending && pinIssue.variables?.number === number:
+        return pendingItemReason(
+          pinIssue.isPaused,
+          pinIssue.variables?.pinned ? "pinning…" : "unpinning…",
+        );
+      case !!offlineHold:
+        return OFFLINE_ITEM_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  const lockHeld = (() => {
+    switch (true) {
+      case lockIssue.isPending && lockIssue.variables?.number === number:
+        return pendingItemReason(lockIssue.isPaused, "locking…");
+      case unlockIssue.isPending && unlockIssue.variables === number:
+        return pendingItemReason(unlockIssue.isPaused, "unlocking…");
+      case !!offlineHold:
+        return OFFLINE_ITEM_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  const pinSuffix = itemSuffix || (pinHeld ? ` — ${pinHeld}` : "");
+  const lockHeldSuffix = lockSuffix || (lockHeld ? ` — ${lockHeld}` : "");
   const selectIssue = useUiStore((s) => s.selectIssue);
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
@@ -418,7 +455,10 @@ export function RemoteIssueView({
       case detailsStale:
         return staleReason;
       case comment.isPending:
-        return pendingWriteReason(comment.isPaused, "Posting your comment…");
+        return pendingWriteReason(
+          comment.isPaused,
+          COMMENT_POST_PENDING_REASON,
+        );
       case closeIssue.isPending:
         return pendingWriteReason(closeIssue.isPaused, "Closing this issue…");
       case reopenIssue.isPending:
@@ -706,6 +746,7 @@ export function RemoteIssueView({
   /** `wasPinned` comes from the render the click landed on: the refetch that
    *  follows already carries the new state, so the verb has to be captured. */
   async function togglePin(wasPinned: boolean) {
+    if (refuseWhileOffline()) return;
     try {
       await pinIssue.mutateAsync({ number, pinned: !wasPinned });
     } catch (e) {
@@ -716,6 +757,7 @@ export function RemoteIssueView({
   }
 
   async function doLock(reason: LockReason | null) {
+    if (refuseWhileOffline()) return;
     try {
       await lockIssue.mutateAsync({ number, reason });
     } catch (e) {
@@ -726,6 +768,7 @@ export function RemoteIssueView({
   }
 
   async function doUnlock() {
+    if (refuseWhileOffline()) return;
     try {
       await unlockIssue.mutateAsync(number);
     } catch (e) {
@@ -1012,11 +1055,12 @@ export function RemoteIssueView({
                     `number`, and a disabled item can't say why it's held. */}
                 {canWrite && !detailsStale && (
                   <DropdownMenuItem
-                    disabled={writeBlocked}
+                    className={MENU_HELD_ROW_CLASS}
+                    disabled={writeBlocked || pinHeld !== undefined}
                     onClick={() => void togglePin(issue.isPinned)}
                   >
                     {issue.isPinned ? "Unpin issue" : "Pin issue"}
-                    {itemSuffix}
+                    {pinSuffix}
                   </DropdownMenuItem>
                 )}
                 {/* Absent while a placeholder is served: which affordance renders
@@ -1026,18 +1070,20 @@ export function RemoteIssueView({
                   !detailsStale &&
                   (issue.locked ? (
                     <DropdownMenuItem
-                      disabled={lockBlocked}
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={lockBlocked || lockHeld !== undefined}
                       onClick={() => void doUnlock()}
                     >
-                      Unlock conversation{lockSuffix}
+                      Unlock conversation{lockHeldSuffix}
                     </DropdownMenuItem>
                   ) : isGitLab ? (
                     // GitLab locks without a reason — a plain item, no submenu.
                     <DropdownMenuItem
-                      disabled={lockBlocked}
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={lockBlocked || lockHeld !== undefined}
                       onClick={() => void doLock(null)}
                     >
-                      Lock conversation{lockSuffix}
+                      Lock conversation{lockHeldSuffix}
                     </DropdownMenuItem>
                   ) : (
                     <DropdownMenuSub>
@@ -1045,10 +1091,10 @@ export function RemoteIssueView({
                           of its own (unlike menu items), so the dim rides a
                           call-site class. */}
                       <DropdownMenuSubTrigger
-                        disabled={writeBlocked}
+                        disabled={lockBlocked || lockHeld !== undefined}
                         className="data-disabled:opacity-50"
                       >
-                        Lock conversation…{itemSuffix}
+                        Lock conversation…{lockHeldSuffix}
                       </DropdownMenuSubTrigger>
                       <DropdownMenuSubContent>
                         {LOCK_REASONS.map(([label, reason]) => (

@@ -1,15 +1,23 @@
 import {
+  type MutationCache,
   queryOptions,
   useInfiniteQuery,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useMutation } from "@/lib/started-mutation";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import type { ForgeProvider, ForgeSearchList, MyWorkSources } from "../types";
 import { keepPreviousDataForRepo } from "./core";
+import { useMutationCacheSnapshot } from "./internal";
+import {
+  type ForkByNameVars,
+  forkByNameKey,
+  pendingForkFor,
+  pendingMutationEntries,
+} from "./pr-writes";
 
 /** Every repo the signed-in user can access (clone dialog). */
 export function useGhRepos(enabled: boolean) {
@@ -253,17 +261,45 @@ export function useStarRepo() {
  *  so the caller can offer "Clone the fork" (and warn when it's not yet clonable).
  *  The new fork belongs in the provider's own-repos list; invalidating at the
  *  mutation level keeps that refresh alive after the calling pane unmounts. */
-export function useForkRepoByName() {
+export function useForkRepoByName(provider: ForgeProvider) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      provider: ForgeProvider;
-      owner: string;
-      name: string;
-    }) => api.forgeForkRepo(args.provider, args.owner, args.name),
+    // The repo rides the variables, so a detail pane remounted on it still finds
+    // the fork ({@link usePendingFork}).
+    mutationKey: forkByNameKey(provider),
+    mutationFn: (args: ForkByNameVars) =>
+      api.forgeForkRepo(args.provider, args.owner, args.name),
     onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
         queryKey: ["forge-repos", args.provider],
       }),
   });
+}
+
+const NO_PENDING_FORK = { pending: false, paused: false };
+
+/** Whether a fork of `owner/name` on `provider` is in flight, and whether it is
+ *  parked offline. Read from the mutation cache: the detail pane is keyed per repo,
+ *  and a remounted one's own observer would re-enable Fork mid-write. */
+export function usePendingFork(
+  provider: ForgeProvider,
+  owner: string,
+  name: string,
+): { pending: boolean; paused: boolean } {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingForkFor(
+        pendingMutationEntries(
+          cache.findAll({
+            mutationKey: forkByNameKey(provider),
+            status: "pending",
+          }),
+        ),
+        provider,
+        owner,
+        name,
+      ),
+    [provider, owner, name],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_FORK);
 }

@@ -1,11 +1,21 @@
-import { type QueryKey, useQueryClient } from "@tanstack/react-query";
+import {
+  type MutationCache,
+  type QueryKey,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useCallback } from "react";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { repoKeys } from "./core";
-import { useRepoMutation } from "./internal";
-import { prWriteKey } from "./pr-writes";
+import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import {
+  type EditLabelsVars,
+  pendingLabelEditFor,
+  pendingMutationEntries,
+  prWriteKey,
+} from "./pr-writes";
 
 export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
@@ -70,15 +80,10 @@ export function useStackDissolve(repo: string, lens: RemoteLens) {
 export function useEditPrLabels(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      kind: "issue" | "mr" | "discussion";
-      number: number;
-      labelableId: string;
-      addIds: string[];
-      removeIds: string[];
-      addNames?: string[];
-      removeNames?: string[];
-    }) =>
+    // The entity rides the variables, so a picker remounted on it still finds the
+    // write ({@link usePendingLabelEdit}) and a switch never detaches it.
+    mutationKey: prWriteKey("labels", repo),
+    mutationFn: (args: EditLabelsVars) =>
       api.forgeEditLabels(
         repo,
         args.kind === "mr" ? "mr" : "issue",
@@ -124,6 +129,34 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
       );
     },
   });
+}
+
+const NO_PENDING_LABEL_EDIT = { pending: false, paused: false };
+
+/** Whether a label edit on the `kind` entity `number` is in flight in `repo`, and
+ *  whether it is parked offline. Read from the mutation cache: the pickers are keyed
+ *  per entity, and a remounted one's own observer would read idle. */
+export function usePendingLabelEdit(
+  repo: string,
+  kind: EditLabelsVars["kind"],
+  number: number,
+): { pending: boolean; paused: boolean } {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingLabelEditFor(
+        pendingMutationEntries(
+          cache.findAll({
+            mutationKey: prWriteKey("labels", repo),
+            status: "pending",
+          }),
+        ),
+        repo,
+        kind,
+        number,
+      ),
+    [repo, kind, number],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_LABEL_EDIT);
 }
 
 export function useCreatePr(repo: string) {

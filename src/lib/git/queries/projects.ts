@@ -84,6 +84,8 @@ import {
   BOARD_WRITES_KEY,
   holdLens,
   pendingBoardWritesFor,
+  pendingItemWriteFor,
+  pendingProjectWritesFor,
   projectItemsRepoKey,
   refetchOnMountUnlessHeld,
   releaseLens,
@@ -212,24 +214,25 @@ export function useItemFieldValues(
 /** The picker's batched link/unlink, with an optimistic patch of the memberships
  *  cache. Adds land as `pending:`-prefixed placeholder item ids — the real item id
  *  only exists once GitHub creates the item, and `onSettled`'s refetch supplies
- *  it; the picker refuses to send a `pending:` id back as a remove target. */
-export function useEditItemProjects(
-  repo: string,
-  kind: "issue" | "pr",
-  number: number,
-  lens: RemoteLens,
-) {
+ *  it; the picker refuses to send a `pending:` id back as a remove target.
+ *
+ *  The item rides the VARIABLES, as {@link useSetItemFieldValues}'s does, so
+ *  {@link usePendingItemProjectsWrite} can find the write from any mount. */
+export function useEditItemProjects() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      contentId: string;
-      /** Full refs, not ids: the optimistic chip renders the title before the
-       *  refetch lands (the backend takes only the ids). */
-      adds: ProjectV2Ref[];
-      removes: ProjectItemRemove[];
-    }) =>
+    mutationKey: ITEM_PROJECTS_WRITE_KEY,
+    mutationFn: (
+      args: ItemWriteTarget & {
+        contentId: string;
+        /** Full refs, not ids: the optimistic chip renders the title before the
+         *  refetch lands (the backend takes only the ids). */
+        adds: ProjectV2Ref[];
+        removes: ProjectItemRemove[];
+      },
+    ) =>
       api.ghEditItemProjects(
-        repo,
+        args.repo,
         args.contentId,
         args.adds.map((p) => p.id),
         args.removes,
@@ -238,8 +241,13 @@ export function useEditItemProjects(
     // so the rollback and re-read name the item the write fired on whatever render
     // they settle through: the rail hosting this survives an entity switch.
     onMutate: async (args) => {
-      const key = itemProjectsKey(repo, lens, kind, number);
-      const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
+      const key = itemProjectsKey(args.repo, args.lens, args.kind, args.number);
+      const fieldsKey = itemFieldValuesKey(
+        args.repo,
+        args.lens,
+        args.kind,
+        args.number,
+      );
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<ItemProjects>(key);
       if (prev) {
@@ -270,7 +278,7 @@ export function useEditItemProjects(
           };
         });
       }
-      return { prev, key, fieldsKey, repo };
+      return { prev, key, fieldsKey, repo: args.repo };
     },
     // Reporting lives here, not in the caller's `mutate` options: the popover
     // that fires this closes as it does, and react-query drops mutate-scoped
@@ -499,6 +507,9 @@ export interface PendingBoardWrite {
    *  Keeping both fields on one total shape is what lets a consumer answer for
    *  every kind without knowing which family it is looking at. */
   count: number | null;
+  /** Parked offline before its request — the same cache entry's `isPaused`, so a
+   *  hold derived from this list can word itself by it. */
+  isPaused: boolean;
 }
 
 /**
@@ -520,6 +531,116 @@ export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
     [repo],
   );
   return useMutationCacheSnapshot(select, []);
+}
+
+/** What a pending project or view write is doing, as the toolbar names it — the
+ *  key's kind, refined by the patch where one hook serves several verbs. */
+export type PendingProjectWriteKind =
+  | "project-create"
+  | "project-edit"
+  | "project-close"
+  | "project-reopen"
+  | "project-delete"
+  | "view-create"
+  | "view-duplicate"
+  | "view-rename"
+  | "view-layout"
+  | "view-fields"
+  | "view-edit"
+  | "view-delete";
+
+/** One pending project or view write. */
+export interface PendingProjectWrite {
+  mutationId: number;
+  kind: PendingProjectWriteKind | null;
+  isPaused: boolean;
+}
+
+/**
+ * Every project write against `repo`, and every view write against `repo` and (when
+ * given) `projectId`, currently in flight — read off the mutation cache for the
+ * reason {@link usePendingBoardWrites} is. Deliberately apart from the board-write
+ * count: these writes neither hold pagination nor settle through
+ * {@link invalidateProjectBoards}.
+ */
+export function usePendingProjectWrites(
+  repo: string,
+  projectId?: string,
+): PendingProjectWrite[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingProjectWritesFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: PROJECT_WRITE_KEY, status: "pending" }),
+        ),
+        pendingMutationEntries(
+          cache.findAll({ mutationKey: VIEW_WRITE_KEY, status: "pending" }),
+        ),
+        repo,
+        projectId ?? null,
+      ),
+    [repo, projectId],
+  );
+  return useMutationCacheSnapshot(select, []);
+}
+
+/** The one issue or pull request a project-rail write addresses, carried in its
+ *  variables. */
+export interface ItemWriteTarget {
+  repo: string;
+  lens: RemoteLens;
+  kind: "issue" | "pr";
+  number: number;
+}
+
+/** Whether a rail write is pending on one item, and whether all of them are parked
+ *  offline — `paused` is only ever true beside `pending`. */
+export interface PendingItemWrite {
+  pending: boolean;
+  paused: boolean;
+}
+
+const NO_ITEM_WRITE: PendingItemWrite = { pending: false, paused: false };
+
+/** The keys the rail's two writes carry: families of their own, never under
+ *  `board-write` (the field editor's per-board chain would flip the board's holds
+ *  link by link) and with no repo or item segment, for the reason
+ *  {@link boardWriteKey} gives — the item rides the variables. */
+const ITEM_PROJECTS_WRITE_KEY = ["project-item-projects"] as const;
+const ITEM_FIELDS_WRITE_KEY = ["project-item-fields"] as const;
+
+function usePendingItemWrite(
+  mutationKey: QueryKey,
+  { repo, lens, kind, number }: ItemWriteTarget,
+): PendingItemWrite {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingItemWriteFor(
+        pendingMutationEntries(
+          cache.findAll({ mutationKey, status: "pending" }),
+        ),
+        { repo, lens, kind, number },
+      ),
+    [mutationKey, repo, lens, kind, number],
+  );
+  return useMutationCacheSnapshot(select, NO_ITEM_WRITE);
+}
+
+/** A {@link useEditItemProjects} write pending on `target`, from the cache rather
+ *  than the observer: the rail mounts per item, and its hold must survive a
+ *  remount onto the same one. */
+export function usePendingItemProjectsWrite(
+  target: ItemWriteTarget,
+): PendingItemWrite {
+  return usePendingItemWrite(ITEM_PROJECTS_WRITE_KEY, target);
+}
+
+/** A {@link useSetItemFieldValues} write pending on `target`, for the reason
+ *  {@link usePendingItemProjectsWrite} reads the cache. */
+export function usePendingItemFieldsWrite(
+  target: ItemWriteTarget,
+): PendingItemWrite {
+  return usePendingItemWrite(ITEM_FIELDS_WRITE_KEY, target);
 }
 
 /**
@@ -3397,32 +3518,32 @@ function unwrittenNote(unwritten: number): string | null {
  * {@link useMoveBoardCard} states: the editor's per-board chain starts each later
  * board's write after an await, from whatever render is current then, so a host
  * re-rendered onto another item would otherwise retarget that write, its patch
- * and its rollback. Deliberately NOT in the board-write family (no
- * `mutationKey`): the chain would flip the board's holds link by link.
+ * and its rollback. Keyed in a family of its own, never the board-write one: the
+ * chain would flip the board's holds link by link.
  */
 export function useSetItemFieldValues() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      repo: string;
-      lens: RemoteLens;
-      kind: "issue" | "pr";
-      number: number;
-      projectId: string;
-      /** The membership's item id on `projectId` — what the write addresses. */
-      itemId: string;
-      updates: ProjectFieldValueUpdate[];
-      /** Field ids to UNSET; no update shape expresses a clear. */
-      clears: string[];
-      /** The item's org issue fields drafted on this board, in the same call, or
-       *  null when there are none. */
-      issueWrites: IssueFieldWrites | null;
-      /** That board's values as they'll read once this lands. */
-      values: ProjectFieldValue[];
-      /** Boards queued behind this one. The editor writes board by board and stops
-       *  at the first failure, so a failure here names what that stop left undone. */
-      unwritten: number;
-    }) =>
+    mutationKey: ITEM_FIELDS_WRITE_KEY,
+    mutationFn: (
+      args: ItemWriteTarget & {
+        projectId: string;
+        /** The membership's item id on `projectId` — what the write addresses. */
+        itemId: string;
+        updates: ProjectFieldValueUpdate[];
+        /** Field ids to UNSET; no update shape expresses a clear. */
+        clears: string[];
+        /** The item's org issue fields drafted on this board, in the same call,
+         *  or null when there are none. */
+        issueWrites: IssueFieldWrites | null;
+        /** That board's values as they'll read once this lands. */
+        values: ProjectFieldValue[];
+        /** Boards queued behind this one. The editor writes board by board and
+         *  stops at the first failure, so a failure here names what that stop
+         *  left undone. */
+        unwritten: number;
+      },
+    ) =>
       api.ghSetItemFieldValues(
         args.repo,
         args.projectId,
@@ -3771,9 +3892,15 @@ interface ViewWriteScope {
 
 /** The keys the project and view writes carry. Prefixes of their own, never under
  *  `board-write` or the status writes' key, for the reason {@link STATUS_WRITE_KEY}
- *  gives; which project or repo a write addresses rides its variables. */
+ *  gives; which project or repo a write addresses rides its variables. Each write
+ *  extends its family's prefix with its kind, which {@link usePendingProjectWrites}
+ *  names it by; the settles match the bare prefix. */
 const PROJECT_WRITE_KEY = ["project-write"] as const;
 const VIEW_WRITE_KEY = ["project-view-write"] as const;
+const projectWriteKey = (kind: "create" | "update" | "delete") =>
+  [...PROJECT_WRITE_KEY, kind] as const;
+const viewWriteKey = (kind: "create" | "duplicate" | "update" | "delete") =>
+  [...VIEW_WRITE_KEY, kind] as const;
 
 /** How many container settles are still waiting out the replica lag, per query
  *  key hash. A read fired inside that window can answer from before the write,
@@ -3951,7 +4078,7 @@ function patchedProject(
 export function useCreateProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: PROJECT_WRITE_KEY,
+    mutationKey: projectWriteKey("create"),
     mutationFn: (
       args: ProjectWriteScope & {
         ownerId: string;
@@ -4004,7 +4131,7 @@ export function useCreateProject() {
 export function useUpdateProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: PROJECT_WRITE_KEY,
+    mutationKey: projectWriteKey("update"),
     mutationFn: (
       args: ProjectWriteScope & { projectId: string; patch: ProjectPatch },
     ) => api.ghUpdateProject(args.repo, args.projectId, args.patch),
@@ -4070,7 +4197,7 @@ export function useUpdateProject() {
 export function useDeleteProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: PROJECT_WRITE_KEY,
+    mutationKey: projectWriteKey("delete"),
     mutationFn: (args: ProjectWriteScope & { projectId: string }) =>
       api.ghDeleteProject(args.repo, args.projectId),
     onMutate: async (args) => ({
@@ -4152,7 +4279,7 @@ function joinCreatedView(
 export function useCreateProjectView() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: VIEW_WRITE_KEY,
+    mutationKey: viewWriteKey("create"),
     mutationFn: (
       args: ViewWriteScope & { name: string; layout: ProjectViewLayout },
     ) => api.ghCreateView(args.repo, args.projectId, args.name, args.layout),
@@ -4177,7 +4304,7 @@ export function useCreateProjectView() {
 export function useDuplicateProjectView() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: VIEW_WRITE_KEY,
+    mutationKey: viewWriteKey("duplicate"),
     mutationFn: (args: ViewWriteScope & { source: DuplicateViewSource }) =>
       api.ghDuplicateView(args.repo, args.projectId, args.source),
     onMutate: async (args) => ({
@@ -4207,7 +4334,7 @@ export function useDuplicateProjectView() {
 export function useUpdateProjectView() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: VIEW_WRITE_KEY,
+    mutationKey: viewWriteKey("update"),
     mutationFn: (
       args: ViewWriteScope & { viewId: string; patch: ProjectViewPatch },
     ) => api.ghUpdateView(args.repo, args.viewId, args.patch),
@@ -4267,7 +4394,7 @@ export function useUpdateProjectView() {
 export function useDeleteProjectView() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: VIEW_WRITE_KEY,
+    mutationKey: viewWriteKey("delete"),
     mutationFn: (args: ViewWriteScope & { viewId: string }) =>
       api.ghDeleteView(args.repo, args.viewId),
     onMutate: async (args) => ({

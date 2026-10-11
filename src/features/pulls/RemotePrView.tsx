@@ -200,6 +200,7 @@ import { useJiraLink } from "@/lib/jira/queries";
 import {
   ACT_PENDING_REASON,
   COMMENT_DELETE_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
   RIDING_COMMENT_CLOSE_HELD,
   refuseWhileOffline,
@@ -397,7 +398,7 @@ export function RemotePrView({
   // Menu items can't show a tooltip once disabled — they carry the compact
   // reason in their label instead.
   const triageItemReason = triageReason ? TRIAGE_ACCESS_ITEM_REASON : undefined;
-  // Set while offline. Merge, close, dissolve, update-branch and the merge
+  // Set while offline. Merge, close, the stack writes, update-branch and the merge
   // dialog's confirm hold on it at the press; comment-class writes are left to
   // park, and their busy reason says so through `pendingWriteReason`.
   const offlineHold = useOfflineHold();
@@ -764,6 +765,7 @@ export function RemotePrView({
   const resolveMergePending = writePending("resolve-merge");
   // A stack create or add holds the offer of every PR it names, whichever PR fired it.
   const stackWritePending = isStackWritePendingFor(pendingWrites, number, lens);
+  const stackWritePaused = isStackWritePendingFor(pausedWrites, number, lens);
   // Repo-wide by design: checkout writes the working tree, and a discard deletes a
   // resolve worktree whose variables name no PR. Only checkout's own PR spins.
   const runningCheckout = pendingWriteOfKind(pendingWrites, "checkout");
@@ -973,7 +975,10 @@ export function RemotePrView({
       !stackOffer ||
       details.isPlaceholderData ||
       writeBlocked ||
-      stackWritePending
+      stackWritePending ||
+      // A stack write rewrites every member's base, so it refuses offline
+      // rather than park and land whenever the connection returns.
+      refuseWhileOffline()
     )
       return;
     // A failed stack write renders inline beside the offer it was fired from, so
@@ -1066,6 +1071,7 @@ export function RemotePrView({
     isSelectedPr &&
       !details.isPlaceholderData &&
       !writeBlocked &&
+      !offlineHold &&
       stackOffer?.kind === "create",
   );
   useHotkeyAction(
@@ -1074,6 +1080,7 @@ export function RemotePrView({
     isSelectedPr &&
       !details.isPlaceholderData &&
       !writeBlocked &&
+      !offlineHold &&
       stackOffer?.kind === "add",
   );
   useHotkeyAction(
@@ -2058,7 +2065,7 @@ export function RemotePrView({
       case commentPending:
         return pendingWriteReason(
           writePaused("comment"),
-          "Posting your comment…",
+          COMMENT_POST_PENDING_REASON,
         );
       case mergePending:
         return pendingWriteReason(
@@ -3065,11 +3072,17 @@ export function RemotePrView({
             offer={stackOffer}
             rows={offerRows}
             pending={stackWritePending}
+            // Read off the same cache entries as `pending`, so a write parked
+            // offline says it is waiting rather than running.
+            pendingReason={pendingWriteReason(
+              stackWritePaused,
+              ACT_PENDING_REASON,
+            )}
             // The rendered twin of `confirmStackOffer`'s refusals. Permission only
             // enables, so a viewer without push sees the offer held with its reason;
             // the stale arm is unreachable today (no offer exists then).
-            disabled={detailsStale || writeBlocked}
-            reason={writeReason ?? staleReason}
+            disabled={detailsStale || writeBlocked || !!offlineHold}
+            reason={writeReason ?? staleReason ?? offlineHold}
             error={
               stackWriteError ? presentError(stackWriteError).summary : null
             }

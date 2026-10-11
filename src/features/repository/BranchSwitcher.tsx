@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -2597,6 +2598,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   item above is their remedy. */}
               {pushable && (
                 <ContextMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={busy || branch.upstreamBehind > 0 || !!offlineHold}
                   onClick={() => doPushBranch(branch)}
                 >
@@ -2611,6 +2613,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   destination. */}
               {publishRemotes.length === 1 ? (
                 <ContextMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={busy || !!offlineHold}
                   onClick={() => doPushBranch(branch, publishRemotes[0])}
                 >
@@ -2622,6 +2625,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 publishRemotes.map((r) => (
                   <ContextMenuItem
                     key={r}
+                    className={MENU_HELD_ROW_CLASS}
                     disabled={busy || !!offlineHold}
                     onClick={() => doPushBranch(branch, r)}
                   >
@@ -2818,6 +2822,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           {/* Held here and at the confirm; the handler still re-checks, since
               the connection can drop between render and press. */}
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={deletionBlocked || !!offlineHold}
             onClick={() => {
               setOpen(false);

@@ -23,6 +23,7 @@ import {
 } from "@/lib/git/queries";
 import type { GitLabMember } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { SAVING_LAST_CHANGE_REASON } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { cn } from "@/lib/utils";
@@ -32,7 +33,6 @@ import {
   InlineConfirm,
   OFFLINE_WRITE_REASON,
   RemoteListSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 
@@ -100,7 +100,7 @@ export function GitLabMembersSection({
   const canAdd = addHeldReason === undefined;
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
   const roleHeld =
-    offlineReason ?? (update.isPending ? SAVING_REASON : undefined);
+    offlineReason ?? (update.isPending ? SAVING_LAST_CHANGE_REASON : undefined);
 
   const memberRows = members.data ?? [];
   // GitLab namespace paths are unique across users AND groups, so a username

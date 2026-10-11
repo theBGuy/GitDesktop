@@ -25,6 +25,7 @@ import type {
   ProjectViewLayout,
 } from "@/lib/git/types";
 import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { pendingWriteReason } from "@/lib/offline-writes";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -142,6 +143,8 @@ function heldSubmitHandlers(
 export function NewProjectDialog({
   open,
   pending,
+  paused,
+  offlineHold,
   target,
   ownerHeldReason,
   onOpenChange,
@@ -150,6 +153,12 @@ export function NewProjectDialog({
   open: boolean;
   /** A project write is in flight — from this run or one the user closed over. */
   pending: boolean;
+  /** That write is parked offline: waiting, so "Saving…" would claim too much.
+   *  The form's own submitting stays true while it waits, so this outranks it. */
+  paused: boolean;
+  /** Why a create can't start now (offline), or undefined. A create holds rather
+   *  than parks: a parked one lands for everyone whenever the connection returns. */
+  offlineHold: string | undefined;
   /** Where the project lands: the repository it's linked to (null when the
    *  catalog couldn't read it, so the create is unlinked) and the account it's
    *  created under, by the names the catalog read with their ids. */
@@ -171,7 +180,9 @@ export function NewProjectDialog({
     form.reset({ title: "" }, { keepDefaultValues: true }),
   );
   const heldReason =
-    pending || submitting ? SAVING_REASON : (ownerHeldReason ?? null);
+    pending || submitting
+      ? pendingWriteReason(paused, SAVING_REASON)
+      : (offlineHold ?? ownerHeldReason ?? null);
   const submit = heldSubmitHandlers(form, heldReason);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -223,6 +234,7 @@ export function NewProjectDialog({
 export function EditProjectDialog({
   open,
   pending,
+  paused,
   seedTitle,
   seedDescription,
   onOpenChange,
@@ -230,6 +242,8 @@ export function EditProjectDialog({
 }: {
   open: boolean;
   pending: boolean;
+  /** The pending write is parked offline, as {@link NewProjectDialog} reads it. */
+  paused: boolean;
   seedTitle: string;
   seedDescription: string;
   onOpenChange: (open: boolean) => void;
@@ -269,7 +283,7 @@ export function EditProjectDialog({
   const heldReason = (() => {
     switch (true) {
       case pending || submitting:
-        return SAVING_REASON;
+        return pendingWriteReason(paused, SAVING_REASON);
       case unchanged:
         return "Change the title or description to save";
       case clearing:
@@ -330,6 +344,8 @@ export function ViewNameDialog({
   mode,
   open,
   pending,
+  paused,
+  offlineHold,
   seedName,
   onOpenChange,
   onSubmit,
@@ -337,6 +353,11 @@ export function ViewNameDialog({
   mode: "create" | "rename";
   open: boolean;
   pending: boolean;
+  /** The pending write is parked offline, as {@link NewProjectDialog} reads it. */
+  paused: boolean;
+  /** Why a CREATE can't start now (offline), or undefined; held for the reason
+   *  {@link NewProjectDialog} holds. A rename ignores it and queues. */
+  offlineHold: string | undefined;
   seedName: string;
   onOpenChange: (open: boolean) => void;
   onSubmit: (name: string, layout: ProjectViewLayout) => Promise<void>;
@@ -358,7 +379,9 @@ export function ViewNameDialog({
   const heldReason = (() => {
     switch (true) {
       case pending || submitting:
-        return SAVING_REASON;
+        return pendingWriteReason(paused, SAVING_REASON);
+      case mode === "create" && offlineHold !== undefined:
+        return offlineHold;
       case unchanged:
         return "Change the name to save";
       default:
@@ -442,6 +465,7 @@ export function ViewNameDialog({
 export function ViewFieldsDialog({
   open,
   pending,
+  paused,
   viewName,
   currentIds,
   defs,
@@ -451,6 +475,8 @@ export function ViewFieldsDialog({
 }: {
   open: boolean;
   pending: boolean;
+  /** The pending write is parked offline, as {@link NewProjectDialog} reads it. */
+  paused: boolean;
   viewName: string;
   currentIds: readonly string[];
   defs: readonly ProjectFieldDef[];
@@ -476,7 +502,8 @@ export function ViewFieldsDialog({
     next.length === currentSet.size && next.every((id) => currentSet.has(id));
   // A plain if/else chain: the React Compiler bails on a switch(true) here.
   let heldReason: string | null = null;
-  if (pending || submitting) heldReason = SAVING_REASON;
+  if (pending || submitting)
+    heldReason = pendingWriteReason(paused, SAVING_REASON);
   else if (defsHeldReason !== undefined) heldReason = defsHeldReason;
   else if (unchanged) heldReason = "Check or uncheck a field to save";
   const submit = heldSubmitHandlers(form, heldReason);

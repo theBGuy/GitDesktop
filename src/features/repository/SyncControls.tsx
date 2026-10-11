@@ -8,6 +8,7 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -778,6 +779,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             {hasUpstream && (
               <>
                 <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={!!offlineHold}
                   onClick={() => void doPull("rebase")}
                 >
@@ -787,6 +789,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                     surfaces no tooltip, and the branch menu states the same
                     refusal the same way. */}
                 <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={mixedRewrite || !!offlineHold}
                   title={mixedRewrite ? mergeDuplicatesReason : undefined}
                   onClick={() => void doPull("merge")}
@@ -811,6 +814,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                 {hasUpstream && <DropdownMenuSeparator />}
                 {/* Base UI menu items fire on onClick, NOT onSelect. */}
                 <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={!!offlineHold}
                   onClick={() => void doUpdateFromUpstream()}
                 >

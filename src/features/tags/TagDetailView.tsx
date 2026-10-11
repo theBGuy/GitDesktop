@@ -50,6 +50,7 @@ import {
   useDownloadReleaseAsset,
   useEditRelease,
   useForgeStatus,
+  usePendingTagPushes,
   usePushTag,
   useReleaseDetails,
   useReleaseList,
@@ -63,6 +64,7 @@ import { providerLabel } from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
   isOfflineNow,
+  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -123,6 +125,10 @@ export function TagDetailView({
   const deleteAsset = useDeleteReleaseAsset(repoPath);
   const downloadAsset = useDownloadReleaseAsset(repoPath);
   const pushTag = usePushTag(repoPath);
+  // Per tag from the cache: this view swaps tags without remounting, so the
+  // observer would hold the next tag on this one's push, and a remount would
+  // release it while the push still runs.
+  const tagPush = usePendingTagPushes(repoPath).find((p) => p.tag === tag);
   const deleteLocalTag = useDeleteLocalTag(repoPath);
   const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
   const deleteTagPending =
@@ -354,7 +360,7 @@ export function TagDetailView({
   }
 
   async function onPushTag() {
-    if (refuseWhileOffline()) return;
+    if (tagPush || refuseWhileOffline()) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
@@ -994,8 +1000,12 @@ export function TagDetailView({
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={pushTag.isPending || !!offlineHold}
-          reason={pushTag.isPending ? ACT_PENDING_REASON : offlineHold}
+          disabled={!!tagPush || !!offlineHold}
+          reason={
+            tagPush
+              ? pendingWriteReason(tagPush.paused, ACT_PENDING_REASON)
+              : offlineHold
+          }
           onClick={() => void onPushTag()}
         >
           Push tag

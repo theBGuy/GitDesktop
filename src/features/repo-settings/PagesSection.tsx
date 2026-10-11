@@ -27,6 +27,10 @@ import {
   useUpdatePages,
 } from "@/lib/git/queries";
 import type { PagesInfo } from "@/lib/git/types";
+import {
+  NO_CHANGES_REASON,
+  SAVING_LAST_CHANGE_REASON,
+} from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import {
@@ -34,10 +38,8 @@ import {
   HeldSwitch,
   heldSwitchReason,
   InlineConfirm,
-  NO_CHANGES_REASON,
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
-  SAVING_REASON,
   useConfirmSwapFocus,
 } from "./parts";
 import {
@@ -303,7 +305,7 @@ function PagesEnabled({
   const updateHeld = (field: "branch" | "cname") =>
     update.variables?.[field] !== undefined
       ? ACT_PENDING_REASON
-      : SAVING_REASON;
+      : SAVING_LAST_CHANGE_REASON;
   // Every hold carries a reason, so Update keeps focus through a save, including
   // the moment the saved source reads back unchanged.
   const sourceHeldReason = (() => {
