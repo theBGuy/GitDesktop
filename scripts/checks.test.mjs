@@ -32,6 +32,8 @@ import {
 } from "./check-appimage-env-twins.mjs";
 import {
   CHECKS,
+  cookSource,
+  cookStringBody,
   generateChordCalls,
   okReportLine,
   reachesGitQueriesInternal,
@@ -40,6 +42,7 @@ import {
   scopePinFailure,
   splitTopLevel,
   stripComments,
+  unscannedScripts,
   view,
 } from "./check-banned-patterns.mjs";
 import {
@@ -3051,20 +3054,81 @@ test("raw-react-query-mutation flags every value route to react-query's construc
     "an export star": `export * from ${RQ};`,
     "a namespace re-export": `export * as rq from ${RQ};`,
     "a dynamic import": `const rq = await import(${RQ});`,
+    "a MutationCache value import": `import { MutationCache } from ${RQ};`,
+    "a Mutation value import":
+      'import { Mutation } from "@tanstack/query-core";',
+    "a hydrate import": `import { hydrate } from ${RQ};`,
+    "a HydrationBoundary import": `import { HydrationBoundary } from ${RQ};`,
+    "a namespace import": `import * as rq from ${RQ};`,
+    "a namespace beside names": `import * as rq, { useQuery } from ${RQ};`,
+    "a default import": `import rq from ${RQ};`,
+    "a default beside names": `import rq, { useQuery } from ${RQ};`,
+    "a route through node_modules":
+      'import { useMutation } from "../../node_modules/@tanstack/react-query";',
+    "a pnpm store path":
+      'import { MutationObserver } from "../node_modules/.pnpm/@tanstack+query-core@5.104.1/node_modules/@tanstack/query-core/build/modern/index.js";',
+    "a whitespace-free import":
+      'import{useMutation}from"@tanstack/react-query";',
+    "a whitespace-free namespace": 'import*as rq from"@tanstack/react-query";',
+    "a whitespace-free export star": 'export*from"@tanstack/react-query";',
+    "an escaped name": `import { useMut\\u0061tion } from ${RQ};`,
+    "a braced escape": `import { useMut\\u{61}tion as m } from ${RQ};`,
+    // A `default` entry is a default import or re-export.
+    "a braced default import": `import { default as rq } from ${RQ};`,
+    "a quoted braced default": `import { "default" as rq } from ${RQ};`,
+    "a default re-export": `export { default } from ${RQ};`,
+    "an aliased default re-export": `export { default as rq } from ${RQ};`,
+    // Unicode names, escaped or not.
+    "a Unicode default import":
+      'import é from "@tanstack/react-query/build/legacy/index.cjs";',
+    "an escaped Unicode default": `import \\u00e9 from ${RQ};`,
+    // Specifiers read as JS string values, case-folded, `\\` as `/`.
+    "an identity-escaped specifier":
+      'import { useMutation } from "\\@tanstack/react-query";',
+    "a hex-escaped specifier":
+      'import { useMutation } from "\\x40tanstack/react-query";',
+    "a Unicode-escaped specifier":
+      'import { useMutation } from "\\u0040tanstack/react-query";',
+    "a case-folded specifier":
+      'import { useMutation } from "@TanStack/React-Query";',
+    "a backslash path":
+      'import { useMutation } from "..\\\\node_modules\\\\@tanstack\\\\react-query";',
+    "a continued specifier":
+      'import { useMutation } from "@tanstack/re\\\nact-query";',
+    // Module calls.
+    "a concatenated dynamic import":
+      'const m = await import("@tanstack/" + "react-query");',
+    "a templated dynamic import":
+      "const m = await import(`@tanstack/${name}`);",
+    "a parenthesized dynamic import":
+      'const m = await import(("@tanstack/react-query"));',
+    "a dynamic import with options":
+      'const m = await import("@tanstack/query-core", { with: {} });',
+    "a require": 'const rq = require("@tanstack/react-query");',
+    "a TS import-equals require": `import rq = require(${RQ});`,
+    "a glob":
+      'const m = import.meta.glob("/node_modules/@tanstack/react-query/**");',
+    "a glob list":
+      'const m = import.meta.glob(["./a/*.ts", "/node_modules/@tanstack/query-core/**"]);',
   };
   for (const [name, source] of Object.entries(cases))
     assert.deepEqual(rawReactQueryMutation(source), [1], name);
-  // A namespace import flags at the use that reaches a constructor.
+  // A namespace import fails at the import, whatever later reads it: spreading
+  // or passing it on reaches the constructors through no member name at all.
   const ns = `import * as rq from ${RQ};`;
   for (const [name, use] of Object.entries({
     "a namespace call": "const m = rq.useMutation({ mutationFn });",
-    "a namespace construction":
-      "const o = new rq.MutationObserver(client, {});",
-    "an optional member": "const f = rq?.useMutation;",
-    "a namespace destructure": "const { useMutation } = rq;",
-    "a namespace passed on": "wrap(rq);",
+    "a namespace spread": "const { useMutation: m } = { ...rq };",
+    "a namespace read of another member": "const c = rq.useQueryClient();",
   }))
-    assert.deepEqual(rawReactQueryMutation(`${ns}\n${use}`), [2], name);
+    assert.deepEqual(rawReactQueryMutation(`${ns}\n${use}`), [1], name);
+  // A variable holding a react-query specifier fails at the call that reads it.
+  assert.deepEqual(
+    rawReactQueryMutation(
+      'const p = "@tanstack/react-query";\nconst m = await import(p);',
+    ),
+    [2],
+  );
 });
 
 test("raw-react-query-mutation leaves types, other hooks and the DOM's observer alone", () => {
@@ -3072,14 +3136,24 @@ test("raw-react-query-mutation leaves types, other hooks and the DOM's observer 
   for (const [name, source] of Object.entries({
     "a type-only import": `import type { MutationObserver, UseMutationResult } from ${RQ};`,
     "inline type specifiers": `import { type MutationObserver, useQuery } from ${RQ};`,
+    "an inline type MutationCache": `import { type MutationCache, useQuery } from ${RQ};`,
     "a type-only namespace": `import type * as rq from ${RQ};\ntype O = rq.MutationObserver;`,
+    "a whitespace-free type import":
+      'import type{QueryKey}from"@tanstack/react-query";',
     "a type-only re-export": `export type { UseMutationOptions } from ${RQ};`,
     "the mutation-state hooks": `import { useIsMutating, useMutationState } from ${RQ};`,
     "a DOM MutationObserver": "const mo = new MutationObserver(() => {});",
     "the helper's export":
       'import { useMutation } from "@/lib/started-mutation";\nuseMutation({ mutationFn });',
-    "a namespace read of another member": `import * as rq from ${RQ};\nconst c = rq.useQueryClient();`,
+    "a cache read": "const all = queryClient.getMutationCache().getAll();",
     "a commented import": `// import { useMutation } from ${RQ};`,
+    "a lookalike package":
+      'import { useMutation } from "@tanstack/react-query-devtools-x";',
+    "a local dynamic import": 'const m = await import(("./local"));',
+    "a templated local import":
+      "const m = await import(`./locale/${lang}.json`);",
+    "a local glob": 'const pages = import.meta.glob("./pages/*.tsx");',
+    "a local require": 'const x = require("./local");',
   }))
     assert.deepEqual(rawReactQueryMutation(source), [], name);
 });
@@ -3120,38 +3194,215 @@ test("raw-react-query-mutation exempts the helper alone, and its pin notices a r
   assert.match(renamed, /src\/lib\/started-mutation\.ts/);
 });
 
+test("mutation-cache-access passes only a call followed by a read", () => {
+  const cacheAccess = scanner("mutation-cache-access");
+  for (const [name, source] of Object.entries({
+    "a build": "queryClient.getMutationCache().build(queryClient, options);",
+    "an optional build": "queryClient.getMutationCache()?.build(qc, o);",
+    "a quoted build": 'queryClient.getMutationCache()["build"](qc, o);',
+    "a template build": "queryClient.getMutationCache()[`build`](qc, o);",
+    "an optional call": "queryClient.getMutationCache?.().build(qc, o);",
+    "an asserted call": "queryClient.getMutationCache()!.build(qc, o);",
+    "a parenthesized method": "(queryClient.getMutationCache)().build(qc, o);",
+    "a generic call":
+      "queryClient.getMutationCache<MutationCache>().build(qc, o);",
+    "a prototype reach":
+      "QueryClient.prototype.getMutationCache.call(qc).build(qc, o);",
+    "a held reference": "const cache = queryClient.getMutationCache();",
+    "a quoted method": 'queryClient["getMutationCache"]().findAll();',
+    "a destructured method": "const { getMutationCache } = queryClient;",
+    "a read member not called":
+      "const f = queryClient.getMutationCache().getAll;",
+    "an escaped method": "queryClient.getMutation\\u0043ache().build(qc, o);",
+  }))
+    assert.deepEqual(cacheAccess(source), [1], name);
+  for (const [name, source] of Object.entries({
+    getAll: "const all = queryClient.getMutationCache().getAll();",
+    find: "queryClient.getMutationCache().find({ mutationKey });",
+    findAll: "queryClient.getMutationCache().findAll({ status });",
+    "an optional findAll": "queryClient.getMutationCache()?.findAll({});",
+    subscribe: "queryClient.getMutationCache().subscribe(() => {});",
+    clear: "queryClient.getMutationCache().clear();",
+    "a wrapped chain":
+      "queryClient\n  .getMutationCache()\n  .subscribe(() => push());",
+  }))
+    assert.deepEqual(cacheAccess(source), [], name);
+  // The one allowlisted holder still holds the cache, so its row isn't stale.
+  const check = CHECKS.find((c) => c.name === "mutation-cache-access");
+  assert.deepEqual(check.allowlist, ["src/lib/git/queries/internal.ts"]);
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const internal = "src/lib/git/queries/internal.ts";
+  const internalView = view(readFileSync(join(root, internal), "utf8"));
+  assert.notDeepEqual(check.scan(internalView), []);
+  const { violations, stale } = runCheck(
+    check,
+    [internal],
+    new Map([[internal, internalView]]),
+  );
+  assert.deepEqual(violations, []);
+  assert.deepEqual(stale, []);
+  assert.ok(check.expectScanned.atLeast >= 500);
+});
+
+test("unscannedScripts names every src/ script the walk can't read", () => {
+  assert.deepEqual(
+    unscannedScripts([
+      "src/a.ts",
+      "src/b.mjs",
+      "src/c.cjs",
+      "src/d.d.ts",
+      "src/e.tsx",
+      "src/f.jsx",
+      "src/g.mts",
+      "src/h.cts",
+      "src/i.js",
+      "src/j.css",
+    ]),
+    [
+      "src/b.mjs",
+      "src/c.cjs",
+      "src/f.jsx",
+      "src/g.mts",
+      "src/h.cts",
+      "src/i.js",
+    ],
+  );
+  assert.deepEqual(unscannedScripts(["src/b.mjs"], ["src/b.mjs"]), []);
+});
+
+test("cookStringBody reads a string literal as JS does", () => {
+  assert.equal(cookStringBody("\\x40tanstack"), "@tanstack");
+  assert.equal(cookStringBody("\\@tanstack"), "@tanstack");
+  assert.equal(cookStringBody("re\\ act"), "react");
+  assert.equal(cookStringBody("a\\nb"), "a\nb");
+  assert.equal(cookStringBody("\\u{1F600}"), "\u{1F600}");
+  assert.equal(cookStringBody("set\\Mutation"), "setMutation");
+});
+
+test("cookSource cooks what keeps the lexical shape, and maps back to the source", () => {
+  const source = "a\\u0062c \"\\u0022\" \\x41 \\u{1F600} 'set\\Mut'";
+  const { text, at } = cookSource(source);
+  assert.equal(text, "abc \"\\u0022\" A \\u{1F600} 'setMut'");
+  assert.equal(at.length, text.length);
+  assert.equal(source[at[text.indexOf("A")]], "\\");
+  assert.equal(at[text.indexOf("c")], source.indexOf("c"));
+  // Outside a string, only a name escape decodes: a regex keeps its own.
+  assert.equal(cookSource("/\\d+/").text, "/\\d+/");
+});
+
 test("mutation-defaults flags every way to give mutations a client default", () => {
   const mutationDefaults = scanner("mutation-defaults");
   for (const [name, source] of Object.entries({
+    // The client's defaults API, in any spelling or reach.
     "a keyed default":
       'queryClient.setMutationDefaults(["save"], { mutationFn: save });',
+    "a runtime default":
+      "queryClient.setDefaultOptions({ mutations: { retry: 1 } });",
+    "a runtime query default":
+      "queryClient.setDefaultOptions({ queries: {} });",
+    "a non-literal runtime default": "queryClient.setDefaultOptions(opts);",
+    "a member runtime default":
+      "queryClient.setDefaultOptions(cfg.defaultOptions);",
+    "a cast runtime default":
+      "queryClient.setDefaultOptions(opts as DefaultOptions);",
+    "a quoted member call":
+      'queryClient["setMutationDefaults"](["save"], { mutationFn: save });',
+    "a quoted runtime default":
+      'queryClient["setDefaultOptions"]({ mutations });',
+    "an identity-escaped member":
+      "queryClient['setMutation\\Defaults'](key, o);",
+    "a continued member": "queryClient['setMutation\\\nDefaults'](key, o);",
+    "an optional call": "queryClient.setDefaultOptions?.({ mutations });",
+    "an optional keyed default": "queryClient.setMutationDefaults?.(key, o);",
+    "a call through call": "queryClient.setMutationDefaults.call(qc, key, o);",
+    "a call through apply": "queryClient.setMutationDefaults.apply(qc, args);",
+    "a bound call": "const set = queryClient.setMutationDefaults.bind(qc);",
+    "a write to the live defaults":
+      "queryClient.getDefaultOptions().mutations = { onError };",
+    "a merge into the live defaults":
+      "Object.assign(queryClient.getDefaultOptions(), { mutations });",
+    "a defaults read": 'const d = queryClient.getMutationDefaults(["save"]);',
+    "an escaped API name":
+      "queryClient.setDefault\\u004Fptions({ mutations });",
+    "a merge-point override":
+      "class C extends QueryClient { defaultMutationOptions(o) { return o; } }",
+    "a merge-point patch": "qc.defaultMutationOptions = (o) => o;",
+    // Defaults literals holding anything but a bare `queries` entry.
     "a mutations entry":
       "new QueryClient({ defaultOptions: { mutations: { onError } } });",
+    "a double-quoted mutations key":
+      'new QueryClient({ defaultOptions: { "mutations": { onError } } });',
+    "a single-quoted mutations key":
+      "new QueryClient({ defaultOptions: { 'mutations': { onError } } });",
+    "a computed mutations key":
+      'new QueryClient({ defaultOptions: { ["mutations"]: { onError } } });',
+    "a computed variable key":
+      "new QueryClient({ defaultOptions: { [K]: { onError } } });",
+    "a computed template key":
+      "new QueryClient({ defaultOptions: { [`mutations`]: { onError } } });",
+    "an escaped mutations key":
+      "new QueryClient({ defaultOptions: { mut\\u0061tions: { onError } } });",
     "a shorthand entry":
       "const c = { defaultOptions: { queries, mutations } };",
     "a method entry":
       "const c = { defaultOptions: { mutations() { return {}; } } };",
-    "a runtime default":
-      "queryClient.setDefaultOptions({ mutations: { retry: 1 } });",
-    "an unreadable value": "new QueryClient({ defaultOptions: base });",
     "a spread": "new QueryClient({ defaultOptions: { ...base } });",
+    "a brace inside a string":
+      'new QueryClient({ defaultOptions: { queries: { meta: { note: "}" } }, mutations: { onError } } });',
+    // A defaults literal read or assigned past its close.
+    "a literal's constructor":
+      "new QueryClient({ defaultOptions: { queries: {} }.constructor({ mutations }) });",
+    "a literal member read":
+      "new QueryClient({ defaultOptions: { queries: { mutations } }.queries });",
+    "a literal index":
+      "new QueryClient({ defaultOptions: { queries: {} }['queries'] });",
+    // `defaultOptions` anywhere a value can't be proven harmless.
+    "an unreadable value": "new QueryClient({ defaultOptions: base });",
     "a shorthand defaults key": "new QueryClient({ defaultOptions });",
     "a shorthand among others":
       "const config = { queryCache, defaultOptions, logger };",
     "a defaults binding": "const defaultOptions = { mutations: { retry: 0 } };",
     "an unreadable binding": "const defaultOptions = makeDefaults();",
+    "a binding to a name": "const defaultOptions = base;",
+    "a cast binding": "const defaultOptions = base as DefaultOptions;",
+    "an annotated query-only binding":
+      "const defaultOptions: DefaultOptions = { queries: { retry: 1 } };",
     "a double-quoted key":
       'new QueryClient({ "defaultOptions": { mutations: {} } });',
     "a single-quoted unreadable key": "const c = { 'defaultOptions': base };",
-    "a quoted member call":
-      'queryClient["setMutationDefaults"](["save"], { mutationFn: save });',
+    "an identity-escaped key":
+      "const c = { 'default\\Options': { mutations } };",
+    "an escaped key":
+      "new QueryClient({ defaultOpti\\u006fns: { mutations: {} } });",
+    "a parameter default":
+      "function make(defaultOptions: T = { mutations: { onError } }) {}",
+    "a plain parameter default":
+      "function make(defaultOptions: DefaultOptions = {}) {}",
+    "an annotated class field":
+      "class C { defaultOptions: T = { mutations: { onError } }; }",
+    "an unannotated class field":
+      "class C { defaultOptions = { mutations: { onError } }; }",
+    "an optional field with an initializer":
+      "class Cfg { defaultOptions?: DefaultOptions = { mutations: { onError } } }",
+    "a type-literal annotation with an initializer":
+      "class Cfg { defaultOptions: { queries: Q } = { mutations: { onError } }; }",
+    "a regex value ending like a parameter":
+      "const c = { defaultOptions: /a)/ };",
+    "a regex value ending like a member": "const c = { defaultOptions: /a;/ };",
+    "a getter": "const c = { get defaultOptions() { return { mutations } } };",
+    "a method": "const c = { defaultOptions() { return { mutations }; } };",
+    "a member write": "cfg.defaultOptions = { mutations };",
+    "a member read": "const o = queryClient.defaultOptions;",
+    "a destructuring rename": "const { defaultOptions: opts } = config;",
+    "a shorthand destructure": "const { queryCache, defaultOptions } = config;",
+    "a mention in a message": 'toast.info("defaultOptions changed");',
     // Documented fail-closed: an annotated parameter followed by another one
     // can't be told from an object entry.
     "an annotated parameter before another":
       "function make(defaultOptions: DefaultOptions, n: number) {}",
   }))
     assert.deepEqual(mutationDefaults(source), [1], name);
-  // Wrapped across lines, it reports the line the defaults start on.
+  // Wrapped across lines, it reports the line the mention starts on.
   assert.deepEqual(
     mutationDefaults(
       "new QueryClient({\n  defaultOptions: {\n    queries: { retry: 1 },\n    mutations: { retry: 0 },\n  },\n});",
@@ -3160,30 +3411,55 @@ test("mutation-defaults flags every way to give mutations a client default", () 
   );
 });
 
-test("mutation-defaults leaves query defaults and other mutations alone", () => {
+test("mutation-defaults passes query defaults and type positions only", () => {
   const check = CHECKS.find((c) => c.name === "mutation-defaults");
   for (const [name, source] of Object.entries({
     "query defaults":
       "new QueryClient({\n  defaultOptions: {\n    queries: {\n      retry: 1,\n      refetchOnWindowFocus: true,\n    },\n  },\n});",
-    "a defaults read": 'const d = queryClient.getMutationDefaults(["save"]);',
-    "a property read": "const o = queryClient.defaultOptions;",
+    "empty defaults": "new QueryClient({ defaultOptions: {} });",
+    "a quoted key holding queries":
+      'new QueryClient({ "defaultOptions": { queries: {} } });',
+    "a shorthand queries entry":
+      "new QueryClient({ defaultOptions: { queries } });",
+    "an escaped queries key":
+      "new QueryClient({ defaultOptions: { qu\\u0065ries: {} } });",
+    "a brace inside a query string":
+      'new QueryClient({ defaultOptions: { queries: { meta: { note: "}, mutations: {" } } } });',
+    "a const assertion":
+      "new QueryClient({ defaultOptions: { queries: {} } as const });",
+    "a satisfies clause":
+      "new QueryClient({ defaultOptions: { queries: {} } satisfies DefaultOptions });",
     "an unrelated name": "const mutations = [];\nmutations.push(1);",
     "a comment": "// queryClient.setMutationDefaults(key, opts)",
     "a type member": "interface Config {\n  defaultOptions: DefaultOptions;\n}",
     "an optional type member":
       "type Config = { defaultOptions?: DefaultOptions };",
+    "an optional member before another":
+      "type Config = { defaultOptions?: DefaultOptions, n: number };",
+    "a readonly optional member":
+      "interface Config { readonly defaultOptions?: DefaultOptions; }",
+    "a private readonly field":
+      "class C { private readonly defaultOptions: DefaultOptions; }",
+    "a protected abstract field":
+      "abstract class C { protected abstract defaultOptions: DefaultOptions; }",
     "a generic type member":
-      "interface Config {\n  defaultOptions: Partial<DefaultOptions>;\n}",
+      "interface Config {\n  defaultOptions: Partial<Record<string, DefaultOptions>>;\n}",
+    "a type-literal member":
+      "interface Config {\n  defaultOptions: { queries: QueryOptions };\n}",
     "a lone annotated parameter":
       "function make(defaultOptions: DefaultOptions) {}",
-    "an annotated parameter with a default":
-      "function make(defaultOptions: DefaultOptions = {}) {}",
-    "a destructuring rename": "const { defaultOptions: opts } = config;",
-    "a shorthand destructure": "const { queryCache, defaultOptions } = config;",
-    "an annotated query-only binding":
-      "const defaultOptions: DefaultOptions = { queries: { retry: 1 } };",
+    "a last annotated parameter":
+      "function make(n: number, defaultOptions: DefaultOptions) {}",
+    "an annotated class field":
+      "class C {\n  defaultOptions: DefaultOptions;\n}",
   }))
     assert.deepEqual(check.scan(view(source)), [], name);
+  // The app's client: its defaults mention exists and reads as harmless, so the
+  // real tree passes by proof rather than by the scan finding nothing.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const client = readFileSync(join(root, "src/lib/query-client.ts"), "utf8");
+  assert.match(client, /\bdefaultOptions\b/);
+  assert.deepEqual(check.scan(view(client)), []);
   assert.equal(check.appliesTo("src/lib/query-client.ts"), true);
   assert.equal(check.appliesTo("src/lib/started-mutation.ts"), true);
   assert.deepEqual(check.allowlist, []);

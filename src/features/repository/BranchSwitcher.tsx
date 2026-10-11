@@ -1210,13 +1210,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         }
         await checkout.mutateAsync(fallback);
         // The same for the delete, which starts only after the checkout lands.
-        const moved = landedIn(deleteIn);
-        if (!moved.live) {
-          toast.info(
-            `You switched repositories before ${deleteTarget} was deleted — ${fallback} is checked out and ${deleteTarget} was kept${moved.away}.`,
-          );
+        if (
+          refuseIfSwitched(
+            deleteIn,
+            `${fallback} is checked out and ${deleteTarget} was kept`,
+            `before ${deleteTarget} was deleted`,
+          )
+        )
           return;
-        }
       }
       await deleteBranch.mutateAsync(deleteTarget);
       toast.success(`Deleted ${deleteTarget}`);

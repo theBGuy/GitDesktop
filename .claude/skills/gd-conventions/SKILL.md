@@ -526,29 +526,38 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the
   helper's path). It snapshots each mutation's options into the context
-  react-query builds once per execution, so a mutation's mutationFn and
+  react-query builds once per execution, so a mutation's mutationFn and option
   callbacks are the ones in effect when it started (the observer's options at
-  the `mutate` call), however its host re-renders before it settles: a write
-  parked offline lands on, refreshes and patches the repo/PR/lens/link it
-  started on. Its `meta` key (`STARTED_KEY`) is reserved, and mutation defaults
-  (`setMutationDefaults`, a `mutations` entry in `defaultOptions`) are banned,
-  since its trampolines shadow them (guard: `mutation-defaults`). The snapshot
-  can't reach a mutation not yet started: a handler that calls `mutate` after an
-  await, or from a confirm whose state outlives a switch, builds from the
-  observer's CURRENT options, so it records the repo when it starts (a dialog:
-  when it opens) and refuses through `refuseIfSwitched`
-  (`@/lib/stores/notifications`, beside `landedIn`) at the point the write would
-  start; never a hand-rolled toast (the reference is `doResetToUpstream` in
-  SyncControls.tsx). A view whose repo can be a worktree rather than the open
-  one compares its own prop instead (ConflictFileView's `refuseIfMoved`). A
-  `useRepoMutation` whose mutationFn or callbacks close over repo/lens AND whose
-  host survives a repo switch passes `identity: ["<op>", repo, lens]`, which
-  scopes the HOLD: a changed key hash detaches the pending mutation at the
-  switch, so the new repo's controls don't read the old repo's write as busy.
-  Callers must consume the promise (`mutateAsync`), since the observer's
-  `isPending`/`data` go idle at the switch. Exemplar: `useCreateIssue`; a plain
-  `useMutation` spells the same pin `mutationKey:`. Guard:
-  `mutation-identity-pinning` ratchets the cache-seeding sites and the
+  the `mutate` call; a per-call `mutate(v, { … })` callback is fixed at the call
+  anyway), however its host re-renders before it settles: a write parked
+  offline lands on, refreshes and patches the repo/PR/lens/link it started on.
+  `scope` and `gcTime` are not snapshotted (query-core reads them off the live
+  options), so a `scope.id` derived from render state would follow a switch.
+  Its `meta` key (`STARTED_KEY`) is reserved, and client mutation defaults are
+  banned, since its trampolines shadow them: the `mutation-defaults` guard fails
+  any use of the client's defaults API and any `defaultOptions` beyond a
+  `queries`-only literal. The client's mutation cache is reached only to read
+  it (`getMutationCache().findAll(…)` and its siblings; guard:
+  `mutation-cache-access`), since its `build(…)` makes a mutation the helper
+  never saw. The snapshot can't reach a mutation not yet started: a
+  handler that calls `mutate` after an await, or from a confirm whose state
+  outlives a switch, builds from the observer's CURRENT options, so it records
+  the repo when it starts (a dialog: when it opens) and refuses through
+  `refuseIfSwitched` (`@/lib/stores/notifications`, beside `landedIn`) at the
+  point the write would start, passing its outcome and, once the prompt is gone,
+  a `when` lead (the reference is `doResetToUpstream` in SyncControls.tsx). Copy
+  that can't take that shape (a partial-state error, or a "Didn't <verb> …" line
+  kept in step with a twin) reads `landedIn` once and builds its message from
+  that one result's `live` and `away`. A view whose repo can be a worktree
+  rather than the open one compares its own prop instead (ConflictFileView's
+  `refuseIfMoved`). A `useRepoMutation` whose mutationFn or callbacks close over
+  repo/lens AND whose host survives a repo switch passes `identity: ["<op>",
+  repo, lens]`, which scopes the HOLD: a changed key hash detaches the pending
+  mutation at the switch, so the new repo's controls don't read the old repo's
+  write as busy. Callers must consume the promise (`mutateAsync`), since the
+  observer's `isPending`/`data` go idle at the switch. Exemplar:
+  `useCreateIssue`; a plain `useMutation` spells the same pin `mutationKey:`.
+  Guard: `mutation-identity-pinning` ratchets the cache-seeding sites and the
   create-family ones it can see by NAME, following delegation one level inside a
   module. It scans the git-queries package, `lib/jira/queries.ts` and the local
   PR/issue query modules (both local wrappers key unconditionally,

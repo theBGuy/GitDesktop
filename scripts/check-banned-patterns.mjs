@@ -1388,131 +1388,463 @@ const settleCacheWriteFromHookScope = ({ text, starts }) => {
 // whose `useMutation` runs each mutation's mutationFn and callbacks from the options
 // in effect when it started (the observer's at the `mutate` call); a VALUE binding
 // of react-query's own constructors anywhere else is a construction that skips it.
+// Threat model: these scans target accidental use, not deliberate evasion.
 const STARTED_MUTATION = "src/lib/started-mutation.ts";
-/** react-query's mutation constructors, by their exported names. */
-const RAW_MUTATION_NAMES = new Set(["useMutation", "MutationObserver"]);
-/** react-query and the core it re-exports, at any subpath: both export them. */
-const REACT_QUERY_SOURCE_RE = /^@tanstack\/(?:react-query|query-core)(?:\/|$)/;
+/** react-query's ways to make a mutation without the helper, by exported name:
+ *  the hook and its observer, the cache and mutation classes (`new
+ *  MutationCache().build(…)`), and hydration, which rebuilds dehydrated
+ *  mutations from the client's defaults rather than any render's options. */
+const RAW_MUTATION_NAMES = new Set([
+  "useMutation",
+  "MutationObserver",
+  "MutationCache",
+  "Mutation",
+  "hydrate",
+  "HydrationBoundary",
+]);
+/** One escape at a sticky position: `\x` + 2 hex, `\u{…}`, `\u` + 4 hex, a line
+ *  continuation (in the joined view, a backslash before a space), or any other
+ *  escaped character. */
+const ESCAPE_STICKY =
+  /\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|( )|([\s\S]))/y;
+const SIMPLE_ESCAPES = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  b: "\b",
+  f: "\f",
+  v: "\v",
+  0: "\0",
+};
+/** A character an identifier can hold past its first. */
+const ID_CHAR_RE = /^[\p{ID_Continue}$\p{Join_Control}]$/u;
+
+/** The value one escape at `i` spells, or null when it spells nothing readable
+ *  (an out-of-range code point); `length` is how much source it covers. */
+function escapeAt(text, i) {
+  ESCAPE_STICKY.lastIndex = i;
+  const m = ESCAPE_STICKY.exec(text);
+  if (!m) return null;
+  const hex = m[1] ?? m[2] ?? m[3];
+  if (hex !== undefined) {
+    const code = Number.parseInt(hex, 16);
+    return code <= 0x10ffff
+      ? { value: String.fromCodePoint(code), length: m[0].length, hex: true }
+      : null;
+  }
+  if (m[4] !== undefined) return { value: "", length: 2, hex: false };
+  return {
+    value: SIMPLE_ESCAPES[m[5]] ?? m[5],
+    length: 2,
+    hex: false,
+  };
+}
+
+/** The value a string literal's raw body spells, cooked as JS reads it: every
+ *  escape decoded, a backslash before any other character dropped, and a line
+ *  continuation dropped with its backslash. */
+export function cookStringBody(body) {
+  let out = "";
+  for (let i = 0; i < body.length; ) {
+    const e = body[i] === "\\" ? escapeAt(body, i) : null;
+    if (e) {
+      out += e.value;
+      i += e.length;
+    } else {
+      out += body[i];
+      i++;
+    }
+  }
+  return out;
+}
+
+/** `text` with escapes cooked in place wherever that keeps its lexical shape:
+ *  inside a string or template literal every escape, unless it spells a quote
+ *  or a backslash (which would re-lex the literal); outside one only an escape
+ *  spelling a name character. So an escaped name or quoted member reads as
+ *  written, and string and bracket tracking over the result still reads what
+ *  the source reads. `at[i]` is the source offset decoded index `i` came from. */
+export function cookSource(text) {
+  let out = "";
+  const at = [];
+  let quote = null;
+  for (let i = 0; i < text.length; ) {
+    if (text[i] === "\\") {
+      const e = escapeAt(text, i);
+      const length = e ? e.length : 1;
+      const decode =
+        e !== null &&
+        (quote === null
+          ? e.hex && ID_CHAR_RE.test(e.value)
+          : !/["'`\\]/.test(e.value));
+      const piece = decode ? e.value : text.slice(i, i + length);
+      for (let k = 0; k < piece.length; k++) {
+        out += piece[k];
+        at.push(decode ? i : i + k);
+      }
+      i += length;
+      continue;
+    }
+    const c = text[i];
+    if (quote === null) {
+      if (c === '"' || c === "'" || c === "`") quote = c;
+    } else if (c === quote) quote = null;
+    out += c;
+    at.push(i);
+    i++;
+  }
+  return { text: out, at };
+}
+
+/** Whether a string literal's raw body names react-query or the core it
+ *  re-exports, at any subpath: cooked, with backslashes read as separators and
+ *  case folded (both resolve on Windows), normalized, then matched as a path
+ *  segment anywhere, so a route through `node_modules` counts too. */
+const reachesReactQuery = (body) =>
+  /(?:^|\/)@tanstack\/(?:react-query|query-core)(?:\/|$)/.test(
+    normalizeSpecifier(
+      cookStringBody(body).replaceAll("\\", "/").toLowerCase(),
+    ),
+  );
+/** A string or template literal, its quote in group 1 and raw body in group 2. */
+const STRING_LITERAL_RE = /(["'`])((?:\\[\s\S]|(?!\1)[^\\])*)\1/g;
+/** An import statement's clause plus its specifier, with or without whitespace
+ *  around the clause (`import{x}from"y"`). `import(` and `import.meta` are other
+ *  arms'. */
+const IMPORT_FROM_RE =
+  /\bimport\b(?!\s*[(.])\s*([^;]*?)\s*\bfrom\s*(["'`])((?:\\[\s\S]|(?!\2)[^\\])*)\2/g;
 /** An export statement's clause plus its specifier, bounded like
  *  REEXPORT_SPECIFIER_RE so a semicolon-less declaration can't pair with a later
  *  statement's `from`. */
 const EXPORT_FROM_RE =
-  /\bexport\b((?:(?!\b(?:import|export)\b)[^;])*?)\bfrom\s*(["'`])([^"'`]+)\2/g;
-const DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*(["'`])([^"'`]+)\1/g;
+  /\bexport\b((?:(?!\b(?:import|export)\b)[^;])*?)\bfrom\s*(["'`])((?:\\[\s\S]|(?!\2)[^\\])*)\2/g;
+/** A call whose argument names a module: `import(…)`, `require(…)` (TS
+ *  `import x = require(…)` included), and Vite's `import.meta.glob(…)`. */
+const MODULE_CALL_RE =
+  /(?<![\w$.])(import|require|import\s*\.\s*meta\s*\.\s*glob(?:Eager)?)\s*\(/g;
 /** `import type …` / `export type { … }`: erased, so it binds no value. A bare
  *  `type` default binding (`import type from`, `import type, {`) is not one. */
-const TYPE_ONLY_CLAUSE_RE = /^type\s+[{*A-Za-z_$]/;
+const TYPE_ONLY_CLAUSE_RE = /^type(?:\s*[{*]|\s+[\p{ID_Start}$_])/u;
+/** A default binding leading a clause (`rq` in `import rq, { … }`). */
+const DEFAULT_BINDING_RE =
+  /^[\p{ID_Start}$_][\p{ID_Continue}$\p{Join_Control}]*\s*(?:,|$)/u;
 
-/** Whether a `{ … }` clause reads a raw constructor as a VALUE: an inline `type`
- *  entry is erased, and the name before `as` is the export read. String-named
- *  specifiers (`"useMutation" as x`) are unquoted first. */
+/** The top-level comma-separated pieces of `text`, trimmed; commas inside
+ *  strings and brackets don't split. Null when a bracket or string never closes. */
+function topLevelPieces(text) {
+  const pieces = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") i = stringEnd(text, i);
+    else if (c === "{" || c === "(" || c === "[") i = literalEnd(text, i);
+    else if (c === ",") {
+      pieces.push(text.slice(start, i).trim());
+      start = i + 1;
+    }
+    if (i === -1) return null;
+  }
+  pieces.push(text.slice(start).trim());
+  return pieces;
+}
+
+/** Whether a `{ … }` clause reads a raw constructor, or the module's default, as
+ *  a VALUE: an inline `type` entry is erased, the name before `as` is the export
+ *  read, and a string-named one (`"useMutation" as x`) is cooked first. A
+ *  `default` entry is a default import or re-export, and a CommonJS build's
+ *  default is the whole module. */
 function bindsRawConstructor(braces) {
   return braces.split(",").some((raw) => {
     const entry = raw.trim();
     if (!entry || /^type\s/.test(entry)) return false;
-    const exported = entry.split(/\s+as\s+/)[0].replace(/["'`]/g, "");
-    return RAW_MUTATION_NAMES.has(exported);
+    const name = entry.split(/\s+as\s+/)[0];
+    const quoted = /^(["'`])([\s\S]*)\1$/.exec(name);
+    const exported = quoted ? cookStringBody(quoted[2]) : name;
+    return exported === "default" || RAW_MUTATION_NAMES.has(exported);
   });
 }
 
+/** Whether a module call's argument text reaches react-query. A single plain
+ *  string literal (parentheses unwrapped) is read; anything else fails when it
+ *  mentions `tanstack` or the file holds a react-query specifier string, since a
+ *  concatenation, a `${}` or a variable can assemble one unseen. A glob reads
+ *  every string literal in its pattern list. */
+function moduleCallReaches(kind, args, fileReaches) {
+  if (/glob/.test(kind)) {
+    for (const m of args.matchAll(STRING_LITERAL_RE))
+      if (reachesReactQuery(m[2])) return true;
+    return false;
+  }
+  const pieces = topLevelPieces(args);
+  if (pieces === null) return true;
+  let first = pieces[0];
+  while (first.startsWith("(") && literalEnd(first, 0) === first.length - 1)
+    first = first.slice(1, -1).trim();
+  const plain = /^(["'`])((?:\\[\s\S]|(?!\1)[^\\])*)\1$/.exec(first);
+  if (plain && !(plain[1] === "`" && plain[2].includes("${")))
+    return reachesReactQuery(plain[2]);
+  return /tanstack/i.test(cookStringBody(first)) || fileReaches();
+}
+
 /** Scanner: react-query's mutation constructors bound as a value — imported named
- *  or aliased, re-exported (`export *` included), imported dynamically (whose
- *  reach can't be read), or reached through a namespace import. A namespace use
- *  passes only as a member access naming something else (`rq.useQuery`); a bare
- *  use (passed on, destructured, indexed) fails closed. */
-const rawReactQueryMutation = ({ text, starts }) => {
+ *  or aliased, re-exported (`export *` included), or reached through a module
+ *  call (`import()`, `require()`, `import.meta.glob()`). A namespace or default
+ *  import of either package fails whatever it is used for (a `{ default }`
+ *  entry included): a namespace can be spread, destructured or passed on, so no
+ *  use of one can be proven safe. Type-only imports bind no value and pass. */
+const rawReactQueryMutation = (fileView) => {
+  const { text, at } = cookSource(fileView.text);
+  const hit = (index) => lineAt(fileView.starts, at[index]);
   const hits = new Set();
-  const namespaces = [];
-  for (const m of text.matchAll(IMPORT_CLAUSE_RE)) {
-    if (!REACT_QUERY_SOURCE_RE.test(m[3])) continue;
+  let reaches;
+  const fileReaches = () => {
+    reaches ??= [...text.matchAll(STRING_LITERAL_RE)].some((m) =>
+      reachesReactQuery(m[2]),
+    );
+    return reaches;
+  };
+  for (const m of text.matchAll(IMPORT_FROM_RE)) {
+    if (!reachesReactQuery(m[3])) continue;
     const clause = m[1].trim();
     if (TYPE_ONLY_CLAUSE_RE.test(clause)) continue;
     const braces = /\{([^}]*)\}/.exec(clause);
-    if (braces && bindsRawConstructor(braces[1]))
-      hits.add(lineAt(starts, m.index));
-    const ns = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause);
-    if (ns)
-      namespaces.push({
-        name: ns[1],
-        start: m.index,
-        end: m.index + m[0].length,
-      });
+    if (
+      /\*\s*as\b/.test(clause) ||
+      DEFAULT_BINDING_RE.test(clause) ||
+      (braces && bindsRawConstructor(braces[1]))
+    )
+      hits.add(hit(m.index));
   }
   for (const m of text.matchAll(EXPORT_FROM_RE)) {
-    if (!REACT_QUERY_SOURCE_RE.test(m[3])) continue;
+    if (!reachesReactQuery(m[3])) continue;
     const clause = m[1].trim();
     if (TYPE_ONLY_CLAUSE_RE.test(clause)) continue;
     const braces = /\{([^}]*)\}/.exec(clause);
     if (clause.startsWith("*") || (braces && bindsRawConstructor(braces[1])))
-      hits.add(lineAt(starts, m.index));
+      hits.add(hit(m.index));
   }
-  for (const m of text.matchAll(DYNAMIC_IMPORT_RE)) {
-    if (REACT_QUERY_SOURCE_RE.test(m[2])) hits.add(lineAt(starts, m.index));
-  }
-  for (const ns of namespaces) {
-    const use = new RegExp(`(?<![\\w$.])${escapeRe(ns.name)}(?![\\w$])`, "g");
-    for (const u of text.matchAll(use)) {
-      if (u.index >= ns.start && u.index < ns.end) continue;
-      const member = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(
-        text.slice(u.index + ns.name.length),
-      );
-      if (member && !RAW_MUTATION_NAMES.has(member[1])) continue;
-      hits.add(lineAt(starts, u.index));
-    }
+  for (const m of text.matchAll(MODULE_CALL_RE)) {
+    const open = m.index + m[0].length - 1;
+    const close = literalEnd(text, open);
+    if (
+      close === -1 ||
+      moduleCallReaches(m[1], text.slice(open + 1, close), fileReaches)
+    )
+      hits.add(hit(m.index));
   }
   return [...hits];
 };
 
+// The client's mutation cache, reached only to read it: a held, quoted, bound or
+// otherwise indirect reach can hand `build(…)` a mutation the helper never saw.
+const MUTATION_CACHE_RE =
+  /(?<![\p{ID_Continue}$])getMutationCache(?![\p{ID_Continue}$])/gu;
+/** What may follow a `getMutationCache` mention: its call, then a read member's
+ *  call. `clear` empties the cache without making a mutation. */
+const MUTATION_CACHE_READ_RE =
+  /^\s*\(\s*\)\s*\??\.\s*(?:getAll|find|findAll|subscribe|clear)\s*\(/;
+
+/** Scanner: every `getMutationCache` mention not proven a read. */
+const mutationCacheAccess = (fileView) => {
+  const { text, at } = cookSource(fileView.text);
+  const hits = new Set();
+  for (const m of text.matchAll(MUTATION_CACHE_RE)) {
+    const after = m.index + m[0].length;
+    if (!MUTATION_CACHE_READ_RE.test(text.slice(after, after + 80)))
+      hits.add(lineAt(fileView.starts, at[m.index]));
+  }
+  return [...hits];
+};
+
+/** Script extensions the walk never reads (it reads `.ts`/`.tsx` alone), so a
+ *  file under src/ ending in one escapes every check here. */
+const UNSCANNED_SCRIPT_RE = /\.(?:[cm]?js|jsx|[cm]ts)$/;
+/** Justified exceptions, each a src/ path with its reason in a comment. */
+const UNSCANNED_SCRIPT_ALLOWLIST = [];
+
+/** The paths in `paths` a check here would never read, minus `allowlist`. */
+export function unscannedScripts(
+  paths,
+  allowlist = UNSCANNED_SCRIPT_ALLOWLIST,
+) {
+  return paths.filter(
+    (p) => UNSCANNED_SCRIPT_RE.test(p) && !allowlist.includes(p),
+  );
+}
+
 // Mutation defaults. started-mutation installs its trampolines on every
 // construction, and react-query spreads a construction's own options over the
-// client's defaults, so a default mutationFn or callback would be shadowed.
-/** `setMutationDefaults(`, called or reached by a quoted member name. */
-const SET_MUTATION_DEFAULTS_RE =
-  /\bsetMutationDefaults\s*\(|(["'`])setMutationDefaults\1/g;
-/** A client-defaults value to read: a `defaultOptions` key (bare or quoted, a
- *  `?:` type member excluded), a `setDefaultOptions(` argument, or the
- *  initializer of a `defaultOptions` binding (its annotation skipped). */
-const DEFAULT_OPTIONS_RE =
-  /(?<![\w$.])(["'`]?)defaultOptions\1\s*:\s*|\bsetDefaultOptions\s*\(\s*|\b(?:const|let|var)\s+defaultOptions\b[^=;]*=(?![=>])\s*/g;
-/** `defaultOptions` as a shorthand property, whose value is a binding this scan
- *  can't see. */
-const DEFAULT_OPTIONS_SHORTHAND_RE = /[{,]\s*defaultOptions\s*(?=[,}])/g;
-/** What makes a `defaultOptions:` key a type or a pattern rather than a value:
- *  a type-like name ending a type member (`;`) or a parameter (`)`, or `=` for
- *  its default), or the closing of a destructuring pattern (`} =`). */
-const NOT_A_VALUE_TAIL_RE =
-  /^[\w$.<>[\]|& ]*?(?:;|\)|=(?![=>])|\}\s*=(?![=>]))/;
-/** A destructuring pattern's close, for a shorthand `defaultOptions` in one. */
-const PATTERN_CLOSE_RE = /^[^{}()]*\}\s*=(?![=>])/;
-/** A `mutations` entry (property, shorthand or method), or a spread that could
- *  carry one unseen. */
-const MUTATIONS_ENTRY_RE = /(?<![\w$.])mutations\s*[:,}(]|\.\.\./;
+// client's defaults, so a default mutationFn or callback would be shadowed. The
+// check is an allowlist of shapes, not a list of bad spellings: what it cannot
+// prove harmless fails.
+/** The client methods that read or write mutation defaults, hand out the live
+ *  defaults object, or merge them into a construction (`defaultMutationOptions`,
+ *  which a subclass or patch could override outright): any mention fails. */
+const CLIENT_DEFAULTS_API_RE =
+  /(?<![\w$])(?:(?:set|get)(?:DefaultOptions|MutationDefaults)|defaultMutationOptions)(?![\w$])/g;
+/** Every `defaultOptions` mention, quoted or not. */
+const DEFAULT_OPTIONS_TOKEN_RE = /(?<![\w$])defaultOptions(?![\w$])/g;
+/** Member modifiers that may sit before a key without making it a value. */
+const MEMBER_MODIFIER_RE =
+  /(?<![\w$])(?:readonly|declare|public|private|protected|static|override|abstract)\s*$/;
 
-/** Scanner: `setMutationDefaults` anywhere, and a client-defaults value holding
- *  a `mutations` entry. A value that is not an object literal can't be read, so
- *  it fails closed, as do a spread inside one and a shorthand `defaultOptions`.
- *  Ignored as not-a-value: a type member, a parameter annotation (when the
- *  parameter list closes, or a default follows), and a destructuring target. A
- *  parameter annotation followed by another parameter can't be told from an
- *  object entry, so it fails closed. */
-const mutationDefaults = ({ text, starts }) => {
-  const hits = new Set();
-  for (const m of text.matchAll(SET_MUTATION_DEFAULTS_RE))
-    hits.add(lineAt(starts, m.index));
-  for (const m of text.matchAll(DEFAULT_OPTIONS_RE)) {
-    const open = m.index + m[0].length;
-    if (text[open] === "{") {
-      const end = balancedEnd(text, open, "{", "}");
-      // Through the closing brace, which ends a last shorthand entry.
-      if (end === -1 || MUTATIONS_ENTRY_RE.test(text.slice(open + 1, end + 1)))
-        hits.add(lineAt(starts, m.index));
-    } else if (!NOT_A_VALUE_TAIL_RE.test(text.slice(open))) {
-      hits.add(lineAt(starts, m.index));
+/** Index of the bracket closing the one opened at `open` (`{`, `(`, `[` or `<`
+ *  for a type argument list), skipping string and template literals and nested
+ *  brackets of every kind; -1 when it never closes. `=>` is not a closer. */
+function literalEnd(text, open) {
+  const closer = { "{": "}", "(": ")", "[": "]", "<": ">" };
+  const stack = [closer[text[open]]];
+  for (let i = open + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") {
+      i = stringEnd(text, i);
+      if (i === -1) return -1;
+    } else if (c === "{" || c === "(" || c === "[") {
+      stack.push(closer[c]);
+    } else if (c === stack.at(-1) && !(c === ">" && text[i - 1] === "=")) {
+      stack.pop();
+      if (stack.length === 0) return i;
+    } else if (c === "}" || c === ")" || c === "]") {
+      return -1;
     }
   }
-  for (const m of text.matchAll(DEFAULT_OPTIONS_SHORTHAND_RE)) {
-    if (!PATTERN_CLOSE_RE.test(text.slice(m.index + m[0].length)))
-      hits.add(lineAt(starts, m.index));
+  return -1;
+}
+
+/** Index of the quote closing the string or template literal opened at `open`,
+ *  honoring backslash escapes; -1 when it never closes. */
+function stringEnd(text, open) {
+  const quote = text[open];
+  for (let i = open + 1; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === quote) return i;
+  }
+  return -1;
+}
+
+/** The top-level entries of the object literal opened at `open`, trimmed, or
+ *  null when it never closes. Commas inside strings and brackets don't split. */
+function topLevelEntries(text, open) {
+  const end = literalEnd(text, open);
+  if (end === -1) return null;
+  const pieces = topLevelPieces(text.slice(open + 1, end));
+  return pieces === null ? null : pieces.filter((e) => e !== "");
+}
+
+/** Where a type annotation starting at `from` ends: the index of the first
+ *  top-level `;`, `,`, `)`, `}` or assignment `=`, with nested brackets, type
+ *  arguments and strings skipped; -1 when nothing ends it. */
+function annotationEnd(text, from) {
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") i = stringEnd(text, i);
+    else if (c === "{" || c === "(" || c === "[" || c === "<")
+      i = literalEnd(text, i);
+    else if (c === "=" && text[i + 1] !== ">" && text[i + 1] !== "=") return i;
+    else if (c === ";" || c === "," || c === ")" || c === "}") return i;
+    if (i === -1) return -1;
+  }
+  return -1;
+}
+
+/** Whether the annotation starting at `from` holds no value: it ends at one of
+ *  `enders` with no assignment `=` first, and holds no `/`, which only a value
+ *  (a regex literal or a division) could, since a regex's `)` or `;` would read
+ *  as the annotation's end. */
+function typeOnlyAnnotation(text, from, enders) {
+  const end = annotationEnd(text, from);
+  return (
+    end !== -1 &&
+    enders.includes(text[end]) &&
+    !text.slice(from, end).includes("/")
+  );
+}
+
+/** Whether a defaults literal ending just before `from` closes its entry: the
+ *  next token, past any `as T` / `satisfies T`, is `,` `}` `;` or `)`. Anything
+ *  else reads the literal (`.constructor(…)`, `['queries']`) or assigns after it. */
+function literalEndsEntry(text, from) {
+  let i = from;
+  for (;;) {
+    while (/\s/.test(text[i] ?? "")) i++;
+    const cast = /^(?:as|satisfies)(?![\w$])/.exec(text.slice(i, i + 10));
+    if (!cast) break;
+    const end = annotationEnd(text, i + cast[0].length);
+    if (end === -1 || text[end] === "=") return false;
+    i = end;
+  }
+  return [",", "}", ";", ")"].includes(text[i]);
+}
+
+/** Whether the `defaultOptions` mention at `index` is provably harmless: a type
+ *  member or parameter annotation with no value (`defaultOptions?: T` ending at
+ *  `;` `,` `)` or `}`, or `defaultOptions: T` ending a member with `;` or a
+ *  parameter list with `)`), or an object-entry key (bare, quoted, or a quoted
+ *  computed key) whose value is a literal holding only a bare `queries` entry
+ *  and closing its entry. Member modifiers before the key are skipped. */
+function harmlessDefaultOptions(text, index) {
+  let after = index + "defaultOptions".length;
+  let keyStart = index;
+  const quote = text[index - 1];
+  const quoted = quote === '"' || quote === "'" || quote === "`";
+  if (quoted) {
+    if (text[after] !== quote) return false;
+    after++;
+    keyStart = index - 1;
+    if (text[index - 2] === "[") {
+      if (text[after] !== "]") return false;
+      after++;
+      keyStart = index - 2;
+    }
+  }
+  // A key opens a member, a parameter or an object entry.
+  let head = text.slice(0, keyStart).trimEnd();
+  for (
+    let m = MEMBER_MODIFIER_RE.exec(head);
+    m;
+    m = MEMBER_MODIFIER_RE.exec(head)
+  )
+    head = head.slice(0, m.index).trimEnd();
+  if (!["{", ";", "(", ","].includes(head.at(-1))) return false;
+  const rest = text.slice(after);
+  const optional = !quoted && /^\s*\?\s*:/.exec(rest);
+  if (optional)
+    return typeOnlyAnnotation(text, after + optional[0].length, [
+      ";",
+      ",",
+      ")",
+      "}",
+    ]);
+  const colon = /^\s*:\s*/.exec(rest);
+  if (!colon) return false;
+  const valueAt = after + colon[0].length;
+  if (text[valueAt] === "{") {
+    const entries = topLevelEntries(text, valueAt);
+    return (
+      entries !== null &&
+      entries.every((e) => /^queries(?:\s*:|$)/.test(e)) &&
+      literalEndsEntry(text, literalEnd(text, valueAt) + 1)
+    );
+  }
+  if (quoted) return false;
+  return typeOnlyAnnotation(text, valueAt, [";", ")"]);
+}
+
+/** Scanner: any mention of the client's defaults API, and any `defaultOptions`
+ *  mention not proven harmless (see harmlessDefaultOptions). So a shorthand, a
+ *  binding, an assignment, a member read or write, a getter or method, a
+ *  parameter default, a class field initializer, a defaults literal with any
+ *  entry but `queries` (`mutations`, a spread, a quoted or computed key) or read
+ *  after it closes, and a value that is not a literal all fail. A parameter
+ *  annotation followed by another parameter can't be told from an object entry,
+ *  so it fails too. */
+const mutationDefaults = (fileView) => {
+  const { text, at } = cookSource(fileView.text);
+  const hit = (index) => lineAt(fileView.starts, at[index]);
+  const hits = new Set();
+  for (const m of text.matchAll(CLIENT_DEFAULTS_API_RE)) hits.add(hit(m.index));
+  for (const m of text.matchAll(DEFAULT_OPTIONS_TOKEN_RE)) {
+    if (!harmlessDefaultOptions(text, m.index)) hits.add(hit(m.index));
   }
   return [...hits];
 };
@@ -2097,7 +2429,7 @@ export const CHECKS = [
       hint: `every .ts/.tsx under src/ except ${STARTED_MUTATION}`,
     },
     message:
-      "construct every mutation with `useMutation` from @/lib/started-mutation (gd-conventions, 'Mutation identity pinning') — react-query's own constructor lets a mounted observer re-rendered with new options replace its PENDING mutation's options, so after a repo, PR, lens or link switch the write runs the new render's mutationFn and callbacks: a write parked offline lands on whichever repo is open at reconnect, and its refresh and cache patches follow it; the helper runs each mutation's mutationFn and callbacks from the options in effect when it started (the observer's at the `mutate` call). This flags react-query's `useMutation` or `MutationObserver` (from @tanstack/react-query or @tanstack/query-core, any subpath) bound as a value: imported named or aliased, re-exported (`export *` included), imported dynamically, or reached through a namespace import other than as `ns.<another member>`. Type-only imports, `useMutationState`, `useIsMutating` and the DOM's `MutationObserver` stay legal. Not seen: a mutation built by hand through `getMutationCache().build(…)` or the core `Mutation` class, and one constructed inside another package",
+      "construct every mutation with `useMutation` from @/lib/started-mutation (gd-conventions, 'Mutation identity pinning') — react-query's own constructor lets a mounted observer re-rendered with new options replace its PENDING mutation's options, so after a repo, PR, lens or link switch the write runs the new render's mutationFn and callbacks: a write parked offline lands on whichever repo is open at reconnect, and its refresh and cache patches follow it; the helper runs each mutation's mutationFn and callbacks from the options in effect when it started (the observer's at the `mutate` call). This flags, outside the helper: react-query's `useMutation`, `MutationObserver`, `MutationCache`, `Mutation`, `hydrate` or `HydrationBoundary` (from @tanstack/react-query or @tanstack/query-core, through any path or subpath; specifiers are cooked as JS strings, case-folded and read with `\\` as `/`) bound as a value, whether imported named or aliased (escaped names decoded first), re-exported (`export *` included), or reached through `import()`, `require()` (TS `import x = require()` too) or `import.meta.glob()`; ANY namespace or default import of either package, a `{ default }` entry included, since a namespace can be spread, destructured or passed on with no member name to see; and a module call whose argument is not one plain string literal when it mentions `tanstack` or its file holds a react-query specifier string. The client's mutation cache is mutation-cache-access's. Type-only imports, `useMutationState`, `useIsMutating` and the DOM's `MutationObserver` stay legal. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a re-export alias spelled as a reserved word or a string holding `;` or `,` (`export { useMutation as import }`); a semicolon-less import chain (the formatter adds the semicolons CI checks); `setOptions` on a mutation reached from the cache or `useMutationState`, which replaces rather than constructs; a construction inside another package; and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): `typeof import(\"@tanstack/react-query\")` and an inline `import(\"@tanstack/react-query\").Type` in a type position, and a non-literal module call in a file that also holds a react-query specifier string",
   },
   {
     name: "started-mutation-present",
@@ -2112,6 +2444,21 @@ export const CHECKS = [
       "src/lib/started-mutation.ts is the one module allowed to construct a mutation from react-query directly — if it moved or was renamed, re-point STARTED_MUTATION (and the networkmode guard's EXEMPT row) together, because raw-react-query-mutation exempts it by path",
   },
   {
+    name: "mutation-cache-access",
+    // Repo-wide: any module can reach the client's cache.
+    appliesTo: () => true,
+    scan: mutationCacheAccess,
+    allowlist: [
+      // useMutationCacheSnapshot holds the cache to subscribe to it and hands it
+      // to its callers' selects, which only read it (findAll); a build through
+      // that reference is review-enforced.
+      "src/lib/git/queries/internal.ts",
+    ],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
+    message:
+      "the client's mutation cache is reached only to read it (gd-conventions, 'Mutation identity pinning') — `MutationCache.build(…)` makes a mutation @/lib/started-mutation never saw, so every `getMutationCache` mention must be its call followed directly by a `.getAll`, `.find`, `.findAll`, `.subscribe` or `.clear` call (`?.` too). A held reference, a quoted, optional, asserted, generic, bound, parenthesized or prototype reach, and anything else fails; a module that must hold the cache takes an allowlist entry with rationale. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: a cache reference handed in from elsewhere (a select callback's parameter), and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line)",
+  },
+  {
     name: "mutation-defaults",
     // Repo-wide: a client can be configured, or reconfigured, from any module.
     appliesTo: () => true,
@@ -2119,7 +2466,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "react-query mutation defaults are banned (gd-conventions, 'Mutation identity pinning') — @/lib/started-mutation installs mutationFn/onMutate/onSuccess/onError/onSettled trampolines on every construction, and react-query spreads a construction's own options over the client's defaults, so a `setMutationDefaults` mutationFn or callback, or one in a `mutations` entry of `defaultOptions` / `setDefaultOptions`, would be shadowed without a sound; the whole entry is banned so none slips in. Put the behavior in the construction, or teach the helper to merge the defaults first. A defaults value that is not an object literal, that spreads, or that is a shorthand `defaultOptions` fails closed; type members, parameter annotations and destructuring targets are ignored, except an annotated parameter followed by another one, which can't be told from an object entry and fails closed (an allowlist entry with rationale is the remedy). Not seen: defaults whose key is never spelled out (a computed `[\"defaultOptions\"]`, an `Object.assign` onto a client config)",
+      "react-query mutation defaults are banned (gd-conventions, 'Mutation identity pinning') — @/lib/started-mutation installs mutationFn/onMutate/onSuccess/onError/onSettled trampolines on every construction, and react-query spreads a construction's own options over the client's defaults, so a default mutationFn or callback would be shadowed without a sound. The check passes only what it can prove harmless. Any mention of `setDefaultOptions`, `getDefaultOptions`, `setMutationDefaults`, `getMutationDefaults` or `defaultMutationOptions` fails, quoted, optional, escaped or bound alike (`getDefaultOptions()` hands out the live defaults object, and `defaultMutationOptions` is query-core's merge point, which a subclass or patch could override). Every `defaultOptions` mention fails unless it is a type position with no value (`defaultOptions?: T` ending at `;` `,` `)` or `}`, or `defaultOptions: T` ending a member with `;` or a parameter list with `)`, member modifiers skipped, with no `=` and no `/` in the annotation) or an object-entry key whose value is a literal holding only a bare `queries` entry and closing its entry (`,` `}` `;` or `)` next, past any `as T` / `satisfies T`). So shorthands, bindings, assignments, member reads and writes, getters, methods, parameter defaults, class-field initializers, non-literal values, a literal read after it closes (`.constructor(…)`, `['queries']`) and any other entry (`mutations`, a spread, a quoted or computed key) fail. Put the behavior in the construction, or teach the helper to merge the defaults first. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: keys or members assembled at runtime (`qc[\"set\" + name]`), reach through `Object.values` / `Object.entries`, prototype pollution, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives, an allowlist entry with rationale is the remedy): an annotated parameter followed by another parameter, which can't be told from an object entry; an interface member ending without `;`; JSX `defaultOptions={…}`; type-level references (`QueryClientConfig['defaultOptions']`, a `Pick`/`Omit` of it); and a nested `defaultOptions` key inside `queries`",
   },
 ];
 
@@ -2144,6 +2491,16 @@ function walk(dir, out = []) {
     } else if (EXTENSIONS.some((ext) => entry.endsWith(ext))) {
       out.push(relative(ROOT, full).split("\\").join("/"));
     }
+  }
+  return out;
+}
+
+/** Every file under `dir`, as repo-relative POSIX paths, whatever its extension. */
+function walkAll(dir, out = []) {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) walkAll(full, out);
+    else out.push(relative(ROOT, full).split("\\").join("/"));
   }
   return out;
 }
@@ -2217,6 +2574,28 @@ function main() {
       for (const f of stale) process.stderr.write(`  ${f}\n`);
       process.stderr.write(`  → ${STALE_FIX}\n`);
     }
+  }
+
+  // EXTENSIONS stays complete: a script under src/ the walk above can't read
+  // escapes every check here, so its presence fails, and so does an allowlist
+  // row naming no such file.
+  const everything = walkAll(SRC);
+  const unscanned = unscannedScripts(everything);
+  const staleScripts = UNSCANNED_SCRIPT_ALLOWLIST.filter(
+    (p) => !everything.includes(p),
+  );
+  if (unscanned.length > 0 || staleScripts.length > 0) {
+    failed = true;
+    for (const f of unscanned)
+      process.stderr.write(
+        `src-script-extensions: ${f} is never scanned (the checks read .ts/.tsx only) — convert it to TypeScript, or add it to UNSCANNED_SCRIPT_ALLOWLIST with rationale\n`,
+      );
+    for (const f of staleScripts)
+      process.stderr.write(`src-script-extensions: ${f}\n  → ${STALE_FIX}\n`);
+  } else {
+    process.stdout.write(
+      `src-script-extensions: OK (${everything.length} files checked)\n`,
+    );
   }
 
   // Not `process.exit`: it can truncate a pending pipe write, losing the very

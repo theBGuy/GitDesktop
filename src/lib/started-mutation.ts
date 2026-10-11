@@ -20,14 +20,19 @@ export const STARTED_KEY = "gitdesktop.started";
  * in effect when each mutation STARTED (the observer's at the `mutate` call). A
  * mounted observer re-rendered with new options replaces its pending mutation's
  * options, but query-core builds the `MutationFunctionContext` once per execution
- * and hands that same object to the `mutationFn` and every callback; the snapshot
+ * and hands that same object to the `mutationFn` and every option callback (a
+ * per-call `mutate(v, { onSuccess })` callback gets a context built from the
+ * observer's current options, and is fixed at the call anyway); the snapshot
  * rides its `meta`, so no later render can change what a running or parked write
- * calls. Every trampoline is installed even when `options` lacks that callback,
- * so a later render cannot add or drop one mid-flight. Each returns its target's
- * result unchanged: `onMutate`'s is the mutation context, and a promise from
- * `onSuccess` is awaited before the mutation settles. They shadow any
- * `defaultOptions.mutations` callback or `setMutationDefaults` mutationFn, which
- * the `mutation-defaults` check in scripts/check-banned-patterns.mjs bans.
+ * calls. Only the mutationFn and the four option callbacks are snapshotted:
+ * query-core reads `scope` and `gcTime` off the mutation's live options, so a
+ * `scope.id` derived from render state would follow a switch. Every trampoline
+ * is installed even when `options` lacks that callback, so a later render cannot
+ * add or drop one mid-flight. Each returns its target's result unchanged:
+ * `onMutate`'s is the mutation context, and a promise from `onSuccess` is awaited
+ * before the mutation settles. They shadow any `defaultOptions.mutations`
+ * callback or `setMutationDefaults` mutationFn, which the `mutation-defaults`
+ * check in scripts/check-banned-patterns.mjs bans.
  */
 export function startedMutationOptions<
   TData = unknown,
