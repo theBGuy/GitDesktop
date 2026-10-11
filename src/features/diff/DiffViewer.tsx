@@ -7,6 +7,7 @@ import {
 import { InfoIcon } from "@phosphor-icons/react";
 import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefObject,
@@ -390,6 +391,21 @@ const answeredSince = (
   before: ReadonlySet<string>,
 ) => q.isFetched && !before.has(answerMark(q));
 
+/** keydown for the hunk buttons and their Discard confirm: an auto-repeat of a
+ *  held Enter or Space activates nothing, so one physical press acts once even
+ *  when a landing hands focus to the next hunk's button mid-hold. Ctrl, Alt
+ *  and Meta chords pass through to app hotkeys untouched. */
+function swallowRepeatedActivation(e: ReactKeyboardEvent<HTMLElement>) {
+  if (
+    e.repeat &&
+    (e.key === "Enter" || e.key === " ") &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !e.metaKey
+  )
+    e.preventDefault();
+}
+
 /** How long a landed focus stays re-landable after a later rebuild remounts
  *  its button: past this, the remount is no longer that action's. */
 const RELAND_BOUND_MS = 500;
@@ -518,6 +534,18 @@ function WorkingTreeDiff({
   // hold releases, so a second press inside the same frame never fires.
   const writingRef = useRef(false);
   const hunkFocusRef = useRef<HunkFocus | null>(null);
+  // A pointer press anywhere after the hunk press drops its pending landing: a
+  // click into the code also leaves focus on <body>, which would otherwise read
+  // as the pressed button unmounting. Keys don't drop it: one that moves focus
+  // fails the landing's focus check, and one that doesn't leaves the user where
+  // the landing assumes.
+  useEffect(() => {
+    const drop = () => {
+      hunkFocusRef.current = null;
+    };
+    document.addEventListener("pointerdown", drop, true);
+    return () => document.removeEventListener("pointerdown", drop, true);
+  }, []);
   // The Discard confirm is closing: Base UI returns focus from the popup's
   // unmount, which is what fires `onOpenChangeComplete(false)`, so a focus
   // move waits for that edge or the return would undo it.
@@ -1054,13 +1082,20 @@ function WorkingTreeDiff({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDiscard(null)}>
+            {/* A held Enter that opened the confirm repeats into whichever of
+                these has focus (Cancel, on open): it must not act on it. */}
+            <Button
+              variant="outline"
+              onKeyDown={swallowRepeatedActivation}
+              onClick={() => setDiscard(null)}
+            >
               Cancel
             </Button>
             <DisabledReasonButton
               variant="destructive"
               disabled={busy}
               reason={UPDATING_DIFF_REASON}
+              onKeyDown={swallowRepeatedActivation}
               onClick={() => {
                 setConfirmClosing(true);
                 discard?.run();
@@ -1430,6 +1465,7 @@ function HunkActionButtons({
         reason={UPDATING_DIFF_REASON}
         aria-describedby={rangeId}
         data-hunk-primary={index}
+        onKeyDown={swallowRepeatedActivation}
         onClick={fire(staged ? "unstage" : "stage")}
       >
         {staged ? "Unstage" : "Stage"} hunk
@@ -1441,6 +1477,7 @@ function HunkActionButtons({
         disabled={busy}
         reason={UPDATING_DIFF_REASON}
         aria-describedby={rangeId}
+        onKeyDown={swallowRepeatedActivation}
         onClick={fire("discard")}
       >
         Discard…
@@ -1452,7 +1489,9 @@ function HunkActionButtons({
 /** A hunk's header bar: the pane-top bar of a hunk starting on line 1, and the
  *  inline header a hunk gets once the line above it is expanded into view.
  *  Carries no line-number spans, so the drag-select math reads it as a
- *  separator; mousedown stops here so a button press never starts a drag. */
+ *  separator and a press on it starts no drag: the library's selection manager
+ *  (a native listener the mousedown stop can't reach) and our anchor latch
+ *  both start only from a line-number cell. */
 function HunkHeaderBar({
   label,
   children,
@@ -1549,8 +1588,10 @@ function StagingDiffView({
   // released them for, not only until that text arrives.
   const held = busy || deferredText !== diffText;
   // The hunk a hunk action's focus last landed on, re-landable while armed
-  // (see the re-land effect below). Any pointer press or key is the user taking
-  // over, and past the bound a remount is no longer this action's.
+  // (see the re-land effect below). A pointer press or a fresh key press is the
+  // user taking over; a held key's auto-repeats are not, since the press that
+  // landed focus is still down. Past the bound, a remount is no longer this
+  // action's.
   const relandRef = useRef<{ index: number; button: HTMLElement } | null>(null);
   const disarmRef = useRef<(() => void) | null>(null);
   const disarmReland = useCallback(() => disarmRef.current?.(), []);
@@ -1563,11 +1604,14 @@ function StagingDiffView({
       disarmRef.current = null;
       window.clearTimeout(timer);
       document.removeEventListener("pointerdown", disarm, true);
-      document.removeEventListener("keydown", disarm, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.repeat) disarm();
     };
     timer = window.setTimeout(disarm, RELAND_BOUND_MS);
     document.addEventListener("pointerdown", disarm, true);
-    document.addEventListener("keydown", disarm, true);
+    document.addEventListener("keydown", onKey, true);
     disarmRef.current = disarm;
   }, []);
   useEffect(() => disarmReland, [disarmReland]);
@@ -2100,8 +2144,8 @@ function StagingDiffView({
       {anchors.map((a, i) =>
         viewHunks[i] && a.host === "row" && a.top >= 0 ? (
           // Buttons sit ON the `@@` separator row (never on code), right-aligned
-          // to clear the native expand controls. mousedown-stop so a button
-          // press never starts a drag-select.
+          // to clear the native expand controls. A press here can't start a
+          // drag: see HunkHeaderBar.
           <div
             key={`${i}:${viewHunks[i].header}`}
             className="absolute right-3 z-10 flex -translate-y-px gap-1"
