@@ -1288,6 +1288,43 @@ async fn walk_filtered_legs<R, T>(
 where
     R: serde::de::DeserializeOwned,
 {
+    let fetch = move |url: String| async move {
+        run_glab(
+            Some(repo_path),
+            &["api", url.as_str()],
+            GLAB_NETWORK_TIMEOUT,
+        )
+        .await
+        .map(|out| out.stdout_lossy())
+    };
+    walk_legs_with(plan, limit, what, parse_failure, map, row, fetch).await
+}
+
+/// `glab` spawns one walk round may hold in flight at once — a cap on process-spawn
+/// pressure (Windows pays per spawn), not on requests; [`MAX_FILTER_REQUESTS`] stays
+/// the budget.
+const MAX_CONCURRENT_LEG_FETCHES: usize = 6;
+
+/// [`walk_filtered_legs`] over any page fetcher, so the walk is testable without `glab`.
+///
+/// A round's pages are FETCHED concurrently (in chunks of [`MAX_CONCURRENT_LEG_FETCHES`])
+/// but PROCESSED in endpoint order: leg N's stop rule reads the rows legs 0..N-1 kept
+/// this round, so completion order must never reach it. The first error in endpoint
+/// order wins, though its chunk may have spent its other spawns first.
+async fn walk_legs_with<R, T, F, Fut>(
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+    what: &str,
+    parse_failure: &str,
+    map: impl Fn(R) -> T,
+    row: impl Fn(&T) -> (u64, &str, Option<&PrAuthor>, &[PrListLabel]),
+    fetch: F,
+) -> AppResult<(Vec<T>, bool)>
+where
+    R: serde::de::DeserializeOwned,
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
     let mut fetched: Vec<T> = Vec::new();
     // Rows that would survive the client axes, tracked alongside the raw fetch so the
     // stop rule counts real matches rather than raw hits.
@@ -1301,54 +1338,47 @@ where
         if active.is_empty() {
             break;
         }
+        let take = active.len().min(MAX_FILTER_REQUESTS - requests);
         let mut deeper: Vec<&String> = Vec::new();
-        let mut spent_budget = false;
-        for endpoint in active.iter().copied() {
-            if requests >= MAX_FILTER_REQUESTS {
-                // A page we meant to read and didn't: every leg left in this round is
-                // unfinished, and the budget is global so no deeper round can run.
-                truncated = true;
-                spent_budget = true;
-                break;
-            }
-            let url = format!("{endpoint}&page={page}");
-            let out = run_glab(
-                Some(repo_path),
-                &["api", url.as_str()],
-                GLAB_NETWORK_TIMEOUT,
+        for chunk in active[..take].chunks(MAX_CONCURRENT_LEG_FETCHES) {
+            let bodies = crate::forge::futures_join_all(
+                chunk
+                    .iter()
+                    .map(|endpoint| fetch(format!("{endpoint}&page={page}"))),
             )
-            .await?;
-            requests += 1;
-            let raw: Vec<R> = serde_json::from_str(&out.stdout_lossy())
-                .map_err(|e| {
-                    gl_unreadable(
-                        what,
-                        format!("{parse_failure}: {e}"),
-                    )
-                })?;
-            let exhausted = (raw.len() as u32) < FILTER_PAGE_SIZE;
-            let start = fetched.len();
-            fetched.extend(raw.into_iter().map(&map));
-            let mut page_oldest: Option<&str> = None;
-            for item in &fetched[start..] {
-                let (id, created_at, author, labels) = row(item);
-                page_oldest = Some(created_at);
-                if matches_client_axes(plan, author, labels) && kept_ids.insert(id) {
-                    kept_times.push(created_at.to_string());
+            .await;
+            for (endpoint, body) in chunk.iter().copied().zip(bodies) {
+                let body = body?;
+                requests += 1;
+                let raw: Vec<R> = serde_json::from_str(&body)
+                    .map_err(|e| gl_unreadable(what, format!("{parse_failure}: {e}")))?;
+                let exhausted = (raw.len() as u32) < FILTER_PAGE_SIZE;
+                let start = fetched.len();
+                fetched.extend(raw.into_iter().map(&map));
+                let mut page_oldest: Option<&str> = None;
+                for item in &fetched[start..] {
+                    let (id, created_at, author, labels) = row(item);
+                    page_oldest = Some(created_at);
+                    if matches_client_axes(plan, author, labels) && kept_ids.insert(id) {
+                        kept_times.push(created_at.to_string());
+                    }
+                }
+                if exhausted {
+                    continue;
+                }
+                let kept: Vec<&str> = kept_times.iter().map(String::as_str).collect();
+                // `None` is unreachable behind the exhausted-guard — a non-exhausted page
+                // mapped at least FILTER_PAGE_SIZE rows, so it has a last row — but that
+                // row's timestamp can still be EMPTY; leg_wants_deeper walks on both.
+                if leg_wants_deeper(page_oldest, &kept, limit) {
+                    deeper.push(endpoint);
                 }
             }
-            if exhausted {
-                continue;
-            }
-            let kept: Vec<&str> = kept_times.iter().map(String::as_str).collect();
-            // `None` is unreachable behind the exhausted-guard — a non-exhausted page
-            // mapped at least FILTER_PAGE_SIZE rows, so it has a last row — but that
-            // row's timestamp can still be EMPTY; leg_wants_deeper walks on both.
-            if leg_wants_deeper(page_oldest, &kept, limit) {
-                deeper.push(endpoint);
-            }
         }
-        if spent_budget {
+        if take < active.len() {
+            // Pages we meant to read and didn't: those legs are unfinished, and the
+            // budget is global so no deeper round can run.
+            truncated = true;
             break;
         }
         active = deeper;
@@ -8567,14 +8597,26 @@ async fn rewrite_origin_after(
     .and_then(crate::git::runner::GitOutput::exit_verdict);
     if let Err(e) = written {
         let display_url = displayed_origin_url(&new_url);
-        let e = e
-            .to_string()
-            .replace(
-                &old_pattern,
-                &exact_value_pattern(&displayed_origin_url(&origin.stored_url)),
-            )
-            .replace(&origin.stored_url, &displayed_origin_url(&origin.stored_url))
-            .replace(&new_url, &display_url);
+        let e = match e {
+            // A lost lock wrote nothing, and git's own line would leak the lock path.
+            AppError::Git { ref stderr, .. }
+                if crate::git::runner::is_config_lock_contention(stderr) =>
+            {
+                crate::git::runner::config_lock_busy("the 'origin' remote wasn't changed.")
+                    .to_string()
+            }
+            e => e
+                .to_string()
+                .replace(
+                    &old_pattern,
+                    &exact_value_pattern(&displayed_origin_url(&origin.stored_url)),
+                )
+                .replace(
+                    &origin.stored_url,
+                    &displayed_origin_url(&origin.stored_url),
+                )
+                .replace(&new_url, &display_url),
+        };
         return Err(AppError::Glab(format!(
             "{verb} on GitLab, but the local 'origin' remote couldn't be updated — \
              set it to {display_url} manually. ({e})"
@@ -10880,11 +10922,13 @@ mod tests {
 
     /// The compare-and-set write rides the config-write retry: a first-attempt loss
     /// still rewrites origin, and a lock held through the retry keeps the framed
-    /// GitLab error with origin untouched.
+    /// GitLab error, carrying the busy refusal instead of git's lock line, with origin
+    /// untouched.
     #[tokio::test]
     async fn origin_rewrite_rides_out_a_lost_config_lock() {
         use crate::git::runner::{
-            hold_config_lock, release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK,
+            hold_config_lock, release_config_lock_before_attempt, CONFIG_LOCK_BUSY_LEAD,
+            CONFIG_WRITE_ATTEMPT_HOOK,
         };
         let (dir, repo) = origin_test_repo("https://host/g/p.git").await;
         let lock = dir.path().join(".git").join("config.lock");
@@ -10898,12 +10942,25 @@ mod tests {
             .to_string();
         std::fs::remove_file(&lock).unwrap();
         assert!(
-            error.contains("Renamed on GitLab, but the local 'origin' remote couldn't be updated"),
+            error.contains(
+                "Renamed on GitLab, but the local 'origin' remote couldn't be updated — \
+                 set it to https://host/g/held.git manually."
+            ),
             "{error}"
         );
-        // The predicate reads raw stderr lines; here git's line sits inside the framing.
         assert!(
-            error.contains("(error: could not lock config file .git/config: File exists)"),
+            error.contains(&format!(
+                "({CONFIG_LOCK_BUSY_LEAD}the 'origin' remote wasn't changed.)"
+            )),
+            "{error}"
+        );
+        // Neither git's raw line nor any spelling of the lock's path reaches the copy.
+        assert!(!error.contains("could not lock config file"), "{error}");
+        assert!(!error.contains(".git/config"), "{error}");
+        assert!(!error.contains(".git\\config"), "{error}");
+        assert!(!error.contains("config.lock"), "{error}");
+        assert!(
+            !error.contains(&dir.path().to_string_lossy().into_owned()),
             "{error}"
         );
         assert_eq!(
@@ -12005,6 +12062,280 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![7, 8, 42]
         );
+    }
+
+    /// A fixed-width timestamp `n` seconds into 2026-01-01; a higher `n` is newer.
+    fn walk_stamp(n: u32) -> String {
+        format!(
+            "2026-01-01T{:02}:{:02}:{:02}.000Z",
+            n / 3600,
+            n / 60 % 60,
+            n % 60
+        )
+    }
+
+    /// A page body as glab prints it: one MR per `(iid, stamp)`, in the given order.
+    fn walk_page(rows: &[(u64, u32)]) -> String {
+        serde_json::Value::Array(
+            rows.iter()
+                .map(|(iid, n)| {
+                    serde_json::json!({
+                        "iid": iid,
+                        "web_url": "",
+                        "title": "",
+                        "target_branch": "main",
+                        "source_branch": "head",
+                        "state": "opened",
+                        "author": { "username": "octocat" },
+                        "labels": [],
+                        "created_at": walk_stamp(*n),
+                    })
+                })
+                .collect(),
+        )
+        .to_string()
+    }
+
+    /// Endpoint prefixes `leg0?per_page=100`, `leg1?…`, with no client axes.
+    fn walk_plan(legs: usize) -> GlFilterPlan {
+        GlFilterPlan {
+            endpoints: (0..legs).map(|i| format!("leg{i}?per_page=100")).collect(),
+            authors: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    /// A walk URL's `(leg, page)`, e.g. `leg3?per_page=100&page=2` → `(3, 2)`.
+    fn walk_target(url: &str) -> (usize, u32) {
+        let leg = url["leg".len()..url.find('?').unwrap()].parse().unwrap();
+        let page = url.rsplit("&page=").next().unwrap().parse().unwrap();
+        (leg, page)
+    }
+
+    /// The MR walk with `fetch` standing in for glab.
+    async fn walk_mrs<F, Fut>(
+        plan: &GlFilterPlan,
+        limit: Option<u32>,
+        fetch: F,
+    ) -> AppResult<(Vec<PrInfo>, bool)>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = AppResult<String>>,
+    {
+        walk_legs_with(
+            plan,
+            limit,
+            "merge requests",
+            "could not parse GitLab merge requests",
+            from_glab_mr,
+            |p: &PrInfo| {
+                (
+                    p.number,
+                    p.created_at.as_str(),
+                    p.author.as_ref(),
+                    p.labels.as_slice(),
+                )
+            },
+            fetch,
+        )
+        .await
+    }
+
+    /// Leg 1's stop rule must read the rows leg 0 kept this round even when leg 1's page
+    /// lands first. Read in completion order, leg 1 would see only its own 100 rows,
+    /// tie its own cutoff, and deepen.
+    #[tokio::test]
+    async fn a_round_reads_its_legs_in_endpoint_order_whatever_order_they_complete_in() {
+        use std::sync::{Arc, Mutex};
+        // Leg 0: 100 rows whose oldest ties the cutoff it alone sets. Leg 1: leg 0's
+        // newest MR again (the viewer is assignee AND reviewer), then 99 rows strictly
+        // older than leg 0's oldest.
+        let leg0: Vec<(u64, u32)> = (0..100).map(|i| (1 + i as u64, 1000 - i)).collect();
+        let mut leg1: Vec<(u64, u32)> = vec![(1, 1000)];
+        leg1.extend((0..99).map(|i| (501 + i as u64, 500 - i)));
+        let bodies = Arc::new([walk_page(&leg0), walk_page(&leg1)]);
+        let requested = Arc::new(Mutex::new(Vec::<String>::new()));
+        let completed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let fetch = {
+            let (requested, completed) = (requested.clone(), completed.clone());
+            move |url: String| {
+                let (bodies, requested, completed) =
+                    (bodies.clone(), requested.clone(), completed.clone());
+                async move {
+                    requested.lock().unwrap().push(url.clone());
+                    let body = match walk_target(&url) {
+                        (0, 1) => {
+                            // Reversed completion: the FIRST leg answers last.
+                            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                            bodies[0].clone()
+                        }
+                        (1, 1) => bodies[1].clone(),
+                        _ => "[]".to_string(),
+                    };
+                    completed.lock().unwrap().push(url);
+                    Ok(body)
+                }
+            }
+        };
+        let (rows, truncated) = walk_mrs(&walk_plan(2), Some(100), fetch).await.unwrap();
+        // The premise: leg 1's page really did complete before leg 0's.
+        assert_eq!(
+            completed.lock().unwrap()[..2],
+            [
+                "leg1?per_page=100&page=1".to_string(),
+                "leg0?per_page=100&page=1".to_string()
+            ]
+        );
+        // Rows land in endpoint order, the shared MR in both legs' runs: the walk
+        // returns raw rows and the merge dedupes.
+        let expected: Vec<u64> = leg0.iter().chain(&leg1).map(|(iid, _)| *iid).collect();
+        assert_eq!(rows.iter().map(|p| p.number).collect::<Vec<_>>(), expected);
+        // Leg 0 tied its cutoff and deepened; leg 1, read after leg 0's 100 kept rows,
+        // ended strictly older than the cutoff and stopped.
+        let deeper: Vec<String> = requested
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|url| walk_target(url).1 == 2)
+            .cloned()
+            .collect();
+        assert_eq!(deeper, ["leg0?per_page=100&page=2"]);
+        assert!(!truncated);
+    }
+
+    /// The serial walk's deeper-round choice on a boundary tie, where only the
+    /// cross-leg dedupe makes it a tie: leg 1 repeats 99 of leg 0's rows, so its one new
+    /// row is the 101st kept and IS the cutoff. Counted twice, the repeats would push
+    /// the cutoff newer and stop leg 1 short.
+    #[tokio::test]
+    async fn a_tie_reached_through_cross_leg_dedupe_deepens_both_legs_as_the_serial_walk_did() {
+        use std::sync::{Arc, Mutex};
+        let leg0: Vec<(u64, u32)> = (0..100).map(|i| (1 + i as u64, 1000 - i)).collect();
+        let mut leg1: Vec<(u64, u32)> = leg0[..99].to_vec();
+        leg1.push((900, 50));
+        let bodies = Arc::new([walk_page(&leg0), walk_page(&leg1)]);
+        let requested = Arc::new(Mutex::new(Vec::<String>::new()));
+        let fetch = {
+            let requested = requested.clone();
+            move |url: String| {
+                let (bodies, requested) = (bodies.clone(), requested.clone());
+                async move {
+                    requested.lock().unwrap().push(url.clone());
+                    Ok(match walk_target(&url) {
+                        (0, 1) => bodies[0].clone(),
+                        (1, 1) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            bodies[1].clone()
+                        }
+                        _ => "[]".to_string(),
+                    })
+                }
+            }
+        };
+        let (_, truncated) = walk_mrs(&walk_plan(2), Some(101), fetch).await.unwrap();
+        // Leg 0 is short of the limit alone (100 < 101); leg 1's oldest row ties the
+        // 101st-newest kept row. Serially both deepen, so both page 2s are read.
+        let mut deeper: Vec<(usize, u32)> = requested
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|url| walk_target(url))
+            .filter(|(_, page)| *page == 2)
+            .collect();
+        deeper.sort_unstable();
+        assert_eq!(deeper, [(0, 2), (1, 2)]);
+        assert!(!truncated);
+    }
+
+    /// The request budget clamps a round, not just a walk: with 25 of 30 requests spent
+    /// and 12 legs wanting page 3, exactly the first 5 in endpoint order are read and the
+    /// walk reports the rest as truncated.
+    #[tokio::test]
+    async fn the_request_budget_clamps_a_round_to_the_pages_it_can_still_afford() {
+        use std::sync::{Arc, Mutex};
+        // Round 1: 13 legs, the last exhausted at once (13 spent); round 2: the other
+        // 12 (25 spent); round 3: 12 legs, 5 requests left. No limit, so every full
+        // page deepens.
+        let requested = Arc::new(Mutex::new(Vec::<(usize, u32)>::new()));
+        let fetch = {
+            let requested = requested.clone();
+            move |url: String| {
+                let requested = requested.clone();
+                async move {
+                    let (leg, page) = walk_target(&url);
+                    requested.lock().unwrap().push((leg, page));
+                    if leg == 12 {
+                        return Ok("[]".to_string());
+                    }
+                    let base = (leg as u64) * 1000 + u64::from(page) * 100;
+                    let rows: Vec<(u64, u32)> = (0..100u32)
+                        .map(|i| (base + u64::from(i), 50_000 - page * 1000 - i))
+                        .collect();
+                    Ok(walk_page(&rows))
+                }
+            }
+        };
+        let (_, truncated) = walk_mrs(&walk_plan(13), None, fetch).await.unwrap();
+        let requested = requested.lock().unwrap();
+        assert_eq!(requested.len(), MAX_FILTER_REQUESTS);
+        let mut third: Vec<usize> = requested
+            .iter()
+            .filter(|(_, page)| *page == 3)
+            .map(|(leg, _)| *leg)
+            .collect();
+        third.sort_unstable();
+        assert_eq!(third, [0, 1, 2, 3, 4]);
+        assert!(!requested.iter().any(|(_, page)| *page > 3));
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn a_round_holds_no_more_than_six_glab_spawns_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetch = {
+            let (in_flight, peak, calls) = (in_flight.clone(), peak.clone(), calls.clone());
+            move |_url: String| {
+                let (in_flight, peak, calls) = (in_flight.clone(), peak.clone(), calls.clone());
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok("[]".to_string())
+                }
+            }
+        };
+        let (_, truncated) = walk_mrs(&walk_plan(12), None, fetch).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 12);
+        // At the cap, not under it: the round really is concurrent.
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_LEG_FETCHES);
+        assert_eq!(MAX_CONCURRENT_LEG_FETCHES, 6);
+        assert!(!truncated);
+    }
+
+    /// A joined round reports the error the serial walk would have hit first: the
+    /// earliest failing leg in endpoint order, not the earliest to fail in time.
+    #[tokio::test]
+    async fn a_round_reports_the_first_error_in_endpoint_order() {
+        let fetch = |url: String| async move {
+            let failed: AppResult<String> = match walk_target(&url).0 {
+                0 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    Err(AppError::Glab("leg 0 failed".into()))
+                }
+                _ => Err(AppError::Glab("leg 1 failed".into())),
+            };
+            failed
+        };
+        let Err(error) = walk_mrs(&walk_plan(2), None, fetch).await else {
+            panic!("both legs failed, so the round must too");
+        };
+        assert_eq!(error.to_string(), "leg 0 failed");
     }
 
     #[test]

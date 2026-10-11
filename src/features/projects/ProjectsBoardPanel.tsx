@@ -1063,7 +1063,8 @@ export function ProjectsBoardPanel({
   // The same gate every other Projects surface reads, so none can fire a read
   // another one withholds.
   const scopeGap = projectScopeMissing(scopes.data);
-  const canRead = active && isGitHub && !scopeGap;
+  // forgeReady too: a signed-out github.com repo still reports its provider.
+  const canRead = active && isGitHub && forgeReady(gh.data) && !scopeGap;
   // The fork/upstream lens picks which repo's project catalog this is, and which
   // slug counts as "this repo" when a card opens — the same lens the Issues and
   // Pulls surfaces resolve, wired once at the view level.

@@ -1374,3 +1374,50 @@ test("a composed presentation of a raw refusal stays raw in Details, under its h
   assert.equal(bare.summary, "Reset failed");
   assert.equal(bare.fullText, RESET_REFUSAL);
 });
+
+test("a plain-string error summarizes to its first line and keeps the raw text", () => {
+  const raw =
+    "Provider returned 401: invalid API key for this model endpoint, check the key\n  at request (client.js:1)\n  at retry (client.js:2)";
+  const p = presentError(raw);
+  assert.equal(p.label, null);
+  assert.equal(
+    p.summary,
+    "Provider returned 401: invalid API key for this model endpoint, check the key",
+  );
+  assert.equal(p.fullText, raw);
+  assert.equal(p.long, true);
+});
+
+test("a busy error's summary names what holds the repository", () => {
+  // The pinned wire shape (busy_serializes_to_the_pinned_wire_shape, error.rs).
+  const sentence =
+    "A worktree removal is still running — try again when it finishes.";
+  const p = presentError({
+    kind: "busy",
+    message: sentence,
+    holder: "a worktree removal",
+  });
+  assert.equal(p.label, "Operation in progress");
+  assert.equal(p.summary, sentence);
+  assert.equal(p.long, false);
+});
+
+test("a Bitbucket app sentence on line one outranks a transport phrase below it", () => {
+  // forge/bitbucket.rs's created-but-unreadable disclosure over its transport cause.
+  const headline =
+    "The repository was created at https://bitbucket.org/ws/repo, but the response couldn't be read back — refresh to see it.";
+  const message = `${headline}\ncould not read Bitbucket response: error decoding response body: connection failed`;
+  const p = presentError(appError("bitbucket", message));
+  assert.equal(p.summary, headline);
+  assert.equal(p.fullText, message);
+  assert.equal(p.long, true);
+});
+
+test("a bare Bitbucket transport failure still reads as unreachable", () => {
+  const message =
+    "could not read Bitbucket response: error decoding response body: connection failed";
+  assert.equal(
+    presentError(appError("bitbucket", message)).summary,
+    reach("Bitbucket"),
+  );
+});

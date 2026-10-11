@@ -140,15 +140,19 @@ export function useBotAvatarUrl(name: string | null) {
 /** Batch-resolves commit-author `email → GitHub avatar` for the recent-commits window
  *  and primes the commit-avatar module, so History rows for authors with no GitHub
  *  no-reply and no Gravatar upgrade from initials. GitHub-only (gated on the detected
- *  provider, so a GitLab/Bitbucket repo never fires the commits API). 15min staleTime —
+ *  provider, so a GitLab/Bitbucket repo never fires the commits API, and on sign-in,
+ *  since a signed-out status still names a github.com repo). 15min staleTime —
  *  the window shifts as commits land. Best-effort: `retry: false`, and the backend
  *  returns `[]` on empty-repo/offline. */
 export function useCommitAuthorAvatarIndex(repo: string) {
-  const provider = useForgeStatus(repo).data?.provider;
+  const forge = useForgeStatus(repo).data;
   const query = useQuery({
     queryKey: ["commit-author-avatars", repo] as const,
     queryFn: () => api.ghCommitAuthorAvatars(repo),
-    enabled: repo !== "" && provider === "github",
+    enabled:
+      repo !== "" &&
+      forge?.provider === "github" &&
+      Boolean(forge.authenticated),
     staleTime: 15 * 60 * 1000,
     retry: false,
   });

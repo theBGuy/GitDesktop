@@ -1,5 +1,4 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import hljs from "highlight.js/lib/common";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
@@ -19,12 +18,12 @@ import {
 } from "@/components/ui/hover-card";
 import { Spinner } from "@/components/ui/spinner";
 import { diffLang } from "@/features/diff/diff-lang";
+import { HighlightedLine } from "@/features/diff/HighlightedLine";
 import { useBlame } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import { useUiStore } from "@/lib/stores/ui";
 import { validEpochMs } from "@/lib/time";
-import "@/features/diff/code-highlight.css";
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha
  *  (author "Not Committed Yet"). Those rows aren't navigable commits, so the
@@ -51,29 +50,6 @@ function resetCard(owner: CardOwner) {
  *  its close routes and both would float. */
 const { claim: claimCard, release: releaseCard } =
   createCardLatch<CardOwner>(resetCard);
-
-/** One code line, syntax-highlighted when the language is recognized. */
-function BlameCode({
-  content,
-  language,
-}: {
-  content: string;
-  language: string | undefined;
-}) {
-  const html =
-    language && hljs.getLanguage(language)
-      ? hljs.highlight(content, { language, ignoreIllegals: true }).value
-      : null;
-  if (html === null) {
-    return <span className="px-2 whitespace-pre-wrap">{content || " "}</span>;
-  }
-  return (
-    <span
-      className="gd-code px-2 whitespace-pre-wrap"
-      dangerouslySetInnerHTML={{ __html: html || " " }}
-    />
-  );
-}
 
 /** `git blame` view: each line's content with the commit that last changed it. */
 export function BlameDialog({
@@ -350,7 +326,7 @@ function BlameLines({
             <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground/70">
               {line.lineNo}
             </span>
-            <BlameCode content={line.content} language={language} />
+            <HighlightedLine content={line.content} language={language} />
           </div>
         );
       })}

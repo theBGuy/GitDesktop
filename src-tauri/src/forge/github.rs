@@ -1740,6 +1740,25 @@ mod tests {
         assert!(!f.capabilities.pull_requests && !f.capabilities.ci);
     }
 
+    #[test]
+    fn a_signed_out_repo_resolved_from_its_origin_still_maps_to_github() {
+        // gh installed but signed out; `gh_status` read the slug off a github.com origin.
+        let gh = GhStatus {
+            installed: true,
+            authenticated: false,
+            repo: Some("owner/name".into()),
+            host: Some("github.com".into()),
+            login: None,
+            probe_error: None,
+        };
+        let f = from_gh_status(gh);
+        assert_eq!(f.provider, Some(Provider::GitHub));
+        assert_eq!(f.repo.as_deref(), Some("owner/name"));
+        assert_eq!(f.host.as_deref(), Some("github.com"));
+        assert!(f.installed && !f.authenticated);
+        assert_eq!(f.login, None);
+    }
+
     // --- gh_status's repo lookup, through the ForgeStatus mapping ---
 
     fn view_out(code: i32, stdout: &str, stderr: &str) -> crate::github::runner::GhOutput {

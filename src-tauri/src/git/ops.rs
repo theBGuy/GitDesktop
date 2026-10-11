@@ -652,32 +652,68 @@ pub async fn git_checkout_commit(
     Ok(())
 }
 
+/// The `-m <n>` value for a merge commit's revert or pick: the 1-based parent that
+/// counts as the mainline. Only the lower bound is checked here, since git itself
+/// rejects a number above the commit's parent count. `None` passes no `-m`, so a
+/// merge commit still fails with git's own reason.
+fn mainline_arg(mainline: Option<u32>) -> AppResult<Option<String>> {
+    match mainline {
+        Some(0) => Err(AppError::InvalidArgument(
+            "The mainline parent number starts at 1.".into(),
+        )),
+        Some(n) => Ok(Some(n.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// The refusal for a multi-commit cherry-pick holding a merge commit.
+pub(crate) const RANGE_MERGE_REFUSAL: &str =
+    "This range contains a merge commit — cherry-pick it on its own to choose its mainline.";
+
+/// Whether any of `hashes` is a merge commit, or `None` when git couldn't say.
+/// The hashes go over stdin: one per argv slot, a large batch overflows Windows'
+/// 32,767-character command line (about 790 full SHAs).
+async fn batch_has_merge(repo_path: &str, hashes: &[String]) -> Option<bool> {
+    let mut input = hashes.join("\n");
+    input.push('\n');
+    let out = run_git_raw_input(
+        Some(repo_path),
+        &["rev-list", "--stdin", "--no-walk", "--min-parents=2"],
+        Some(&input),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    (out.code == 0).then(|| !out.stdout_lossy().trim().is_empty())
+}
+
 #[tauri::command]
 pub async fn git_revert(
     state: State<'_, AppState>,
     repo_path: String,
     hash: String,
+    mainline: Option<u32>,
 ) -> AppResult<()> {
-    git_revert_core(&state, repo_path, hash).await
+    git_revert_core(&state, repo_path, hash, mainline).await
 }
 
 pub(crate) async fn git_revert_core(
     state: &AppState,
     repo_path: String,
     hash: String,
+    mainline: Option<u32>,
 ) -> AppResult<()> {
     validate_hash(&hash)?;
+    let mainline = mainline_arg(mainline)?;
     let already_unmerged = unmerged_paths(&repo_path).await;
-    // -m is not supported here; reverting merge commits needs a parent choice
+    let mut args = vec!["revert", "--no-edit"];
+    if let Some(n) = &mainline {
+        args.extend(["-m", n.as_str()]);
+    }
+    args.push(&hash);
     // Raw: a conflicted revert splits its report — `could not revert` on stderr,
     // the `CONFLICT (…` file list on stdout — so the error needs both halves.
-    let out = run_git_mutating_raw(
-        state,
-        &repo_path,
-        &["revert", "--no-edit", &hash],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(classify_failure(
             &repo_path,
@@ -699,21 +735,28 @@ pub async fn git_cherry_pick(
     state: State<'_, AppState>,
     repo_path: String,
     hash: String,
+    mainline: Option<u32>,
 ) -> AppResult<bool> {
-    git_cherry_pick_core(&state, repo_path, hash).await
+    git_cherry_pick_core(&state, repo_path, hash, mainline).await
 }
 
 pub(crate) async fn git_cherry_pick_core(
     state: &AppState,
     repo_path: String,
     hash: String,
+    mainline: Option<u32>,
 ) -> AppResult<bool> {
     validate_hash(&hash)?;
+    let mainline = mainline_arg(mainline)?;
     let already_unmerged = unmerged_paths(&repo_path).await;
+    let mut args = vec!["cherry-pick"];
+    if let Some(n) = &mainline {
+        args.extend(["-m", n.as_str()]);
+    }
+    args.push(&hash);
     // Raw: a conflicted pick splits its report — `could not apply` on stderr, the
     // `CONFLICT (…` file list on stdout — so the error needs both halves.
-    let out =
-        run_git_mutating_raw(state, &repo_path, &["cherry-pick", &hash], DEFAULT_TIMEOUT).await?;
+    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code == 0 {
         return Ok(true);
     }
@@ -753,15 +796,17 @@ pub struct CherryPickRangeResult {
 /// Every other failure (and any failure in a multi-commit batch) is rolled back:
 /// the target branch is reset to its prior tip and you return to where you
 /// started. Each rollback step is best-effort; when one fails the returned error
-/// names what was left behind and how to recover.
+/// names what was left behind and how to recover. `mainline` is a lone merge
+/// commit's `-m` parent; a batch never takes one.
 #[tauri::command]
 pub async fn git_cherry_pick_onto(
     state: State<'_, AppState>,
     repo_path: String,
     hashes: Vec<String>,
     target_branch: String,
+    mainline: Option<u32>,
 ) -> AppResult<CherryPickRangeResult> {
-    cherry_pick_onto(&state, &repo_path, &hashes, &target_branch).await
+    cherry_pick_onto(&state, &repo_path, &hashes, &target_branch, mainline).await
 }
 
 /// Testable core of [`git_cherry_pick_onto`] — takes a plain `&AppState` so the
@@ -771,12 +816,14 @@ pub(crate) async fn cherry_pick_onto(
     repo_path: &str,
     hashes: &[String],
     target_branch: &str,
+    mainline: Option<u32>,
 ) -> AppResult<CherryPickRangeResult> {
     cherry_pick_onto_with_timeouts(
         state,
         repo_path,
         hashes,
         target_branch,
+        mainline,
         DEFAULT_TIMEOUT,
         DEFAULT_TIMEOUT,
     )
@@ -794,6 +841,7 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     repo_path: &str,
     hashes: &[String],
     target_branch: &str,
+    mainline: Option<u32>,
     pick_timeout: std::time::Duration,
     rollback_timeout: std::time::Duration,
 ) -> AppResult<CherryPickRangeResult> {
@@ -801,11 +849,27 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     for h in hashes {
         validate_hash(h)?;
     }
+    let mainline = mainline_arg(mainline)?;
     if hashes.is_empty() {
         return Ok(CherryPickRangeResult {
             applied: 0,
             skipped: 0,
         });
+    }
+
+    // A batch never takes `-m`: one mainline number can't speak for every merge in
+    // it, so a batch holding a merge refuses before anything moves. A lone merge
+    // takes the caller's mainline, or without one keeps git's own verdict, rolled
+    // back like any other single failure.
+    if hashes.len() > 1 && mainline.is_some() {
+        return Err(AppError::InvalidArgument(
+            "A mainline parent applies to a single merge commit, not a batch.".into(),
+        ));
+    }
+    // A check that can't run (an unresolvable hash among them) falls through to the
+    // picks: the loop below already frames that failure in its rolled-back verdict.
+    if hashes.len() > 1 && batch_has_merge(repo_path, hashes).await == Some(true) {
+        return Err(AppError::InvalidArgument(RANGE_MERGE_REFUSAL.into()));
     }
 
     // One hold across guard → capture → pick → rollback: the rollback hard-resets
@@ -925,8 +989,12 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             // runs inside the compound's own working-tree hold. A conflicted pick
             // splits its report — `could not apply` on stderr, the `CONFLICT (…`
             // file list on stdout — so the rollback verdict below needs both.
-            let out = match run_git_raw(Some(repo_path), &["cherry-pick", hash], pick_timeout).await
-            {
+            let mut pick_args = vec!["cherry-pick"];
+            if let Some(n) = &mainline {
+                pick_args.extend(["-m", n.as_str()]);
+            }
+            pick_args.push(hash);
+            let out = match run_git_raw(Some(repo_path), &pick_args, pick_timeout).await {
                 Ok(out) => out,
                 Err(e) => {
                     failure = Some((hash.clone(), e));
@@ -5935,7 +6003,7 @@ mod tests {
         let c2 = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
-        let out = cherry_pick_onto(&state, &repo, &[c1, c2], "target")
+        let out = cherry_pick_onto(&state, &repo, &[c1, c2], "target", None)
             .await
             .unwrap();
         assert_eq!((out.applied, out.skipped), (2, 0));
@@ -5969,7 +6037,7 @@ mod tests {
         let feature_tip = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
-        match cherry_pick_onto(&state, &repo, &[c1, c2], "target").await {
+        match cherry_pick_onto(&state, &repo, &[c1, c2], "target", None).await {
             Err(AppError::Git { stderr, .. }) => {
                 assert_verdict_shape(&stderr, "was rolled back");
                 assert!(
@@ -6026,7 +6094,7 @@ mod tests {
         let feature_tip = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
-        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+        match cherry_pick_onto(&state, &repo, &[c1], "target", None).await {
             Err(AppError::Conflict { op, paths, report }) => {
                 assert_eq!(op, "cherry-pick", "the banner's copy table keys on this");
                 assert_eq!(paths, vec!["a.txt".to_string()]);
@@ -6098,7 +6166,7 @@ mod tests {
 
         let state = AppState::default();
         assert!(
-            cherry_pick_onto(&state, &repo, &[c1], "target")
+            cherry_pick_onto(&state, &repo, &[c1], "target", None)
                 .await
                 .is_err(),
             "the fixture's pick must conflict"
@@ -6130,9 +6198,11 @@ mod tests {
         // Pause a pick on target and resolve it all-ours, which stages a resolution
         // AND leaves the tree clean.
         let state = AppState::default();
-        assert!(cherry_pick_onto(&state, &repo, std::slice::from_ref(&c1), "target")
-            .await
-            .is_err());
+        assert!(
+            cherry_pick_onto(&state, &repo, std::slice::from_ref(&c1), "target", None)
+                .await
+                .is_err()
+        );
         git(&repo, &["checkout", "--ours", "a.txt"]).await;
         git(&repo, &["add", "a.txt"]).await;
         let staged = git(&repo, &["ls-files", "--unmerged"]).await;
@@ -6146,7 +6216,7 @@ mod tests {
             "and from a clean tree, or the guard under test isn't the one refusing: {tracked}"
         );
 
-        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+        match cherry_pick_onto(&state, &repo, &[c1], "target", None).await {
             Err(AppError::InvalidArgument(msg)) => {
                 assert!(
                     msg.starts_with("Can't cherry-pick while") && msg.contains("in progress"),
@@ -6184,7 +6254,7 @@ mod tests {
         let target_tip = rev(&repo, "target").await;
 
         let state = AppState::default();
-        match cherry_pick_onto(&state, &repo, &[merge_commit], "target").await {
+        match cherry_pick_onto(&state, &repo, &[merge_commit], "target", None).await {
             Err(AppError::Git { stderr, .. }) => {
                 assert_verdict_shape(&stderr, "was rolled back");
                 assert!(
@@ -6372,6 +6442,7 @@ mod tests {
             &repo,
             &[c1],
             "target",
+            None,
             NO_BUDGET,
             DEFAULT_TIMEOUT,
         )
@@ -6421,6 +6492,7 @@ mod tests {
             &repo,
             &[c1, c2],
             "target",
+            None,
             DEFAULT_TIMEOUT,
             NO_BUDGET,
         )
@@ -6473,6 +6545,7 @@ mod tests {
             &repo,
             &[c1],
             "target",
+            None,
             NO_BUDGET,
             NO_BUDGET,
         )
@@ -6913,7 +6986,7 @@ mod tests {
         commit_file(&repo, dir.path(), "a.txt", "two\n", "two").await;
 
         let state = AppState::default();
-        let err = git_revert_core(&state, repo.clone(), target)
+        let err = git_revert_core(&state, repo.clone(), target, None)
             .await
             .unwrap_err();
         assert_both_streams(&err, "revert", "could not revert");
@@ -6930,10 +7003,313 @@ mod tests {
         commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
 
         let state = AppState::default();
-        let err = git_cherry_pick_core(&state, repo.clone(), feature)
+        let err = git_cherry_pick_core(&state, repo.clone(), feature, None)
             .await
             .unwrap_err();
         assert_both_streams(&err, "cherry-pick", "could not apply");
+    }
+
+    // --- merge commits: the -m parent choice --------------------------------
+
+    /// A two-parent merge whose sides touch different files: the default branch
+    /// adds `m.txt`, `side` adds `s.txt`. Returns the merge and its two parents.
+    async fn setup_two_parent_merge(marker: &str) -> (tempfile::TempDir, String, [String; 3]) {
+        let (dir, repo) = setup_repo(marker).await;
+        let main = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "side"]).await;
+        commit_file(&repo, dir.path(), "s.txt", "s\n", "side work").await;
+        git(&repo, &["switch", &main]).await;
+        commit_file(&repo, dir.path(), "m.txt", "m\n", "main work").await;
+        git(&repo, &["merge", "--no-ff", "-m", "merge side", "side"]).await;
+        let merge = rev(&repo, "HEAD").await;
+        let first = rev(&repo, "HEAD^1").await;
+        let second = rev(&repo, "HEAD^2").await;
+        (dir, repo, [merge, first, second])
+    }
+
+    async fn tree(repo: &str, r: &str) -> String {
+        rev(repo, &format!("{r}^{{tree}}")).await
+    }
+
+    #[tokio::test]
+    async fn reverting_a_merge_against_parent_one_restores_the_first_parents_tree() {
+        let (_dir, repo, [merge, first, _]) = setup_two_parent_merge("revert-m1").await;
+        let state = AppState::default();
+        git_revert_core(&state, repo.clone(), merge.clone(), Some(1))
+            .await
+            .expect("a merge reverts once its mainline is named");
+        assert_ne!(
+            rev(&repo, "HEAD").await,
+            merge,
+            "the revert is a new commit"
+        );
+        assert_eq!(tree(&repo, "HEAD").await, tree(&repo, &first).await);
+    }
+
+    #[tokio::test]
+    async fn reverting_a_merge_against_parent_two_undoes_the_other_side() {
+        let (_dir, repo, [merge, first, second]) = setup_two_parent_merge("revert-m2").await;
+        let state = AppState::default();
+        git_revert_core(&state, repo.clone(), merge, Some(2))
+            .await
+            .expect("parent 2 is a valid mainline for a two-parent merge");
+        let after = tree(&repo, "HEAD").await;
+        assert_ne!(after, tree(&repo, &first).await);
+        assert_eq!(after, tree(&repo, &second).await);
+    }
+
+    #[tokio::test]
+    async fn reverting_an_ordinary_commit_needs_no_mainline() {
+        // The commit right after the root, so the revert lands back on the root's tree.
+        let (dir, repo) = setup_repo("revert-root-adjacent").await;
+        let root = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "after root").await;
+        let target = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+        git_revert_core(&state, repo.clone(), target, None)
+            .await
+            .expect("an ordinary commit reverts without -m");
+        assert_eq!(tree(&repo, "HEAD").await, tree(&repo, &root).await);
+    }
+
+    #[tokio::test]
+    async fn reverting_a_merge_without_a_mainline_keeps_gits_own_error() {
+        let (_dir, repo, [merge, ..]) = setup_two_parent_merge("revert-m-none").await;
+        let state = AppState::default();
+        match git_revert_core(&state, repo.clone(), merge.clone(), None).await {
+            Err(AppError::Git { stderr, .. }) => assert!(
+                stderr.contains("is a merge but no -m option was given"),
+                "git's reason must reach the caller unchanged: {stderr}"
+            ),
+            other => panic!("expected git's raw failure, got {other:?}"),
+        }
+        assert_eq!(rev(&repo, "HEAD").await, merge);
+    }
+
+    #[tokio::test]
+    async fn a_zero_mainline_is_refused_before_git_runs() {
+        let (_dir, repo, [merge, ..]) = setup_two_parent_merge("mainline-zero").await;
+        let state = AppState::default();
+        let revert = git_revert_core(&state, repo.clone(), merge.clone(), Some(0)).await;
+        assert!(
+            matches!(revert, Err(AppError::InvalidArgument(_))),
+            "got {revert:?}"
+        );
+        let pick = git_cherry_pick_core(&state, repo.clone(), merge.clone(), Some(0)).await;
+        assert!(
+            matches!(pick, Err(AppError::InvalidArgument(_))),
+            "got {pick:?}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, merge, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn cherry_picking_a_merge_against_parent_one_brings_the_side_branchs_changes() {
+        let (dir, repo, [merge, ..]) = setup_two_parent_merge("pick-m1").await;
+        git(&repo, &["switch", "-c", "target", "HEAD~1"]).await;
+        let state = AppState::default();
+        let created = git_cherry_pick_core(&state, repo.clone(), merge, Some(1))
+            .await
+            .expect("a merge picks once its mainline is named");
+        assert!(created, "the pick records a commit");
+        assert!(dir.path().join("s.txt").exists(), "the side's file arrives");
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    #[tokio::test]
+    async fn cherry_picking_a_range_holding_a_merge_refuses_before_anything_moves() {
+        let (dir, repo) = setup_repo("pick-range-merge").await;
+        let main = head_branch(&repo).await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["switch", "-c", "side"]).await;
+        commit_file(&repo, dir.path(), "s.txt", "s\n", "side work").await;
+        git(&repo, &["switch", &main]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "before").await;
+        git(&repo, &["merge", "--no-ff", "-m", "merge side", "side"]).await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "after").await;
+        // `target..main`, oldest-first: the merge sits mid-range, its side commit too.
+        let range = git(&repo, &["rev-list", "--reverse", "target..HEAD"]).await;
+        let hashes: Vec<String> = range.lines().map(str::to_string).collect();
+        assert_eq!(hashes.len(), 4, "side work, before, the merge, after");
+        let target_tip = rev(&repo, "target").await;
+        let head = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &hashes, "target", None).await {
+            Err(AppError::InvalidArgument(msg)) => assert_eq!(msg, RANGE_MERGE_REFUSAL),
+            Ok(_) => panic!("a range holding a merge must refuse up front"),
+            Err(e) => panic!("expected the up-front refusal, got {e:?}"),
+        }
+        assert_eq!(
+            rev(&repo, "target").await,
+            target_tip,
+            "target is untouched"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, head);
+        assert_eq!(head_branch(&repo).await, main, "the refusal never switched");
+    }
+
+    #[tokio::test]
+    async fn cherry_picking_a_lone_merge_onto_a_branch_takes_its_mainline() {
+        let (_dir, repo, [merge, first, _]) = setup_two_parent_merge("pick-onto-m1").await;
+        git(&repo, &["branch", "target", &first]).await;
+        let state = AppState::default();
+        let out = cherry_pick_onto(
+            &state,
+            &repo,
+            std::slice::from_ref(&merge),
+            "target",
+            Some(1),
+        )
+        .await
+        .expect("a lone merge picks onto a branch once its mainline is named");
+        assert_eq!((out.applied, out.skipped), (1, 0));
+        assert_eq!(head_branch(&repo).await, "target");
+        // Picked against its first parent onto that same parent, the merge's whole
+        // contribution lands: the result matches the merge's own tree.
+        assert_eq!(tree(&repo, "target").await, tree(&repo, &merge).await);
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    #[tokio::test]
+    async fn a_mainline_with_more_than_one_commit_is_refused_before_anything_moves() {
+        let (dir, repo) = setup_repo("pick-onto-batch-mainline").await;
+        let main = head_branch(&repo).await;
+        git(&repo, &["branch", "target"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        let target_tip = rev(&repo, "target").await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &[c1, c2], "target", Some(1)).await {
+            Err(AppError::InvalidArgument(_)) => {}
+            Ok(_) => panic!("a batch must never take a mainline"),
+            Err(e) => panic!("expected the up-front refusal, got {e:?}"),
+        }
+        assert_eq!(rev(&repo, "target").await, target_tip);
+        assert_eq!(head_branch(&repo).await, main);
+    }
+
+    /// `n` empty commits on `branch` from one `git fast-import` run, the commit at
+    /// `merge_at` (1-based, above 1) merging a one-commit side branch. Returns the
+    /// branch's first-parent chain oldest-first, so the side commit is not in it.
+    async fn fast_import_chain(
+        repo: &str,
+        branch: &str,
+        n: usize,
+        merge_at: Option<usize>,
+    ) -> Vec<String> {
+        // The name lands in refs/heads/ templates below — route it through the
+        // validator so the fixture stays injection-safe for future callers.
+        crate::git::branches::validate_ref_name(branch).expect("fixture branch name");
+        let side = n + 1;
+        let mut stream = String::new();
+        for i in 1..=n {
+            let msg = format!("{branch} {i}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/{branch}\nmark :{i}\ncommitter t <t@t> 1700000000 +0000\ndata {}\n{msg}",
+                msg.len()
+            ));
+            if i > 1 {
+                stream.push_str(&format!("from :{}\n", i - 1));
+            }
+            if merge_at == Some(i) {
+                stream.push_str(&format!("merge :{side}\n"));
+            }
+            stream.push('\n');
+            if i == 1 && merge_at.is_some() {
+                let msg = format!("{branch} side\n");
+                stream.push_str(&format!(
+                    "commit refs/heads/{branch}-side\nmark :{side}\ncommitter t <t@t> 1700000000 +0000\ndata {}\n{msg}from :1\n\n",
+                    msg.len()
+                ));
+            }
+        }
+        let out = run_git_raw_input(
+            Some(repo),
+            &["fast-import", "--quiet"],
+            Some(&stream),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0, "fast-import: {}", out.full_failure_text());
+        let chain = git(repo, &["rev-list", "--reverse", "--first-parent", branch]).await;
+        chain.lines().map(str::to_string).collect()
+    }
+
+    /// The batch check reads its hashes over stdin, one per line, and `--no-walk`
+    /// still holds there: only the listed commits are tested, never their history.
+    /// 900 SHAs overflow Windows' 32,767-character command line, so this batch could
+    /// not have reached git as argv.
+    #[tokio::test]
+    async fn the_batch_merge_check_reads_hundreds_of_hashes_over_stdin() {
+        let (_dir, repo) = setup_repo("batch-merge-stdin").await;
+        let plain = fast_import_chain(&repo, "plain", 900, None).await;
+        assert_eq!(plain.len(), 900);
+        assert!(
+            plain.join(" ").len() > 32_767,
+            "the batch must exceed the argv cap"
+        );
+        assert_eq!(batch_has_merge(&repo, &plain).await, Some(false));
+
+        let merged = fast_import_chain(&repo, "merged", 900, Some(450)).await;
+        assert_eq!(batch_has_merge(&repo, &merged).await, Some(true));
+        // The commits after the merge descend from it; a walk would find it.
+        assert_eq!(batch_has_merge(&repo, &merged[450..]).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_an_unresolvable_hash_keeps_the_rolled_back_verdict() {
+        let (dir, repo) = setup_repo("pick-onto-bad-object").await;
+        git(&repo, &["branch", "target"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let bogus = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let target_tip = rev(&repo, "target").await;
+        let hashes = [c1, bogus];
+        assert_eq!(
+            batch_has_merge(&repo, &hashes).await,
+            None,
+            "the check can't say, so the picks decide"
+        );
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &hashes, "target", None).await {
+            Err(AppError::Git { stderr, .. }) => assert_verdict_shape(&stderr, "was rolled back"),
+            Ok(_) => panic!("an unresolvable pick must fail"),
+            Err(e) => panic!("expected the rolled-back verdict, got {e:?}"),
+        }
+        assert_eq!(rev(&repo, "target").await, target_tip);
+    }
+
+    #[tokio::test]
+    async fn commit_parents_lists_an_octopus_merges_parents_in_order() {
+        let (dir, repo) = setup_repo("parents-octopus").await;
+        let main = head_branch(&repo).await;
+        for (branch, file) in [("one", "1.txt"), ("two", "2.txt")] {
+            git(&repo, &["switch", "-c", branch, &main]).await;
+            commit_file(&repo, dir.path(), file, "x\n", &format!("{branch} work")).await;
+        }
+        git(&repo, &["switch", &main]).await;
+        commit_file(&repo, dir.path(), "m.txt", "m\n", "main work").await;
+        git(&repo, &["merge", "--no-ff", "-m", "octopus", "one", "two"]).await;
+        let merge = rev(&repo, "HEAD").await;
+
+        let parents = crate::git::history::git_commit_parents(repo.clone(), merge.clone())
+            .await
+            .unwrap();
+        let got: Vec<(String, String)> = parents.into_iter().map(|p| (p.hash, p.subject)).collect();
+        let mut want = Vec::new();
+        for (n, subject) in [(1, "main work"), (2, "one work"), (3, "two work")] {
+            want.push((
+                rev(&repo, &format!("{merge}^{n}")).await,
+                subject.to_string(),
+            ));
+        }
+        assert_eq!(got, want);
     }
 
     #[tokio::test]
@@ -8813,7 +9189,7 @@ detached
         git(&repo, &["tag", "feature", "target"]).await;
 
         let state = AppState::default();
-        match cherry_pick_onto(&state, &repo, &[c1, c2], "target").await {
+        match cherry_pick_onto(&state, &repo, &[c1, c2], "target", None).await {
             Err(AppError::Git { stderr, .. }) => {
                 assert!(stderr.contains("was rolled back"), "{stderr}");
             }
@@ -9086,7 +9462,7 @@ detached
 
         let state = AppState::default();
         assert!(
-            cherry_pick_onto(&state, &repo, &[c1, c2], "target")
+            cherry_pick_onto(&state, &repo, &[c1, c2], "target", None)
                 .await
                 .is_err(),
             "the conflicting batch fails and rolls back"

@@ -94,14 +94,36 @@ export const unlockWorktree = (repoPath: string, path: string) =>
 export const repairWorktrees = (repoPath: string) =>
   invoke<void>("git_worktree_repair", { repoPath });
 
-/** Removes a session worktree and (when given) deletes its branch. `force` is
- *  required to drop a worktree with uncommitted changes. */
+/** What a removal did with the branch it was asked to delete. The spared arms
+ *  mean the branch is still there: it gained commits since the removal began
+ *  (`sparedMoved`), or its tip couldn't be read or git refused the delete
+ *  (`sparedUnreadable`). `notRequested`: no branch passed, or already gone. */
+export type BranchCleanup =
+  | "deleted"
+  | "sparedMoved"
+  | "sparedUnreadable"
+  | "notRequested";
+
+/** Mirrors `WorktreeRemoveOutcome` in `src-tauri/src/git/worktree.rs`. */
+export interface WorktreeRemoveOutcome {
+  branchCleanup: BranchCleanup;
+}
+
+/** Removes a session worktree and (when given) deletes its branch, unless the
+ *  branch moved since. `force` is required to drop a worktree with
+ *  uncommitted changes. */
 export const removeWorktree = (
   repoPath: string,
   path: string,
   branch: string | null,
   force: boolean,
-) => invoke<void>("git_worktree_remove", { repoPath, path, branch, force });
+) =>
+  invoke<WorktreeRemoveOutcome>("git_worktree_remove", {
+    repoPath,
+    path,
+    branch,
+    force,
+  });
 
 /** Prunes stale worktree admin entries (e.g. after a crash). */
 export const pruneWorktrees = (repoPath: string) =>

@@ -35,17 +35,17 @@ export function useCheckoutCommit(repo: string) {
   );
 }
 
-export function useRevertCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) => api.gitRevert(repo, hash), {
-    // Local history write — never park it offline.
-    networkMode: "always",
-  });
+/** A revert or pick's target. `mainline` names a MERGE commit's parent (git's
+ *  `-m`, 1-based) and stays unset for an ordinary commit. */
+export interface CommitPickArgs {
+  hash: string;
+  mainline?: number;
 }
 
-export function useCherryPick(repo: string) {
+export function useRevertCommit(repo: string) {
   return useRepoMutation(
     repo,
-    (hash: string) => api.gitCherryPick(repo, hash),
+    (args: CommitPickArgs) => api.gitRevert(repo, args.hash, args.mainline),
     {
       // Local history write — never park it offline.
       networkMode: "always",
@@ -53,11 +53,46 @@ export function useCherryPick(repo: string) {
   );
 }
 
+export function useCherryPick(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: CommitPickArgs) => api.gitCherryPick(repo, args.hash, args.mainline),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
+
+/** Shared by the merge-parent dialog's read and a host's imperative fetch, so
+ *  both run under the same options: a commit's parents never change, and the
+ *  read is local. */
+export const commitParentsOptions = (repo: string, hash: string) => ({
+  queryKey: ["repo", repo, "commit", hash, "parents"] as const,
+  queryFn: () => api.gitCommitParents(repo, hash),
+  staleTime: Number.POSITIVE_INFINITY,
+  // A local read: react-query's default "online" mode would park it offline.
+  networkMode: "always" as const,
+});
+
+/** The parents of `hash`, read only while it is set. */
+export function useCommitParents(repo: string, hash: string | null) {
+  return useQuery({
+    ...commitParentsOptions(repo, hash ?? ""),
+    enabled: hash !== null,
+  });
+}
+
 export function useCherryPickOnto(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { hashes: string[]; targetBranch: string }) =>
-      api.gitCherryPickOnto(repo, args.hashes, args.targetBranch),
+    (args: { hashes: string[]; targetBranch: string; mainline?: number }) =>
+      api.gitCherryPickOnto(
+        repo,
+        args.hashes,
+        args.targetBranch,
+        args.mainline,
+      ),
     {
       // Local history write — never park it offline.
       networkMode: "always",

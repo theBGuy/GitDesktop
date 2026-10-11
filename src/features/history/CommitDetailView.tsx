@@ -1,4 +1,5 @@
 import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
@@ -30,8 +31,10 @@ import {
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
+import type { CommitParent } from "@/lib/git/api";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
+  commitParentsOptions,
   useCheckoutCommit,
   useCherryPick,
   useCommitAuthorAvatarIndex,
@@ -53,15 +56,22 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
+  type MergeParentOp,
   revertCommitConfirm,
 } from "./commit-confirms";
 import { FileRowActions } from "./FileRowActions";
+import { MergeParentDialog } from "./HistoryDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
+
+/** Where a revert or cherry-pick from the detail view goes once the commit's
+ *  parents are read. */
+type MergeRoute = "dialog" | "plain" | "stale";
 
 export function CommitDetailView({
   repoPath,
@@ -213,6 +223,16 @@ export function CommitDetailView({
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
   const cherryPick = useCherryPick(repoPath);
+  const queryClient = useQueryClient();
+  // The live commit and repo, for the merge route's post-read staleness check.
+  const liveHash = useLatestRef(hash);
+  const liveRepo = useLatestRef(repoPath);
+  // A merge commit's revert or cherry-pick, awaiting its mainline parent.
+  const [mergePick, setMergePick] = useState<{
+    hash: string;
+    op: MergeParentOp;
+    repo: string;
+  } | null>(null);
   const prefetchFileDiff = usePrefetchCommitFileDiff(repoPath);
   const hoverPrefetch = useHoverPrefetch();
   const isLatest = log.data?.pages[0]?.[0]?.hash === hash;
@@ -275,7 +295,31 @@ export function CommitDetailView({
     toast.success(checkoutCommitSuccessToast(hash));
   }
 
+  // This view's commit carries no merge flag, so the parents are read on demand:
+  // a merge opens the mainline-parent dialog, anything else gets the plain
+  // confirm. A failed read takes the plain confirm too, since ordinary commits
+  // never needed it and a merge then meets git's own error. A commit or repo that
+  // changed during the read runs nothing; the user re-invokes on the new one.
+  async function routeMergeCommit(op: MergeParentOp): Promise<MergeRoute> {
+    const askedIn = repoPath;
+    const askedFor = hash;
+    let parents: CommitParent[] | null;
+    try {
+      parents = await queryClient.fetchQuery(
+        commitParentsOptions(askedIn, askedFor),
+      );
+    } catch {
+      parents = null;
+    }
+    if (liveRepo.current !== askedIn || liveHash.current !== askedFor)
+      return "stale";
+    if (parents === null || parents.length < 2) return "plain";
+    setMergePick({ hash: askedFor, op, repo: askedIn });
+    return "dialog";
+  }
+
   async function doRevertCommit() {
+    if ((await routeMergeCommit("revert")) !== "plain") return;
     const revertIn = repoPath;
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
     if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
@@ -283,12 +327,13 @@ export function CommitDetailView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    void revertCommit.mutateAsync(hash).catch(onError);
+    void revertCommit.mutateAsync({ hash }).catch(onError);
   }
 
   // No branch name: this view doesn't subscribe to repo status, and doing so for
   // one prompt's wording would re-render the diff pane on every status poll.
   async function doCherryPick() {
+    if ((await routeMergeCommit("cherry-pick")) !== "plain") return;
     const pickIn = repoPath;
     const ok = await useConfirm
       .getState()
@@ -300,7 +345,7 @@ export function CommitDetailView({
     }
     let applied: boolean;
     try {
-      applied = await cherryPick.mutateAsync(hash);
+      applied = await cherryPick.mutateAsync({ hash });
     } catch (e) {
       onError(e);
       return;
@@ -542,6 +587,12 @@ export function CommitDetailView({
       ) : null}
 
       <AmendForcePushDialog {...forcePushDialog} />
+      <MergeParentDialog
+        repoPath={repoPath}
+        target={mergePick}
+        openedIn={mergePick?.repo ?? null}
+        onClose={() => setMergePick(null)}
+      />
     </div>
   );
 }

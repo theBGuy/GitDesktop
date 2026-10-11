@@ -560,6 +560,28 @@ async fn worktree_is_registered(repo_path: &str, path: &str) -> bool {
     }
 }
 
+/// What a removal did with the branch it was asked to delete. The spared arms
+/// let the caller tell the user a branch they expected gone is still there.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum BranchCleanup {
+    Deleted,
+    /// The tip gained commits since the removal began, so deleting it would drop them.
+    SparedMoved,
+    /// The tip couldn't be read or git refused the delete; the branch is left as is.
+    SparedUnreadable,
+    /// No branch was passed, or it was already gone.
+    NotRequested,
+}
+
+/// The `git_worktree_remove` result; the TS mirror is `WorktreeRemoveOutcome` in
+/// `src/lib/git/worktree.ts`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemoveOutcome {
+    pub branch_cleanup: BranchCleanup,
+}
+
 /// Removes a session worktree and (when given) deletes its branch. `force` is
 /// needed to drop a worktree with uncommitted changes (a discarded session
 /// whose output was never committed) or a locked one.
@@ -570,7 +592,7 @@ pub async fn git_worktree_remove(
     path: String,
     branch: Option<String>,
     force: bool,
-) -> AppResult<()> {
+) -> AppResult<WorktreeRemoveOutcome> {
     remove_worktree(&state, &repo_path, &path, branch, force).await
 }
 
@@ -581,7 +603,7 @@ pub(crate) async fn remove_worktree(
     path: &str,
     branch: Option<String>,
     force: bool,
-) -> AppResult<()> {
+) -> AppResult<WorktreeRemoveOutcome> {
     let mut args = vec!["worktree", "remove"];
     if force {
         // Doubled deliberately: git requires `--force` TWICE to remove a LOCKED
@@ -604,11 +626,11 @@ pub(crate) async fn remove_worktree(
     // of from a working-tree hold: git itself refuses to delete a branch checked out
     // in any worktree, and the equality check below covers the commit race the old
     // whole-repo hold closed — a hold that never reached another process (the MCP
-    // server) anyway. An unreadable tip counts as absent, so the delete is skipped.
+    // server) anyway. An unreadable tip skips the delete.
     let branch = branch.as_deref().filter(|b| !b.is_empty());
     let expected_tip = match branch {
-        Some(b) => validated_branch_tip(repo_path, b).await,
-        None => None,
+        Some(b) => read_branch_tip(repo_path, b).await,
+        None => TipRead::Absent,
     };
 
     // `git worktree remove` deletes the directory itself, but its recursive delete
@@ -653,22 +675,37 @@ pub(crate) async fn remove_worktree(
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
     // the worktree is gone). Best-effort: a failure here shouldn't fail removal.
-    if let (Some(branch), Some(expected_tip)) = (branch, expected_tip.as_deref()) {
-        delete_branch_if_unmoved(repo_path, branch, expected_tip).await;
-    }
-    Ok(())
+    let branch_cleanup = match (branch, expected_tip) {
+        (Some(branch), TipRead::Present(expected_tip)) => {
+            delete_branch_if_unmoved(repo_path, branch, &expected_tip).await
+        }
+        (Some(_), TipRead::Unreadable) => BranchCleanup::SparedUnreadable,
+        _ => BranchCleanup::NotRequested,
+    };
+    Ok(WorktreeRemoveOutcome { branch_cleanup })
 }
 
-/// The commit `refs/heads/<branch>` points at. `None` when the branch is gone or
-/// the read fails — callers treat both as "don't touch it".
+/// A branch-tip read that keeps "gone" apart from "couldn't tell".
+#[derive(Debug, PartialEq, Eq)]
+enum TipRead {
+    Present(String),
+    /// `rev-parse --verify --quiet` exits 1 with no output for a missing ref.
+    Absent,
+    /// An invalid name, a failed spawn, or any other git failure.
+    Unreadable,
+}
+
+/// The commit `refs/heads/<branch>` points at.
 ///
 /// Fully qualified: bare `rev-parse <name>` resolves a same-named TAG first, which
 /// would compare a tag's tip against a branch delete. The name is IPC-supplied and
 /// validated here, so an invalid name skips the whole delete rather than reaching
 /// this template or the `branch -D` argv downstream.
-async fn validated_branch_tip(repo_path: &str, branch: &str) -> Option<String> {
-    crate::git::branches::validate_ref_name(branch).ok()?;
-    let out = run_git_raw(
+async fn read_branch_tip(repo_path: &str, branch: &str) -> TipRead {
+    if crate::git::branches::validate_ref_name(branch).is_err() {
+        return TipRead::Unreadable;
+    }
+    let Ok(out) = run_git_raw(
         Some(repo_path),
         &[
             "rev-parse",
@@ -679,32 +716,58 @@ async fn validated_branch_tip(repo_path: &str, branch: &str) -> Option<String> {
         DEFAULT_TIMEOUT,
     )
     .await
-    .ok()?;
-    (out.code == 0)
-        .then(|| out.stdout_lossy().trim().to_string())
-        .filter(|tip| !tip.is_empty())
+    else {
+        return TipRead::Unreadable;
+    };
+    let tip = out.stdout_lossy().trim().to_string();
+    match out.code {
+        0 if !tip.is_empty() => TipRead::Present(tip),
+        1 if tip.is_empty() => TipRead::Absent,
+        _ => TipRead::Unreadable,
+    }
+}
+
+/// [`read_branch_tip`] collapsed to the tip alone; `None` for gone or unreadable.
+#[cfg(test)]
+async fn validated_branch_tip(repo_path: &str, branch: &str) -> Option<String> {
+    match read_branch_tip(repo_path, branch).await {
+        TipRead::Present(tip) => Some(tip),
+        _ => None,
+    }
 }
 
 /// Deletes `branch` ONLY IF its tip is still `expected_tip` — a commit that landed
 /// on it since would otherwise be discarded by a `-D` decided before it existed.
-/// A moved or unreadable tip skips silently; the delete stays best-effort, since a
-/// refusal must never turn a completed removal into a reported failure.
-async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &str) {
-    if validated_branch_tip(repo_path, branch).await.as_deref() != Some(expected_tip) {
-        return;
+/// Never an error: a refusal must not turn a completed removal into a reported
+/// failure, so the outcome reports what happened to the branch instead.
+async fn delete_branch_if_unmoved(
+    repo_path: &str,
+    branch: &str,
+    expected_tip: &str,
+) -> BranchCleanup {
+    match read_branch_tip(repo_path, branch).await {
+        TipRead::Present(tip) if tip == expected_tip => {}
+        TipRead::Present(_) => return BranchCleanup::SparedMoved,
+        TipRead::Absent => return BranchCleanup::NotRequested,
+        TipRead::Unreadable => return BranchCleanup::SparedUnreadable,
     }
     // `-D` rewrites `branch.*`, so it runs under the config-write mutex (a leaf below
     // the held admin domain), and a lost config lock is repaired before the result goes.
     with_config_write_lock(repo_path, |held| async move {
         let deleted =
             run_git_raw(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
-        if let Ok(out) = deleted {
-            if out.code == 0 && is_config_lock_contention(&out.stderr) {
-                remove_deleted_branch_section(&held, repo_path, branch).await;
+        match deleted {
+            Ok(out) if out.code == 0 => {
+                if is_config_lock_contention(&out.stderr) {
+                    remove_deleted_branch_section(&held, repo_path, branch).await;
+                }
+                BranchCleanup::Deleted
             }
+            // git refused (the branch is checked out elsewhere) or the run failed.
+            _ => BranchCleanup::SparedUnreadable,
         }
     })
-    .await;
+    .await
 }
 
 /// Prunes stale worktree admin entries (a worktree whose directory was deleted
@@ -1402,9 +1465,10 @@ prunable gitdir file points to non-existent location
         run(&repo_s, &["worktree", "lock", &wt_s]).await;
 
         let state = AppState::default();
-        remove_worktree(&state, &repo_s, &wt_s, None, true)
+        let outcome = remove_worktree(&state, &repo_s, &wt_s, None, true)
             .await
             .expect("forced removal of a locked worktree succeeds");
+        assert_eq!(outcome.branch_cleanup, BranchCleanup::NotRequested);
 
         assert!(!wt.exists(), "the checkout is gone from disk");
         assert!(
@@ -1776,9 +1840,10 @@ prunable gitdir file points to non-existent location
         let working_tree = state.working_tree_lock(&repo_s).await;
         let _held = working_tree.lock().lock_owned().await;
 
-        remove_worktree(&state, &repo_s, &wt_s, Some("feat-busy".into()), false)
+        let outcome = remove_worktree(&state, &repo_s, &wt_s, Some("feat-busy".into()), false)
             .await
             .expect("a removal must not wait on the working-tree domain");
+        assert_eq!(outcome.branch_cleanup, BranchCleanup::Deleted);
         assert!(!wt.exists(), "the checkout is gone");
         assert!(
             run(&repo_s, &["branch", "--list", "feat-busy"])
@@ -1844,7 +1909,10 @@ prunable gitdir file points to non-existent location
         run(&repo_s, &["commit", "-qm", "landed after the snapshot"]).await;
         run(&repo_s, &["switch", "-q", "-"]).await;
 
-        delete_branch_if_unmoved(&repo_s, "moved", &tip).await;
+        assert_eq!(
+            delete_branch_if_unmoved(&repo_s, "moved", &tip).await,
+            BranchCleanup::SparedMoved
+        );
         assert!(
             !run(&repo_s, &["branch", "--list", "moved"])
                 .await
@@ -1854,7 +1922,10 @@ prunable gitdir file points to non-existent location
         );
 
         let unmoved_tip = validated_branch_tip(&repo_s, "unmoved").await.unwrap();
-        delete_branch_if_unmoved(&repo_s, "unmoved", &unmoved_tip).await;
+        assert_eq!(
+            delete_branch_if_unmoved(&repo_s, "unmoved", &unmoved_tip).await,
+            BranchCleanup::Deleted
+        );
         assert!(
             run(&repo_s, &["branch", "--list", "unmoved"])
                 .await
@@ -1863,8 +1934,11 @@ prunable gitdir file points to non-existent location
             "an unmoved branch is deleted"
         );
 
-        // A branch that never existed is a no-op, not a panic.
-        delete_branch_if_unmoved(&repo_s, "never-existed", &unmoved_tip).await;
+        // A branch that never existed is a no-op with nothing to report as kept.
+        assert_eq!(
+            delete_branch_if_unmoved(&repo_s, "never-existed", &unmoved_tip).await,
+            BranchCleanup::NotRequested
+        );
     }
 
     /// `branch -D` exits 0 when it loses `.git/config.lock`, so the best-effort delete
@@ -1890,9 +1964,12 @@ prunable gitdir file points to non-existent location
         std::fs::write(&lock, b"").unwrap();
         let (hook, attempts) = release_config_lock_before_attempt(lock, 2);
 
-        CONFIG_WRITE_ATTEMPT_HOOK
-            .scope(hook, delete_branch_if_unmoved(&repo_s, branch, &tip))
-            .await;
+        assert_eq!(
+            CONFIG_WRITE_ATTEMPT_HOOK
+                .scope(hook, delete_branch_if_unmoved(&repo_s, branch, &tip))
+                .await,
+            BranchCleanup::Deleted
+        );
         assert!(
             validated_branch_tip(&repo_s, branch).await.is_none(),
             "deleted"
@@ -2157,7 +2234,10 @@ prunable gitdir file points to non-existent location
         run(&repo_s, &["worktree", "add", "-b", "feat-live", &wt_s, "HEAD"]).await;
         let tip = validated_branch_tip(&repo_s, "feat-live").await.unwrap();
 
-        delete_branch_if_unmoved(&repo_s, "feat-live", &tip).await;
+        assert_eq!(
+            delete_branch_if_unmoved(&repo_s, "feat-live", &tip).await,
+            BranchCleanup::SparedUnreadable
+        );
         assert!(
             !run(&repo_s, &["branch", "--list", "feat-live"])
                 .await
@@ -2165,5 +2245,43 @@ prunable gitdir file points to non-existent location
                 .is_empty(),
             "git refuses to delete a branch checked out in a worktree"
         );
+    }
+
+    /// A branch deleted out from under the session leaves nothing to report as
+    /// kept, and an unreadable name is reported as spared rather than deleted.
+    #[tokio::test]
+    async fn removal_reports_a_vanished_branch_as_not_requested() {
+        let (base, repo_s) = setup_repo("tip-gate-vanished").await;
+        let wt = base.path().join("vanished-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "--detach", &wt_s, "HEAD"]).await;
+
+        let state = AppState::default();
+        let outcome = remove_worktree(&state, &repo_s, &wt_s, Some("gone".into()), false)
+            .await
+            .expect("the removal itself succeeds");
+        assert_eq!(outcome.branch_cleanup, BranchCleanup::NotRequested);
+        assert!(!wt.exists(), "the checkout is gone");
+        assert_eq!(
+            read_branch_tip(&repo_s, "glob*name").await,
+            TipRead::Unreadable
+        );
+    }
+
+    /// The exact JSON `removeWorktree` reads in `src/lib/git/worktree.ts`: a
+    /// camelCase field and camelCase variant tags, no snake_case spelling.
+    #[test]
+    fn worktree_remove_outcome_serializes_to_the_ts_wire_shape() {
+        let cases = [
+            (BranchCleanup::Deleted, "deleted"),
+            (BranchCleanup::SparedMoved, "sparedMoved"),
+            (BranchCleanup::SparedUnreadable, "sparedUnreadable"),
+            (BranchCleanup::NotRequested, "notRequested"),
+        ];
+        for (branch_cleanup, tag) in cases {
+            let json = serde_json::to_string(&WorktreeRemoveOutcome { branch_cleanup }).unwrap();
+            assert_eq!(json, format!(r#"{{"branchCleanup":"{tag}"}}"#));
+            assert!(!json.contains("branch_cleanup"), "{json}");
+        }
     }
 }

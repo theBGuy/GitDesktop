@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { useRemoveUpstreamRemote } from "@/features/repository/useRemoveUpstreamRemote";
 import { probeAndPersistVisibility } from "@/features/repository/useRepoVisibilityProbe";
 import {
   invalidateRepoAfterWrite,
@@ -31,7 +32,6 @@ import {
   useGlRemoveForkRelationship,
   useGlRepoSettings,
   useRemotes,
-  useRemoveRemote,
   useRenameRepo,
   useRepoAdmin,
   useRepoSettings,
@@ -40,10 +40,7 @@ import {
   useTransferRepo,
 } from "@/lib/git/queries";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
-import { clearRepoLensCache } from "@/lib/repo-lens/queries";
-import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
@@ -496,34 +493,13 @@ function ArchiveAction({
  *  never fakes the persisted `isFork` provenance (that reflects GitHub-side
  *  truth and only changes via re-probe). */
 function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
-  const queryClient = useQueryClient();
   const remotes = useRemotes(repoPath);
-  const removeRemote = useRemoveRemote(repoPath);
+  const removeUpstream = useRemoveUpstreamRemote(repoPath);
   const [confirming, setConfirming] = useState(false);
   const swapFocus = useConfirmSwapFocus();
 
   async function handleRemoveUpstream() {
-    try {
-      await removeRemote.mutateAsync({ name: "upstream" });
-      // Hygiene: the persisted "upstream" lens no longer applies.
-      // Fire-and-forget — the lens read safe-defaults to origin,
-      // so a failure here is harmless. The CACHED lens drops with
-      // it: its key sits outside the repo subtree this mutation
-      // invalidates, so re-adding upstream in the same session
-      // would otherwise resurrect the preference just deleted.
-      deleteRepoLens(repoPath).catch(() => undefined);
-      clearRepoLensCache(queryClient, repoPath);
-      // Removing upstream collapses the lens to origin, so a still-
-      // selected remote number would resolve against the other repo:
-      // the same non-bumping prune a lens flip runs, and only while
-      // this repo is the open one (the selections are global).
-      const ui = useUiStore.getState();
-      if (ui.repoPath === repoPath) ui.clearRemoteSelections();
-      toast.success("Upstream remote removed");
-      setConfirming(false);
-    } catch (e) {
-      toastError(e);
-    }
+    if (await removeUpstream.remove()) setConfirming(false);
   }
 
   if (!remotes.data?.includes("upstream")) return null;
@@ -539,7 +515,7 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
           <div className="flex shrink-0 items-center gap-2">
             <InlineConfirm
               actLabel="Remove"
-              pending={removeRemote.isPending}
+              pending={removeUpstream.isPending}
               swapFocusRef={swapFocus()}
               onCancel={() => setConfirming(false)}
               onAct={handleRemoveUpstream}

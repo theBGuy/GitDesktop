@@ -55,8 +55,11 @@ export function useLensState(repo: string): {
   const forge = useForgeStatus(repo);
   const remotes = useRemotes(repo);
   const raw = useRepoLensRaw(repo);
+  // Signed out, the status still names a github.com repo, but resolving the
+  // parent needs `gh repo view`, so the upstream lens can't be offered.
   const gate =
     forge.data?.provider === "github" &&
+    Boolean(forge.data.authenticated) &&
     Boolean(remotes.data?.includes("upstream"));
   return {
     gate,

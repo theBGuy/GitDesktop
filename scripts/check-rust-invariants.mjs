@@ -98,6 +98,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/ops.rs",
+    fn: "fast_import_chain",
+    rationale:
+      "cfg(test) fast-import fixture; validates branch with validate_ref_name at fn entry, callers pass literal names",
+  },
+  {
+    file: "git/ops.rs",
     fn: "branch_tip",
     rationale:
       "private helper reading a branch tip (never a refspec); both callers (merge_local_pr, finalize_base via its own callers) validate base with validate_branch_name",
@@ -159,7 +165,7 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/worktree.rs",
-    fn: "validated_branch_tip",
+    fn: "read_branch_tip",
     rationale:
       "read-only rev-parse tip probe gating the removal's best-effort branch delete (never a refspec); validates with validate_ref_name at fn entry",
   },

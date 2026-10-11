@@ -3,7 +3,6 @@ import {
   FolderOpenIcon,
   NotePencilIcon,
 } from "@phosphor-icons/react";
-import hljs from "highlight.js/lib/common";
 import { useState } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
@@ -11,6 +10,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { diffLang } from "@/features/diff/diff-lang";
+import { HighlightedLine } from "@/features/diff/HighlightedLine";
 import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog";
 import { useOpenFile } from "@/features/sessions/useOpenFile";
 import {
@@ -23,34 +23,9 @@ import { validEpochMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { basename } from "./markers";
-import "@/features/diff/code-highlight.css";
 
 /** Lines of context to show on each side of the TODO line in the excerpt. */
 const CONTEXT = 20;
-
-/** One code line, syntax-highlighted when the language is recognized — a local
- *  equivalent of BlameDialog's `BlameCode` (we don't import its internals). */
-function CodeLine({
-  content,
-  language,
-}: {
-  content: string;
-  language: string | undefined;
-}) {
-  const html =
-    language && hljs.getLanguage(language)
-      ? hljs.highlight(content, { language, ignoreIllegals: true }).value
-      : null;
-  if (html === null) {
-    return <span className="px-2 whitespace-pre-wrap">{content || " "}</span>;
-  }
-  return (
-    <span
-      className="gd-code px-2 whitespace-pre-wrap"
-      dangerouslySetInnerHTML={{ __html: html || " " }}
-    />
-  );
-}
 
 export function CodeTodoDetailView({
   repoPath,
@@ -257,7 +232,7 @@ export function CodeTodoDetailView({
                   >
                     {bl.lineNo}
                   </span>
-                  <CodeLine content={bl.content} language={lang} />
+                  <HighlightedLine content={bl.content} language={lang} />
                 </div>
               );
             })}

@@ -129,11 +129,13 @@ export function DeleteWorktreeDialog({
           <DialogDescription>
             Removes the worktree folder. Its branch{" "}
             {worktree?.branch ? (
-              <span className="font-mono">{worktree.branch}</span>
+              <>
+                <span className="font-mono">{worktree.branch}</span> stays
+              </>
             ) : (
-              "and commits"
+              "and commits stay"
             )}{" "}
-            stays — you can check it out again later.
+            — you can check it out again later.
           </DialogDescription>
         </DialogHeader>
 

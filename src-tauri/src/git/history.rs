@@ -310,6 +310,52 @@ pub async fn git_commit_details(repo_path: String, hash: String) -> AppResult<Co
     })
 }
 
+/// One parent of a commit. Its position in [`git_commit_parents`]'s list is the
+/// parent number `-m` takes, counting from 1.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitParent {
+    pub hash: String,
+    pub subject: String,
+}
+
+/// A commit's parents in git's parent order, each with its subject: the choice a
+/// merge commit's revert or cherry-pick needs. A root commit has none.
+#[tauri::command]
+pub async fn git_commit_parents(repo_path: String, hash: String) -> AppResult<Vec<CommitParent>> {
+    validate_hash(&hash)?;
+    let out = run_git(
+        Some(&repo_path),
+        &["rev-list", "--parents", "-n", "1", &hash],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let line = out.stdout_lossy();
+    let parents: Vec<&str> = line.split_whitespace().skip(1).collect();
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["log", "--no-walk=unsorted", "--format=%H%x00%s"];
+    args.extend(parents.iter().copied());
+    let out = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+    let text = out.stdout_lossy();
+    let subjects: std::collections::HashMap<&str, &str> =
+        text.lines().filter_map(|l| l.split_once('\0')).collect();
+    parents
+        .into_iter()
+        .map(|p| match subjects.get(p) {
+            Some(subject) => Ok(CommitParent {
+                hash: p.to_string(),
+                subject: (*subject).to_string(),
+            }),
+            None => Err(crate::error::AppError::Git {
+                code: 0,
+                stderr: format!("git log did not list parent {p}"),
+            }),
+        })
+        .collect()
+}
+
 /// Files changed by a commit. `-m --first-parent` makes merge commits show
 /// their diff against the first parent (like GitHub), and `show` handles the
 /// root commit by diffing against the empty tree.
@@ -544,6 +590,33 @@ mod tests {
                 diff.text
             );
         }
+    }
+
+    /// The TS mirror reads these exact keys; a rename would read `undefined`.
+    #[test]
+    fn commit_parent_serializes_its_exact_wire_keys() {
+        let value = serde_json::to_value(CommitParent {
+            hash: "abc1234".into(),
+            subject: "main work".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "hash": "abc1234", "subject": "main work" })
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_parents_reads_none_for_the_root_and_one_for_the_next_commit() {
+        let (_dir, repo, first, second) = two_commit_repo("parents-root").await;
+        let at_root = git_commit_parents(repo.clone(), first.clone())
+            .await
+            .unwrap();
+        assert!(at_root.is_empty(), "a root commit has no parents");
+        let next = git_commit_parents(repo.clone(), second).await.unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].hash, first);
+        assert_eq!(next[0].subject, "one");
     }
 
     #[tokio::test]

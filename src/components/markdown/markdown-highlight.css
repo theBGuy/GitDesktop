@@ -1,100 +1,54 @@
 /* highlight.js token colors for rendered-markdown code blocks (PR/issue/
    discussion bodies & comments, AI review output, release notes). Scoped to
    .markdown-body so the global hljs token classes can't leak into other hljs
-   users (e.g. the blame view's .blame-hl). GitHub syntax palette; the dark
-   variant keys off the app's .dark class (toggled on <html> in main.tsx),
-   matching the diff's Shiki theme. */
+   users (.gd-code owns those, in code-highlight.css). The --gd-syn-* tokens
+   (App.css) are the single syntax palette; dark rides the token cascade. */
 .markdown-body .hljs-comment,
 .markdown-body .hljs-quote {
-  color: #6e7781;
+  color: var(--gd-syn-comment);
   font-style: italic;
 }
 .markdown-body .hljs-keyword,
-.markdown-body .hljs-selector-tag,
 .markdown-body .hljs-doctag,
 .markdown-body .hljs-meta .hljs-keyword {
-  color: #cf222e;
+  color: var(--gd-syn-keyword);
 }
 .markdown-body .hljs-string,
 .markdown-body .hljs-regexp,
 .markdown-body .hljs-meta .hljs-string {
-  color: #0a3069;
+  color: var(--gd-syn-string);
 }
 .markdown-body .hljs-number,
 .markdown-body .hljs-literal {
-  color: #0550ae;
+  color: var(--gd-syn-number);
 }
 .markdown-body .hljs-title,
 .markdown-body .hljs-title.function_,
 .markdown-body .hljs-section,
 .markdown-body .hljs-built_in {
-  color: #8250df;
+  color: var(--gd-syn-func);
 }
 .markdown-body .hljs-type,
 .markdown-body .hljs-class .hljs-title,
 .markdown-body .hljs-title.class_ {
-  color: #953800;
+  color: var(--gd-syn-type);
 }
-.markdown-body .hljs-attr,
-.markdown-body .hljs-attribute,
 .markdown-body .hljs-property,
 .markdown-body .hljs-variable,
 .markdown-body .hljs-template-variable {
-  color: #0550ae;
+  color: var(--gd-syn-variable);
+}
+.markdown-body .hljs-attr,
+.markdown-body .hljs-attribute {
+  color: var(--gd-syn-attr);
 }
 .markdown-body .hljs-tag,
 .markdown-body .hljs-name,
+.markdown-body .hljs-selector-tag,
 .markdown-body .hljs-symbol,
 .markdown-body .hljs-bullet {
-  color: #116329;
+  color: var(--gd-syn-tag);
 }
 .markdown-body .hljs-meta {
-  color: #6e7781;
-}
-
-.dark .markdown-body .hljs-comment,
-.dark .markdown-body .hljs-quote {
-  color: #8b949e;
-}
-.dark .markdown-body .hljs-keyword,
-.dark .markdown-body .hljs-selector-tag,
-.dark .markdown-body .hljs-doctag,
-.dark .markdown-body .hljs-meta .hljs-keyword {
-  color: #ff7b72;
-}
-.dark .markdown-body .hljs-string,
-.dark .markdown-body .hljs-regexp,
-.dark .markdown-body .hljs-meta .hljs-string {
-  color: #a5d6ff;
-}
-.dark .markdown-body .hljs-number,
-.dark .markdown-body .hljs-literal {
-  color: #79c0ff;
-}
-.dark .markdown-body .hljs-title,
-.dark .markdown-body .hljs-title.function_,
-.dark .markdown-body .hljs-section,
-.dark .markdown-body .hljs-built_in {
-  color: #d2a8ff;
-}
-.dark .markdown-body .hljs-type,
-.dark .markdown-body .hljs-class .hljs-title,
-.dark .markdown-body .hljs-title.class_ {
-  color: #ffa657;
-}
-.dark .markdown-body .hljs-attr,
-.dark .markdown-body .hljs-attribute,
-.dark .markdown-body .hljs-property,
-.dark .markdown-body .hljs-variable,
-.dark .markdown-body .hljs-template-variable {
-  color: #79c0ff;
-}
-.dark .markdown-body .hljs-tag,
-.dark .markdown-body .hljs-name,
-.dark .markdown-body .hljs-symbol,
-.dark .markdown-body .hljs-bullet {
-  color: #7ee787;
-}
-.dark .markdown-body .hljs-meta {
-  color: #8b949e;
+  color: var(--gd-syn-comment);
 }

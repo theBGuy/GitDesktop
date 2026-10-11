@@ -475,7 +475,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Detach from a fork — remove the upstream remote; leave the fork network on GitHub, GitLab, or Bitbucket (in-app on GitLab)",
+      "Detach from a fork — remove the upstream remote from the repository menu, palette, or settings; leave the fork network on GitHub, GitLab, or Bitbucket (in-app on GitLab)",
   },
   {
     group: "Repository & workspace",

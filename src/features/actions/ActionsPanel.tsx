@@ -120,11 +120,12 @@ export function ActionsPanel({
   // Starting a run is a repo write: an explicitly read-only viewer keeps the
   // control (with the reason) rather than losing it. CI is repo-wide, so the
   // probe takes no lens; an Activity-hidden tab still renders, so it also gates
-  // on `active` to keep a background tab from fetching.
+  // on `active` to keep a background tab from fetching, and on the sign-in, which
+  // the probe needs.
   const writeAccess = useRepoWriteAccess(
     repoPath,
     undefined,
-    active && !!provider,
+    active && !!provider && Boolean(forge.data?.authenticated),
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;

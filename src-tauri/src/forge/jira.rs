@@ -2998,19 +2998,7 @@ mod tests {
     #[tokio::test]
     async fn jira_body_read_connect_failure_carries_the_transport_marker() {
         // SYNTHETIC: a refused send supplies is_connect at the body-error seam.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let error = Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .get(format!("http://127.0.0.1:{port}/fixture"))
-            .send()
-            .await
-            .unwrap_err();
+        let error = crate::forge::http::refused_connection_error().await;
         assert!(error.is_connect());
         let message = jira_body_read_error(error).to_string();
         assert!(message.ends_with(": connection failed"), "{message}");

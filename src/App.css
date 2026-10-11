@@ -197,7 +197,9 @@
    wash out. */
 :root {
   --gd-syn-fg: #1f2328;
-  --gd-syn-comment: #6e7781;
+  /* #59636e: ≥4.5:1 on add-row and conflict tints (the GitHub stock #6e7781
+     measured 4.08:1 on add rows — below AA for normal-size comment text). */
+  --gd-syn-comment: #59636e;
   --gd-syn-keyword: #cf222e;
   --gd-syn-string: #0a3069;
   --gd-syn-number: #0550ae;

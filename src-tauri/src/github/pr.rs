@@ -23,7 +23,8 @@ fn validate_branch(name: &str) -> AppResult<()> {
 pub struct GhStatus {
     pub installed: bool,
     pub authenticated: bool,
-    /// "owner/name" when this repo has a GitHub remote gh recognizes.
+    /// "owner/name" when this repo has a GitHub remote gh recognizes — or, signed
+    /// out, a literal github.com origin, read locally.
     pub repo: Option<String>,
     /// The repo's GitHub host — "github.com" or an Enterprise server like
     /// "github.acme.com" — when it's a recognized GitHub repo. gh derives it
@@ -113,7 +114,15 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
             Err(_) => (None, None, None),
         }
     } else {
-        (None, None, None)
+        // Signed out, `gh repo view` can't answer, but a github.com origin names its
+        // repo and host locally — so links keep working, as GitLab's and Bitbucket's do.
+        match crate::git::remote::git_remote_url(repo_path.clone(), "origin".into()).await {
+            Ok(url) => match local_github_repo(&url) {
+                Some((repo, host)) => (Some(repo), Some(host), None),
+                None => (None, None, None),
+            },
+            Err(_) => (None, None, None),
+        }
     };
 
     // The active login on the repo's host (each host has its own active
@@ -137,6 +146,17 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         login,
         probe_error,
     })
+}
+
+/// The `(owner/repo, host)` a remote URL names, read without gh or the network — only
+/// for the literal github.com host ([`is_canonical_github_remote`]), since an
+/// Enterprise host or an SSH alias can't be confirmed as GitHub from its URL. Pure.
+fn local_github_repo(url: &str) -> Option<(String, String)> {
+    if !is_canonical_github_remote(url) {
+        return None;
+    }
+    let slug = crate::forge::remote_path(url)?;
+    super::valid_github_slug(&slug).then(|| (slug, "github.com".to_string()))
 }
 
 /// The host-global `gh auth status` fallback's `(authenticated, accounts)`. A failing
@@ -8865,6 +8885,51 @@ mod tests {
         ] {
             assert!(!is_canonical_github_remote(remote), "{remote} should NOT be canonical");
         }
+    }
+
+    /// Signed out, a github.com origin still names its repo and host — read locally,
+    /// so nothing here may admit a URL the browser couldn't open as that repo.
+    #[test]
+    fn local_github_repo_reads_only_a_literal_github_com_owner_and_repo() {
+        use super::local_github_repo;
+        let named = |slug: &str| Some((slug.to_string(), "github.com".to_string()));
+        // https form.
+        assert_eq!(
+            local_github_repo("https://github.com/theBGuy/biome"),
+            named("theBGuy/biome")
+        );
+        // scp form.
+        assert_eq!(
+            local_github_repo("git@github.com:theBGuy/biome.git"),
+            named("theBGuy/biome")
+        );
+        // A `.git` suffix is stripped, and the host compares case-folded.
+        assert_eq!(
+            local_github_repo("https://GitHub.com/theBGuy/biome.git"),
+            named("theBGuy/biome")
+        );
+        // GitHub Enterprise and an SSH alias can't be confirmed from the URL.
+        assert_eq!(
+            local_github_repo("https://github.acme.com/team/svc.git"),
+            None
+        );
+        assert_eq!(
+            local_github_repo("git@github.com-work:theBGuy/biome.git"),
+            None
+        );
+        // Path data that looks like userinfo: the authority is `tok`, not github.com,
+        // and an `@` inside the path is no owner.
+        assert_eq!(local_github_repo("https://tok/en@github.com/o/r"), None);
+        assert_eq!(
+            local_github_repo("https://github.com/x@evil.com/repo"),
+            None
+        );
+        // No path, or a path that isn't exactly owner/repo.
+        assert_eq!(local_github_repo("https://github.com"), None);
+        assert_eq!(local_github_repo("https://github.com/"), None);
+        assert_eq!(local_github_repo("git@github.com:"), None);
+        assert_eq!(local_github_repo("https://github.com/owner"), None);
+        assert_eq!(local_github_repo("https://github.com/a/b/c"), None);
     }
 
     /// The detail view's mergeability rides the SAME `gh pr view` call, so the

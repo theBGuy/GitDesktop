@@ -13,6 +13,7 @@ import {
   GitForkIcon,
   KanbanIcon,
   LightningIcon,
+  LinkBreakIcon,
   LinkIcon,
   PencilSimpleIcon,
   ShieldCheckIcon,
@@ -77,6 +78,7 @@ import {
   useForgeOwnedNamespaces,
   useForgeStatus,
   useForkRepo,
+  useRemotes,
   useRepoAdmin,
   useRepoIdentity,
   useRepoStarStatus,
@@ -96,6 +98,8 @@ import {
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
@@ -106,6 +110,7 @@ import {
   type RepositoryFilesTab,
 } from "./RepositoryFilesDialog";
 import { SubmodulesDialog } from "./SubmodulesDialog";
+import { useRemoveUpstreamRemote } from "./useRemoveUpstreamRemote";
 import { WorktreesDialog } from "./WorktreesDialog";
 
 // Named so the menu can warm the chunk while the dropdown is up: the warm call
@@ -280,9 +285,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // `Boolean` rather than an undefined check because `provider` is `T | null`,
   // and a repo with no hosted remote at all settles to `null` too (never widen
   // this to "any settled probe"). GitLab/Bitbucket's `provider` resolves from the
-  // origin remote regardless of auth; GitHub's live probe (`gh.data.provider`)
-  // still needs an authenticated `gh repo view` round-trip, but `persistedProvider`
-  // covers it anyway — `useRepoVisibilityProbe` persists `RecentRepo.provider`
+  // origin remote regardless of auth, as GitHub's does for a `github.com` origin
+  // signed out (GHE still needs auth). `persistedProvider` covers the window
+  // before the probe answers — `useRepoVisibilityProbe` persists `RecentRepo.provider`
   // from a PURE LOCAL remote-host parse (`git_repo_owners`/`provider_tag_for_host`,
   // no CLI) on every repo open, GitHub included, so a signed-out `github.com`
   // repo shows the item too once it's been opened at least once. Only a
@@ -347,6 +352,26 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // The repo's Jira link (if any), so the menu item reads "Change…" vs "Link…"
   // and the dialog opens in edit mode.
   const jiraLink = useJiraLink(repoPath);
+
+  // A local git-config write, so unlike Repository settings it reads no admin
+  // probe: clones of someone else's fork reach it too. Hidden with no upstream
+  // remote, like the menu's other remote-dependent items.
+  const hasUpstream = useRemotes(repoPath).data?.includes("upstream") ?? false;
+  const removeUpstream = useRemoveUpstreamRemote(repoPath);
+  async function confirmRemoveUpstream() {
+    const removeIn = repoPath;
+    const ok = await useConfirm.getState().ask({
+      title: "Remove the upstream remote?",
+      body: "Reversible — re-add the remote to restore it. Upstream pull requests and selections for this repository will clear.",
+      confirmLabel: "Remove",
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
+    // The removal builds from the live repo's options, so a switch under the
+    // prompt refuses rather than removing another repo's upstream.
+    if (refuseIfSwitched(removeIn, "nothing was removed")) return;
+    await removeUpstream.remove();
+  }
 
   // Every route opens through here, so the render path is captured once per
   // open and holds for that whole open.
@@ -539,6 +564,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("worktrees", () => setWorktreesOpen(true));
   useHotkeyAction("star-repository", doStar, canStar && !setStar.isPending);
   useHotkeyAction("change-remote-url", () => setRemoteUrlOpen(true));
+  useHotkeyAction(
+    "remove-upstream-remote",
+    () => void confirmRemoveUpstream(),
+    hasUpstream,
+  );
   useHotkeyAction("repo-alias", () => setAliasTarget(repoEntry));
   useHotkeyAction("copy-repo-path", () =>
     copyText(repoPath, "Repository path copied"),
@@ -721,6 +751,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <LinkIcon />
           Change remote URL…
         </DropdownMenuItem>
+        {hasUpstream && (
+          <DropdownMenuItem onClick={() => void confirmRemoveUpstream()}>
+            <LinkBreakIcon />
+            Remove upstream remote…
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={() => setAliasTarget(repoEntry)}>
           <TagSimpleIcon />
           {repoEntry.alias ? "Change alias…" : "Create alias…"}

@@ -425,6 +425,17 @@ struct ShaArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MainlineShaArgs {
+    /// A commit SHA (hex).
+    sha: String,
+    /// For a MERGE commit only: which parent counts as the mainline, 1-based, passed
+    /// to git as `-m <n>`. Parent 1 (the branch the merge was made on) is the usual
+    /// choice. Omit it for an ordinary commit.
+    #[serde(default)]
+    mainline: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CreateTagArgs {
     /// The tag name.
     name: String,
@@ -936,40 +947,53 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Revert a commit by SHA in the bound repository — creates a new commit that \
-                       undoes it (history is preserved, nothing is lost). Reverting a merge commit \
-                       is not supported (it needs a parent choice). Requires --allow-git-write.",
+                       undoes it (history is preserved, nothing is lost). A merge commit needs \
+                       `mainline`: the 1-based parent whose side is kept (git's `-m`; 1 is the \
+                       usual choice). Without it git refuses a merge. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn revert_commit(
         &self,
-        Parameters(args): Parameters<ShaArgs>,
+        Parameters(args): Parameters<MainlineShaArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.sha, "sha")?;
         let _promote = self.promote_gate().await?;
-        crate::git::ops::git_revert_core(&self.state, self.repo.clone(), args.sha.clone())
-            .await
-            .map_err(app_err)?;
+        crate::git::ops::git_revert_core(
+            &self.state,
+            self.repo.clone(),
+            args.sha.clone(),
+            args.mainline,
+        )
+        .await
+        .map_err(app_err)?;
         ok_text(format!("reverted {}", args.sha))
     }
 
     #[tool(
         description = "Cherry-pick a commit by SHA onto the current branch in the bound \
                        repository. Returns whether a commit was created (a pick that is already \
-                       present is skipped and returns false). Requires --allow-git-write.",
+                       present is skipped and returns false). A merge commit needs `mainline`: \
+                       the 1-based parent its changes are taken relative to (git's `-m`; 1 is \
+                       the usual choice). Without it git refuses a merge. Requires \
+                       --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn cherry_pick(
         &self,
-        Parameters(args): Parameters<ShaArgs>,
+        Parameters(args): Parameters<MainlineShaArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         ensure_not_flag(&args.sha, "sha")?;
         let _promote = self.promote_gate().await?;
-        let created =
-            crate::git::ops::git_cherry_pick_core(&self.state, self.repo.clone(), args.sha.clone())
-                .await
-                .map_err(app_err)?;
+        let created = crate::git::ops::git_cherry_pick_core(
+            &self.state,
+            self.repo.clone(),
+            args.sha.clone(),
+            args.mainline,
+        )
+        .await
+        .map_err(app_err)?;
         json_result(&serde_json::json!({ "sha": args.sha, "committed": created }))
     }
 
@@ -1367,11 +1391,17 @@ mod tests {
             "--allow-git-write"
         );
         assert_gated!(
-            h.revert_commit(Parameters(ShaArgs { sha: "abc".into() })),
+            h.revert_commit(Parameters(MainlineShaArgs {
+                sha: "abc".into(),
+                mainline: None
+            })),
             "--allow-git-write"
         );
         assert_gated!(
-            h.cherry_pick(Parameters(ShaArgs { sha: "abc".into() })),
+            h.cherry_pick(Parameters(MainlineShaArgs {
+                sha: "abc".into(),
+                mainline: Some(1)
+            })),
             "--allow-git-write"
         );
         assert_gated!(
@@ -2338,13 +2368,15 @@ mod tests {
             }))
             .await
             .expect_err("rebase refuses mid-promote"),
-            h.revert_commit(Parameters(ShaArgs {
+            h.revert_commit(Parameters(MainlineShaArgs {
                 sha: head.trim().to_string(),
+                mainline: None,
             }))
             .await
             .expect_err("revert refuses mid-promote"),
-            h.cherry_pick(Parameters(ShaArgs {
+            h.cherry_pick(Parameters(MainlineShaArgs {
                 sha: head.trim().to_string(),
+                mainline: None,
             }))
             .await
             .expect_err("cherry-pick refuses mid-promote"),

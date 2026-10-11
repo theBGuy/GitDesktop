@@ -11,10 +11,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   useEffect,
   useEffectEvent,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -93,7 +95,7 @@ import {
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateReleaseNotes } from "./useGenerateReleaseNotes";
-import { findPreviousTag } from "./version";
+import { findPreviousTag, isNewTagName, validateTagName } from "./version";
 
 const RELEASE_DEFAULTS = {
   tag: "",
@@ -110,10 +112,9 @@ const GENERATED_NOTES_PENDING_REASON = "Wait for the generated notes to finish";
 
 /**
  * Creates a GitHub release. The tag is a combobox — pick an existing tag, or
- * type a new one and click "Create new tag" to persist it (a Base UI combobox
- * reverts a free-typed value on blur, so the new tag must become a real item).
- * A newly-created tag exposes the tabbed Target picker (branches / recent
- * commits, à la GitHub). Notes can be hand-written (live Preview) or generated
+ * type a new one, which is validated as it's typed. A valid new tag exposes the
+ * tabbed Target picker (branches / recent commits, à la GitHub) once the field
+ * settles. Notes can be hand-written (live Preview) or generated
  * from GitHub's auto-notes / AI relative to a previous tag we resolve via semver
  * and let the user override. Form state lives in `useAppForm`; the previous tag
  * is generation-only (not a create input) so it stays derived local state.
@@ -239,10 +240,15 @@ export function CreateReleaseDialog({
   const tagNames = existingTags.map((t) => t.name);
 
   // Ephemeral UI state (not release inputs): the tag combobox's created entries
-  // and open state, the previous-tag override (null = use the resolved default),
-  // and which notes tab is showing.
+  // (list ordering only) and open state, the previous-tag override (null = use
+  // the resolved default), and which notes tab is showing.
   const [createdTags, setCreatedTags] = useState<string[]>([]);
   const [tagOpen, setTagOpen] = useState(false);
+  // The tag field's popup has closed, or Tab or a blur has left it, since the
+  // last edit. The Target picker waits on it so it doesn't mount and unmount
+  // while typing.
+  const [tagSettled, setTagSettled] = useState(false);
+  const tagErrorId = useId();
   const [previousTagOverride, setPreviousTagOverride] = useState<string | null>(
     null,
   );
@@ -260,7 +266,7 @@ export function CreateReleaseDialog({
       const submitTag = initialTag;
       const tag = value.tag.trim();
       if (!tag || refuseWhileOffline()) return;
-      const hasTarget = !initialTag && createdTags.includes(tag);
+      const hasTarget = !initialTag && isNewTagName(tag, tagNames);
       try {
         const url = await createRelease.mutateAsync({
           tag,
@@ -309,15 +315,20 @@ export function CreateReleaseDialog({
   const draft = useSelector(form.store, (s) => s.values.draft);
   const tagTrimmed = tag.trim();
 
-  // The tag combobox items must include user-created tags so a typed value
-  // persists past blur. "Create" shows while the typed value is genuinely new.
+  // Created tags lead the list; the typed value stands on its own either way.
   const tagItems = [...createdTags, ...tagNames].map((name) => ({ name }));
+  const tagValue = tag ? { name: tag } : null;
   const isExistingTag = tagNames.includes(tagTrimmed);
-  const canCreate =
-    !!tagTrimmed && !isExistingTag && !createdTags.includes(tagTrimmed);
-  // Target only matters for a NEW (created) tag — and only once it's persisted,
-  // so interacting with the target can't revert the tag input.
-  const showTarget = !initialTag && createdTags.includes(tagTrimmed);
+  // Only a typed new name is checked: an existing tag already passed git's rules.
+  const tagError =
+    !initialTag && tagTrimmed && !isExistingTag
+      ? validateTagName(tagTrimmed)
+      : null;
+  const isNewTag = !initialTag && isNewTagName(tagTrimmed, tagNames);
+  const canCreate = isNewTag && !createdTags.includes(tagTrimmed);
+  // The target is part of the payload for any new tag; the picker shows once
+  // the field settles.
+  const showTarget = isNewTag && tagSettled;
 
   // Previous tag for generated notes: the user's override, else the semver
   // resolution. Derived (not effect-synced) so it can't go stale across reopens.
@@ -326,6 +337,8 @@ export function CreateReleaseDialog({
   const effectivePreviousTag = tagNames.includes(previousTag.trim())
     ? previousTag.trim()
     : "";
+  const previousTagValue = previousTag ? { name: previousTag } : null;
+  const previousTagUnknown = previousTag.trim() !== "" && !effectivePreviousTag;
 
   const seedOnOpen = useEffectEvent(() => {
     draftRepoRef.current = repoPath;
@@ -349,11 +362,14 @@ export function CreateReleaseDialog({
       { keepDefaultValues: true },
     );
     setCreatedTags([]);
+    setTagSettled(false);
     setPreviousTagOverride(null);
     // The editor remounts with the dialog (Write tab) — no explicit reset needed.
   });
   useSeedOnOpen(open, seedOnOpen);
 
+  // A controlled close never reaches `onOpenChange`, so this settles the field
+  // itself.
   function createNewTag(name: string) {
     const n = name.trim();
     if (!n) return;
@@ -362,6 +378,7 @@ export function CreateReleaseDialog({
     }
     form.setFieldValue("tag", n);
     setTagOpen(false);
+    setTagSettled(true);
   }
 
   // Awaited like the submit above: react-query drops per-call callbacks once the
@@ -381,7 +398,7 @@ export function CreateReleaseDialog({
     try {
       gen = await githubNotes.mutateAsync({
         tag: requestedFor,
-        target: showTarget ? target.trim() : "",
+        target: isNewTag ? target.trim() : "",
         previousTag: effectivePreviousTag,
       });
     } catch (e) {
@@ -421,7 +438,7 @@ export function CreateReleaseDialog({
     aiNotes
       .generate({
         tag: requestedFor,
-        target: showTarget ? target.trim() : requestedFor,
+        target: isNewTag ? target.trim() : requestedFor,
         previousTag: effectivePreviousTag,
         repoName,
         isGitHub,
@@ -487,12 +504,13 @@ export function CreateReleaseDialog({
   // The one submit gate, shared by the button and the form's native submit:
   // Enter must submit exactly when the button would. Publishing holds offline
   // rather than park: a parked release would land after the dialog was left.
-  const submitBlocked = !tagTrimmed || busyGenerating || !!offlineHold;
+  const submitBlocked =
+    !tagTrimmed || tagError !== null || busyGenerating || !!offlineHold;
   // Each running notes draft, the running create, and offline carry a reason,
   // ranked running-first, so a flip between them never drops focus to a native
   // disable. The GitHub generator isn't AI (it stays offered with Hide AI on),
   // so it gets its own non-AI line. An empty tag stays a plain disable: no copy
-  // names it.
+  // names it. An invalid one is explained by the line under the tag field.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
@@ -553,21 +571,47 @@ export function CreateReleaseDialog({
                   <Combobox
                     items={tagItems}
                     itemToStringLabel={(t: { name: string }) => t.name}
+                    isItemEqualToValue={(
+                      a: { name: string },
+                      b: { name: string },
+                    ) => a.name === b.name}
                     inputValue={tag}
-                    onInputValueChange={(v: string) =>
-                      form.setFieldValue("tag", v)
-                    }
-                    value={tagItems.find((t) => t.name === tagTrimmed) ?? null}
+                    onInputValueChange={(v: string) => {
+                      // The close-time sync below echoes the current text back;
+                      // only a real edit un-settles the field.
+                      if (v === form.getFieldValue("tag")) return;
+                      form.setFieldValue("tag", v);
+                      setTagSettled(false);
+                    }}
+                    // UNCLAMPED on purpose: Base UI syncs the input to the selected
+                    // item's label as the popup finishes closing, and a null selection
+                    // syncs it to "" — clamping to the list would wipe a typed tag.
+                    value={tagValue}
                     onValueChange={(t: { name: string } | null) =>
                       t && form.setFieldValue("tag", t.name)
                     }
                     open={tagOpen}
-                    onOpenChange={setTagOpen}
+                    onOpenChange={(o) => {
+                      setTagOpen(o);
+                      if (!o) setTagSettled(true);
+                    }}
                     openOnInputClick
                   >
                     <ComboboxInput
+                      id="rel-tag"
                       className="w-full font-mono"
                       placeholder="v1.2.0"
+                      aria-invalid={tagError ? true : undefined}
+                      aria-describedby={tagError ? tagErrorId : undefined}
+                      // Tab settles before focus moves, so the Target picker is
+                      // mounted when the browser picks the next stop. Synchronous:
+                      // the commit has to land inside this keydown. Blur is the
+                      // backstop for leaving by pointer.
+                      onKeyDown={(e) => {
+                        if (e.key === "Tab")
+                          flushSync(() => setTagSettled(true));
+                      }}
+                      onBlur={() => setTagSettled(true)}
                     />
                     <ComboboxContent>
                       <ComboboxEmpty>
@@ -594,6 +638,11 @@ export function CreateReleaseDialog({
                       )}
                     </ComboboxContent>
                   </Combobox>
+                )}
+                {tagError && (
+                  <p id={tagErrorId} className="text-xs text-warning">
+                    {tagError}
+                  </p>
                 )}
               </div>
               {showTarget && (
@@ -634,13 +683,16 @@ export function CreateReleaseDialog({
                     <Combobox
                       items={tagNames.map((name) => ({ name }))}
                       itemToStringLabel={(t: { name: string }) => t.name}
+                      isItemEqualToValue={(
+                        a: { name: string },
+                        b: { name: string },
+                      ) => a.name === b.name}
                       inputValue={previousTag}
                       onInputValueChange={setPreviousTagOverride}
-                      value={
-                        existingTags.find(
-                          (t) => t.name === previousTag.trim(),
-                        ) ?? null
-                      }
+                      // UNCLAMPED, as on the tag field: a clamped selection would
+                      // wipe a typed name on close. The generators read the
+                      // clamped `effectivePreviousTag`, which the hint below names.
+                      value={previousTagValue}
                       onValueChange={(t: { name: string } | null) =>
                         setPreviousTagOverride(t ? t.name : "")
                       }
@@ -667,6 +719,14 @@ export function CreateReleaseDialog({
                 )
               }
             >
+              {/* Its own full-width line: the w-64 control is too narrow to
+                  carry it. */}
+              {existingTags.length > 0 && previousTagUnknown && (
+                <p className="text-[11px] text-muted-foreground">
+                  Not an existing tag, so generated notes ignore it and use
+                  their default range.
+                </p>
+              )}
               <MarkdownEditor
                 ref={notesEditorRef}
                 aria-label="Release notes"

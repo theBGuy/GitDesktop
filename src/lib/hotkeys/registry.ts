@@ -668,6 +668,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "remove-upstream-remote",
+    label: "Remove upstream remote…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "reconnect-forge-session",
     label: "Reconnect forge session",
     category: "Repository",

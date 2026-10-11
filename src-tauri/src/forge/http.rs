@@ -455,6 +455,16 @@ pub async fn bb_send(
     path_or_url: &str,
     body: Option<&serde_json::Value>,
 ) -> AppResult<(u16, Option<String>, String)> {
+    let (status, location, body) = bb_send_request_split(creds, method, path_or_url, body).await?;
+    Ok((status, location, body?))
+}
+
+pub(super) async fn bb_send_request_split(
+    creds: &BbCredentials,
+    method: reqwest::Method,
+    path_or_url: &str,
+    body: Option<&serde_json::Value>,
+) -> AppResult<(u16, Option<String>, AppResult<String>)> {
     let url = resolve_url(path_or_url);
     let mut req = client()
         .request(method, &url)
@@ -469,19 +479,30 @@ pub async fn bb_send(
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(text);
     }
+    bb_send_split(req, "Bitbucket request failed").await
+}
+
+pub(super) async fn bb_send_split(
+    req: reqwest::RequestBuilder,
+    ctx: &str,
+) -> AppResult<(u16, Option<String>, AppResult<String>)> {
     let resp = req
         .send()
         .await
-        .map_err(|e| {
-            AppError::Bitbucket(transport_failure_message("Bitbucket request failed", &e))
-        })?;
+        .map_err(|e| AppError::Bitbucket(transport_failure_message(ctx, &e)))?;
+    #[cfg(test)]
+    let _ = BODY_READ_STARTED.try_with(|started| {
+        if let Some(started) = started.borrow_mut().take() {
+            started.send(()).unwrap();
+        }
+    });
     let status = resp.status().as_u16();
     let location = resp
         .headers()
         .get(reqwest::header::LOCATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = resp.text().await.map_err(bb_body_read_error)?;
+    let body = resp.text().await.map_err(bb_body_read_error);
     Ok((status, location, body))
 }
 
@@ -542,6 +563,20 @@ pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) async fn refused_connection_error() -> reqwest::Error {
+    // Port zero cannot be claimed by another listener between setup and connect.
+    Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get("http://127.0.0.1:0/")
+        .send()
+        .await
+        .unwrap_err()
+}
+
 // SYNTHETIC: headers arrive successfully, then the body stalls or ends early.
 #[cfg(test)]
 pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
@@ -550,6 +585,49 @@ pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
 
 #[cfg(test)]
 async fn incomplete_body_error_mode(timeout: bool, reset: bool) -> reqwest::Error {
+    let (req, body_started, server) = incomplete_body_request(timeout, reset).await;
+    let response = req.send().await.unwrap();
+    if reset {
+        body_started.send(()).unwrap();
+    }
+    let error = response.text().await.unwrap_err();
+    server.abort();
+    assert_eq!(error.is_timeout(), timeout);
+    assert!(!error.is_connect());
+    error
+}
+
+// A reset must follow receipt of headers so it fails the body read, not the send.
+#[cfg(test)]
+tokio::task_local! {
+    static BODY_READ_STARTED: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<()>>>;
+}
+
+#[cfg(test)]
+pub(super) async fn incomplete_body_split(
+    timeout: bool,
+    reset: bool,
+) -> (u16, Option<String>, AppResult<String>) {
+    let (req, body_started, server) = incomplete_body_request(timeout, reset).await;
+    let result = BODY_READ_STARTED
+        .scope(
+            std::cell::RefCell::new(reset.then_some(body_started)),
+            bb_send_split(req, "Bitbucket request failed"),
+        )
+        .await;
+    server.abort();
+    result.unwrap()
+}
+
+#[cfg(test)]
+async fn incomplete_body_request(
+    timeout: bool,
+    reset: bool,
+) -> (
+    reqwest::RequestBuilder,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -575,23 +653,13 @@ async fn incomplete_body_error_mode(timeout: bool, reset: bool) -> reqwest::Erro
             std::future::pending::<()>().await;
         }
     });
-    let response = Client::builder()
+    let req = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap()
-        .get(url)
-        .send()
-        .await
-        .unwrap();
-    if reset {
-        body_started.send(()).unwrap();
-    }
-    let error = response.text().await.unwrap_err();
-    server.abort();
-    assert_eq!(error.is_timeout(), timeout);
-    assert!(!error.is_connect());
-    error
+        .get(url);
+    (req, body_started, server)
 }
 
 #[cfg(test)]
@@ -860,18 +928,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn port_zero_fixture_is_a_connect_error_without_a_timeout() {
+        let error = refused_connection_error().await;
+        assert!(error.is_connect(), "{error:?}");
+        assert!(!error.is_timeout(), "{error:?}");
+    }
+
+    #[tokio::test]
     async fn a_refused_connection_carries_the_connect_marker() {
-        // A just-released ephemeral port refuses the connection.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let error = Client::new()
-            .get(format!("http://127.0.0.1:{port}/fixture"))
-            .send()
-            .await
-            .unwrap_err();
+        let error = refused_connection_error().await;
         let message = transport_failure_message("Bitbucket request failed", &error);
         assert!(
             message.starts_with("Bitbucket request failed: "),

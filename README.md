@@ -461,9 +461,10 @@ in one click.
   choice is remembered per repo (defaulting to your fork) and also sits in
   the palette as the **Switch to fork / upstream view** commands.
   Opening a PR targets a repository explicitly, offering your fork or the
-  upstream repo on a fork. When you're done with a fork, the settings
-  **Danger zone** can **remove the upstream remote** (a local detach;
-  reversible) or **leave the fork network** entirely: on **GitLab** this
+  upstream repo on a fork. When you're done with a fork, the repository menu
+  and command palette can **remove the upstream remote** (a local detach;
+  reversible; no admin needed — it's in the settings **Danger zone** too),
+  or the Danger zone can **leave the fork network** entirely: on **GitLab** this
   happens right in the app (Owner-only; open MRs to the parent close),
   and on **GitHub** and **Bitbucket** it links out to the provider's
   detach page. A **Re-check fork status** button refreshes the fork badge

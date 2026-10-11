@@ -101,7 +101,12 @@ export function TagDetailView({
   const canCreate = canWrite || forgeFeatureReady(gh.data, "releaseCreate");
   // Publishing a release is a repo write: an explicitly read-only viewer keeps
   // the buttons (disabled, with the reason). Releases are repo-wide — no lens.
-  const writeAccess = useRepoWriteAccess(repoPath, undefined, !!provider);
+  // Signed out the probe can't answer, so it waits for the sign-in too.
+  const writeAccess = useRepoWriteAccess(
+    repoPath,
+    undefined,
+    !!provider && Boolean(gh.data?.authenticated),
+  );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
   // Remote release and tag writes hold offline rather than park — a parked publish,

@@ -196,6 +196,7 @@ pub fn run() {
             git::history::git_file_log,
             git::history::git_blame,
             git::history::git_commit_details,
+            git::history::git_commit_parents,
             git::history::git_commit_files,
             git::history::git_commit_file_diff,
             git::history::git_commit_diff,

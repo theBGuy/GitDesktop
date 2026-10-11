@@ -35,23 +35,87 @@ export function checkoutTagSuccessToast(tag: string) {
   return checkedOutDetached(tag);
 }
 
+/** What each op does, for its plain confirm. `branch` names the destination when
+ *  the caller already holds repo status; without it the copy says "the current
+ *  branch" rather than subscribing a view to status for one string. */
+const OP_EFFECT: Record<
+  MergeParentOp,
+  (hash: string, branch: string | null) => string
+> = {
+  revert: (hash) =>
+    `Creates a new commit that undoes what ${short(hash)} changed, so history keeps both and nothing already recorded is rewritten.`,
+  "cherry-pick": (hash, branch) =>
+    `Copies ${short(hash)} onto ${branch ?? "the current branch"} as a new commit and leaves the original where it is.`,
+};
+
+/** Where each op stops on a conflict: shared by the plain confirm and the
+ *  merge-parent dialog, which both owe the user this warning. */
+const OP_CONFLICT: Record<MergeParentOp, string> = {
+  revert: "If it conflicts, the revert pauses in Changes for you to resolve.",
+  "cherry-pick":
+    "If it conflicts, the pick pauses in Changes for you to resolve.",
+};
+
 export const revertCommitConfirm = (hash: string) => ({
   title: `Revert commit ${short(hash)}?`,
-  body: `Creates a new commit that undoes what ${short(hash)} changed, so history keeps both and nothing already recorded is rewritten. If it conflicts, the revert pauses in Changes for you to resolve.`,
+  body: `${OP_EFFECT.revert(hash, null)} ${OP_CONFLICT.revert}`,
   confirmLabel: "Revert commit",
 });
 
-/** `branch` names the destination when the caller already holds repo status;
- *  without it the copy says "the current branch" rather than subscribing a view
- *  to status for a string only this prompt reads. */
 export const cherryPickCommitConfirm = (
   hash: string,
   branch: string | null,
 ) => ({
   title: `Cherry-pick commit ${short(hash)}?`,
-  body: `Copies ${short(hash)} onto ${branch ?? "the current branch"} as a new commit and leaves the original where it is. If it conflicts, the pick pauses in Changes for you to resolve.`,
+  body: `${OP_EFFECT["cherry-pick"](hash, branch)} ${OP_CONFLICT["cherry-pick"]}`,
   confirmLabel: "Cherry-pick commit",
 });
+
+/** A merge commit's revert or cherry-pick asks which parent is the mainline
+ *  (git's `-m`) instead of the plain confirm above: without that choice git
+ *  refuses the commit outright. */
+export type MergeParentOp = "revert" | "cherry-pick";
+
+/** The mainline choice in words, for every surface that offers it: Parent 1 is
+ *  the side the merge was made on. */
+export const MERGE_PARENT_DESCRIPTION =
+  "A merge has more than one parent — choose which one counts as the mainline. Parent 1 is the usual choice.";
+
+export const MERGE_PARENT_COPY: Record<
+  MergeParentOp,
+  { title: string; confirmLabel: string; nothingDone: string }
+> = {
+  revert: {
+    title: "Revert merge commit",
+    confirmLabel: "Revert commit",
+    nothingDone: "nothing was reverted",
+  },
+  "cherry-pick": {
+    title: "Cherry-pick merge commit",
+    confirmLabel: "Cherry-pick commit",
+    nothingDone: "nothing was cherry-picked",
+  },
+};
+
+/** The merge-parent dialog's title and description for `hash`: the commit named
+ *  like its plain confirm names it, the mainline choice, then the op's conflict
+ *  warning (the plain confirm's effect sentence stays there; the dialog keeps to
+ *  the choice). */
+export const mergeParentPrompt = (op: MergeParentOp, hash: string) => ({
+  title: `${MERGE_PARENT_COPY[op].title} ${short(hash)}`,
+  body: `${MERGE_PARENT_DESCRIPTION} ${OP_CONFLICT[op]}`,
+});
+
+/** Why a multi-commit cherry-pick holding a merge can't run. Mirrors the Rust
+ *  `RANGE_MERGE_REFUSAL` (src-tauri/src/git/ops.rs) verbatim, so an attempt-time
+ *  refusal and the backend's say the same thing. {@link RANGE_MERGE_ITEM_REASON}
+ *  is its compact form; a change to one changes both. */
+export const RANGE_MERGE_REASON =
+  "This range contains a merge commit — cherry-pick it on its own to choose its mainline.";
+
+/** {@link RANGE_MERGE_REASON} compacted for a disabled menu item's label, which
+ *  carries its reason inline (no tooltip) and would otherwise widen the menu. */
+export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own";
 
 /** A parentless commit has nothing to soft-reset to, so undo deletes the branch
  *  ref instead — the one undo that doesn't just re-stage in place. Scoped to the

@@ -751,7 +751,9 @@ export const AiProviderSection = withForm({
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<{
       ok: boolean;
+      /** One-line summary for display; `fullText` is the raw text Copy takes. */
       message?: string;
+      fullText?: string;
       /** The draft signature this verdict was produced under (see testConfig). */
       config: string;
     } | null>(null);
@@ -844,14 +846,26 @@ export const AiProviderSection = withForm({
         );
         const result = await client.testConnection();
         if (run !== testRun.current) return;
-        setTestResult(
-          result.ok
-            ? { ok: true, config }
-            : { ok: false, message: result.message, config },
-        );
+        if (result.ok) {
+          setTestResult({ ok: true, config });
+        } else {
+          const p = presentError(result.message);
+          setTestResult({
+            ok: false,
+            message: p.summary,
+            fullText: p.fullText,
+            config,
+          });
+        }
       } catch (e) {
         if (run !== testRun.current) return;
-        setTestResult({ ok: false, message: presentError(e).summary, config });
+        const p = presentError(e);
+        setTestResult({
+          ok: false,
+          message: p.summary,
+          fullText: p.fullText,
+          config,
+        });
       } finally {
         // Always released: the button is disabled while testing, so no newer run
         // can own this flag — a superseded run still has to hand it back.
@@ -992,7 +1006,7 @@ export const AiProviderSection = withForm({
               <XCircleIcon className="size-4 shrink-0" />
               <span className="line-clamp-2">{testResult.message}</span>
               <CopyIconButton
-                text={testResult.message ?? ""}
+                text={testResult.fullText ?? testResult.message ?? ""}
                 label="Copy error message"
                 toast="Error message copied"
               />

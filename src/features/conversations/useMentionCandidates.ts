@@ -2,7 +2,12 @@ import { useCallback, useState } from "react";
 import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { useForgeGhHost } from "@/lib/git/host";
 import { type MentionTrigger, TRIGGERS } from "@/lib/git/mention-triggers";
-import { useAssignableUsers, useIssueList, usePrList } from "@/lib/git/queries";
+import {
+  useAssignableUsers,
+  useForgeStatus,
+  useIssueList,
+  usePrList,
+} from "@/lib/git/queries";
 import type {
   ForgeProvider,
   ForgeUserRef,
@@ -33,8 +38,9 @@ export interface MentionSource {
   /** GitHub host for login-derived avatars; `null` off GitHub. */
   ghHost: string | null;
   /** The same forge context, shaped for the markdown renderer so a body can
-   *  linkify the references this source helps write. Undefined whenever the
-   *  source is inert (forge status unresolved, or no hosted remote). */
+   *  linkify the references this source helps write. Undefined while forge status
+   *  is unresolved or there's no hosted remote; present signed out, where links
+   *  still work but the triggers stay inert. */
   refs?: MarkdownRefs;
   /** First time a trigger token opens — flips the lazy queries on. Idempotent. */
   onActive: () => void;
@@ -180,7 +186,10 @@ export function useMentionCandidates({
   provider: ForgeProvider | null | undefined;
 }): MentionSource {
   const [active, setActive] = useState(false);
-  const triggers = provider ? TRIGGERS[provider] : NO_TRIGGERS;
+  // Signed out, the status still names a github.com repo: its references keep
+  // linkifying, but the candidate lists need the forge, so no trigger opens.
+  const signedIn = Boolean(useForgeStatus(repoPath).data?.authenticated);
+  const triggers = provider && signedIn ? TRIGGERS[provider] : NO_TRIGGERS;
   const wantsUsers = active && triggers.includes("@");
   const wantsIssues = active && triggers.includes("#");
   // GitHub's `#` covers PRs too; GitLab reaches merge requests through `!` instead.

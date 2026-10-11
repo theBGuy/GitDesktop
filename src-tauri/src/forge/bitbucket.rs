@@ -5479,12 +5479,25 @@ struct BbCreatedRepo {
     links: Option<BbHtmlLinks>,
 }
 
-/// The create POST's response, read the way the publish flow must present it: a non-2xx
-/// created nothing and takes the ordinary API error, while a 2xx body that won't parse
-/// (a proxy-rewritten body, a truncated read) leaves a repository behind and says so on
-/// LINE ONE — the toast headline is the first line alone (`firstMeaningfulLine`,
-/// `src/lib/error-summary.ts`), and a user who never sees the fact retries the publish
-/// into "name already taken".
+/// Disclose a confirmed creation on line one when its body cannot be read.
+/// Publishing stops before adding a remote or pushing, so include manual recovery.
+fn created_repo_response(
+    status: u16,
+    body: AppResult<String>,
+    url: &str,
+) -> AppResult<BbCreatedRepo> {
+    match body {
+        Err(error) if !(200..300).contains(&status) => Err(error),
+        Err(error) => Err(AppError::Bitbucket(format!(
+            "The repository WAS created at {url} — add it as a remote and push manually, \
+             or delete it there and retry.\n{error}"
+        ))),
+        Ok(body) => parse_created_repo(status, &body, url),
+    }
+}
+
+/// Reject non-2xx responses normally; disclose creation when a read 2xx body won't parse.
+/// The toast uses line one alone, so the creation fact and recovery belong there.
 fn parse_created_repo(status: u16, body: &str, created_at_url: &str) -> AppResult<BbCreatedRepo> {
     if !(200..300).contains(&status) {
         return Err(http::http_error(status, body));
@@ -5499,16 +5512,9 @@ fn parse_created_repo(status: u16, body: &str, created_at_url: &str) -> AppResul
     })
 }
 
-/// Publish a local repo to Bitbucket: create the repo in `workspace`, seed git's
-/// credential store, add `origin`, and push the current branch. Returns the repo's html
-/// URL. `website` maps to Bitbucket's website field; topics are dropped (Bitbucket has
-/// none).
-///
-/// Guard order mirrors `gitlab::publish_repo`: every locally-checkable precondition runs
-/// BEFORE the create POST — the failure to avoid is an orphaned repo whose slug then
-/// blocks retries. Every failure from the create's own response onward discloses the
-/// partial state on its first line — [`parse_created_repo`] for the response itself, the
-/// "The Bitbucket repository was created at <url>, but …" prefix for the arms after it.
+/// Validate locally before creating, adding `origin`, and pushing; return the repo URL.
+/// After a confirmed creation, errors disclose it via [`created_repo_response`] or the
+/// later created-repository prefix, so recovery accounts for the repository left behind.
 pub async fn publish_repo(
     state: &crate::state::AppState,
     repo_path: &str,
@@ -5568,12 +5574,11 @@ pub async fn publish_repo(
     // The slug is ours before the server answers, so the disclosure exists before the
     // POST does — the create's own parse failure is already past the point of no return.
     let created_at_url = format!("https://bitbucket.org/{workspace}/{slug}");
-    // Split from the typed helper on purpose: `bb_post_json` folds a non-2xx and an
-    // unparseable 2xx into one error kind, and only the second one may claim a repo now
-    // exists.
+    // Only a received 2xx can establish creation when the response body is unreadable.
     let (status, _, body) =
-        http::bb_send(&creds, reqwest::Method::POST, &create_path, Some(&payload)).await?;
-    let created: BbCreatedRepo = parse_created_repo(status, &body, &created_at_url)?;
+        http::bb_send_request_split(&creds, reqwest::Method::POST, &create_path, Some(&payload))
+            .await?;
+    let created = created_repo_response(status, body, &created_at_url)?;
     let created_slug = if created.slug.is_empty() {
         slug.clone()
     } else {
@@ -8354,6 +8359,72 @@ definitions:
             "rejected create: {rejected}"
         );
         assert_eq!(rejected, "Repository with this Slug already exists.");
+    }
+
+    #[tokio::test]
+    async fn created_repo_response_preserves_non_success_body_read_errors() {
+        let url = "https://bitbucket.org/acme/demo";
+        for status in [199, 300, 400, 500] {
+            let (_, _, body) = http::incomplete_body_split(false, false).await;
+            let body_error = body.unwrap_err();
+            let expected = body_error.to_string();
+            let Err(AppError::Bitbucket(message)) =
+                created_repo_response(status, Err(body_error), url)
+            else {
+                panic!("a non-2xx body-read failure must stay an error");
+            };
+            assert_eq!(message, expected);
+            assert!(!message.contains("was created"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn created_repo_response_discloses_creation_and_preserves_body_read_detail() {
+        let url = "https://bitbucket.org/acme/demo";
+        for (timeout, reset, marker) in [
+            (false, false, None),
+            (true, false, Some(": request timed out")),
+            (false, true, Some(": connection failed")),
+        ] {
+            let (status, _, body) = http::incomplete_body_split(timeout, reset).await;
+            assert_eq!(status, 200);
+            let body_error = body.unwrap_err();
+            let expected = body_error.to_string();
+            let Err(AppError::Bitbucket(message)) =
+                created_repo_response(status, Err(body_error), url)
+            else {
+                panic!("a created repository with an unreadable body must be disclosed");
+            };
+            let (first, detail) = message.split_once('\n').unwrap();
+            assert_eq!(
+                first,
+                format!(
+                    "The repository WAS created at {url} — add it as a remote and push manually, \
+                     or delete it there and retry."
+                )
+            );
+            assert_eq!(detail, expected);
+            if let Some(marker) = marker {
+                assert!(detail.ends_with(marker), "{detail}");
+            }
+        }
+    }
+
+    #[test]
+    fn created_repo_response_parses_readable_bodies_as_before() {
+        let url = "https://bitbucket.org/acme/demo";
+        let body = r#"{"slug":"demo","links":{"html":{"href":"https://bitbucket.org/acme/demo"}}}"#;
+        let created = created_repo_response(201, Ok(body.into()), url).unwrap();
+        assert_eq!(created.slug, "demo");
+        assert_eq!(html_href(&created.links), url);
+
+        for (status, body) in [(200, "<html>proxy</html>"), (400, "rejected")] {
+            let expected = parse_created_repo(status, body, url).err().unwrap();
+            let actual = created_repo_response(status, Ok(body.into()), url)
+                .err()
+                .unwrap();
+            assert_eq!(actual.to_string(), expected.to_string());
+        }
     }
 
     #[test]
