@@ -59,6 +59,7 @@ import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
+  CHERRY_PICK_ALREADY_APPLIED,
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
@@ -231,6 +232,7 @@ export function CommitDetailView({
   const [mergePick, setMergePick] = useState<{
     hash: string;
     op: MergeParentOp;
+    alreadyApplied: string;
     repo: string;
   } | null>(null);
   const prefetchFileDiff = usePrefetchCommitFileDiff(repoPath);
@@ -314,7 +316,12 @@ export function CommitDetailView({
     if (liveRepo.current !== askedIn || liveHash.current !== askedFor)
       return "stale";
     if (parents === null || parents.length < 2) return "plain";
-    setMergePick({ hash: askedFor, op, repo: askedIn });
+    setMergePick({
+      hash: askedFor,
+      op,
+      alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
+      repo: askedIn,
+    });
     return "dialog";
   }
 
@@ -353,9 +360,7 @@ export function CommitDetailView({
     if (applied) {
       toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
     } else {
-      toast.info(
-        "Nothing to cherry-pick — these changes are already on this branch.",
-      );
+      toast.info(CHERRY_PICK_ALREADY_APPLIED);
     }
   }
 

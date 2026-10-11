@@ -71,6 +71,14 @@ export const cherryPickCommitConfirm = (
   confirmLabel: "Cherry-pick commit",
 });
 
+/** A cherry-pick that found its changes already on the branch. History's search
+ *  results word it shorter; every other route, merge dialog included, uses the
+ *  full line. */
+export const CHERRY_PICK_ALREADY_APPLIED =
+  "Nothing to cherry-pick — these changes are already on this branch.";
+export const CHERRY_PICK_ALREADY_APPLIED_SHORT =
+  "Nothing to cherry-pick — already on this branch.";
+
 /** A merge commit's revert or cherry-pick asks which parent is the mainline
  *  (git's `-m`) instead of the plain confirm above: without that choice git
  *  refuses the commit outright. */
@@ -106,15 +114,10 @@ export const mergeParentPrompt = (op: MergeParentOp, hash: string) => ({
   body: `${MERGE_PARENT_DESCRIPTION} ${OP_CONFLICT[op]}`,
 });
 
-/** Why a multi-commit cherry-pick holding a merge can't run. Mirrors the Rust
- *  `RANGE_MERGE_REFUSAL` (src-tauri/src/git/ops.rs) verbatim, so an attempt-time
- *  refusal and the backend's say the same thing. {@link RANGE_MERGE_ITEM_REASON}
- *  is its compact form; a change to one changes both. */
-export const RANGE_MERGE_REASON =
-  "This range contains a merge commit — cherry-pick it on its own to choose its mainline.";
-
-/** {@link RANGE_MERGE_REASON} compacted for a disabled menu item's label, which
- *  carries its reason inline (no tooltip) and would otherwise widen the menu. */
+/** Compact form of the backend's batch-merge refusal (`RANGE_MERGE_REFUSAL`,
+ *  src-tauri/src/git/ops.rs) for a disabled menu item's label, which carries its
+ *  reason inline (no tooltip) and would otherwise widen the menu. The full
+ *  sentence reaches users through the Rust error itself — no TS copy exists. */
 export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own";
 
 /** A parentless commit has nothing to soft-reset to, so undo deletes the branch

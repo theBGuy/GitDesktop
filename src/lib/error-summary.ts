@@ -624,13 +624,18 @@ const TRANSPORT_GATE_PHRASES = [
 
 /** Scope hints respect networkSummary's verdict, the "Couldn't reach " prefix,
  *  Rust ": <phrase>" suffixes, anchored ": eof", and the masked
- *  TRANSPORT_GATE_PHRASES scan. */
+ *  TRANSPORT_GATE_PHRASES scan. FIRST_LINE_NETWORK_KINDS read those arms from
+ *  the headline alone, the same rule networkSummary applies to them. */
 export function isTransportError(error: unknown): boolean {
-  const message = errorMessage(error).trim();
+  const full = errorMessage(error).trim();
+  const message =
+    isAppError(error) && FIRST_LINE_NETWORK_KINDS.has(error.kind)
+      ? firstMeaningfulLine(full)
+      : full;
   const lower = message.toLowerCase();
   const scan = maskTransportIdentifiers(message).toLowerCase();
   return (
-    (isAppError(error) && networkSummary(error.kind, message) !== null) ||
+    (isAppError(error) && networkSummary(error.kind, full) !== null) ||
     message.startsWith("Couldn't reach ") ||
     RUST_TRANSPORT_PHRASES.some((phrase) => message.endsWith(`: ${phrase}`)) ||
     // URL and host tokens cannot contain the space-separated EOF suffix.

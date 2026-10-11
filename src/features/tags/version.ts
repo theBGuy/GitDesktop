@@ -146,8 +146,9 @@ export function validateTagName(name: string): string | null {
   if (n.endsWith(".")) return `Tag names can't end with "."`;
   if (n.endsWith(".lock")) return `Tag names can't end with ".lock"`;
   if (n.includes("..")) return `Tag names can't contain ".."`;
+  // A lone "@" is deliberately VALID: git's anti-"@" rule matches the entire
+  // refname, never refs/tags/<name> — mirrors validate_tag_name (ops.rs), probe-verified.
   if (n.includes("@{")) return `Tag names can't contain "@{"`;
-  if (n === "@") return `"@" on its own isn't a valid tag name`;
   for (const ch of n) {
     const code = ch.charCodeAt(0);
     if (code < 0x20 || code === 0x7f) {

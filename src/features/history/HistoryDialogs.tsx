@@ -244,16 +244,19 @@ export function ResetCommitDialog({
 
 /** The mainline choice a merge commit's revert or pick asks for: its parents, read
  *  in `repo` (the one the dialog opened in), with Parent 1 pre-selected. The pick
- *  is keyed by commit, so every new subject starts on Parent 1 without a seed.
- *  A null `hash` asks nothing and holds nothing. */
-function useMainlineChoice(repo: string, hash: string | null) {
+ *  is keyed by commit AND `op` (what the choice is for), so every new subject
+ *  starts on Parent 1 without a seed. A null `hash` asks nothing and holds nothing. */
+function useMainlineChoice(repo: string, hash: string | null, op: string) {
   const parents = useCommitParents(repo, hash);
   const [picked, setPicked] = useState<{
     hash: string;
+    op: string;
     mainline: number;
   } | null>(null);
   const mainline =
-    picked !== null && picked.hash === hash ? picked.mainline : 1;
+    picked !== null && picked.hash === hash && picked.op === op
+      ? picked.mainline
+      : 1;
   const heldReason = (() => {
     switch (true) {
       case hash === null:
@@ -271,7 +274,7 @@ function useMainlineChoice(repo: string, hash: string | null) {
     mainline,
     heldReason,
     pick: (n: number) => {
-      if (hash !== null) setPicked({ hash, mainline: n });
+      if (hash !== null) setPicked({ hash, op, mainline: n });
     },
     reset: () => setPicked(null),
   };
@@ -377,7 +380,7 @@ export function CherryPickOntoDialog({
   const count = shownHashes?.length ?? 0;
   const mergeHash =
     count === 1 && shownIsMerge ? (shownHashes?.[0] ?? null) : null;
-  const choice = useMainlineChoice(shownIn ?? repoPath, mergeHash);
+  const choice = useMainlineChoice(shownIn ?? repoPath, mergeHash, "pick-onto");
   const liveHashes = useLatestRef(hashes);
   const liveRepo = useLatestRef(repoPath);
 
@@ -545,7 +548,9 @@ export function MergeParentDialog({
   onClose,
 }: {
   repoPath: string;
-  target: { hash: string; op: MergeParentOp } | null;
+  /** `alreadyApplied` is the host's own wording for a pick with nothing to
+   *  apply, the line its plain confirm path toasts. */
+  target: { hash: string; op: MergeParentOp; alreadyApplied: string } | null;
   openedIn: string | null;
   onClose: () => void;
 }) {
@@ -554,7 +559,11 @@ export function MergeParentDialog({
   const pending = revertCommit.isPending || cherryPick.isPending;
   const shown = useRetained(target);
   const shownIn = useRetained(openedIn);
-  const choice = useMainlineChoice(shownIn ?? repoPath, shown?.hash ?? null);
+  const choice = useMainlineChoice(
+    shownIn ?? repoPath,
+    shown?.hash ?? null,
+    shown?.op ?? "revert",
+  );
   const { mainline } = choice;
   const liveTarget = useLatestRef(target);
   const liveRepo = useLatestRef(repoPath);
@@ -576,7 +585,7 @@ export function MergeParentDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    const { hash, op } = target;
+    const { hash, op, alreadyApplied } = target;
     const startedIn = repoPath;
     // Same repo, commit AND op: a settling revert never closes a cherry-pick
     // dialog reopened on the same commit.
@@ -595,9 +604,7 @@ export function MergeParentDialog({
       } else if (await cherryPick.mutateAsync({ hash, mainline })) {
         toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
       } else {
-        toast.info(
-          "Nothing to cherry-pick — these changes are already on this branch.",
-        );
+        toast.info(alreadyApplied);
       }
     } catch (e) {
       onError(e);

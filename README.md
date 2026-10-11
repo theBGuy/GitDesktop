@@ -463,8 +463,8 @@ in one click.
   Opening a PR targets a repository explicitly, offering your fork or the
   upstream repo on a fork. When you're done with a fork, the repository menu
   and command palette can **remove the upstream remote** (a local detach;
-  reversible; no admin needed — it's in the settings **Danger zone** too),
-  or the Danger zone can **leave the fork network** entirely: on **GitLab** this
+  reversible; no admin needed — the admin-gated settings **Danger zone**
+  offers it too), or the Danger zone can **leave the fork network** entirely: on **GitLab** this
   happens right in the app (Owner-only; open MRs to the parent close),
   and on **GitHub** and **Bitbucket** it links out to the provider's
   detach page. A **Re-check fork status** button refreshes the fork badge

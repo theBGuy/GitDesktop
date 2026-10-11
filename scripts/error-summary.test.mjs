@@ -1402,22 +1402,35 @@ test("a busy error's summary names what holds the repository", () => {
   assert.equal(p.long, false);
 });
 
+/** `created_repo_response`'s disclosure (forge/bitbucket.rs), verbatim with
+ *  `{url}` filled in, over a transport cause in http.rs's message shape. */
+const BB_CREATED_HEADLINE =
+  "The repository WAS created at https://bitbucket.org/ws/repo — add it as a remote and push manually, or delete it there and retry.";
+const BB_TRANSPORT_LINE =
+  "could not read Bitbucket response: error decoding response body: connection failed";
+const BB_CREATED_DISCLOSURE = `${BB_CREATED_HEADLINE}\n${BB_TRANSPORT_LINE}`;
+
 test("a Bitbucket app sentence on line one outranks a transport phrase below it", () => {
-  // forge/bitbucket.rs's created-but-unreadable disclosure over its transport cause.
-  const headline =
-    "The repository was created at https://bitbucket.org/ws/repo, but the response couldn't be read back — refresh to see it.";
-  const message = `${headline}\ncould not read Bitbucket response: error decoding response body: connection failed`;
-  const p = presentError(appError("bitbucket", message));
-  assert.equal(p.summary, headline);
-  assert.equal(p.fullText, message);
+  const p = presentError(appError("bitbucket", BB_CREATED_DISCLOSURE));
+  assert.equal(p.summary, BB_CREATED_HEADLINE);
+  assert.equal(p.fullText, BB_CREATED_DISCLOSURE);
   assert.equal(p.long, true);
 });
 
-test("a bare Bitbucket transport failure still reads as unreachable", () => {
-  const message =
-    "could not read Bitbucket response: error decoding response body: connection failed";
+test("isTransportError reads a Bitbucket disclosure by its headline", () => {
   assert.equal(
-    presentError(appError("bitbucket", message)).summary,
+    isTransportError(appError("bitbucket", BB_CREATED_DISCLOSURE)),
+    false,
+  );
+  assert.equal(
+    isTransportError(appError("bitbucket", BB_TRANSPORT_LINE)),
+    true,
+  );
+});
+
+test("a bare Bitbucket transport failure still reads as unreachable", () => {
+  assert.equal(
+    presentError(appError("bitbucket", BB_TRANSPORT_LINE)).summary,
     reach("Bitbucket"),
   );
 });

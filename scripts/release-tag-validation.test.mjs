@@ -52,9 +52,11 @@ test("double dot", () => {
   assert.equal(validateTagName("v1..2"), `Tag names can't contain ".."`);
 });
 
-test("@{ sequence and a lone @", () => {
+test("@{ sequence rejected; @ itself is a creatable tag", () => {
   assert.equal(validateTagName("v1@{u}"), `Tag names can't contain "@{"`);
-  assert.equal(validateTagName("@"), `"@" on its own isn't a valid tag name`);
+  // Mirrors the backend's probe-verified rule: git's anti-"@" check matches the
+  // whole refname, never refs/tags/<name> (validate_tag_name, ops.rs).
+  assert.equal(validateTagName("@"), null);
   assert.equal(validateTagName("v1@2"), null);
 });
 

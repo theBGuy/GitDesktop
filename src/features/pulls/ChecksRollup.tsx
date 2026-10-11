@@ -852,11 +852,15 @@ export function ChecksRollup({
   // keeps the buttons (disabled, with the reason). Probed only when one of them
   // renders — the id lists already carry their provider gates — and on the same
   // lens the rest of the PR view uses, so it shares that query's cache entry.
+  // Signed out the probe can't answer, so it waits for the sign-in too.
   const lens = useRepoLens(repoPath);
   const writeAccess = useRepoWriteAccess(
     repoPath,
     lens,
-    blockedRunIds.length > 0 || rerunOffer !== null || jobCandidates.length > 0,
+    Boolean(forge.data?.authenticated) &&
+      (blockedRunIds.length > 0 ||
+        rerunOffer !== null ||
+        jobCandidates.length > 0),
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;

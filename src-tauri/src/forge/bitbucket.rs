@@ -5512,6 +5512,12 @@ fn parse_created_repo(status: u16, body: &str, created_at_url: &str) -> AppResul
     })
 }
 
+fn created_repo_push_error(url: &str, error: AppError) -> AppError {
+    AppError::Bitbucket(format!(
+        "The repository WAS created at {url} and origin points at it — retry the push.\n{error}"
+    ))
+}
+
 /// Validate locally before creating, adding `origin`, and pushing; return the repo URL.
 /// After a confirmed creation, errors disclose it via [`created_repo_response`] or the
 /// later created-repository prefix, so recovery accounts for the repository left behind.
@@ -5591,8 +5597,7 @@ pub async fn publish_repo(
         html_url
     };
     // From here on, any failure must disclose that the repo WAS created.
-    let created_hint =
-        format!("The Bitbucket repository was created at {html_url}, but ");
+    let created_hint = format!("The repository WAS created at {html_url}, but ");
 
     // ── Seed git's credential store so the push authenticates non-interactively (see
     //    `seed_git_credential`). Best-effort — the push surfaces any auth failure. ──
@@ -5629,7 +5634,7 @@ pub async fn publish_repo(
     )
     .await
     {
-        return Err(AppError::Bitbucket(format!("{created_hint}pushing failed: {e}")));
+        return Err(created_repo_push_error(&html_url, e));
     }
 
     Ok(html_url)
@@ -8408,6 +8413,27 @@ definitions:
                 assert!(detail.ends_with(marker), "{detail}");
             }
         }
+    }
+
+    #[test]
+    fn created_repo_push_error_keeps_transport_detail_below_the_disclosure() {
+        let url = "https://bitbucket.org/acme/demo";
+        let stderr = "Could not resolve host: bitbucket.org";
+        let error = AppError::Git {
+            code: 128,
+            stderr: stderr.into(),
+        };
+        let message = created_repo_push_error(url, error).to_string();
+        let (headline, detail) = message.split_once('\n').unwrap();
+        assert_eq!(
+            headline,
+            format!(
+                "The repository WAS created at {url} and origin points at it — retry the push."
+            )
+        );
+        assert!(headline.contains("WAS created"));
+        assert!(!headline.contains("Could not resolve host"));
+        assert_eq!(detail, stderr);
     }
 
     #[test]

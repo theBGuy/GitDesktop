@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { CompareBranchCombobox } from "@/features/compare/CompareBranchCombobox";
 import { CommitContextMenuItems } from "@/features/history/CommitContextMenu";
 import {
+  CHERRY_PICK_ALREADY_APPLIED,
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
@@ -194,6 +195,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const [mergePick, setMergePick] = useState<{
     hash: string;
     op: MergeParentOp;
+    alreadyApplied: string;
     repo: string;
   } | null>(null);
   const [branchHash, setBranchHash] = useState<string | null>(null);
@@ -271,7 +273,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // A merge commit routes to the mainline-parent dialog instead of the confirm.
   async function doRevertCommit(hash: string, isMerge: boolean) {
     if (isMerge) {
-      setMergePick({ hash, op: "revert", repo: repoPath });
+      setMergePick({
+        hash,
+        op: "revert",
+        alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
+        repo: repoPath,
+      });
       return;
     }
     const revertIn = repoPath;
@@ -290,7 +297,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
 
   async function doCherryPick(hash: string, isMerge: boolean) {
     if (isMerge) {
-      setMergePick({ hash, op: "cherry-pick", repo: repoPath });
+      setMergePick({
+        hash,
+        op: "cherry-pick",
+        alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
+        repo: repoPath,
+      });
       return;
     }
     const pickIn = repoPath;
@@ -312,9 +324,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     if (applied) {
       toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
     } else {
-      toast.info(
-        "Nothing to cherry-pick — these changes are already on this branch.",
-      );
+      toast.info(CHERRY_PICK_ALREADY_APPLIED);
     }
   }
 

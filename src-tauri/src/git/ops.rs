@@ -7204,6 +7204,10 @@ mod tests {
         // The name lands in refs/heads/ templates below — route it through the
         // validator so the fixture stays injection-safe for future callers.
         crate::git::branches::validate_ref_name(branch).expect("fixture branch name");
+        // The side commit is minted after commit 1, so a merge can't come sooner.
+        if let Some(m) = merge_at {
+            assert!((2..=n).contains(&m), "merge_at must be in 2..={n}, got {m}");
+        }
         let side = n + 1;
         let mut stream = String::new();
         for i in 1..=n {
