@@ -1,17 +1,21 @@
 // Static ratchet for plugin-store read-modify-write locking.
 //
 // Heuristics: after ts-mask removes comments, strings, regexes, and JSX text,
-// store writes are plausible-receiver `set/delete/save/clear/reset` calls plus
-// direct `foldIdentityKey` calls; named helper functions are followed through
+// store writes are tracked `store`-receiver `set/delete/save/clear/reset` calls
+// plus direct `foldIdentityKey` calls; named helper functions are followed through
 // direct call sites, and a lock callback is the arrow argument body or expression
-// up to withAppStoreLock's closing parenthesis. Reloads are the shared reload
-// helper, a plausible-receiver `.reload()`, or a local helper whose body contains
-// one. Static scanning deliberately does not reason about dead branches.
+// up to withAppStoreLock's closing parenthesis. Static scanning deliberately does
+// not reason about dead branches or positional conditional saves/reloads.
 //
-// This deliberately does not see dynamic store names, cross-module write
-// helpers, aliased receivers (`const s = store`), `.bind()` calls, or computed
-// members. The alias is a documented static-scan blind spot.
-// generic plugin-store loader is scanned as a write-free infrastructure module.
+// The scanner deliberately does not resolve cross-module write helpers, method
+// references (`keys.forEach(store.delete)`), `.bind()` calls, or computed members.
+// It rejects tracked-store
+// aliases and writes in statically ranged `setTimeout`, `queueMicrotask`, `.then`,
+// `.on`, and returned-function callback shapes. Conditional saves, early returns
+// before save, and conditional reloads remain positional blind spots. The dynamic
+// migrator is exempt only from the literal lock-file comparison: it pins the same
+// identifier expression at load and lock.
+// The generic plugin-store loader is scanned as a write-free infrastructure module.
 // Exemptions pin these shapes: analytics owns one idempotent `distinct_id` key;
 // plan/research/notifications persist zustand whole-state snapshots; review
 // notes uses Rust commands except for its COLD_START plugin-store fallback.
@@ -66,15 +70,26 @@ const EXEMPT = new Map([
 
 // These are measured from the current tree. A deletion or an unlisted opener
 // must make the guard red instead of silently shrinking its proof surface.
-const MIN_SCANNED = 24;
+const MIN_SCANNED = 25;
 const MIN_ADOPTED = 17;
 
 const MUTATION_KINDS = new Set(["set", "delete", "clear", "reset", "fold"]);
-const STORE_METHOD_PATTERN =
-  /(?<![\w$.])store\s*\.\s*(set|delete|save|clear|reset)\s*\(|\(\s*await\s+[A-Za-z_$][\w$]*\s*\(\s*\)\s*\)\s*\.\s*(set|delete|save|clear|reset)\s*\(/g;
-const STORE_RELOAD_PATTERN =
-  /(?<![\w$.])store\s*\.\s*reload\s*\(|\(\s*await\s+[A-Za-z_$][\w$]*\s*\(\s*\)\s*\)\s*\.\s*reload\s*\(/g;
+const STORE_METHODS = "set|delete|save|clear|reset";
+const STORE_METHOD_PATTERN = new RegExp(
+  `(?<![\\w$.])store(?:\\s+as\\s+[^;,)]+)?\\s*\\)*\\s*(?:\\?\\.|!\\.|\\.)\\s*(${STORE_METHODS})\\s*\\(`,
+  "g",
+);
+const STORE_RELOAD_PATTERN = new RegExp(
+  `(?<![\\w$.])store(?:\\s+as\\s+[^;,)]+)?\\s*\\)*\\s*(?:\\?\\.|!\\.|\\.)\\s*reload\\s*\\(`,
+  "g",
+);
 const FOLD_PATTERN = /\bfoldIdentityKey\s*(?:<[^>]*>)?\s*\(/g;
+const LOCKED_CALLBACK_SHAPES =
+  /\b(?:setTimeout|queueMicrotask)\s*\(|\.\s*(?:then|on)\s*\(/g;
+const LOADER_IMPORT_SOURCES = [
+  "@tauri-apps/plugin-store",
+  "@/lib/plugin-store",
+];
 
 function hasStoreReload(text) {
   STORE_RELOAD_PATTERN.lastIndex = 0;
@@ -99,31 +114,96 @@ function matchingParen(masked, open) {
   return close;
 }
 
-function directLoadAliases(source, masked) {
-  const aliases = new Set();
+function loaderImports(source, masked) {
+  const info = {
+    scanned: false,
+    load: new Set(),
+    memo: new Set(),
+    failures: [],
+  };
   const imports =
-    /\bimport\s*\{([\s\S]*?)\}\s*from\s*(["'])@tauri-apps\/plugin-store\2/g;
+    /\bimport\s+([\s\S]*?)\s+from\s*(["'])(@tauri-apps\/plugin-store|@\/lib\/plugin-store)\2/g;
   for (const match of source.matchAll(imports)) {
     if (masked.slice(match.index, match.index + 6) !== "import") continue;
-    for (const item of match[1].split(",")) {
-      const parts = item.trim().split(/\s+as\s+/);
-      if (parts[0] === "load") aliases.add(parts[1] ?? "load");
+    info.scanned = true;
+    const clause = match[1].trim();
+    const named = clause.match(/\{([\s\S]*)\}/)?.[1] ?? "";
+    for (const item of named.split(",")) {
+      const trimmed = item.trim();
+      if (!trimmed || /^type\b/.test(trimmed)) continue;
+      const parts = trimmed.split(/\s+as\s+/);
+      const imported = parts[0].replace(/^type\s+/, "").trim();
+      const local = parts[1]?.trim() ?? imported;
+      if (imported === "load") {
+        if (local !== imported)
+          info.failures.push("aliased import of load is unsupported");
+        else info.load.add(local);
+      }
+      if (imported === "memoizedStoreLoader") {
+        if (local !== imported)
+          info.failures.push(
+            "aliased import of memoizedStoreLoader is unsupported",
+          );
+        else info.memo.add(local);
+      }
+    }
+    if (/\*\s+as\s+[A-Za-z_$][\w$]*/.test(clause))
+      info.failures.push("namespace import of a store loader is unsupported");
+    if (!named && !/^\*\s+as\s+/.test(clause) && !/^type\b/.test(clause))
+      info.failures.push("default import of a store loader is unsupported");
+  }
+  for (const match of source.matchAll(
+    /\bimport\s*\(\s*["'](?:@tauri-apps\/plugin-store|@\/lib\/plugin-store)["']\s*\)/g,
+  )) {
+    if (masked.slice(match.index, match.index + 6).includes("import")) {
+      info.scanned = true;
+      info.failures.push("dynamic import of a store loader is unsupported");
     }
   }
-  return aliases;
+  if (
+    !info.scanned &&
+    /\bexport\s+(?:\*|\{[\s\S]*\})\s+from\s*["'](?:@tauri-apps\/plugin-store|@\/lib\/plugin-store)["']/.test(
+      source,
+    )
+  )
+    info.scanned = true;
+  return info;
 }
 
-function storeOpeners(source, masked) {
+function storeOpeners(source, masked, imports, functions) {
   const openers = [];
-  const memo = /\bmemoizedStoreLoader\s*\(/g;
+  const memoNames =
+    imports.memo.size > 0 || !/\bmemoizedStoreLoader\b/.test(masked)
+      ? imports.memo
+      : new Set(["memoizedStoreLoader"]);
+  const memo = new RegExp(
+    `(?<![\\w$.])(?:${[...memoNames].map(escapeRe).join("|") || "(?!x)x"})\\s*\\(`,
+    "g",
+  );
   for (const match of masked.matchAll(memo)) {
     const before = masked.slice(Math.max(0, match.index - 40), match.index);
     if (/\bfunction\s*$/.test(before)) continue;
     openers.push(match.index);
   }
-  for (const alias of directLoadAliases(source, masked)) {
-    const call = new RegExp(`(?<![\\w$.])${escapeRe(alias)}\\s*\\(`, "g");
-    for (const match of masked.matchAll(call)) openers.push(match.index);
+  const openerNames = new Set(imports.load);
+  for (const fn of functions) {
+    const body = masked.slice(fn.open, fn.close);
+    if (
+      [...imports.load].some((name) =>
+        new RegExp(`\\b${escapeRe(name)}\\s*\\(`).test(body),
+      )
+    )
+      openerNames.add(fn.name);
+  }
+  for (const name of openerNames) {
+    const call = new RegExp(`(?<![\\w$.])${escapeRe(name)}\\s*\\(`, "g");
+    for (const match of masked.matchAll(call)) {
+      if (
+        functions.some((fn) => fn.name === name && fn.nameIndex === match.index)
+      )
+        continue;
+      openers.push(match.index);
+    }
   }
   return openers.sort((a, b) => a - b);
 }
@@ -151,35 +231,54 @@ function parseFunctions(masked) {
 }
 
 function constantStrings(source, masked) {
-  const bindings = new Map();
-  for (const match of masked.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
-    const name = match[1];
+  const declarations = new Map();
+  for (const match of masked.matchAll(
+    /\b(?:const|let)\s+([A-Za-z_$][\w$]*)(?:\s*=\s*)?/g,
+  )) {
+    const hasInitializer = /=\s*$/.test(match[0]);
     const raw = source.slice(match.index + match[0].length);
-    const literal = raw.match(/^(["'])([^"']+)\1/);
-    if (!literal) continue;
-    const values = bindings.get(name) ?? [];
-    values.push(literal[2]);
-    bindings.set(name, values);
+    const literal = hasInitializer
+      ? raw.match(/^(["'])([^"']+)\1(?=\s*(?:;|\r?\n|$))/)
+      : null;
+    const values = declarations.get(match[1]) ?? [];
+    values.push(literal?.[2] ?? null);
+    declarations.set(match[1], values);
+  }
+  const bindings = new Map();
+  for (const [name, values] of declarations) {
+    if (values.length === 1 && values[0] !== null)
+      bindings.set(name, values[0]);
   }
   return bindings;
 }
 
+function firstArgumentText(source, masked, open, close) {
+  let depth = 0;
+  const args = masked.slice(open + 1, close);
+  for (let i = 0; i < args.length; i++) {
+    if ("([{<".includes(args[i])) depth++;
+    else if (")]}>".includes(args[i])) depth--;
+    else if (args[i] === "," && depth === 0)
+      return source.slice(open + 1, open + 1 + i).trim();
+  }
+  return source.slice(open + 1, close).trim();
+}
+
 function firstArgument(source, masked, open, close, constants) {
-  const raw = source.slice(open + 1, close);
-  const literal = raw.match(/^\s*(["'])([^"']+)\1/);
+  const raw = firstArgumentText(source, masked, open, close);
+  const literal = raw.match(/^(["'])([^"']+)\1$/);
   if (literal) return literal[2];
-  const identifier = masked
-    .slice(open + 1, close)
-    .match(/^\s*([A-Za-z_$][\w$]*)/);
-  if (!identifier) return null;
-  const values = constants.get(identifier[1]);
-  return values?.length === 1 ? values[0] : null;
+  const identifier = raw.match(/^[A-Za-z_$][\w$]*$/);
+  return identifier ? (constants.get(identifier[0]) ?? null) : null;
 }
 
 function lockCallbacks(source, masked) {
   const constants = constantStrings(source, masked);
   const callbacks = [];
   for (const match of masked.matchAll(/\bwithAppStoreLock\s*\(/g)) {
+    const before = masked.slice(Math.max(0, match.index - 48), match.index);
+    if (/\bfunction\s*$/.test(before) || /(?:const|let|var)\s*$/.test(before))
+      continue;
     const open = masked.indexOf("(", match.index);
     const close = matchingParen(masked, open);
     const arrow = masked.indexOf("=>", open + 1);
@@ -238,13 +337,93 @@ function inCallback(index, callbacks) {
   );
 }
 
+function lockIdentity(source, masked, file) {
+  const failures = [];
+  if (file === LOCK_HELPER) return { valid: true, failures };
+  let imported = false;
+  for (const match of source.matchAll(
+    /\bimport\s+([\s\S]*?)\s+from\s*(["'])([^"']+)\2/g,
+  )) {
+    if (masked.slice(match.index, match.index + 6) !== "import") continue;
+    const named = match[1].match(/\{([\s\S]*)\}/)?.[1] ?? "";
+    for (const item of named.split(",")) {
+      const parts = item.trim().split(/\s+as\s+/);
+      if (parts[0]?.trim() !== "withAppStoreLock") continue;
+      if (parts[1] || match[3] !== "@/lib/app-store-lock")
+        failures.push(
+          "withAppStoreLock must be imported unaliased from @/lib/app-store-lock",
+        );
+      else imported = true;
+    }
+  }
+  if (/\b(?:function|const|let|var)\s+withAppStoreLock\b/.test(masked))
+    failures.push("withAppStoreLock must not be locally declared");
+  if (
+    /\bwithAppStoreLock\s*\(/.test(masked) &&
+    !imported &&
+    file !== LOCK_HELPER
+  )
+    failures.push(
+      "withAppStoreLock must be imported from @/lib/app-store-lock",
+    );
+  return { valid: failures.length === 0 && imported, failures };
+}
+
+function openerBindings(source, masked, imports, functions) {
+  const names = new Set(imports.load);
+  const memoNames =
+    imports.memo.size > 0 || !/\bmemoizedStoreLoader\b/.test(masked)
+      ? imports.memo
+      : new Set(["memoizedStoreLoader"]);
+  const directLoads = [...imports.load];
+  for (const fn of functions) {
+    const body = masked.slice(fn.open, fn.close);
+    if (
+      directLoads.some((name) =>
+        new RegExp(`\\b${escapeRe(name)}\\s*\\(`).test(body),
+      )
+    )
+      names.add(fn.name);
+  }
+  for (const match of masked.matchAll(
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\s*)\(/g,
+  )) {
+    if (memoNames.has(match[0].match(/=\s*([A-Za-z_$][\w$]*)/)?.[1]))
+      names.add(match[1]);
+  }
+  return names;
+}
+
+function awaitedBefore(masked, index, kind) {
+  const prefix = masked.slice(Math.max(0, index - 40), index);
+  return (
+    /\bawait\s*$/.test(prefix) ||
+    (kind === "fold" && /\breturn\s*$/.test(prefix))
+  );
+}
+
+function callBodyRange(masked, index) {
+  const open = masked.indexOf("(", index);
+  return open === -1 ? null : { open, close: matchingParen(masked, open) };
+}
+
 function scanSource(source, file = "fixture.ts") {
   const masked = maskNonCode(source, file.endsWith(".tsx"));
-  const openers = storeOpeners(source, masked);
+  const imports = loaderImports(source, masked);
+  const functions = parseFunctions(masked);
+  const openers = storeOpeners(source, masked, imports, functions);
   const infrastructure =
     file === INFRASTRUCTURE &&
     /\bfunction\s+memoizedStoreLoader\b/.test(masked);
-  if (openers.length === 0 && !infrastructure)
+  const unsupportedOpenerShape =
+    /\bnew\s+LazyStore\s*\(|\bStore\.load\s*\(/.test(masked);
+  const scannedByImport = imports.scanned;
+  if (
+    openers.length === 0 &&
+    !infrastructure &&
+    !scannedByImport &&
+    !unsupportedOpenerShape
+  )
     return {
       file,
       scanned: false,
@@ -253,18 +432,131 @@ function scanSource(source, file = "fixture.ts") {
       failures: [],
     };
 
-  const functions = parseFunctions(masked);
   const callbacks = lockCallbacks(source, masked);
-  const writes = [
-    ...masked.matchAll(STORE_METHOD_PATTERN),
-    ...masked.matchAll(FOLD_PATTERN),
-  ]
+  const identity = lockIdentity(source, masked, file);
+  const bindings = openerBindings(source, masked, imports, functions);
+  const foldMatches = [...masked.matchAll(FOLD_PATTERN)].filter(
+    (match) =>
+      !functions.some(
+        (fn) =>
+          fn.name === "foldIdentityKey" &&
+          match.index >= fn.nameIndex &&
+          match.index < fn.open,
+      ),
+  );
+  const writes = [...masked.matchAll(STORE_METHOD_PATTERN), ...foldMatches]
     .map((match) => ({
       index: match.index,
       kind: match[1] ?? match[2] ?? "fold",
       line: lineOf(source, match.index),
     }))
     .sort((a, b) => a.index - b.index);
+  const reloadEvents = [
+    ...masked.matchAll(STORE_RELOAD_PATTERN),
+    ...[...masked.matchAll(/\breloadToleratingEmptyStore\s*\(/g)].filter(
+      (match) =>
+        !/\bfunction\s*$/.test(
+          masked.slice(Math.max(0, match.index - 32), match.index),
+        ),
+    ),
+  ].map((match) => ({
+    index: match.index,
+    kind: "reload",
+    helper: /reloadTolerating/.test(match[0]),
+    line: lineOf(source, match.index),
+  }));
+  const structuralFailures = [...imports.failures];
+  const wrongReceivers = new Set();
+  const openerNamePattern = [...bindings].map(escapeRe).join("|");
+  if (openerNamePattern) {
+    for (const match of masked.matchAll(
+      new RegExp(
+        `\\b(const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*await\\s+(?:${openerNamePattern})\\s*\\(`,
+        "g",
+      ),
+    )) {
+      if (match[2] !== "store" || match[1] !== "const") {
+        wrongReceivers.add(match[2]);
+        structuralFailures.push(
+          `opener result must be bound as const store (found ${match[2]})`,
+        );
+      }
+    }
+    const unbound = new RegExp(
+      `\\(\\s*await\\s+(?:${openerNamePattern})\\s*\\([^)]*\\)\\s*\\)\\s*(?:\\?\\.|!\\.|\\.)\\s*(${STORE_METHODS}|reload)\\s*\\(`,
+      "g",
+    );
+    for (const match of masked.matchAll(unbound)) {
+      structuralFailures.push(
+        "opener result must be bound as const store before member access",
+      );
+      writes.push({
+        index: match.index,
+        kind: match[1],
+        line: lineOf(source, match.index),
+      });
+    }
+  }
+  for (const receiver of wrongReceivers) {
+    const pattern = new RegExp(
+      `(?<![\\w$.])${escapeRe(receiver)}\\s*(?:\\?\\.|!\\.|\\.)\\s*(${STORE_METHODS}|reload)\\s*\\(`,
+      "g",
+    );
+    for (const match of masked.matchAll(pattern)) {
+      structuralFailures.push(
+        `untracked opener receiver ${receiver} is fail-closed`,
+      );
+      writes.push({
+        index: match.index,
+        kind: match[1],
+        line: lineOf(source, match.index),
+      });
+    }
+  }
+  for (const match of masked.matchAll(
+    /\bthis\s*\.\s*store\s*(?:\?\.|!\.|\.)\s*(set|delete|save|clear|reset|reload)\s*\(/g,
+  )) {
+    structuralFailures.push("this.store member access is fail-closed");
+    writes.push({
+      index: match.index,
+      kind: match[1],
+      line: lineOf(source, match.index),
+    });
+  }
+  if (/\bstore\s*\[/.test(masked))
+    structuralFailures.push("computed store members are fail-closed");
+  for (const reload of reloadEvents.filter((event) => event.helper)) {
+    const open = masked.indexOf("(", reload.index);
+    const close = matchingParen(masked, open);
+    const arg = firstArgumentText(source, masked, open, close);
+    const valid =
+      arg === "store" ||
+      (openerNamePattern &&
+        new RegExp(`^await\\s+(?:${openerNamePattern})\\s*\\([^)]*\\)$`).test(
+          arg,
+        ));
+    if (!valid)
+      structuralFailures.push(
+        "reloadToleratingEmptyStore() must receive the tracked store binding",
+      );
+  }
+  if (/\bnew\s+LazyStore\s*\(|\bStore\.load\s*\(/.test(masked))
+    structuralFailures.push(
+      "new LazyStore and Store.load openers are unsupported",
+    );
+  if (
+    /\bexport\s+(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:memoizedStoreLoader|load)\s*\(/.test(
+      masked,
+    )
+  )
+    structuralFailures.push("exported loader call results are unsupported");
+  if (
+    /\bimport\s*\{[\s\S]*\bfoldIdentityKey\s+as\s+[A-Za-z_$][\w$]*/.test(masked)
+  )
+    structuralFailures.push("aliased import of foldIdentityKey is unsupported");
+  if (identity.failures.length) structuralFailures.push(...identity.failures);
+  writes.sort((a, b) => a.index - b.index);
+  let unawaited;
   const mutationEvents = writes.filter((write) =>
     MUTATION_KINDS.has(write.kind),
   );
@@ -297,6 +589,42 @@ function scanSource(source, file = "fixture.ts") {
     functionProtected.set(fn, protectedEverywhere);
     return protectedEverywhere;
   };
+
+  for (const fn of writeFunctions) {
+    if (!isProtected(fn)) continue;
+    const declarationPrefix = masked.slice(
+      Math.max(0, fn.nameIndex - 24),
+      fn.nameIndex,
+    );
+    if (/\bexport\s*$/.test(declarationPrefix))
+      structuralFailures.push(
+        `protected helper ${fn.name} must not be exported`,
+      );
+    for (const match of masked.matchAll(
+      new RegExp(`\\b${escapeRe(fn.name)}\\b`, "g"),
+    )) {
+      if (match.index === fn.nameIndex) continue;
+      const after = masked.slice(match.index + fn.name.length);
+      const before = masked.slice(Math.max(0, match.index - 16), match.index);
+      if (/^\s*\(/.test(after) || /\bfunction\s*$/.test(before)) continue;
+      structuralFailures.push(
+        `protected helper ${fn.name} has a non-call reference`,
+      );
+      break;
+    }
+  }
+
+  unawaited = (
+    infrastructure ? [...writes] : [...writes, ...reloadEvents]
+  ).filter((event) => {
+    if (awaitedBefore(masked, event.index, event.kind)) return false;
+    if (event.kind !== "reload") return true;
+    const owner = containingFunction(event.index, functions);
+    return (
+      inCallback(event.index, callbacks) ||
+      (owner && reloadFunctions.includes(owner) && isProtected(owner))
+    );
+  });
 
   const summaryCache = new Map();
   const summarizing = new Set();
@@ -366,11 +694,42 @@ function scanSource(source, file = "fixture.ts") {
     return operations.sort((a, b) => a.index - b.index);
   };
 
-  const failures = [];
+  const mutationCallback = callbacks.some((callback) =>
+    callbackOperations(callback).some(
+      (event) =>
+        MUTATION_KINDS.has(event.kind) ||
+        (event.helper && functionSummary(event.helper).mutates),
+    ),
+  );
+  const adoptionReady =
+    ADOPTED.has(file) &&
+    identity.valid &&
+    callbacks.length > 0 &&
+    (mutationCallback ||
+      (file === "src/lib/settings/api.ts" &&
+        mutationEvents.some(
+          (event) =>
+            containingFunction(event.index, functions)?.name === "saveSettings",
+        )));
+  if (ADOPTED.has(file) && !adoptionReady)
+    structuralFailures.push(
+      "adopted module must contain an unaliased lock callback with a mutation event",
+    );
+
+  const failures = structuralFailures.map((message) => ({
+    line: lineOf(source, 0),
+    message,
+  }));
+  for (const event of unawaited) {
+    failures.push({
+      line: event.line,
+      message: `${event.kind} must be awaited`,
+    });
+  }
   for (const write of writes) {
     const owner = containingFunction(write.index, functions);
     if (
-      MUTATION_KINDS.has(write.kind) &&
+      (MUTATION_KINDS.has(write.kind) || write.kind === "save") &&
       !inCallback(write.index, callbacks) &&
       !isProtected(owner)
     ) {
@@ -380,22 +739,84 @@ function scanSource(source, file = "fixture.ts") {
       });
     }
   }
+  for (const match of masked.matchAll(LOCKED_CALLBACK_SHAPES)) {
+    const range = callBodyRange(masked, match.index);
+    if (!range) continue;
+    for (const event of writes) {
+      if (event.index < range.open || event.index >= range.close) continue;
+      const lock = callbacks.find(
+        (callback) =>
+          event.index >= callback.start && event.index < callback.end,
+      );
+      if (!lock || lock.start <= match.index)
+        failures.push({
+          line: event.line,
+          message: `${event.kind} inside ${match[0].trim()} callback is fail-closed`,
+        });
+    }
+  }
+  for (const callback of callbacks) {
+    const body = masked.slice(callback.start, callback.end);
+    for (const match of body.matchAll(
+      /\breturn\s+(?:async\s+)?(?:\([^{}]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g,
+    )) {
+      const open = callback.start + match.index + match[0].lastIndexOf("{");
+      const close = matchBrace(masked, open);
+      if (close === -1) continue;
+      for (const event of writes) {
+        if (event.index > open && event.index < close)
+          failures.push({
+            line: event.line,
+            message: `${event.kind} inside a function returned from a locked callback is fail-closed`,
+          });
+      }
+    }
+  }
+  for (const event of writes) {
+    const owner = containingFunction(event.index, functions);
+    const lock = callbacks.find(
+      (callback) => event.index >= callback.start && event.index < callback.end,
+    );
+    if (owner && lock && owner.open > lock.start) {
+      const prefix = masked.slice(
+        Math.max(lock.start, owner.open - 96),
+        owner.open,
+      );
+      const returnedName = new RegExp(
+        `\\breturn\\s+${escapeRe(owner.name)}\\b`,
+      ).test(masked.slice(lock.start, lock.end));
+      if (/\breturn\s*$/.test(prefix) || returnedName)
+        failures.push({
+          line: event.line,
+          message: `${event.kind} inside a function returned from a locked callback is fail-closed`,
+        });
+    }
+  }
 
   for (const callback of callbacks) {
     const events = callbackOperations(callback).filter(
       (event) => event.helper || MUTATION_KINDS.has(event.kind),
     );
-    const reloads = [];
-    for (const match of storeReloadMatches(
-      masked.slice(callback.start, callback.end),
-    )) {
-      reloads.push(callback.start + match.index);
-    }
-    for (const match of masked
-      .slice(callback.start, callback.end)
-      .matchAll(/\breloadToleratingEmptyStore\s*\(/g)) {
-      reloads.push(callback.start + match.index);
-    }
+    const reloads = reloadEvents
+      .filter(
+        (reload) =>
+          reload.index >= callback.start &&
+          reload.index < callback.end &&
+          (!reload.helper ||
+            (() => {
+              const open = masked.indexOf("(", reload.index);
+              const close = matchingParen(masked, open);
+              const arg = firstArgumentText(source, masked, open, close);
+              return (
+                arg === "store" ||
+                (openerNamePattern &&
+                  new RegExp(
+                    `^await\\s+(?:${openerNamePattern})\\s*\\([^)]*\\)$`,
+                  ).test(arg))
+              );
+            })()),
+      )
+      .map((reload) => reload.index);
     for (const fn of reloadFunctions) {
       for (const call of callsOf(fn.name, masked, functions)) {
         if (call < callback.start || call >= callback.end) continue;
@@ -471,6 +892,46 @@ function scanSource(source, file = "fixture.ts") {
     }
   }
 
+  if (infrastructure && writes.length !== 0)
+    failures.push({
+      line: lineOf(source, writes[0].index),
+      message: "infrastructure module must contain zero store writes",
+    });
+  if (file === DYNAMIC_MIGRATOR) {
+    for (const callback of callbacks) {
+      const before = masked.slice(0, callback.call);
+      const matches = [
+        ...before.matchAll(/\bconst\s+store\s*=\s*await\s+loadStore\s*\(/g),
+      ];
+      const opener = matches.at(-1);
+      if (!opener) {
+        failures.push({
+          line: lineOf(source, callback.call),
+          message:
+            "migrator lock must follow const store = await loadStore(...)",
+        });
+        continue;
+      }
+      const openerOpen = masked.indexOf("(", opener.index);
+      const openerClose = matchingParen(masked, openerOpen);
+      const lockOpen = masked.indexOf("(", callback.call);
+      const lockClose = matchingParen(masked, lockOpen);
+      const loadArg = firstArgumentText(
+        source,
+        masked,
+        openerOpen,
+        openerClose,
+      );
+      const lockArg = firstArgumentText(source, masked, lockOpen, lockClose);
+      if (loadArg !== lockArg)
+        failures.push({
+          line: lineOf(source, callback.call),
+          message:
+            "migrator lock and loadStore arguments must be the same identifier",
+        });
+    }
+  }
+
   const classification = infrastructure
     ? "INFRASTRUCTURE_WRITE_FREE"
     : file === DYNAMIC_MIGRATOR
@@ -479,7 +940,7 @@ function scanSource(source, file = "fixture.ts") {
         ? "EXEMPT"
         : ADOPTED.has(file)
           ? "ADOPTED"
-          : writes.length === 0
+          : openers.length === 0
             ? "UNLISTED_WRITE_FREE"
             : "UNLISTED";
   return {
@@ -491,19 +952,30 @@ function scanSource(source, file = "fixture.ts") {
     source,
     masked,
     functions,
+    identityValid: identity.valid,
+    adoptionReady,
   };
 }
 
 function firstStoreArgument(source, write) {
-  const open = source.indexOf("(", write.index);
-  const match = source.slice(open + 1).match(/^\s*(["'])([^"']+)\1/);
-  return match?.[2] ?? null;
+  const masked = maskNonCode(source, false);
+  const open = masked.indexOf("(", write.index);
+  if (open === -1) return null;
+  const close = matchingParen(masked, open);
+  return firstArgument(
+    source,
+    masked,
+    open,
+    close,
+    constantStrings(source, masked),
+  );
 }
 
 function exemptionFailure(file, result) {
   const source = result.source;
   const masked = result.masked;
   const writes = result.writes;
+  const functions = result.functions ?? [];
   const expected = {
     "src/lib/analytics/posthog.ts": {
       count: 2,
@@ -523,7 +995,6 @@ function exemptionFailure(file, result) {
       functions: ["writeBranchToStore"],
     },
   }[file];
-  const functions = result.functions ?? [];
   const actualFunctions = writes.map(
     (write) => containingFunction(write.index, functions)?.name ?? null,
   );
@@ -550,12 +1021,16 @@ function exemptionFailure(file, result) {
   if (file === "src/lib/review-notes/store.ts") {
     if (!masked.includes("COLD_START") || masked.includes("withAppStoreLock"))
       return "review-notes exemption pins the COLD_START-only plugin writer and no frontend lock path";
-    const calls = [...masked.matchAll(/\bwriteBranchToStore\s*\(/g)];
+    const calls = callsOf("writeBranchToStore", masked, functions);
+    const cold = masked.match(/if\s*\(\s*COLD_START\s*\)\s*\{/);
+    const coldClose = cold
+      ? matchBrace(masked, masked.indexOf("{", cold.index))
+      : -1;
     if (
-      calls.length !== 2 ||
-      !/if\s*\(\s*COLD_START\s*\)\s*\{?[\s\S]{0,180}\bwriteBranchToStore\s*\(/.test(
-        masked,
-      )
+      calls.length !== 1 ||
+      coldClose === -1 ||
+      calls[0] < masked.indexOf("{", cold?.index ?? -1) ||
+      calls[0] >= coldClose
     )
       return "review-notes plugin-store writer must remain only under the COLD_START branch";
     if (
@@ -570,6 +1045,18 @@ function exemptionFailure(file, result) {
     masked.includes("withAppStoreLock")
   )
     return `${EXEMPT.get(file)} exemption pins whole-state store.set persistence without a frontend lock`;
+  if (
+    [
+      "src/features/plan/persistence.ts",
+      "src/features/research/persistence.ts",
+      "src/lib/stores/notifications.ts",
+    ].includes(file)
+  ) {
+    const pinned = expected.functions[0];
+    const fn = functions.find((candidate) => candidate.name === pinned);
+    if (!fn || /\bstore\s*\.\s*get\s*\(/.test(masked.slice(fn.open, fn.close)))
+      return `${EXEMPT.get(file)} writer must contain zero store.get() reads`;
+  }
   if (
     file === "src/lib/stores/notifications.ts" &&
     !masked.includes("useNotifStore.subscribe")
@@ -602,17 +1089,17 @@ function settingsShapeFailure(result) {
   );
   const wrapper = callbacks.find((callback) => {
     const body = masked.slice(callback.start, callback.end);
+    const reload = body.search(/\breloadToleratingEmptyStore\s*\(/);
+    const fnCall = body.search(/\bfn\s*\(/);
+    const save = body.search(/\bstore\s*\.\s*save\s*\(/);
     return (
       callback.start > open &&
       callback.end < close &&
-      /\bfn\s*\(/.test(body) &&
-      body.includes("reloadToleratingEmptyStore") &&
-      result.writes.some(
-        (write) =>
-          write.kind === "save" &&
-          write.index >= callback.start &&
-          write.index < callback.end,
-      )
+      reload !== -1 &&
+      fnCall !== -1 &&
+      save !== -1 &&
+      reload < fnCall &&
+      fnCall < save
     );
   });
   if (!wrapper)
@@ -621,6 +1108,7 @@ function settingsShapeFailure(result) {
   const setWrites = result.writes.filter((write) => write.kind === "set");
   if (
     setWrites.length !== 1 ||
+    result.writes.some((write) => !["set", "save"].includes(write.kind)) ||
     containingFunction(setWrites[0]?.index, result.functions)?.name !==
       "saveSettings"
   )
@@ -644,6 +1132,14 @@ function settingsShapeFailure(result) {
     )
       return "every saveSettings() call must be inside a serializedRecentRepoWrite() argument";
   }
+  for (const match of masked.matchAll(/\bsaveSettings\b/g)) {
+    const after = masked.slice(match.index + "saveSettings".length);
+    const declaration = result.functions.some(
+      (fn) => fn.name === "saveSettings" && fn.nameIndex === match.index,
+    );
+    if (!declaration && !/^\s*\(/.test(after))
+      return "saveSettings must not be referenced except as a call";
+  }
   return null;
 }
 
@@ -662,19 +1158,49 @@ function scanTree() {
     } catch (error) {
       throw new ScanError(`${path}: ${error.message}`);
     }
+    const globalIdentity = lockIdentity(
+      source,
+      result.masked ?? maskNonCode(source, path.endsWith(".tsx")),
+      path,
+    );
+    if (globalIdentity.failures.length && !result.scanned)
+      for (const failure of globalIdentity.failures)
+        failures.push(`${path}: ${failure}`);
     if (!result.scanned) continue;
     scanned.push(result);
     if (result.classification === "UNLISTED")
       failures.push(
         `${path}: store opener has writes but is neither adopted nor exempt`,
       );
-    if (result.classification === "UNLISTED_WRITE_FREE")
-      failures.push(`${path}: store opener is not listed as adopted or exempt`);
     const enforceSites =
-      result.classification === "ADOPTED" && path !== "src/lib/settings/api.ts";
+      result.classification === "ADOPTED" ||
+      result.classification === "INFRASTRUCTURE_WRITE_FREE" ||
+      result.classification === "DYNAMIC_MIGRATOR";
     if (enforceSites)
-      for (const failure of result.failures)
+      for (const failure of result.failures) {
+        if (
+          result.classification === "DYNAMIC_MIGRATOR" &&
+          /file must match the opener's file literal/.test(failure.message)
+        )
+          continue;
+        if (
+          result.classification === "ADOPTED" &&
+          path === "src/lib/settings/api.ts" &&
+          /outside a withAppStoreLock callback/.test(failure.message) &&
+          (() => {
+            const fn = result.functions.find(
+              (candidate) => candidate.name === "saveSettings",
+            );
+            return (
+              fn &&
+              failure.line >= lineOf(result.source, fn.open) &&
+              failure.line <= lineOf(result.source, fn.close)
+            );
+          })()
+        )
+          continue;
         failures.push(`${path}:${failure.line}: ${failure.message}`);
+      }
     if (result.classification === "EXEMPT") {
       const failure = exemptionFailure(path, result);
       if (failure) failures.push(`${path}: ${failure}`);
@@ -692,23 +1218,80 @@ function scanTree() {
       );
   return {
     scanned,
-    adopted: scanned.filter((result) => result.classification === "ADOPTED"),
+    adopted: scanned.filter(
+      (result) => result.classification === "ADOPTED" && result.adoptionReady,
+    ),
     failures,
   };
+}
+
+function helperShapeFailure(source) {
+  const masked = maskNonCode(source, false);
+  const calls = [...masked.matchAll(/\binvoke(?:<[^>]+>)?\s*\(/g)];
+  const methods = calls.map((match) => {
+    const open = masked.indexOf("(", match.index);
+    const close = matchingParen(masked, open);
+    return firstArgumentText(source, masked, open, close);
+  });
+  if (!masked.match(/export\s+async\s+function\s+withAppStoreLock\b/))
+    return "lock helper must export withAppStoreLock";
+  if (
+    methods.filter(
+      (method) =>
+        method === '"app_store_lock_acquire"' ||
+        method === "'app_store_lock_acquire'",
+    ).length !== 1
+  )
+    return "lock helper must contain one code acquire invoke";
+  if (
+    methods.filter(
+      (method) =>
+        method === '"app_store_lock_release"' ||
+        method === "'app_store_lock_release'",
+    ).length !== 1
+  )
+    return "lock helper must contain one code release invoke";
+  const fn = masked.match(
+    /export\s+async\s+function\s+withAppStoreLock\b[^\{]*\{/,
+  );
+  const open = fn ? masked.indexOf("{", fn.index) : -1;
+  const close = open === -1 ? -1 : matchBrace(masked, open);
+  if (open === -1 || close === -1) return "lock helper body is unreadable";
+  const body = masked.slice(open, close);
+  const early =
+    body.match(/if\s*\(\s*COLD_START\s*\)\s*return\s+fn\s*\(\s*\)\s*;/g) ?? [];
+  if (early.length !== 1)
+    return "COLD_START must have exactly one early return fn()";
+  const tryIndex = body.indexOf("try");
+  if (
+    tryIndex === -1 ||
+    (body.slice(0, tryIndex).match(/\breturn\b/g) ?? []).length !== 1
+  )
+    return "COLD_START return must be the only early helper return";
+  const finallyIndex = body.indexOf("finally");
+  if (finallyIndex === -1) return "lock release must be inside finally";
+  const finallyOpen = masked.indexOf("{", open + finallyIndex);
+  const finallyClose =
+    finallyOpen === -1 ? -1 : matchBrace(masked, finallyOpen);
+  const release = methods.findIndex(
+    (method) =>
+      method === '"app_store_lock_release"' ||
+      method === "'app_store_lock_release'",
+  );
+  const releaseIndex = calls[release]?.index ?? -1;
+  if (
+    finallyClose === -1 ||
+    releaseIndex < finallyOpen ||
+    releaseIndex >= finallyClose
+  )
+    return "app_store_lock_release must stay inside finally";
+  return null;
 }
 
 function assertLockHelper() {
   assert.ok(existsSync(join(ROOT, LOCK_HELPER)), `${LOCK_HELPER} must exist`);
   const source = readFileSync(join(ROOT, LOCK_HELPER), "utf8");
-  const masked = maskNonCode(source, false);
-  assert.match(masked, /export\s+async\s+function\s+withAppStoreLock\b/);
-  assert.equal((source.match(/app_store_lock_acquire/g) ?? []).length, 1);
-  assert.equal((source.match(/app_store_lock_release/g) ?? []).length, 1);
-  assert.match(
-    source,
-    /invoke(?:<[^>]+>)?\(\s*["']app_store_lock_acquire["']\s*,/,
-  );
-  assert.match(source, /invoke\(\s*["']app_store_lock_release["']\s*,/);
+  assert.equal(helperShapeFailure(source), null, helperShapeFailure(source));
 }
 
 function assertCleanTreeScan() {
@@ -762,7 +1345,7 @@ test("app-store-lock scanner has red fixtures", () => {
     `const getStore = memoizedStoreLoader("fixture.json");
 // store.set("comment", 1); store.save();
 const fake = "store.set('string', 1)";`,
-    "src/lib/jira/store.ts",
+    "fixture.ts",
   );
   assert.deepEqual(masked.failures, []);
 
@@ -884,6 +1467,213 @@ const fake = "store.set('string', 1)";`,
   assert.match(
     settingsShapeFailure(directSettingsWrite),
     /exactly one store\.set/,
+  );
+
+  const receiverAlias = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("jira.json"); async function save() { const s = await getStore(); await withAppStoreLock("jira.json", async () => { await s.clear(); await s.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    receiverAlias.failures.map((failure) => failure.message).join("\n"),
+    /bound as const store|untracked opener receiver/,
+  );
+
+  const adoptedNoLocks = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    adoptedNoLocks.failures[0]?.message ?? "",
+    /adopted module must contain/,
+  );
+
+  const infrastructureWrite = scanSource(
+    'import { load } from "@tauri-apps/plugin-store"; export function memoizedStoreLoader(file) { const store = load(file); return async () => { await store.set("x", 1); return store; }; }',
+    "src/lib/plugin-store.ts",
+  );
+  assert.match(
+    infrastructureWrite.failures.map((failure) => failure.message).join("\n"),
+    /infrastructure module must contain zero store writes/,
+  );
+
+  const migratorUnlocked = scanSource(
+    'import { load } from "@tauri-apps/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; function loadStore(file) { return load(file); } async function migrate(file) { const store = await loadStore(file); await store.delete("x"); }',
+    DYNAMIC_MIGRATOR,
+  );
+  assert.match(
+    migratorUnlocked.failures.map((failure) => failure.message).join("\n"),
+    /outside a withAppStoreLock/,
+  );
+
+  const settingsDelete = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("settings.json"); async function saveSettings(value) { const store = await getStore(); await store.delete("settings"); } function serializedRecentRepoWrite(fn) { return withAppStoreLock("settings.json", async () => { const store = await getStore(); await reloadToleratingEmptyStore(store); await fn(); await store.save(); }); }',
+    "src/lib/settings/api.ts",
+  );
+  assert.match(settingsShapeFailure(settingsDelete), /exactly one store\.set/);
+
+  const settingsOrder = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("settings.json"); async function saveSettings(value) { const store = await getStore(); await store.set("settings", value); } function serializedRecentRepoWrite(fn) { return withAppStoreLock("settings.json", async () => { const store = await getStore(); await store.save(); await fn(); await reloadToleratingEmptyStore(store); }); }',
+    "src/lib/settings/api.ts",
+  );
+  assert.match(settingsShapeFailure(settingsOrder), /lock callback/);
+
+  const settingsReference = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("settings.json"); async function saveSettings(value) { const store = await getStore(); await store.set("settings", value); } const persist = saveSettings; function serializedRecentRepoWrite(fn) { return withAppStoreLock("settings.json", async () => { const store = await getStore(); await reloadToleratingEmptyStore(store); await fn(); await store.save(); }); }',
+    "src/lib/settings/api.ts",
+  );
+  assert.match(
+    settingsShapeFailure(settingsReference),
+    /must not be referenced/,
+  );
+
+  const localLock = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; const getStore = memoizedStoreLoader("fixture.json"); async function withAppStoreLock(file, fn) { return fn(); } async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.set("x", 1); await store.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    localLock.failures.map((failure) => failure.message).join("\n"),
+    /locally declared|must be imported/,
+  );
+
+  const foreignLock = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "./other-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.set("x", 1); await store.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    foreignLock.failures.map((failure) => failure.message).join("\n"),
+    /unaliased from/,
+  );
+
+  const commentedAcquire = `export async function withAppStoreLock(file, fn) { if (COLD_START) return fn(); // invoke("app_store_lock_acquire", {}) try { return await fn(); } finally { await invoke("app_store_lock_release", {}); } }`;
+  assert.match(helperShapeFailure(commentedAcquire) ?? "", /one code acquire/);
+
+  const plansGet = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; const getStore = memoizedStoreLoader("plans.json"); async function savePersistedPlans(runs) { const store = await getStore(); await store.get("plans"); await store.set("plans", runs); }',
+    "src/features/plan/persistence.ts",
+  );
+  assert.match(
+    exemptionFailure("src/features/plan/persistence.ts", plansGet),
+    /zero store\.get/,
+  );
+
+  const coldOutside = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; const getStore = memoizedStoreLoader("review-notes.json"); async function writeBranchToStore(note) { const store = await getStore(); if (note === null) await store.delete("x"); else await store.set("x", 1); await store.save(); } async function write() { return writeBranchToStore(); } if (COLD_START) { writeBranchToStore(null); }',
+    "src/lib/review-notes/store.ts",
+  );
+  assert.match(
+    exemptionFailure("src/lib/review-notes/store.ts", coldOutside),
+    /COLD_START branch/,
+  );
+
+  for (const literal of [
+    '"x.json" + suffix',
+    '"x.json".replace("x", "y")',
+    "FILE",
+  ]) {
+    const suffix =
+      literal === "FILE"
+        ? 'const FILE = "x.json"; function shadow() { const FILE = pickOther(); }'
+        : "";
+    const anchored = scanSource(
+      `import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; ${suffix} const getStore = memoizedStoreLoader(${literal}); async function save() { const store = await getStore(); await withAppStoreLock("x.json", async () => { await store.reload(); await store.set("x", 1); await store.save(); }); }`,
+      "src/lib/jira/store.ts",
+    );
+    assert.match(
+      anchored.failures.map((failure) => failure.message).join("\n"),
+      /file literal/,
+    );
+  }
+
+  const openerAlias = scanSource(
+    'import { memoizedStoreLoader as mk } from "@/lib/plugin-store"; const getStore = mk("fixture.json");',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    openerAlias.failures.map((failure) => failure.message).join("\n"),
+    /aliased import/,
+  );
+  const openerNamespace = scanSource(
+    'import * as ps from "@tauri-apps/plugin-store"; const getStore = ps.load("fixture.json");',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    openerNamespace.failures.map((failure) => failure.message).join("\n"),
+    /namespace import/,
+  );
+  for (const openerShape of [
+    'import("@tauri-apps/plugin-store")',
+    'new LazyStore("fixture.json")',
+    'Store.load("fixture.json")',
+    'export const getStore = memoizedStoreLoader("fixture.json")',
+  ]) {
+    const openerTripwire = scanSource(openerShape, "src/lib/jira/store.ts");
+    assert.ok(
+      openerTripwire.failures.length > 0,
+      `${openerShape} must fail closed`,
+    );
+  }
+
+  const receiverShapes = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store?.set("a", 1); await store!.delete("a"); await (store as any).set("a", 1); await this.store.set("a", 1); await store["set"]("a", 1); await (await getStore(r)).set("a", 1); await store.save(); }); }',
+    "fixture.ts",
+  );
+  assert.match(
+    receiverShapes.failures.map((failure) => failure.message).join("\n"),
+    /fail-closed|opener result must be bound/,
+  );
+
+  const scheduledWrite = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.reload(); await Promise.resolve().then(async () => { await store.set("x", 1); await store.save(); }); }); }',
+    "fixture.ts",
+  );
+  assert.match(
+    scheduledWrite.failures.map((failure) => failure.message).join("\n"),
+    /inside \.\s*then|inside \.then/,
+  );
+
+  const foldAlias = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { foldIdentityKey as fold } from "@/lib/git/repo-identity"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.reload(); await fold(store, "x", a, b, merge); await store.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    foldAlias.failures.map((failure) => failure.message).join("\n"),
+    /aliased import of foldIdentityKey/,
+  );
+
+  const unawaitedSave = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.reload(); await store.set("x", 1); void store.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    unawaitedSave.failures.map((failure) => failure.message).join("\n"),
+    /save must be awaited/,
+  );
+
+  const wrongReload = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); const other = await getStore(); await withAppStoreLock("fixture.json", async () => { await reloadToleratingEmptyStore(other); await store.set("x", 1); await store.save(); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    wrongReload.failures.map((failure) => failure.message).join("\n"),
+    /tracked store binding|must precede/,
+  );
+
+  const protectedEscape = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function writeIt(store) { await store.set("x", 1); await store.save(); } async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.reload(); await writeIt(store); setTimeout(writeIt, 10); }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    protectedEscape.failures.map((failure) => failure.message).join("\n"),
+    /protected helper writeIt has a non-call reference/,
+  );
+
+  const returnedWrite = scanSource(
+    'import { memoizedStoreLoader } from "@/lib/plugin-store"; import { withAppStoreLock } from "@/lib/app-store-lock"; const getStore = memoizedStoreLoader("fixture.json"); async function save() { const store = await getStore(); await withAppStoreLock("fixture.json", async () => { await store.reload(); return async () => { await store.set("x", 1); await store.save(); }; }); }',
+    "src/lib/jira/store.ts",
+  );
+  assert.match(
+    returnedWrite.failures.map((failure) => failure.message).join("\n"),
+    /returned from a locked callback/,
   );
 
   assert.throws(

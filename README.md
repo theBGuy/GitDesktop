@@ -347,9 +347,9 @@ in one click.
   conflicted files in the in-app conflict editor, and **Finish & push**
   updates the PR's head branch, **never force-pushed**: a head that moved
   meanwhile refuses the push and keeps your work. **Discard** drops the
-  worktree and nothing else, and an unfinished resolution is offered back as
-  **Continue resolving**. Fork PRs are excluded, since their head lives in
-  another repository.
+  worktree and nothing else, and an unfinished resolution is offered back
+  from any checkout of the repository as **Continue resolving**. Fork PRs
+  are excluded, since their head lives in another repository.
 - **Blocked by branch protection**: a PR that merges cleanly but whose rules
   refuse it gets its own strip line naming the reason. On **GitHub** that's
   the required checks still outstanding (four, then *and N more*) plus the
