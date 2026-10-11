@@ -15,10 +15,11 @@ use tauri::State;
 
 use crate::error::AppResult;
 use crate::git::branches::{finish_tracking_setup, validate_ref_name, TrackedBy};
+use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{
     acquire_repo_lock, run_git, run_git_raw, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -226,6 +227,19 @@ pub(crate) async fn git_pull_autostash_core(
     let network = state.network_lock(&repo_path).await;
     let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await?;
 
+    // Commits the pull's own transfer brings are not checked.
+    if mode != "rebase" {
+        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await {
+            if ignored_guard::pull_can_merge(&repo_path, &target, mode != "merge").await? {
+                let paths = ignored_files_in_the_way(&repo_path, &target, WORKTREE_OP_TIMEOUT)
+                    .await
+                    .map_err(|e| ignored_guard::check_failed("Pull", e))?;
+                if !paths.is_empty() {
+                    return Err(ignored_guard::pull_refusal(&paths));
+                }
+            }
+        }
+    }
     let stashed = autostash_push(&repo_path).await?;
     let op = run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await;
     settle(&repo_path, paused, stashed, true, op).await
@@ -252,6 +266,19 @@ pub(crate) async fn git_merge_autostash_core(
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
+    let network = state.network_lock(&repo_path).await;
+    let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a merge").await?;
+    let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
+    if let Some(incoming_sha) =
+        ignored_guard::target_commit(&repo_path, &rev, DEFAULT_TIMEOUT, "Merge").await?
+    {
+        let paths = ignored_files_in_the_way(&repo_path, &incoming_sha, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Merge", e))?;
+        if !paths.is_empty() {
+            return Err(ignored_guard::merge_refusal(&branch, &paths));
+        }
+    }
 
     let stashed = autostash_push(&repo_path).await?;
     // Read AFTER the push: it can mint `refs/stash`, which a bare `stash` resolves
@@ -259,7 +286,7 @@ pub(crate) async fn git_merge_autostash_core(
     let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     let op = run_git_raw(
         Some(&repo_path),
-        &["merge", "--no-edit", &rev],
+        &["merge", "--no-edit", "--no-overwrite-ignore", &rev],
         DEFAULT_TIMEOUT,
     )
     .await;
@@ -2153,5 +2180,60 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(upstream.code, 0, "the upstream miss stays a miss");
+    }
+    #[tokio::test]
+    async fn merge_autostash_ignored_guard_sensitivity() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        for diverged in [false, true] {
+            let mut f = Fixture::new(Shape::IgnoredFile, diverged).await;
+            let tracked = std::path::Path::new(&f.repo).join("tracked.txt");
+            std::fs::write(&tracked, "dirty tracked edit\n").unwrap();
+            f.snapshot().await;
+            let state = AppState::default();
+            let err = super::git_merge_autostash_core(&state, f.repo.clone(), "incoming".into())
+                .await
+                .unwrap_err();
+            f.assert_unchanged(&err).await;
+            assert_eq!(
+                std::fs::read_to_string(&tracked).unwrap(),
+                "dirty tracked edit\n"
+            );
+            f.remove_ignored();
+            assert!(matches!(
+                super::git_merge_autostash_core(&state, f.repo.clone(), "incoming".into())
+                    .await
+                    .unwrap(),
+                AutostashOutcome::Reapplied
+            ));
+            f.assert_landed().await;
+            assert_eq!(
+                std::fs::read_to_string(&tracked).unwrap(),
+                "dirty tracked edit\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_autostash_mid_operation_does_not_wait_for_fetch() {
+        use crate::git::ignored_guard::tests::{Fixture, MergeState, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        MergeState::MergeHead.install(&f).await;
+        let expected = crate::git::ops::refuse_mid_op(&f.repo).await.unwrap_err();
+        let state = AppState::default();
+        let network = state.network_lock(&f.repo).await;
+        let _held = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch")
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            git_merge_autostash_core(&state, f.repo.clone(), "incoming".into()),
+        )
+        .await
+        .expect("mid-operation refusal must precede the network wait")
+        .unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert_eq!(err.to_string(), expected.to_string());
+        assert!(!err.to_string().contains("ignored files"), "{err}");
+        f.assert_snapshot().await;
     }
 }

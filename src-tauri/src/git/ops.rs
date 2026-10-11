@@ -6,10 +6,11 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
+use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
     acquire_repo_lock, run_git, run_git_mutating, run_git_mutating_raw, run_git_raw,
-    run_git_raw_input, run_git_worktree_admin, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    run_git_raw_index_retry, run_git_raw_input, run_git_worktree_admin, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
@@ -2374,7 +2375,11 @@ pub(crate) async fn git_merge_core(
     strategy: String,
 ) -> AppResult<()> {
     validate_branch_arg(&branch)?;
-    let mut args: Vec<&str> = vec!["merge"];
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
+    let network = state.network_lock(&repo_path).await;
+    let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a merge").await?;
+    let mut args: Vec<&str> = vec!["merge", "--no-overwrite-ignore"];
     if squash {
         args.push("--squash");
     } else {
@@ -2391,9 +2396,25 @@ pub(crate) async fn git_merge_core(
     let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     args.push(&rev);
     let already_unmerged = unmerged_paths(&repo_path).await;
+    // Let git retain its own refusal for operations that already prevent a merge.
+    if !ignored_guard::merge_is_blocked(&repo_path, &already_unmerged)
+        .await
+        .map_err(|e| ignored_guard::check_failed("Merge", e))?
+    {
+        if let Some(incoming_sha) =
+            ignored_guard::target_commit(&repo_path, &rev, DEFAULT_TIMEOUT, "Merge").await?
+        {
+            let paths = ignored_files_in_the_way(&repo_path, &incoming_sha, DEFAULT_TIMEOUT)
+                .await
+                .map_err(|e| ignored_guard::check_failed("Merge", e))?;
+            if !paths.is_empty() {
+                return Err(ignored_guard::merge_refusal(&branch, &paths));
+            }
+        }
+    }
     // Raw, because a conflicted merge reports entirely on stdout and leaves
     // stderr empty — the combined text is what keeps that report in the error.
-    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(classify_failure(
             &repo_path,
@@ -2925,8 +2946,21 @@ async fn finalize_base(
              that change. {base} is unchanged — re-run the merge from its current tip."
         )
     };
-    // One read, before any arm: whatever `base` points at now has to match the
-    // tip the merge was built on.
+    let _current_guard = if base == current {
+        let domain = state.working_tree_lock(repo_path).await;
+        Some(acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?)
+    } else {
+        None
+    };
+    // The main checkout's hold spans the branch/pin reads through the fast-forward.
+    if base == current
+        && crate::git::branches::current_branch_name(repo_path)
+            .await?
+            .as_deref()
+            != Some(base)
+    {
+        return Err(AppError::Command(moved()));
+    }
     let tip_now = branch_tip(repo_path, base).await?;
     if let Some(expected) = expected_tip {
         if tip_now != expected {
@@ -2950,13 +2984,24 @@ async fn finalize_base(
         // `base` is the main repo's current branch — fast-forward its working
         // tree to the merged commit. (Guaranteed a fast-forward: `new_sha` was
         // built from base's tip in the resolve worktree.)
-        run_git_mutating(
-            state,
+        let paths = ignored_files_in_the_way(repo_path, new_sha, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Fast-forward", e))?;
+        if !paths.is_empty() {
+            return Err(ignored_guard::finalize_refusal(base, None, &paths));
+        }
+        let out = run_git_raw_index_retry(
             repo_path,
-            &["merge", "--ff-only", new_sha],
+            &["merge", "--ff-only", "--no-overwrite-ignore", new_sha],
             DEFAULT_TIMEOUT,
         )
         .await?;
+        if out.code != 0 {
+            return Err(AppError::Git {
+                code: out.code,
+                stderr: out.full_failure_text(),
+            });
+        }
         return Ok(());
     }
 
@@ -3030,16 +3075,39 @@ async fn finalize_base(
     }
 
     if let Some(worktree) = owning_worktree {
-        // Route the fast-forward INTO the worktree holding `base` so its index and
-        // working tree advance too; fails cleanly (base untouched) if it's dirty.
-        return run_git_mutating(
-            state,
-            &worktree,
-            &["merge", "--ff-only", new_sha],
-            DEFAULT_TIMEOUT,
-        )
+        let domain = state.working_tree_lock(&worktree).await;
+        let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
+        // The holder was discovered outside its lock, so verify its branch and tip again.
+        if crate::git::branches::current_branch_name(&worktree)
+            .await?
+            .as_deref()
+            != Some(base)
+            || branch_tip(&worktree, base).await? != tip_now
+        {
+            return Err(AppError::Command(moved()));
+        }
+        let paths = ignored_files_in_the_way(&worktree, new_sha, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Fast-forward", e))?;
+        if !paths.is_empty() {
+            return Err(ignored_guard::finalize_refusal(
+                base,
+                Some(&worktree),
+                &paths,
+            ));
+        }
+        return async {
+            let out = run_git_raw_index_retry(
+                &worktree,
+                &["merge", "--ff-only", "--no-overwrite-ignore", new_sha],
+                DEFAULT_TIMEOUT,
+            ).await?;
+            if out.code != 0 {
+                return Err(AppError::Git { code: out.code, stderr: out.full_failure_text() });
+            }
+            Ok(())
+        }
         .await
-        .map(|_| ())
         .map_err(|e| match e {
             AppError::Git { stderr, .. } => AppError::Command(format!(
                 "{base} is checked out at {worktree}; couldn't fast-forward it there \
@@ -10872,6 +10940,242 @@ detached
             rev(&repo, "refs/heads/feature").await,
             tip,
             "and the branch is exactly where it was"
+        );
+    }
+    #[tokio::test]
+    async fn merge_ignored_shapes_and_modes() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape, SHAPES};
+        for shape in SHAPES {
+            for diverged in [false, true] {
+                if shape == Shape::ModifyDelete && !diverged {
+                    continue;
+                }
+                for (squash, no_ff, strategy) in [
+                    (false, false, ""),
+                    (true, false, ""),
+                    (false, true, ""),
+                    (false, false, "theirs"),
+                ] {
+                    let f = Fixture::new(shape, diverged).await;
+                    let result = super::git_merge_core(
+                        &AppState::default(),
+                        f.repo.clone(),
+                        "incoming".into(),
+                        squash,
+                        no_ff,
+                        strategy.into(),
+                    )
+                    .await;
+                    if shape == Shape::InsideIgnoredDir {
+                        result.unwrap();
+                        f.assert_landed().await;
+                    } else {
+                        f.assert_unchanged(&result.unwrap_err()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_ignored_guard_sensitivity() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let state = AppState::default();
+        let err = super::git_merge_core(
+            &state,
+            f.repo.clone(),
+            "incoming".into(),
+            false,
+            false,
+            "".into(),
+        )
+        .await
+        .unwrap_err();
+        f.assert_unchanged(&err).await;
+        f.remove_ignored();
+        super::git_merge_core(
+            &state,
+            f.repo.clone(),
+            "incoming".into(),
+            false,
+            false,
+            "".into(),
+        )
+        .await
+        .unwrap();
+        f.assert_landed().await;
+    }
+
+    #[tokio::test]
+    async fn merge_ignored_subdirectory_refuses() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let sub = Path::new(&f.repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let err = super::git_merge_core(
+            &AppState::default(),
+            sub.to_string_lossy().into_owned(),
+            "incoming".into(),
+            false,
+            false,
+            "".into(),
+        )
+        .await
+        .unwrap_err();
+        f.assert_unchanged(&err).await;
+    }
+
+    #[tokio::test]
+    async fn merge_ignored_mid_merge_keeps_gits_refusal() {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        run(&f.repo, &["branch", "other", "HEAD~1"]).await;
+        run(&f.repo, &["switch", "-q", "other"]).await;
+        std::fs::write(Path::new(&f.repo).join("other.txt"), "other\n").unwrap();
+        run(&f.repo, &["add", "other.txt"]).await;
+        run(&f.repo, &["commit", "-qm", "other"]).await;
+        run(&f.repo, &["switch", "-q", "local"]).await;
+        run(&f.repo, &["merge", "--no-ff", "--no-commit", "other"]).await;
+        assert!(super::op_state(&f.repo).await.unwrap().merging);
+        let native = run_git_raw(
+            Some(&f.repo),
+            &["merge", "--no-edit", "--no-overwrite-ignore", "incoming"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(native.code, 0);
+        let err = super::git_merge_core(
+            &AppState::default(),
+            f.repo.clone(),
+            "incoming".into(),
+            false,
+            false,
+            "".into(),
+        )
+        .await
+        .unwrap_err();
+        let AppError::Git { code, stderr } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(code, native.code);
+        assert_eq!(stderr, native.full_failure_text());
+    }
+
+    #[tokio::test]
+    async fn finalize_ignored_guard_sensitivity_current() {
+        assert_finalize_ignored_guard_sensitivity(false).await;
+    }
+
+    #[tokio::test]
+    async fn finalize_ignored_guard_sensitivity_holder() {
+        assert_finalize_ignored_guard_sensitivity(true).await;
+    }
+
+    async fn assert_finalize_ignored_guard_sensitivity(held: bool) {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape};
+        let mut f = Fixture::new(Shape::IgnoredFile, false).await;
+        let repo = f.repo.clone();
+        if held {
+            let holder = f.dir.path().join("holder").to_string_lossy().into_owned();
+            run(&repo, &["switch", "--detach", "-q"]).await;
+            run(&repo, &["worktree", "add", &holder, "local"]).await;
+            std::fs::rename(
+                Path::new(&repo).join(f.ignored),
+                Path::new(&holder).join(f.ignored),
+            )
+            .unwrap();
+            f.repo = holder;
+        }
+        f.snapshot().await;
+        let current = if held { "HEAD" } else { "local" };
+        let state = AppState::default();
+        let err = super::finalize_base(&state, &repo, "local", &f.target, current, Some(&f.head))
+            .await
+            .unwrap_err();
+        f.assert_unchanged(&err).await;
+        if held {
+            assert!(err.to_string().contains(&f.repo.replace('\\', "/")));
+        }
+        f.remove_ignored();
+        super::finalize_base(&state, &repo, "local", &f.target, current, Some(&f.head))
+            .await
+            .unwrap();
+        f.assert_landed().await;
+        assert_eq!(run(&f.repo, &["rev-parse", "HEAD"]).await, f.target);
+    }
+
+    #[tokio::test]
+    async fn merge_ignored_guard_matches_native_operation_states() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape, MERGE_STATES};
+        for state in MERGE_STATES {
+            let mut f = Fixture::new(Shape::IgnoredFile, true).await;
+            state.install(&f).await;
+            f.snapshot().await;
+            let expected = if state.blocks_merge() {
+                Some(
+                    run_git_raw(
+                        Some(&f.repo),
+                        &["merge", "--no-overwrite-ignore", "--no-edit", "incoming"],
+                        DEFAULT_TIMEOUT,
+                    )
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            let err = git_merge_core(
+                &AppState::default(),
+                f.repo.clone(),
+                "incoming".into(),
+                false,
+                false,
+                "".into(),
+            )
+            .await
+            .unwrap_err();
+            if let Some(expected) = expected {
+                let AppError::Git { code, stderr } = err else {
+                    panic!("{state:?}: {err:?}")
+                };
+                assert_ne!(expected.code, 0);
+                assert_eq!(code, expected.code);
+                assert_eq!(stderr, expected.full_failure_text(), "{state:?}");
+                f.assert_snapshot().await;
+            } else {
+                f.assert_unchanged(&err).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_current_branch_rechecks_the_checkout() {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, false).await;
+        run(&f.repo, &["switch", "-c", "other"]).await;
+        let err = finalize_base(
+            &AppState::default(),
+            &f.repo,
+            "local",
+            &f.target,
+            "local",
+            Some(&f.head),
+        )
+        .await
+        .unwrap_err();
+        let AppError::Command(message) = err else {
+            panic!("{err:?}")
+        };
+        assert!(
+            message.starts_with("local moved while this merge was being prepared"),
+            "{message}"
+        );
+        f.assert_intact().await;
+        assert_eq!(
+            run(&f.repo, &["rev-parse", "refs/heads/other"]).await,
+            f.head
         );
     }
 }

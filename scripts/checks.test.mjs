@@ -3097,6 +3097,209 @@ test("stripComments blanks comments but not comment-shaped strings", () => {
 
 // -------------------------------------------------------- check-rust-invariants
 
+import {
+  checkMergeIgnoredGuard,
+  MERGE_GUARD_ALLOWLIST,
+} from "./check-rust-invariants.mjs";
+
+function mergeGuardHits(src, file = "fixture.rs") {
+  const hits = [];
+  checkMergeIgnoredGuard(file, src, src.split("\n"), hits);
+  return hits;
+}
+
+test("merge guard flags merge and pull argv, including incrementally built argv", () => {
+  for (const argv of [
+    '&["merge", target]',
+    'vec!["merge"]',
+    'vec!["merge".to_string()]',
+    '&["pull", flag]',
+    '& [ "merge", target]',
+    'vec ! [ "pull", flag]',
+  ]) {
+    const hits = mergeGuardHits(
+      "async fn unsafe_merge() {\n let args = " +
+        argv +
+        ';\n args.push("--ff-only");\n args.push("--no-overwrite-ignore");\n}',
+    );
+    assert.equal(hits.length, 1, argv);
+    assert.equal(hits[0].fn, "unsafe_merge");
+    assert.equal(hits[0].allowlisted, false);
+  }
+});
+
+test("merge guard ignores array constants starting with merge", () => {
+  const src =
+    'const MERGE_METHODS: [&str; 3] = ["merge", "rebase_merge", "ff"];';
+  assert.deepEqual(mergeGuardHits(src), []);
+});
+
+test("merge guard accepts a checked function and both literal exemptions", () => {
+  for (const src of [
+    'async fn guarded() { ignored_files_in_the_way(repo, sha, timeout).await?; run(&["merge", sha]); }',
+    'fn abort() { run(&["merge", "--abort"]); }',
+    'fn ff() { run(&["merge", "--ff-only", "--no-overwrite-ignore", sha]); }',
+  ]) {
+    assert.deepEqual(mergeGuardHits(src), []);
+  }
+});
+
+test("merge guard requires its own executable guard call", () => {
+  for (const body of [
+    "// ignored_files_in_the_way(repo, sha, timeout)\n",
+    'let prose = "ignored_files_in_the_way(repo, sha, timeout)";',
+    "fn nested() { ignored_files_in_the_way(repo, sha, timeout); }",
+    "let x = 0; fn inline_nested() { ignored_files_in_the_way(repo, sha, timeout); }",
+  ]) {
+    const src =
+      "fn earlier() { ignored_files_in_the_way(repo, sha, timeout); }\nfn unsafe_merge() {\n" +
+      body +
+      '\nrun(&["merge", sha]);\n}\nfn later() { ignored_files_in_the_way(repo, sha, timeout); }';
+    assert.equal(mergeGuardHits(src).length, 1, body);
+  }
+});
+
+test("merge guard ignores test modules and literals but scans production after tests", () => {
+  const src = [
+    '#[cfg(test)] mod tests { fn fixture() { run(&["merge", sha]); } }',
+    'fn prose() { let raw = r#"&["merge", sha]"#; }',
+    'fn production() { run(&["merge", sha]); }',
+  ].join("\n");
+  const hits = mergeGuardHits(src);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "production");
+});
+
+test("merge guard allowlists only the named fresh-checkout function", () => {
+  const src = 'async fn verify_pin_and_merge() { run(&["merge", sha]); }';
+  const hits = mergeGuardHits(src, "git/branches.rs");
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].allowlisted, true);
+  assert.equal(mergeGuardHits(src, "fixture.rs")[0].allowlisted, false);
+});
+
+test("merge guard reports stale rows after removal or a guard", () => {
+  const entry = MERGE_GUARD_ALLOWLIST.find(
+    (row) => row.fn === "verify_pin_and_merge",
+  );
+  for (const src of [
+    "fn verify_pin_and_merge() {}",
+    'fn verify_pin_and_merge() { ignored_files_in_the_way(repo, sha, timeout); run(&["merge", sha]); }',
+  ]) {
+    assert.deepEqual(
+      staleAllowlistEntries([entry], mergeGuardHits(src, entry.file)),
+      [entry],
+    );
+  }
+});
+
+test("merge guard recognizes argv wrappers, config pairs and Command", () => {
+  for (const argv of [
+    '&["-c", "a=b", "-c", setting, "merge", sha]',
+    'vec![String::from("merge"), sha]',
+    'vec!["pull".into(), flag]',
+    '&["merge".to_string(), sha]',
+    'Command::new("git").args(["merge", sha])',
+    'Command::new("git").arg("merge").arg(sha)',
+    'Command::new("git").arg("-c").arg(setting).arg("pull")',
+    '["pull", flag]',
+  ]) {
+    const src = "fn unsafe_merge() { let args = " + argv + "; }";
+    const hits = mergeGuardHits(src);
+    assert.equal(hits.length, 1, argv);
+    assert.equal(hits[0].fn, "unsafe_merge", argv);
+  }
+});
+
+test("merge guard recognizes typed arrays and array parameters", () => {
+  const src = [
+    "fn unsafe_merge(bytes: [u8; 4]) {",
+    '  let args: [&str; 2] = ["merge", sha];',
+    "}",
+  ].join("\n");
+  const hits = mergeGuardHits(src);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "unsafe_merge");
+});
+
+test("merge guard leaves const and static arrays alone", () => {
+  for (const item of ["const", "static", "static mut"]) {
+    for (const value of ['["merge", "ff"]', '&["merge", "ff"]']) {
+      const src = item + " METHODS: [&str; 2] = " + value + ";";
+      assert.deepEqual(mergeGuardHits(src), [], src);
+    }
+  }
+});
+
+test("merge guard requires the builder caller to check", () => {
+  const src = [
+    "async fn merge_pinned() { plain_merge_argv(repo, plain, flag).await; }",
+    "async fn merge_pinned_autostash() {",
+    "  ignored_files_in_the_way(repo, sha, timeout).await?;",
+    "  plain_merge_argv(repo, plain, flag).await;",
+    "}",
+  ].join("\n");
+  const hits = mergeGuardHits(src, "git/pull_guard.rs");
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "merge_pinned");
+  assert.equal(hits[0].allowlisted, false);
+  const swapped = src
+    .replace("fn merge_pinned()", "fn merge_pinned_autostash()")
+    .replace("fn merge_pinned_autostash() {\n", "fn merge_pinned() {\n");
+  const swappedHits = mergeGuardHits(swapped, "git/pull_guard.rs");
+  assert.equal(swappedHits.length, 1);
+  assert.equal(swappedHits[0].fn, "merge_pinned_autostash");
+});
+
+test("merge guard ignores builder prose and declarations", () => {
+  const src = [
+    "fn plain_merge_argv() {}",
+    "fn prose() {",
+    "  // plain_merge_argv(repo, plain, flag)",
+    '  let text = "plain_merge_argv(repo, plain, flag)";',
+    "}",
+  ].join("\n");
+  assert.deepEqual(mergeGuardHits(src), []);
+});
+
+test("merge guard limits fast-forward exemptions and skips control ops", () => {
+  assert.equal(
+    mergeGuardHits(
+      'fn pull() { run(&["pull", "--ff-only", ' +
+        '"--no-overwrite-ignore"]); }',
+    ).length,
+    1,
+  );
+  for (const flag of ["--abort", "--continue", "--quit"]) {
+    for (const argv of [
+      '&["merge", "' + flag + '"]',
+      'Command::new("git").arg("merge").arg("' + flag + '")',
+    ]) {
+      assert.deepEqual(
+        mergeGuardHits("fn control() { let args = " + argv + "; }"),
+        [],
+      );
+    }
+  }
+  assert.deepEqual(
+    mergeGuardHits(
+      'fn ff() { run(&["-c", "a=b", "merge", "--ff-only", ' +
+        '"--no-overwrite-ignore"]); }',
+    ),
+    [],
+  );
+});
+
+test("merge guard counts a guard anywhere in its own function", () => {
+  const src = [
+    "fn guarded(bytes: [u8; 4]) {",
+    '  run(&["merge", sha]);',
+    "  if check { ignored_files_in_the_way(repo, sha, timeout); }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(mergeGuardHits(src), []);
+});
+
 test("enclosingFn attributes const, unsafe and extern signatures", () => {
   const cases = [
     ["pub const fn for_provider(p: Provider) -> Self {", "for_provider"],

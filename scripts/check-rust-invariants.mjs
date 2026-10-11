@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for seven Rust invariants that have each cost this repo a fix
+// Static gate for eight Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -31,6 +31,9 @@
 //      rev-taking argv) resolves to a same-named tag first. A branch-first
 //      resolver (`git::branches::branch_first_rev`) or the measured tip sha
 //      (`git::branches::branch_tip_sha`) is the replacement.
+//
+//   H. merge into a checkout without the ignored-file guard — merge-ort ignores
+//      --no-overwrite-ignore on 3-way merges, so checkout merges check first.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
 // RULE: the lists only shrink by default. Adding an entry is a reviewed change —
@@ -984,6 +987,188 @@ export function checkBareBranchRevs(file, _src, lines, hits) {
   }
 }
 
+// The initial argv literal owns the verdict; flags pushed later do not grant
+// the ff-only exemption. Function spans and literal masking keep a neighbor's,
+// nested function's, comment's or string's guard from authorizing this merge.
+export const MERGE_GUARD_ALLOWLIST = [
+  {
+    file: "git/branches.rs",
+    fn: "verify_pin_and_merge",
+    rationale: "fresh gd-update checkout, with no user's ignored files",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "merge_local_pr",
+    rationale: "fresh resolve worktree, with no user's ignored files",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "merge_remote_pr",
+    rationale: "fresh resolve worktree, with no user's ignored files",
+  },
+  {
+    file: "git/pull_guard.rs",
+    fn: "plain_merge_argv",
+    builder: true,
+    rationale:
+      "argv builder; merge_pinned and merge_pinned_autostash run the guard",
+  },
+];
+
+function mergeArgLiteral(text) {
+  const from = /^String\s*::\s*from\s*\(([\s\S]*)\)$/.exec(text.trim());
+  const value = (from?.[1] ?? text).trim();
+  const literal = /^"([^"\\]*)"(?:\s*\.\s*(?:to_string|into)\s*\(\s*\))?$/.exec(
+    value,
+  );
+  return literal?.[1];
+}
+
+function mergeArrayArgs(text, open) {
+  return argvElements(bracketBody(text, open)).map((el) =>
+    mergeArgLiteral(el.text),
+  );
+}
+
+export function checkMergeIgnoredGuard(file, _src, lines, hits) {
+  const src = stripComments(lines).join("\n");
+  const masked = src.split("");
+  for (let i = 0; i < src.length; i++) {
+    const end = literalEnd(src, i);
+    if (end < 0) continue;
+    for (let j = i; j <= end; j++) {
+      if (src[j] !== "\n") masked[j] = " ";
+    }
+    i = end;
+  }
+  const code = masked.join("");
+  const tests = testModuleSpans(code);
+  const functions = [];
+  const signature = /\bfn\s+(\w+)/g;
+  for (let m = signature.exec(code); m; m = signature.exec(code)) {
+    let depth = 0;
+    let open = -1;
+    for (let i = m.index + m[0].length; i < code.length; i++) {
+      const char = code[i];
+      if (depth === 0 && char === ";") break;
+      if (depth === 0 && char === "{") {
+        open = i;
+        break;
+      }
+      if ("([".includes(char)) depth++;
+      else if (")]".includes(char)) depth--;
+    }
+    if (open < 0) continue;
+    const close = open + 1 + braceBody(code, open).length;
+    functions.push({ name: m[1], start: m.index, open, close });
+  }
+
+  const record = (at, builderCall = false) => {
+    if (tests.some(([s, e]) => at > s && at < e)) return;
+    const enclosing = functions
+      .filter((fn) => at > fn.open && at < fn.close)
+      .at(-1);
+    if (enclosing) {
+      let body = code.slice(enclosing.open + 1, enclosing.close);
+      // A nested function is another operation, not a check in its caller.
+      for (const nested of functions) {
+        if (nested.start <= enclosing.open || nested.close >= enclosing.close)
+          continue;
+        const start = nested.start - enclosing.open - 1;
+        const end = nested.close - enclosing.open;
+        body = body.slice(0, start) + " ".repeat(end - start) + body.slice(end);
+      }
+      // A guard anywhere in the body counts; there is no dominance analysis.
+      if (/\bignored_files_in_the_way\s*\(/.test(body)) return;
+    }
+    const fn = enclosing?.name ?? "<unresolved>";
+    hits.push({
+      file,
+      line: src.slice(0, at).split("\n").length,
+      fn,
+      allowlisted: !builderCall && allowed(MERGE_GUARD_ALLOWLIST, file, fn),
+      fix:
+        "merge/pull into a checkout must call ignored_files_in_the_way " +
+        "under its working-tree hold before writing",
+    });
+  };
+
+  const sites = [];
+  const arrayStart = new RegExp(
+    [
+      "(?:&\\s*|\\bvec\\s*!\\s*|\\.\\s*args\\s*\\(\\s*)\\[",
+      "\\blet\\s+(?:mut\\s+)?\\w+(?:\\s*:\\s*[^={}]+)?\\s*=\\s*\\[",
+    ].join("|"),
+    "g",
+  );
+  for (let m = arrayStart.exec(code); m; m = arrayStart.exec(code)) {
+    const open = m.index + m[0].length - 1;
+    const item = /\b(?:const|static)\s+(?:mut\s+)?\w+[^{}=]*=\s*$/;
+    const prefix = code.slice(0, open).replace(/(?:&|vec\s*!)\s*$/, "");
+    if (item.test(prefix)) continue;
+    sites.push({ at: open, argv: mergeArrayArgs(src, open), literal: true });
+  }
+
+  const argStart = /\.\s*arg\s*\(/g;
+  for (let m = argStart.exec(code); m; m = argStart.exec(code)) {
+    const argv = [];
+    let open = m.index + m[0].length - 1;
+    let method = "arg";
+    let end;
+    for (;;) {
+      const body = bracketBody(src, open);
+      if (method === "arg") {
+        argv.push(mergeArgLiteral(body));
+      } else {
+        const array = /^\s*(?:&\s*|vec\s*!\s*)?\[/.exec(body);
+        argv.push(
+          ...(array ? mergeArrayArgs(body, array[0].length - 1) : [undefined]),
+        );
+      }
+      end = open + body.length + 2;
+      const next = /^\s*\.\s*(arg|args)\s*\(/.exec(code.slice(end));
+      if (!next) break;
+      method = next[1];
+      open = end + next[0].length - 1;
+    }
+    // A chained args array belongs to this command, not a second argv site.
+    for (let i = sites.length - 1; i >= 0; i--) {
+      if (sites[i].at >= m.index && sites[i].at < end) sites.splice(i, 1);
+    }
+    sites.push({ at: m.index, argv, literal: false });
+    argStart.lastIndex = end;
+  }
+
+  for (const { at, argv, literal } of sites) {
+    let command = 0;
+    while (argv[command] === "-c" && command + 1 < argv.length) command += 2;
+    const verb = argv[command];
+    if (verb !== "merge" && verb !== "pull") continue;
+    const flags = argv.slice(command + 1);
+    if (
+      flags.some((flag) => ["--abort", "--continue", "--quit"].includes(flag))
+    )
+      continue;
+    if (
+      verb === "merge" &&
+      literal &&
+      flags.includes("--ff-only") &&
+      flags.includes("--no-overwrite-ignore")
+    )
+      continue;
+    record(at);
+  }
+
+  for (const row of MERGE_GUARD_ALLOWLIST.filter((entry) => entry.builder)) {
+    const call = new RegExp("\\b" + row.fn + "\\s*\\(", "g");
+    for (let m = call.exec(code); m; m = call.exec(code)) {
+      if (functions.some((fn) => m.index >= fn.start && m.index <= fn.open))
+        continue;
+      record(m.index, true);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -1028,6 +1213,12 @@ function main() {
       name: "G. bare branch revs",
       run: checkBareBranchRevs,
       allowlist: BARE_REV_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "H. merge into a checkout without the ignored-file guard",
+      run: checkMergeIgnoredGuard,
+      allowlist: MERGE_GUARD_ALLOWLIST,
       hits: [],
     },
   ];

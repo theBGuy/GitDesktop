@@ -7,6 +7,7 @@ pub mod config;
 pub mod conflict;
 pub mod diff;
 pub mod history;
+pub(crate) mod ignored_guard;
 pub mod ops;
 pub mod pathspec;
 pub mod promote_marker;

@@ -22,6 +22,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::autostash::{autostash_push, settle, AutostashOutcome};
 use crate::git::history::validate_hash;
+use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{
     acquire_repo_lock, run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
@@ -902,7 +903,7 @@ async fn plain_merge_argv(
     plain: &PlainPull,
     autostash: Option<&str>,
 ) -> AppResult<Vec<String>> {
-    let mut argv = vec!["merge".to_string()];
+    let mut argv = vec!["merge".to_string(), "--no-overwrite-ignore".to_string()];
     argv.extend(autostash.map(str::to_string));
     if plain.ff_only {
         argv.push("--ff-only".to_string());
@@ -948,6 +949,14 @@ pub(crate) async fn merge_pinned(state: &AppState, repo: &str, plain: &PlainPull
     let domain = state.working_tree_lock(repo).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     ensure_branch_current(repo, &plain.target.branch).await?;
+    if ignored_guard::pull_can_merge(repo, &plain.pinned.new_tip, plain.ff_only).await? {
+        let paths = ignored_files_in_the_way(repo, &plain.pinned.new_tip, WORKTREE_OP_TIMEOUT)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Pull", e))?;
+        if !paths.is_empty() {
+            return Err(ignored_guard::pull_refusal(&paths));
+        }
+    }
     let argv = plain_merge_argv(repo, plain, plain_autostash_flag(repo).await).await?;
     let already_unmerged = crate::git::ops::unmerged_paths(repo).await;
     let out = run_pinned_merge(repo, &argv).await?;
@@ -976,6 +985,14 @@ pub(crate) async fn merge_pinned_autostash(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(repo).await?;
     ensure_branch_current(repo, &plain.target.branch).await?;
+    if ignored_guard::pull_can_merge(repo, &plain.pinned.new_tip, plain.ff_only).await? {
+        let paths = ignored_files_in_the_way(repo, &plain.pinned.new_tip, WORKTREE_OP_TIMEOUT)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Pull", e))?;
+        if !paths.is_empty() {
+            return Err(ignored_guard::pull_refusal(&paths));
+        }
+    }
     let argv = plain_merge_argv(repo, plain, COMPOUND_AUTOSTASH).await?;
 
     let stashed = autostash_push(repo).await?;
@@ -3091,7 +3108,12 @@ mod tests {
 
         assert_eq!(
             plain_merge_argv(&clone, &plain, None).await.unwrap(),
-            vec!["merge".to_string(), "--ff-only".into(), tip.clone()]
+            vec![
+                "merge".to_string(),
+                "--no-overwrite-ignore".into(),
+                "--ff-only".into(),
+                tip.clone()
+            ]
         );
         assert_eq!(
             plain_merge_argv(&clone, &plain, Some("--autostash"))
@@ -3099,6 +3121,7 @@ mod tests {
                 .unwrap(),
             vec![
                 "merge".to_string(),
+                "--no-overwrite-ignore".into(),
                 "--autostash".into(),
                 "--ff-only".into(),
                 tip.clone()
@@ -3110,13 +3133,14 @@ mod tests {
                 .unwrap(),
             vec![
                 "merge".to_string(),
+                "--no-overwrite-ignore".into(),
                 "--no-autostash".into(),
                 "--ff-only".into(),
                 tip.clone()
             ]
         );
 
-        // Merge mode: the flag still leads, with the subject between it and the tip.
+        // Both modes retain the ignored-file flag alongside the requested autostash flag.
         let merge_mode = PlainPull {
             target: plain.target,
             pinned: plain.pinned,
@@ -3125,10 +3149,18 @@ mod tests {
         let argv = plain_merge_argv(&clone, &merge_mode, COMPOUND_AUTOSTASH)
             .await
             .unwrap();
-        assert_eq!(argv[..3], ["merge", "--no-autostash", "--no-edit"]);
-        assert_eq!(argv[3], "-m");
-        assert!(argv[4].starts_with("Merge branch 'main' of "), "{argv:?}");
-        assert_eq!(argv[5], tip);
+        assert_eq!(
+            argv[..4],
+            [
+                "merge",
+                "--no-overwrite-ignore",
+                "--no-autostash",
+                "--no-edit"
+            ]
+        );
+        assert_eq!(argv[4], "-m");
+        assert!(argv[5].starts_with("Merge branch 'main' of "), "{argv:?}");
+        assert_eq!(argv[6], tip);
     }
 
     // ---- submodule parity ---------------------------------------------------
@@ -3431,5 +3463,184 @@ mod tests {
             before,
             "the worktree stays where the user left it"
         );
+    }
+    #[tokio::test]
+    async fn pull_ignored_guard_sensitivity_plain() {
+        assert_pull_ignored_guard_sensitivity(false).await;
+    }
+
+    #[tokio::test]
+    async fn pull_ignored_guard_sensitivity_autostash() {
+        assert_pull_ignored_guard_sensitivity(true).await;
+    }
+
+    async fn assert_pull_ignored_guard_sensitivity(autostash: bool) {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape};
+        for shape in [
+            Shape::IgnoredFile,
+            Shape::ModifyDelete,
+            Shape::IgnoredDirVsFile,
+        ] {
+            for mode in ["ff-only", "merge"] {
+                if shape == Shape::ModifyDelete && mode == "ff-only" {
+                    continue;
+                }
+                let mut f = Fixture::new(shape, mode == "merge").await;
+                f.with_remote().await;
+                let tracked = std::path::Path::new(&f.repo).join("tracked.txt");
+                if autostash {
+                    std::fs::write(&tracked, "dirty tracked edit\n").unwrap();
+                }
+                f.snapshot().await;
+                let state = AppState::default();
+                let result = if autostash {
+                    crate::git::autostash::git_pull_autostash_core(
+                        &state,
+                        f.repo.clone(),
+                        mode.into(),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    crate::git::remote::git_pull_core(&state, f.repo.clone(), mode.into()).await
+                };
+                f.assert_unchanged(&result.unwrap_err()).await;
+                assert_eq!(
+                    run(&f.repo, &["rev-parse", "refs/remotes/origin/incoming"]).await,
+                    f.target
+                );
+                if autostash {
+                    assert_eq!(
+                        std::fs::read_to_string(&tracked).unwrap(),
+                        "dirty tracked edit\n"
+                    );
+                }
+                f.remove_ignored();
+                if shape == Shape::ModifyDelete {
+                    // Without ignored data the native modify/delete conflict is allowed to pause.
+                    if autostash {
+                        let outcome = crate::git::autostash::git_pull_autostash_core(
+                            &state,
+                            f.repo.clone(),
+                            mode.into(),
+                        )
+                        .await
+                        .unwrap();
+                        assert!(
+                            matches!(
+                                outcome,
+                                crate::git::autostash::AutostashOutcome::OpFailedStashKept {
+                                    in_progress: true,
+                                    ..
+                                }
+                            ),
+                            "{outcome:?}"
+                        );
+                    } else {
+                        let err =
+                            crate::git::remote::git_pull_core(&state, f.repo.clone(), mode.into())
+                                .await
+                                .unwrap_err();
+                        assert!(matches!(err, AppError::Conflict { .. }), "{err:?}");
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(std::path::Path::new(&f.repo).join("seed.txt"))
+                            .unwrap(),
+                        "incoming bytes\n"
+                    );
+                    continue;
+                }
+                if autostash {
+                    crate::git::autostash::git_pull_autostash_core(
+                        &state,
+                        f.repo.clone(),
+                        mode.into(),
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    crate::git::remote::git_pull_core(&state, f.repo.clone(), mode.into())
+                        .await
+                        .unwrap();
+                }
+                f.assert_landed().await;
+                if autostash {
+                    assert_eq!(
+                        std::fs::read_to_string(&tracked).unwrap(),
+                        "dirty tracked edit\n"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_ignored_ff_only_divergence_keeps_native_refusal() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        for autostash in [false, true] {
+            let mut f = Fixture::new(Shape::IgnoredFile, true).await;
+            f.with_remote().await;
+            // A native ff-only refusal writes ORIG_HEAD; compare against that native state.
+            let native = run_git_raw(
+                Some(&f.repo),
+                &["merge", "--ff-only", &f.target],
+                WORKTREE_OP_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_ne!(native.code, 0);
+            assert!(native
+                .full_failure_text()
+                .contains("Not possible to fast-forward"));
+            assert_eq!(
+                std::fs::read_to_string(std::path::Path::new(&f.repo).join(".git/ORIG_HEAD"))
+                    .unwrap()
+                    .trim(),
+                f.head,
+            );
+            f.snapshot().await;
+            let state = AppState::default();
+            let err = if autostash {
+                crate::git::autostash::git_pull_autostash_core(
+                    &state,
+                    f.repo.clone(),
+                    "ff-only".into(),
+                )
+                .await
+                .map(|_| ())
+                .unwrap_err()
+            } else {
+                crate::git::remote::git_pull_core(&state, f.repo.clone(), "ff-only".into())
+                    .await
+                    .unwrap_err()
+            };
+            let AppError::Git { stderr, .. } = err else {
+                panic!("{err:?}");
+            };
+            assert!(
+                stderr
+                    .to_lowercase()
+                    .contains("not possible to fast-forward"),
+                "{stderr}"
+            );
+            f.assert_intact().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_ignored_subdirectory() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, false).await;
+        f.with_remote().await;
+        let sub = std::path::Path::new(&f.repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let err = crate::git::remote::git_pull_core(
+            &AppState::default(),
+            sub.to_string_lossy().into_owned(),
+            "ff-only".into(),
+        )
+        .await
+        .unwrap_err();
+        f.assert_unchanged(&err).await;
     }
 }

@@ -6,11 +6,12 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
+use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
     acquire_repo_lock, config_lock_busy, holder_label, is_config_lock_contention, run_git,
     run_git_config_write_held, run_git_mutating_config_write, run_git_raw, subcommand_of,
     with_config_write_lock, ConfigWriteHeld, GitOutput, CONFIG_LOCK_BUSY_LEAD, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -820,6 +821,23 @@ pub(crate) async fn git_pull_core(
     let wt = state.working_tree_lock(&repo_path).await;
     let _wt_guard = acquire_repo_lock(&wt, LOCK_WAIT_TIMEOUT, "a pull").await?;
     let already_unmerged = crate::git::ops::unmerged_paths(&repo_path).await;
+    // Commits the pull's own transfer brings are not checked.
+    if mode != "rebase"
+        && !ignored_guard::merge_is_blocked(&repo_path, &already_unmerged)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Pull", e))?
+    {
+        if let Some(target) = ignored_guard::upstream_commit(&repo_path).await {
+            if ignored_guard::pull_can_merge(&repo_path, &target, mode != "merge").await? {
+                let paths = ignored_files_in_the_way(&repo_path, &target, WORKTREE_OP_TIMEOUT)
+                    .await
+                    .map_err(|e| ignored_guard::check_failed("Pull", e))?;
+                if !paths.is_empty() {
+                    return Err(ignored_guard::pull_refusal(&paths));
+                }
+            }
+        }
+    }
     if let Err(err) =
         run_git_mutating_with_creds(state, &repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await
     {
@@ -5004,5 +5022,220 @@ and the repository exists.
                 .is_empty(),
             "the deleted upstream branch's tracking ref must still be pruned"
         );
+    }
+    #[tokio::test]
+    async fn pull_fallthrough_ignored_guard_sensitivity_plain() {
+        assert_pull_fallthrough_ignored_guard_sensitivity(false).await;
+    }
+
+    #[tokio::test]
+    async fn pull_fallthrough_ignored_guard_sensitivity_autostash() {
+        assert_pull_fallthrough_ignored_guard_sensitivity(true).await;
+    }
+
+    async fn assert_pull_fallthrough_ignored_guard_sensitivity(autostash: bool) {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape};
+        for shape in [
+            Shape::IgnoredFile,
+            Shape::ModifyDelete,
+            Shape::IgnoredDirVsFile,
+        ] {
+            for mode in ["ff-only", "merge"] {
+                if shape == Shape::ModifyDelete && mode == "ff-only" {
+                    continue;
+                }
+                let mut f = Fixture::new(shape, mode == "merge").await;
+                f.with_remote().await;
+                run(&f.repo, &["fetch", "origin"]).await;
+                run(&f.repo, &["config", "submodule.recurse", "true"]).await;
+                let tracked = std::path::Path::new(&f.repo).join("tracked.txt");
+                if autostash {
+                    std::fs::write(&tracked, "dirty tracked edit\n").unwrap();
+                }
+                f.snapshot().await;
+                let state = AppState::default();
+                assert!(
+                    crate::git::pull_guard::pin_plain_pull(&state, &f.repo, mode != "merge")
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let result = if autostash {
+                    crate::git::autostash::git_pull_autostash_core(
+                        &state,
+                        f.repo.clone(),
+                        mode.into(),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    super::git_pull_core(&state, f.repo.clone(), mode.into()).await
+                };
+                f.assert_unchanged(&result.unwrap_err()).await;
+                if autostash {
+                    assert_eq!(
+                        std::fs::read_to_string(&tracked).unwrap(),
+                        "dirty tracked edit\n"
+                    );
+                }
+                f.remove_ignored();
+                if shape == Shape::ModifyDelete {
+                    // Without ignored data the native modify/delete conflict is allowed to pause.
+                    if autostash {
+                        let outcome = crate::git::autostash::git_pull_autostash_core(
+                            &state,
+                            f.repo.clone(),
+                            mode.into(),
+                        )
+                        .await
+                        .unwrap();
+                        assert!(
+                            matches!(
+                                outcome,
+                                crate::git::autostash::AutostashOutcome::OpFailedStashKept {
+                                    in_progress: true,
+                                    ..
+                                }
+                            ),
+                            "{outcome:?}"
+                        );
+                    } else {
+                        let err =
+                            crate::git::remote::git_pull_core(&state, f.repo.clone(), mode.into())
+                                .await
+                                .unwrap_err();
+                        assert!(matches!(err, AppError::Conflict { .. }), "{err:?}");
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(std::path::Path::new(&f.repo).join("seed.txt"))
+                            .unwrap(),
+                        "incoming bytes\n"
+                    );
+                    continue;
+                }
+                if autostash {
+                    crate::git::autostash::git_pull_autostash_core(
+                        &state,
+                        f.repo.clone(),
+                        mode.into(),
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    super::git_pull_core(&state, f.repo.clone(), mode.into())
+                        .await
+                        .unwrap();
+                }
+                f.assert_landed().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_fallthrough_ignored_guard_matches_native_operation_states() {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape, MERGE_STATES};
+        for state in MERGE_STATES {
+            let mut f = Fixture::new(Shape::IgnoredFile, true).await;
+            f.with_remote().await;
+            run(&f.repo, &["fetch", "origin"]).await;
+            state.install(&f).await;
+            f.snapshot().await;
+            let expected = if state.blocks_merge() {
+                Some(
+                    run_git_raw(Some(&f.repo), &["pull", "--no-rebase"], DEFAULT_TIMEOUT)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let err = git_pull_core(&AppState::default(), f.repo.clone(), "merge".into())
+                .await
+                .unwrap_err();
+            if let Some(expected) = expected {
+                let AppError::Git { code, stderr } = err else {
+                    panic!("{state:?}: {err:?}")
+                };
+                assert_ne!(expected.code, 0);
+                assert_eq!(code, expected.code);
+                assert_eq!(stderr, expected.full_failure_text(), "{state:?}");
+                f.assert_snapshot().await;
+            } else {
+                f.assert_unchanged(&err).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_unborn_fast_forwards_and_protects_ignored_files() {
+        use crate::git::ignored_guard::tests::{run, Fixture, Shape, SENTINEL};
+        for ignored in [false, true] {
+            let f = Fixture::new(Shape::IgnoredFile, false).await;
+            f.with_remote().await;
+            let remote = f
+                .dir
+                .path()
+                .join("remote.git")
+                .to_string_lossy()
+                .into_owned();
+            let clone = f.dir.path().join("empty").to_string_lossy().into_owned();
+            run(&f.repo, &["clone", "--no-checkout", &remote, &clone]).await;
+            run(&clone, &["config", "core.autocrlf", "false"]).await;
+            run(&clone, &["switch", "--orphan", "empty"]).await;
+            run(&clone, &["config", "branch.empty.remote", "origin"]).await;
+            run(
+                &clone,
+                &["config", "branch.empty.merge", "refs/heads/incoming"],
+            )
+            .await;
+            run(&clone, &["fetch", "origin"]).await;
+            std::fs::write(
+                std::path::Path::new(&clone).join(".git/info/exclude"),
+                "local.cfg\n",
+            )
+            .unwrap();
+            if ignored {
+                std::fs::write(std::path::Path::new(&clone).join("local.cfg"), SENTINEL).unwrap();
+            }
+            assert!(crate::git::branches::head_is_unborn(&clone).await.unwrap());
+            let index = run(&clone, &["ls-files", "-s"]).await;
+            let status = run(&clone, &["status", "--porcelain=v1"]).await;
+            let result = git_pull_core(&AppState::default(), clone.clone(), "ff-only".into()).await;
+            if ignored {
+                let err = result.unwrap_err();
+                let AppError::Command(message) = err else {
+                    panic!("{err:?}")
+                };
+                assert!(
+                    message.contains("ignored files in your working tree: local.cfg"),
+                    "{message}"
+                );
+                assert!(crate::git::branches::head_is_unborn(&clone).await.unwrap());
+                assert_eq!(
+                    std::fs::read(std::path::Path::new(&clone).join("local.cfg")).unwrap(),
+                    SENTINEL
+                );
+                assert_eq!(run(&clone, &["ls-files", "-s"]).await, index);
+                assert_eq!(run(&clone, &["status", "--porcelain=v1"]).await, status);
+                for marker in ["MERGE_HEAD", "SQUASH_MSG", "ORIG_HEAD"] {
+                    assert!(
+                        !std::path::Path::new(&clone)
+                            .join(".git")
+                            .join(marker)
+                            .exists(),
+                        "{marker}"
+                    );
+                }
+                assert!(run(&clone, &["stash", "list"]).await.is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(run(&clone, &["rev-parse", "HEAD"]).await, f.target);
+                assert_eq!(
+                    std::fs::read_to_string(std::path::Path::new(&clone).join("local.cfg"))
+                        .unwrap(),
+                    "incoming bytes\n"
+                );
+            }
+        }
     }
 }

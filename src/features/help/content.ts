@@ -945,6 +945,12 @@ reapply on pull, merge, rebase, and branch updates** under **Settings → Genera
 those operations recover on their own, with no prompt. Either way it only kicks in when
 uncommitted changes would otherwise block the operation.
 
+Ignored files are handled differently. When a pull that merges or fast-forwards, a merge,
+or an update of the branch you're on would replace a file your \`.gitignore\` covers (a
+private config or local build output, say), GitDesktop stops before changing anything and
+names the files: move them aside, then run it again. No stash prompt appears for this,
+because a stash never takes ignored files.
+
 ## Safer pull with rebase
 
 The Pull menu's caret offers **Pull with rebase**, which replays your local commits on top

@@ -3,12 +3,13 @@ use std::collections::HashSet;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::ignored_guard::{self, ignored_files_in_the_way, name_paths};
 use crate::git::runner::{
     acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
     run_git_config_write, run_git_config_write_held, run_git_mutating,
     run_git_mutating_config_write, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock,
-    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT,
+    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -1663,13 +1664,32 @@ pub(crate) async fn update_branch_from(
 
     // The current branch is already checked out, so just merge in place.
     if current.as_deref() == Some(branch) {
+        let network = state.network_lock(repo_path).await;
+        let _net_guard =
+            acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a branch update").await?;
         let already_unmerged = crate::git::ops::unmerged_paths(repo_path).await;
+        if !ignored_guard::merge_is_blocked(repo_path, &already_unmerged)
+            .await
+            .map_err(|e| ignored_guard::check_failed("Update", e))?
+        {
+            if let Some(incoming_sha) =
+                ignored_guard::target_commit(repo_path, &base_rev, DEFAULT_TIMEOUT, "Update")
+                    .await?
+            {
+                let paths = ignored_files_in_the_way(repo_path, &incoming_sha, DEFAULT_TIMEOUT)
+                    .await
+                    .map_err(|e| ignored_guard::check_failed("Update", e))?;
+                if !paths.is_empty() {
+                    return Err(ignored_guard::update_refusal(branch, base, &paths));
+                }
+            }
+        }
         // Raw: a conflicted merge reports entirely on stdout and leaves stderr
         // empty (measured, git 2.51.1), which a stderr-only error renders as
         // "git exited with code 1". Lock-free runners only — the hold is ours.
         let out = run_git_raw(
             Some(repo_path),
-            &["merge", "--no-edit", &base_rev],
+            &["merge", "--no-edit", "--no-overwrite-ignore", &base_rev],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -1987,7 +2007,7 @@ async fn update_in_holder(
     };
 
     // Fails closed: a check that could not run refuses rather than risk the overwrite.
-    let in_the_way = match ignored_files_in_the_way(holder, base_sha).await {
+    let in_the_way = match ignored_files_in_the_way(holder, base_sha, DEFAULT_TIMEOUT).await {
         Ok(paths) => paths,
         Err(e) => {
             return Err(branch_held(
@@ -2108,137 +2128,6 @@ async fn has_tracked_changes(dir: &str) -> AppResult<bool> {
     )
     .await?;
     Ok(!status.stdout_lossy().trim().is_empty())
-}
-
-/// The ignored files at `holder` a merge of `base_sha` would write over. Candidates are
-/// every base-side change since the merge base but deletions: an add, and a modify or
-/// type change of a path the holder deleted, whose conflict leaves the base's file over
-/// the ignored one (and `merge --abort` then deletes it; measured, git 2.51.1). A
-/// candidate's ancestors on disk as a file or symlink count too, which the merge would
-/// replace with a directory; a directory ancestor only receives the new file. Tracked
-/// paths never qualify, as `check-ignore` skips them. A directory at a candidate's path,
-/// which the merge would remove whole, counts when it is ignored itself or holds ignored
-/// files (measured). Not covered: a file written between this check and the merge, and a
-/// criss-cross history, whose three-dot diff takes just one merge base.
-async fn ignored_files_in_the_way(holder: &str, base_sha: &str) -> AppResult<Vec<String>> {
-    let changed = run_git(
-        Some(holder),
-        &[
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "--diff-filter=d",
-            "-z",
-            &format!("HEAD...{base_sha}"),
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    let dir = std::path::Path::new(holder);
-    let changed = changed.stdout_lossy();
-    // Diff paths are unique and, being one tree's, never a prefix of each other, so the
-    // prefix memo is the only dedupe needed: a repeat prefix was already classified.
-    let mut probed = HashSet::new();
-    let (mut files, mut folders): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
-    for path in changed.split('\0').filter(|p| !p.is_empty()) {
-        for (at, _) in path.match_indices('/') {
-            let prefix = &path[..at];
-            let file = || {
-                dir.join(prefix)
-                    .symlink_metadata()
-                    .is_ok_and(|m| !m.is_dir())
-            };
-            if probed.insert(prefix) && file() {
-                files.push(prefix);
-            }
-        }
-        match dir.join(path).symlink_metadata() {
-            Ok(meta) if meta.is_dir() => folders.push(path),
-            Ok(_) => files.push(path),
-            Err(_) => {}
-        }
-    }
-
-    let mut in_the_way = Vec::new();
-    if !files.is_empty() {
-        let checked = crate::git::runner::run_git_raw_input(
-            Some(holder),
-            &["check-ignore", "--stdin", "-z"],
-            Some(&files.join("\0")),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        // Exit 1 is git's "none of these is ignored"; anything past it is a failure.
-        match checked.code {
-            0 => in_the_way.extend(nul_separated(&checked.stdout_lossy())),
-            1 => {}
-            code => {
-                return Err(AppError::Git {
-                    code,
-                    stderr: checked.full_failure_text(),
-                })
-            }
-        }
-    }
-    if !folders.is_empty() {
-        // `check-ignore` on a folder's own name misses one that is not ignored itself but
-        // holds ignored files. This lists an ignored folder as `<dir>/`, else the ignored
-        // files inside, and for a folder of ONLY ignored files both (measured).
-        let specs: Vec<String> = folders
-            .iter()
-            .map(|f| crate::git::pathspec::literal(f))
-            .collect();
-        let mut args = vec![
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "-z",
-            "--",
-        ];
-        args.extend(specs.iter().map(String::as_str));
-        let listed = run_git_raw(Some(holder), &args, DEFAULT_TIMEOUT).await?;
-        if listed.code != 0 {
-            return Err(AppError::Git {
-                code: listed.code,
-                stderr: listed.full_failure_text(),
-            });
-        }
-        let listed = nul_separated(&listed.stdout_lossy());
-        // A `<dir>/` entry with its own contents listed beside it names nothing new.
-        let covered = |p: &String| {
-            p.ends_with('/')
-                && listed
-                    .iter()
-                    .any(|q| q.len() > p.len() && q.starts_with(p.as_str()))
-        };
-        in_the_way.extend(listed.iter().filter(|p| !covered(p)).cloned());
-    }
-    Ok(in_the_way)
-}
-
-/// The non-empty entries of git's `-z` output.
-fn nul_separated(text: &str) -> Vec<String> {
-    text.split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// The first three paths, then a count of the rest.
-fn name_paths(paths: &[String]) -> String {
-    const NAMED: usize = 3;
-    let named = paths
-        .iter()
-        .take(NAMED)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    match paths.len().saturating_sub(NAMED) {
-        0 => named,
-        more => format!("{named} and {more} more"),
-    }
 }
 
 /// A fixed `Merge branch '<x>' into <branch>` subject (`remote-tracking branch` for a
@@ -6661,5 +6550,159 @@ mod tests {
         assert!(archive_config_busy("feat/x", false)
             .to_string()
             .contains("feat/x wasn't unarchived — try again."));
+    }
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_branch_from_ignored_shapes() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape, SHAPES};
+        for shape in SHAPES {
+            for diverged in [false, true] {
+                if shape == Shape::ModifyDelete && !diverged {
+                    continue;
+                }
+                let f = Fixture::new(shape, diverged).await;
+                let (_serialized, _override, _root) = holder_marker_root(&f.repo);
+                let result = update_branch_from(
+                    &AppState::default(),
+                    &f.repo,
+                    "local",
+                    "incoming",
+                    &HashSet::new(),
+                    None,
+                )
+                .await;
+                if shape == Shape::InsideIgnoredDir {
+                    result.unwrap();
+                    f.assert_landed().await;
+                } else {
+                    f.assert_unchanged(&result.unwrap_err()).await;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_branch_from_ignored_guard_sensitivity() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let (_serialized, _override, _root) = holder_marker_root(&f.repo);
+        let state = AppState::default();
+        let err = update_branch_from(&state, &f.repo, "local", "incoming", &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        f.assert_unchanged(&err).await;
+        f.remove_ignored();
+        update_branch_from(&state, &f.repo, "local", "incoming", &HashSet::new(), None)
+            .await
+            .unwrap();
+        f.assert_landed().await;
+    }
+    #[tokio::test]
+    async fn holder_ignored_guard_sensitivity() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let state = AppState::default();
+        let err = update_in_holder(
+            &state,
+            &f.repo,
+            "local",
+            "incoming",
+            &f.target,
+            HolderMerge::Merge { subject: None },
+        )
+        .await
+        .unwrap_err();
+        let AppError::BranchHeld {
+            message, reason, ..
+        } = err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!(reason, "failed");
+        assert!(
+            message.contains("ignored files there: local.cfg"),
+            "{message}"
+        );
+        f.assert_intact().await;
+        f.remove_ignored();
+        update_in_holder(
+            &state,
+            &f.repo,
+            "local",
+            "incoming",
+            &f.target,
+            HolderMerge::Merge { subject: None },
+        )
+        .await
+        .unwrap();
+        f.assert_landed().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_branch_from_ignored_guard_matches_native_operation_states() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape, MERGE_STATES};
+        for state in MERGE_STATES {
+            let mut f = Fixture::new(Shape::IgnoredFile, true).await;
+            let (_serialized, _override, _root) = holder_marker_root(&f.repo);
+            state.install(&f).await;
+            f.snapshot().await;
+            let expected = if state.blocks_merge() {
+                Some(
+                    run_git_raw(
+                        Some(&f.repo),
+                        &["merge", "--no-edit", "--no-overwrite-ignore", "incoming"],
+                        DEFAULT_TIMEOUT,
+                    )
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            let err = update_branch_from(
+                &AppState::default(),
+                &f.repo,
+                "local",
+                "incoming",
+                &HashSet::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+            if let Some(expected) = expected {
+                let AppError::Git { code, stderr } = err else {
+                    panic!("{state:?}: {err:?}")
+                };
+                assert_ne!(expected.code, 0);
+                assert_eq!(code, expected.code);
+                assert_eq!(stderr, expected.full_failure_text(), "{state:?}");
+                f.assert_snapshot().await;
+            } else {
+                f.assert_unchanged(&err).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_branch_from_ignored_subdirectory() {
+        use crate::git::ignored_guard::tests::{Fixture, Shape};
+        let f = Fixture::new(Shape::IgnoredFile, true).await;
+        let (_serialized, _override, _root) = holder_marker_root(&f.repo);
+        let sub = std::path::Path::new(&f.repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let err = update_branch_from(
+            &AppState::default(),
+            &sub.to_string_lossy(),
+            "local",
+            "incoming",
+            &HashSet::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        f.assert_unchanged(&err).await;
     }
 }

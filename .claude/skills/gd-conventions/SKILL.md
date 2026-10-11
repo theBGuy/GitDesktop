@@ -669,6 +669,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   refspec or re-derive the validation. Refs reaching a compare-endpoint
   basehead route through `forge::validate_compare_branch`
   (guard: check-rust-invariants check E).
+- **Merges into a checkout check for ignored files first:** git's merge
+  default silently replaces an ignored file the incoming side tracks, and
+  merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git
+  2.51.1). Every merge or merge-mode pull into a user checkout calls
+  `git::ignored_guard::ignored_files_in_the_way` under its working-tree hold,
+  before any stash push, and refuses on a hit with copy free of the
+  frontend's dirty-tree and conflict markers; fresh throwaway checkouts are
+  exempt (guard: check-rust-invariants check H).
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order
