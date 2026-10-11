@@ -3208,6 +3208,37 @@ test("raw-react-query-mutation leaves types, other hooks and the DOM's observer 
   );
 });
 
+test("raw-react-query-mutation judges a plain module literal by its exact package", () => {
+  // Other TanStack packages this app depends on, and a local path naming the
+  // word: each passes as a plain literal, with or without a react-query string
+  // elsewhere in its file.
+  const passes = [
+    'const m = await import("@tanstack/react-virtual");',
+    'const m = await import("@tanstack/react-form");',
+    'const m = await import("@tanstack/react-store");',
+    'const m = await import("./tanstack-adapter");',
+    'const m = require("@tanstack/react-virtual");',
+    'const m = require("@tanstack/react-form");',
+    'const m = require("@tanstack/react-store");',
+  ];
+  const held =
+    'import { useQuery } from "@tanstack/react-query";\nconst pkg = "@tanstack/react-query";\n';
+  for (const prefix of ["", held])
+    for (const call of passes)
+      assert.deepEqual(
+        rawReactQueryMutation(prefix + call),
+        [],
+        `${prefix ? "held: " : ""}${call}`,
+      );
+  for (const call of [
+    'const m = await import("@tanstack/react-query");',
+    "const m = await import(`@tanstack/${p}`);",
+    'const m = await import("@tanstack/" + "react-query");',
+    'const m = await import(("@tanstack/react-query"));',
+  ])
+    assert.deepEqual(rawReactQueryMutation(call), [1], call);
+});
+
 test("raw-react-query-mutation exempts the helper alone, and its pin notices a rename", () => {
   const check = CHECKS.find((c) => c.name === "raw-react-query-mutation");
   const helper = "src/lib/started-mutation.ts";

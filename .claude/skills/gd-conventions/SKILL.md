@@ -536,10 +536,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   Its `meta` key (`STARTED_KEY`) is reserved, and client mutation defaults are
   banned, since its trampolines shadow them: the `mutation-defaults` guard fails
   any use of the client's defaults API and any `defaultOptions` beyond a
-  `queries`-only literal. The client's mutation cache is reached only to read
-  it (`getMutationCache().findAll(…)` and its siblings; guard:
-  `mutation-cache-access`), since its `build(…)` makes a mutation the helper
-  never saw. The snapshot can't reach a mutation not yet started: a
+  `queries`-only literal. Every `getMutationCache()` call leads straight into a
+  member that makes no mutation (`getAll`, `find`, `findAll`, `subscribe`,
+  `hasListeners` or `clear`), never `build(…)`, which makes one the helper never
+  saw (guard: `mutation-cache-access`; its one exemption is the reference
+  `useMutationCacheSnapshot` holds in `queries/internal.ts`, pinned to its exact
+  statement). The snapshot can't reach a mutation not yet started: a
   handler that calls `mutate` after an await, or from a confirm whose state
   outlives a switch, builds from the observer's CURRENT options, so it records
   the repo when it starts (a dialog: when it opens) and refuses through
@@ -564,7 +566,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `["local-pr" | "local-issue", op, repo]`; a wrapper keyed through an optional
   parameter would oblige its delegating call to pass one) — a repo-scoped create
   written anywhere else is unratcheted, and the wider class stays a review
-  concern. The `Add…`/`Submit…`/`Publish…`/`Fork…` creates stay unpinned BY
+  concern. The creates `useAddRemote`, `useAddCollaborator`, `useAddSubmodule`,
+  `useAddUserWorktree`, `useAddDiscussionComment`, `useAddIssueSpentTime`,
+  `useAddMrSpentTime`, `useSubmitReview` and `useForkRepo` stay unpinned BY
   DECISION: their callers read `isPending` as a re-entry guard, which a pin
   idles, so the isPending → local-flag migration comes first. A cache WRITE
   (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/`onSettled` keys
