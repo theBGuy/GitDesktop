@@ -3932,6 +3932,40 @@ test("merge guard keeps an argv whose expression is followed by a pattern token"
   );
 });
 
+test("merge guard opens no pattern span at a raw identifier", () => {
+  for (const body of [
+    'r#let(&["merge", sha]);',
+    'let f = |r#let| run(&["merge", r#let]);',
+    'r#match(&["merge", sha]);',
+    'r#match! { run(&["merge", sha]) => go() }',
+    'let v = r#move | run(&["merge", sha]) | 1;',
+    'let v = \u00e5let(&["merge", sha]);',
+  ]) {
+    const hits = mergeGuardHits(unguarded(body));
+    assert.equal(hits.length, 1, body);
+    assert.equal(hits[0].fn, "unsafe_merge", body);
+  }
+});
+
+test("merge guard never reads a pattern's own pipe as a closure", () => {
+  for (const body of [
+    'match mode { | A if run(&["merge", sha]).is_ok() | ready => 1, _ => 0 };',
+    'match m { A => 0, | B if run(&["merge", sha]).is_ok() | z => 1, _ => 2 }',
+    'let ok = matches!(m, | A if run(&["merge", sha]).is_ok() | ready);',
+    'match m { A => |x| run(&["merge", x]), _ => |x| x }',
+  ]) {
+    const hits = mergeGuardHits(unguarded(body));
+    assert.equal(hits.length, 1, body);
+    assert.equal(hits[0].fn, "unsafe_merge", body);
+  }
+  for (const body of [
+    'match argv { | ["merge", ..] | ["pull", ..] => a(), _ => b() }',
+    'let ok = matches!(argv, | ["merge", ..] | ["pull"]);',
+  ]) {
+    assert.deepEqual(mergeGuardHits(unguarded(body)), [], body);
+  }
+});
+
 test("merge guard verifies every namesake of a guard wrapper", () => {
   const rows = [
     {

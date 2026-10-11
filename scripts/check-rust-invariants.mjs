@@ -1222,6 +1222,16 @@ const EXPR_KEYWORDS = new Set([
   "while",
   "yield",
 ]);
+// A keyword TOKEN followed by `tail`: never a raw identifier (`r#let`) or
+// part of a longer name, since only the keyword introduces a pattern.
+const keywordRe = (word, tail = "") =>
+  new RegExp(
+    String.raw`(?<![#\p{ID_Continue}])${word}(?!\p{ID_Continue})${tail}`,
+    "gu",
+  );
+// A character a keyword token never follows: a raw identifier's `#` or a
+// name's own character.
+const BEFORE_NAME_RE = /[#\p{ID_Continue}]/u;
 
 /** The string a Rust literal token spells, or undefined when `t` is not
  *  exactly one string literal. */
@@ -1732,7 +1742,7 @@ export function checkMergeIgnoredGuard(
       closeOf.set(stack.pop(), i);
   }
   const arrows = new Map();
-  for (const m of masked.matchAll(/\bmatch\b/g)) {
+  for (const m of masked.matchAll(keywordRe("match"))) {
     let depth = 0;
     for (let i = m.index + 5; i < masked.length; i++) {
       const ch = masked[i];
@@ -1753,20 +1763,22 @@ export function checkMergeIgnoredGuard(
   // `(…)` parameters. A `[` anywhere else is an expression, and an
   // unrecognized pattern spelling stays a site: fail closed.
   const patternSpans = [];
+  const isPattern = (open) =>
+    patternSpans.some(([s, e]) => open >= s && open < e);
   // Where a pattern in [start, end) of `group` ends: its first guard `if`.
   const guardEnd = (start, end, group) => {
     for (let p = start; p < end; p++) {
       if (
         inner[p] === group &&
         masked.startsWith("if", p) &&
-        !WORD.test(masked[p - 1] ?? "") &&
+        !BEFORE_NAME_RE.test(masked[p - 1] ?? "") &&
         !WORD.test(masked[p + 2] ?? "")
       )
         return p;
     }
     return end;
   };
-  for (const m of masked.matchAll(/\blet\b/g)) {
+  for (const m of masked.matchAll(keywordRe("let"))) {
     const group = inner[m.index];
     let end = m.index + 3;
     while (
@@ -1788,7 +1800,9 @@ export function checkMergeIgnoredGuard(
       from = arrow + 2;
     }
   }
-  for (const m of masked.matchAll(/\b(?:assert_)?matches\s*!\s*\(/g)) {
+  for (const m of masked.matchAll(
+    keywordRe("(?:assert_)?matches", String.raw`\s*!\s*\(`),
+  )) {
     const open = m.index + m[0].length - 1;
     const pattern = argvElements(bracketBody(masked, open))[1];
     if (!pattern) continue;
@@ -1798,9 +1812,25 @@ export function checkMergeIgnoredGuard(
       guardEnd(start, start + pattern.text.length, open),
     ]);
   }
+  for (const m of masked.matchAll(
+    keywordRe("fn", String.raw`\s+[A-Za-z_]\w*\s*`),
+  )) {
+    let p = m.index + m[0].length;
+    if (masked[p] === "<") {
+      for (let depth = 0; p < masked.length; p++) {
+        if (masked[p] === "<") depth++;
+        else if (masked[p] === ">" && masked[p - 1] !== "-" && --depth === 0)
+          break;
+      }
+      p++;
+      while (p < masked.length && /\s/.test(masked[p])) p++;
+    }
+    if (masked[p] === "(") patternSpans.push([p, closeOf.get(p) ?? p]);
+  }
   // A closure opens where an expression can start, so never after a name, a
-  // literal, a close or `?`; its list ends at the next `|` of its own group,
-  // and a `=` or `;` there first means it was no parameter list.
+  // literal, a close or `?`, and never inside a pattern (an or-pattern's
+  // leading `|`); its list ends at the next `|` of its own group, and a `=`
+  // or `;` there first means it was no parameter list.
   const CLOSURE_KEYWORDS = new Set([
     "async",
     "break",
@@ -1814,13 +1844,18 @@ export function checkMergeIgnoredGuard(
       i++;
       continue;
     }
+    if (isPattern(i)) continue;
     let q = i - 1;
     while (q >= 0 && /\s/.test(code[q])) q--;
     if (q >= 0 && ")]}?\"'#".includes(code[q])) continue;
     if (q >= 0 && WORD.test(code[q])) {
       let w = q;
       while (w >= 0 && WORD.test(code[w])) w--;
-      if (!CLOSURE_KEYWORDS.has(code.slice(w + 1, q + 1))) continue;
+      if (
+        BEFORE_NAME_RE.test(code[w] ?? "") ||
+        !CLOSURE_KEYWORDS.has(code.slice(w + 1, q + 1))
+      )
+        continue;
     }
     const group = inner[i];
     let j = i + 1;
@@ -1833,21 +1868,6 @@ export function checkMergeIgnoredGuard(
     patternSpans.push([i, j]);
     i = j;
   }
-  for (const m of masked.matchAll(/\bfn\s+[A-Za-z_]\w*\s*/g)) {
-    let p = m.index + m[0].length;
-    if (masked[p] === "<") {
-      for (let depth = 0; p < masked.length; p++) {
-        if (masked[p] === "<") depth++;
-        else if (masked[p] === ">" && masked[p - 1] !== "-" && --depth === 0)
-          break;
-      }
-      p++;
-      while (p < masked.length && /\s/.test(masked[p])) p++;
-    }
-    if (masked[p] === "(") patternSpans.push([p, closeOf.get(p) ?? p]);
-  }
-  const isPattern = (open) =>
-    patternSpans.some(([s, e]) => open >= s && open < e);
 
   // Array-literal units: every `[` that is not an attribute or an index.
   const units = [];
