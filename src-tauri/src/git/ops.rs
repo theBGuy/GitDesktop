@@ -3774,17 +3774,16 @@ fn pr_resolve_prefix(remote: &str, number: u64) -> String {
 /// Whether `path` is `<base>/<16 hex>/<name>`: an entry DIRECTLY inside one of the
 /// per-repository roots under the worktrees base, whichever key hashed that root
 /// (identity or a checkout path, this checkout's or another's). Shape only — it does
-/// not say WHICH repository; callers scope by this repository's worktree registry.
+/// not say WHICH repository; a caller acting on the path checks registry membership
+/// under the same spelling (see [`classify_pr_resolve_path`]).
 ///
 /// The two sides routinely arrive as DIFFERENT SPELLINGS of the same location — git's
 /// porcelain prints macOS's canonical `/private/var/…` where the caller holds the
 /// `/var/…` symlink, and a Windows runner's 8.3 short name where the caller holds the
 /// long one — so each side is canonicalized (`canonical_wt_path`) before comparing.
 /// The normalize-only spelling is a second chance for a path that no longer exists,
-/// where `canonicalize` fails on one side only. This is shape only: a caller acting on
-/// the path must also check membership under the same spelling (see
-/// [`classify_pr_resolve_path`]). The separator after `base` is required: a bare
-/// prefix match would accept a SIBLING `<base>evil/…`.
+/// where `canonicalize` fails on one side only. The separator after `base` is
+/// required: a bare prefix match would accept a SIBLING `<base>evil/…`.
 fn is_in_a_worktree_root(base: &Path, path: &str) -> bool {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let base_str = base.to_string_lossy();
