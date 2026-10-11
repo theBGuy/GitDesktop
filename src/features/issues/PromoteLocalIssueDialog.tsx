@@ -129,12 +129,11 @@ export function PromoteLocalIssueDialog({
   // force-switched toggle.
   const [pendingTo, setPendingTo] = useState<Destination | null>(null);
   const pending = pendingTo !== null;
-  // The forge publish holds offline rather than park: a parked create keeps
-  // `pending` set, locking Cancel until reconnect. The Jira arm isn't held, so
-  // pressed offline it parks with the local issue already closed; the reason
-  // below is how its controls say so while the dialog stays up.
+  // Both destinations hold offline rather than park: the local issue closes
+  // before the create, so a parked create lost to an app quit would strand it
+  // closed with no successor. A create that parks anyway (the connection dropped
+  // after the press) is what the pending reason below covers.
   const offlineHold = useOfflineHold();
-  const forgeHold = destination === "forge" ? offlineHold : undefined;
   const destinationLabel: Record<Destination, string> = {
     forge: remoteLabel,
     jira: "Jira",
@@ -266,9 +265,7 @@ export function PromoteLocalIssueDialog({
     let created: { key: string; url: string } | null = null;
     let failedStep = "linking the local issue";
     try {
-      // Closed first, as on the forge path. This arm isn't held offline, so a
-      // create pressed offline parks with the local issue already closed and
-      // finishes on reconnect.
+      // Closed first, as on the forge path.
       const stamp = new Date().toISOString();
       await closeLocal(stamp);
       closedAt = stamp;
@@ -378,7 +375,7 @@ export function PromoteLocalIssueDialog({
   }
 
   async function promote() {
-    if (destination === "forge" && refuseWhileOffline()) return;
+    if (refuseWhileOffline()) return;
     setPendingTo(destination);
     try {
       if (destination === "jira") await promoteJira();
@@ -490,8 +487,8 @@ export function PromoteLocalIssueDialog({
           </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
-            disabled={pending || !jiraReady || !!forgeHold}
-            reason={pending ? pendingReason : forgeHold}
+            disabled={pending || !jiraReady || !!offlineHold}
+            reason={pending ? pendingReason : offlineHold}
           >
             {pending && <Spinner data-icon="inline-start" />}
             Publish to {targetLabel}

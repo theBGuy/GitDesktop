@@ -581,10 +581,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `useForkRepo` (repo-access.ts — RepositoryMenu reads its observer as the
   re-entry guard) stay unpinned BY DECISION: their callers read `isPending` as
   a re-entry guard, which a pin idles, so the isPending → cache-reader
-  migration comes first. (`useSubmitReview` and `useAddIssueSpentTime` left
-  this list when the offline round-4 wave keyed them and moved their re-entry
-  guards to mutation-cache readers; `useForkRepoByName` — a different hook
-  from `useForkRepo` — was keyed in the same wave.) A cache WRITE
+  migration comes first. (`useSubmitReview`, `useAddIssueSpentTime` and `useForkRepoByName` — a
+  different hook from `useForkRepo` — are pinned, their re-entry guards on
+  mutation-cache readers.) A cache WRITE
   (`setQueryData`/`setQueriesData`) in `onSuccess`/`onError`/`onSettled` keys
   from the callback's own parameters, never hook scope. The snapshot already
   runs the settle callbacks in effect at the start, so this is defense in depth:

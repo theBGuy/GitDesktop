@@ -62,6 +62,7 @@ import {
   IssueRelationships,
   PendingWriteNote,
   RelatedRow,
+  type RowPending,
 } from "./IssueRelations";
 
 /** A rail row's hold while its own write is pending: parked offline or saving. */
@@ -850,15 +851,19 @@ function IssueLinksSection({
     pendingIssueWrite(pendingWrites, "link", (v) => v.number === number),
     "Linking the issue…",
   );
-  const unlinkReason = (linkId: string) =>
-    rowPendingReason(
-      pendingIssueWrite(
-        pendingWrites,
-        "unlink",
-        (v) => v.number === number && v.linkId === linkId,
-      ),
-      "Removing this link…",
+  const unlinking = (linkId: string): RowPending | undefined => {
+    const pending = pendingIssueWrite(
+      pendingWrites,
+      "unlink",
+      (v) => v.number === number && v.linkId === linkId,
     );
+    return pending
+      ? {
+          reason: pendingWriteReason(pending.paused, "Removing this link…"),
+          paused: pending.paused,
+        }
+      : undefined;
+  };
   // A second link while one is pending could name the same issue twice.
   const addReason = disabledReason ?? linkReason;
 
@@ -909,7 +914,7 @@ function IssueLinksSection({
           issue={toRelated(l)}
           onOpen={open}
           removeDisabledReason={disabledReason}
-          pendingReason={unlinkReason(l.linkId)}
+          pending={unlinking(l.linkId)}
           onRemove={() => unlinkIssue.mutate({ number, linkId: l.linkId })}
         />
       ))}

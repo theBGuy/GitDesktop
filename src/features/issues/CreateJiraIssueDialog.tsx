@@ -218,7 +218,9 @@ export function CreateJiraIssueDialog({
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   // An offline create queues rather than refuses: the dialog stays open on the
   // waiting draft and sends it once the connection returns. `isSubmitting` covers
-  // the submit's lead-in before the mutation reports pending.
+  // the submit's lead-in before the mutation reports pending. The fields freeze
+  // meanwhile: the summary read-only, since its Enter starts the submit while it
+  // holds focus; the description and type disable, as neither can submit.
   const creating = create.isPending || isSubmitting;
   // Why the submit is held, for both the hover wrapper and the sr-only node.
   const submitReason = (() => {
@@ -309,7 +311,7 @@ export function CreateJiraIssueDialog({
                 <field.TextField
                   label="Summary"
                   placeholder="Summarize the issue"
-                  disabled={creating}
+                  readOnly={creating}
                   warning={(v) =>
                     v.trim() ? null : "Enter a summary to create the issue"
                   }

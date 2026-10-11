@@ -92,6 +92,7 @@ import {
 import type {
   BoardMoveBucket,
   BoardWriteKind,
+  PendingProjectWrite,
   PendingProjectWriteKind,
 } from "@/lib/git/queries";
 import {
@@ -676,6 +677,22 @@ const NO_COLLAPSED: ReadonlySet<string> = new Set<string>();
  *  writes to one card settle in an order nothing promises. Worded by what IS
  *  pending: a lone one-item field write is a cell edit, not a bulk change. */
 const BULK_PENDING_REASON = "Applying the last bulk change…";
+/** Whether a write of one of `kinds` is pending in `writes`, and whether every
+ *  such write is parked offline. A project or view hold reads this rather than its
+ *  mutation's observer: the observer describes only its latest call, and the panel
+ *  outlives repository switches, so another repo's call would hide this one's. */
+function projectWriteHold(
+  writes: readonly PendingProjectWrite[],
+  ...kinds: PendingProjectWriteKind[]
+): { pending: boolean; paused: boolean } {
+  const matches = writes.filter(
+    (w) => w.kind !== null && kinds.includes(w.kind),
+  );
+  return {
+    pending: matches.length > 0,
+    paused: matches.length > 0 && matches.every((w) => w.isPaused),
+  };
+}
 /** The toolbar's line for each project or view write still on its way. */
 const PROJECT_WRITE_LINE: Record<PendingProjectWriteKind, string> = {
   "project-create": "Creating a project…",
@@ -3239,6 +3256,36 @@ export function ProjectsBoardPanel({
    *  animates out. */
   const [lifecycle, setLifecycle] = useState<LifecycleDialog | null>(null);
   const [lifecycleOpen, setLifecycleOpen] = useState(false);
+  // Every project and view hold, matched to this repo (and, past a create, the
+  // project on screen) by each write's own variables.
+  const newProjectWrite = projectWriteHold(
+    pendingProjectWrites,
+    "project-create",
+  );
+  const editProjectWrite = projectWriteHold(
+    pendingProjectWrites,
+    "project-edit",
+  );
+  const closeWrite = projectWriteHold(
+    pendingProjectWrites,
+    "project-close",
+    "project-reopen",
+  );
+  const deleteProjectWrite = projectWriteHold(
+    pendingProjectWrites,
+    "project-delete",
+  );
+  const viewNameWrite = projectWriteHold(
+    pendingProjectWrites,
+    lifecycle?.kind === "rename-view" ? "view-rename" : "view-create",
+  );
+  const viewFieldsWrite = projectWriteHold(pendingProjectWrites, "view-fields");
+  const duplicateViewWrite = projectWriteHold(
+    pendingProjectWrites,
+    "view-duplicate",
+  );
+  const deleteViewWrite = projectWriteHold(pendingProjectWrites, "view-delete");
+  const layoutWrite = projectWriteHold(pendingProjectWrites, "view-layout");
   /** Which run of a lifecycle dialog is current, the contract
    *  {@link dialogSessionRef} keeps for the board's own dialogs: a write that
    *  outlives its dialog may close only the run that fired it. */
@@ -3382,8 +3429,8 @@ export function ProjectsBoardPanel({
   // offer rather than the write still going.
   const closeReopenHeld = (() => {
     switch (true) {
-      case closeProject.isPending:
-        return pendingItemReason(closeProject.isPaused, "saving…");
+      case closeWrite.pending:
+        return pendingItemReason(closeWrite.paused, "saving…");
       case projectScopeReadOnly(scopes.data):
         return "needs the project scope";
       case project?.closed === true && !project.viewerCanReopen:
@@ -3400,8 +3447,8 @@ export function ProjectsBoardPanel({
   })();
   const deleteProjectHeld =
     statusWriteHeld ??
-    (deleteProject.isPending
-      ? pendingItemReason(deleteProject.isPaused, "deleting…")
+    (deleteProjectWrite.pending
+      ? pendingItemReason(deleteProjectWrite.paused, "deleting…")
       : undefined) ??
     (offlineHold ? OFFLINE_ITEM_REASON : undefined);
   // Close asks first, so it carries the ellipsis; a held row drops it for the
@@ -3510,8 +3557,8 @@ export function ProjectsBoardPanel({
           "Saving this view…",
         )
       : undefined) ??
-    (duplicateView.isPending
-      ? pendingWriteReason(duplicateView.isPaused, "Duplicating a view…")
+    (duplicateViewWrite.pending
+      ? pendingWriteReason(duplicateViewWrite.paused, "Duplicating a view…")
       : undefined) ??
     offlineHold;
   const viewFieldsReason = viewActionReason(true) ?? viewsRefreshing;
@@ -3522,15 +3569,15 @@ export function ProjectsBoardPanel({
   const deleteViewReason =
     viewActionReason(true) ??
     (lastView ? LAST_VIEW_REASON : undefined) ??
-    (deleteView.isPending
-      ? pendingWriteReason(deleteView.isPaused, "Deleting a view…")
+    (deleteViewWrite.pending
+      ? pendingWriteReason(deleteViewWrite.paused, "Deleting a view…")
       : undefined) ??
     offlineHold;
   const saveLayoutReason =
     viewActionReason(true) ??
     unknownLayoutHeld ??
-    (saveViewLayout.isPending
-      ? pendingWriteReason(saveViewLayout.isPaused, "Saving the layout…")
+    (layoutWrite.pending
+      ? pendingWriteReason(layoutWrite.paused, "Saving the layout…")
       : undefined);
 
   function openNewView() {
@@ -6685,8 +6732,8 @@ export function ProjectsBoardPanel({
           was opened on from `lifecycle`, which outlives the close. */}
       <NewProjectDialog
         open={lifecycleOpen && lifecycle?.kind === "new-project"}
-        pending={createProject.isPending}
-        paused={createProject.isPaused}
+        pending={newProjectWrite.pending}
+        paused={newProjectWrite.paused}
         offlineHold={offlineHold}
         target={{
           repository: projects.data?.repositoryId
@@ -6704,8 +6751,8 @@ export function ProjectsBoardPanel({
       />
       <EditProjectDialog
         open={lifecycleOpen && lifecycle?.kind === "edit-project"}
-        pending={editProjectDetails.isPending}
-        paused={editProjectDetails.isPaused}
+        pending={editProjectWrite.pending}
+        paused={editProjectWrite.paused}
         seedTitle={lifecycle?.kind === "edit-project" ? lifecycle.title : ""}
         seedDescription={
           lifecycle?.kind === "edit-project" ? lifecycle.description : ""
@@ -6721,16 +6768,8 @@ export function ProjectsBoardPanel({
           lifecycleOpen &&
           (lifecycle?.kind === "new-view" || lifecycle?.kind === "rename-view")
         }
-        pending={
-          lifecycle?.kind === "rename-view"
-            ? renameView.isPending
-            : createView.isPending
-        }
-        paused={
-          lifecycle?.kind === "rename-view"
-            ? renameView.isPaused
-            : createView.isPaused
-        }
+        pending={viewNameWrite.pending}
+        paused={viewNameWrite.paused}
         offlineHold={offlineHold}
         seedName={lifecycle?.kind === "rename-view" ? lifecycle.view.name : ""}
         onOpenChange={(o) => {
@@ -6740,8 +6779,8 @@ export function ProjectsBoardPanel({
       />
       <ViewFieldsDialog
         open={lifecycleOpen && lifecycle?.kind === "view-fields"}
-        pending={setViewFields.isPending}
-        paused={setViewFields.isPaused}
+        pending={viewFieldsWrite.pending}
+        paused={viewFieldsWrite.paused}
         viewName={
           lifecycle?.kind === "view-fields"
             ? lifecycle.view.name || UNTITLED_VIEW

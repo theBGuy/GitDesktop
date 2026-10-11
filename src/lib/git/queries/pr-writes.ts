@@ -278,7 +278,7 @@ export type DiscussionUpvoteVars = {
 };
 
 /** Whether an upvote toggle on discussion `number` in `repo` is among `entries`
- *  (keyed `[op, repo]`), and whether any such toggle is parked offline. */
+ *  (keyed `[op, repo]`), and whether every such toggle is parked offline. */
 export function pendingDiscussionUpvoteFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
@@ -292,14 +292,15 @@ export function pendingDiscussionUpvoteFor(
   return pendingAndPaused(matching);
 }
 
-/** Whether any of `matching` is in flight, and whether any is parked offline. */
+/** Whether any of `matching` is in flight, and whether ALL of it is parked offline:
+ *  one running write means work is happening, so the hold says in-flight. */
 function pendingAndPaused(matching: readonly PendingMutationEntry[]): {
   pending: boolean;
   paused: boolean;
 } {
   return {
     pending: matching.length > 0,
-    paused: matching.some((e) => e.paused ?? false),
+    paused: matching.length > 0 && matching.every((e) => e.paused === true),
   };
 }
 
@@ -318,7 +319,7 @@ export type EditLabelsVars = {
 };
 
 /** Whether a label edit on the `kind` entity `number` in `repo` is among `entries`
- *  (keyed {@link prWriteKey}`("labels", repo)`), and whether any is parked offline. */
+ *  (keyed {@link prWriteKey}`("labels", repo)`), and whether every one is parked offline. */
 export function pendingLabelEditFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
@@ -355,8 +356,8 @@ export type ForkByNameVars = {
   name: string;
 };
 
-/** Whether a fork of `owner/name` on `provider` is among `entries`, and whether any
- *  such fork is parked offline. */
+/** Whether a fork of `owner/name` on `provider` is among `entries`, and whether
+ *  every such fork is parked offline. */
 export function pendingForkFor(
   entries: readonly PendingMutationEntry[],
   provider: ForgeProvider,
@@ -383,7 +384,7 @@ export const TAG_PUSH_KEY = ["tag-push"] as const;
 /** A tag push's mutation key; the tag rides the variables. */
 export const tagPushKey = (repo: string) => [...TAG_PUSH_KEY, repo] as const;
 
-/** One tag with a push in flight; `paused` when any push of it is parked offline. */
+/** One tag with a push in flight; `paused` when every push of it is parked offline. */
 export interface TagPushState {
   tag: string;
   paused: boolean;
@@ -403,9 +404,10 @@ export function pendingTagPushesFor(
     if (prefix !== TAG_PUSH_KEY[0] || keyRepo !== repo) continue;
     if (typeof e.vars !== "string") continue;
     const tag = e.vars;
-    const paused = e.paused ?? false;
+    const paused = e.paused === true;
     const prev = out.find((p) => p.tag === tag);
-    if (prev) prev.paused ||= paused;
+    // All-parked: one running push of the tag makes it in flight.
+    if (prev) prev.paused &&= paused;
     else out.push({ tag, paused });
   }
   return out;

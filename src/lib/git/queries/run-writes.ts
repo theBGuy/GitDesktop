@@ -57,7 +57,8 @@ export type ApproveRunVars = {
   lens?: RemoteLens;
 };
 
-/** One in-flight write: `paused` when any write of it is parked offline. */
+/** One in-flight write: `paused` only when EVERY write of it is parked offline —
+ *  a running request means work is happening, so the in-flight copy is honest. */
 export interface RunWriteState {
   paused: boolean;
 }
@@ -98,8 +99,9 @@ function idOf(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+/** Folds one more write into a state: parked only while every write is. */
 const merged = (prev: RunWriteState | undefined, paused: boolean) => ({
-  paused: (prev?.paused ?? false) || paused,
+  paused: (prev?.paused ?? true) && paused,
 });
 
 /** The run writes among `entries` filed against `repo` (keyed `[prefix, kind,
@@ -198,7 +200,7 @@ export function pendingJobState(
 }
 
 /** The run's re-run family in flight: its own re-run or a re-run of one of its
- *  jobs, which act on the same attempt. Paused when either is parked. */
+ *  jobs, which act on the same attempt. Paused only when every part is parked. */
 export function rerunFamilyState(
   state: PendingRunState | undefined,
 ): RunWriteState | undefined {
@@ -207,5 +209,5 @@ export function rerunFamilyState(
   );
   return parts.length === 0
     ? undefined
-    : { paused: parts.some((p) => p.paused) };
+    : { paused: parts.every((p) => p.paused) };
 }

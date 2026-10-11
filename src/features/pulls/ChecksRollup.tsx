@@ -907,13 +907,14 @@ export function ChecksRollup({
   // of its own, so the button holds focus through the disable.
   const offlineHold = useOfflineHold();
   // Approvals of these runs in flight from any surface or an earlier mount: the
-  // `approving` flag spans only this mount's batch.
+  // `approving` flag spans only this mount's batch. Parked only when every one
+  // is, so a running approval keeps the in-flight copy.
   const approvals = blockedRunIds.flatMap(
     (id) => pendingRunState(runWrites, id)?.approve ?? [],
   );
   const approvePending =
     approvals.length > 0
-      ? { paused: approvals.some((a) => a.paused) }
+      ? { paused: approvals.every((a) => a.paused) }
       : undefined;
   const approveHeldReason = (() => {
     switch (true) {
@@ -952,11 +953,11 @@ export function ChecksRollup({
     }
   })();
   // A re-run of an offered run already in flight holds the batch, which would
-  // otherwise submit that run a second time.
+  // otherwise submit that run a second time; parked only when every one is.
   const batchFamilies = rerunnable.flatMap(([id]) => familyOf(id) ?? []);
   const batchPending =
     batchFamilies.length > 0
-      ? { paused: batchFamilies.some((f) => f.paused) }
+      ? { paused: batchFamilies.every((f) => f.paused) }
       : undefined;
 
   /** Re-read the PR's checks once the started attempts have transitioned. Both

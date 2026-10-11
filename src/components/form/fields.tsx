@@ -41,6 +41,7 @@ export function TextField({
   type,
   autoFocus,
   disabled,
+  readOnly,
   className,
   warning,
   id,
@@ -50,6 +51,10 @@ export function TextField({
   type?: string;
   autoFocus?: boolean;
   disabled?: boolean;
+  /** Freezes the value but keeps the input focusable — for a hold that can
+   *  start while the input has focus (an Enter submit), where `disabled` would
+   *  drop focus to the body. */
+  readOnly?: boolean;
   className?: string;
   warning?: (value: string) => string | null;
   /** Override the auto-generated input id — for call sites that render their
@@ -68,6 +73,7 @@ export function TextField({
         placeholder={placeholder}
         autoFocus={autoFocus}
         disabled={disabled}
+        readOnly={readOnly}
         className={className}
         autoComplete="off"
         value={field.state.value}

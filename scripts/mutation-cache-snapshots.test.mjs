@@ -188,6 +188,26 @@ test("writes match the repo AND the named project; a create matches the repo alo
   );
 });
 
+test("a parked create in one repo stays pending there after another repo's create", () => {
+  // The panel's observer would describe only the LATER (repo B) call; the cache
+  // read keeps repo A's parked create, under A's open project too.
+  const projects = pendingMutationEntries([
+    mutation(
+      61,
+      ["project-write", "create"],
+      { repo: "C:/a", title: "A" },
+      true,
+    ),
+    mutation(62, ["project-write", "create"], { repo: "C:/b", title: "B" }),
+  ]);
+  assert.deepEqual(pendingProjectWritesFor(projects, [], "C:/a", "P_1"), [
+    { mutationId: 61, kind: "project-create", isPaused: true },
+  ]);
+  assert.deepEqual(pendingProjectWritesFor(projects, [], "C:/b", null), [
+    { mutationId: 62, kind: "project-create", isPaused: false },
+  ]);
+});
+
 test("an update's patch names its verb; an unreadable one stays generic", () => {
   const projects = pendingMutationEntries([
     mutation(41, ["project-write", "update"], {
@@ -294,7 +314,12 @@ test("a discussion upvote holds its own discussion in its own repo", () => {
     mutation(3, ["toggle-discussion-upvote", "C:/a"], { number: 9 }, true),
     mutation(4, ["toggle-discussion-upvote", "C:/b"], { number: 8 }, true),
   ]);
+  // One running toggle beside a parked one reads as in flight: parked means ALL.
   assert.deepEqual(pendingDiscussionUpvoteFor(entries, "C:/a", 8), {
+    pending: true,
+    paused: false,
+  });
+  assert.deepEqual(pendingDiscussionUpvoteFor(entries, "C:/a", 9), {
     pending: true,
     paused: true,
   });
@@ -314,9 +339,13 @@ test("a discussion upvote holds its own discussion in its own repo", () => {
 
 test("run writes fold per run and per job, matching ids across number and string", () => {
   const entries = pendingMutationEntries([
-    // The run view cancels by number; a parked twin from the menu ORs the pause.
+    // The run view cancels by number; a parked twin from the menu leaves it
+    // running (the wave's rule: parked only when every write is).
     mutation(1, ["ci-run-write", "cancel-run", "C:/a"], 101),
     mutation(2, ["ci-run-write", "cancel-run", "C:/a"], 101, true),
+    // Two parked cancels of one run: parked.
+    mutation(7, ["ci-run-write", "cancel-run", "C:/a"], 303, true),
+    mutation(8, ["ci-run-write", "cancel-run", "C:/a"], "303", true),
     // The PR checks re-run by string id, the run view by number: one run.
     mutation(3, ["ci-run-write", "rerun-run", "C:/a"], {
       runId: "202",
@@ -336,7 +365,8 @@ test("run writes fold per run and per job, matching ids across number and string
   const writes = pendingRunWritesFor(entries, "C:/a");
   assert.deepEqual(writes, {
     runs: [
-      { runId: "101", cancel: { paused: true }, jobRerun: { paused: false } },
+      { runId: "101", cancel: { paused: false }, jobRerun: { paused: false } },
+      { runId: "303", cancel: { paused: true } },
       { runId: "202", rerun: { paused: false, failed: true, whole: true } },
     ],
     jobs: [
@@ -346,7 +376,7 @@ test("run writes fold per run and per job, matching ids across number and string
   });
   assert.equal(pendingRunState(writes, 202), pendingRunState(writes, "202"));
   assert.notEqual(pendingRunState(writes, 202), undefined);
-  assert.equal(pendingRunState(writes, 303), undefined);
+  assert.equal(pendingRunState(writes, 404), undefined);
   assert.deepEqual(pendingJobState(writes, "J2"), {
     jobId: "J2",
     play: { paused: true },
@@ -384,7 +414,7 @@ test("run writes stay in their repo and their kind", () => {
   assert.equal(pendingRunState(other, "constructor"), undefined);
 });
 
-test("an approval holds its own run, beside the run's other writes, and ORs its pauses", () => {
+test("an approval holds its own run, beside the run's other writes, parked only when all are", () => {
   const entries = pendingMutationEntries([
     // The run view approves by number, the PR checks pass a lens too.
     mutation(1, ["ci-run-write", "approve-run", "C:/a"], { runId: 7 }),
@@ -396,6 +426,9 @@ test("an approval holds its own run, beside the run's other writes, and ORs its 
     ),
     mutation(3, ["ci-run-write", "cancel-run", "C:/a"], 7),
     mutation(4, ["ci-run-write", "approve-run", "C:/a"], { runId: 8 }),
+    // Two parked approvals of one run: parked.
+    mutation(7, ["ci-run-write", "approve-run", "C:/a"], { runId: 10 }, true),
+    mutation(8, ["ci-run-write", "approve-run", "C:/a"], { runId: 10 }, true),
     // Other repo; an approval with no readable run id.
     mutation(5, ["ci-run-write", "approve-run", "C:/b"], { runId: 9 }),
     mutation(6, ["ci-run-write", "approve-run", "C:/a"], { lens: "origin" }),
@@ -403,18 +436,20 @@ test("an approval holds its own run, beside the run's other writes, and ORs its 
   const writes = pendingRunWritesFor(entries, "C:/a");
   assert.deepEqual(writes, {
     runs: [
-      { runId: "7", approve: { paused: true }, cancel: { paused: false } },
+      // One running approval beside a parked twin keeps the run in flight.
+      { runId: "7", approve: { paused: false }, cancel: { paused: false } },
       { runId: "8", approve: { paused: false } },
+      { runId: "10", approve: { paused: true } },
     ],
     jobs: [],
   });
-  assert.deepEqual(pendingRunState(writes, "7")?.approve, { paused: true });
+  assert.deepEqual(pendingRunState(writes, "10")?.approve, { paused: true });
   // An approval is not a re-run.
   assert.equal(rerunFamilyState(pendingRunState(writes, 8)), undefined);
   assert.equal(pendingRunState(writes, 9), undefined);
 });
 
-test("a run's re-run family is its own re-run or a job re-run, paused when either is", () => {
+test("a run's re-run family is its own re-run or a job re-run, parked only when both are", () => {
   const entries = pendingMutationEntries([
     mutation(1, ["ci-run-write", "rerun-run", "C:/a"], {
       runId: 1,
@@ -424,17 +459,29 @@ test("a run's re-run family is its own re-run or a job re-run, paused when eithe
       jobId: "J9",
       runId: "1",
     }),
-    mutation(3, ["ci-run-write", "rerun-job", "C:/a"], {
-      jobId: "J8",
-      runId: 2,
-      lens: "origin",
-    }),
+    mutation(
+      3,
+      ["ci-run-write", "rerun-job", "C:/a"],
+      { jobId: "J8", runId: 2, lens: "origin" },
+      true,
+    ),
     mutation(
       4,
       ["ci-run-write", "rerun-run", "C:/a"],
       { runId: 2, failed: true },
       true,
     ),
+    // A parked run re-run beside a running job re-run: still in flight.
+    mutation(
+      5,
+      ["ci-run-write", "rerun-run", "C:/a"],
+      { runId: 3, failed: true },
+      true,
+    ),
+    mutation(6, ["ci-run-write", "rerun-job", "C:/a"], {
+      jobId: "J7",
+      runId: 3,
+    }),
   ]);
   const writes = pendingRunWritesFor(entries, "C:/a");
   assert.deepEqual(rerunFamilyState(pendingRunState(writes, 1)), {
@@ -442,6 +489,9 @@ test("a run's re-run family is its own re-run or a job re-run, paused when eithe
   });
   assert.deepEqual(rerunFamilyState(pendingRunState(writes, "2")), {
     paused: true,
+  });
+  assert.deepEqual(rerunFamilyState(pendingRunState(writes, 3)), {
+    paused: false,
   });
   assert.deepEqual(pendingRunState(writes, 2)?.rerun, {
     paused: true,
@@ -486,6 +536,14 @@ test("a label edit holds its own entity: repo by KEY, kind and number by variabl
   assert.equal(pendingLabelEditFor(entries, "C:/a", "mr", 6).pending, false);
   assert.equal(pendingLabelEditFor(entries, "C:/a", "issue", 6).pending, true);
   assert.equal(pendingLabelEditFor(entries, "C:/a", "mr", 7).pending, false);
+  // A running edit beside the parked one on PR 3: parked only when ALL are.
+  const mixed = pendingMutationEntries([
+    mutation(46, prWriteKey("labels", "C:/a"), labelVars("mr", 3)),
+  ]);
+  assert.deepEqual(
+    pendingLabelEditFor([...entries, ...mixed], "C:/a", "mr", 3),
+    { pending: true, paused: false },
+  );
 });
 
 test("a review submit holds its PR through the PR-write aggregate, either lens", () => {
@@ -531,7 +589,7 @@ test("a fork holds the repo it forks on its provider, and maps the pause", () =>
   });
 });
 
-test("tag pushes read as a per-repo SET of tags, a tag paused if any push is", () => {
+test("tag pushes read as a per-repo SET of tags, a tag paused only if every push is", () => {
   const entries = pendingMutationEntries([
     mutation(71, tagPushKey("C:/a"), "v1"),
     mutation(72, tagPushKey("C:/a"), "v2", true),
@@ -542,8 +600,9 @@ test("tag pushes read as a per-repo SET of tags, a tag paused if any push is", (
     // Variables that aren't a tag name hold nothing.
     mutation(76, tagPushKey("C:/a"), { name: "v4" }),
   ]);
+  // v1 has a running push beside its parked one, so it reads as in flight.
   assert.deepEqual(pendingTagPushesFor(entries, "C:/a"), [
-    { tag: "v1", paused: true },
+    { tag: "v1", paused: false },
     { tag: "v2", paused: true },
     { tag: "constructor", paused: false },
   ]);
@@ -551,6 +610,14 @@ test("tag pushes read as a per-repo SET of tags, a tag paused if any push is", (
     { tag: "v3", paused: false },
   ]);
   assert.deepEqual(pendingTagPushesFor(entries, "C:/c"), []);
+  // Order-free: a parked push seen first still yields to a running one after it.
+  const parkedFirst = pendingMutationEntries([
+    mutation(77, tagPushKey("C:/a"), "v5", true),
+    mutation(78, tagPushKey("C:/a"), "v5"),
+  ]);
+  assert.deepEqual(pendingTagPushesFor(parkedFirst, "C:/a"), [
+    { tag: "v5", paused: false },
+  ]);
 });
 
 test("issue and Jira rail writes scope by repo KEY and keep kind, pause and variables", () => {

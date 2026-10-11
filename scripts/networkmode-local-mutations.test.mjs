@@ -1278,7 +1278,7 @@ function hookClasses(sites, sources = []) {
           for (const cls of local.get(call) ?? [])
             if (add(local, hook.name, cls)) changed = true;
     } while (changed);
-    for (const hook of hooks.filter((f) => f.exported))
+    for (const hook of hooks)
       for (const cls of local.get(hook.name) ?? []) add(classes, hook.name, cls);
   }
   return classes;
@@ -1414,6 +1414,29 @@ test("offline vocabulary follows same-file factory callers to a fixpoint", () =>
   assert.deepEqual([...classes.get("useLocal")], ["local"]);
   for (const hook of ["useReference", "useComment", "useCrossModule"])
     assert.equal(classes.has(hook), false);
+});
+
+test("offline vocabulary covers non-exported same-file factory wrappers", () => {
+  const file = "src/features/fixture.tsx";
+  const source = `
+    function useNetworkFactory() {
+      return useMutation({ mutationFn: api.gitPush });
+    }
+    function useThing() {
+      const m = useNetworkFactory();
+      return m;
+    }
+    const save = useThing();
+    save.mutate(v);
+  `;
+  const verdict = scan(source, file);
+  assert.deepEqual(verdict.ambiguities, []);
+  const classes = hookClasses(verdict.sites, [{ file, source }]);
+  const check = (source) =>
+    offlineVocabularyFindings([{ file, source }], classes, []);
+  assert.equal(check(source).boundFiles, 1);
+  assert.deepEqual(check(source).failures, [{ file, hooks: ["useThing"] }]);
+  assert.deepEqual(check(`${source}\nuseOnline();`).failures, []);
 });
 
 test("offline vocabulary flags bound network writes and stale file exemptions", () => {

@@ -1125,6 +1125,8 @@ export function RemoteIssueView({
                         {LOCK_REASONS.map(([label, reason]) => (
                           <DropdownMenuItem
                             key={reason ?? "none"}
+                            className={MENU_HELD_ROW_CLASS}
+                            disabled={lockBlocked || lockHeld !== undefined}
                             onClick={() => void doLock(reason)}
                           >
                             {label}
