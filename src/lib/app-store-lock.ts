@@ -8,8 +8,10 @@ import { COLD_START } from "@/lib/test-mode";
  * never take it. Fail-open: an acquire that errors or answers null runs `fn`
  * unlocked, so the lock can never block a write. Keep the hold ms-scale: resolve
  * identity keys and spawn git BEFORE calling this, since contenders stop waiting
- * after ~475ms and a hold past ~10s is evictable as stale. Cold-start instances
- * skip it: their `coldstart-*` files have no second writer.
+ * after ~475ms; past ~5s this process's next acquire of the same store evicts the
+ * hold, and past ~10s any process can. The release is awaited so this chain's next
+ * acquire never races it. Cold-start instances skip it: their `coldstart-*` files
+ * have no second writer.
  */
 export async function withAppStoreLock<T>(
   file: string,
@@ -23,6 +25,6 @@ export async function withAppStoreLock<T>(
     return await fn();
   } finally {
     if (id)
-      void invoke("app_store_lock_release", { id }).catch(() => undefined);
+      await invoke("app_store_lock_release", { id }).catch(() => undefined);
   }
 }

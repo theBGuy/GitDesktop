@@ -2816,8 +2816,9 @@ pub(crate) fn repo_hash(repo_path: &str) -> String {
 }
 
 /// The app-data worktrees base, `<data_dir>/<identifier>/worktrees`: every
-/// per-repository root sits directly in it. Mirrors `worktree.rs::worktree_root`, but
-/// resolved via `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the merge
+/// per-repository root sits directly in it. Mirrors `worktree.rs::worktree_root`'s
+/// base derivation (that function returns a per-repo root), but resolved via
+/// `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the merge
 /// commands carry no `AppHandle`. Tauri's `app_data_dir()` is exactly
 /// `dirs::data_dir()/<identifier>`, so this points at the same directory.
 fn worktrees_base_dir() -> AppResult<std::path::PathBuf> {
@@ -2840,9 +2841,9 @@ fn worktree_root_for_key(key: &str) -> AppResult<std::path::PathBuf> {
     Ok(worktree_root_in(&worktrees_base_dir()?, key))
 }
 
-/// The checkout-path-keyed worktree root. Nothing in this module mints here; what
-/// remains under it is what earlier builds left — resolve worktrees, which the
-/// resolve flows still adopt — plus `update_marker`'s pre-rekey legacy root.
+/// The checkout-path-keyed worktree root, the same directory agent-session worktrees
+/// mint in (`worktree.rs::worktree_root`). This module mints nothing here: it only
+/// ADOPTS resolve worktrees earlier builds left, plus `update_marker`'s pre-rekey root.
 pub(crate) fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
     worktree_root_for_key(repo_path)
 }
@@ -3780,9 +3781,10 @@ fn pr_resolve_prefix(remote: &str, number: u64) -> String {
 /// `/var/…` symlink, and a Windows runner's 8.3 short name where the caller holds the
 /// long one — so each side is canonicalized (`canonical_wt_path`) before comparing.
 /// The normalize-only spelling is a second chance for a path that no longer exists,
-/// where `canonicalize` fails on one side only. Both test the same shape under the
-/// same base, so accepting either never widens what passes. The separator after
-/// `base` is required: a bare prefix match would accept a SIBLING `<base>evil/…`.
+/// where `canonicalize` fails on one side only. This is shape only: a caller acting on
+/// the path must also check membership under the same spelling (see
+/// [`classify_pr_resolve_path`]). The separator after `base` is required: a bare
+/// prefix match would accept a SIBLING `<base>evil/…`.
 fn is_in_a_worktree_root(base: &Path, path: &str) -> bool {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let base_str = base.to_string_lossy();
@@ -10527,9 +10529,8 @@ detached
         );
     }
 
-    /// Resolves minted before the identity root sit in a CHECKOUT-keyed root, which
-    /// only that checkout used to sweep. The sweep now runs from any checkout over
-    /// every root shape, with the worthless-gate still protecting work in progress.
+    /// A worthless resolve in a CHECKOUT-keyed root is reclaimable from any checkout of
+    /// the repository; in-progress work survives the worthless gate.
     #[tokio::test]
     async fn cleanup_reclaims_a_worthless_resolve_in_a_legacy_checkout_root() {
         let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-legacy-sweep").await;

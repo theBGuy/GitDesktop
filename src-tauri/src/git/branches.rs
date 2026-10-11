@@ -449,8 +449,8 @@ pub(crate) async fn git_rename_branch_core(
 /// speak. The `repo_path` checkout is excluded so deleting its *current* branch
 /// isn't misreported here (that path pre-switches, and git errors clearly if not).
 ///
-/// The self-exclusion compares CANONICALIZED spellings (`ops::is_in_a_worktree_root` /
-/// `ops::is_listed_worktree`): git's porcelain prints the resolved path, so a caller
+/// The self-exclusion compares CANONICALIZED spellings (`worktree::canonical_wt_path`, as
+/// `ops::is_listed_worktree` does): git's porcelain prints the resolved path, so a caller
 /// holding macOS's `/var/…` symlink or a Windows 8.3 short name (`RUNNER~1`)
 /// would otherwise fail to recognize its OWN checkout and report the branch as
 /// held by a "linked" worktree that is really this one — sending the caller to

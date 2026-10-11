@@ -4,6 +4,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { reconcileNumbers } from "./agent-number-reconcile";
 
 // A GitHub-style short identifier (`#N`) for every agent entry — sessions, plans,
 // and research — so an entry is easy to reference and a plan can point at the
@@ -154,8 +155,8 @@ export const useAgentNumbers = create<AgentNumberState>((set, get) => ({
 // keeps it off the file: it turns true only after a successful read, and nothing can
 // change `numbers`/`counter` before then (`ensure` refuses to mint while false), so
 // every map this writes descends from what was on disk. The write aborts on a failed
-// store open rather than rejecting unhandled — the numbers are re-derivable on the
-// next launch, and a half-written pair is worse than a missed save.
+// store open or reload (logged, never rejecting unhandled) — the numbers are
+// re-derivable on the next launch, and a half-written pair is worse than a missed save.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 useAgentNumbers.subscribe((state, prev) => {
   if (
@@ -190,41 +191,11 @@ useAgentNumbers.subscribe((state, prev) => {
           await store.save();
         }),
       )
-      .catch(() => undefined);
+      .catch((e: unknown) => {
+        console.error("[agent-numbers] persist failed", e);
+      });
   }, 500);
 });
-
-/** Merges this instance's map into the persisted one so no number is held by two
- *  entries across instances: an id numbered on both sides takes the DISK number, and
- *  a memory-only id whose number is already taken on disk is re-minted past every
- *  counter, in order. `changed` says whether memory must absorb the result. */
-function reconcileNumbers(
-  disk: Record<string, number>,
-  diskCounter: number,
-  memory: Record<string, number>,
-  memoryCounter: number,
-): { numbers: Record<string, number>; counter: number; changed: boolean } {
-  const numbers = { ...disk };
-  const taken = new Set(Object.values(disk));
-  const maxOnDisk = Object.values(disk).reduce((m, n) => Math.max(m, n), 0);
-  let next = Math.max(diskCounter, memoryCounter, maxOnDisk + 1, 1);
-  for (const [id, n] of Object.entries(memory)) {
-    if (disk[id] != null) continue;
-    if (taken.has(n)) {
-      while (taken.has(next)) next += 1;
-      numbers[id] = next;
-      next += 1;
-    } else {
-      numbers[id] = n;
-    }
-    taken.add(numbers[id]);
-  }
-  const changed =
-    next !== memoryCounter ||
-    Object.keys(numbers).length !== Object.keys(memory).length ||
-    Object.entries(numbers).some(([id, n]) => memory[id] !== n);
-  return { numbers, counter: next, changed };
-}
 
 // A failure here leaves `hydrated` false, which holds BOTH gates above: no numbers are
 // minted and nothing is written, so the file survives intact. Recovery lives in
