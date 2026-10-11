@@ -1,6 +1,7 @@
 import type { ReviewMode } from "@/lib/ai/types";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
-  identityKeyFor,
+  foldIdentityKey,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
@@ -100,14 +101,16 @@ const groupKey = (
 // into the repo itself (the text quotes user source + may contain AI false
 // positives). Routed through storeName() so cold-start/test mode never pollutes
 // real history.
-const getStore = memoizedStoreLoader("pr-reviews.json");
+const STORE_FILE = "pr-reviews.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping mutations would both
 // reload the same pre-flush disk snapshot and the later would drop the earlier's
 // change (e.g. an automation's review finishing while the user edits another's text).
-// Unlike local-prs.json this file has NO external MCP writer, so the overlap is
-// entirely in-process. With the force-save in writeAll, each reload sees fresh state.
+// With the force-save in writeAll, each reload sees fresh state. A second app
+// instance is kept out of the reload→save window by the cross-instance store lock
+// each mutation takes; the MCP server never writes this file.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -132,16 +135,18 @@ async function readMerged(repo: string): Promise<PersistedReview[]> {
   return mergeById(primary, legacy);
 }
 
-/** The identity store key for `repo`, folding any legacy checkout-path-keyed
- *  records onto it once. Call inside the serialized queue (after `reloadRaw`) so
- *  the fold is ordered with the mutation and a delete can't leave a lingering
- *  legacy record that would reappear via `readMerged`'s read-merge. */
-async function keyFor(repo: string): Promise<string> {
+/** The identity store key for `repo` (`identity` resolved before the store lock),
+ *  folding any legacy checkout-path-keyed records onto it once. Call under the lock
+ *  after `reloadRaw` so the fold is ordered with the mutation and a delete can't
+ *  leave a lingering legacy record that would reappear via `readMerged`'s
+ *  read-merge. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<PersistedReview[]>(
+  return foldIdentityKey<PersistedReview[]>(
     store,
     "pr-reviews",
     repo,
+    identity,
     mergeById,
   );
 }
@@ -338,11 +343,14 @@ export async function saveReview(
   record: PersistedReview,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    const without = all.filter((r) => r.id !== record.id);
-    await writeAll(key, prune([record, ...without]));
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      const without = all.filter((r) => r.id !== record.id);
+      await writeAll(key, prune([record, ...without]));
+    });
   });
 }
 
@@ -354,25 +362,31 @@ export async function updateReviewText(
   text: string,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    await writeAll(
-      key,
-      all.map((r) => (r.id === id ? { ...r, text } : r)),
-    );
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      await writeAll(
+        key,
+        all.map((r) => (r.id === id ? { ...r, text } : r)),
+      );
+    });
   });
 }
 
 export async function deleteReview(repo: string, id: string): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    await writeAll(
-      key,
-      all.filter((r) => r.id !== id),
-    );
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      await writeAll(
+        key,
+        all.filter((r) => r.id !== id),
+      );
+    });
   });
 }
 
@@ -388,14 +402,17 @@ export async function clearReviewsFor(
   ref: string,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    await writeAll(
-      key,
-      all.filter(
-        (r) => !(lensOf(r) === lens && r.kind === kind && r.ref === ref),
-      ),
-    );
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      await writeAll(
+        key,
+        all.filter(
+          (r) => !(lensOf(r) === lens && r.kind === kind && r.ref === ref),
+        ),
+      );
+    });
   });
 }

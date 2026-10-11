@@ -450,7 +450,7 @@ pub(crate) async fn git_rename_branch_core(
 /// isn't misreported here (that path pre-switches, and git errors clearly if not).
 ///
 /// The self-exclusion compares CANONICALIZED spellings (the #152 helper, same as
-/// `ops::path_is_under`): git's porcelain prints the resolved path, so a caller
+/// `ops::is_in_a_worktree_root` / `ops::is_listed_worktree`): git's porcelain prints the resolved path, so a caller
 /// holding macOS's `/var/…` symlink or a Windows 8.3 short name (`RUNNER~1`)
 /// would otherwise fail to recognize its OWN checkout and report the branch as
 /// held by a "linked" worktree that is really this one — sending the caller to

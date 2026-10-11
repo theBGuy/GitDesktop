@@ -619,6 +619,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a
   bare `store.reload()`: the former memoizes a REJECTED load (store dead until
   restart), the latter swallows an unreadable file and saves the cache over it.
+- **Plugin-store writes take the cross-process lock** — a store a second app
+  instance (or the MCP server) can write wraps its read-modify-write in
+  `withAppStoreLock` (`src/lib/app-store-lock.ts`): identity/git resolution
+  BEFORE the lock, reload → mutate → forced `save()` inside it, all within the
+  module's serialize queue. Advisory and fail-open; cold-start instances skip it.
 - **Per-record repo scope** — a record offered per-repo-or-globally carries a
   `scope` string: the `"global"` sentinel (also the absent-value default) or
   an identity key. Reads match BOTH key forms (raw + identity, most-preferred
@@ -638,7 +643,7 @@ one grep away on the named symbol. Grows via Conventions-sync.
   remount: a consumer gating on `data !== undefined` must treat the error as
   settled (fall back to the raw path, the key the swallowing `repoIdentity` and
   the disk loaders use) or its gate never opens. A store's WRITER takes
-  `repoIdentityStrict` unless its reads heal through an `identityKeyFor` fold:
+  `repoIdentityStrict` unless its reads heal through a `foldIdentityKey` fold:
   swallowing in a fold-less writer mints a record no healed read consults (the
   exemplar is `conversation-filters/store.ts`); loaders may still swallow, since
   a defaults read costs one session, never a strand. `pnpm run checks` fails the

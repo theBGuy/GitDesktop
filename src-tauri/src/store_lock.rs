@@ -5,9 +5,9 @@
 //! processes: the GUI and the `gitdesktop mcp` server — the SAME binary under a
 //! different subcommand, so both link this module and share its protocol. An in-process
 //! mutex cannot serialize across that boundary, so a concurrent write silently drops the
-//! loser's records. Carve-out: the GUI writes `local-prs.json` and `local-issues.json`
-//! through the Tauri Store plugin, which takes neither lock, so those two are protected
-//! MCP-side only until the GUI's writes route through Rust the way `review_notes` does.
+//! loser's records. The GUI's own Tauri Store plugin writes hold this same lock through
+//! the [`crate::store_lock_commands`] seam; cold-start instances are the exception, since
+//! the `coldstart-*` files they write have no second writing process.
 //!
 //! ## Ownership token
 //!
@@ -62,6 +62,13 @@ const STALE_LOCK_AGE: Duration = Duration::from_secs(10);
 /// stamped in that file, because the path alone can name a LATER generation's lock.
 pub(crate) struct StoreLock {
     owned: Option<(PathBuf, String)>,
+}
+
+impl StoreLock {
+    /// Whether this guard holds the lock, as opposed to a fail-open guard owning nothing.
+    pub(crate) fn acquired(&self) -> bool {
+        self.owned.is_some()
+    }
 }
 
 impl Drop for StoreLock {

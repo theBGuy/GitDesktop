@@ -1,8 +1,9 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import type { ReviewMode } from "@/lib/ai/types";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
-  identityKeyFor,
+  foldIdentityKey,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
@@ -46,16 +47,16 @@ const MAX_IN_SESSION = 20;
 // into the repo itself (the text quotes user source + may contain AI false
 // positives). Routed through storeName() so cold-start/test mode never pollutes
 // real results.
-const getStore = memoizedStoreLoader("automation-results.json");
+const STORE_FILE = "automation-results.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write through one in-process queue: autoSave persists
 // on a ~100ms debounce, so two overlapping writes would both reload the same
 // pre-flush disk snapshot and the later would drop the earlier's record (two review
 // modes of the same commit settle back to back). With the force-save in `persist`,
-// each reload sees fresh state. Cross-INSTANCE overlap (two app instances delivering
-// different runs) still races last-writer-wins like the sibling plugin stores — the
-// automation claim only keeps instances off the SAME run; cross-process locking for
-// this store class is a recorded deferral.
+// each reload sees fresh state. Two app instances delivering DIFFERENT runs (the
+// automation claim only keeps them off the same run) are ordered by the
+// cross-instance store lock `persist` takes around its reload→save.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -88,15 +89,16 @@ async function readMerged(
   return mergeById(primary, legacy);
 }
 
-/** The identity store key for `repo`, folding any legacy checkout-path-keyed records
- *  onto it once. Called inside the serialized queue (after `reloadRaw`) so the fold
- *  is ordered with the write. */
-async function keyFor(repo: string): Promise<string> {
+/** The identity store key for `repo` (`identity` resolved before the store lock),
+ *  folding any legacy checkout-path-keyed records onto it once. Called under the
+ *  lock after `reloadRaw` so the fold is ordered with the write. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<AutomationRunResult[]>(
+  return foldIdentityKey<AutomationRunResult[]>(
     store,
     "automation-results",
     repo,
+    identity,
     mergeById,
   );
 }
@@ -104,15 +106,21 @@ async function keyFor(repo: string): Promise<string> {
 /** Upserts a record by id under its repo's identity key, then prunes. */
 async function persist(result: AutomationRunResult): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const store = await getStore();
-    const key = await keyFor(result.repoPath);
-    const all = await readByKey(key);
-    const without = all.filter((r) => r.id !== result.id);
-    await store.set(key, pruneByCreatedAt([result, ...without], MAX_PER_REPO));
-    // Flush now instead of on autoSave's debounce, so the next serialized reload
-    // can't re-read a pre-write disk snapshot and drop this record.
-    await store.save();
+    const identity = await repoIdentity(result.repoPath);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const store = await getStore();
+      const key = await keyFor(result.repoPath, identity);
+      const all = await readByKey(key);
+      const without = all.filter((r) => r.id !== result.id);
+      await store.set(
+        key,
+        pruneByCreatedAt([result, ...without], MAX_PER_REPO),
+      );
+      // Flush now instead of on autoSave's debounce, so the next serialized reload
+      // can't re-read a pre-write disk snapshot and drop this record.
+      await store.save();
+    });
   });
 }
 

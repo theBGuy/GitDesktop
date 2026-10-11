@@ -6,8 +6,12 @@ import {
 import { REVIEW_EFFORTS, type ReviewEffort } from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import { THEME_ORDER, type ThemeSetting } from "@/lib/theme";
 
@@ -833,23 +837,39 @@ export async function loadSettings(): Promise<AppSettings> {
  * if it is ever re-exported.
  */
 async function saveSettings(settings: AppSettings): Promise<void> {
+  // Cache-only: the chain's forced save persists it inside the store lock.
   const store = await getStore();
   await store.set("settings", settings);
 }
 
 /**
- * Serializes every `recentRepos` read-modify-write through one module-level promise chain,
- * so concurrent mutators can't clobber each other. Each wrapped helper is a NON-atomic
- * load→modify→save; run two at once and the later save wins with a stale snapshot. That
- * lost-update race is real — the visibility backfill fires concurrent persists alongside
- * `persistRepoOwners` / `addRecentRepo` and silently dropped persisted visibility.
+ * Every settings.json read-modify-write runs in one critical section: serialized
+ * in-process by this module-level promise chain, and across app instances and windows
+ * by the advisory `withAppStoreLock` on the file. Inside it the store is reloaded from
+ * disk (so `loadSettings` reads current state, not this runtime's launch-time cache) and
+ * force-saved after `fn` (the autosave debounce would otherwise land outside the lock).
  *
- * The no-op-when-unchanged guards inside each helper MUST stay inside this critical section
- * (they re-read fresh state under the lock) — do not hoist them out.
+ * The no-op-when-unchanged guards inside each helper MUST stay inside this critical
+ * section (they read the reloaded state) — do not hoist them out. The lock is held for
+ * `fn`'s whole run, so slow work (a git spawn) resolves before queueing wherever its
+ * inputs allow.
+ *
+ * Entries run in QUEUE order, not call order: writers that pre-resolve identities
+ * (`persistRepoOwners`, `persistRepoVisibility`, `relocateRecentRepo`) enter after
+ * their awaits, so a sync-queued writer called later can run first. No entry may
+ * depend on another's ordering.
  */
 let recentRepoWrites: Promise<unknown> = Promise.resolve();
 function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
-  const run = recentRepoWrites.then(fn, fn);
+  const locked = () =>
+    withAppStoreLock("settings.json", async () => {
+      const store = await getStore();
+      await reloadToleratingEmptyStore(store);
+      const out = await fn();
+      await store.save();
+      return out;
+    });
+  const run = recentRepoWrites.then(locked, locked);
   recentRepoWrites = run.catch(() => undefined);
   return run;
 }
@@ -884,6 +904,21 @@ export function addRecentRepo(repo: {
   });
 }
 
+/** Resolves each probe's identity, and warms the memo for every current recent-repo row,
+ *  BEFORE the caller queues: the locked section's row lookups then hit the per-path
+ *  {@link repoIdentity} memo instead of waiting on git. A row another instance added
+ *  since is the one lookup left to resolve under the lock. */
+async function identitiesBeforeLock(
+  probes: { path: string }[],
+): Promise<string[]> {
+  const { recentRepos } = await loadSettings();
+  const [ids] = await Promise.all([
+    Promise.all(probes.map((p) => repoIdentity(p.path))),
+    Promise.all(recentRepos.map((r) => repoIdentity(r.path))),
+  ]);
+  return ids;
+}
+
 /**
  * Stores resolved repo owners (+ hosts + remote repo names) onto the matching recent-repo
  * records so the repo list groups synchronously and the context menu names the right
@@ -894,7 +929,7 @@ export function addRecentRepo(repo: {
  * checkout path, so a probe from one checkout updates EVERY row for the same underlying
  * repo; rows keep their own `.path`. Falls back to the raw path on a git error.
  */
-export function persistRepoOwners(
+export async function persistRepoOwners(
   owners: {
     path: string;
     owner: string | null;
@@ -903,18 +938,13 @@ export function persistRepoOwners(
     repoName: string | null;
   }[],
 ): Promise<void> {
-  if (owners.length === 0) return Promise.resolve();
-  return serializedRecentRepoWrite(async () => {
+  if (owners.length === 0) return;
+  const ids = await identitiesBeforeLock(owners);
+  await serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
     // Index the probes by repo IDENTITY and resolve each existing row's identity too, so a
-    // row matches an entry for a sibling worktree of the same repo. repoIdentity is
-    // promise-memoized per path — one IPC round per path per re-validation window,
-    // not per probe.
-    const byIdentity = new Map(
-      await Promise.all(
-        owners.map(async (o) => [await repoIdentity(o.path), o] as const),
-      ),
-    );
+    // row matches an entry for a sibling worktree of the same repo.
+    const byIdentity = new Map(ids.map((id, i) => [id, owners[i]] as const));
     const rowIdentities = await Promise.all(
       settings.recentRepos.map((r) => repoIdentity(r.path)),
     );
@@ -966,7 +996,7 @@ export function persistRepoOwners(
  * with its own settings refetch. Matched by worktree-stable identity like
  * {@link persistRepoOwners}, falling back to the raw path when git can't resolve it.
  */
-export function persistRepoVisibility(
+export async function persistRepoVisibility(
   entries: {
     path: string;
     visibility: string | null;
@@ -976,15 +1006,11 @@ export function persistRepoVisibility(
     forkParent?: string;
   }[],
 ): Promise<void> {
-  if (entries.length === 0) return Promise.resolve();
-  return serializedRecentRepoWrite(async () => {
+  if (entries.length === 0) return;
+  const ids = await identitiesBeforeLock(entries);
+  await serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
-    // Identity lookups are promise-memoized per path (see persistRepoOwners).
-    const byIdentity = new Map(
-      await Promise.all(
-        entries.map(async (e) => [await repoIdentity(e.path), e] as const),
-      ),
-    );
+    const byIdentity = new Map(ids.map((id, i) => [id, entries[i]] as const));
     const rowIdentities = await Promise.all(
       settings.recentRepos.map((r) => repoIdentity(r.path)),
     );
@@ -1053,22 +1079,27 @@ export function removeRecentRepo(path: string): Promise<void> {
  * still re-homed. A row ALREADY at `newPath` → MERGE: drop the old row, keep the new-path row
  * in place, adopt the old alias only when the new row has none — never two rows for one path.
  * Otherwise: rewrite in place. Nothing to change in either → no write.
+ *
+ * Once the write settles, {@link subscribeMcpRehome} listeners hear `{ oldPath, newKey }`
+ * (every relocate that reached the chain, write or no-op) so an open Settings draft can
+ * re-home its own copy of the keys.
  */
-export function relocateRecentRepo(
+export async function relocateRecentRepo(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
-  return serializedRecentRepoWrite(async () => {
-    // Windows paths are case-insensitive; compare them that way (see addRecentRepo).
-    const samePath = (a: string, b: string) =>
-      a.toLowerCase() === b.toLowerCase();
-    // Picking the folder at its ORIGINAL path (repo restored / moved back) is a
-    // no-op — the row already points there. Without this guard the merge branch
-    // below would match the row as both `old` and `existing` and drop it.
-    if (samePath(oldPath, newPath)) return;
+  // Windows paths are case-insensitive; compare them that way (see addRecentRepo).
+  const samePath = (a: string, b: string) =>
+    a.toLowerCase() === b.toLowerCase();
+  // Picking the folder at its ORIGINAL path (repo restored / moved back) is a
+  // no-op — the row already points there. Without this guard the merge branch
+  // below would match the row as both `old` and `existing` and drop it.
+  if (samePath(oldPath, newPath)) return;
+  // Resolved before queueing so no git process runs under the store lock. Never
+  // rejects; a raw-path fallback still matches, as reads key on [path, identity].
+  const newKey = await repoIdentity(newPath);
+  await serializedRecentRepoWrite(async () => {
     const settings = await loadSettings();
-    // Never rejects; a raw-path fallback still matches, as reads key on [path, identity].
-    const newKey = await repoIdentity(newPath);
     const mcp = rehomeServerRepoKeys(settings.mcpServers, oldPath, newKey);
     const old = settings.recentRepos.find((r) => samePath(r.path, oldPath));
     let recentRepos = settings.recentRepos;
@@ -1096,6 +1127,36 @@ export function relocateRecentRepo(
       mcpServers: mcp.servers,
     });
   });
+  // The write has landed: a throwing listener must neither skip the others nor
+  // fail the relocate.
+  for (const listener of mcpRehomeListeners) {
+    try {
+      listener({ oldPath, newKey });
+    } catch (e) {
+      console.error("[settings] MCP re-home listener failed", e);
+    }
+  }
+}
+
+/** A relocate's MCP key move, as {@link rehomeServerRepoKeys} takes it. */
+export interface McpRehome {
+  oldPath: string;
+  newKey: string;
+}
+
+const mcpRehomeListeners = new Set<(rehome: McpRehome) => void>();
+
+/** Hears every {@link relocateRecentRepo} after its write, outside the store lock.
+ *  In-runtime only: another window's relocate never reaches this window's listeners.
+ *  Listeners must be idempotent (re-homing an already re-homed draft is a no-op).
+ *  Returns the unsubscribe. */
+export function subscribeMcpRehome(
+  listener: (rehome: McpRehome) => void,
+): () => void {
+  mcpRehomeListeners.add(listener);
+  return () => {
+    mcpRehomeListeners.delete(listener);
+  };
 }
 
 /**
@@ -1121,8 +1182,8 @@ export function setBitbucketTokenExpiresAt(
  * `recentRepos` and `bitbucketTokenExpiresAt` are the only fields those writers own, so
  * they're re-pinned from a read taken INSIDE the critical section — the caller's snapshot
  * of them is stale by definition, every other field is the user's intent. `mcpServers`,
- * which `relocateRecentRepo` also rewrites, stays the caller's: the user edits it here.
- * Serialization is per-runtime: a second window writing settings is a separate chain.
+ * which `relocateRecentRepo` also rewrites, stays the caller's: the user edits it here, and
+ * an open form re-homes its draft copy via {@link subscribeMcpRehome}.
  */
 export function saveSettingsMerged(settings: AppSettings): Promise<void> {
   return serializedRecentRepoWrite(async () => {

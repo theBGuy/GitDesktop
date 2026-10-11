@@ -1,5 +1,6 @@
 import type { ReviewMode } from "@/lib/ai/types";
-import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
+import { withAppStoreLock } from "@/lib/app-store-lock";
+import { foldIdentityKey, repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
 import {
   memoizedStoreLoader,
@@ -47,13 +48,15 @@ const legacyCellPrefix = (
 
 // Personal app-data, keyed by repo identity — never written into the repo itself.
 // Routed through storeName() so cold-start/test mode never pollutes real data.
-const getStore = memoizedStoreLoader("automation-dismissals.json");
+const STORE_FILE = "automation-dismissals.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write AND every fresh read on this store through one
 // in-process queue: a reload replaces the whole in-memory map from disk, so one
 // landing between a writer's `set` and its flush would persist the pre-write state
 // and silently drop the dismissal. Mirrors automations/store.ts and
-// reviews-history.ts. In-process only; cross-window races remain out of scope.
+// reviews-history.ts. Writers also take the cross-instance store lock around their
+// reload→save, so another app instance's write can't land inside that window.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -79,12 +82,14 @@ async function readMerged(repo: string): Promise<DismissalMap> {
   return { ...legacy, ...primary };
 }
 
-async function keyFor(repo: string): Promise<string> {
+// `identity` is resolved before the store lock; call under it after `reloadRaw`.
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<DismissalMap>(
+  return foldIdentityKey<DismissalMap>(
     store,
     "automation-dismissals",
     repo,
+    identity,
     (identityVal, legacyVal) => ({ ...legacyVal, ...identityVal }),
   );
 }
@@ -155,19 +160,25 @@ export async function setDismissedHead(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    // Reload before the read-modify-write: this rewrites the whole per-repo map, so
-    // basing it on a launch-time cache would drop another instance's cells.
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
-    // This watermark supersedes any pre-lens cell for the same PR + mode — dropping
-    // it here is the fold, one cell at a time, never a sweep over the store.
-    const preLens = legacyCellPrefix(lens, kind, ref);
-    if (preLens !== undefined) delete all[`${preLens}${mode}`];
-    await store.set(key, { ...all, [cellKey(lens, kind, ref, mode)]: headSha });
-    // Flush past autoSave's ~100ms debounce so the next queued reload reads this
-    // write back instead of a pre-write snapshot.
-    await store.save();
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      // Reload before the read-modify-write: this rewrites the whole per-repo map, so
+      // basing it on a launch-time cache would drop another instance's cells.
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+      // This watermark supersedes any pre-lens cell for the same PR + mode — dropping
+      // it here is the fold, one cell at a time, never a sweep over the store.
+      const preLens = legacyCellPrefix(lens, kind, ref);
+      if (preLens !== undefined) delete all[`${preLens}${mode}`];
+      await store.set(key, {
+        ...all,
+        [cellKey(lens, kind, ref, mode)]: headSha,
+      });
+      // Flush past autoSave's ~100ms debounce so the next queued reload reads this
+      // write back instead of a pre-write snapshot.
+      await store.save();
+    });
   });
 }
 
@@ -187,18 +198,21 @@ export async function clearDismissedHead(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    // Same reload-first rationale as setDismissedHead.
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
-    delete all[cellKey(lens, kind, ref, mode)];
-    // The pre-lens cell goes too — it reads as this lens's watermark, so leaving it
-    // would keep re-blocking the re-run this call exists to unblock.
-    const preLens = legacyCellPrefix(lens, kind, ref);
-    if (preLens !== undefined) delete all[`${preLens}${mode}`];
-    await store.set(key, all);
-    // Flush for the same reason: an unflushed clear would be undone by the next
-    // queued reload, re-blocking the re-run this call exists to unblock.
-    await store.save();
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      // Same reload-first rationale as setDismissedHead.
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+      delete all[cellKey(lens, kind, ref, mode)];
+      // The pre-lens cell goes too — it reads as this lens's watermark, so leaving it
+      // would keep re-blocking the re-run this call exists to unblock.
+      const preLens = legacyCellPrefix(lens, kind, ref);
+      if (preLens !== undefined) delete all[`${preLens}${mode}`];
+      await store.set(key, all);
+      // Flush for the same reason: an unflushed clear would be undone by the next
+      // queued reload, re-blocking the re-run this call exists to unblock.
+      await store.save();
+    });
   });
 }

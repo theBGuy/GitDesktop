@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { REVIEW_MODES, type ReviewMode } from "@/lib/ai/types";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   memoizedStoreLoader,
@@ -23,14 +24,15 @@ const LIFECYCLES = LIFECYCLE_EVENTS;
 const ACTIONS = REVIEW_MODES;
 
 // Personal app-data — automation rules are the user's, never the repo's.
-const getStore = memoizedStoreLoader("automations.json");
+const STORE_FILE = "automations.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping saves would both read
 // the same pre-flush disk snapshot and the later would drop the earlier's change
 // (e.g. a per-repo override save clobbering a concurrent global-lifecycles save).
-// Mirrors pulls/local.ts and settings/api.ts. In-process only; cross-window races
-// remain out of scope.
+// Mirrors pulls/local.ts and settings/api.ts. Writers also take the cross-instance
+// store lock around their reload→save against another app instance's writes.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -50,11 +52,13 @@ function mutateConfig(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    await reloadToleratingEmptyStore(store);
-    const current = normalizeAutomations(await store.get<unknown>("config"));
-    const next = mutate(current);
-    await store.set("config", next);
-    await store.save();
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      const current = normalizeAutomations(await store.get<unknown>("config"));
+      const next = mutate(current);
+      await store.set("config", next);
+      await store.save();
+    });
   });
 }
 
@@ -319,13 +323,15 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
     // concurrent save. Re-check fresh RAW state inside the chain: if a neighbor
     // already wrote a v2 value mid-migration, leave it intact rather than clobber
     // it with a migration computed from the now-stale v1 blob.
-    await serialize(async () => {
-      await reloadToleratingEmptyStore(store);
-      const fresh = await store.get<unknown>("config");
-      if (!isV1(fresh)) return;
-      await store.set("config", config);
-      await store.save();
-    });
+    await serialize(() =>
+      withAppStoreLock(STORE_FILE, async () => {
+        await reloadToleratingEmptyStore(store);
+        const fresh = await store.get<unknown>("config");
+        if (!isV1(fresh)) return;
+        await store.set("config", config);
+        await store.save();
+      }),
+    );
     if (collapsed > 0) {
       toast.info(
         `Automations updated — ${collapsed} duplicate rule${

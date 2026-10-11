@@ -22,6 +22,8 @@ import {
   notificationsSignature,
   useNotificationsDraft,
 } from "@/lib/notifications/matrix";
+import { subscribeMcpRehome } from "@/lib/settings/api";
+import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -172,6 +174,23 @@ export function SettingsScreen() {
       form.reset(toDraft(settings.data), { keepDefaultValues: true });
     }
   }, [settings.data, form]);
+
+  // A relocate re-homes the SAVED mcpServers keys; the draft gets the same move so
+  // Save can't write the pre-relocate keys back and an untouched draft stays clean.
+  // Field-scoped on purpose: a form reset would drop other sections' edits. The raw
+  // draft goes in (the helper passes junk through) so no entry is dropped unasked.
+  useEffect(
+    () =>
+      subscribeMcpRehome(({ oldPath, newKey }) => {
+        const result = rehomeServerRepoKeys(
+          form.state.values.mcpServers,
+          oldPath,
+          newKey,
+        );
+        if (result.changed) form.setFieldValue("mcpServers", result.servers);
+      }),
+    [form],
+  );
 
   // Dirty by value-equality against the persisted settings (not "has been
   // touched"), so typing and undoing leaves the screen clean. Stringify the

@@ -1,5 +1,9 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity, repoIdentityStrict } from "@/lib/git/repo-identity";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 // The per-repo filter choices for the Pull Requests + Issues panels, persisted in
 // app data (never committed). Keyed by the repo's worktree-stable identity
@@ -10,7 +14,7 @@ import { memoizedStoreLoader } from "@/lib/plugin-store";
 // path-keyed record — an address healed reads would never look under. A raw path git
 // itself answers (non-repo, git unavailable, timeout) IS that session's identity by
 // the resolver's contract, and writes normally. (The store is also new enough to have
-// no legacy path-keyed entries, so no identityKeyFor fold.) The loader stays
+// no legacy path-keyed entries, so no foldIdentityKey fold.) The loader stays
 // swallowing: a defaults read costs one unfiltered session, never a stranded record.
 
 /** What a repo's PR/issue panels filter by, as persisted. `teams` holds
@@ -71,7 +75,17 @@ export function normalizeConversationFilterPrefs(
   };
 }
 
-const getStore = memoizedStoreLoader("conversation-filters.json");
+const STORE_FILE = "conversation-filters.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
+
+// Serializes this module's writes in-process; the cross-instance store lock inside
+// each op covers the other processes.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  opChain = run.catch(() => undefined);
+  return run;
+}
 
 /** Read a repo's persisted filter prefs. Never throws: an unreadable store reads as
  *  the defaults (an unfiltered panel), since a failed preference read must not keep
@@ -97,7 +111,13 @@ export async function saveConversationFilterPrefs(
   repo: string,
   prefs: ConversationFilterPrefs,
 ): Promise<void> {
-  const store = await getStore();
-  const id = await repoIdentityStrict(repo);
-  await store.set(id, prefs);
+  return serialize(async () => {
+    const store = await getStore();
+    const id = await repoIdentityStrict(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      await store.set(id, prefs);
+      await store.save();
+    });
+  });
 }

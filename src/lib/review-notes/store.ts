@@ -55,7 +55,7 @@ export async function reloadReviewNotes(): Promise<void> {
 }
 
 // This store has NO legacy checkout-path keys (it postdates identity-keying), so
-// we key on the identity directly — no `identityKeyFor` fold is needed.
+// we key on the identity directly — no `foldIdentityKey` fold is needed.
 async function keyFor(repo: string): Promise<string> {
   return repoIdentity(repo);
 }

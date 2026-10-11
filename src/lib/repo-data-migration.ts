@@ -1,4 +1,5 @@
 import { load } from "@tauri-apps/plugin-store";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { norm } from "@/lib/repo-key";
 import { rehomeTaskScopes } from "@/lib/scripts/store";
@@ -41,12 +42,12 @@ import { storeName } from "@/lib/test-mode";
 // notifications.json (transient), analytics / agent-numbers / jira-field-maps
 // (not per-repo).
 //
-// Accepted residuals: this runs outside the feature modules' serialized write queues,
-// so a peer write landing between a store's reload() and save() loses to our
-// write-back; and a store that throws mid-migration orphans its old-key data
-// permanently — nothing retries on reopen, and the stores' own legacy folding only
-// re-homes the CURRENT checkout's raw-path key, never the departed `<oldPath>/.git`
-// key.
+// Accepted residuals: this runs outside the feature modules' in-process write queues
+// (each file's section holds the cross-instance store lock, so only same-process
+// peers can interleave between its reload() and save()); and a store that throws
+// mid-migration orphans its old-key data permanently — nothing retries on reopen,
+// and the stores' own legacy folding only re-homes the CURRENT checkout's raw-path
+// key, never the departed `<oldPath>/.git` key.
 
 /** Load a store with the exact shared-instance options every feature module uses,
  *  so we mutate the same cached instance rather than a private copy. */
@@ -206,6 +207,17 @@ async function migrateIdentityStore(
   newKey: string,
 ): Promise<void> {
   const store = await loadStore(desc.file);
+  await withAppStoreLock(desc.file, () =>
+    migrateIdentityStoreLocked(store, desc, oldPath, newKey),
+  );
+}
+
+async function migrateIdentityStoreLocked(
+  store: Awaited<ReturnType<typeof loadStore>>,
+  desc: IdentityStore,
+  oldPath: string,
+  newKey: string,
+): Promise<void> {
   await store.reload();
 
   if (desc.nested) {
@@ -243,24 +255,26 @@ async function migrateRawPathStore(
   newPath: string,
 ): Promise<void> {
   const store = await loadStore(file);
-  await store.reload();
-  const items = await store.get<unknown>(key);
-  if (!Array.isArray(items)) return;
-  const rawOld = norm(oldPath);
-  let changed = false;
-  for (const item of items) {
-    if (
-      isRecord(item) &&
-      typeof item.repoPath === "string" &&
-      norm(item.repoPath) === rawOld
-    ) {
-      item.repoPath = newPath;
-      changed = true;
+  await withAppStoreLock(file, async () => {
+    await store.reload();
+    const items = await store.get<unknown>(key);
+    if (!Array.isArray(items)) return;
+    const rawOld = norm(oldPath);
+    let changed = false;
+    for (const item of items) {
+      if (
+        isRecord(item) &&
+        typeof item.repoPath === "string" &&
+        norm(item.repoPath) === rawOld
+      ) {
+        item.repoPath = newPath;
+        changed = true;
+      }
     }
-  }
-  if (!changed) return;
-  await store.set(key, items);
-  await store.save();
+    if (!changed) return;
+    await store.set(key, items);
+    await store.save();
+  });
 }
 
 /**

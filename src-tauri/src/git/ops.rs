@@ -2815,35 +2815,44 @@ pub(crate) fn repo_hash(repo_path: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// The app-data worktree root for a repo KEY — `<data_dir>/<identifier>/worktrees/
-/// <hash>`. Mirrors `worktree.rs::worktree_root`, but resolved via
-/// `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the local-PR
-/// merge commands carry no `AppHandle`. Tauri's `app_data_dir()` is exactly
+/// The app-data worktrees base, `<data_dir>/<identifier>/worktrees`: every
+/// per-repository root sits directly in it. Mirrors `worktree.rs::worktree_root`, but
+/// resolved via `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the merge
+/// commands carry no `AppHandle`. Tauri's `app_data_dir()` is exactly
 /// `dirs::data_dir()/<identifier>`, so this points at the same directory.
-///
-/// Two keys are in use, and the base path must never differ between them: the checkout
-/// path ([`worktree_root_dir`]) and the repository's worktree-stable identity
-/// ([`identity_worktree_root_dir`]).
-fn worktree_root_for_key(key: &str) -> AppResult<std::path::PathBuf> {
+fn worktrees_base_dir() -> AppResult<std::path::PathBuf> {
     let data = dirs::data_dir()
         .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
     Ok(data
         .join(crate::local_prs::APP_IDENTIFIER)
-        .join("worktrees")
-        .join(repo_hash(key)))
+        .join("worktrees"))
 }
 
-/// The checkout-path-keyed worktree root: resolve worktrees, agent-session worktrees,
-/// and the pre-rekey update-marker root all live here.
+/// The root for a repo KEY under `base`: `<base>/<repo_hash(key)>`. Two keys are in
+/// use — the checkout path ([`worktree_root_dir`]) and the repository's worktree-stable
+/// identity ([`identity_worktree_root_dir`]) — and both share one base, which is what
+/// lets [`is_adoptable_pr_resolve`] accept a resolve under either.
+fn worktree_root_in(base: &Path, key: &str) -> std::path::PathBuf {
+    base.join(repo_hash(key))
+}
+
+fn worktree_root_for_key(key: &str) -> AppResult<std::path::PathBuf> {
+    Ok(worktree_root_in(&worktrees_base_dir()?, key))
+}
+
+/// The checkout-path-keyed worktree root. Nothing in this module mints here; what
+/// remains under it is what earlier builds left — resolve worktrees, which the
+/// resolve flows still adopt — plus `update_marker`'s pre-rekey legacy root.
 pub(crate) fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
     worktree_root_for_key(repo_path)
 }
 
 /// The worktree root every checkout of a repository SHARES, keyed on `identity`
 /// ([`crate::git::repo::repo_identity`]'s output, the absolute common git dir) rather
-/// than the checkout path. `update_marker` mints and guards here so a sibling worktree
-/// resolves the same directory and sees the same markers. Takes the resolved identity
-/// so the mapping stays callable without a repo on disk.
+/// than the checkout path. Local- and remote-PR resolves mint here, and `update_marker`
+/// mints and guards here, so a sibling worktree resolves the same directory. Takes the
+/// resolved identity RAW (never normalized: `repo_hash` keeps separators) so the
+/// mapping stays callable without a repo on disk.
 pub(crate) fn identity_worktree_root_dir(identity: &str) -> AppResult<std::path::PathBuf> {
     worktree_root_for_key(identity)
 }
@@ -3231,14 +3240,15 @@ pub async fn git_merge_local_pr(
     message: String,
     strategy: String,
 ) -> AppResult<LocalPrMergeOutcome> {
-    let root = worktree_root_dir(&repo_path)?;
+    let identity = state.repo_identity_cached(&repo_path).await?;
+    let root = identity_worktree_root_dir(&identity)?;
     merge_local_pr(&state, &repo_path, &base, &head, &message, &strategy, &root).await
 }
 
 /// Testable core of [`git_merge_local_pr`] — takes a plain `&AppState` and an
 /// explicit worktree-root dir so real-repo tokio tests can drive it against a
 /// temp dir (mirrors `rewrite_commits` / `replace_file_lines`). The command
-/// resolves `root` to the app-data worktrees dir.
+/// resolves `root` to the repository's identity root.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_local_pr(
     state: &AppState,
@@ -3638,8 +3648,8 @@ pub async fn git_cleanup_orphaned_resolve_worktrees(
     repo_path: String,
     keep_paths: Vec<String>,
 ) -> AppResult<()> {
-    let root = worktree_root_dir(&repo_path)?;
-    cleanup_orphaned_resolve_worktrees(&state, &repo_path, &keep_paths, &root).await
+    let base = worktrees_base_dir()?;
+    cleanup_orphaned_resolve_worktrees(&state, &repo_path, &keep_paths, &base).await
 }
 
 /// Whether a remote-PR resolve worktree holds NOTHING worth keeping: no merge in
@@ -3676,12 +3686,12 @@ async fn pr_resolve_is_worthless(worktree_path: &str) -> bool {
 }
 
 /// Testable core of [`git_cleanup_orphaned_resolve_worktrees`] — takes a plain
-/// `&AppState` and an explicit worktree root (see [`merge_remote_pr`]).
+/// `&AppState` and an explicit worktrees base (see [`find_remote_pr_resolve`]).
 pub(crate) async fn cleanup_orphaned_resolve_worktrees(
     state: &AppState,
     repo_path: &str,
     keep_paths: &[String],
-    root: &Path,
+    base: &Path,
 ) -> AppResult<()> {
     let listed = run_git(
         Some(repo_path),
@@ -3699,17 +3709,16 @@ pub(crate) async fn cleanup_orphaned_resolve_worktrees(
     // Remote-PR resolves take no keep-set: WORTHLESSNESS is the protection, and it
     // is strictly safer than a caller-supplied list — a paused conflicted resolve
     // is dirty, a resolved-but-unpushed one has commits, and a merge in progress
-    // has MERGE_HEAD, so all three survive even if the frontend forgot them.
+    // has MERGE_HEAD, so all three survive even if the frontend forgot them. The
+    // scope is every root shape (`is_adoptable_pr_resolve`) over THIS repository's
+    // registry, so a resolve any checkout of it minted, legacy roots included, is
+    // reclaimable from any other.
     // Accepted race: a worktree is briefly clean, contained and merge-free between
     // `worktree add` and the merge starting. The frontend re-arms this sweep on
-    // every switch back to a repo, so switching away and back while a
-    // `merge_remote_pr` is mid-flight can land in that window; the cost is a
-    // failed automatic merge the user retries, never resolved work.
-    for path in all
-        .iter()
-        .filter(|p| is_pr_resolve_worktree_path(p))
-        .filter(|p| path_is_under(root, p))
-    {
+    // every switch back to a repo, so switching to ANY checkout of the repository
+    // while a `merge_remote_pr` is mid-flight can land in that window; the cost is
+    // a failed automatic merge the user retries, never resolved work.
+    for path in all.iter().filter(|p| is_adoptable_pr_resolve(base, p)) {
         if pr_resolve_is_worthless(path).await {
             remove_resolve_worktree(state, repo_path, path).await;
         }
@@ -3761,35 +3770,122 @@ fn pr_resolve_prefix(remote: &str, number: u64) -> String {
     format!("gd-pr-resolve-{remote}-{number}-")
 }
 
-/// Whether `path` lives under `root`. The two sides routinely arrive as DIFFERENT
-/// SPELLINGS of the same location — git's porcelain prints macOS's canonical
-/// `/private/var/…` where the caller holds the `/var/…` symlink, and a Windows
-/// runner's 8.3 short name (`RUNNER~1`) where the caller holds the long one — so
-/// each side is canonicalized (`canonical_wt_path`, the #152 helper) before
-/// comparing. The normalize-only spelling is a second chance for a path that no
-/// longer exists: `canonicalize` fails there, and one side falling back while the
-/// other resolves would make two spellings of the same path look different.
-/// Either comparison is a containment check against the SAME root, so accepting
-/// either never widens what passes. The separator is appended (as
-/// `is_session_worktree` does) — a bare prefix match would accept a SIBLING
-/// directory `<root>evil/…`.
-fn path_is_under(root: &Path, path: &str) -> bool {
+/// Whether `path` is `<base>/<16 hex>/<name>`: an entry DIRECTLY inside one of the
+/// per-repository roots under the worktrees base, whichever key hashed that root
+/// (identity or a checkout path, this checkout's or another's). Shape only — it does
+/// not say WHICH repository; callers scope by this repository's worktree registry.
+///
+/// The two sides routinely arrive as DIFFERENT SPELLINGS of the same location — git's
+/// porcelain prints macOS's canonical `/private/var/…` where the caller holds the
+/// `/var/…` symlink, and a Windows runner's 8.3 short name where the caller holds the
+/// long one — so each side is canonicalized (`canonical_wt_path`) before comparing.
+/// The normalize-only spelling is a second chance for a path that no longer exists,
+/// where `canonicalize` fails on one side only. Both test the same shape under the
+/// same base, so accepting either never widens what passes. The separator after
+/// `base` is required: a bare prefix match would accept a SIBLING `<base>evil/…`.
+fn is_in_a_worktree_root(base: &Path, path: &str) -> bool {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
-    let root_str = root.to_string_lossy();
-    let canon = canonical_wt_path(path).starts_with(&format!("{}/", canonical_wt_path(&root_str)));
-    let norm = normalize_wt_path(path).starts_with(&format!("{}/", normalize_wt_path(&root_str)));
-    canon || norm
+    let base_str = base.to_string_lossy();
+    root_shaped(&canonical_wt_path(path), &canonical_wt_path(&base_str))
+        || root_shaped(&normalize_wt_path(path), &normalize_wt_path(&base_str))
 }
 
-/// Guards an IPC-supplied worktree path before `worktree remove --force` is aimed
-/// at it: it must be one of ours AND live under this repo's app-data worktree root.
-fn ensure_pr_resolve_worktree(root: &Path, worktree_path: &str) -> AppResult<()> {
-    if is_pr_resolve_worktree_path(worktree_path) && path_is_under(root, worktree_path) {
-        return Ok(());
+/// The root shape over ONE spelling: both sides already spelled the same way.
+fn root_shaped(path: &str, base: &str) -> bool {
+    path.strip_prefix(&format!("{base}/"))
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(hash, name)| {
+            hash.len() == 16
+                && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                && !name.is_empty()
+                && !name.contains('/')
+        })
+}
+
+/// Whether `path` is a remote-PR resolve this app minted under ANY root of `base`:
+/// the `gd-pr-resolve-` basename plus the root shape. Identity-free on purpose, so
+/// resolves from every checkout and from pre-identity (checkout-keyed) roots are all
+/// adopted without a migration. Not a repository scope by itself.
+fn is_adoptable_pr_resolve(base: &Path, path: &str) -> bool {
+    is_pr_resolve_worktree_path(path) && is_in_a_worktree_root(base, path)
+}
+
+/// Whether `path` is one of the `worktree list --porcelain` paths, compared through
+/// the same two spellings as [`is_in_a_worktree_root`].
+fn is_listed_worktree(listed: &[String], path: &str) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let (canon, norm) = (canonical_wt_path(path), normalize_wt_path(path));
+    listed
+        .iter()
+        .any(|p| canonical_wt_path(p) == canon || normalize_wt_path(p) == norm)
+}
+
+/// How an IPC-supplied resolve path stands against THIS repository's registry.
+#[derive(Debug, PartialEq)]
+enum PrResolvePath {
+    /// Adoptable by name and root shape AND registered, under one spelling.
+    Registered,
+    /// Adoptable by shape but registered under no spelling: already removed, or
+    /// another repository's.
+    Unregistered,
+    Refused,
+}
+
+/// Classifies `path` against `listed` (this repository's porcelain paths). ONE
+/// spelling must satisfy both the name+shape gate and membership: gates evaluated
+/// independently would let a junction planted in a root's shape pass shape under
+/// its own spelling and membership under its target's — a registered worktree
+/// elsewhere. A path registered under any spelling but never shaped is Refused.
+fn classify_pr_resolve_path(base: &Path, listed: &[String], path: &str) -> PrResolvePath {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let base_str = base.to_string_lossy();
+    let spellings: [fn(&str) -> String; 2] = [canonical_wt_path, normalize_wt_path];
+    let shaped = |spell: fn(&str) -> String| {
+        let p = spell(path);
+        is_pr_resolve_worktree_path(&p) && root_shaped(&p, &spell(&base_str))
+    };
+    let member = |spell: fn(&str) -> String| {
+        let p = spell(path);
+        listed.iter().any(|l| spell(l) == p)
+    };
+    if spellings.iter().any(|&s| shaped(s) && member(s)) {
+        PrResolvePath::Registered
+    } else if is_listed_worktree(listed, path) || !spellings.iter().any(|&s| shaped(s)) {
+        PrResolvePath::Refused
+    } else {
+        PrResolvePath::Unregistered
     }
-    Err(AppError::InvalidArgument(format!(
+}
+
+/// Classifies an IPC-supplied worktree path before `worktree remove --force` (or a
+/// push of its HEAD) is aimed at it. The registry is the repository scope — the
+/// shape alone would accept a crafted path under another repository's root — and an
+/// unreadable registry is an error, never a verdict.
+async fn check_pr_resolve_worktree(
+    repo_path: &str,
+    base: &Path,
+    worktree_path: &str,
+) -> AppResult<PrResolvePath> {
+    if !is_adoptable_pr_resolve(base, worktree_path) {
+        return Ok(PrResolvePath::Refused);
+    }
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(classify_pr_resolve_path(
+        base,
+        &parse_worktree_paths(&listed.stdout_lossy()),
+        worktree_path,
+    ))
+}
+
+fn not_a_pr_resolve(worktree_path: &str) -> AppError {
+    AppError::InvalidArgument(format!(
         "not a pull-request resolve worktree: {worktree_path}"
-    )))
+    ))
 }
 
 /// The git remote a PR lens addresses, validated for this flow. Reuses the lens →
@@ -3874,7 +3970,8 @@ pub async fn git_merge_remote_pr(
     message: Option<String>,
     lens: Option<String>,
 ) -> AppResult<RemotePrResolveOutcome> {
-    let root = worktree_root_dir(&repo_path)?;
+    let identity = state.repo_identity_cached(&repo_path).await?;
+    let root = identity_worktree_root_dir(&identity)?;
     merge_remote_pr(
         &state,
         &repo_path,
@@ -3888,9 +3985,25 @@ pub async fn git_merge_remote_pr(
     .await
 }
 
+/// The takeover outcome for a resolve worktree that already exists. Its conflict list
+/// may be EMPTY — a fully-resolved-but-unpushed resolve, which the frontend's takeover
+/// renders exactly as that state.
+async fn resumed_resolve(existing: RemotePrResolveHandle) -> RemotePrResolveOutcome {
+    let conflicts = unmerged_paths(&existing.worktree_path).await;
+    RemotePrResolveOutcome {
+        status: "conflicts".to_string(),
+        conflicts,
+        worktree_path: Some(existing.worktree_path),
+        worktree_id: Some(existing.worktree_id),
+        pushed_sha: None,
+    }
+}
+
 /// Testable core of [`git_merge_remote_pr`] — takes a plain `&AppState` and an
 /// explicit worktree-root dir so real-repo tokio tests can drive it against a
-/// temp dir (mirrors [`merge_local_pr`]).
+/// temp dir (mirrors [`merge_local_pr`]). `root` is `<base>/<16 hex>`: the mint goes
+/// in it, and the resume search spans every root beside it (see
+/// [`find_remote_pr_resolve`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_remote_pr(
     state: &AppState,
@@ -3908,21 +4021,16 @@ pub(crate) async fn merge_remote_pr(
     crate::git::branches::validate_branch_name(base)?;
     crate::git::branches::validate_branch_name(head)?;
     let remote = resolve_pr_remote(repo_path, lens).await?;
+    let worktrees_base = root.parent().ok_or_else(|| {
+        AppError::InvalidArgument(format!("not a worktree root: {}", root.display()))
+    })?;
 
     // Resume before starting: an existing worktree for this (remote, PR) holds
     // work the user may already have done, so hand it back instead of minting a
-    // second one that would strand the first. Its conflict list may be EMPTY —
-    // that's a fully-resolved-but-unpushed resolve, and the frontend's takeover
-    // renders exactly that state.
-    if let Some(existing) = find_remote_pr_resolve(repo_path, number, lens, root).await? {
-        let conflicts = unmerged_paths(&existing.worktree_path).await;
-        return Ok(RemotePrResolveOutcome {
-            status: "conflicts".to_string(),
-            conflicts,
-            worktree_path: Some(existing.worktree_path),
-            worktree_id: Some(existing.worktree_id),
-            pushed_sha: None,
-        });
+    // second one that would strand the first. Checked again under the mint's admin
+    // hold below; this early pass spares a resume the network fetch.
+    if let Some(existing) = find_remote_pr_resolve(repo_path, number, lens, worktrees_base).await? {
+        return Ok(resumed_resolve(existing).await);
     }
 
     let cred = crate::forge::credential_config_for_remote(repo_path, remote).await?;
@@ -3988,13 +4096,24 @@ pub(crate) async fn merge_remote_pr(
     ));
     let worktree_path = worktree_path.to_string_lossy().into_owned();
     std::fs::create_dir_all(root).map_err(AppError::Io)?;
-    run_git_worktree_admin(
-        state,
-        repo_path,
+    // Find-then-add under ONE admin hold. Every checkout of the repository shares
+    // the roots and, within this process, this lock, so of two starts racing for one
+    // PR here the second sees the first's worktree and resumes it instead of minting
+    // twice; the lock is in-process, so a second app instance is not excluded.
+    // Plain `run_git` inside: the admin runner would re-acquire the held lock.
+    let admin_domain = state.worktree_admin_lock(repo_path).await;
+    let admin = acquire_repo_lock(&admin_domain, LOCK_WAIT_TIMEOUT, "a worktree operation").await?;
+    if let Some(existing) = find_remote_pr_resolve(repo_path, number, lens, worktrees_base).await? {
+        drop(admin);
+        return Ok(resumed_resolve(existing).await);
+    }
+    run_git(
+        Some(repo_path),
         &["worktree", "add", "--detach", &worktree_path, &head_tip],
         WORKTREE_OP_TIMEOUT,
     )
     .await?;
+    drop(admin);
 
     let message = match message.map(str::trim) {
         Some(m) if !m.is_empty() => m.to_string(),
@@ -4075,7 +4194,7 @@ pub async fn git_finish_remote_pr_resolve(
     message: Option<String>,
     lens: Option<String>,
 ) -> AppResult<RemotePrResolveOutcome> {
-    let root = worktree_root_dir(&repo_path)?;
+    let base = worktrees_base_dir()?;
     finish_remote_pr_resolve(
         &state,
         &repo_path,
@@ -4084,12 +4203,13 @@ pub async fn git_finish_remote_pr_resolve(
         &worktree_id,
         message.as_deref(),
         lens.as_deref(),
-        &root,
+        &base,
     )
     .await
 }
 
-/// Testable core of [`git_finish_remote_pr_resolve`] (see [`merge_remote_pr`]).
+/// Testable core of [`git_finish_remote_pr_resolve`] (see [`find_remote_pr_resolve`]
+/// for `base`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_remote_pr_resolve(
     state: &AppState,
@@ -4099,11 +4219,14 @@ pub(crate) async fn finish_remote_pr_resolve(
     worktree_id: &str,
     message: Option<&str>,
     lens: Option<&str>,
-    root: &Path,
+    base: &Path,
 ) -> AppResult<RemotePrResolveOutcome> {
     crate::git::branches::validate_branch_name(head)?;
     let remote = resolve_pr_remote(repo_path, lens).await?;
-    ensure_pr_resolve_worktree(root, worktree_path)?;
+    if check_pr_resolve_worktree(repo_path, base, worktree_path).await? != PrResolvePath::Registered
+    {
+        return Err(not_a_pr_resolve(worktree_path));
+    }
     // Parse the identity this module itself encodes into the directory name —
     // `gd-pr-resolve-<remote>-<number>-<id>` — rather than suffix-matching the
     // id: an empty id makes `ends_with` vacuously true, and a partial one matches
@@ -4234,19 +4357,25 @@ pub async fn git_abort_remote_pr_resolve(
     repo_path: String,
     worktree_path: String,
 ) -> AppResult<()> {
-    let root = worktree_root_dir(&repo_path)?;
-    abort_remote_pr_resolve(&state, &repo_path, &worktree_path, &root).await
+    let base = worktrees_base_dir()?;
+    abort_remote_pr_resolve(&state, &repo_path, &worktree_path, &base).await
 }
 
-/// Testable core of [`git_abort_remote_pr_resolve`] (see [`merge_remote_pr`]).
+/// Testable core of [`git_abort_remote_pr_resolve`] (see [`find_remote_pr_resolve`]
+/// for `base`).
 pub(crate) async fn abort_remote_pr_resolve(
     state: &AppState,
     repo_path: &str,
     worktree_path: &str,
-    root: &Path,
+    base: &Path,
 ) -> AppResult<()> {
-    ensure_pr_resolve_worktree(root, worktree_path)?;
-    remove_resolve_worktree(state, repo_path, worktree_path).await;
+    match check_pr_resolve_worktree(repo_path, base, worktree_path).await? {
+        PrResolvePath::Registered => remove_resolve_worktree(state, repo_path, worktree_path).await,
+        // Another checkout already finished or discarded it: nothing left to tear
+        // down, and discarding a stale handle must clear rather than fail.
+        PrResolvePath::Unregistered => {}
+        PrResolvePath::Refused => return Err(not_a_pr_resolve(worktree_path)),
+    }
     Ok(())
 }
 
@@ -4259,16 +4388,19 @@ pub async fn git_find_remote_pr_resolve(
     number: u64,
     lens: Option<String>,
 ) -> AppResult<Option<RemotePrResolveHandle>> {
-    let root = worktree_root_dir(&repo_path)?;
-    find_remote_pr_resolve(&repo_path, number, lens.as_deref(), &root).await
+    let base = worktrees_base_dir()?;
+    find_remote_pr_resolve(&repo_path, number, lens.as_deref(), &base).await
 }
 
-/// Testable core of [`git_find_remote_pr_resolve`] (see [`merge_remote_pr`]).
+/// Testable core of [`git_find_remote_pr_resolve`]. `base` is the worktrees base,
+/// not one repository's root: candidates come from THIS repository's shared
+/// worktree registry, so any root under `base` that holds one of them counts — the
+/// identity root, a legacy checkout-keyed root, or another checkout's.
 pub(crate) async fn find_remote_pr_resolve(
     repo_path: &str,
     number: u64,
     lens: Option<&str>,
-    root: &Path,
+    base: &Path,
 ) -> AppResult<Option<RemotePrResolveHandle>> {
     let remote = crate::github::lens_remote(lens)?;
     let listed = run_git(
@@ -4281,9 +4413,7 @@ pub(crate) async fn find_remote_pr_resolve(
     Ok(parse_worktree_paths(&listed.stdout_lossy())
         .into_iter()
         .find_map(|p| {
-            // Porcelain paths and `root` can be different spellings of the same
-            // location (see `path_is_under`).
-            if !path_is_under(root, &p) {
+            if !is_adoptable_pr_resolve(base, &p) {
                 return None;
             }
             // The id is the segment AFTER the prefix — this module names these
@@ -8600,6 +8730,34 @@ detached
         (bare_dir, bare)
     }
 
+    /// A temp worktrees base and the root `key` maps to inside it, through the
+    /// production `<base>/<repo_hash(key)>` mapping — the real app data is never touched.
+    fn resolve_roots(
+        holder: &tempfile::TempDir,
+        key: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = holder.path().join("worktrees");
+        let root = worktree_root_in(&base, key);
+        (base, root)
+    }
+
+    /// A second checkout of `repo`: a detached linked worktree in its own temp dir.
+    async fn add_linked_checkout(repo: &str) -> (tempfile::TempDir, String) {
+        let holder = tempfile::tempdir().expect("create temp dir");
+        let linked = holder.path().join("linked").to_string_lossy().into_owned();
+        git(repo, &["worktree", "add", "--detach", &linked, "HEAD"]).await;
+        (holder, linked)
+    }
+
+    /// The `gd-pr-resolve-*` entries in `repo`'s worktree registry.
+    async fn pr_resolves_listed(repo: &str) -> Vec<String> {
+        let porcelain = git(repo, &["worktree", "list", "--porcelain"]).await;
+        parse_worktree_paths(&porcelain)
+            .into_iter()
+            .filter(|p| is_pr_resolve_worktree_path(p))
+            .collect()
+    }
+
     /// Pushes a base/head pair to `remote` that conflicts on the same line of
     /// `a.txt`, leaving the main tree on `base`. Returns the base branch name.
     async fn push_conflicting_pair(repo: &str, dir: &std::path::Path, remote: &str) -> String {
@@ -8625,7 +8783,7 @@ detached
         let head_before = rev(&bare, "refs/heads/feature").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 42, &base, "feature", None, None, &root)
             .await
@@ -8652,7 +8810,7 @@ detached
         git(&wt, &["add", "a.txt"]).await;
 
         let done = finish_remote_pr_resolve(
-            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+            &state, &repo, "feature", &wt, &wt_id, None, None, &wt_base,
         )
         .await
         .unwrap();
@@ -8684,7 +8842,7 @@ detached
         let head_before = rev(&bare, "refs/heads/feature").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (_, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 7, &base, "feature", None, None, &root)
             .await
@@ -8723,7 +8881,7 @@ detached
         let upstream_before = rev(&upstream, "refs/heads/feature").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (_, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(
             &state,
@@ -8763,7 +8921,7 @@ detached
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (_, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let first = merge_remote_pr(&state, &repo, 77, &base, "feature", None, None, &root)
             .await
@@ -8817,7 +8975,7 @@ detached
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (_, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 42, &base, "feature", None, None, &root)
             .await
@@ -8856,7 +9014,7 @@ detached
         let legacy_id = uuid::Uuid::new_v4().to_string();
         assert_eq!(legacy_id.len(), 36, "the old mint's shape: {legacy_id}");
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         std::fs::create_dir_all(&root).unwrap();
         let wt = root
             .join(format!("{}{legacy_id}", pr_resolve_prefix("origin", 8)))
@@ -8879,7 +9037,7 @@ detached
 
         let state = AppState::default();
         let done = finish_remote_pr_resolve(
-            &state, &repo, "feature", &wt, &legacy_id, None, None, &root,
+            &state, &repo, "feature", &wt, &legacy_id, None, None, &wt_base,
         )
         .await
         .unwrap();
@@ -8901,7 +9059,7 @@ detached
         let head_before = rev(&bare, "refs/heads/feature").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 99, &base, "feature", None, None, &root)
             .await
@@ -8913,7 +9071,7 @@ detached
         // spelling of the same location (forward slashes here, macOS's
         // `/private/var/…` for a `/var/…` temp dir, long names for a Windows
         // runner's 8.3 short names), so raw string equality is not identity.
-        let found = find_remote_pr_resolve(&repo, 99, None, &root)
+        let found = find_remote_pr_resolve(&repo, 99, None, &wt_base)
             .await
             .unwrap()
             .expect("the live resolve is found");
@@ -8923,11 +9081,11 @@ detached
         );
         assert_eq!(found.worktree_id, wt_id, "the id is parsed off the path");
         // Neither a different PR number nor a different lens may claim it.
-        assert!(find_remote_pr_resolve(&repo, 98, None, &root)
+        assert!(find_remote_pr_resolve(&repo, 98, None, &wt_base)
             .await
             .unwrap()
             .is_none());
-        assert!(find_remote_pr_resolve(&repo, 99, Some("upstream"), &root)
+        assert!(find_remote_pr_resolve(&repo, 99, Some("upstream"), &wt_base)
             .await
             .unwrap()
             .is_none());
@@ -8942,11 +9100,11 @@ detached
             "the local-PR sweep must not touch a remote-PR resolve: {all:?}"
         );
 
-        abort_remote_pr_resolve(&state, &repo, &wt, &root)
+        abort_remote_pr_resolve(&state, &repo, &wt, &wt_base)
             .await
             .unwrap();
         assert!(!Path::new(&wt).exists(), "worktree removed after abort");
-        assert!(find_remote_pr_resolve(&repo, 99, None, &root)
+        assert!(find_remote_pr_resolve(&repo, 99, None, &wt_base)
             .await
             .unwrap()
             .is_none());
@@ -9066,7 +9224,7 @@ detached
             .to_string();
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 55, &base, "feature", None, None, &root)
             .await
@@ -9097,7 +9255,7 @@ detached
             &wt_id,
             None,
             Some("upstream"),
-            &root,
+            &wt_base,
         )
         .await
         .unwrap_err();
@@ -9117,7 +9275,7 @@ detached
         // refused for the same reason — the id must match the whole trailing segment.
         for bad_id in ["", &wt_id[wt_id.len() - 4..]] {
             let err = finish_remote_pr_resolve(
-                &state, &repo, "feature", &wt, bad_id, None, None, &root,
+                &state, &repo, "feature", &wt, bad_id, None, None, &wt_base,
             )
             .await
             .unwrap_err();
@@ -9133,7 +9291,7 @@ detached
         );
 
         let done = finish_remote_pr_resolve(
-            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+            &state, &repo, "feature", &wt, &wt_id, None, None, &wt_base,
         )
         .await
         .unwrap();
@@ -10115,7 +10273,7 @@ detached
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
         let outcome = merge_remote_pr(&state, &repo, 12, &base, "feature", None, None, &root)
             .await
@@ -10134,7 +10292,7 @@ detached
         git(&wt, &["add", "a.txt"]).await;
 
         let err = finish_remote_pr_resolve(
-            &state, &repo, "feature", &wt, &wt_id, None, None, &root,
+            &state, &repo, "feature", &wt, &wt_id, None, None, &wt_base,
         )
         .await
         .unwrap_err();
@@ -10164,7 +10322,7 @@ detached
         let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
 
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
 
         // (1) A paused conflicted resolve — dirty.
@@ -10215,7 +10373,7 @@ detached
             .into_owned();
         git(&repo, &["worktree", "add", "--detach", &clean, &head_tip]).await;
 
-        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &root)
+        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &wt_base)
             .await
             .unwrap();
 
@@ -10237,6 +10395,249 @@ detached
         );
     }
 
+    /// Every checkout of a repository resolves one identity, hence one resolve root: a
+    /// resolve started from the main checkout is offered to a linked one, a start
+    /// there resumes it instead of minting a second, and it finishes from there.
+    #[tokio::test]
+    async fn remote_pr_resolve_minted_in_one_checkout_is_found_and_finished_from_another() {
+        use crate::git::worktree::canonical_wt_path;
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-cross").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let (_linked_holder, linked) = add_linked_checkout(&repo).await;
+        let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+        assert_eq!(
+            crate::git::repo::repo_identity(&linked).await.unwrap(),
+            identity,
+            "the premise: both checkouts share one identity"
+        );
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &identity);
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 21, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+
+        let found = find_remote_pr_resolve(&linked, 21, None, &wt_base)
+            .await
+            .unwrap()
+            .expect("the other checkout's resolve is offered here");
+        assert_eq!(
+            canonical_wt_path(&found.worktree_path),
+            canonical_wt_path(&wt)
+        );
+        assert_eq!(Some(&found.worktree_id), outcome.worktree_id.as_ref());
+
+        let resumed = merge_remote_pr(&state, &linked, 21, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.worktree_id, outcome.worktree_id,
+            "resumed, not re-minted"
+        );
+        assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        let done = finish_remote_pr_resolve(
+            &state,
+            &linked,
+            "feature",
+            &found.worktree_path,
+            &found.worktree_id,
+            None,
+            None,
+            &wt_base,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "pushed");
+        assert_eq!(
+            Some(rev(&bare, "refs/heads/feature").await),
+            done.pushed_sha,
+            "the PR head is the merge finished from the second checkout"
+        );
+        assert!(!Path::new(&wt).exists(), "worktree removed after finish");
+        assert!(pr_resolves_listed(&repo).await.is_empty());
+    }
+
+    /// The root shape alone would accept ANY repository's resolve, since every root
+    /// under the base has it. Registry membership is the repository scope: a path
+    /// unregistered here is never removed — finish refuses it, abort treats it as
+    /// already gone (the stale-handle case) and leaves it untouched.
+    #[tokio::test]
+    async fn remote_pr_guard_never_touches_a_root_shaped_path_unregistered_here() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-foreign-x").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+        let (_other_dir, _other_origin, other, _other_bare) =
+            setup_repo_with_origin("rpr-foreign-y").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 3, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let wt_id = outcome.worktree_id.clone().expect("worktree id set");
+        assert!(
+            is_adoptable_pr_resolve(&wt_base, &wt),
+            "the premise: the foreign path has the accepted root shape"
+        );
+
+        abort_remote_pr_resolve(&state, &other, &wt, &wt_base)
+            .await
+            .expect("abort of an unregistered resolve is a no-op");
+        let err =
+            finish_remote_pr_resolve(&state, &other, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("not a pull-request resolve worktree")),
+            "got: {err:?}"
+        );
+        assert!(
+            Path::new(&wt).exists(),
+            "the other repository's resolve is untouched"
+        );
+        assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+        assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+        // Its own repository still passes the same guard.
+        abort_remote_pr_resolve(&state, &repo, &wt, &wt_base)
+            .await
+            .unwrap();
+        assert!(!Path::new(&wt).exists());
+
+        // Once removed it is unregistered here too: a second Discard clears, while
+        // finish keeps refusing the same path.
+        abort_remote_pr_resolve(&state, &repo, &wt, &wt_base)
+            .await
+            .expect("abort of an already-removed resolve is a no-op");
+        let err =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("not a pull-request resolve worktree")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Resolves minted before the identity root sit in a CHECKOUT-keyed root, which
+    /// only that checkout used to sweep. The sweep now runs from any checkout over
+    /// every root shape, with the worthless-gate still protecting work in progress.
+    #[tokio::test]
+    async fn cleanup_reclaims_a_worthless_resolve_in_a_legacy_checkout_root() {
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-legacy-sweep").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let (_linked_holder, linked) = add_linked_checkout(&repo).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, legacy_root) = resolve_roots(&root_holder, &repo);
+        let state = AppState::default();
+        // In progress (dirty), minted under the legacy root the way an older build did.
+        let dirty = merge_remote_pr(&state, &repo, 5, &base, "feature", None, None, &legacy_root)
+            .await
+            .unwrap()
+            .worktree_path
+            .expect("worktree path set");
+        // Worthless: detached at a commit the remote has, no merge in flight.
+        let head_tip = rev(&repo, "refs/remotes/origin/feature").await;
+        let clean = legacy_root
+            .join("gd-pr-resolve-origin-4-clean")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &clean, &head_tip]).await;
+
+        cleanup_orphaned_resolve_worktrees(&state, &linked, &[], &wt_base)
+            .await
+            .unwrap();
+
+        assert!(
+            !Path::new(&clean).exists(),
+            "a worthless legacy-rooted resolve is reclaimed from another checkout"
+        );
+        assert!(Path::new(&dirty).exists(), "an in-progress one is kept");
+        assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+    }
+
+    /// An in-progress resolve in a legacy checkout-keyed root is adopted as-is: a
+    /// start through the identity root resumes it rather than minting beside it.
+    #[tokio::test]
+    async fn remote_pr_resume_adopts_a_legacy_rooted_resolve() {
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-legacy-resume").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let (_linked_holder, linked) = add_linked_checkout(&repo).await;
+        let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, legacy_root) = resolve_roots(&root_holder, &repo);
+        let identity_root = worktree_root_in(&wt_base, &identity);
+        assert_ne!(
+            legacy_root, identity_root,
+            "the premise: two different roots"
+        );
+
+        let state = AppState::default();
+        let legacy = merge_remote_pr(&state, &repo, 8, &base, "feature", None, None, &legacy_root)
+            .await
+            .unwrap();
+        assert_eq!(legacy.status, "conflicts");
+
+        for checkout in [&repo, &linked] {
+            let found = find_remote_pr_resolve(checkout, 8, None, &wt_base)
+                .await
+                .unwrap()
+                .expect("the legacy-rooted resolve is found");
+            assert_eq!(Some(&found.worktree_id), legacy.worktree_id.as_ref());
+            let resumed = merge_remote_pr(
+                &state,
+                checkout,
+                8,
+                &base,
+                "feature",
+                None,
+                None,
+                &identity_root,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resumed.worktree_id, legacy.worktree_id, "from {checkout}");
+            assert!(resumed.conflicts.iter().any(|p| p == "a.txt"));
+        }
+        assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+        assert!(
+            !identity_root.exists() || std::fs::read_dir(&identity_root).unwrap().next().is_none(),
+            "nothing was minted under the identity root"
+        );
+    }
+
+    /// Two starts of one PR racing from two checkouts: the find-then-add runs under
+    /// the shared admin hold, so exactly one mints and the other resumes it.
+    #[tokio::test]
+    async fn concurrent_remote_pr_starts_from_two_checkouts_mint_one_resolve() {
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-race").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let (_linked_holder, linked) = add_linked_checkout(&repo).await;
+        let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (_, root) = resolve_roots(&root_holder, &identity);
+        let state = AppState::default();
+        let (a, b) = tokio::join!(
+            merge_remote_pr(&state, &repo, 64, &base, "feature", None, None, &root),
+            merge_remote_pr(&state, &linked, 64, &base, "feature", None, None, &root),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.worktree_id, b.worktree_id, "one winner, one resume");
+        let listed = pr_resolves_listed(&repo).await;
+        assert_eq!(listed.len(), 1, "exactly one resolve worktree: {listed:?}");
+    }
+
     /// Refspec metacharacters are rejected BEFORE anything is fetched, created, or
     /// pushed — these names are interpolated into fetch/push refspecs, where `*`
     /// globs and `:` separates. A lens whose remote does not exist is refused just
@@ -10245,7 +10646,7 @@ detached
     async fn remote_pr_rejects_bad_refs_and_missing_remotes_before_any_mutation() {
         let (dir, repo) = setup_repo("rpr-validate").await;
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (_, root) = resolve_roots(&root_holder, &repo);
         let state = AppState::default();
 
         // Metacharacters and rev expressions alike: on this path the names are
@@ -10314,7 +10715,7 @@ detached
     async fn finish_remote_pr_resolve_rejects_rev_expressions_in_the_head() {
         let (_dir, repo) = setup_repo("frpr-validate").await;
         let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
         let wt = root.join("gd-pr-resolve-origin-5-abcdef").to_string_lossy().into_owned();
         let state = AppState::default();
 
@@ -10329,7 +10730,7 @@ detached
             "a:b",
         ] {
             let err = finish_remote_pr_resolve(
-                &state, &repo, bad, &wt, "abcdef", None, None, &root,
+                &state, &repo, bad, &wt, "abcdef", None, None, &wt_base,
             )
             .await
             .unwrap_err();
@@ -10342,7 +10743,7 @@ detached
         // The confounder, live: a VALID head gets the same variant from the remote
         // lookup instead — only the message tells the two gates apart.
         let err = finish_remote_pr_resolve(
-            &state, &repo, "feature", &wt, "abcdef", None, None, &root,
+            &state, &repo, "feature", &wt, "abcdef", None, None, &wt_base,
         )
         .await
         .unwrap_err();
@@ -10369,32 +10770,50 @@ detached
         // The remote namespaces the directory, so two lenses never collide.
         assert_ne!(pr_resolve_prefix("origin", 12), pr_resolve_prefix("upstream", 12));
 
-        let root = Path::new("/data/wt/h");
-        assert!(ensure_pr_resolve_worktree(root, "/data/wt/h/gd-pr-resolve-origin-12-abc").is_ok());
-        // Ours by name but OUTSIDE the app-data root, and inside the root but not
-        // ours — both refused before `worktree remove --force` is aimed at them.
-        assert!(ensure_pr_resolve_worktree(root, "/users/me/gd-pr-resolve-origin-12-abc").is_err());
-        assert!(ensure_pr_resolve_worktree(root, "/data/wt/h/my-work").is_err());
-        // A SIBLING directory sharing the root's prefix must not slip through a
-        // bare `starts_with` — this check ends in `worktree remove --force`.
-        assert!(
-            ensure_pr_resolve_worktree(root, "/data/wt/hevil/gd-pr-resolve-origin-12-abc").is_err()
-        );
+        let base = Path::new("/data/wt");
+        // Directly inside ANY 16-hex root: the identity root, a legacy checkout-keyed
+        // one, another checkout's — the shape cannot tell them apart, by design.
+        for path in [
+            "/data/wt/0123456789abcdef/gd-pr-resolve-origin-12-abc",
+            "/data/wt/fedcba9876543210/gd-pr-resolve-origin-12-abc",
+        ] {
+            assert!(is_adoptable_pr_resolve(base, path), "{path}");
+        }
+        for path in [
+            // Ours by name but outside the base, and in a root but not ours.
+            "/users/me/gd-pr-resolve-origin-12-abc",
+            "/data/wt/0123456789abcdef/my-work",
+            // A SIBLING of the base sharing its prefix must not slip through a bare
+            // `starts_with` — acceptance ends in `worktree remove --force`.
+            "/data/wtevil/0123456789abcdef/gd-pr-resolve-origin-12-abc",
+            // Not directly in a root: in the base itself, one level too deep, or
+            // under a directory that is not a `repo_hash` (wrong length, non-hex).
+            "/data/wt/gd-pr-resolve-origin-12-abc",
+            "/data/wt/0123456789abcdef/nested/gd-pr-resolve-origin-12-abc",
+            "/data/wt/0123456789abcde/gd-pr-resolve-origin-12-abc",
+            "/data/wt/0123456789abcdeg/gd-pr-resolve-origin-12-abc",
+            "/data/wt/0123456789abcdef0/gd-pr-resolve-origin-12-abc",
+        ] {
+            assert!(!is_adoptable_pr_resolve(base, path), "{path}");
+        }
+        // The production mapping always lands in the accepted shape.
+        let minted = worktree_root_in(base, "C:/repos/app/.git").join("gd-pr-resolve-origin-1-abc");
+        assert!(is_adoptable_pr_resolve(base, &minted.to_string_lossy()));
     }
 
     /// The divergent-spelling class the 3-OS matrix caught: one side reaches a
     /// directory through a link, the other through its real path. macOS's
     /// `/var → /private/var` temp dirs are that shape; a junction reproduces it on
     /// Windows, the only platform this can run on locally. Canonicalizing BOTH
-    /// sides is what makes the two spellings compare equal — and containment must
-    /// still REFUSE a sibling through either spelling.
+    /// sides is what makes the two spellings compare equal — and the shape test must
+    /// still REFUSE a sibling of the base through either spelling.
     #[cfg(windows)]
     #[test]
-    fn path_is_under_matches_across_a_linked_spelling() {
+    fn worktree_root_shape_matches_across_a_linked_spelling() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let real = tmp.path().join("real");
-        let leaf = "gd-pr-resolve-origin-1-abc";
-        std::fs::create_dir_all(real.join(leaf)).unwrap();
+        let leaf = Path::new("0123456789abcdef").join("gd-pr-resolve-origin-1-abc");
+        std::fs::create_dir_all(real.join(&leaf)).unwrap();
         let link = tmp.path().join("link");
         // Directory junctions need no elevation (unlike symlinks).
         let made = std::process::Command::new("cmd")
@@ -10413,17 +10832,23 @@ detached
             String::from_utf8_lossy(&made.stderr)
         );
 
-        let child_real = real.join(leaf).to_string_lossy().into_owned();
-        let child_link = link.join(leaf).to_string_lossy().into_owned();
-        // Root spelled one way, child the other — both directions.
-        assert!(path_is_under(&link, &child_real), "linked root vs real child");
-        assert!(path_is_under(&real, &child_link), "real root vs linked child");
-        // A sibling sharing the root's prefix is still refused through either.
-        let sibling = tmp.path().join("realevil").join(leaf);
+        let child_real = real.join(&leaf).to_string_lossy().into_owned();
+        let child_link = link.join(&leaf).to_string_lossy().into_owned();
+        // Base spelled one way, child the other — both directions.
+        assert!(
+            is_in_a_worktree_root(&link, &child_real),
+            "linked base vs real child"
+        );
+        assert!(
+            is_in_a_worktree_root(&real, &child_link),
+            "real base vs linked child"
+        );
+        // A sibling sharing the base's prefix is still refused through either.
+        let sibling = tmp.path().join("realevil").join(&leaf);
         std::fs::create_dir_all(&sibling).unwrap();
         let sibling = sibling.to_string_lossy().into_owned();
-        assert!(!path_is_under(&real, &sibling));
-        assert!(!path_is_under(&link, &sibling));
+        assert!(!is_in_a_worktree_root(&real, &sibling));
+        assert!(!is_in_a_worktree_root(&link, &sibling));
     }
 
     /// Windows-only: drive letters, case-insensitivity and backslash separators
@@ -10432,13 +10857,83 @@ detached
     #[cfg(windows)]
     #[test]
     fn pr_resolve_worktree_guard_accepts_windows_spellings() {
-        let root = Path::new("C:/data/wt/h");
+        let base = Path::new("C:/data/wt");
+        assert!(is_adoptable_pr_resolve(
+            base,
+            "c:\\data\\wt\\0123456789ABCDEF\\gd-pr-resolve-origin-12-abc"
+        ));
+        assert!(!is_adoptable_pr_resolve(
+            base,
+            "C:/data/wtevil/0123456789abcdef/gd-pr-resolve-origin-12-abc"
+        ));
+        // Registry membership compares through the same spellings.
+        let listed = vec!["C:/data/wt/0123456789abcdef/gd-pr-resolve-origin-12-abc".to_string()];
+        assert!(is_listed_worktree(
+            &listed,
+            "c:\\data\\wt\\0123456789abcdef\\gd-pr-resolve-origin-12-abc"
+        ));
+        assert!(!is_listed_worktree(
+            &listed,
+            "c:\\data\\wt\\fedcba9876543210\\gd-pr-resolve-origin-12-abc"
+        ));
+    }
+
+    #[test]
+    fn pr_resolve_path_classification() {
+        let base = Path::new("/data/wt");
+        let resolve = "/data/wt/0123456789abcdef/gd-pr-resolve-origin-12-abc";
+        let check = |listed: &[&str], path: &str| {
+            let listed: Vec<String> = listed.iter().map(|s| s.to_string()).collect();
+            classify_pr_resolve_path(base, &listed, path)
+        };
+        assert_eq!(check(&[resolve], resolve), PrResolvePath::Registered);
+        assert_eq!(check(&[], resolve), PrResolvePath::Unregistered);
+        // Registered but not shaped as a resolve: never a silent no-op.
+        let plain = "/data/wt/0123456789abcdef/feature";
+        assert_eq!(check(&[plain], plain), PrResolvePath::Refused);
+        let outside = "/elsewhere/gd-pr-resolve-origin-12-abc";
+        assert_eq!(check(&[outside], outside), PrResolvePath::Refused);
+        assert_eq!(check(&[], outside), PrResolvePath::Refused);
+    }
+
+    /// A junction planted in a root's shape, pointing at a registered worktree
+    /// elsewhere, passes shape under its own spelling and membership under its
+    /// target's. Both gates must hold under ONE spelling, so it is refused.
+    #[cfg(windows)]
+    #[test]
+    fn pr_resolve_guard_refuses_a_shaped_junction_to_a_registered_worktree() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let base = tmp.path().join("wt");
+        let target = tmp.path().join("elsewhere").join("linked");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = base.join("0123456789abcdef");
+        std::fs::create_dir_all(&root).unwrap();
+        let junction = root.join("gd-pr-resolve-origin-1-abc");
+        let made = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &junction.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .output()
+            .expect("run mklink");
         assert!(
-            ensure_pr_resolve_worktree(root, "c:\\data\\wt\\h\\gd-pr-resolve-origin-12-abc").is_ok()
+            made.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&made.stderr)
         );
+
+        let listed = vec![target.to_string_lossy().into_owned()];
+        let junction = junction.to_string_lossy().into_owned();
         assert!(
-            ensure_pr_resolve_worktree(root, "C:/data/wt/hevil/gd-pr-resolve-origin-12-abc")
-                .is_err()
+            is_adoptable_pr_resolve(&base, &junction) && is_listed_worktree(&listed, &junction),
+            "the premise: each gate passes on its own under some spelling"
+        );
+        assert_eq!(
+            classify_pr_resolve_path(&base, &listed, &junction),
+            PrResolvePath::Refused
         );
     }
 

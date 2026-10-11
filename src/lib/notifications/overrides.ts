@@ -1,3 +1,4 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   memoizedStoreLoader,
@@ -40,13 +41,14 @@ export interface RepoNotificationOverride {
 const STORE_KEY = "overrides";
 
 // Personal app-data — notification preferences are the user's, never the repo's.
-const getStore = memoizedStoreLoader("notification-overrides.json");
+const STORE_FILE = "notification-overrides.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping saves would both read
 // the same pre-flush disk snapshot and the later would drop the earlier's change.
-// Mirrors automations/store.ts. In-process only; cross-window races remain out of
-// scope.
+// Mirrors automations/store.ts, cross-instance store lock around the reload→save
+// included.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -357,10 +359,12 @@ function mutateOverrides(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    await reloadToleratingEmptyStore(store);
-    const current = normalizeOverrides(await store.get<unknown>(STORE_KEY));
-    await store.set(STORE_KEY, mutate(current));
-    await store.save();
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      const current = normalizeOverrides(await store.get<unknown>(STORE_KEY));
+      await store.set(STORE_KEY, mutate(current));
+      await store.save();
+    });
   });
 }
 

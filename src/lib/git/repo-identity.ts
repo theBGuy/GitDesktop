@@ -84,7 +84,7 @@ export async function repoIdentity(repoPath: string): Promise<string> {
     // Unaged, unlike the query reader's bounded grace, because the two non-refusing
     // surfaces lose differently. Here a fallback REDIRECTS a write: a raw-path
     // record is one that healed reads never consult once an identity-keyed record
-    // exists, and identityKeyFor's once-per-session guard won't migrate it — the
+    // exists, and foldIdentityKey's once-per-session guard won't migrate it — the
     // write is lost with nothing on screen. A reader running out of grace only
     // renders an error body, which is visible and self-corrects. So a path resolved
     // once never answers the raw path again; the TTL still heals a reused path
@@ -121,22 +121,23 @@ export function mergeById<T extends { id: string }>(
 // outlives a path changing hands only skips a fold with nothing left to move.
 const folds = new Map<string, Promise<void>>();
 
-/** Resolve `repoPath`'s identity key and, once, fold any record still stored under
- *  the raw checkout path (pre-identity-keying) into the identity key via `merge`,
- *  then delete the legacy key. Returns the key the caller should read/write under.
- *  `merge(identityVal, legacyVal)` combines the two — for list stores use
- *  {@link mergeById}; for single-value stores prefer the identity value
+/** Once per session, fold any record still stored under the raw checkout path
+ *  (pre-identity-keying) into `id` — the identity the caller already resolved with
+ *  {@link repoIdentity}, outside any store lock, since a fold under a cross-instance
+ *  lock must never wait on a git spawn — then delete the legacy key. Returns the key
+ *  to read/write under. `merge(identityVal, legacyVal)` combines the two — for list
+ *  stores use {@link mergeById}; for single-value stores prefer the identity value
  *  (`(id, legacy) => id ?? legacy`). `tag` namespaces the once-guard per store.
  *  Idempotent: a no-op passthrough once folded (or when the identity couldn't be
  *  resolved and equals the raw path). Callers that serialize their own writes
  *  should invoke this inside that queue so the fold is ordered with their ops. */
-export async function identityKeyFor<T>(
+export async function foldIdentityKey<T>(
   store: Store,
   tag: string,
   repoPath: string,
+  id: string,
   merge: (identityVal: T | undefined, legacyVal: T) => T,
 ): Promise<string> {
-  const id = await repoIdentity(repoPath);
   // Fallback fired (git unresolved): the raw path IS the key, so there's no
   // distinct legacy entry to fold.
   if (id === repoPath) return id;

@@ -36,10 +36,9 @@
 //! every read-modify-write here holds the in-process [`PRS_LOCK`] and, inside it, the
 //! cross-process [`crate::store_lock`] — cheap exact serialization first, then the
 //! OS-level file lock, which fails open. `atomic_write` gives torn-file safety; the
-//! locks give lost-update safety. Known limit: the GUI writes this store through its own
-//! plugin-store cache and takes neither lock, so a GUI/MCP overlap can still lose an
-//! update — closing that needs the GUI's writes routed through Rust, as `review_notes`
-//! does.
+//! locks give lost-update safety. The GUI's plugin-store writes hold the same
+//! cross-process lock through [`crate::store_lock_commands`]; cold-start instances are
+//! the exception, writing a `coldstart-*` alias no second process touches.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -434,7 +433,7 @@ fn fold_legacy_key(store: &mut Map<String, Value>, identity: &str, legacy: &str)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -452,11 +451,11 @@ mod tests {
     }
 
     /// The store override is process-wide, so every test that installs one takes this
-    /// lock — as must any future test that drives the public read/write fns. Poisoning is
-    /// ignored: the guarded state is one override slot, not invariant data.
+    /// lock — as must any test, in any module, that reads `store_path` or drives the
+    /// public fns. Poisoning is ignored: the guarded state is one override slot.
     static STORE_DIR_LOCK: Mutex<()> = Mutex::new(());
 
-    fn store_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn store_dir_lock() -> std::sync::MutexGuard<'static, ()> {
         STORE_DIR_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

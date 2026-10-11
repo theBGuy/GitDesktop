@@ -1,11 +1,15 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
-  identityKeyFor,
+  foldIdentityKey,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 
@@ -37,14 +41,16 @@ const legacyDraftKey = (lens: RemoteLens, number: number) =>
 
 // Personal app-data, keyed by repo path → per-PR drafts — never written into the
 // repo itself. Mirrors `local.ts`'s store idiom.
-const getStore = memoizedStoreLoader("pr-review-drafts.json");
+const STORE_FILE = "pr-review-drafts.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue.
 // Without it, two overlapping mutations each reload the SAME pre-flush disk
 // snapshot — autoSave persists on a ~100ms debounce, so the first write isn't on
 // disk yet — and the later write drops the earlier one's change (a lost update).
-// Running them one at a time, plus the force-save in writeAll, guarantees each
-// read sees a current snapshot. (This repo has been bitten by store write races.)
+// The queue plus writeRepo's force-save keep each reload current within this
+// process; each mutation reloads under the cross-instance store lock, so another
+// app instance's saved drafts are read back rather than overwritten.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -74,11 +80,22 @@ async function readMerged(repo: string): Promise<PrDrafts> {
   return mergeDrafts(primary, legacy);
 }
 
-/** Identity store key for `repo`, folding any legacy checkout-path drafts onto it
- *  once. Call inside the serialized queue. */
-async function keyFor(repo: string): Promise<string> {
+async function reloadRaw(): Promise<void> {
+  await reloadToleratingEmptyStore(await getStore());
+}
+
+/** Identity store key for `repo` (`identity` resolved before the store lock),
+ *  folding any legacy checkout-path drafts onto it once. Call under the lock after
+ *  `reloadRaw`. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<PrDrafts>(store, "pr-review-drafts", repo, mergeDrafts);
+  return foldIdentityKey<PrDrafts>(
+    store,
+    "pr-review-drafts",
+    repo,
+    identity,
+    mergeDrafts,
+  );
 }
 
 async function readByKey(key: string): Promise<PrDrafts> {
@@ -129,10 +146,14 @@ export async function addDraft(
   draft: ReviewDraft,
 ): Promise<void> {
   return serialize(async () => {
-    const repoKey = await keyFor(repo);
-    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-    const k = draftKey(lens, number);
-    await writeRepo(repoKey, { ...all, [k]: [...(all[k] ?? []), draft] });
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const repoKey = await keyFor(repo, identity);
+      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+      const k = draftKey(lens, number);
+      await writeRepo(repoKey, { ...all, [k]: [...(all[k] ?? []), draft] });
+    });
   });
 }
 
@@ -144,11 +165,17 @@ export async function updateDraft(
   body: string,
 ): Promise<void> {
   return serialize(async () => {
-    const repoKey = await keyFor(repo);
-    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-    const k = draftKey(lens, number);
-    const next = (all[k] ?? []).map((d) => (d.id === id ? { ...d, body } : d));
-    await writeRepo(repoKey, { ...all, [k]: next });
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const repoKey = await keyFor(repo, identity);
+      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+      const k = draftKey(lens, number);
+      const next = (all[k] ?? []).map((d) =>
+        d.id === id ? { ...d, body } : d,
+      );
+      await writeRepo(repoKey, { ...all, [k]: next });
+    });
   });
 }
 
@@ -159,12 +186,16 @@ export async function removeDraft(
   id: string,
 ): Promise<void> {
   return serialize(async () => {
-    const repoKey = await keyFor(repo);
-    const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-    const k = draftKey(lens, number);
-    await writeRepo(repoKey, {
-      ...all,
-      [k]: (all[k] ?? []).filter((d) => d.id !== id),
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const repoKey = await keyFor(repo, identity);
+      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+      const k = draftKey(lens, number);
+      await writeRepo(repoKey, {
+        ...all,
+        [k]: (all[k] ?? []).filter((d) => d.id !== id),
+      });
     });
   });
 }
@@ -175,14 +206,18 @@ export async function clearDrafts(
   number: number,
 ): Promise<void> {
   return serialize(async () => {
-    const repoKey = await keyFor(repo);
-    // Fold first: a discard must take the pre-lens entry with it, or `listDrafts`
-    // would read the legacy drafts straight back after the clear. Copied before the
-    // delete — the fold passes the store's own object through when there's nothing
-    // to fold, and that must not be mutated in place.
-    const next = { ...foldLegacyKey(await readByKey(repoKey), lens, number) };
-    delete next[draftKey(lens, number)];
-    await writeRepo(repoKey, next);
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const repoKey = await keyFor(repo, identity);
+      // Fold first: a discard must take the pre-lens entry with it, or `listDrafts`
+      // would read the legacy drafts straight back after the clear. Copied before the
+      // delete — the fold passes the store's own object through when there's nothing
+      // to fold, and that must not be mutated in place.
+      const next = { ...foldLegacyKey(await readByKey(repoKey), lens, number) };
+      delete next[draftKey(lens, number)];
+      await writeRepo(repoKey, next);
+    });
   });
 }
 

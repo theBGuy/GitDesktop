@@ -35,6 +35,7 @@ mod secrets;
 mod sessions;
 mod state;
 mod store_lock;
+mod store_lock_commands;
 mod tray;
 
 use state::AppState;
@@ -137,6 +138,7 @@ pub fn run() {
         .on_window_event(tray::handle_window_event)
         .manage(AppState::default())
         .manage(pty::PtyState::default())
+        .manage(store_lock_commands::StoreLockState::default())
         .invoke_handler(tauri::generate_handler![
             git::repo::check_git_installed,
             git::repo::validate_repo,
@@ -280,6 +282,8 @@ pub fn run() {
             oplog::git_oplog_dismiss,
             review_notes::review_notes_set_branch,
             review_notes::review_notes_delete_branch,
+            store_lock_commands::app_store_lock_acquire,
+            store_lock_commands::app_store_lock_release,
             automation_claims::claim_automation_run,
             automation_claims::release_automation_claim,
             automation_claims::touch_automation_claim,

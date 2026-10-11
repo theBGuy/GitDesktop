@@ -1,5 +1,9 @@
 import { create } from "zustand";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { withAppStoreLock } from "@/lib/app-store-lock";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 // A GitHub-style short identifier (`#N`) for every agent entry — sessions, plans,
 // and research — so an entry is easy to reference and a plan can point at the
@@ -30,7 +34,8 @@ interface AgentNumberState {
   ensure: (ids: string[]) => void;
 }
 
-const getStore = memoizedStoreLoader("agent-numbers.json");
+const STORE_FILE = "agent-numbers.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 /** The in-flight `hydrate()` attempt, so concurrent callers share one disk read instead
  *  of each starting their own. Pairs with {@link RETRY_COOLDOWN_MS}: this bounds
@@ -161,15 +166,65 @@ useAgentNumbers.subscribe((state, prev) => {
   }
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const st = useAgentNumbers.getState();
+    // Reconcile under the store lock against disk, the shared truth once persisted
+    // (see reconcileNumbers). Memory reads and absorbs the result synchronously, so no
+    // mint can land between the two; this deliberately departs from hydrate-once for
+    // the reconciled entries, and the re-fired pass finds nothing left to change.
     void getStore()
-      .then(async (store) => {
-        await store.set("numbers", st.numbers);
-        await store.set("counter", st.counter);
-      })
+      .then((store) =>
+        withAppStoreLock(STORE_FILE, async () => {
+          await reloadToleratingEmptyStore(store);
+          const disk =
+            (await store.get<Record<string, number>>("numbers")) ?? {};
+          const diskCounter = (await store.get<number>("counter")) ?? 1;
+          const live = useAgentNumbers.getState();
+          const { numbers, counter, changed } = reconcileNumbers(
+            disk,
+            diskCounter,
+            live.numbers,
+            live.counter,
+          );
+          if (changed) useAgentNumbers.setState({ numbers, counter });
+          await store.set("numbers", numbers);
+          await store.set("counter", counter);
+          await store.save();
+        }),
+      )
       .catch(() => undefined);
   }, 500);
 });
+
+/** Merges this instance's map into the persisted one so no number is held by two
+ *  entries across instances: an id numbered on both sides takes the DISK number, and
+ *  a memory-only id whose number is already taken on disk is re-minted past every
+ *  counter, in order. `changed` says whether memory must absorb the result. */
+function reconcileNumbers(
+  disk: Record<string, number>,
+  diskCounter: number,
+  memory: Record<string, number>,
+  memoryCounter: number,
+): { numbers: Record<string, number>; counter: number; changed: boolean } {
+  const numbers = { ...disk };
+  const taken = new Set(Object.values(disk));
+  const maxOnDisk = Object.values(disk).reduce((m, n) => Math.max(m, n), 0);
+  let next = Math.max(diskCounter, memoryCounter, maxOnDisk + 1, 1);
+  for (const [id, n] of Object.entries(memory)) {
+    if (disk[id] != null) continue;
+    if (taken.has(n)) {
+      while (taken.has(next)) next += 1;
+      numbers[id] = next;
+      next += 1;
+    } else {
+      numbers[id] = n;
+    }
+    taken.add(numbers[id]);
+  }
+  const changed =
+    next !== memoryCounter ||
+    Object.keys(numbers).length !== Object.keys(memory).length ||
+    Object.entries(numbers).some(([id, n]) => memory[id] !== n);
+  return { numbers, counter: next, changed };
+}
 
 // A failure here leaves `hydrated` false, which holds BOTH gates above: no numbers are
 // minted and nothing is written, so the file survives intact. Recovery lives in

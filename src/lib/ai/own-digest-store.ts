@@ -1,4 +1,5 @@
-import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
+import { withAppStoreLock } from "@/lib/app-store-lock";
+import { foldIdentityKey, repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
 import {
   memoizedStoreLoader,
@@ -77,11 +78,13 @@ function legacyDigestKey(key: string): string | undefined {
 // (not its checkout path) so a PR's cached digest is shared across the main
 // checkout and every worktree. Routed through storeName() so cold-start/test mode
 // never pollutes real data. One digest per `digestKey` key.
-const getStore = memoizedStoreLoader("own-comments-digest.json");
+const STORE_FILE = "own-comments-digest.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write through one in-process queue — without it two
 // overlapping saves each reload the same pre-flush disk snapshot (autoSave's ~100ms
-// debounce) and the later drops the earlier. Mirrors pr-reviews.json's chain.
+// debounce) and the later drops the earlier. Mirrors pr-reviews.json's chain,
+// cross-instance store lock around each reload→save included.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -93,15 +96,17 @@ async function reloadRaw(): Promise<void> {
   await reloadToleratingEmptyStore(await getStore());
 }
 
-/** The identity store key for `repo`, folding any legacy checkout-path-keyed
- *  record onto the identity key once (single-value store: prefer the identity
- *  value). Call inside the serialized queue so the fold orders with the mutation. */
-async function keyFor(repo: string): Promise<string> {
+/** The identity store key for `repo` (`identity` resolved before the store lock),
+ *  folding any legacy checkout-path-keyed record onto the identity key once
+ *  (single-value store: prefer the identity value). Call under the lock after
+ *  `reloadRaw` so the fold orders with the mutation. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<Record<string, OwnCommentsDigest>>(
+  return foldIdentityKey<Record<string, OwnCommentsDigest>>(
     store,
     "own-comments-digest",
     repo,
+    identity,
     (id, legacy) => ({ ...legacy, ...(id ?? {}) }),
   );
 }
@@ -143,19 +148,23 @@ export async function saveDigest(
   record: OwnCommentsDigest,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repoPath);
-    const store = await getStore();
-    const bag = (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
-    bag[record.key] = record;
-    // This write supersedes any pre-lens record for the same PR — dropping it here
-    // is the fold, one PR at a time, never a sweep over the store.
-    const preLens = legacyDigestKey(record.key);
-    if (preLens !== undefined) delete bag[preLens];
-    await store.set(key, bag);
-    // Flush now instead of on autoSave's debounce, so the next serialized reload
-    // can't re-read a pre-write disk snapshot and drop this change.
-    await store.save();
+    const identity = await repoIdentity(repoPath);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repoPath, identity);
+      const store = await getStore();
+      const bag =
+        (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
+      bag[record.key] = record;
+      // This write supersedes any pre-lens record for the same PR — dropping it here
+      // is the fold, one PR at a time, never a sweep over the store.
+      const preLens = legacyDigestKey(record.key);
+      if (preLens !== undefined) delete bag[preLens];
+      await store.set(key, bag);
+      // Flush now instead of on autoSave's debounce, so the next serialized reload
+      // can't re-read a pre-write disk snapshot and drop this change.
+      await store.save();
+    });
   });
 }
 
@@ -182,31 +191,35 @@ export async function recordDigestFailure(
   failed: NonNullable<OwnCommentsDigest["failed"]>,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repoPath);
-    const store = await getStore();
-    const bag = (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
-    const recordKey = digestKey(lens, kind, ref);
-    // Adopt any pre-lens record for this PR rather than stranding its ledger — the
-    // same one-PR-at-a-time fold `saveDigest` does.
-    const preLens = legacyDigestKey(recordKey);
-    const existing =
-      bag[recordKey] ?? (preLens === undefined ? undefined : bag[preLens]);
-    if (preLens !== undefined) delete bag[preLens];
-    bag[recordKey] = {
-      // No record yet → a ledger-less skeleton, so the failure has somewhere to
-      // live without inventing a ledger that was never produced.
-      ...(existing ?? {
-        schemaVersion: 1,
-        fingerprint: failed.fingerprint,
-        ledger: "",
-        model: "",
-        createdAt: failed.at,
-      }),
-      key: recordKey,
-      failed,
-    };
-    await store.set(key, bag);
-    await store.save();
+    const identity = await repoIdentity(repoPath);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repoPath, identity);
+      const store = await getStore();
+      const bag =
+        (await store.get<Record<string, OwnCommentsDigest>>(key)) ?? {};
+      const recordKey = digestKey(lens, kind, ref);
+      // Adopt any pre-lens record for this PR rather than stranding its ledger — the
+      // same one-PR-at-a-time fold `saveDigest` does.
+      const preLens = legacyDigestKey(recordKey);
+      const existing =
+        bag[recordKey] ?? (preLens === undefined ? undefined : bag[preLens]);
+      if (preLens !== undefined) delete bag[preLens];
+      bag[recordKey] = {
+        // No record yet → a ledger-less skeleton, so the failure has somewhere to
+        // live without inventing a ledger that was never produced.
+        ...(existing ?? {
+          schemaVersion: 1,
+          fingerprint: failed.fingerprint,
+          ledger: "",
+          model: "",
+          createdAt: failed.at,
+        }),
+        key: recordKey,
+        failed,
+      };
+      await store.set(key, bag);
+      await store.save();
+    });
   });
 }

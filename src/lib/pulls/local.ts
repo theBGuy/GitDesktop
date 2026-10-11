@@ -1,5 +1,6 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
-  identityKeyFor,
+  foldIdentityKey,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
@@ -70,13 +71,16 @@ export interface LocalPr {
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never written
 // into the repo itself.
-const getStore = memoizedStoreLoader("local-prs.json");
+const STORE_FILE = "local-prs.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store (and the reconcile reload) through
 // one in-process queue: autoSave persists on a ~100ms debounce, so two overlapping
 // mutations would both reload the same pre-flush disk snapshot and the later would
 // drop the earlier's change (e.g. the reconcile hook marking several PRs in a parallel
 // forEach). With the force-save in writeAll, each reload sees a current snapshot.
+// Other writers (a second app instance, the MCP server) are kept out of the
+// reload→save window by the cross-instance store lock each mutation takes.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -112,13 +116,20 @@ export async function listLocalPrs(repo: string): Promise<LocalPr[]> {
   return mergeById(primary, legacy).map(withLabels);
 }
 
-/** The identity store key for `repo`, folding any legacy checkout-path-keyed
- *  records onto it once. Call inside the serialized queue (after `reloadRaw`) so
- *  the fold is ordered with the mutation and a delete/update can't leave a
- *  lingering legacy record that would reappear via `listLocalPrs`'s read-merge. */
-async function keyFor(repo: string): Promise<string> {
+/** The identity store key for `repo` (`identity` resolved by the caller BEFORE it
+ *  took the store lock), folding any legacy checkout-path-keyed records onto it
+ *  once. Call under the lock after `reloadRaw` so the fold is ordered with the
+ *  mutation and a delete/update can't leave a lingering legacy record that would
+ *  reappear via `listLocalPrs`'s read-merge. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<LocalPr[]>(store, "local-prs", repo, mergeById);
+  return foldIdentityKey<LocalPr[]>(
+    store,
+    "local-prs",
+    repo,
+    identity,
+    mergeById,
+  );
 }
 
 async function readByKey(key: string): Promise<LocalPr[]> {
@@ -139,24 +150,27 @@ export async function createLocalPr(
   input: { title: string; body: string; base: string; head: string },
 ): Promise<LocalPr> {
   return serialize(async () => {
-    // Fresh disk state first, so we don't drop a concurrent external MCP write.
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const pr: LocalPr = {
-      id: crypto.randomUUID(),
-      title: input.title,
-      body: input.body,
-      base: input.base,
-      head: input.head,
-      status: "open",
-      approved: false,
-      labels: [],
-      comments: [],
-      createdAt: new Date().toISOString(),
-    };
-    const all = await readByKey(key);
-    await writeAll(key, [pr, ...all]);
-    return pr;
+    const identity = await repoIdentity(repo);
+    return withAppStoreLock(STORE_FILE, async () => {
+      // Fresh disk state first, so we don't drop a concurrent external MCP write.
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const pr: LocalPr = {
+        id: crypto.randomUUID(),
+        title: input.title,
+        body: input.body,
+        base: input.base,
+        head: input.head,
+        status: "open",
+        approved: false,
+        labels: [],
+        comments: [],
+        createdAt: new Date().toISOString(),
+      };
+      const all = await readByKey(key);
+      await writeAll(key, [pr, ...all]);
+      return pr;
+    });
   });
 }
 
@@ -171,30 +185,36 @@ export async function updateLocalPr(
   mutate: (pr: LocalPr) => LocalPr,
 ): Promise<LocalPr> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    const idx = all.findIndex((p) => p.id === id);
-    if (idx === -1)
-      throw new Error(
-        `no local PR with id ${id} — it may have been deleted or belong to a different repository`,
-      );
-    const next = [...all];
-    next[idx] = mutate(all[idx]);
-    await writeAll(key, next);
-    return next[idx];
+    const identity = await repoIdentity(repo);
+    return withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      const idx = all.findIndex((p) => p.id === id);
+      if (idx === -1)
+        throw new Error(
+          `no local PR with id ${id} — it may have been deleted or belong to a different repository`,
+        );
+      const next = [...all];
+      next[idx] = mutate(all[idx]);
+      await writeAll(key, next);
+      return next[idx];
+    });
   });
 }
 
 export async function deleteLocalPr(repo: string, id: string): Promise<void> {
   return serialize(async () => {
-    // Fresh disk state first, so we don't drop a concurrent external MCP write.
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    await writeAll(
-      key,
-      all.filter((p) => p.id !== id),
-    );
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      // Fresh disk state first, so we don't drop a concurrent external MCP write.
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      await writeAll(
+        key,
+        all.filter((p) => p.id !== id),
+      );
+    });
   });
 }

@@ -1,3 +1,4 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
@@ -19,11 +20,13 @@ import {
 
 // Personal app-data — task definitions are the user's, NEVER read from repo
 // content, so a cloned/malicious repo can't plant a runnable task.
-const getStore = memoizedStoreLoader("scripts.json");
+const STORE_FILE = "scripts.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write through one in-process queue so two
 // overlapping saves can't each read the same pre-flush snapshot and drop each
 // other's change (the lost-update the automations/settings stores also guard).
+// The reload→save also runs under the cross-instance store lock.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -31,22 +34,31 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Serialized read-modify-write against fresh disk state. The queue position is
- *  taken when this is CALLED and the whole entry — an async `mutate` included —
- *  runs to completion before the next starts, so ops commit in INVOCATION order.
- *  Per-write resolution that can block (scope folding spawns git) therefore
- *  belongs inside `mutate`: awaited before the call, a slow one would commit
- *  after a later write and overwrite it. */
+/** Serialized read-modify-write against fresh disk state. */
 function mutateConfig(
-  mutate: (current: ScriptsConfig) => ScriptsConfig | Promise<ScriptsConfig>,
+  mutate: (current: ScriptsConfig) => ScriptsConfig,
+): Promise<void> {
+  return mutateConfigPrepared(async () => mutate);
+}
+
+/** {@link mutateConfig} for a write that must first resolve something that can
+ *  block (scope folding spawns git). The queue position is taken when this is
+ *  CALLED and the whole entry runs to completion before the next starts, so ops
+ *  commit in INVOCATION order: `prepare` runs inside the entry (awaited before the
+ *  call, a slow one would commit after a later write and overwrite it) but before
+ *  the store lock, and returns the synchronous mutate that runs under it. */
+function mutateConfigPrepared(
+  prepare: () => Promise<(current: ScriptsConfig) => ScriptsConfig>,
 ): Promise<void> {
   return serialize(async () => {
+    const mutate = await prepare();
     const store = await getStore();
-    await reloadToleratingEmptyStore(store);
-    const current = normalizeScripts(await store.get<unknown>("config"));
-    const next = await mutate(current);
-    await store.set("config", next);
-    await store.save();
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      const current = normalizeScripts(await store.get<unknown>("config"));
+      await store.set("config", mutate(current));
+      await store.save();
+    });
   });
 }
 
@@ -178,19 +190,19 @@ export function setTasksEnabled(enabled: boolean): Promise<void> {
 // without the resolution's latency reordering the writes against each other.
 
 export function addTask(task: TaskDef): Promise<void> {
-  return mutateConfig(async (c) => ({
-    ...c,
-    tasks: [...c.tasks, await foldTaskScopeKeys(task)],
-  }));
+  return mutateConfigPrepared(async () => {
+    const folded = await foldTaskScopeKeys(task);
+    return (c) => ({ ...c, tasks: [...c.tasks, folded] });
+  });
 }
 
 export function updateTask(task: TaskDef): Promise<void> {
-  return mutateConfig(async (c) => {
+  return mutateConfigPrepared(async () => {
     const folded = await foldTaskScopeKeys(task);
-    return {
+    return (c) => ({
       ...c,
       tasks: c.tasks.map((t) => (t.id === folded.id ? folded : t)),
-    };
+    });
   });
 }
 

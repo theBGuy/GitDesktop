@@ -1,5 +1,6 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import {
-  identityKeyFor,
+  foldIdentityKey,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
@@ -33,12 +34,14 @@ export interface LocalIssue {
 }
 
 // Personal app-data, keyed by repo path — never written into the repo itself.
-const getStore = memoizedStoreLoader("local-issues.json");
+const STORE_FILE = "local-issues.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store (and the reload) through one in-process
 // queue — mirrors the local-PR store. Without it two overlapping mutations each reload the
 // SAME pre-flush disk snapshot (autoSave persists on a ~100ms debounce) and the later write
 // drops the earlier one's change. writeAll force-saves so each reload sees a current one.
+// Each mutation also takes the cross-instance store lock against out-of-process writers.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -70,11 +73,18 @@ export async function listLocalIssues(repo: string): Promise<LocalIssue[]> {
   return mergeById(primary, legacy).map(withLabels);
 }
 
-/** Identity store key for `repo`, folding any legacy checkout-path records onto it
- *  once. Call inside the serialized queue (after `reloadRaw`). */
-async function keyFor(repo: string): Promise<string> {
+/** Identity store key for `repo` (`identity` resolved before the store lock), folding
+ *  any legacy checkout-path records onto it once. Call under the lock after
+ *  `reloadRaw`. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<LocalIssue[]>(store, "local-issues", repo, mergeById);
+  return foldIdentityKey<LocalIssue[]>(
+    store,
+    "local-issues",
+    repo,
+    identity,
+    mergeById,
+  );
 }
 
 async function readByKey(key: string): Promise<LocalIssue[]> {
@@ -104,20 +114,23 @@ export async function createLocalIssue(
   input: { title: string; body: string },
 ): Promise<LocalIssue> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const issue: LocalIssue = {
-      id: crypto.randomUUID(),
-      title: input.title,
-      body: input.body,
-      status: "open",
-      labels: [],
-      comments: [],
-      createdAt: new Date().toISOString(),
-    };
-    const all = await readByKey(key);
-    await writeAll(key, [issue, ...all]);
-    return issue;
+    const identity = await repoIdentity(repo);
+    return withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const issue: LocalIssue = {
+        id: crypto.randomUUID(),
+        title: input.title,
+        body: input.body,
+        status: "open",
+        labels: [],
+        comments: [],
+        createdAt: new Date().toISOString(),
+      };
+      const all = await readByKey(key);
+      await writeAll(key, [issue, ...all]);
+      return issue;
+    });
   });
 }
 
@@ -130,18 +143,21 @@ export async function updateLocalIssue(
   mutate: (issue: LocalIssue) => LocalIssue,
 ): Promise<LocalIssue> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    const idx = all.findIndex((i) => i.id === id);
-    if (idx === -1)
-      throw new Error(
-        `no local issue with id ${id} — it may have been deleted or belong to a different repository`,
-      );
-    const next = [...all];
-    next[idx] = mutate(all[idx]);
-    await writeAll(key, next);
-    return next[idx];
+    const identity = await repoIdentity(repo);
+    return withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      const idx = all.findIndex((i) => i.id === id);
+      if (idx === -1)
+        throw new Error(
+          `no local issue with id ${id} — it may have been deleted or belong to a different repository`,
+        );
+      const next = [...all];
+      next[idx] = mutate(all[idx]);
+      await writeAll(key, next);
+      return next[idx];
+    });
   });
 }
 
@@ -150,12 +166,15 @@ export async function deleteLocalIssue(
   id: string,
 ): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const key = await keyFor(repo);
-    const all = await readByKey(key);
-    await writeAll(
-      key,
-      all.filter((i) => i.id !== id),
-    );
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const key = await keyFor(repo, identity);
+      const all = await readByKey(key);
+      await writeAll(
+        key,
+        all.filter((i) => i.id !== id),
+      );
+    });
   });
 }

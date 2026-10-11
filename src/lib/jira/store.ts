@@ -1,4 +1,5 @@
-import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
+import { withAppStoreLock } from "@/lib/app-store-lock";
+import { foldIdentityKey, repoIdentity } from "@/lib/git/repo-identity";
 import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
@@ -17,13 +18,15 @@ export interface JiraLink {
 }
 
 // Personal app-data — one link per repo, keyed by repo identity.
-const getStore = memoizedStoreLoader("jira-links.json");
+const STORE_FILE = "jira-links.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store (and the reload) through one
 // in-process queue — mirrors the local-issue/PR stores. Without it two
 // overlapping mutations each reload the SAME pre-flush disk snapshot (autoSave
 // persists on a ~100ms debounce) and the later write drops the earlier one's
-// change. writeLink force-saves so each reload sees a current one.
+// change. Each mutation force-saves so each reload sees a current one, and takes
+// the cross-instance store lock around its reload→save against other processes.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -56,7 +59,7 @@ function asLink(v: unknown): JiraLink | null {
 }
 
 /** The identity value wins over any legacy checkout-path value when folding a
- *  single-value store (per identityKeyFor's contract). */
+ *  single-value store (per foldIdentityKey's contract). */
 const preferIdentity = (id: JiraLink | undefined, legacy: JiraLink): JiraLink =>
   id ?? legacy;
 
@@ -72,11 +75,18 @@ export async function getJiraLink(repo: string): Promise<JiraLink | null> {
   return asLink(await store.get(repo));
 }
 
-/** Identity store key for `repo`, folding any legacy checkout-path record onto
- *  it once. Call inside the serialized queue (after `reloadRaw`). */
-async function keyFor(repo: string): Promise<string> {
+/** Identity store key for `repo` (`identity` resolved before the store lock),
+ *  folding any legacy checkout-path record onto it once. Call under the lock after
+ *  `reloadRaw`. */
+async function keyFor(repo: string, identity: string): Promise<string> {
   const store = await getStore();
-  return identityKeyFor<JiraLink>(store, "jira-links", repo, preferIdentity);
+  return foldIdentityKey<JiraLink>(
+    store,
+    "jira-links",
+    repo,
+    identity,
+    preferIdentity,
+  );
 }
 
 /** Link (or re-link) `repo` to a Jira project. */
@@ -85,14 +95,17 @@ export async function setJiraLink(
   link: JiraLink,
 ): Promise<JiraLink> {
   return serialize(async () => {
-    await reloadRaw();
-    const store = await getStore();
-    const key = await keyFor(repo);
-    await store.set(key, link);
-    // Flush now (not on autoSave's debounce) so the next serialized reload can't
-    // drop this.
-    await store.save();
-    return link;
+    const identity = await repoIdentity(repo);
+    return withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const store = await getStore();
+      const key = await keyFor(repo, identity);
+      await store.set(key, link);
+      // Flush now (not on autoSave's debounce) so the next serialized reload can't
+      // drop this.
+      await store.save();
+      return link;
+    });
   });
 }
 
@@ -100,10 +113,13 @@ export async function setJiraLink(
  *  account may serve other repos). */
 export async function clearJiraLink(repo: string): Promise<void> {
   return serialize(async () => {
-    await reloadRaw();
-    const store = await getStore();
-    const key = await keyFor(repo);
-    await store.delete(key);
-    await store.save();
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const store = await getStore();
+      const key = await keyFor(repo, identity);
+      await store.delete(key);
+      await store.save();
+    });
   });
 }

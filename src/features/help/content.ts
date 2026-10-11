@@ -1301,7 +1301,7 @@ request's **head branch**, so the pull request itself picks the resolution up. T
 **never forced**: if the head moved while you were working, it's refused and your
 resolution is kept rather than overwritten. **Discard** deletes the hidden worktree and
 touches nothing else. Leave a resolution unfinished and it's offered back the next time
-you open that pull request, as **Continue resolving**.
+you open that pull request from any checkout of the repository, as **Continue resolving**.
 
 This flow stops at a pull request **from a fork**: finishing a resolution means pushing
 it to a head branch in the contributor's repository, which the conflict resolver doesn't

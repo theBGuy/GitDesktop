@@ -1,6 +1,10 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentityStrict } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 // The per-repo origin|upstream lens for the Pull Requests + Issues surfaces,
 // persisted in app data (never committed). Keyed by the repo's worktree-stable
@@ -8,9 +12,19 @@ import { memoizedStoreLoader } from "@/lib/plugin-store";
 // choice is shared across a repo's main checkout and every worktree.
 //
 // This is a NEW store file, so there are no legacy checkout-path-keyed entries
-// to fold — a plain identity-key read/write suffices (no identityKeyFor).
+// to fold — a plain identity-key read/write suffices (no foldIdentityKey).
 
-const getStore = memoizedStoreLoader("repo-lens.json");
+const STORE_FILE = "repo-lens.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
+
+// Serializes this module's writes in-process; the cross-instance store lock inside
+// each op covers the other processes.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  opChain = run.catch(() => undefined);
+  return run;
+}
 
 /** Read the persisted lens for a repo. Any value that isn't exactly "upstream"
  *  (missing, hand-edited junk, an older shape) reads as "origin" — the safe
@@ -41,9 +55,15 @@ export async function saveRepoLens(
   repo: string,
   lens: RemoteLens,
 ): Promise<void> {
-  const store = await getStore();
-  const id = await repoIdentityStrict(repo);
-  await store.set(id, lens);
+  return serialize(async () => {
+    const store = await getStore();
+    const id = await repoIdentityStrict(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      await store.set(id, lens);
+      await store.save();
+    });
+  });
 }
 
 /** Drop the persisted lens for a repo (hygiene after detaching from a fork —
@@ -53,7 +73,13 @@ export async function saveRepoLens(
  *  delete aimed at the raw path would report success while leaving the real
  *  entry in place. */
 export async function deleteRepoLens(repo: string): Promise<void> {
-  const store = await getStore();
-  const id = await repoIdentityStrict(repo);
-  await store.delete(id);
+  return serialize(async () => {
+    const store = await getStore();
+    const id = await repoIdentityStrict(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      await store.delete(id);
+      await store.save();
+    });
+  });
 }

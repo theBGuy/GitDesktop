@@ -41,7 +41,7 @@
 //!
 //! Every read-modify-write holds the in-process [`ISSUES_LOCK`] and, inside it, the
 //! cross-process [`crate::store_lock`] — see [`crate::local_prs`]'s concurrency section
-//! for the contract and its known GUI-side limit, which applies identically here.
+//! for the contract and how the GUI's writes join it, which applies identically here.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};

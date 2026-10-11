@@ -1,6 +1,10 @@
+import { withAppStoreLock } from "@/lib/app-store-lock";
 import { readRepoBranchRules, writeRepoBranchRules } from "@/lib/git/api";
-import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
-import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { foldIdentityKey, repoIdentity } from "@/lib/git/repo-identity";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import {
   ALL_MERGE_METHODS,
   type BranchProtection,
@@ -62,7 +66,17 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
 
 // ── Personal scope: app-data keyed by repo path, never committed ────────────
 
-const getStore = memoizedStoreLoader("branch-rules.json");
+const STORE_FILE = "branch-rules.json";
+const getStore = memoizedStoreLoader(STORE_FILE);
+
+// Serializes this module's writes in-process; the cross-instance store lock inside
+// each op covers the other processes.
+let opChain: Promise<unknown> = Promise.resolve();
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = opChain.then(op, op);
+  opChain = run.catch(() => undefined);
+  return run;
+}
 
 // Keyed by the repo's worktree-stable identity (not its checkout path) so a repo's
 // personal branch rules apply the same from the main checkout and every worktree.
@@ -82,20 +96,26 @@ export async function saveBranchRules(
   repo: string,
   config: BranchRulesConfig,
 ): Promise<void> {
-  const store = await getStore();
-  // Resolve the identity key FIRST: identityKeyFor folds + deletes any legacy
-  // checkout-path entry (writing the merged value), then we overwrite it with the
-  // new config (persisted by the store's autoSave). This order is intentional —
-  // folding AFTER store.set would merge the stale legacy entry back over the fresh
-  // config. The brief window where disk holds the merged value is harmless: branch
-  // rules are GUI-only, so a crash there just leaves valid data one save behind.
-  const key = await identityKeyFor<BranchRulesConfig>(
-    store,
-    "branch-rules",
-    repo,
-    (identityVal, legacyVal) => identityVal ?? legacyVal,
-  );
-  await store.set(key, config);
+  return serialize(async () => {
+    const store = await getStore();
+    // Identity resolves (a git spawn) before the lock. Fold BEFORE the set:
+    // folding after would merge a stale legacy entry back over the fresh config.
+    // The window where disk holds the merged value is harmless: a crash there leaves
+    // valid data one save behind.
+    const id = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadToleratingEmptyStore(store);
+      const key = await foldIdentityKey<BranchRulesConfig>(
+        store,
+        "branch-rules",
+        repo,
+        id,
+        (identityVal, legacyVal) => identityVal ?? legacyVal,
+      );
+      await store.set(key, config);
+      await store.save();
+    });
+  });
 }
 
 // ── Shared scope: committed `<repo>/.gitdesktop/branch-rules.json` ───────────
