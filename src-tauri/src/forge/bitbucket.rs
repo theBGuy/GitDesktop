@@ -5487,7 +5487,9 @@ fn created_repo_response(
     url: &str,
 ) -> AppResult<BbCreatedRepo> {
     match body {
-        Err(error) if !(200..300).contains(&status) => Err(error),
+        Err(error) if !(200..300).contains(&status) => Err(AppError::Bitbucket(format!(
+            "Bitbucket rejected the repository create (HTTP {status}) and the response couldn't be read.\n{error}"
+        ))),
         Err(error) => Err(AppError::Bitbucket(format!(
             "The repository WAS created at {url} — add it as a remote and push manually, \
              or delete it there and retry.\n{error}"
@@ -8369,7 +8371,7 @@ definitions:
     #[tokio::test]
     async fn created_repo_response_preserves_non_success_body_read_errors() {
         let url = "https://bitbucket.org/acme/demo";
-        for status in [199, 300, 400, 500] {
+        for status in [199, 300, 400, 403, 500] {
             let (_, _, body) = http::incomplete_body_split(false, false).await;
             let body_error = body.unwrap_err();
             let expected = body_error.to_string();
@@ -8378,8 +8380,15 @@ definitions:
             else {
                 panic!("a non-2xx body-read failure must stay an error");
             };
-            assert_eq!(message, expected);
-            assert!(!message.contains("was created"), "{message}");
+            let (headline, detail) = message.split_once('\n').unwrap();
+            assert_eq!(
+                headline,
+                format!(
+                    "Bitbucket rejected the repository create (HTTP {status}) and the response couldn't be read."
+                )
+            );
+            assert_eq!(detail, expected);
+            assert!(!message.contains("WAS created"), "{message}");
         }
     }
 

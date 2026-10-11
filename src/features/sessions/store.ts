@@ -535,12 +535,6 @@ async function runTurn(
   }
 }
 
-/**
- * Concurrent, multi-turn agent sessions: each runs full-auto in its own
- * throwaway worktree, streaming independently. Start a session → run turns
- * (each resumes the prior context, commits a checkpoint) → Keep (optionally
- * squashing the per-turn commits) or Discard.
- */
 /** A discard that leaves the session's branch behind says so; only the spared
  *  outcomes have a note. */
 const KEPT_BRANCH_NOTES: Partial<
@@ -552,6 +546,12 @@ const KEPT_BRANCH_NOTES: Partial<
     `Session discarded. Its branch ${branch} was kept.`,
 };
 
+/**
+ * Concurrent, multi-turn agent sessions: each runs full-auto in its own
+ * throwaway worktree, streaming independently. Start a session → run turns
+ * (each resumes the prior context, commits a checkpoint) → Keep (optionally
+ * squashing the per-turn commits) or Discard.
+ */
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: [],
   activeId: null,
@@ -576,7 +576,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const live: Record<string, Set<string>> = {};
       for (const repo of repos) {
         try {
-          // A busy prune mustn't drop the repo: the list read takes no lock.
+          // A busy prune mustn't drop the repo: the list read takes no lock and
+          // itself skips entries whose folder is gone.
           await pruneWorktrees(repo).catch(() => undefined);
           const list = await listWorktrees(repo);
           live[repo] = new Set(list.map((w) => normPath(w.path)));

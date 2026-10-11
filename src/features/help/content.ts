@@ -615,7 +615,8 @@ selection to compare a range.
   it (or a multi-selection) onto another branch and switch to it. A single commit that
   conflicts pauses on the destination branch so you can resolve it and continue; a
   multi-commit batch rolls back automatically on any failure. A multi-commit
-  cherry-pick that includes a merge asks you to pick that commit on its own.
+  cherry-pick that includes a merge is disabled — select the merge on its own to
+  choose its mainline.
 - **Reset** the current branch to a commit — a **mixed reset**, so the changes from later
   commits return to your working tree as uncommitted changes.
 - **Edit history** — open the interactive-rebase editor over your unpushed commits, where
@@ -2545,9 +2546,9 @@ provider differences).
 - See every tag and **create a tag** (also available from a commit in History).
 - **Create a release** from a tag: set the title and notes, mark it a **pre-release** or
   **draft**, and publish. Releases show badges (**Latest**, **Pre-release**, **Draft**).
-  Typed tag names stick and validate as you type — a brand-new name reveals a **target**
-  picker once you leave the field, and an unknown **previous tag** says it will be
-  ignored (generated notes use their default range).
+  A new tag name is checked as you type, and a **target** picker appears once you
+  leave the field; a **previous tag** that doesn't exist is flagged as ignored
+  (generated notes use their default range).
 - **Edit a release** — revise its title and notes any time, in an editor that fills the
   dialog. When a **GitHub** release carries a \`latest.json\` updater manifest, the dialog
   offers to update the manifest's notes in the same save, so the "what's new" that

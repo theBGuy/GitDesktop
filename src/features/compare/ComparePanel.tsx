@@ -35,13 +35,13 @@ import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
-  type MergeParentOp,
   revertCommitConfirm,
 } from "@/features/history/commit-confirms";
 import {
   CreateRefFromCommitDialog,
   createRefFromCommitFormOpts,
   MergeParentDialog,
+  type MergePickTarget,
 } from "@/features/history/HistoryDialogs";
 import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
@@ -192,12 +192,9 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     isMerge: boolean;
   } | null>(null);
   // A merge commit's revert or cherry-pick, awaiting its mainline parent.
-  const [mergePick, setMergePick] = useState<{
-    hash: string;
-    op: MergeParentOp;
-    alreadyApplied: string;
-    repo: string;
-  } | null>(null);
+  const [mergePick, setMergePick] = useState<
+    (MergePickTarget & { repo: string }) | null
+  >(null);
   const [branchHash, setBranchHash] = useState<string | null>(null);
   const [tagHash, setTagHash] = useState<string | null>(null);
   const shownBranchHash = useRetained(branchHash);
@@ -273,12 +270,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // A merge commit routes to the mainline-parent dialog instead of the confirm.
   async function doRevertCommit(hash: string, isMerge: boolean) {
     if (isMerge) {
-      setMergePick({
-        hash,
-        op: "revert",
-        alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
-        repo: repoPath,
-      });
+      setMergePick({ hash, op: "revert", repo: repoPath });
       return;
     }
     const revertIn = repoPath;
@@ -297,12 +289,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
 
   async function doCherryPick(hash: string, isMerge: boolean) {
     if (isMerge) {
-      setMergePick({
-        hash,
-        op: "cherry-pick",
-        alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
-        repo: repoPath,
-      });
+      setMergePick({ hash, op: "cherry-pick", repo: repoPath });
       return;
     }
     const pickIn = repoPath;

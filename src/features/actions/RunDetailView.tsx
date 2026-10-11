@@ -445,12 +445,11 @@ export function RunDetailView({
   const canRerunJob = canWrite || forgeFeatureReady(forge.data, "ciJobRerun");
   const jobOffer = jobRerunOffer(provider);
   // Re-run and cancel are repo writes: an explicitly read-only viewer keeps the
-  // buttons (disabled, with the reason). CI is repo-wide — no lens. Signed out the
-  // probe can't answer, so it waits for the sign-in too.
+  // buttons (disabled, with the reason). CI is repo-wide — no lens.
   const writeAccess = useRepoWriteAccess(
     repoPath,
     undefined,
-    tabActive && !!provider && Boolean(forge.data?.authenticated),
+    tabActive && !!provider,
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;

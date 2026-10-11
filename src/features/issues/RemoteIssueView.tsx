@@ -168,11 +168,7 @@ export function RemoteIssueView({
   // issue-metadata rows come with it without push, so those read `canTriage`;
   // pin, transfer, delete and branch creation are write-tier. Each blocked flag
   // derives from its reason so the two can never disagree.
-  const writeAccess = useRepoWriteAccess(
-    repoPath,
-    lens,
-    !!provider && Boolean(forge.data?.authenticated),
-  );
+  const writeAccess = useRepoWriteAccess(repoPath, lens, !!provider);
   const writeReason = writeAccessReason(writeAccess.data);
   const triageReason = triageAccessReason(writeAccess.data);
   const writeBlocked = !!writeReason;

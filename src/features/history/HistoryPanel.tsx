@@ -82,7 +82,6 @@ import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
-  type MergeParentOp,
   RANGE_MERGE_ITEM_REASON,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
@@ -94,6 +93,7 @@ import {
   createRefFromCommitFormOpts,
   DeleteTagDialog,
   MergeParentDialog,
+  type MergePickTarget,
   ResetCommitDialog,
 } from "./HistoryDialogs";
 import { SquashDialog } from "./RewriteDialogs";
@@ -163,12 +163,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   } | null>(null);
   const [pickOntoBranch, setPickOntoBranch] = useState("");
   // A merge commit's revert or cherry-pick, awaiting its mainline parent.
-  const [mergePick, setMergePick] = useState<{
-    hash: string;
-    op: MergeParentOp;
-    alreadyApplied: string;
-    repo: string;
-  } | null>(null);
+  const [mergePick, setMergePick] = useState<
+    (MergePickTarget & { repo: string }) | null
+  >(null);
   const [filterText, setFilterText] = useState("");
   // "Search all history" mode: server-side message grep across every commit,
   // not just the loaded pages. Kept separate from the operational log so the
@@ -369,12 +366,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // A merge commit routes to the mainline-parent dialog instead of the confirm.
   async function doRevertCommit(hash: string, isMerge: boolean) {
     if (isMerge) {
-      setMergePick({
-        hash,
-        op: "revert",
-        alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
-        repo: repoPath,
-      });
+      setMergePick({ hash, op: "revert", repo: repoPath });
       return;
     }
     const revertIn = repoPath;

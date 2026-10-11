@@ -67,7 +67,7 @@ import {
   revertCommitConfirm,
 } from "./commit-confirms";
 import { FileRowActions } from "./FileRowActions";
-import { MergeParentDialog } from "./HistoryDialogs";
+import { MergeParentDialog, type MergePickTarget } from "./HistoryDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 /** Where a revert or cherry-pick from the detail view goes once the commit's
@@ -229,12 +229,9 @@ export function CommitDetailView({
   const liveHash = useLatestRef(hash);
   const liveRepo = useLatestRef(repoPath);
   // A merge commit's revert or cherry-pick, awaiting its mainline parent.
-  const [mergePick, setMergePick] = useState<{
-    hash: string;
-    op: MergeParentOp;
-    alreadyApplied: string;
-    repo: string;
-  } | null>(null);
+  const [mergePick, setMergePick] = useState<
+    (MergePickTarget & { repo: string }) | null
+  >(null);
   const prefetchFileDiff = usePrefetchCommitFileDiff(repoPath);
   const hoverPrefetch = useHoverPrefetch();
   const isLatest = log.data?.pages[0]?.[0]?.hash === hash;
@@ -316,12 +313,7 @@ export function CommitDetailView({
     if (liveRepo.current !== askedIn || liveHash.current !== askedFor)
       return "stale";
     if (parents === null || parents.length < 2) return "plain";
-    setMergePick({
-      hash: askedFor,
-      op,
-      alreadyApplied: CHERRY_PICK_ALREADY_APPLIED,
-      repo: askedIn,
-    });
+    setMergePick({ hash: askedFor, op, repo: askedIn });
     return "dialog";
   }
 

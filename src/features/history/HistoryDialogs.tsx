@@ -51,6 +51,7 @@ import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import {
+  CHERRY_PICK_ALREADY_APPLIED,
   MERGE_PARENT_COPY,
   MERGE_PARENT_DESCRIPTION,
   type MergeParentOp,
@@ -538,6 +539,15 @@ export function CherryPickOntoDialog({
   );
 }
 
+/** What a host opens {@link MergeParentDialog} on. `alreadyApplied` is a host's
+ *  own wording for a pick with nothing to apply, given only where it differs from
+ *  the default {@link CHERRY_PICK_ALREADY_APPLIED}. */
+export type MergePickTarget = {
+  hash: string;
+  op: MergeParentOp;
+  alreadyApplied?: string;
+};
+
 /** Revert or cherry-pick a MERGE commit, choosing which parent counts as the
  *  mainline (git's `-m`). Owns its mutations and the parents read; hosts route
  *  merge commits here and every other commit to the plain confirm. */
@@ -548,9 +558,7 @@ export function MergeParentDialog({
   onClose,
 }: {
   repoPath: string;
-  /** `alreadyApplied` is the host's own wording for a pick with nothing to
-   *  apply, the line its plain confirm path toasts. */
-  target: { hash: string; op: MergeParentOp; alreadyApplied: string } | null;
+  target: MergePickTarget | null;
   openedIn: string | null;
   onClose: () => void;
 }) {
@@ -585,7 +593,7 @@ export function MergeParentDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    const { hash, op, alreadyApplied } = target;
+    const { hash, op, alreadyApplied = CHERRY_PICK_ALREADY_APPLIED } = target;
     const startedIn = repoPath;
     // Same repo, commit AND op: a settling revert never closes a cherry-pick
     // dialog reopened on the same commit.

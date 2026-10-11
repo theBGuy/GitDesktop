@@ -1017,12 +1017,24 @@ pub(crate) fn worktree_last_activity_ms(worktree_path: &str) -> Option<i64> {
 /// Parses `git worktree list --porcelain` into one `WorktreeInfo` per stanza.
 /// Stanzas are blank-line separated; each carries a `worktree <path>` line and
 /// (unless detached) a `branch refs/heads/<name>` line.
+///
+/// A `prunable` stanza is skipped: its folder is gone, and the list has to say so
+/// even when the prune that would have dropped the entry didn't run.
 fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeInfo> {
     let mut out = Vec::new();
     let mut path: Option<String> = None;
     let mut branch = String::new();
-    let flush = |path: &mut Option<String>, branch: &mut String, out: &mut Vec<WorktreeInfo>| {
-        if let Some(p) = path.take() {
+    let mut prunable = false;
+    let flush = |path: &mut Option<String>,
+                 branch: &mut String,
+                 prunable: &mut bool,
+                 out: &mut Vec<WorktreeInfo>| {
+        let p = path.take();
+        let b = std::mem::take(branch);
+        if std::mem::take(prunable) {
+            return;
+        }
+        if let Some(p) = p {
             let id = std::path::Path::new(&p)
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -1030,20 +1042,22 @@ fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeInfo> {
             out.push(WorktreeInfo {
                 id,
                 path: p,
-                branch: std::mem::take(branch),
+                branch: b,
                 base: String::new(),
             });
         }
     };
     for line in porcelain.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            flush(&mut path, &mut branch, &mut out);
+            flush(&mut path, &mut branch, &mut prunable, &mut out);
             path = Some(p.to_string());
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = b.strip_prefix("refs/heads/").unwrap_or(b).to_string();
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            prunable = true;
         }
     }
-    flush(&mut path, &mut branch, &mut out);
+    flush(&mut path, &mut branch, &mut prunable, &mut out);
     out
 }
 
@@ -1113,6 +1127,35 @@ branch refs/heads/gd/session/sess1
                 },
             ]
         );
+    }
+
+    /// A folder-less entry must not read as a live session when the startup prune
+    /// was skipped, so the list drops it, bare `prunable` line included.
+    #[test]
+    fn parse_worktree_list_skips_prunable_entries() {
+        let porcelain = "\
+worktree C:/repos/app
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree C:/repos/app-stale
+HEAD 4444444444444444444444444444444444444444
+branch refs/heads/gone
+prunable gitdir file points to non-existent location
+
+worktree C:/repos/app-bare
+HEAD 5555555555555555555555555555555555555555
+detached
+prunable
+
+worktree C:/repos/app-live
+HEAD 6666666666666666666666666666666666666666
+branch refs/heads/live
+";
+        let got = parse_worktree_list(porcelain);
+        let paths: Vec<&str> = got.iter().map(|w| w.path.as_str()).collect();
+        assert_eq!(paths, ["C:/repos/app", "C:/repos/app-live"]);
+        assert_eq!(got[1].branch, "live", "a skipped stanza's branch never leaks");
     }
 
     #[test]

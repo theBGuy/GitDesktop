@@ -464,11 +464,11 @@ in one click.
   upstream repo on a fork. When you're done with a fork, the repository menu
   and command palette can **remove the upstream remote** (a local detach;
   reversible; no admin needed — the admin-gated settings **Danger zone**
-  offers it too), or the Danger zone can **leave the fork network** entirely: on **GitLab** this
-  happens right in the app (Owner-only; open MRs to the parent close),
-  and on **GitHub** and **Bitbucket** it links out to the provider's
-  detach page. A **Re-check fork status** button refreshes the fork badge
-  in place afterward.
+  offers it too), or the Danger zone can **leave the fork network**
+  entirely: on **GitLab** this happens right in the app (Owner-only; open
+  MRs to the parent close), and on **GitHub** and **Bitbucket** it links out
+  to the provider's detach page. A **Re-check fork status** button refreshes
+  the fork badge in place afterward.
 - **Maintaining a fork's PR** (GitHub): a pull request that's fallen
   **behind its base** says so under its header, and **Update branch** brings
   it up to date — a merge by default, or **Update with rebase…** behind a

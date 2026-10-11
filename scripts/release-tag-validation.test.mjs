@@ -48,6 +48,31 @@ test("trailing .lock", () => {
   assert.equal(validateTagName("v1.lockstep"), null);
 });
 
+test("per-part rules name the offending part", () => {
+  assert.equal(
+    validateTagName("pkg.lock/v1"),
+    `The tag name part "pkg.lock" can't end with ".lock"`,
+  );
+  assert.equal(
+    validateTagName("pkg/.hidden"),
+    `The tag name part ".hidden" can't start with "."`,
+  );
+  assert.equal(validateTagName(".hidden"), `Tag names can't start with "."`);
+});
+
+test("empty parts: leading, trailing, and doubled slashes", () => {
+  assert.equal(validateTagName("pkg//v1"), `Tag names can't contain "//"`);
+  assert.equal(validateTagName("/v1"), `Tag names can't start with "/"`);
+  assert.equal(validateTagName("pkg/"), `Tag names can't end with "/"`);
+});
+
+test("hierarchical names pass", () => {
+  // `v1/@/x` is pinned valid by the backend's validate_tag_name test (ops.rs).
+  for (const name of ["pkg/v1", "a@b/c", "v1/@/x", "pkg.v1/x.lockstep"]) {
+    assert.equal(validateTagName(name), null, name);
+  }
+});
+
 test("double dot", () => {
   assert.equal(validateTagName("v1..2"), `Tag names can't contain ".."`);
 });

@@ -71,9 +71,9 @@ export const cherryPickCommitConfirm = (
   confirmLabel: "Cherry-pick commit",
 });
 
-/** A cherry-pick that found its changes already on the branch. History's search
- *  results word it shorter; every other route, merge dialog included, uses the
- *  full line. */
+/** A cherry-pick that found its changes already on the branch. The full line is
+ *  every route's wording and the merge-parent dialog's default; History's search
+ *  results word it shorter and hand the dialog that instead. */
 export const CHERRY_PICK_ALREADY_APPLIED =
   "Nothing to cherry-pick — these changes are already on this branch.";
 export const CHERRY_PICK_ALREADY_APPLIED_SHORT =

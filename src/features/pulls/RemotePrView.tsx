@@ -381,12 +381,12 @@ export function RemotePrView({
   // on and this says which one is on screen now.
   const entityKeyRef = useLatestRef(entityKey);
   // The viewer's push permission on the lens repo — the axis the per-action
-  // forge flags don't cover. Only fetched once a provider is known and signed
-  // in; an unanswered probe leaves every control exactly as it is.
+  // forge flags don't cover. Only fetched once a provider is known; an
+  // unanswered probe leaves every control exactly as it is.
   const writeAccess = useRepoWriteAccess(
     repoPath,
     lens,
-    !!forge.data?.provider && Boolean(forge.data.authenticated),
+    !!forge.data?.provider,
   );
   const writeReason = writeAccessReason(writeAccess.data);
   // Labels, assignees, reviewers, hiding comments and close/reopen are granted

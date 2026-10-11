@@ -72,10 +72,12 @@ export function useRepoWriteAccess(
   lens: RemoteLens | undefined,
   enabled: boolean,
 ) {
+  // Signed out the probe can't answer — every caller waits for sign-in.
+  const signedIn = Boolean(useForgeStatus(repo).data?.authenticated);
   return useQuery({
     queryKey: ["repo", repo, "write-access", lens ?? "origin"] as const,
     queryFn: () => api.forgeRepoWriteAccess(repo, lens),
-    enabled,
+    enabled: enabled && signedIn,
     staleTime: 5 * 60_000,
     retry: false,
   });
