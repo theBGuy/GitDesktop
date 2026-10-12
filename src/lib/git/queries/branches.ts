@@ -17,16 +17,32 @@ export function useBranches(repo: string) {
   });
 }
 
-/** Branches that exist on a remote (reflecting the last fetch), for the switcher's
- *  "Remote" group. `enabled` gates the fetch so it only runs while the menu is
- *  open, like the divergence/worktree queries. */
-export function useRemoteBranches(repo: string, enabled = true) {
-  return useQuery({
+/** Shared by the hook and the shell warm-up, so the switcher's Remote group is
+ *  cached before the menu first opens. Kept on the shell gcTime because the read
+ *  shapes the open menu's layout. */
+export function remoteBranchesOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "remote-branches"] as const,
     queryFn: () => api.gitRemoteBranches(repo),
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** How old a remote-branch list the hook (and the shell warm-up) may serve. Kept
+ *  out of {@link remoteBranchesOptions} so an imperative fetch spreading the
+ *  options keeps fetch-always semantics. */
+export const REMOTE_BRANCHES_STALE_TIME = 30_000;
+
+/** Branches that exist on a remote (reflecting the last fetch), for the switcher's
+ *  "Remote" group. `enabled` gates the fetch so it only runs while the menu is
+ *  open: an enabled observer would re-run an O(remote refs) `for-each-ref` on
+ *  every window focus and repo mutation. */
+export function useRemoteBranches(repo: string, enabled = true) {
+  return useQuery({
+    ...remoteBranchesOptions(repo),
     enabled: enabled && Boolean(repo),
-    staleTime: 30_000,
-    networkMode: "always",
+    staleTime: REMOTE_BRANCHES_STALE_TIME,
   });
 }
 

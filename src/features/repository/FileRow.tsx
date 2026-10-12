@@ -1,6 +1,6 @@
 import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
-import { DiffStat } from "@/components/diff-stat";
+import { DiffStatSlot } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { KIND_BADGE } from "@/lib/git/change-kind-badge";
@@ -38,7 +38,7 @@ export const FileRow = memo(function FileRow({
   active: boolean;
   disabled: boolean;
   /** This row's OWN side of the diff (staged rows: index vs HEAD; unstaged:
-   *  working tree vs index). Absent = no counts to show. */
+   *  working tree vs index). Absent = a blank, still-reserved counts cell. */
   stat?: DiffStatEntry;
   /** Tree mode: render only the basename(s); the row carries a static full-path title. */
   treeDisplay?: boolean;
@@ -138,14 +138,7 @@ export const FileRow = memo(function FileRow({
         {treeDisplay ? `${badge.label} ${label} ` : `${badge.label} `}
       </span>
       {nameCell}
-      {stat ? (
-        <DiffStat
-          added={stat.added}
-          deleted={stat.deleted}
-          isBinary={stat.isBinary}
-          className="text-[11px]"
-        />
-      ) : null}
+      <DiffStatSlot stat={stat} className="text-[11px]" />
       <DisabledReasonButton
         variant="ghost"
         size="icon-xs"

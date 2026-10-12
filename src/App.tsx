@@ -306,7 +306,10 @@ function App() {
 
   return (
     <>
-      <div className="flex h-screen flex-col">
+      {/* `overflow-clip`, not hidden: a leaking panel never grows a window
+          scrollbar, and the root never becomes a scroll container that a focus
+          or scrollIntoView could shift with no scrollbar to undo it. */}
+      <div className="flex h-screen flex-col overflow-clip">
         {view === "welcome" && <WelcomeScreen />}
         {view === "repo" && <RepositoryView />}
         {view === "settings" && <SettingsScreen />}

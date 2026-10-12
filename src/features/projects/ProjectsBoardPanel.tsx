@@ -161,6 +161,7 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
 import { BoardBulkFieldsDialog } from "./BoardBulkFieldsDialog";
 import {
@@ -934,6 +935,61 @@ function BoardSkeleton() {
         ))}
       </div>
     </>
+  );
+}
+
+/** The toolbar row's shape while the board loads, mirroring the real row's
+ *  container and control sizes so the skeleton below already sits at the
+ *  board's final offset. Inert: no controls, no landing markers, and no status
+ *  of its own (BoardSkeleton announces the load). */
+function BoardToolbarSkeleton() {
+  return (
+    <div
+      aria-hidden
+      className="@container/toolbar mb-2 flex shrink-0 flex-wrap items-center gap-2"
+    >
+      <Skeleton className="h-7 w-40" />
+      <Skeleton className="size-7" />
+      <Skeleton className="h-7 w-24" />
+      <div className="h-5 min-w-3 flex-1 basis-0" />
+      <Skeleton className="h-7 w-28" />
+      <Skeleton className="h-4 w-20" />
+    </div>
+  );
+}
+
+/** How to build a card selection. Without `onDismiss` it is the loading
+ *  frame's reservation: the same strip and wrapping text, contents invisible
+ *  and out of the a11y tree, so the columns below start where the real hint
+ *  leaves them. */
+function SelectionHintStrip({
+  noun,
+  onDismiss,
+}: {
+  noun: ItemNoun;
+  onDismiss?: () => void;
+}) {
+  const reserve = onDismiss === undefined;
+  const linkClass =
+    "shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline";
+  return (
+    <div
+      aria-hidden={reserve || undefined}
+      className="mb-2 flex shrink-0 items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground"
+    >
+      <InfoIcon className={cn("size-3.5 shrink-0", reserve && "invisible")} />
+      <span className={cn("flex-1 leading-snug", reserve && "invisible")}>
+        {formatBinding("mod")}-click to select {noun}s individually, Shift-click
+        for a range.
+      </span>
+      {reserve ? (
+        <span className={cn(linkClass, "invisible")}>Don't show again</span>
+      ) : (
+        <button type="button" onClick={onDismiss} className={linkClass}>
+          Don't show again
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -5321,6 +5377,12 @@ export function ProjectsBoardPanel({
     [forgeHostRef],
   );
 
+  // The selection hint mounts with the data while unseen; holding its strip in
+  // the loading frame keeps the columns still for a board that loads with two
+  // or more cards (its other gate, `shown >= 2`, isn't knowable yet).
+  const hintReserved =
+    settings.data !== undefined &&
+    settings.data.showBoardSelectionHint !== false;
   const body = (() => {
     switch (true) {
       // A failed forge probe with nothing cached is not "still detecting":
@@ -5335,9 +5397,17 @@ export function ProjectsBoardPanel({
             retryRef={forgeRescue.retryRef}
           />
         );
-      // Still detecting: `gh.data` undefined is not yet "not GitHub".
+      // Still detecting: `gh.data` undefined is not yet "not GitHub". The
+      // toolbar shell assumes GitHub, as most repos opening this tab are; any
+      // other provider's notice replaces the whole body once.
       case gh.data === undefined:
-        return <BoardSkeleton />;
+        return (
+          <>
+            <BoardToolbarSkeleton />
+            {hintReserved && <SelectionHintStrip noun={noun} />}
+            <BoardSkeleton />
+          </>
+        );
       // A KNOWN other provider is the one thing this tab can name precisely, so
       // it is checked ahead of the not-ready ladder: telling a GitLab user to
       // install `glab` would walk them toward a feature GitLab doesn't have.
@@ -5413,8 +5483,18 @@ export function ProjectsBoardPanel({
             retryRef={forgeRescue.retryRef}
           />
         );
+      // The shell stands in until the real toolbar mounts (`showBoardChrome`,
+      // spelled out here: that const is declared below this IIFE).
       case loading || fatalRetrying:
-        return <BoardSkeleton />;
+        return (
+          <>
+            {!(isGitHub && !scopeGap && projectId !== null) && (
+              <BoardToolbarSkeleton />
+            )}
+            {hintReserved && <SelectionHintStrip noun={noun} />}
+            <BoardSkeleton />
+          </>
+        );
       // A capped or half-answered catalog can be empty while boards exist, so
       // the definitive "there are none" is held back for a complete read and the
       // hedged wording names what wasn't searched.
@@ -6334,7 +6414,9 @@ export function ProjectsBoardPanel({
               </Popover.Positioner>
             </Popover.Portal>
           </Popover.Root>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {/* `min-w-20 justify-end`: the group never narrows below its loading
+              skeleton, so a short count lands without sliding View options. */}
+          <div className="flex min-w-20 items-center justify-end gap-2 text-xs text-muted-foreground">
             {/* No number until the read has produced one. "0 items" is a CLAIM
                 about the board, and neither unsettled state has earned it: still
                 loading gets the skeleton, and failed-with-nothing-loaded gets
@@ -6504,28 +6586,18 @@ export function ProjectsBoardPanel({
         settings.data.showBoardSelectionHint !== false &&
         shown >= 2 &&
         selectionSize <= 1 && (
-          <div className="mb-2 flex shrink-0 items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
-            <InfoIcon className="size-3.5 shrink-0" />
-            <span className="flex-1 leading-snug">
-              {formatBinding("mod")}-click to select {noun}s individually,
-              Shift-click for a range.
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                if (!settings.data) return;
-                void saveSettings
-                  .mutateAsync({
-                    ...settings.data,
-                    showBoardSelectionHint: false,
-                  })
-                  .catch(() => undefined);
-              }}
-              className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
-            >
-              Don't show again
-            </button>
-          </div>
+          <SelectionHintStrip
+            noun={noun}
+            onDismiss={() => {
+              if (!settings.data) return;
+              void saveSettings
+                .mutateAsync({
+                  ...settings.data,
+                  showBoardSelectionHint: false,
+                })
+                .catch(() => undefined);
+            }}
+          />
         )}
       {/* What the selection can do, in the layout FLOW like every strip above it —
           a bar that floated over the board would cover the cards it is about. Two

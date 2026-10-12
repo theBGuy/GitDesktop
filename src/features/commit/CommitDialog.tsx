@@ -1,5 +1,5 @@
 import { InfoIcon, SparkleIcon } from "@phosphor-icons/react";
-import { DiffStat } from "@/components/diff-stat";
+import { DiffStatSlot } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -231,14 +231,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
                       ) : (
                         <PathText path={entry.path} className="flex-1" />
                       )}
-                      {stat ? (
-                        <DiffStat
-                          added={stat.added}
-                          deleted={stat.deleted}
-                          isBinary={stat.isBinary}
-                          className="text-[11px]"
-                        />
-                      ) : null}
+                      <DiffStatSlot stat={stat} className="text-[11px]" />
                     </li>
                   );
                 })}

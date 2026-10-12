@@ -1,7 +1,7 @@
 import { useId } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import type { LanguageStat } from "@/lib/git/types";
-import { cn } from "@/lib/utils";
+import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
 /** GitHub-linguist-ish colors for the makeup bar; unknowns fall back to gray. */
 export const LANG_COLORS: Record<string, string> = {
@@ -96,32 +96,57 @@ export function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 /** An insight card's "nothing to show" line — shared so a card that decides its own
- *  emptiness reads identically to one the board decides for. */
+ *  emptiness reads identically to one the board decides for. `my-auto` centres it
+ *  in a reserved card body and resolves to zero in block flow. */
 export function Empty({ children }: { children: React.ReactNode }) {
   return (
-    <p className="py-6 text-center text-xs text-muted-foreground">{children}</p>
+    <p className="my-auto py-6 text-center text-xs text-muted-foreground">
+      {children}
+    </p>
   );
 }
 
-/** A bordered card for an Insights board panel. */
+/** A bordered card for an Insights board panel. The body is a flex column, so
+ *  a `bodyClassName` height holds the card at one size across its loading,
+ *  empty and loaded arms; `stale` dims it while a placeholder (another
+ *  window's data) stands in. */
 export function InsightCard({
   title,
   action,
   className,
+  bodyClassName,
+  stale = false,
   children,
 }: {
   title: string;
   action?: React.ReactNode;
   className?: string;
+  bodyClassName?: string;
+  stale?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <section className={cn("space-y-2 border bg-card p-3", className)}>
+    <section
+      aria-busy={stale || undefined}
+      className={cn("space-y-2 border bg-card p-3", className)}
+    >
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-xs font-semibold">{title}</h3>
         {action}
       </div>
-      {children}
+      <div
+        // A placeholder drives rendering only: the other window's grid, tables
+        // and announcements stay out of reach until the data is current.
+        inert={stale}
+        className={cn(
+          "flex flex-col",
+          PLACEHOLDER_FADE,
+          stale && "opacity-60",
+          bodyClassName,
+        )}
+      >
+        {children}
+      </div>
     </section>
   );
 }

@@ -235,6 +235,7 @@ const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
 const finishAndSurface = scanner("generator-dialog-finish-and-surface");
 const diffStatPair = scanner("hand-rolled-diff-stat");
+const diffStatSlot = scanner("list-row-diff-stat-slot");
 const kindBadge = scanner("kind-badge-single-source");
 const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
@@ -1251,6 +1252,66 @@ test("hand-rolled-diff-stat exempts the component file and vendored ui only", ()
   assert.equal(appliesTo("src/components/diff-stat.tsx"), false);
   assert.equal(appliesTo("src/components/ui/badge.tsx"), false);
   assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
+});
+
+test("list-row-diff-stat-slot flags a counts cell gated on its own stat", () => {
+  // The FileRow / CommitDialog shape the slot replaced, wrapped as formatted.
+  const fileRow = [
+    "      {nameCell}",
+    "      {stat ? (",
+    "        <DiffStat",
+    "          added={stat.added}",
+    "          deleted={stat.deleted}",
+    "          isBinary={stat.isBinary}",
+    '          className="text-[11px]"',
+    "        />",
+    "      ) : null}",
+  ].join("\n");
+  assert.deepEqual(diffStatSlot(fileRow), [2]);
+  const andForm = [
+    "{file.stats && (",
+    "  <DiffStat added={file.stats.added} deleted={file.stats.deleted} />",
+    ")}",
+  ].join("\n");
+  assert.deepEqual(diffStatSlot(andForm), [1]);
+  assert.deepEqual(
+    diffStatSlot(
+      "{stat ? <DiffStat added={stat.added} deleted={stat.deleted} /> : null}",
+    ),
+    [1],
+  );
+});
+
+test("list-row-diff-stat-slot leaves unrelated gates and the slot alone", () => {
+  // A total hidden on a flag of its own, not on the stat object (RemotePrView).
+  const total = [
+    "{!totalsUnknown && (",
+    "  <DiffStat added={pr.additions} deleted={pr.deletions} />",
+    ")}",
+  ].join("\n");
+  assert.deepEqual(diffStatSlot(total), []);
+  // The condition and the props read different objects.
+  assert.deepEqual(
+    diffStatSlot("{ok ? <DiffStat added={stat.added} deleted={0} /> : null}"),
+    [],
+  );
+  assert.deepEqual(
+    diffStatSlot('<DiffStatSlot stat={stat} className="text-[11px]" />'),
+    [],
+  );
+  assert.deepEqual(
+    diffStatSlot("<DiffStat added={file.added} deleted={file.deleted} />"),
+    [],
+  );
+});
+
+test("list-row-diff-stat-slot scans feature tsx files only", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "list-row-diff-stat-slot",
+  );
+  assert.equal(appliesTo("src/features/x/A.tsx"), true);
+  assert.equal(appliesTo("src/components/diff-stat.tsx"), false);
+  assert.equal(appliesTo("src/features/x/a.ts"), false);
 });
 
 test("kind-badge-single-source flags a re-declared table, exported or not", () => {

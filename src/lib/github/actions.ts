@@ -3,7 +3,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { repoKeys } from "@/lib/git/queries";
+import { keepPreviousDataForRepo, repoKeys } from "@/lib/git/queries";
 import {
   type CancelRunVars,
   type DispatchVars,
@@ -355,6 +355,10 @@ export function useLatestRun(
   return useQuery({
     ...latestRunOptions(repo, branch),
     enabled: enabled && Boolean(branch),
+    // The same repo's last run, across branches, is the badge's "this repo has
+    // runs" signal for reserving its slot; callers gate run data on
+    // `!isPlaceholderData` so another branch's run never renders.
+    placeholderData: keepPreviousDataForRepo(repo),
     refetchInterval: (query) =>
       query.state.data && isRunActive(query.state.data.status) ? 8000 : 30_000,
   });

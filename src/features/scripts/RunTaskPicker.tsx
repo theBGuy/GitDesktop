@@ -2,6 +2,7 @@ import { PlayIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PALETTE_DIALOG_CLASS } from "@/features/shortcuts/palette-dialog";
 import { clipTitle } from "@/lib/clip-title";
 import { useScripts, useTaskRepoKeys } from "@/lib/scripts/queries";
 import { taskInScope } from "@/lib/scripts/scope";
@@ -94,9 +95,9 @@ export function RunTaskPicker({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-md" showCloseButton={false}>
+      <DialogContent className={PALETTE_DIALOG_CLASS} showCloseButton={false}>
         <DialogTitle className="sr-only">Run a task</DialogTitle>
-        <div className="border-b p-2">
+        <div className="shrink-0 border-b p-2">
           <Input
             autoFocus
             value={query}
@@ -114,7 +115,7 @@ export function RunTaskPicker({
             No matching tasks.
           </p>
         ) : (
-          <ul ref={listRef} className="max-h-80 overflow-y-auto py-1">
+          <ul ref={listRef} className="max-h-80 min-h-0 overflow-y-auto py-1">
             {items.map((task, index) => (
               <li key={task.id}>
                 <button

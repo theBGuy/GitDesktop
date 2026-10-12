@@ -29,15 +29,59 @@ import {
   BitbucketLinkOutsCard,
   GitLabLinkOutsCard,
   LinkOutsCard,
+  LinkOutsSkeleton,
 } from "./LinkOutsCard";
-import { PunchCard } from "./PunchCard";
+import { PunchCard, PunchCardSkeleton } from "./PunchCard";
 import { Empty, fmt, InsightCard } from "./primitives";
 import { TrafficCard } from "./TrafficCard";
 
 const WINDOW_WEEKS = 52;
 
+/** Body heights: each at least the loaded arm (a chart card counts a 2-line
+ *  caption and the table toggle), so loading, empty and loaded paint one
+ *  height. A min, not a fixed height: an expanded data table, or a list longer
+ *  than its reservation, still grows the card. `contributors` is exactly the
+ *  six-row skeleton (6 x 26px rows + 5 x 6px gaps). */
+const CARD_BODY = {
+  chart: "min-h-57",
+  community: "min-h-48",
+  dependencies: "min-h-74",
+  contributors: "min-h-46.5",
+} as const;
+
+/** Rows the contributors skeleton reserves: a typical list. Shorter lists keep
+ *  the space ({@link CARD_BODY}); longer ones grow downward to the 12-row cap. */
+const CONTRIBUTOR_SKELETON_ROWS = ["a", "b", "c", "d", "e", "f"];
+
+/** Fills a {@link CARD_BODY} slot. */
 function ChartSkeleton() {
-  return <Skeleton className="h-40 w-full" />;
+  return <Skeleton className="w-full flex-1" />;
+}
+
+/** {@link ContributorsList}'s row boxes (name line + bar), so loaded rows land
+ *  where the skeleton's were. */
+function ContributorsSkeleton() {
+  return (
+    <ul aria-hidden className="space-y-1.5">
+      {CONTRIBUTOR_SKELETON_ROWS.map((key) => (
+        <li key={key} className="space-y-1">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="h-1.5 w-full rounded-full" />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** TrafficCard's usual top: the stat row and the 14-day chart figure. The
+ *  referrer and path lists below it may still grow the card. */
+function TrafficSkeleton() {
+  return (
+    <div aria-hidden className="space-y-3">
+      <Skeleton className="h-6 w-full" />
+      <Skeleton className="h-48 w-full" />
+    </div>
+  );
 }
 
 /** Top contributors as an accessible bar-list (name + commits + line churn). */
@@ -114,6 +158,10 @@ export function InsightsBoard({
   const canForks = active && forgeFeatureReady(gh.data, "forkActivity");
   const canCompare = forgeFeatureReady(gh.data, "forkCompare");
   const forkProvider = gh.data?.provider ?? null;
+  // While the forge probe is unanswered, the GitHub cards draw as skeletons in
+  // their slots (their queries are disabled, so each reads pending) instead of
+  // mounting late and pushing the grid down; any other answer drops them once.
+  const forgeDetecting = active && gh.isPending;
 
   // These are heavy (full-history git scans + gh calls); gate them on the
   // Insights tab being visible. <Activity> keeps this mounted while hidden but
@@ -183,7 +231,11 @@ export function InsightsBoard({
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <InsightCard title="Commit activity">
+          <InsightCard
+            title="Commit activity"
+            bodyClassName={CARD_BODY.chart}
+            stale={commitActivity.isPlaceholderData}
+          >
             {commitActivity.isPending ? (
               <ChartSkeleton />
             ) : commitActivity.data?.length ? (
@@ -193,7 +245,11 @@ export function InsightsBoard({
             )}
           </InsightCard>
 
-          <InsightCard title="Code frequency">
+          <InsightCard
+            title="Code frequency"
+            bodyClassName={CARD_BODY.chart}
+            stale={codeFreq.isPlaceholderData}
+          >
             {codeFreq.isPending ? (
               <ChartSkeleton />
             ) : codeFreq.data?.length ? (
@@ -203,9 +259,14 @@ export function InsightsBoard({
             )}
           </InsightCard>
 
-          <InsightCard title="Contributors" className="xl:col-span-2">
+          <InsightCard
+            title="Contributors"
+            className="xl:col-span-2"
+            bodyClassName={CARD_BODY.contributors}
+            stale={contributors.isPlaceholderData}
+          >
             {contributors.isPending ? (
-              <ChartSkeleton />
+              <ContributorsSkeleton />
             ) : contributors.data?.length ? (
               <ContributorsList data={contributors.data} />
             ) : (
@@ -213,9 +274,13 @@ export function InsightsBoard({
             )}
           </InsightCard>
 
-          <InsightCard title="Commits by day & hour" className="xl:col-span-2">
+          <InsightCard
+            title="Commits by day & hour"
+            className="xl:col-span-2"
+            stale={punchCard.isPlaceholderData}
+          >
             {punchCard.isPending ? (
-              <ChartSkeleton />
+              <PunchCardSkeleton />
             ) : punchCard.data ? (
               <PunchCard grid={punchCard.data} />
             ) : (
@@ -223,9 +288,10 @@ export function InsightsBoard({
             )}
           </InsightCard>
 
-          {canGh && (
+          {(canGh || forgeDetecting) && (
             <InsightCard
               title={isGitLab || isBitbucket ? "Pipelines" : "Actions"}
+              bodyClassName={CARD_BODY.chart}
               action={
                 successRate !== null && (
                   <span className="text-[11px] text-muted-foreground tabular-nums">
@@ -247,9 +313,10 @@ export function InsightsBoard({
             </InsightCard>
           )}
 
-          {canForks && forkProvider && (
+          {((canForks && forkProvider) || forgeDetecting) && (
             <InsightCard
               title="Fork activity"
+              bodyClassName={CARD_BODY.chart}
               action={
                 forkActivity.data?.totalCount != null && (
                   <span className="text-[11px] text-muted-foreground tabular-nums">
@@ -261,7 +328,7 @@ export function InsightsBoard({
             >
               {forkActivity.isPending ? (
                 <ChartSkeleton />
-              ) : forkActivity.data ? (
+              ) : forkActivity.data && forkProvider ? (
                 <ForkActivityCard
                   repoPath={repoPath}
                   data={forkActivity.data}
@@ -274,8 +341,8 @@ export function InsightsBoard({
             </InsightCard>
           )}
 
-          {canGhOnly && (
-            <InsightCard title="Community">
+          {(canGhOnly || forgeDetecting) && (
+            <InsightCard title="Community" bodyClassName={CARD_BODY.community}>
               {community.isPending ? (
                 <ChartSkeleton />
               ) : community.data ? (
@@ -286,10 +353,10 @@ export function InsightsBoard({
             </InsightCard>
           )}
 
-          {canGhOnly && (
+          {(canGhOnly || forgeDetecting) && (
             <InsightCard title="Traffic" className="xl:col-span-2">
               {traffic.isPending ? (
-                <ChartSkeleton />
+                <TrafficSkeleton />
               ) : traffic.data ? (
                 <TrafficCard data={traffic.data} />
               ) : (
@@ -298,8 +365,11 @@ export function InsightsBoard({
             </InsightCard>
           )}
 
-          {canGhOnly && (
-            <InsightCard title="Dependencies">
+          {(canGhOnly || forgeDetecting) && (
+            <InsightCard
+              title="Dependencies"
+              bodyClassName={CARD_BODY.dependencies}
+            >
               {dependencies.isPending ? (
                 <ChartSkeleton />
               ) : dependencies.data ? (
@@ -310,12 +380,24 @@ export function InsightsBoard({
             </InsightCard>
           )}
 
-          {canGhOnly && (
+          {(canGhOnly || forgeDetecting) && (
             <InsightCard title="More on GitHub">
-              <LinkOutsCard
-                repoPath={repoPath}
-                isPublic={community.data ? !community.data.private : undefined}
-              />
+              {forgeDetecting ? (
+                <LinkOutsSkeleton />
+              ) : (
+                <LinkOutsCard
+                  repoPath={repoPath}
+                  // Undefined while community loads, which holds the
+                  // public-only link's cell; a failed read hides it.
+                  isPublic={
+                    community.isPending
+                      ? undefined
+                      : community.data
+                        ? !community.data.private
+                        : false
+                  }
+                />
+              )}
             </InsightCard>
           )}
 

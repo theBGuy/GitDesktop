@@ -47,6 +47,8 @@ import { normPath } from "@/lib/git/path";
 import {
   branchRewriteStatusOptions,
   forgeFeatureReady,
+  REMOTE_BRANCHES_STALE_TIME,
+  remoteBranchesOptions,
   useBranchAhead,
   useBranchDivergence,
   useBranches,
@@ -683,6 +685,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     repoPath,
     open || branchDialogOpen,
   );
+  // One prefetch per repo for the opens that skip the shell warm-up (notification
+  // and My work jumps), so the menu still opens with its Remote group. The hook
+  // stays open-gated; a fresh warmed entry makes this a no-op.
+  useEffect(() => {
+    if (!repoPath) return;
+    void queryClient.prefetchQuery({
+      ...remoteBranchesOptions(repoPath),
+      staleTime: REMOTE_BRANCHES_STALE_TIME,
+    });
+  }, [repoPath, queryClient]);
   const localNames = useMemo(
     () => new Set(allBranches.map((b) => b.name)),
     [allBranches],

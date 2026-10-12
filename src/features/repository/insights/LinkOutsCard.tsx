@@ -1,6 +1,7 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { forgeRepoUrl } from "@/lib/git/api";
 import { useActiveGhHost } from "@/lib/git/host";
 import { toastError } from "@/lib/toast";
@@ -102,6 +103,25 @@ export function BitbucketLinkOutsCard({ repoPath }: { repoPath: string }) {
   );
 }
 
+/** The GitHub link-outs' shape while the forge is still being detected: the
+ *  lead line and every button cell, Dependents and Stars over time included. */
+export function LinkOutsSkeleton() {
+  return (
+    <div aria-hidden className="space-y-2">
+      <p className="text-xs">
+        <Skeleton className="inline-block h-[1em] w-48 align-middle" />
+      </p>
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+        {[...LINKS.map((l) => l.label), "Stars over time"].map((label) => (
+          <Skeleton key={label} className="h-7" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** `isPublic` undefined = visibility still loading (the public-only cell is
+ *  held); false hides that link. */
 export function LinkOutsCard({
   repoPath,
   isPublic,
@@ -138,18 +158,24 @@ export function LinkOutsCard({
         These insights only render on the web:
       </p>
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-        {LINKS.filter((l) => !l.publicOnly || isPublic).map((l) => (
-          <Button
-            key={l.label}
-            variant="outline"
-            size="sm"
-            className="cursor-pointer justify-start"
-            onClick={() => open(l.suffix)}
-          >
-            <ArrowSquareOutIcon data-icon="inline-start" />
-            {l.label}
-          </Button>
-        ))}
+        {LINKS.filter((l) => !l.publicOnly || isPublic !== false).map((l) =>
+          // Visibility not known yet: hold the public-only link's cell rather
+          // than adding a row under the user once it resolves public.
+          l.publicOnly && isPublic === undefined ? (
+            <Skeleton key={l.label} aria-hidden className="h-7" />
+          ) : (
+            <Button
+              key={l.label}
+              variant="outline"
+              size="sm"
+              className="cursor-pointer justify-start"
+              onClick={() => open(l.suffix)}
+            >
+              <ArrowSquareOutIcon data-icon="inline-start" />
+              {l.label}
+            </Button>
+          ),
+        )}
         {canStarHistory && (
           <Button
             variant="outline"

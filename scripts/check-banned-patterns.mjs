@@ -369,6 +369,14 @@ const DIFF_STAT_PAIR_RE = new RegExp(
   "g",
 );
 
+// A counts cell rendered only once its own stat object exists — `{stat ?
+// <DiffStat added={stat.added} …` or the `&&` spelling. The backreference ties
+// the condition to the props, so a total hidden on an unrelated flag
+// (`{!totalsUnknown && <DiffStat …`) stays clean. Run over the normalized
+// whole-file view, so the wrapped JSX matches.
+const CONDITIONAL_DIFF_STAT_CELL_RE =
+  /\{\s*([\w.]+)\s*(?:\?|&&)\s*\(?\s*<DiffStat\b[^>]*?\badded=\{\s*\1\./g;
+
 // An icon-only copy control built by hand: a `<button>`/`<Button>` whose SOLE
 // child is a self-closing `<CopyIcon/>`. Requiring the opening tag's own `>`
 // directly before the icon, and the matching close directly after it, is what
@@ -2220,6 +2228,15 @@ export const CHECKS = [
     allowlist: [],
     message:
       "`+added -deleted` counts render through DiffStat (src/components/diff-stat.tsx) — a hand-rolled pair drifts from the canonical spacing, minus glyph, and tabular digits one site at a time; a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "list-row-diff-stat-slot",
+    appliesTo: (file) =>
+      file.startsWith("src/features/") && file.endsWith(".tsx"),
+    scan: perFile(CONDITIONAL_DIFF_STAT_CELL_RE),
+    allowlist: [],
+    message:
+      "a file row whose counts can arrive after the row renders them through DiffStatSlot (src/components/diff-stat.tsx), never `{stat ? <DiffStat …/> : null}` — the slot keeps the cell's width while counts load (and on rows that never get them), so a late stat doesn't reflow the file names; a row whose counts ship with the row itself renders DiffStat unconditionally",
   },
   {
     name: "raw-copy-icon-button",

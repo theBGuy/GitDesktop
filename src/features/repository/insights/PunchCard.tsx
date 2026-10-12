@@ -1,10 +1,12 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { PunchCard as PunchCardData } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 import { fmt } from "./primitives";
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const HOUR_TICKS = [0, 6, 12, 18];
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
 
 function hourLabel(h: number): string {
   if (h === 0) return "12am";
@@ -15,6 +17,36 @@ function hourLabel(h: number): string {
 function describe(grid: PunchCardData, day: number, hour: number): string {
   const n = grid[day]?.[hour] ?? 0;
   return `${DAYS[day]} ${hourLabel(hour)} — ${fmt(n)} commit${n === 1 ? "" : "s"}`;
+}
+
+/** The loading shape of {@link PunchCard}: the same row, cell, tick and caption
+ *  boxes, so its width-proportional height matches the loaded grid at any
+ *  pane width. */
+export function PunchCardSkeleton() {
+  return (
+    <div aria-hidden className="space-y-2">
+      <div className="space-y-px text-[10px]">
+        {DAYS.map((day) => (
+          <div key={day} className="flex items-center gap-1">
+            {/* The day label's line height sets the row at narrow widths. */}
+            <span className="w-7 shrink-0">&nbsp;</span>
+            <div className="flex flex-1 gap-px">
+              {HOURS.map((hour) => (
+                <Skeleton
+                  key={hour}
+                  className="aspect-square min-w-0 flex-1 rounded-[1px]"
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+        <div className="pt-0.5">&nbsp;</div>
+      </div>
+      <p className="text-[11px]">
+        <Skeleton className="inline-block h-[1em] w-48 align-middle" />
+      </p>
+    </div>
+  );
 }
 
 /**

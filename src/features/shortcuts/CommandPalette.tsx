@@ -11,6 +11,7 @@ import { ACTIONS, type ActionId } from "@/lib/hotkeys/registry";
 import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import { PALETTE_DIALOG_CLASS } from "./palette-dialog";
 
 /**
  * Searchable list of every action that's runnable *right now* — actions
@@ -73,9 +74,9 @@ export function CommandPalette({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-md" showCloseButton={false}>
+      <DialogContent className={PALETTE_DIALOG_CLASS} showCloseButton={false}>
         <DialogTitle className="sr-only">Command palette</DialogTitle>
-        <div className="border-b p-2">
+        <div className="shrink-0 border-b p-2">
           <Input
             autoFocus
             value={query}
@@ -93,7 +94,7 @@ export function CommandPalette({
             No matching commands here.
           </p>
         ) : (
-          <ul ref={listRef} className="max-h-80 overflow-y-auto py-1">
+          <ul ref={listRef} className="max-h-80 min-h-0 overflow-y-auto py-1">
             {items.map((action, index) => {
               const binding = bindings.get(action.id);
               return (

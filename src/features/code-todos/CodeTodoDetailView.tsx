@@ -120,7 +120,7 @@ export function CodeTodoDetailView({
     !sourcePending && !previewUnavailable && line > excerptLines.length;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="border-b p-4">
         <div className="flex items-start gap-2">
           <MarkerChip marker={marker} className="mt-0.5 shrink-0" />

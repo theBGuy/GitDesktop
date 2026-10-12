@@ -12,6 +12,8 @@ import {
   defaultBranchOptions,
   oplogCheckOptions,
   opStateOptions,
+  REMOTE_BRANCHES_STALE_TIME,
+  remoteBranchesOptions,
   remotesOptions,
   repoStatusOptions,
   stashCountOptions,
@@ -82,6 +84,16 @@ export function warmRepoShell(
     ...userWorktreesOptions(root),
     staleTime: USER_WORKTREES_STALE_TIME,
   });
+  // Warmed but never held: nothing on the first paint reads it, and its cost
+  // scales with the remote-ref count, so holding would spend the budget on a
+  // closed menu. The cache lets the branch menu open with its Remote group.
+  warm(
+    {
+      ...remoteBranchesOptions(root),
+      staleTime: REMOTE_BRANCHES_STALE_TIME,
+    },
+    { into: [] },
+  );
   warm(stashCountOptions(root));
 
   // The Changes panel's reads keyed by what status and default-branch answer, under

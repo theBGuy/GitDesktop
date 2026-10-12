@@ -197,8 +197,11 @@ function GitHubAccounts() {
         </p>
       </div>
 
+      {/* The skeleton is one account row (the usual signed-in list); "Add an
+          account" below is static, so it renders while gh is being read too and
+          leaves only when gh turns out to be missing. */}
       {accounts.isPending ? (
-        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-9.5 w-full max-w-xl" />
       ) : version === "" ? (
         <p className="text-xs text-muted-foreground">
           The GitHub CLI (gh) isn't installed, so there are no accounts to
@@ -322,38 +325,46 @@ function GitHubAccounts() {
               , then restart GitDesktop.
             </p>
           )}
-
-          <div className="space-y-2">
-            <p className="text-xs font-medium">Add an account</p>
-            <Button
-              size="sm"
-              className="cursor-pointer"
-              onClick={() =>
-                openReconnect({
-                  provider: "github",
-                  host: "github.com",
-                  mode: "login",
-                })
-              }
-            >
-              Sign in to GitHub…
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              For a GitHub Enterprise host, run{" "}
-              <button
-                type="button"
-                className="font-mono underline underline-offset-2"
-                onClick={() =>
-                  copyText("gh auth login -h <host>", "Command copied")
-                }
-                title="Copy command"
-              >
-                gh auth login -h &lt;host&gt;
-              </button>{" "}
-              in a terminal, then come back here.
-            </p>
-          </div>
         </>
+      )}
+
+      {(accounts.isPending || version !== "") && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium">Add an account</p>
+          {/* Held while gh is read: the block keeps its place, but a sign-in
+              must not start before the CLI is known to be installed. */}
+          <DisabledReasonButton
+            size="sm"
+            className="cursor-pointer"
+            disabled={accounts.isPending}
+            reason={
+              accounts.isPending ? "Checking for the GitHub CLI…" : undefined
+            }
+            onClick={() =>
+              openReconnect({
+                provider: "github",
+                host: "github.com",
+                mode: "login",
+              })
+            }
+          >
+            Sign in to GitHub…
+          </DisabledReasonButton>
+          <p className="text-xs text-muted-foreground">
+            For a GitHub Enterprise host, run{" "}
+            <button
+              type="button"
+              className="font-mono underline underline-offset-2"
+              onClick={() =>
+                copyText("gh auth login -h <host>", "Command copied")
+              }
+              title="Copy command"
+            >
+              gh auth login -h &lt;host&gt;
+            </button>{" "}
+            in a terminal, then come back here.
+          </p>
+        </div>
       )}
     </section>
   );
@@ -380,11 +391,13 @@ function GitLabSignInBlock() {
     (h) => h.state !== "cliMissing" && h.state !== "notConnected",
   );
 
-  if (health.isPending) return <Skeleton className="h-16 w-full" />;
-
   return (
     <div className="max-w-xl space-y-3">
-      {cliMissing ? (
+      {/* Sized to the loaded arms (install or sign-in prompt, one host row);
+          the nudge below is static, so it renders from the first frame. */}
+      {health.isPending ? (
+        <Skeleton className="h-13 w-full" />
+      ) : cliMissing ? (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
             The GitLab CLI (<span className="font-mono">glab</span>) isn't
@@ -568,97 +581,97 @@ function GitLabAccount() {
         </p>
       </div>
 
-      {status.isPending ? (
-        <Skeleton className="h-16 w-full" />
-      ) : (
-        <div className="max-w-xl space-y-4">
-          {botLogin ? (
-            <div className="space-y-3 border">
-              <div className="flex items-center gap-2 border-b px-3 py-2">
-                <p className="min-w-0 truncate text-xs">
-                  AI reviews post as{" "}
-                  <span className="font-medium">@{botLogin}</span>
-                </p>
-                <Badge variant="secondary" className="ml-auto shrink-0">
-                  connected
-                </Badge>
-              </div>
-              <div className="flex items-center gap-2 px-3 pb-3">
-                <Button
-                  variant="destructive"
-                  size="xs"
-                  onClick={() => setConfirmClear(true)}
-                >
-                  Disconnect
-                </Button>
-              </div>
+      <div className="max-w-xl space-y-4">
+        {/* The skeleton is the connected box's size; the docs below don't
+            depend on the status, so they render from the first frame. */}
+        {status.isPending ? (
+          <Skeleton className="h-22 w-full" />
+        ) : botLogin ? (
+          <div className="space-y-3 border">
+            <div className="flex items-center gap-2 border-b px-3 py-2">
+              <p className="min-w-0 truncate text-xs">
+                AI reviews post as{" "}
+                <span className="font-medium">@{botLogin}</span>
+              </p>
+              <Badge variant="secondary" className="ml-auto shrink-0">
+                connected
+              </Badge>
             </div>
-          ) : (
-            <form
-              className="space-y-3"
-              onSubmit={(e) => {
-                e.preventDefault();
-                form.handleSubmit();
-              }}
-            >
-              <form.AppField name="token">
-                {(field) => (
-                  <field.TextField
-                    type="password"
-                    label="Project or group access token"
-                    placeholder="Paste a GitLab project or group access token"
-                  />
-                )}
-              </form.AppField>
-
-              <div className="flex items-center gap-2">
-                <DisabledReasonButton
-                  type="submit"
-                  size="sm"
-                  disabled={!canSubmit || setToken.isPending}
-                  // No `reason`: the same text renders as the visible warning
-                  // beside the button, so announcing it would double up.
-                  title={
-                    canSubmit
-                      ? undefined
-                      : "Paste a project or group access token"
-                  }
-                >
-                  {setToken.isPending && <Spinner data-icon="inline-start" />}
-                  Connect
-                </DisabledReasonButton>
-                {!canSubmit && (
-                  <span className="text-xs text-warning">
-                    Paste a project or group access token
-                  </span>
-                )}
-              </div>
-
-              {error && <p className="text-xs text-destructive">{error}</p>}
-            </form>
-          )}
-
-          <div className="space-y-1.5 text-xs text-muted-foreground">
-            <p>
-              The token needs the <span className="font-mono">api</span> scope
-              and a role of <span className="font-medium">Maintainer</span> or{" "}
-              <span className="font-medium">Owner</span> to mint. On gitlab.com,
-              project access tokens require a{" "}
-              <span className="font-medium">Premium or Ultimate</span> namespace
-              (they're free on self-managed GitLab). This applies to gitlab.com
-              in this version.
-            </p>
-            <button
-              type="button"
-              className="cursor-pointer underline underline-offset-2"
-              onClick={() => openUrl(GITLAB_PROJECT_TOKEN_URL)}
-              title="Open the GitLab project access token docs"
-            >
-              Create one on GitLab
-            </button>
+            <div className="flex items-center gap-2 px-3 pb-3">
+              <Button
+                variant="destructive"
+                size="xs"
+                onClick={() => setConfirmClear(true)}
+              >
+                Disconnect
+              </Button>
+            </div>
           </div>
+        ) : (
+          <form
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              form.handleSubmit();
+            }}
+          >
+            <form.AppField name="token">
+              {(field) => (
+                <field.TextField
+                  type="password"
+                  label="Project or group access token"
+                  placeholder="Paste a GitLab project or group access token"
+                />
+              )}
+            </form.AppField>
+
+            <div className="flex items-center gap-2">
+              <DisabledReasonButton
+                type="submit"
+                size="sm"
+                disabled={!canSubmit || setToken.isPending}
+                // No `reason`: the same text renders as the visible warning
+                // beside the button, so announcing it would double up.
+                title={
+                  canSubmit
+                    ? undefined
+                    : "Paste a project or group access token"
+                }
+              >
+                {setToken.isPending && <Spinner data-icon="inline-start" />}
+                Connect
+              </DisabledReasonButton>
+              {!canSubmit && (
+                <span className="text-xs text-warning">
+                  Paste a project or group access token
+                </span>
+              )}
+            </div>
+
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </form>
+        )}
+
+        <div className="space-y-1.5 text-xs text-muted-foreground">
+          <p>
+            The token needs the <span className="font-mono">api</span> scope and
+            a role of <span className="font-medium">Maintainer</span> or{" "}
+            <span className="font-medium">Owner</span> to mint. On gitlab.com,
+            project access tokens require a{" "}
+            <span className="font-medium">Premium or Ultimate</span> namespace
+            (they're free on self-managed GitLab). This applies to gitlab.com in
+            this version.
+          </p>
+          <button
+            type="button"
+            className="cursor-pointer underline underline-offset-2"
+            onClick={() => openUrl(GITLAB_PROJECT_TOKEN_URL)}
+            title="Open the GitLab project access token docs"
+          >
+            Create one on GitLab
+          </button>
         </div>
-      )}
+      </div>
 
       <Dialog open={confirmClear} onOpenChange={setConfirmClear}>
         <DialogContent>
@@ -791,185 +804,191 @@ function BitbucketAccount() {
         </p>
       </div>
 
-      {account.isPending ? (
-        <Skeleton className="h-16 w-full" />
-      ) : (
-        <div className="max-w-xl space-y-4">
-          {connected && !replacing && (
-            <div className="space-y-3 border">
-              <div className="flex items-center gap-2 border-b px-3 py-2">
-                <div className="min-w-0">
-                  <p
-                    className="truncate text-xs font-medium"
-                    title={connected.username ?? connected.email}
-                  >
-                    {connected.displayName ??
-                      connected.username ??
-                      connected.email}
-                  </p>
-                  <p
-                    className="truncate text-[11px] text-muted-foreground"
-                    title={connected.email}
-                  >
-                    {connected.username ? `${connected.username} · ` : ""}
-                    {connected.email}
-                  </p>
+      <div className="max-w-xl space-y-4">
+        {/* The skeleton is the connected box's size; the docs below don't
+            depend on the account, so they render from the first frame. */}
+        {account.isPending ? (
+          <Skeleton className="h-25 w-full" />
+        ) : (
+          <>
+            {connected && !replacing && (
+              <div className="space-y-3 border">
+                <div className="flex items-center gap-2 border-b px-3 py-2">
+                  <div className="min-w-0">
+                    <p
+                      className="truncate text-xs font-medium"
+                      title={connected.username ?? connected.email}
+                    >
+                      {connected.displayName ??
+                        connected.username ??
+                        connected.email}
+                    </p>
+                    <p
+                      className="truncate text-[11px] text-muted-foreground"
+                      title={connected.email}
+                    >
+                      {connected.username ? `${connected.username} · ` : ""}
+                      {connected.email}
+                    </p>
+                  </div>
+                  <Badge variant="secondary" className="ml-auto shrink-0">
+                    connected
+                  </Badge>
                 </div>
-                <Badge variant="secondary" className="ml-auto shrink-0">
-                  connected
-                </Badge>
-              </div>
-              {storedExpiry && (
-                <p
-                  className={`px-3 text-[11px] ${
-                    expiryDaysLeft != null && expiryDaysLeft <= 14
-                      ? "text-warning"
-                      : "text-muted-foreground"
-                  }`}
-                >
-                  {expiryDaysLeft != null && expiryDaysLeft <= 14
-                    ? `${
-                        expiryDaysLeft < 0
-                          ? "token expired"
-                          : expiryDaysLeft === 0
-                            ? "token expires today"
-                            : `token expires in ${expiryDaysLeft} day${
-                                expiryDaysLeft === 1 ? "" : "s"
-                              }`
-                      } — replace the token soon`
-                    : `token expires ${formatDate(storedExpiry)}`}
-                </p>
-              )}
-              <div className="flex items-center gap-2 px-3 pb-3">
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => {
-                    setError(null);
-                    form.reset({
-                      email: connected.email,
-                      token: "",
-                      expiresAt: storedExpiry ?? "",
-                    });
-                    setReplacing(true);
-                  }}
-                >
-                  Replace token…
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="xs"
-                  onClick={() => setConfirmClear(true)}
-                >
-                  Disconnect
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {showForm && (
-            <form
-              className="space-y-3"
-              onSubmit={(e) => {
-                e.preventDefault();
-                form.handleSubmit();
-              }}
-            >
-              <form.AppField name="email">
-                {(field) => (
-                  <field.TextField
-                    type="email"
-                    label="Atlassian account email"
-                    placeholder="you@example.com"
-                  />
+                {storedExpiry && (
+                  <p
+                    className={`px-3 text-[11px] ${
+                      expiryDaysLeft != null && expiryDaysLeft <= 14
+                        ? "text-warning"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {expiryDaysLeft != null && expiryDaysLeft <= 14
+                      ? `${
+                          expiryDaysLeft < 0
+                            ? "token expired"
+                            : expiryDaysLeft === 0
+                              ? "token expires today"
+                              : `token expires in ${expiryDaysLeft} day${
+                                  expiryDaysLeft === 1 ? "" : "s"
+                                }`
+                        } — replace the token soon`
+                      : `token expires ${formatDate(storedExpiry)}`}
+                  </p>
                 )}
-              </form.AppField>
-              <form.AppField name="token">
-                {(field) => (
-                  <field.TextField
-                    type="password"
-                    label="API token"
-                    placeholder="Paste your Atlassian API token"
-                  />
-                )}
-              </form.AppField>
-              {/* Optional — connect works without it (Bitbucket never reports the
-                  expiry, so it's user-supplied to power the pre-expiry warning). */}
-              <div className="space-y-1.5">
-                <form.AppField name="expiresAt">
-                  {(field) => (
-                    <field.TextField type="date" label="Token expires on" />
-                  )}
-                </form.AppField>
-                <p className="text-[11px] text-muted-foreground">
-                  Shown when Atlassian created the token (max 1 year). Lets
-                  GitDesktop warn you before it expires.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <DisabledReasonButton
-                  type="submit"
-                  size="sm"
-                  disabled={!canSubmit}
-                  // No `reason`: the same text renders as the visible warning
-                  // beside the button, so announcing it would double up.
-                  title={disabledReason ?? undefined}
-                >
-                  {connected ? "Save token" : "Connect"}
-                </DisabledReasonButton>
-                {replacing && (
+                <div className="flex items-center gap-2 px-3 pb-3">
                   <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
+                    variant="outline"
+                    size="xs"
                     onClick={() => {
-                      setReplacing(false);
                       setError(null);
+                      form.reset({
+                        email: connected.email,
+                        token: "",
+                        expiresAt: storedExpiry ?? "",
+                      });
+                      setReplacing(true);
                     }}
                   >
-                    Cancel
+                    Replace token…
                   </Button>
-                )}
-                {disabledReason && (
-                  <span className="text-xs text-warning">{disabledReason}</span>
-                )}
+                  <Button
+                    variant="destructive"
+                    size="xs"
+                    onClick={() => setConfirmClear(true)}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
               </div>
+            )}
 
-              {error && <p className="text-xs text-destructive">{error}</p>}
-            </form>
-          )}
-
-          <div className="space-y-1.5 text-xs text-muted-foreground">
-            <p>
-              Create a token at{" "}
-              <button
-                type="button"
-                className="cursor-pointer underline underline-offset-2"
-                onClick={() => openUrl(ATLASSIAN_TOKEN_URL)}
-                title="Open the Atlassian API tokens page"
+            {showForm && (
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  form.handleSubmit();
+                }}
               >
-                id.atlassian.com
-              </button>{" "}
-              and sign in with your Atlassian{" "}
-              <span className="font-medium">account email</span> (not your
-              Bitbucket username). The token needs these scopes (the{" "}
-              <span className="font-mono">write:…</span> scopes let you act on
-              PRs and Pipelines):
-            </p>
-            <ul className="flex flex-wrap gap-1">
-              {BB_SCOPES.map((scope) => (
-                <li
-                  key={scope}
-                  className="rounded-none border px-1.5 py-0.5 font-mono text-[10px]"
-                >
-                  {scope}
-                </li>
-              ))}
-            </ul>
-          </div>
+                <form.AppField name="email">
+                  {(field) => (
+                    <field.TextField
+                      type="email"
+                      label="Atlassian account email"
+                      placeholder="you@example.com"
+                    />
+                  )}
+                </form.AppField>
+                <form.AppField name="token">
+                  {(field) => (
+                    <field.TextField
+                      type="password"
+                      label="API token"
+                      placeholder="Paste your Atlassian API token"
+                    />
+                  )}
+                </form.AppField>
+                {/* Optional — connect works without it (Bitbucket never reports the
+                  expiry, so it's user-supplied to power the pre-expiry warning). */}
+                <div className="space-y-1.5">
+                  <form.AppField name="expiresAt">
+                    {(field) => (
+                      <field.TextField type="date" label="Token expires on" />
+                    )}
+                  </form.AppField>
+                  <p className="text-[11px] text-muted-foreground">
+                    Shown when Atlassian created the token (max 1 year). Lets
+                    GitDesktop warn you before it expires.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <DisabledReasonButton
+                    type="submit"
+                    size="sm"
+                    disabled={!canSubmit}
+                    // No `reason`: the same text renders as the visible warning
+                    // beside the button, so announcing it would double up.
+                    title={disabledReason ?? undefined}
+                  >
+                    {connected ? "Save token" : "Connect"}
+                  </DisabledReasonButton>
+                  {replacing && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setReplacing(false);
+                        setError(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                  {disabledReason && (
+                    <span className="text-xs text-warning">
+                      {disabledReason}
+                    </span>
+                  )}
+                </div>
+
+                {error && <p className="text-xs text-destructive">{error}</p>}
+              </form>
+            )}
+          </>
+        )}
+
+        <div className="space-y-1.5 text-xs text-muted-foreground">
+          <p>
+            Create a token at{" "}
+            <button
+              type="button"
+              className="cursor-pointer underline underline-offset-2"
+              onClick={() => openUrl(ATLASSIAN_TOKEN_URL)}
+              title="Open the Atlassian API tokens page"
+            >
+              id.atlassian.com
+            </button>{" "}
+            and sign in with your Atlassian{" "}
+            <span className="font-medium">account email</span> (not your
+            Bitbucket username). The token needs these scopes (the{" "}
+            <span className="font-mono">write:…</span> scopes let you act on PRs
+            and Pipelines):
+          </p>
+          <ul className="flex flex-wrap gap-1">
+            {BB_SCOPES.map((scope) => (
+              <li
+                key={scope}
+                className="rounded-none border px-1.5 py-0.5 font-mono text-[10px]"
+              >
+                {scope}
+              </li>
+            ))}
+          </ul>
         </div>
-      )}
+      </div>
 
       <Dialog open={confirmClear} onOpenChange={setConfirmClear}>
         <DialogContent>

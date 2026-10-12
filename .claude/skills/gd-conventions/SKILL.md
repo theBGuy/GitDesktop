@@ -153,7 +153,11 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   (`src/components/diff-stat.tsx`) — plain numbers in, optional `isBinary`
   (a muted `bin`) and `format` (Insights abbreviates via `fmt`); never
   hand-rolled, and the `hand-rolled-diff-stat` guard in `pnpm run checks`
-  fails on a new pair.
+  fails on a new pair. A file-list row whose counts load after the row (the
+  Changes list, the commit dialog) renders `DiffStatSlot` from the same module
+  on EVERY row, stat or not: it reserves the cell's width, so late counts don't
+  reflow the names. The `list-row-diff-stat-slot` guard fails on a conditional
+  `{stat ? <DiffStat …/> : null}` cell; DiffStat itself keeps no width.
 - Icon-only copy buttons are `CopyIconButton`
   (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
   it always stops click propagation, and the `raw-copy-icon-button` guard in
@@ -368,7 +372,11 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   jumps). The reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
   (`src/lib/query-cache-times.ts`) through curated `<thing>Options` factories:
   the local ones are spread by their hook and the warm-up, the network-backed
-  ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. Never a
+  ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. A
+  warmed read nothing on the first paint shows (`remoteBranchesOptions`, the
+  closed branch menu's Remote group) warms unheld (`into: []`), so it never
+  spends the budget; BranchSwitcher prefetches it once per repo for the
+  switches that skip the warm-up, and its hook stays open-gated. Never a
   `["repo"]` prefix default (it would catch the notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module

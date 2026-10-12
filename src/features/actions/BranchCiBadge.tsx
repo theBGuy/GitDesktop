@@ -10,7 +10,9 @@ import { StatusIcon, statusLabel } from "./status";
 /**
  * Glanceable CI status for the current branch's latest run, in the repo header.
  * Renders nothing until gh is ready and a run exists; clicking jumps to the
- * Actions tab with that run selected.
+ * Actions tab with that run selected. While this branch's answer loads, a repo
+ * whose last check found runs keeps an empty icon-wide slot, so the badge's
+ * arrival doesn't squeeze the branch name.
  */
 export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
@@ -19,10 +21,23 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   const ciReady = forgeFeatureReady(gh.data, "ci");
   const status = useRepoStatus(repoPath);
   const branch = status.data?.branch.name ?? null;
+  const hasUpstream = Boolean(status.data?.branch.upstream);
   const latest = useLatestRun(repoPath, ciReady, branch);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectRun = useUiStore((s) => s.selectRun);
 
+  // Under a placeholder the data is another branch's run: it only decides
+  // whether to reserve, never what renders. The slot needs a fetch that will
+  // still run (forge ready or still resolving) for a branch that can have runs
+  // (one with an upstream), and it holds while the read is parked offline.
+  if (latest.isPlaceholderData) {
+    const reserve =
+      latest.data != null &&
+      branch !== null &&
+      hasUpstream &&
+      (ciReady || gh.isPending);
+    return reserve ? <span aria-hidden className="w-6.5 shrink-0" /> : null;
+  }
   const run = latest.data;
   if (!run) return null;
 

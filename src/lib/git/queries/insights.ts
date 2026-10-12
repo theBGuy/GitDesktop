@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import * as api from "../api";
+import { keepPreviousDataForRepo } from "./core";
 
 /** Repo-wide stats; the scan is heavy, so only fetch while the dialog is up. */
 export function useRepoStats(repo: string, enabled: boolean) {
@@ -30,8 +31,10 @@ export function useBranchStats(
 }
 
 // ── Insights graphs ──────────────────────────────────────────────────────────
-// All keyed on the trailing window (`weeks`) so toggling it refetches. Local-git
-// queries are cheap to keep fresh; the gh community call is gated on a GitHub repo.
+// All keyed on the trailing window (`weeks`) so toggling it refetches. The local
+// graphs keep the other window's data as placeholder meanwhile (same repo only),
+// so a toggle never drops a card back to its skeleton; consumers dim on
+// `isPlaceholderData`. The gh community call is gated on a GitHub repo.
 
 export function useContributorActivity(
   repo: string,
@@ -41,6 +44,7 @@ export function useContributorActivity(
   return useQuery({
     queryKey: ["repo", repo, "insights", "contributors", weeks] as const,
     queryFn: () => api.gitContributorActivity(repo, weeks),
+    placeholderData: keepPreviousDataForRepo(repo),
     enabled,
     staleTime: 5 * 60_000,
     networkMode: "always",
@@ -55,6 +59,7 @@ export function useCommitActivity(
   return useQuery({
     queryKey: ["repo", repo, "insights", "commit-activity", weeks] as const,
     queryFn: () => api.gitCommitActivity(repo, weeks),
+    placeholderData: keepPreviousDataForRepo(repo),
     enabled,
     staleTime: 5 * 60_000,
     networkMode: "always",
@@ -69,6 +74,7 @@ export function useCodeFrequency(
   return useQuery({
     queryKey: ["repo", repo, "insights", "code-frequency", weeks] as const,
     queryFn: () => api.gitCodeFrequency(repo, weeks),
+    placeholderData: keepPreviousDataForRepo(repo),
     enabled,
     staleTime: 5 * 60_000,
     networkMode: "always",
@@ -79,6 +85,7 @@ export function usePunchCard(repo: string, weeks: number, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "insights", "punch-card", weeks] as const,
     queryFn: () => api.gitPunchCard(repo, weeks),
+    placeholderData: keepPreviousDataForRepo(repo),
     enabled,
     staleTime: 5 * 60_000,
     networkMode: "always",

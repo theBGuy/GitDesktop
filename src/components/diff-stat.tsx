@@ -50,3 +50,39 @@ export function DiffStat({
     </span>
   );
 }
+
+/** The reserved width of a file list's counts cell: `+999 -99` and `bin` fit,
+ *  larger counts grow past it. */
+const DIFF_STAT_SLOT_CLASS = "min-w-[8ch] text-right";
+
+/**
+ * A file-list row's counts cell. It keeps its width whether or not the row has
+ * counts yet (they load after the list, and some rows never get them), so a late
+ * stat never reflows the file names. Rows render it unconditionally (the
+ * `list-row-diff-stat-slot` guard bans a conditional DiffStat cell).
+ */
+export function DiffStatSlot({
+  stat,
+  className,
+}: {
+  /** Absent = no counts (yet, or ever): an empty cell of the same width. */
+  stat?: { added: number; deleted: number; isBinary?: boolean };
+  className?: string;
+}) {
+  if (!stat) {
+    return (
+      <span
+        aria-hidden
+        className={cn("shrink-0", DIFF_STAT_SLOT_CLASS, className)}
+      />
+    );
+  }
+  return (
+    <DiffStat
+      added={stat.added}
+      deleted={stat.deleted}
+      isBinary={stat.isBinary}
+      className={cn(DIFF_STAT_SLOT_CLASS, className)}
+    />
+  );
+}
