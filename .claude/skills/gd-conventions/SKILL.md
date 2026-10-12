@@ -156,8 +156,10 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   fails on a new pair. A file-list row whose counts load after the row (the
   Changes list, the commit dialog) renders `DiffStatSlot` from the same module
   on EVERY row, stat or not: it reserves the cell's width, so late counts don't
-  reflow the names. The `list-row-diff-stat-slot` guard fails on a conditional
-  `{stat ? <DiffStat …/> : null}` cell; DiffStat itself keeps no width.
+  reflow the names. The `list-row-diff-stat-slot` guard fails on any
+  conditionally rendered `<DiffStat>` in a feature `.tsx` (`&&`, `||`, `??`,
+  either ternary branch); a non-row total hidden on purpose takes an
+  allowlist entry with its rationale. DiffStat itself keeps no width.
 - Icon-only copy buttons are `CopyIconButton`
   (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
   it always stops click propagation, and the `raw-copy-icon-button` guard in

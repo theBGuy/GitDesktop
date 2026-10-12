@@ -8,15 +8,88 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { maskNonCode, ScanError } from "./lib/ts-mask.mjs";
 
 /** What every installed-only suite reads to turn a missing dependency into a
- *  failure. Matched as a whole token, it marks a suite the enforced step must
- *  list, however the suite words its skip. */
+ *  failure. Reading it marks a suite the enforced step must list, however the
+ *  suite words its skip. */
 export const CARRIER_TOKEN = "process.env.GD_EXPECT_DEPS";
 
-const CARRIER = new RegExp(
-  `(?<![\\w$.])${CARRIER_TOKEN.replaceAll(".", "\\.")}(?![\\w$])`,
+const VAR = "GD_EXPECT_DEPS";
+const ENV = String.raw`(?<![\w$.])process\s*\??\.\s*env`;
+const DOT_READ = new RegExp(String.raw`${ENV}\s*\??\.\s*${VAR}(?![\w$])`, "g");
+const BRACKET_OPEN = new RegExp(String.raw`${ENV}\s*(?:\?\.)?\s*\[\s*`, "g");
+const DESTRUCTURE = new RegExp(
+  String.raw`\{([^{}]*)\}\s*=\s*${ENV}(?![\w$])`,
+  "g",
 );
+const BARE_VAR = new RegExp(String.raw`(?<![\w$])${VAR}(?![\w$])`, "g");
+const QUOTED_VAR = new RegExp(String.raw`(['"\x60])${VAR}\1`, "g");
+const QUOTED_KEY_AT = new RegExp(String.raw`^(['"\x60])${VAR}\1`);
+
+/**
+ * Whether a suite reads GD_EXPECT_DEPS, judged on code only (comments and
+ * string, template and regex text masked by maskNonCode, so a fixture string
+ * can't make a carrier). Recognized reads: `process.env.X` with optional `?.`
+ * and whitespace around the dots, `process.env[...]` with a ', " or ` quoted
+ * key, and destructuring from process.env. Any other code-level mention of the
+ * name (an identifier, or a string holding exactly the name) throws: a read the
+ * gate can't recognize must not pass as "not a carrier". So does a ScanError.
+ */
+export function readsExpectDeps(src, file) {
+  let masked;
+  try {
+    masked = maskNonCode(src, false);
+  } catch (err) {
+    if (err instanceof ScanError)
+      throw new Error(`could not scan ${file}: ${err.message}`);
+    throw err;
+  }
+  const seen = new Set();
+  let carrier = false;
+  for (const m of masked.matchAll(DOT_READ)) {
+    seen.add(m.index + m[0].length - VAR.length);
+    carrier = true;
+  }
+  for (const m of masked.matchAll(BRACKET_OPEN)) {
+    const q = m.index + m[0].length;
+    const key = src.slice(q).match(QUOTED_KEY_AT);
+    if (
+      key &&
+      masked[q] === key[1] &&
+      /^\s*\]/.test(masked.slice(q + key[0].length))
+    ) {
+      seen.add(q);
+      carrier = true;
+    }
+  }
+  for (const m of masked.matchAll(DESTRUCTURE)) {
+    const start = m.index + 1;
+    for (const k of m[1].matchAll(BARE_VAR)) {
+      // A key, not a rename target: led by the brace or a comma, followed by
+      // the next entry, a rename or a default.
+      if (
+        !/(?:^|,)\s*$/.test(m[1].slice(0, k.index)) ||
+        !/^\s*(?:[,:=]|$)/.test(m[1].slice(k.index + VAR.length))
+      )
+        continue;
+      seen.add(start + k.index);
+      carrier = true;
+    }
+  }
+  const unsupported = [
+    ...[...masked.matchAll(BARE_VAR)].map((m) => m.index),
+    // A string holding exactly the name, in code (its quote survived masking).
+    ...[...src.matchAll(QUOTED_VAR)]
+      .filter((m) => masked[m.index] === m[1])
+      .map((m) => m.index),
+  ].filter((at) => !seen.has(at));
+  if (unsupported.length > 0)
+    throw new Error(
+      `unsupported GD_EXPECT_DEPS read in ${file}; use ${CARRIER_TOKEN}`,
+    );
+  return carrier;
+}
 
 /** The frontend.yml step that is those suites' one enforced run. */
 export const ENFORCED_STEP = "Node suites needing node_modules (enforced)";
@@ -257,10 +330,15 @@ function main() {
       .filter((name) => name.endsWith(".test.mjs"))
       .map((name) => `scripts/${name}`);
     if (suites.length === 0) throw new Error("no scripts/*.test.mjs found");
-    const carriers = suites.filter((suite) =>
-      CARRIER.test(readFileSync(join(root, suite), "utf8")),
-    );
     const failures = [];
+    const carriers = suites.filter((suite) => {
+      try {
+        return readsExpectDeps(readFileSync(join(root, suite), "utf8"), suite);
+      } catch (err) {
+        failures.push(err.message);
+        return false;
+      }
+    });
     if (carriers.length === 0)
       failures.push(`no suite reads ${CARRIER_TOKEN}; refusing a vacuous pass`);
     const missing = unlistedCarriers(carriers, listed);

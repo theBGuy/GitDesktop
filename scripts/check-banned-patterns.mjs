@@ -378,7 +378,7 @@ const DIFF_STAT_PAIR_RE = new RegExp(
 // and strings can neither trigger nor hide a hit. Over-matches loudly (a total
 // hidden on its own flag) — such a site takes an allowlist entry.
 const CONDITIONAL_DIFF_STAT_RE =
-  /(?:&&|\|\||\?\?|\?|:)\s*(?:\(\s*)*<DiffStat\b(?!Slot)/g;
+  /(?:&&|\|\||\?\?|\?|:)\s*(?:\(\s*)*<DiffStat\b/g;
 
 /** Scanner for {@link CONDITIONAL_DIFF_STAT_RE}. A file ts-mask can't lex
  *  throws with its path: the check refuses rather than passing unread code. */

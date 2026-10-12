@@ -59,6 +59,7 @@ import {
 import {
   CARRIER_TOKEN as ENFORCED_CARRIER_TOKEN,
   parseEnforcedSuites,
+  readsExpectDeps,
   unlistedCarriers,
 } from "./check-enforced-node-suites.mjs";
 import {
@@ -7635,4 +7636,87 @@ test("enforced-node-suites CLI fails an unlisted carrier (negative control)", ()
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Carrier recognition: every equivalent read of the variable marks a suite;
+// any other code-level mention fails closed. The variable's name is spliced
+// in so this file's own code never reads it.
+const EXPECT_VAR = ENFORCED_CARRIER_TOKEN.split(".").at(-1);
+const UNSUPPORTED_READ = /unsupported GD_EXPECT_DEPS read in s\.mjs/;
+
+test("enforced-node-suites: a single-quoted bracket read is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process.env['${EXPECT_VAR}']) x();`, "s.mjs"),
+    true,
+  );
+});
+
+test("enforced-node-suites: a double-quoted bracket read is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process.env["${EXPECT_VAR}"]) x();`, "s.mjs"),
+    true,
+  );
+});
+
+test("enforced-node-suites: an optional-chaining read is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process?.env?.${EXPECT_VAR}) x();`, "s.mjs"),
+    true,
+  );
+});
+
+test("enforced-node-suites: a read with whitespace around the dots is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process . env\n  . ${EXPECT_VAR}) x();`, "s.mjs"),
+    true,
+  );
+});
+
+test("enforced-node-suites: destructuring from process.env is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(
+      `const { CI, ${EXPECT_VAR}: expect = "" } = process.env;`,
+      "s.mjs",
+    ),
+    true,
+  );
+});
+
+test("enforced-node-suites: an unrecognized read fails closed", () => {
+  assert.throws(
+    () =>
+      readsExpectDeps(
+        `const e = process.env;\nif (e.${EXPECT_VAR}) x();`,
+        "s.mjs",
+      ),
+    UNSUPPORTED_READ,
+  );
+});
+
+test("enforced-node-suites: the name held in a string key fails closed", () => {
+  assert.throws(
+    () =>
+      readsExpectDeps(
+        `const k = "${EXPECT_VAR}";\nif (process.env[k]) x();`,
+        "s.mjs",
+      ),
+    UNSUPPORTED_READ,
+  );
+});
+
+test("enforced-node-suites: the name inside text or a comment is neither", () => {
+  assert.equal(
+    readsExpectDeps(
+      `const yaml = '  ${EXPECT_VAR}: "1"';\n// process.env.${EXPECT_VAR}\n`,
+      "s.mjs",
+    ),
+    false,
+  );
+});
+
+test("enforced-node-suites: a suite it cannot scan fails closed", () => {
+  assert.throws(
+    () => readsExpectDeps("const a = 'unterminated\nconst b = 1;\n", "s.mjs"),
+    /could not scan s\.mjs/,
+  );
 });
