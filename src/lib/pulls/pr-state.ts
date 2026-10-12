@@ -21,8 +21,7 @@ interface PrStatePresentation {
 /** The kind half of `word`: GitLab calls its change requests merge requests. */
 export type PrNoun = "pull request" | "merge request";
 
-/** What each forge calls a pull request: the one spelling every surface reads
- *  (plural as `${PR_NOUN[provider]}s`). */
+/** What each forge calls a pull request (plural as `${PR_NOUN[provider]}s`). */
 export const PR_NOUN: Record<ForgeProvider, PrNoun> = {
   github: "pull request",
   gitlab: "merge request",

@@ -83,6 +83,8 @@ export function mergeStripArm(input: MergeStripInputs): {
         return "pending";
       case resolve.found:
         return "resume";
+      // Above the still-computing answer: GitHub reports UNKNOWN for the whole
+      // update window, which would hide the update the user just started.
       case input.updating:
         return "updating";
       // GitHub answers UNKNOWN while it computes and the ladder re-polls: the same
@@ -93,6 +95,9 @@ export function mergeStripArm(input: MergeStripInputs): {
       // refresh failed on stays.
       case mergeability.isError && mergeability.data === undefined:
         return "unreachable";
+      // A BLOCKED detail rides a settled "mergeable" answer, so it sits below the
+      // answer-shaped rungs; rules the base enforces outrank a base that has only
+      // moved on (`behind`).
       case input.blocked:
         return "blocked";
       case divergence.enabled && unanswered(divergence):

@@ -126,6 +126,27 @@ test("a still-computing answer waits while the poll climbs, then reads unknown",
   );
 });
 
+test("a running update outranks the still-computing answer it causes", () => {
+  const r = mergeStripArm(
+    inputs({
+      updating: true,
+      mergeability: {
+        data: { state: "checking" },
+        isFetching: false,
+        isError: false,
+        polling: true,
+      },
+    }),
+  );
+  assert.equal(r.arm, "updating");
+});
+
+test("the base's rules outrank a base that has only moved on", () => {
+  // The default mergeability is a settled "mergeable" answer, which BLOCKED rides.
+  const r = mergeStripArm(inputs({ blocked: true, behindBy: 3 }));
+  assert.equal(r.arm, "blocked");
+});
+
 test("mergeable reads clean, and so does a clean local prediction", () => {
   assert.equal(mergeStripArm(inputs()).arm, "clean");
   for (const status of PREVIEW_NO_CONFLICT) {

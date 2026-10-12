@@ -152,7 +152,7 @@ export function usePrTasks(repo: string, number: number | null) {
   });
 }
 
-/** Shared by {@link usePrTasks} and the PR view's switch prefetch. */
+/** {@link usePrTasks}'s query options. */
 export const prTasksOptions = (repo: string, number: number) =>
   queryOptions({
     queryKey: prTasksKey(repo, number),

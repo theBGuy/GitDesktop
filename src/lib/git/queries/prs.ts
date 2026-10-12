@@ -1005,7 +1005,7 @@ export function usePrefetchPr(repo: string, lens: RemoteLens) {
   );
 }
 
-/** Shared by {@link usePrReactions} and the PR view's switch prefetch. */
+/** {@link usePrReactions}'s query options. */
 export const prReactionsOptions = (
   repo: string,
   number: number,

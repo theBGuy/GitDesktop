@@ -449,8 +449,8 @@ export function RemoteIssueView({
   // The rendered details are another issue's placeholder: the loading and
   // offline arms, never a hold (the held issue's details are its own).
   const detailsPlaceholder = details.isPlaceholderData;
-  // Every write gate reads this, so each entry point holds while the issue on
-  // screen isn't the selected one.
+  // Handlers and in-menu items refuse on this; controls visible at rest read
+  // `detailsPlaceholder` (see `staleReason`).
   const detailsStale = hold.holding || detailsPlaceholder;
   const reactions = useIssueReactions(
     repoPath,
@@ -724,14 +724,11 @@ export function RemoteIssueView({
   }
 
   const isOpen = issue.state === "OPEN";
-  // The rendered issue may not be the selected one, which is already `number`,
-  // so everything that seeds from it or reads a verb off it holds, in two ways.
-  // Controls visible at rest read only the placeholder (`detailsPlaceholder`,
-  // `staleReason`): a hold draws none of it, its controls keeping their look
-  // inside the inert frame. Every handler, and every item painted only inside an
-  // open menu (which can sit open across the hold's start), refuses on the hold
-  // too (`detailsStale`, `heldItemReason`). Either reason ranks BELOW any
-  // permission reason: that one never lifts and is still true once it lands.
+  // Controls visible at rest hold only over the placeholder: a hold draws none
+  // of it, its controls keeping their look inside the inert frame. Handlers and
+  // items painted only inside an open menu (which can sit open as a hold
+  // starts) refuse on the hold too. Either reason ranks BELOW any permission
+  // reason: that one never lifts and is still true once the issue lands.
   const staleReason = detailsPlaceholder
     ? ISSUE_SWITCH_LOADING_REASON
     : undefined;
