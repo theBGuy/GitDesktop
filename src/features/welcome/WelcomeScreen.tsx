@@ -22,10 +22,8 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import {
-  RECENT_REPO_LIST_MAX_HEIGHT_PX,
-  RecentRepoList,
-} from "./RecentRepoList";
+import { RecentRepoList } from "./RecentRepoList";
+import { RECENT_REPO_LIST_MAX_HEIGHT_PX } from "./recent-repo-list-sizes";
 
 // Set only when recents exist: unset, the var leaves both min-heights inert.
 const RECENT_REPOS_RESERVE = {

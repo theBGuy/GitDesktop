@@ -4,22 +4,14 @@ import {
   RemoveRepoDialog,
   RepoAliasDialog,
 } from "@/features/repository/RepoDialogs";
-import {
-  REPO_LIST_MAX_HEIGHT_PX,
-  RepoList,
-} from "@/features/repository/RepoList";
+import { RepoList } from "@/features/repository/RepoList";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
-
-// This column at its tallest, which the Welcome reserves so the centered block
-// never moves: the heading row (the `text-sm` h2's line box), the `space-y-2`
-// gap, the box's `border`, and RepoList's own maximum. Each px figure mirrors
-// the markup below, so a size change edits both.
-const HEADING_ROW_PX = 20;
-const HEADING_GAP_PX = 8;
-const BOX_BORDER_PX = 2;
-export const RECENT_REPO_LIST_MAX_HEIGHT_PX =
-  HEADING_ROW_PX + HEADING_GAP_PX + BOX_BORDER_PX + REPO_LIST_MAX_HEIGHT_PX;
+import {
+  BOX_CLASS,
+  COLUMN_CLASS,
+  HEADING_CLASS,
+} from "./recent-repo-list-sizes";
 
 export function RecentRepoList() {
   const settings = useSettings();
@@ -28,9 +20,9 @@ export function RecentRepoList() {
   const [removeTarget, setRemoveTarget] = useState<RecentRepo | null>(null);
 
   return (
-    <div className="min-w-0 space-y-2">
+    <div className={COLUMN_CLASS}>
       <div className="flex items-baseline justify-between gap-2 px-1">
-        <h2 className="font-heading text-sm font-medium">Repositories</h2>
+        <h2 className={HEADING_CLASS}>Repositories</h2>
         {recents.length > 0 && (
           <span className="text-[11px] tabular-nums text-muted-foreground">
             {recents.length}
@@ -47,7 +39,7 @@ export function RecentRepoList() {
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-none border">
+        <div className={BOX_CLASS}>
           <RepoList
             onAliasRepo={setAliasTarget}
             onRemoveRepo={setRemoveTarget}
