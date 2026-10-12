@@ -6,6 +6,7 @@ import {
   type Icon,
   XCircleIcon,
 } from "@phosphor-icons/react";
+import type { ForgeProvider } from "@/lib/git/types";
 
 // A leaf on purpose: the markdown ref card draws from this too, and the issue
 // module reaches markdown, so a home under issues/ would close an import cycle.
@@ -18,7 +19,15 @@ interface PrStatePresentation {
 }
 
 /** The kind half of `word`: GitLab calls its change requests merge requests. */
-type PrNoun = "pull request" | "merge request";
+export type PrNoun = "pull request" | "merge request";
+
+/** What each forge calls a pull request: the one spelling every surface reads
+ *  (plural as `${PR_NOUN[provider]}s`). */
+export const PR_NOUN: Record<ForgeProvider, PrNoun> = {
+  github: "pull request",
+  gitlab: "merge request",
+  bitbucket: "pull request",
+};
 
 /**
  * The one PR-state table every surface draws from. Each arm carries its own

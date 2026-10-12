@@ -75,6 +75,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween } from "@/lib/time";
@@ -103,13 +104,6 @@ export const APPROVE_RUN_CONFIRM = {
   // park and run it whenever the connection returns.
   holdOffline: true,
 } as const;
-
-/** What each forge calls the requests a switch moves between, plural. */
-const PR_NOUN_PLURAL: Record<ForgeProvider, string> = {
-  github: "pull requests",
-  gitlab: "merge requests",
-  bitbucket: "pull requests",
-};
 
 /** How long a started re-run waits before re-reading the PR's checks. The
  *  mutation's own invalidation races the forge's attempt transition and can cache
@@ -1016,7 +1010,7 @@ export function ChecksRollup({
     // rather than letting a just-confirmed action go silent.
     if (switchedRef.current) {
       toast.info(
-        `You switched ${PR_NOUN_PLURAL[provider]} while the dialog was open — nothing was approved.`,
+        `You switched ${PR_NOUN[provider]}s while the dialog was open — nothing was approved.`,
       );
       return;
     }
@@ -1237,7 +1231,7 @@ export function ChecksRollup({
     },
   ].filter((s) => s.count > 0);
 
-  const prNoun = provider === "gitlab" ? "merge request" : "pull request";
+  const prNoun = PR_NOUN[provider];
   const notice = unknownListNotice({
     prNoun,
     list: "checks",

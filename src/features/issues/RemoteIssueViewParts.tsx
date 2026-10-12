@@ -443,7 +443,6 @@ export function IssueSidebar({
           disabledReason={writeItemReason ?? loadingReason}
           linkOutReason={loadingReason}
           reserve={reserve}
-          held={held}
         />
       ),
     },

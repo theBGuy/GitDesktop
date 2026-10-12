@@ -61,6 +61,18 @@ export interface EntityHoldSlot {
   role: EntitySlotRole;
 }
 
+/** The number a host's `scope#number` key ends with (the PR and issue views
+ *  key `repo#lens#number`), read after the LAST `#` so a scope may hold any. */
+export function entityKeyNumber(key: string): number {
+  return Number(key.slice(key.lastIndexOf("#") + 1));
+}
+
+/** A `scope#number` key's scope, up to and including its last `#`: two keys
+ *  share one when they name items of the same repo and lens. */
+export function entityKeyScope(key: string): string {
+  return key.slice(0, key.lastIndexOf("#") + 1);
+}
+
 /** The target painted directly, no hold. */
 export function startEntityHold(key: string, settled: boolean): EntityHold {
   return { shown: key, target: key, shownSettled: settled, since: null };

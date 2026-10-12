@@ -106,6 +106,7 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
+import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
 import { presentError } from "@/lib/error-summary";
 import {
   gitFetch,
@@ -217,6 +218,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import type { PrSection } from "@/lib/pulls/pr-section";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
@@ -235,6 +237,7 @@ import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
+import { mergeStripArm } from "./merge-strip-arm";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PendingReviewStrip } from "./PendingReviewStrip";
 import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
@@ -243,7 +246,6 @@ import {
   blockedMergeLine,
   gitlabBlockedLine,
   PR_SWITCH_LOADING_REASON,
-  type PrMergeabilityArm,
   PrMergeabilityBanner,
   type PromotionKind,
 } from "./PrMergeabilityBanner";
@@ -364,23 +366,6 @@ function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
  *  (yet) name — coverage holds today, but this keeps the four sites that
  *  guard against it in step rather than re-typing the sentence. */
 const BUSY_HOLD_FALLBACK_REASON = "Another operation is in progress";
-
-/** The PR number an `entityKey` (`repo#lens#number`) names. */
-function entityKeyNumber(key: string): number {
-  return Number(key.slice(key.lastIndexOf("#") + 1));
-}
-
-/** An `entityKey`'s repo and lens: the prefix before its number. */
-function entityKeyScope(key: string): string {
-  return key.slice(0, key.lastIndexOf("#") + 1);
-}
-
-/** Local-prediction outcomes that mean the head merges into the base cleanly. */
-const PREVIEW_NO_CONFLICT: ReadonlySet<string> = new Set([
-  "clean",
-  "up-to-date",
-  "fast-forward",
-]);
 
 /** The PR's row in any cached list page of this repo and lens, for the loading
  *  frame: its title, state, author and branches are what the header's first rows
@@ -565,7 +550,7 @@ export function RemotePrView({
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const remoteLabel = providerLabel(provider);
-  const prNoun = provider === "gitlab" ? "merge request" : "pull request";
+  const prNoun = PR_NOUN[provider ?? "github"];
   // The single lens-resolution point for this surface: every PR read/write below
   // targets the fork (origin) or its parent (upstream) — "origin" everywhere but a
   // GitHub fork whose lens is set upstream.
@@ -1600,78 +1585,31 @@ export function RemotePrView({
   // matching LocalPrView's twin, since nothing would arrive to lift the hold.
   const defaultBranchSettling = lens === "origin" && defaultBranch.isPending;
 
-  // The banner's arm: server truth, then the local prediction where the forge has
-  // none, then the resume offer — the resolve worktree is only worth its own line
-  // when there's nothing more urgent to say about the merge. `updating` outranks the
-  // still-computing answer: GitHub reports mergeability UNKNOWN for the whole async
-  // update window, which would otherwise hide the very thing the user just started.
-  // Behind-the-base and the unreachable line are the quietest of all, so they fill
-  // only an arm that would otherwise stay silent. An open pull request always keeps
-  // one line: only positive evidence earns "no conflicts", and with none to give the
-  // line says the conflicts can't be checked.
-  //
-  // Each rung waits only on its OWN input: an arm decided above a read still
-  // loading shows at once (a cached conflicting PR, offline too), while a pending
-  // read holds the one waiting line, so the strip never trades one arm for another
-  // that outranks it. A read parked offline counts as pending, and the line says
-  // why; the forge reads expose no paused flag, hence the offline term, and an
-  // errored read has answered.
-  const unanswered = (q: { data: unknown; isFetching: boolean }) =>
-    q.data === undefined && (q.isFetching || offlineHold !== undefined);
-  const mergeabilityPending = unanswered(mergeability) && !mergeability.isError;
-  const previewPending = previewEnabled && conflictPreview.isPending;
-  const resolvePending = repoTab === "pulls" && findResolve.isPending;
-  const bannerArm: PrMergeabilityArm = (() => {
-    switch (true) {
-      case !isOpenPr:
-        return null;
-      case mergeabilityPending:
-        return "pending";
-      case serverConflicting:
-        return "conflicting";
-      case previewPending:
-        return "pending";
-      case predictedConflict:
-        return "predicted";
-      case resolvePending:
-        return "pending";
-      case !!findResolve.data:
-        return "resume";
-      case updatingBranch:
-        return "updating";
-      // GitHub answers UNKNOWN while it computes and the ladder re-polls: the same
-      // waiting line as a first load, until the poll gives up.
-      case mergeability.data?.state === "checking":
-        return mergeability.polling ? "pending" : "unknown";
-      // A settled answer that a later read failed to refresh stays invisible; only a
-      // read that never landed leaves the banner with nothing but the local prediction.
-      case forgeUnreachable:
-        return "unreachable";
-      // Below the answer-shaped arms above only for reading order: a BLOCKED detail
-      // rides a settled "mergeable" answer, which neither `checking` nor
-      // `unreachable` can be true of. It does outrank `behind` — rules the base is
-      // enforcing are more pressing than a base that has merely moved on.
-      case blockedByRules || gitlabBlockedNote !== null:
-        return "blocked";
-      case divergenceEnabled && unanswered(divergence):
-        return "pending";
-      case behindBy > 0:
-        return "behind";
-      case serverState === "mergeable" ||
-        (previewEnabled &&
-          PREVIEW_NO_CONFLICT.has(conflictPreview.data?.status ?? "")):
-        return "clean";
-      default:
-        return "unchecked";
-    }
-  })();
-  // The waiting line blames the connection only when the rung it waits on is a
-  // forge read, which parks offline; the local prediction and the resolve-worktree
-  // read never park, so offline says nothing about them.
-  const pendingOffline =
-    bannerArm === "pending" &&
-    offlineHold !== undefined &&
-    (mergeabilityPending || (!previewPending && !resolvePending));
+  // The banner's arm and whether its waiting line blames the connection. The
+  // ladder and its rung order live in `mergeStripArm`, pinned by its test.
+  const { arm: bannerArm, pendingOffline } = mergeStripArm({
+    isOpen: isOpenPr,
+    offline: offlineHold !== undefined,
+    mergeability,
+    preview: {
+      enabled: previewEnabled,
+      isPending: conflictPreview.isPending,
+      data: conflictPreview.data,
+    },
+    resolve: {
+      enabled: repoTab === "pulls",
+      isPending: findResolve.isPending,
+      found: !!findResolve.data,
+    },
+    updating: updatingBranch,
+    blocked: blockedByRules || gitlabBlockedNote !== null,
+    divergence: {
+      enabled: divergenceEnabled,
+      data: divergence.data,
+      isFetching: divergence.isFetching,
+    },
+    behindBy,
+  });
   // Both halves below read `details`, which can serve ANOTHER pull request's
   // placeholder — and revisiting a blocked PR serves its cached mergeability
   // synchronously, so the arm can be "blocked" while the base ref and checks belong to
@@ -2189,13 +2127,12 @@ export function RemotePrView({
     if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
       return;
     if (
-      withComment
-        ? refuseIfSwitched(
-            closeIn,
-            `your comment was posted, but the ${prNoun} wasn't closed`,
-            "before the close started",
-          )
-        : refuseIfSwitched(closeIn, "nothing was closed")
+      withComment &&
+      refuseIfSwitched(
+        closeIn,
+        `your comment was posted, but the ${prNoun} wasn't closed`,
+        "before the close started",
+      )
     )
       return;
     try {

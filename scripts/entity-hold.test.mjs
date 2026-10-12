@@ -17,6 +17,8 @@ import {
   ENTITY_HOLD_BOUND_MS,
   entityHoldPhase,
   entityHoldSlots,
+  entityKeyNumber,
+  entityKeyScope,
   expireEntityHold,
   isEntityHolding,
   REVEAL_HIDDEN,
@@ -375,4 +377,19 @@ test("arriving while a hold keeps another item paints the reveal frame", () => {
     shownKey: "A",
   });
   assert.equal(guard.revealing, true);
+});
+
+test("a key reads its number after the LAST #, and its scope up to it", () => {
+  const key = "C:/repos/a#b#origin#48";
+  assert.equal(entityKeyNumber(key), 48);
+  assert.equal(entityKeyScope(key), "C:/repos/a#b#origin#");
+});
+
+test("keys share a scope only within one repo and lens", () => {
+  assert.equal(entityKeyScope("/r#origin#7"), entityKeyScope("/r#origin#48"));
+  assert.notEqual(
+    entityKeyScope("/r#origin#7"),
+    entityKeyScope("/r#upstream#7"),
+  );
+  assert.notEqual(entityKeyScope("/r#origin#7"), entityKeyScope("/s#origin#7"));
 });

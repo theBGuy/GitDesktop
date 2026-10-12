@@ -65,7 +65,6 @@ export function IssueDevelopment({
   disabledReason,
   linkOutReason,
   reserve = false,
-  held = false,
 }: {
   repoPath: string;
   /** Whose development the section lists. */
@@ -86,9 +85,6 @@ export function IssueDevelopment({
   /** The provider is known to carry this section: the empty state's line is
    *  held while the read is out, and says so when it can't load. */
   reserve?: boolean;
-  /** The host is holding this issue on screen while another loads. `inert`
-   *  can't reach the portaled dialog, so this shuts it. */
-  held?: boolean;
 }) {
   const dev = useIssueDevelopment(repoPath, number, lens);
   const createBranch = useCreateLinkedBranch(repoPath, lens);
@@ -101,7 +97,6 @@ export function IssueDevelopment({
     number: number;
   } | null>(null);
   const [branchName, setBranchName] = useState("");
-  if (held && branchOpen) setBranchOpen(false);
   const { hostRef, retryRef } = useRetryFocusRescue(
     reserve && sectionReadFailed(dev),
   );

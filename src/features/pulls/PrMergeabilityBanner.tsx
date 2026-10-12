@@ -21,6 +21,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
 
@@ -169,13 +170,6 @@ export type PromotionKind = "default" | "configured" | null;
 export const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
   default: " is the repository's default branch",
   configured: " is a promotion branch for this repository",
-};
-
-/** What each forge calls the request the strip describes. */
-const PR_NOUN: Record<ForgeProvider, string> = {
-  github: "pull request",
-  gitlab: "merge request",
-  bitbucket: "pull request",
 };
 
 /** An unresolved provider reads as GitHub, the app's default forge. */
