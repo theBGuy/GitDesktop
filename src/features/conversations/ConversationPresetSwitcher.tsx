@@ -32,8 +32,11 @@ const SEGMENTS: Record<
  * triple of `aria-pressed` buttons mirroring the Open/Closed state filter and the
  * Fork/Upstream lens.
  *
- * Nothing renders when the provider can't express the "mine" axes server-side:
- * the popover's disabled rows carry that explanation, so the toolbar stays calm.
+ * Nothing renders once the forge check settles on a provider that can't express
+ * the "mine" axes server-side: the popover's disabled rows carry that
+ * explanation, so the toolbar stays calm. While that check runs, the feature's
+ * whole segment set holds with `probeReason`, so the row is in place from the
+ * first frame and only trims or drops segments once, at settle.
  * `preset` is null when the user has hand-picked axes matching no segment — every
  * button then reads unpressed, and the funnel badge carries the detail.
  */
@@ -44,6 +47,7 @@ export function ConversationPresetSwitcher({
   canFilterMine,
   canGroupByReview,
   disabledReason,
+  probeReason,
 }: {
   feature: ConversationFeature;
   preset: ConversationPreset | null;
@@ -57,12 +61,21 @@ export function ConversationPresetSwitcher({
    *  reason rather than hidden: the segments are the panel's scope readout, and a
    *  toolbar that empties on every repo switch is worse than one that waits. */
   disabledReason?: string | null;
+  /** Non-null while the forge check has no answer yet: which segments exist is
+   *  still unknown, so every one holds with this reason, ahead of
+   *  `disabledReason`. Required, so no caller can skip the waiting arm. */
+  probeReason: string | null;
 }) {
-  if (!canFilterMine) return null;
+  if (!canFilterMine && probeReason === null) return null;
 
-  const segments = SEGMENTS[feature].filter(
-    (s) => s.value !== "needs-review" || canGroupByReview,
-  );
+  const waiting = !canFilterMine;
+  // Waiting paints the full set: GitHub, the usual answer, keeps every segment.
+  const segments = waiting
+    ? SEGMENTS[feature]
+    : SEGMENTS[feature].filter(
+        (s) => s.value !== "needs-review" || canGroupByReview,
+      );
+  const heldReason = waiting ? probeReason : disabledReason;
 
   return (
     <div className="flex items-center gap-1">
@@ -74,8 +87,8 @@ export function ConversationPresetSwitcher({
           className="px-1.5"
           aria-pressed={preset === s.value}
           title={s.title}
-          disabled={!!disabledReason}
-          reason={disabledReason}
+          disabled={!!heldReason}
+          reason={heldReason}
           onClick={() => onPreset(s.value)}
         >
           {s.label}

@@ -5,6 +5,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import * as api from "../api";
 import type { DiscussionDetails } from "../types";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
@@ -25,6 +26,7 @@ export function useDiscussionMeta(repo: string, enabled: boolean) {
     queryFn: () => api.ghDiscussionCategories(repo),
     enabled,
     staleTime: 5 * 60_000,
+    gcTime: REPO_SHELL_GC_TIME,
     retry: false,
   });
 }

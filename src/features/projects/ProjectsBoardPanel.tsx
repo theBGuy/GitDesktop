@@ -939,20 +939,22 @@ function BoardSkeleton() {
 }
 
 /** The toolbar row's shape while the board loads, mirroring the real row's
- *  container and control sizes so the skeleton below already sits at the
- *  board's final offset. Inert: no controls, no landing markers, and no status
- *  of its own (BoardSkeleton announces the load). */
+ *  container and each in-flow control's width, in order, so the row wraps
+ *  where the loaded one does and the skeleton below already sits at the
+ *  board's final offset. The button widths are rem so they track the text
+ *  they stand in for. Inert: no controls, no landing markers, and no status of
+ *  its own (BoardSkeleton announces the load). */
 function BoardToolbarSkeleton() {
   return (
     <div
       aria-hidden
       className="@container/toolbar mb-2 flex shrink-0 flex-wrap items-center gap-2"
     >
-      <Skeleton className="h-7 w-40" />
+      <Skeleton className="h-7 w-64" />
       <Skeleton className="size-7" />
-      <Skeleton className="h-7 w-24" />
+      <Skeleton className="h-7 w-[5.85rem]" />
       <div className="h-5 min-w-3 flex-1 basis-0" />
-      <Skeleton className="h-7 w-28" />
+      <Skeleton className="h-7 w-[7.65rem]" />
       <Skeleton className="h-4 w-20" />
     </div>
   );
@@ -5907,16 +5909,22 @@ export function ProjectsBoardPanel({
               if (typeof v === "string") switchProject(v);
             }}
           >
-            <SelectTrigger size="sm" aria-label="Project" className="max-w-64">
+            {/* Fixed width, so the row wraps the same at any title length and
+                BoardToolbarSkeleton can mirror it. */}
+            <SelectTrigger size="sm" aria-label="Project" className="w-64">
               {/* An ellipsis where the title is cut, so a cut on a word boundary
                   never reads as the whole title. `block!` because the trigger
-                  styles its value as a flex line-clamp, which clips without one. */}
+                  styles its value as a flex line-clamp, which clips without one;
+                  `flex-initial` so a short title leaves the slack before the
+                  caret instead of between it and "(closed)". */}
               <SelectValue
-                className="block! min-w-0 truncate"
+                className="block! min-w-0 flex-initial truncate"
                 onMouseEnter={clipTitleFromText}
               />
               {project?.closed === true && (
-                <span className="shrink-0 text-muted-foreground">(closed)</span>
+                <span className="mr-auto shrink-0 text-muted-foreground">
+                  (closed)
+                </span>
               )}
             </SelectTrigger>
             <SelectContent>

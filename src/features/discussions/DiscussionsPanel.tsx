@@ -52,6 +52,9 @@ import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { CreateDiscussionDialog } from "./CreateDiscussionDialog";
 
+/** Loading rows for the list, shared by the probe and list arms. */
+const DISCUSSION_SKELETON_ROWS = 3;
+
 /** What the forge and meta probes draw in place of the list, ahead of it. */
 type ProbeArm =
   | "skeleton"
@@ -180,10 +183,20 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (t) => String(t.number),
   });
 
-  // The forge-status and discussions-meta probes both precede any list data, so
-  // both render the same single-row placeholder.
+  // The probes paint the list arm's row count so the probe→list flip never
+  // grows the list. A retry after either probe failed flips error card ↔
+  // skeleton each time, so 1 row keeps that flip small.
   const probeSkeleton = (
-    <ListRowSkeletons rows={1} lines={3} indent={false} name="discussions" />
+    <ListRowSkeletons
+      rows={
+        gh.errorUpdateCount > 0 || meta.errorUpdateCount > 0
+          ? 1
+          : DISCUSSION_SKELETON_ROWS
+      }
+      lines={3}
+      indent={false}
+      name="discussions"
+    />
   );
 
   // Refetching a disabled list would fire a read the meta probe hasn't cleared;
@@ -384,7 +397,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       default:
         return (
           <ListRowSkeletons
-            rows={3}
+            rows={DISCUSSION_SKELETON_ROWS}
             lines={3}
             indent={false}
             name="discussions"

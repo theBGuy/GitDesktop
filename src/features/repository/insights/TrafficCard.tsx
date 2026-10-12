@@ -1,6 +1,6 @@
 import type { RepoTraffic, TrafficItem } from "@/lib/git/types";
 import { TrafficChart } from "./charts";
-import { fmt, SectionTitle, Stat } from "./primitives";
+import { Empty, fmt, SectionTitle, Stat } from "./primitives";
 
 function ItemList({
   items,
@@ -34,10 +34,10 @@ function ItemList({
 export function TrafficCard({ data }: { data: RepoTraffic }) {
   if (!data.available) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <Empty>
         Traffic needs push access — GitHub only shares views and clones with the
         repository's maintainers.
-      </p>
+      </Empty>
     );
   }
   return (

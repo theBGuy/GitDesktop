@@ -77,6 +77,10 @@ import {
  *  The cap is GitHub's, so other providers' totals render as reported. */
 const FILTERED_RUN_WINDOW = 1000;
 
+/** Loading rows for the run list, shared by the forge probe and the list read
+ *  so the probe→list flip never grows the list. */
+const RUN_SKELETON_ROWS = 3;
+
 /** The loaded pages as one list, deduped by run id with the first occurrence
  *  winning. Page-number paging over a list that PREPENDS shifts rows across the
  *  boundary whenever a refetch lands after new runs started, so the same run can come
@@ -372,7 +376,12 @@ export function ActionsPanel({
           className="pt-2"
         />
         {forge.isPending ? (
-          <ListRowSkeletons rows={2} lines={3} name={ciFeature} />
+          // After a failed probe each retry flips error ↔ skeleton, so 1 row.
+          <ListRowSkeletons
+            rows={forge.errorUpdateCount > 0 ? 1 : RUN_SKELETON_ROWS}
+            lines={3}
+            name={ciFeature}
+          />
         ) : !ghReady ? (
           <ForgeNotReady
             repoPath={repoPath}
@@ -389,7 +398,11 @@ export function ActionsPanel({
           </p>
         ) : runs.isPending ||
           (runs.isError && allRuns.length === 0 && runs.isFetching) ? (
-          <ListRowSkeletons rows={3} lines={3} name={ciFeature} />
+          <ListRowSkeletons
+            rows={RUN_SKELETON_ROWS}
+            lines={3}
+            name={ciFeature}
+          />
         ) : refreshFailed(runs) && allRuns.length === 0 ? (
           // Only when there is nothing to show: a failed Load more also flips isError
           // while every already-loaded page survives in the cache, and that failure

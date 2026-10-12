@@ -473,6 +473,13 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             canFilterMine={canFilterMine}
             canGroupByReview={false}
             disabledReason={listFilter.prefsReason}
+            // Only before the first failure: a refetch of an errored probe with
+            // no data reads "checking" again, and would re-flash the row.
+            probeReason={
+              probe === "checking" && gh.errorUpdateCount === 0
+                ? forgeProbeReason(probe, "switch the list's scope")
+                : null
+            }
           />
         }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
@@ -568,6 +575,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         onToggleLocal={toggleLocal}
         onToggleRemote={toggleRemote}
         ghPending={gh.isPending}
+        ghProbeFailed={gh.errorUpdateCount > 0}
         ghReady={ghReady}
         remoteNotReadySlot={bitbucketNotReadySlot}
         listPending={issueList.isPending}

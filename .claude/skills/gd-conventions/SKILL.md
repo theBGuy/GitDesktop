@@ -273,6 +273,9 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   cold load doesn't shift the list as rows arrive. It carries the group's
   `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
   not a call-site component.
+- A panel with a probe arm and a list arm paints the SAME skeleton row count in
+  both (one shared constant or prop), so the probe→list flip never grows the
+  list; after a failed probe, retries may pin 1 row.
 - The Changes pane swaps files through a two-slot hold: `FileSlot` in
   `src/features/diff/DiffViewer.tsx` is the reference implementation, with its
   transitions in `diff-pane-slots.ts` and the `DiffPaneHold` context

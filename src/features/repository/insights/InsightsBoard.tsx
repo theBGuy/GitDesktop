@@ -41,12 +41,14 @@ const WINDOW_WEEKS = 52;
  *  caption and the table toggle), so loading, empty and loaded paint one
  *  height. A min, not a fixed height: an expanded data table, or a list longer
  *  than its reservation, still grows the card. `contributors` is exactly the
- *  six-row skeleton (6 x 26px rows + 5 x 6px gaps). */
+ *  six-row skeleton (6 x 26px rows + 5 x 6px gaps). `traffic` is sized for
+ *  4-digit counts at the 640 px window floor. */
 const CARD_BODY = {
   chart: "min-h-57",
   community: "min-h-48",
   dependencies: "min-h-74",
   contributors: "min-h-46.5",
+  traffic: "min-h-72.5",
 } as const;
 
 /** Rows the contributors skeleton reserves: a typical list. Shorter lists keep
@@ -77,9 +79,9 @@ function ContributorsSkeleton() {
  *  referrer and path lists below it may still grow the card. */
 function TrafficSkeleton() {
   return (
-    <div aria-hidden className="space-y-3">
+    <div aria-hidden className="flex flex-1 flex-col gap-3">
       <Skeleton className="h-6 w-full" />
-      <Skeleton className="h-48 w-full" />
+      <Skeleton className="min-h-48 w-full flex-1" />
     </div>
   );
 }
@@ -354,7 +356,11 @@ export function InsightsBoard({
           )}
 
           {(canGhOnly || forgeDetecting) && (
-            <InsightCard title="Traffic" className="xl:col-span-2">
+            <InsightCard
+              title="Traffic"
+              className="xl:col-span-2"
+              bodyClassName={CARD_BODY.traffic}
+            >
               {traffic.isPending ? (
                 <TrafficSkeleton />
               ) : traffic.data ? (

@@ -268,6 +268,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   onToggleRemote: () => void;
   // remote (provider) section
   ghPending: boolean;
+  /** The forge probe has failed at least once. A retry after that flips error
+   *  card ↔ skeleton on each refetch, so its skeleton drops to 1 row. */
+  ghProbeFailed: boolean;
   ghReady: boolean;
   /** The provider's display name for the section header (default "GitHub"). */
   remoteLabel?: string;
@@ -284,8 +287,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   onSelectRemote: (item: R) => void;
   onRemoteHover: (item: R) => void;
   renderRemoteRow: (item: R) => ReactNode;
-  /** Skeleton rows while the GitHub list loads (PR=2, issue=3) — the row COUNT,
-   *  not lines; see `skeletonRowLines`. */
+  /** Skeleton rows while the forge probe and then the list load (PR=2,
+   *  issue=3), one count for both so the probe→list flip never grows the list.
+   *  The row COUNT, not lines; see `skeletonRowLines`. */
   remoteSkeletonRows: number;
   /** Lines per skeleton row: match the panel's real row layout (three-line
    *  PR rows vs two-line issue rows); `remoteSkeletonRows` sets the count. */
@@ -430,6 +434,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     onToggleLocal,
     onToggleRemote,
     ghPending,
+    ghProbeFailed,
     ghReady,
     remoteLabel = "GitHub",
     remoteNotReadySlot,
@@ -578,7 +583,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
       case "gh-skeleton":
         return (
           <ListRowSkeletons
-            rows={1}
+            rows={ghProbeFailed ? 1 : remoteSkeletonRows}
             lines={skeletonRowLines}
             name={remoteNoun}
           />

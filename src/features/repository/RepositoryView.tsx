@@ -52,6 +52,7 @@ import { CommitDialog } from "@/features/commit/CommitDialog";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
+import { DiffRestingFallback } from "@/features/diff/DiffRestingFallback";
 import { DiscussionsPanel } from "@/features/discussions/DiscussionsPanel";
 import { DiscussionView } from "@/features/discussions/DiscussionView";
 import { BlameDialog } from "@/features/history/BlameDialog";
@@ -144,9 +145,9 @@ const SessionView = lazy(() =>
   })),
 );
 
-// The diff viewer pulls in the @git-diff-view stack; lazy it so that chunk
-// loads with the first diff render rather than on boot. It sits in the default
-// "changes" tab, so the load happens on first paint (tens of ms from disk).
+// Lazy keeps the @git-diff-view stack off the boot chunk. Its first render per
+// page load suspends ~300 ms even with the module cached (react-dom throttles
+// the reveal), so the Changes boundary below paints the pane's resting frame.
 const DiffViewer = lazy(() =>
   import("@/features/diff/DiffViewer").then((m) => ({
     default: m.DiffViewer,
@@ -986,12 +987,10 @@ export function RepositoryView() {
         </aside>
         <main className="min-w-0 flex-1">
           <TabPanel active={repoTab === "changes"}>
-            {/* rows={[]}: this boundary is on the boot path and DiffViewer's
-                resting state is a centered placeholder — skeleton bars would
-                flash where the app otherwise paints nothing. */}
-            <Suspense
-              fallback={<LazyPanelFallback name="the diff" rows={[]} />}
-            >
+            {/* The reveal lands ≥300 ms after the fallback commits (react-dom's
+                fallback throttle), so the fallback must equal DiffViewer's
+                settled empty state or first open lands in two steps. */}
+            <Suspense fallback={<DiffRestingFallback repoPath={repoPath} />}>
               <DiffViewer repoPath={repoPath} />
             </Suspense>
           </TabPanel>

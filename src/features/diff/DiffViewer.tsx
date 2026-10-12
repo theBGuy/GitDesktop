@@ -107,6 +107,7 @@ import {
   settlePane,
   startPaneHold,
 } from "./diff-pane-slots";
+import { restingDiffMessage } from "./diff-resting-message";
 import {
   collapseAllContext,
   diffRendersRows,
@@ -208,15 +209,12 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
         <ConflictFileView repoPath={repoPath} path={view.key} />
       );
     }
-    const treeClean =
-      !status.isPending && (status.data?.entries.length ?? 0) === 0;
     return (
       <DiffPlaceholder
-        message={
-          treeClean
-            ? "No changes to review"
-            : "Select a file to see its changes"
-        }
+        message={restingDiffMessage(
+          status.isPending,
+          status.data?.entries.length ?? 0,
+        )}
       />
     );
   };
@@ -264,10 +262,12 @@ function paneTarget(
 const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {
   shown: "h-full",
   held: "h-full",
-  // Stacked invisibly over the held slot (absolute, rendered after it) at full
-  // size, so container queries, the split/unified measure and row measurement
-  // are final before it shows.
-  preparing: "invisible absolute inset-0",
+  // Stacked over the held slot (absolute, rendered after it) at full size, so
+  // container queries, the split/unified measure and row measurement are final
+  // before it shows. Hidden by a full clip, never `invisible`: the vendored
+  // Button's transition-all animates inherited visibility, so its buttons would
+  // paint a frame late at promotion. Opacity is out too (PLACEHOLDER_FADE).
+  preparing: "absolute inset-0 [clip-path:inset(50%)]",
 };
 
 /** The no-file placeholder or a conflict view. Only the placeholder is ever
