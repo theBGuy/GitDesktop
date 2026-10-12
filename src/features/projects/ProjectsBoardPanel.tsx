@@ -6581,7 +6581,6 @@ export function ProjectsBoardPanel({
       {bodyLoading && hintUnseen && <SelectionHintStrip noun={noun} />}
       {!bodyLoading &&
         showBoardChrome &&
-        settings.data &&
         hintUnseen &&
         shown >= 2 &&
         selectionSize <= 1 && (

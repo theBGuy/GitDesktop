@@ -141,7 +141,7 @@ export function InsightCard({
         className={cn(
           "flex flex-col",
           PLACEHOLDER_FADE,
-          stale && "opacity-60",
+          stale && "opacity-80",
           bodyClassName,
         )}
       >

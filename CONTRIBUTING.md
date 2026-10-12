@@ -131,9 +131,9 @@ parity of each Tauri package's npm and crate halves (each declared npm half
 needing a crate half to compare against), a single resolved version in
 `pnpm-lock.yaml` for each CodeMirror/Lezer core package, and parity between
 the AppImage guard's allowed exports and the Rust child-environment tables,
-and that every node suite which skips without `node_modules` is listed in
-`frontend.yml`'s installed, enforced step (otherwise its skipped tests run in
-no CI job).
+and that every node suite which reads `GD_EXPECT_DEPS` (the ones that skip
+without `node_modules`) is listed in `frontend.yml`'s installed, enforced step
+(otherwise its skipped tests run in no CI job).
 
 The pattern, Rust-invariant, and surface checks carry allowlists; the AppImage
 environment-twins check carries an exemption map. They ratchet one way

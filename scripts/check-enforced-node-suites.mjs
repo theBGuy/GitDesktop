@@ -1,16 +1,22 @@
 #!/usr/bin/env node
-// A node suite that skips without node_modules (the installless guards job)
-// names frontend.yml's installed step as its enforced run, so that step must
-// list it: an unlisted suite's skipped tests run in no CI job at all. This
-// gate needs only Node stdlib because CI runs it before installing anything.
+// A node suite that reads GD_EXPECT_DEPS skips without node_modules (the
+// installless guards job) and relies on frontend.yml's installed step, which
+// sets that variable, as its enforced run; so that step must list it, or the
+// suite's skipped tests run in no CI job at all. This gate needs only Node
+// stdlib because CI runs it before installing anything.
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-/** The skip reason a suite carries when its deps are absent. */
-export const SKIP_PHRASE =
-  "needs node_modules — frontend.yml's installed step is the enforced run";
+/** What every installed-only suite reads to turn a missing dependency into a
+ *  failure. Matched as a whole token, it marks a suite the enforced step must
+ *  list, however the suite words its skip. */
+export const CARRIER_TOKEN = "process.env.GD_EXPECT_DEPS";
+
+const CARRIER = new RegExp(
+  `(?<![\\w$.])${CARRIER_TOKEN.replaceAll(".", "\\.")}(?![\\w$])`,
+);
 
 /** The frontend.yml step that is those suites' one enforced run. */
 export const ENFORCED_STEP = "Node suites needing node_modules (enforced)";
@@ -234,7 +240,7 @@ export function parseEnforcedSuites(workflow) {
   return seen;
 }
 
-/** Carriers of the skip phrase that the enforced step doesn't list. */
+/** Suites reading CARRIER_TOKEN that the enforced step doesn't list. */
 export function unlistedCarriers(carriers, listed) {
   return [...carriers].filter((suite) => !listed.has(suite)).sort();
 }
@@ -252,17 +258,15 @@ function main() {
       .map((name) => `scripts/${name}`);
     if (suites.length === 0) throw new Error("no scripts/*.test.mjs found");
     const carriers = suites.filter((suite) =>
-      readFileSync(join(root, suite), "utf8").includes(SKIP_PHRASE),
+      CARRIER.test(readFileSync(join(root, suite), "utf8")),
     );
     const failures = [];
     if (carriers.length === 0)
-      failures.push(
-        "no suite carries the skip phrase; refusing a vacuous pass",
-      );
+      failures.push(`no suite reads ${CARRIER_TOKEN}; refusing a vacuous pass`);
     const missing = unlistedCarriers(carriers, listed);
     if (missing.length)
       failures.push(
-        `skip in the guards job but missing from '${ENFORCED_STEP}': ${missing.join(", ")}`,
+        `read GD_EXPECT_DEPS but missing from '${ENFORCED_STEP}': ${missing.join(", ")}`,
       );
     const absent = [...listed].filter((suite) => !suites.includes(suite));
     if (absent.length)
@@ -275,7 +279,7 @@ function main() {
       return;
     }
     process.stdout.write(
-      `enforced-node-suites: OK ${carriers.length} skipping suites, all enforced\n`,
+      `enforced-node-suites: OK ${carriers.length} installed-only suites, all enforced\n`,
     );
   } catch (err) {
     process.stderr.write(`enforced-node-suites: FAIL ${err.message}\n`);

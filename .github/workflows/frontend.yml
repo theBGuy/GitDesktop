@@ -78,8 +78,8 @@ jobs:
       # started-mutation drives one through the app's mutation helper, which
       # imports react plus @tanstack/react-query, and the palette-dialog suite
       # merges the palette's classes over the dialog's through tailwind-merge.
-      # check-enforced-node-suites.mjs fails any suite carrying the guards-job
-      # skip phrase that this list leaves out.
+      # check-enforced-node-suites.mjs fails any suite reading
+      # process.env.GD_EXPECT_DEPS that this list leaves out.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
       # unresolvable import there into a failure rather than a silent skip.
       - name: Node suites needing node_modules (enforced)

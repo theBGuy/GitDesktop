@@ -57,7 +57,7 @@ import {
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
 import {
-  SKIP_PHRASE as ENFORCED_SKIP_PHRASE,
+  CARRIER_TOKEN as ENFORCED_CARRIER_TOKEN,
   parseEnforcedSuites,
   unlistedCarriers,
 } from "./check-enforced-node-suites.mjs";
@@ -1287,17 +1287,74 @@ test("list-row-diff-stat-slot flags a counts cell gated on its own stat", () => 
   );
 });
 
-test("list-row-diff-stat-slot leaves unrelated gates and the slot alone", () => {
-  // A total hidden on a flag of its own, not on the stat object (RemotePrView).
+test("list-row-diff-stat-slot flags a total on its own flag; the allowlist exempts RemotePrView", () => {
+  // The shape is flagged whatever the condition: RemotePrView's header total,
+  // hidden while totals are unknown, is exempt by its allowlist entry only.
   const total = [
     "{!totalsUnknown && (",
     "  <DiffStat added={pr.additions} deleted={pr.deletions} />",
     ")}",
   ].join("\n");
-  assert.deepEqual(diffStatSlot(total), []);
-  // The condition and the props read different objects.
+  assert.deepEqual(diffStatSlot(total), [1]);
+  const check = CHECKS.find((c) => c.name === "list-row-diff-stat-slot");
+  const file = "src/features/pulls/RemotePrView.tsx";
+  const { violations, stale } = runCheck(
+    check,
+    [file],
+    new Map([[file, view(total)]]),
+  );
+  assert.deepEqual(violations, []);
+  assert.deepEqual(stale, []);
+  // The entry covers exactly one real site.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  assert.equal(
+    check.scan(view(readFileSync(join(root, file), "utf8")), file).length,
+    1,
+  );
+});
+
+test("list-row-diff-stat-slot flags the condition by shape, not by spelling", () => {
   assert.deepEqual(
     diffStatSlot("{ok ? <DiffStat added={stat.added} deleted={0} /> : null}"),
+    [1],
+  );
+  assert.deepEqual(diffStatSlot("{stat && <DiffStat {...stat} />}"), [1]);
+  assert.deepEqual(
+    diffStatSlot(
+      "{stat ? <DiffStat added={stat.added} deleted={stat.deleted} /> : null}",
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    diffStatSlot(
+      "{stat != null && <DiffStat added={stat.added} deleted={stat.deleted} />}",
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    diffStatSlot(
+      "{x?.stat && <DiffStat added={x.stat.added} deleted={x.stat.deleted} />}",
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    diffStatSlot("{map.get(path) && <DiffStat added={1} deleted={2} />}"),
+    [1],
+  );
+  // The else branch and the `||` / `??` operands are the same shape.
+  assert.deepEqual(
+    diffStatSlot("{busy ? null : <DiffStat added={1} deleted={2} />}"),
+    [1],
+  );
+  assert.deepEqual(
+    diffStatSlot("{fallback ?? <DiffStat added={1} deleted={2} />}"),
+    [1],
+  );
+});
+
+test("list-row-diff-stat-slot leaves unconditional cells, the slot, and text alone", () => {
+  assert.deepEqual(
+    diffStatSlot("<DiffStat added={file.added} deleted={file.deleted} />"),
     [],
   );
   assert.deepEqual(
@@ -1305,7 +1362,22 @@ test("list-row-diff-stat-slot leaves unrelated gates and the slot alone", () => 
     [],
   );
   assert.deepEqual(
-    diffStatSlot("<DiffStat added={file.added} deleted={file.deleted} />"),
+    diffStatSlot("{stat ? <DiffStatSlot stat={stat} /> : null}"),
+    [],
+  );
+  // Masked text: a comment or string can't trigger a hit.
+  assert.deepEqual(
+    diffStatSlot(
+      "// {stat && <DiffStat added={1} deleted={2} />}\nconst a = 1;",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    diffStatSlot("{/* stat ? <DiffStat added={1} deleted={2} /> : null */}"),
+    [],
+  );
+  assert.deepEqual(
+    diffStatSlot('const s = "x && <DiffStat added={1} />";'),
     [],
   );
 });
@@ -7507,16 +7579,35 @@ test("enforced-node-suites CLI fails an unlisted carrier (negative control)", ()
     mkdirSync(join(root, ".github/workflows"), { recursive: true });
     mkdirSync(join(root, "scripts"), { recursive: true });
     const workflow = join(root, ".github/workflows/frontend.yml");
-    const carrier = `const skip = "${ENFORCED_SKIP_PHRASE}";\n`;
+    // Built by interpolation: spelling the token here would make this file a
+    // carrier the real gate then demands in the enforced step.
+    const carrier = `if (${ENFORCED_CARRIER_TOKEN}) throw err;\nskip = "needs deps";\n`;
     writeFileSync(join(root, "scripts/a.test.mjs"), carrier);
     writeFileSync(join(root, "scripts/plain.test.mjs"), "// no deps\n");
+    // A longer variable sharing the prefix is not the token.
+    writeFileSync(
+      join(root, "scripts/near.test.mjs"),
+      `const x = ${ENFORCED_CARRIER_TOKEN}_OTHER;\n`,
+    );
     writeFileSync(workflow, enforcedWorkflowFixture(["scripts/a.test.mjs"]));
     assert.equal(run(), 0, lastOut);
-    assert.match(lastOut, /OK 1 skipping suites/);
+    assert.match(lastOut, /OK 1 installed-only suites/);
 
     writeFileSync(join(root, "scripts/b.test.mjs"), carrier);
     assert.equal(run(), 1, lastOut);
     assert.match(lastOut, /missing from .*: scripts\/b\.test\.mjs/);
+
+    // A suite wording its skip differently is still a carrier: detection keys
+    // on the variable it reads, never on its skip text.
+    rmSync(join(root, "scripts/b.test.mjs"));
+    writeFileSync(
+      join(root, "scripts/c.test.mjs"),
+      `const expect = Boolean(${ENFORCED_CARRIER_TOKEN});\nconst skip = expect ? false : "optional deps absent";\n`,
+    );
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /missing from .*: scripts\/c\.test\.mjs/);
+    writeFileSync(join(root, "scripts/b.test.mjs"), carrier);
+    rmSync(join(root, "scripts/c.test.mjs"));
 
     writeFileSync(
       workflow,

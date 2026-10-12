@@ -10,6 +10,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { lineOf, maskNonCode, ScanError } from "./lib/ts-mask.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "src");
@@ -84,7 +85,8 @@ export function stripComments(lines) {
 
 /** A file's scannable view: comment-stripped lines, plus those lines joined
  *  into one string with each line's start offset — so a match that spans a
- *  wrapped expression still reports a real line number. */
+ *  wrapped expression still reports a real line number. `source` rides along
+ *  for a scan that needs the raw text (a ts-mask lexer). */
 export function view(source) {
   const lines = stripComments(source.split(/\r?\n/));
   const starts = [];
@@ -95,7 +97,7 @@ export function view(source) {
     offset += part.length + 1;
     return part;
   });
-  return { lines, text: parts.join(" "), starts };
+  return { lines, text: parts.join(" "), starts, source };
 }
 
 /** 1-based source line owning a normalized-text offset. */
@@ -369,13 +371,33 @@ const DIFF_STAT_PAIR_RE = new RegExp(
   "g",
 );
 
-// A counts cell rendered only once its own stat object exists — `{stat ?
-// <DiffStat added={stat.added} …` or the `&&` spelling. The backreference ties
-// the condition to the props, so a total hidden on an unrelated flag
-// (`{!totalsUnknown && <DiffStat …`) stays clean. Run over the normalized
-// whole-file view, so the wrapped JSX matches.
-const CONDITIONAL_DIFF_STAT_CELL_RE =
-  /\{\s*([\w.]+)\s*(?:\?|&&)\s*\(?\s*<DiffStat\b[^>]*?\badded=\{\s*\1\./g;
+// A conditionally rendered DiffStat: the element as the right operand of
+// `&&` / `||` / `??`, or either branch of a ternary, behind any parens. Matched
+// by SHAPE, whatever the condition or prop spelling, since each spelling-bound
+// form failed open on the next one. Run over ts-mask's masked text so comments
+// and strings can neither trigger nor hide a hit. Over-matches loudly (a total
+// hidden on its own flag) — such a site takes an allowlist entry.
+const CONDITIONAL_DIFF_STAT_RE =
+  /(?:&&|\|\||\?\?|\?|:)\s*(?:\(\s*)*<DiffStat\b(?!Slot)/g;
+
+/** Scanner for {@link CONDITIONAL_DIFF_STAT_RE}. A file ts-mask can't lex
+ *  throws with its path: the check refuses rather than passing unread code. */
+const conditionalDiffStat = ({ source }, file) => {
+  let masked;
+  try {
+    masked = maskNonCode(source, true);
+  } catch (e) {
+    if (e instanceof ScanError)
+      throw new Error(
+        `list-row-diff-stat-slot: cannot lex ${file ?? "<input>"}: ${e.message}`,
+      );
+    throw e;
+  }
+  const hits = new Set();
+  for (const m of masked.matchAll(CONDITIONAL_DIFF_STAT_RE))
+    hits.add(lineOf(source, m.index));
+  return [...hits];
+};
 
 // An icon-only copy control built by hand: a `<button>`/`<Button>` whose SOLE
 // child is a self-closing `<CopyIcon/>`. Requiring the opening tag's own `>`
@@ -2233,10 +2255,14 @@ export const CHECKS = [
     name: "list-row-diff-stat-slot",
     appliesTo: (file) =>
       file.startsWith("src/features/") && file.endsWith(".tsx"),
-    scan: perFile(CONDITIONAL_DIFF_STAT_CELL_RE),
-    allowlist: [],
+    scan: conditionalDiffStat,
+    allowlist: [
+      // The PR header's total +N −M, hidden on purpose while totals are unknown
+      // (the Files notice explains the gap) — not a file-list row.
+      "src/features/pulls/RemotePrView.tsx",
+    ],
     message:
-      "a file row whose counts can arrive after the row renders them through DiffStatSlot (src/components/diff-stat.tsx), never `{stat ? <DiffStat …/> : null}` — the slot keeps the cell's width while counts load (and on rows that never get them), so a late stat doesn't reflow the file names; a row whose counts ship with the row itself renders DiffStat unconditionally",
+      "a conditionally rendered DiffStat in a JSX expression (`{x && <DiffStat …/>}`, `{x ? <DiffStat …/> : null}`, `||`/`??`, either ternary branch) — a file row whose counts can arrive after the row renders them through DiffStatSlot (src/components/diff-stat.tsx) on every row, so the cell keeps its width while counts load (and on rows that never get them) and a late stat doesn't reflow the file names; a row whose counts ship with the row itself renders DiffStat unconditionally, and a non-row total hidden on purpose needs an allowlist entry with rationale",
   },
   {
     name: "raw-copy-icon-button",
