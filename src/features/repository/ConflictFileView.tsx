@@ -290,8 +290,9 @@ export function ConflictFileView({
   // Whether the view moved to another repo, or went away, while a prompt was
   // open, saying so: a mutate called then builds from options this view no
   // longer describes. Not the shared `refuseIfSwitched`, which compares against
-  // the live repo, never a worktree. A close unmounts the view too, so it is
-  // checked first to name what actually happened.
+  // the live repo, never a worktree. The closed arm is defense in depth: the
+  // confirm store already cancels a repo-scoped prompt on a close, so neither
+  // caller reaches it today.
   const refuseIfMoved = (startedIn: string, outcome: string) => {
     if (useUiStore.getState().repoPath === null) {
       toast.info(

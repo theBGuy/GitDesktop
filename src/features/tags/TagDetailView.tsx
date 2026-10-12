@@ -497,7 +497,7 @@ export function TagDetailView({
             "You were offline, so the manifest wasn't uploaded. Save the release again once you're back online to update it.",
           );
         // The upload builds from the live repo's options once the edit lands;
-        // a switch during it takes the same partial-state path.
+        // a switch or close during it takes the same partial-state path.
         const { live, away, closed } = landedIn(saveIn);
         if (!live)
           throw new Error(

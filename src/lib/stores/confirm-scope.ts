@@ -9,9 +9,9 @@
  *  `"app"` is for prompts that act outside it (quit, recents, settings). */
 export type ConfirmScope = "repo" | "app";
 
-/** The repository a prompt is stamped with, or `null` for an unscoped one. A
- *  repo-scoped ask with no repository open stays unscoped: a null stamp would
- *  read every later open as a switch. */
+/** The repository a prompt is stamped with, or `null` for an unscoped one.
+ *  Stamping the closed state (no repository open) would read every later open
+ *  as a switch, so a repo-scoped ask then returns `null` (unscoped). */
 export function confirmStamp(
   scope: ConfirmScope | undefined,
   live: string | null,

@@ -565,20 +565,21 @@ one grep away on the named symbol. Grows via Conventions-sync.
   that can't take that shape (a partial-state error, or a "Didn't <verb> …" line
   kept in step with a twin) reads `landedIn` once and builds its message from
   that one result's `live` and `away` (`closed` picks "you closed the
-  repository" over "you switched repositories"). The shared confirm store already
-  covers the PROMPT window (a repo-scoped `ask` resolves `false` on a switch),
-  so a per-site stamp is for writes started after a NON-confirm await, or after
-  further awaits that follow the answer. The store stamps the repo at ASK time,
-  so a caller whose repo predates an earlier await (a render-time closure, as in
-  CommitDetailView's `doCherryPick`) keeps its own `refuseIfSwitched` after the
-  ask. A view whose repo can be a worktree rather than the open one compares
-  its own prop instead (ConflictFileView's `refuseIfMoved`). A `useRepoMutation`
-  whose mutationFn or callbacks close over repo/lens AND whose host survives a
-  repo switch passes `identity: ["<op>", repo, lens]`, which scopes the HOLD: a
-  changed key hash detaches the pending mutation at the switch, so the new repo's
-  controls don't read the old repo's write as busy. Callers must consume the
-  promise (`mutateAsync`), since the observer's `isPending`/`data` go idle at
-  the switch. Exemplar: `useCreateIssue`; a plain `useMutation` spells the same
+  repository" over "you switched repositories"; the publish twins don't yet).
+  The shared confirm store covers the prompt window once the switch applies (a
+  repo-scoped `ask` resolves `false` on a switch), so a per-site stamp is for
+  writes started after a NON-confirm await, or after further awaits that follow
+  the answer. The store stamps the repo at ASK time, so a caller whose repo
+  predates an earlier await (a render-time closure, as in CommitDetailView's
+  `doCherryPick`) keeps its own `refuseIfSwitched` after the ask. A view whose
+  repo can be a worktree rather than the open one compares its own prop instead
+  (ConflictFileView's `refuseIfMoved`). A `useRepoMutation` whose mutationFn or
+  callbacks close over repo/lens AND whose host survives a repo switch passes
+  `identity: ["<op>", repo, lens]`, which scopes the HOLD: a changed key hash
+  detaches the pending mutation at the switch, so the new repo's controls don't
+  read the old repo's write as busy. Callers must consume the promise
+  (`mutateAsync`), since the observer's `isPending`/`data` go idle at the
+  switch. Exemplar: `useCreateIssue`; a plain `useMutation` spells the same
   pin `mutationKey:`.
   Guard: `mutation-identity-pinning` ratchets the cache-seeding sites and the
   create-family ones it can see by NAME, following delegation one level inside a

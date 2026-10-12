@@ -8,7 +8,7 @@
 // imports. The wiring the pure helpers can't see (the store's subscription and
 // the app-scoped call sites) is pinned by source scans at the bottom.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { normPath as norm } from "../src/lib/git/path.ts";
@@ -142,3 +142,79 @@ for (const file of APP_SCOPED) {
       assert.match(options, /\bscope: "app"/, 'an ask lost scope: "app"');
   });
 }
+
+// Folders that hold the app-level screens (Settings, Explore, Welcome, My work).
+// A prompt there acts outside the open repository, so the repo-scope default is
+// a trap: every ask under them must spell its `scope:` out.
+const APP_LEVEL_DIRS = [
+  "src/features/settings",
+  "src/features/explore",
+  "src/features/welcome",
+  "src/features/mywork",
+];
+
+const ASK_CALL = /useConfirm\s*\.getState\(\)\s*\.(?:ask|askChecked)\(/g;
+
+/** Each confirm ask in `text` whose options don't name a `scope:`, by line. An
+ *  argument that isn't an inline object literal is flagged too: its scope can't
+ *  be read here, so it fails closed. Comment lines are skipped. */
+function unscopedAsks(text) {
+  const misses = [];
+  for (const m of text.matchAll(ASK_CALL)) {
+    const lineStart = text.lastIndexOf("\n", m.index) + 1;
+    if (/^\s*(\*|\/\/)/.test(text.slice(lineStart, m.index))) continue;
+    const open = m.index + m[0].length;
+    let depth = 1;
+    let end = open;
+    for (; end < text.length && depth > 0; end++) {
+      if (text[end] === "(") depth++;
+      else if (text[end] === ")") depth--;
+    }
+    const arg = text.slice(open, end - 1).trim();
+    if (!arg.startsWith("{") || !/\bscope:/.test(arg))
+      misses.push(text.slice(0, m.index).split("\n").length);
+  }
+  return misses;
+}
+
+function sourceFiles(rel) {
+  const dir = new URL(`../${rel}/`, import.meta.url);
+  return readdirSync(dir, { recursive: true })
+    .filter((f) => /\.(ts|tsx)$/.test(f))
+    .map((f) => `${rel}/${String(f).replace(/\\/g, "/")}`);
+}
+
+test("the app-level scan flags an ask without a scope", () => {
+  const fixture = `
+    const ok = await useConfirm.getState().ask({
+      title: "Clear it?",
+      body: "",
+      confirmLabel: "Clear",
+    });
+    const named = await useConfirm.getState().ask(PROMPT);
+    // useConfirm.getState().ask({ title }) in a comment is not a call
+    const scoped = await useConfirm
+      .getState()
+      .ask({ title: "Fork?", body: "", confirmLabel: "Fork", scope: "app" });
+  `;
+  assert.deepEqual(unscopedAsks(fixture), [2, 7]);
+});
+
+test("every ask on an app-level screen passes an explicit scope", () => {
+  let files = 0;
+  let asks = 0;
+  for (const dir of APP_LEVEL_DIRS) {
+    for (const file of sourceFiles(dir)) {
+      files++;
+      const text = source(file);
+      asks += [...text.matchAll(ASK_CALL)].length;
+      assert.deepEqual(
+        unscopedAsks(text),
+        [],
+        `${file}: an ask without scope: (repo-scoped by default)`,
+      );
+    }
+  }
+  assert.ok(files > 0, "no app-level source files found");
+  assert.ok(asks > 0, "no asks found under the app-level folders");
+});
