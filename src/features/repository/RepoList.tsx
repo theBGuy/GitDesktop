@@ -51,6 +51,18 @@ import { useOpenRepoByPath } from "./useOpenRepoByPath";
 const RECENT_COUNT = 5;
 const OTHER_GROUP = "Other";
 
+// RepoList at its tallest: the filter row (`p-2` around an `h-7` input) plus the
+// list viewport at its cap. Each px figure mirrors the class beside it, so a size
+// change edits both; the Welcome reserves the sum so its layout never moves.
+const FILTER_ROW_CLASS = "shrink-0 p-2";
+const FILTER_INPUT_CLASS = "h-7";
+const FILTER_ROW_HEIGHT_PX = 8 + 28 + 8;
+const LIST_VIEWPORT_CLASS =
+  "min-h-0 **:data-[slot=scroll-area-viewport]:max-h-96";
+const LIST_VIEWPORT_MAX_HEIGHT_PX = 384;
+export const REPO_LIST_MAX_HEIGHT_PX =
+  FILTER_ROW_HEIGHT_PX + LIST_VIEWPORT_MAX_HEIGHT_PX;
+
 const REPO_LISTBOX_ID = "repo-list-listbox";
 /** Stable DOM id per repo row, so the filter's aria-activedescendant can point
  *  at the keyboard-highlighted option for screen readers. `repo.path` is the
@@ -354,7 +366,7 @@ export function RepoList({
 
   return (
     <div className="flex min-h-0 flex-col">
-      <div className="shrink-0 p-2">
+      <div className={FILTER_ROW_CLASS}>
         <Input
           // the filter is the keyboard entry point of this surface
           autoFocus
@@ -377,13 +389,10 @@ export function RepoList({
           aria-activedescendant={
             highlightedPath ? repoOptionId(highlightedPath) : undefined
           }
-          className="h-7"
+          className={FILTER_INPUT_CLASS}
         />
       </div>
-      <ScrollArea
-        className="min-h-0 **:data-[slot=scroll-area-viewport]:max-h-96"
-        ref={listRef}
-      >
+      <ScrollArea className={LIST_VIEWPORT_CLASS} ref={listRef}>
         <ContextMenu>
           <ContextMenuTrigger
             render={

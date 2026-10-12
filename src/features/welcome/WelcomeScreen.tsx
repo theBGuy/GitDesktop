@@ -8,6 +8,7 @@ import {
   QuestionIcon,
   TrayIcon,
 } from "@phosphor-icons/react";
+import type { CSSProperties } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -21,7 +22,15 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { RecentRepoList } from "./RecentRepoList";
+import {
+  RECENT_REPO_LIST_MAX_HEIGHT_PX,
+  RecentRepoList,
+} from "./RecentRepoList";
+
+// Set only when recents exist: unset, the var leaves both min-heights inert.
+const RECENT_REPOS_RESERVE = {
+  "--recent-repos-max": `${RECENT_REPO_LIST_MAX_HEIGHT_PX}px`,
+} as CSSProperties;
 
 export function WelcomeScreen() {
   const openSettings = useUiStore((s) => s.openSettings);
@@ -33,6 +42,7 @@ export function WelcomeScreen() {
   const aiEnabled = useAiEnabled();
   const bindings = useEffectiveBindings();
   const updateAvailable = Boolean(useUpdateCheck().data);
+  const hasRecents = (settings.data?.recentRepos ?? []).length > 0;
 
   function dismissNudge() {
     if (settings.data) {
@@ -133,14 +143,16 @@ export function WelcomeScreen() {
       {/* overflow-hidden contains the content's natural height (vendored Root is
           `relative`-only), so a tall welcome pane can't leak a window scrollbar. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-        {/* A fixed top inset, never centring: the repo filter must not move as
-            its results shrink or the list loads. Content waits for the local
-            settings read so the nudge and the recents list (both above or at
-            the filter) land with it rather than after it. */}
-        <main className="mx-auto flex min-h-full w-full max-w-4xl flex-col p-8 pt-[clamp(2rem,10vh,6rem)]">
+        {/* `my-auto` centers the block and resolves to zero once it overflows, so
+            the filter stays still only while the block's height is constant: the
+            content waits for settings, and with recents the grid reserves the
+            list column's maximum at md and up, `content-start` keeping its row at
+            natural height so the divider spans the taller column shown. Below md
+            the stacked list cell holds the reservation. */}
+        <main className="mx-auto flex min-h-full w-full max-w-4xl flex-col p-8">
           <div
             aria-busy={settings.isPending}
-            className="flex w-full flex-col gap-6"
+            className="my-auto flex w-full flex-col gap-6"
           >
             {!settings.isPending && (
               <>
@@ -162,7 +174,10 @@ export function WelcomeScreen() {
                   </div>
                 )}
 
-                <div className="grid items-start gap-y-8 md:grid-cols-2">
+                <div
+                  className="grid content-start items-start gap-y-8 md:min-h-(--recent-repos-max) md:grid-cols-2"
+                  style={hasRecents ? RECENT_REPOS_RESERVE : undefined}
+                >
                   <div className="flex flex-col gap-6 md:pr-10">
                     <div className="space-y-2">
                       <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">
@@ -210,7 +225,7 @@ export function WelcomeScreen() {
                     </div>
                   </div>
 
-                  <div className="self-stretch md:border-l md:border-border md:pl-10">
+                  <div className="self-stretch max-md:min-h-(--recent-repos-max) md:border-l md:border-border md:pl-10">
                     <RecentRepoList />
                   </div>
                 </div>
