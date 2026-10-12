@@ -528,7 +528,19 @@ export function RemoteIssueView({
 
   const issue = details.data;
 
-  const threadActive = isSelectedIssue && !!issue && !detailsStale;
+  // The feed lands whole: comments and timeline events appear together once the
+  // shown issue's timeline has answered, so no event inserts above a comment
+  // after the fact. A DISABLED timeline never leaves pending, so with none
+  // coming a settled forge probe stands in for it.
+  // Reactions ride the same landing: the bars draw their chips before the
+  // add button, so late counts would push it sideways. A disabled read
+  // (`canReact` false) never answers, so it never holds anything.
+  const reactionsReady = !canReact || answered(reactions);
+  const feedReady =
+    reactionsReady && (timelineEnabled ? answered(timeline) : !forge.isPending);
+  // The thread's hotkeys wait for the feed too: a jump would land on its
+  // skeleton rows.
+  const threadActive = isSelectedIssue && !!issue && !detailsStale && feedReady;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The composer sits below the thread AND the sidebar, so reaching it by Tab
   // means crossing the whole rail — this is the keyboard route past it. Enabled
@@ -1227,16 +1239,6 @@ export function RemoteIssueView({
     });
   }
   const feed = sortTimeline(feedEntries);
-  // The feed lands whole: comments and timeline events appear together once the
-  // shown issue's timeline has answered, so no event inserts above a comment
-  // after the fact. A DISABLED timeline never leaves pending, so with none
-  // coming a settled forge probe stands in for it.
-  // Reactions ride the same landing: the bars draw their chips before the
-  // add button, so late counts would push it sideways. A disabled read
-  // (`canReact` false) never answers, so it never holds anything.
-  const reactionsReady = !canReact || answered(reactions);
-  const feedReady =
-    reactionsReady && (timelineEnabled ? answered(timeline) : !forge.isPending);
 
   // The close/reopen arm LEADS the bottom bar in both permission states — inside
   // the composer's action row (Comment is the primary and stays last), or alone

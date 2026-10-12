@@ -130,8 +130,6 @@ import {
   pendingWriteOfKind,
   prApprovalsOptions,
   prDiffOptions,
-  prReactionsOptions,
-  prTasksOptions,
   prUpdateBranchKeys,
   repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -251,6 +249,7 @@ import {
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
+import { prSectionAnswered } from "./pr-section-answered";
 import {
   MergePrDialog,
   MrTimeTracking,
@@ -374,16 +373,6 @@ function entityKeyNumber(key: string): number {
 /** An `entityKey`'s repo and lens: the prefix before its number. */
 function entityKeyScope(key: string): string {
   return key.slice(0, key.lastIndexOf("#") + 1);
-}
-
-/** Whether a read has answered for its key: its data, a final error, or a
- *  park offline, which renders its own notice rather than waiting. */
-function readAnswered(q: {
-  data: unknown;
-  isError: boolean;
-  isPaused: boolean;
-}): boolean {
-  return q.data !== undefined || q.isError || q.isPaused;
 }
 
 /** Local-prediction outcomes that mean the head merges into the base cleanly. */
@@ -672,20 +661,31 @@ export function RemotePrView({
     section === "conversation" && !!provider,
     lens,
   );
-  usePrDiff(repoPath, number, lens);
+  const targetDiff = usePrDiff(repoPath, number, lens);
+  const targetReactions = usePrReactions(
+    repoPath,
+    canReact ? number : null,
+    lens,
+  );
+  const targetTasks = usePrTasks(repoPath, canTasks ? number : null);
   const targetOwnDetails =
     targetDetails.isError ||
     (targetDetails.data !== undefined && !targetDetails.isPlaceholderData);
-  // The Conversation feed lands whole (below), so the hold waits for its reads too.
-  // A parked read counts as answered: it renders its own offline notice. With no
-  // provider the timeline never runs, so a settled forge probe stands in for it.
-  const feedAnswered =
-    section !== "conversation" ||
-    (readAnswered(targetThreads) &&
-      (provider ? readAnswered(targetTimeline) : !forge.isPending));
+  // The hold settles on the same rule the section mounts on
+  // (`prSectionAnswered`), over the selected PR's reads: the swap brings the
+  // section whole, never a skeleton that fills in as a second step.
   const hold = useEntityHold({
     key: entityKey,
-    settled: targetOwnDetails && feedAnswered,
+    settled:
+      targetOwnDetails &&
+      prSectionAnswered(section, {
+        threads: targetThreads,
+        timeline: provider ? targetTimeline : null,
+        forgeSettled: !forge.isPending,
+        reactions: canReact ? targetReactions : null,
+        tasks: canTasks ? targetTasks : null,
+        diff: targetDiff,
+      }),
     // The PR on screen may stand in when it is of the same repo and lens (the
     // key's prefix); the reducer adds that it settled. Never the placeholder: a
     // hover prefetch caches the target's details, which then arrive with none.
@@ -710,19 +710,14 @@ export function RemotePrView({
   // The selected PR's late reads, warmed while the hold keeps the old one on
   // screen so they are cached when it swaps in, rather than filling it in after.
   // Gated as their consumers are, on the selected PR's own state where known.
-  // Drafts and GitLab time stats have no shared options factory, so they warm
-  // through an observer.
+  // Reactions and tasks are observed above, since the hold waits for them; drafts
+  // and GitLab time stats have no shared options factory, so they warm through an
+  // observer.
   const targetState = targetDetails.isPlaceholderData
     ? undefined
     : targetDetails.data?.state;
   useEffect(() => {
     if (!hold.holding) return;
-    if (canReact)
-      void queryClient.prefetchQuery(
-        prReactionsOptions(repoPath, number, lens),
-      );
-    if (canTasks)
-      void queryClient.prefetchQuery(prTasksOptions(repoPath, number));
     if (targetState === "OPEN" && (canApprove || canRequestChanges))
       void queryClient.prefetchQuery(prApprovalsOptions(repoPath, number));
     if (targetState === "OPEN" && canAutoMerge)
@@ -756,8 +751,6 @@ export function RemotePrView({
     shownNumber,
     lens,
     targetState,
-    canReact,
-    canTasks,
     canApprove,
     canRequestChanges,
     canAutoMerge,
@@ -925,6 +918,21 @@ export function RemotePrView({
     section === "conversation" && !!provider,
     lens,
   );
+  // The Conversation feed mounts once the shown PR's reads have answered
+  // (`prSectionAnswered`, the hold's rule too): reviews, comments, claimed
+  // threads, timeline events, reaction counts and the Bitbucket tasks above them
+  // appear together, so no row inserts above another after.
+  const feedReady = prSectionAnswered("conversation", {
+    threads: reviewThreads,
+    timeline: provider ? timeline : null,
+    forgeSettled: !forge.isPending,
+    reactions: canReact ? reactions : null,
+    tasks: canTasks ? prTasks : null,
+    diff: prDiff,
+  });
+  // The header chip's "View" asks for the tasks section, which mounts with the
+  // feed: armed per shown PR and consumed once the section is in the DOM.
+  const [tasksScrollFor, setTasksScrollFor] = useState<string | null>(null);
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
   const pendingReviewId = useUiStore((s) => s.pendingReviewId);
@@ -2577,19 +2585,15 @@ export function RemotePrView({
   // anchors, so the handoff waits for that sub-tab too — the hinted tab arrives
   // through `pendingPrSection` in its own commit.
   //
-  // Details alone aren't enough: threads decide which reviews claim inline
-  // blocks and the timeline interleaves rows ABOVE the target, so either landing
-  // afterwards would push a scrolled-to card back off screen. Waiting for all
-  // three to settle (an ERROR settles too — the feed keeps what it has under a
-  // refresh notice) keeps this to one attempt against the finished layout. A
-  // DISABLED timeline (no provider resolved yet) is neither, so the reveal waits
-  // and fires once the probe answers; if it never does, the request simply lapses.
-  // Retained content counts as settled: a failed refresh keeps rendering it.
+  // The request is consumed only once the feed it scrolls in is MOUNTED: the
+  // feed's own readiness (`feedReady`), so no row lands above the target after
+  // the one attempt, and never under a placeholder, a hold or a resolve takeover.
+  // Retained content counts: a failed refresh keeps rendering it.
   const revealInputsSettled =
     (details.isSuccess || (details.isError && details.data !== undefined)) &&
     !detailsStale &&
-    (reviewThreads.isSuccess || reviewThreads.isError) &&
-    (timeline.isSuccess || timeline.isError);
+    !resolve &&
+    feedReady;
   useEffect(() => {
     if (pendingReviewId === null || !isSelectedPr) return;
     if (!revealInputsSettled || section !== "conversation") return;
@@ -2615,7 +2619,8 @@ export function RemotePrView({
     section === "conversation" &&
     !resolve &&
     !!pr &&
-    !detailsStale;
+    !detailsStale &&
+    feedReady;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Every term the composer itself is
   // gated on rides here too, so the action is offered only where there is a box
@@ -2657,6 +2662,23 @@ export function RemotePrView({
     reveal.revealing ||
     detailPane === "skeleton" ||
     (hold.phase === "loading" && detailsPlaceholder);
+  // The chip's pending scroll, consumed in the commit that mounts the tasks
+  // section (it lands with the feed, so a bare frame after the click can miss
+  // it). A request armed for another PR retires at the swap.
+  const tasksSectionShown =
+    section === "conversation" && canTasks && feedReady && !showsLoadingFrame;
+  useLayoutEffect(() => {
+    if (tasksScrollFor === null) return;
+    if (tasksScrollFor !== hold.shownKey) {
+      setTasksScrollFor(null);
+      return;
+    }
+    if (!tasksSectionShown) return;
+    const tasksEl = document.getElementById("pr-tasks-section");
+    if (!tasksEl) return;
+    setTasksScrollFor(null);
+    tasksEl.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }, [tasksScrollFor, hold.shownKey, tasksSectionShown]);
   // The frame stands in for the LIVE selection, never the lagging `number` (a
   // reveal frame paints before it catches up). Whether a cached list row lays
   // its header out is decided once per selection and latched: a row landing
@@ -2883,14 +2905,6 @@ export function RemotePrView({
     isError: detailFailed,
     stale: detailsPlaceholder,
   });
-  // The feed lands whole: reviews, comments, claimed threads, timeline events,
-  // their reaction counts and the Bitbucket tasks above them appear together once
-  // the shown PR's reads have answered, so no row inserts above another after.
-  const feedReady =
-    readAnswered(reviewThreads) &&
-    (provider ? readAnswered(timeline) : !forge.isPending) &&
-    (!canReact || readAnswered(reactions)) &&
-    (!canTasks || readAnswered(prTasks));
 
   // Open the Edit dialog: the chips OWN the trailing ref block, so peel any exact
   // `Closes #N` / `Relates to #N` lines off the body into chips (keyword preserved)
@@ -3686,12 +3700,7 @@ export function RemotePrView({
             number={shownNumber}
             onView={() => {
               setSection("conversation");
-              // Defer the scroll so the conversation column has mounted.
-              requestAnimationFrame(() =>
-                document
-                  .getElementById("pr-tasks-section")
-                  ?.scrollIntoView({ block: "nearest", behavior: "auto" }),
-              );
+              setTasksScrollFor(hold.shownKey);
             }}
           />
         )}
