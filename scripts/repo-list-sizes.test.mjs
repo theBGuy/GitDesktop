@@ -25,11 +25,12 @@ import {
   COLUMN_GAP_PX,
   HEADING_CLASS,
   HEADING_ROW_PX,
+  RECENT_REPO_LIST_MAX_HEIGHT_CSS,
   RECENT_REPO_LIST_MAX_HEIGHT_PX,
 } from "../src/features/welcome/recent-repo-list-sizes.ts";
 
-// Tailwind v4 spacing is 0.25rem per step; the app never scales its 16px root,
-// so one step is 4px.
+// Tailwind v4 spacing is 0.25rem per step. The px figures are measured at a 16px
+// root, where one step is 4px; the reservation itself scales with the root.
 const spacing = (n) => n * 4;
 
 // The sized utility each mirrored constant carries: a plain-integer form only,
@@ -119,6 +120,11 @@ function sizeOf(name, ...override) {
     const utility = utilityOf(token);
     const m = rule.exact.exec(utility);
     if (m) {
+      if (mirror.sizedPrefix && token === utility) {
+        throw new Error(
+          `${name}: "${token}" is missing its required "${mirror.sizedPrefix}" prefix`,
+        );
+      }
       if (token !== mirror.sizedPrefix + utility) {
         throw new Error(
           `${name}: "${token}" is a variant of the sized utility — the reservation has one figure for every width`,
@@ -189,6 +195,34 @@ test("RECENT_REPO_LIST_MAX_HEIGHT_PX is heading + gap + 2 x border + RepoList", 
   assert.equal(RECENT_REPO_LIST_MAX_HEIGHT_PX, 458);
 });
 
+// The rem part times 16 plus the px part rebuilds the 16px-root figure; any other
+// string shape fails the match.
+const RESERVE_CSS = /^calc\((\d+(?:\.\d+)?)rem \+ (\d+)px\)$/;
+
+test("RECENT_REPO_LIST_MAX_HEIGHT_CSS is the px maximum as rem plus border px", () => {
+  assert.equal(RECENT_REPO_LIST_MAX_HEIGHT_CSS, "calc(28.5rem + 2px)");
+  const m = RESERVE_CSS.exec(RECENT_REPO_LIST_MAX_HEIGHT_CSS);
+  assert.ok(m, `unparseable reservation: ${RECENT_REPO_LIST_MAX_HEIGHT_CSS}`);
+  assert.equal(
+    Number(m[1]) * 16 + Number(m[2]),
+    RECENT_REPO_LIST_MAX_HEIGHT_PX,
+  );
+  assert.equal(Number(m[2]), 2 * BOX_BORDER_PX);
+});
+
+test("negative control: the reservation parser rejects other shapes", () => {
+  for (const shape of [
+    "458px",
+    "calc(28.5rem)",
+    "calc(2px + 28.5rem)",
+    "calc(28.5rem + 2px) ",
+    "calc(28.5rem - 2px)",
+    "calc(28.5em + 2px)",
+  ]) {
+    assert.equal(RESERVE_CSS.exec(shape), null, shape);
+  }
+});
+
 test("positive control: reordered tokens still pass", () => {
   for (const name of Object.keys(MIRRORS)) {
     const reordered = MIRRORS[name].value.split(/\s+/).reverse().join(" ");
@@ -255,7 +289,7 @@ test("negative control: LIST_VIEWPORT_CLASS under another bracket prefix fails c
   );
   assert.throws(
     () => sizeOf("LIST_VIEWPORT_CLASS", "min-h-0 max-h-96"),
-    VARIANT,
+    /LIST_VIEWPORT_CLASS: "max-h-96" is missing its required "\*\*:data-\[slot=scroll-area-viewport\]:" prefix/,
   );
 });
 

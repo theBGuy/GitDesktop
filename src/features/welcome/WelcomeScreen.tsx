@@ -23,11 +23,11 @@ import {
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { RecentRepoList } from "./RecentRepoList";
-import { RECENT_REPO_LIST_MAX_HEIGHT_PX } from "./recent-repo-list-sizes";
+import { RECENT_REPO_LIST_MAX_HEIGHT_CSS } from "./recent-repo-list-sizes";
 
 // Set only when recents exist: unset, the var leaves both min-heights inert.
 const RECENT_REPOS_RESERVE = {
-  "--recent-repos-max": `${RECENT_REPO_LIST_MAX_HEIGHT_PX}px`,
+  "--recent-repos-max": RECENT_REPO_LIST_MAX_HEIGHT_CSS,
 } as CSSProperties;
 
 export function WelcomeScreen() {
