@@ -32,9 +32,12 @@ const QUOTED_KEY_AT = new RegExp(String.raw`^(['"\x60])${VAR}\1`);
  * string, template and regex text masked by maskNonCode, so a fixture string
  * can't make a carrier). Recognized reads: `process.env.X` with optional `?.`
  * and whitespace around the dots, `process.env[...]` with a ', " or ` quoted
- * key, and destructuring from process.env. Any other code-level mention of the
- * name (an identifier, or a string holding exactly the name) throws: a read the
- * gate can't recognize must not pass as "not a carrier". So does a ScanError.
+ * key, and a destructured key from process.env. Only that key is recognized:
+ * a renamed binding (`{ X: expect }`, default or not) reads cleanly, while a
+ * shorthand one (`{ X }`, `{ X = "" }`) fails closed at its first use (never
+ * used, it still counts). Any other code-level mention of the name (an
+ * identifier, or a string holding exactly the name) throws: a read the gate
+ * can't recognize must not pass as "not a carrier". So does a ScanError.
  */
 export function readsExpectDeps(src, file) {
   let masked;

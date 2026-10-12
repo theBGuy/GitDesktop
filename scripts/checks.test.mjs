@@ -7682,6 +7682,42 @@ test("enforced-node-suites: destructuring from process.env is a carrier", () => 
   );
 });
 
+test("enforced-node-suites: a shorthand destructured binding fails closed at its use", () => {
+  assert.throws(
+    () =>
+      readsExpectDeps(
+        `const { ${EXPECT_VAR} } = process.env;\nif (${EXPECT_VAR}) x();`,
+        "s.mjs",
+      ),
+    UNSUPPORTED_READ,
+  );
+});
+
+test("enforced-node-suites: a shorthand binding with a default fails closed at its use", () => {
+  assert.throws(
+    () =>
+      readsExpectDeps(
+        `const { ${EXPECT_VAR} = "" } = process.env;\nif (${EXPECT_VAR}) x();`,
+        "s.mjs",
+      ),
+    UNSUPPORTED_READ,
+  );
+});
+
+test("enforced-node-suites: a backtick-quoted bracket read is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process.env[\`${EXPECT_VAR}\`]) x();`, "s.mjs"),
+    true,
+  );
+});
+
+test("enforced-node-suites: an optional bracket read is a carrier", () => {
+  assert.equal(
+    readsExpectDeps(`if (process.env?.["${EXPECT_VAR}"]) x();`, "s.mjs"),
+    true,
+  );
+});
+
 test("enforced-node-suites: an unrecognized read fails closed", () => {
   assert.throws(
     () =>
