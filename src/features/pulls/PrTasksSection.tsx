@@ -297,7 +297,7 @@ export function PrTasksSection({
   const tasks = tasksQuery.data;
 
   // Wait for the first load so a PR with no tasks doesn't flash an empty section
-  // before it resolves (IssueSubIssues idiom). A first load parked offline shows
+  // before it resolves (no slot is reserved). A first load parked offline shows
   // instead: it has no timeout, so hiding it would hide the section until the
   // connection returns with nothing saying why. A section that has already
   // failed stays mounted through its Retry: the refetch resets a no-data read to

@@ -1273,19 +1273,23 @@ follows its link, and badges and icons stay put.
 
 ## Conflicts with the base branch
 
-When a pull request no longer merges cleanly into its base, a quiet strip under its
-header says so, naming the base branch. Whenever GitDesktop can work out **which files
-clash**, it lists them right under that sentence — up to five paths, then *and N more*
-(hover it for the rest). **GitHub** and **GitLab** answer that question themselves; while
-a forge is still working it out the strip reads **Checking mergeability…**, and if the
-answer never arrives, **Retry** asks again. When the answer can't be read at all, the
-strip names the forge it couldn't reach, offers that same **Retry**, and falls back to
-the local prediction below — so a clash visible from your last fetch is still named, and
-still resolvable. On **GitHub** a conflicting pull request also runs no checks until the
-conflicts are resolved, and the strip says so — an empty checks list there means *never
-ran*, not *passed*. In the list, **GitHub** and **GitLab** rows carry a **Conflicts**
-chip (icon plus the word) on open pull requests, so you can spot a conflicting one
-without opening it.
+Every open pull request keeps a one-line strip under its header about merging into its
+base. It reads **Checking for conflicts…** while the answers load, then **No conflicts
+with \`main\`** when the forge (or the local prediction below) finds none; where neither
+can answer, it says the conflicts can't be checked. When a pull request no longer merges
+cleanly into its base, the strip says so, naming the base branch. A line too long for
+the panel is cut short; hover it to read the rest. Whenever GitDesktop can work out
+**which files clash**, it lists them right under that sentence — up to five paths, then
+*and N more* (hover it for the rest). **GitHub** and **GitLab** answer that question
+themselves; while a forge is still working it out the strip keeps reading **Checking for
+conflicts…**, and if the answer never arrives, **Retry** asks again. When the answer
+can't be read at all, the strip names the forge it couldn't reach, offers that same
+**Retry**, and falls back to the local prediction below — so a clash visible from your
+last fetch is still named, and still resolvable. On **GitHub** a conflicting pull
+request also runs no checks until the conflicts are resolved, and the strip says so — an
+empty checks list there means *never ran*, not *passed*. In the list, **GitHub** and
+**GitLab** rows carry a **Conflicts** chip (icon plus the word) on open pull requests,
+so you can spot a conflicting one without opening it.
 
 **Resolve conflicts** settles it right here. GitDesktop merges the base branch into the
 pull request's **head** branch in an **isolated worktree** — your own branch and working

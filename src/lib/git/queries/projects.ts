@@ -6,6 +6,7 @@ import {
   type Query,
   type QueryClient,
   type QueryKey,
+  queryOptions,
   useInfiniteQuery,
   useQuery,
   useQueryClient,
@@ -168,13 +169,24 @@ export function useItemProjects(
   lens: RemoteLens,
 ) {
   return useQuery({
+    ...itemProjectsOptions(repo, kind, number, lens),
+    enabled,
+  });
+}
+
+/** Shared by {@link useItemProjects} and a detail view's switch prefetch. */
+export const itemProjectsOptions = (
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) =>
+  queryOptions({
     queryKey: itemProjectsKey(repo, lens, kind, number),
     queryFn: () => api.ghItemProjects(repo, kind, number, lens),
-    enabled,
     staleTime: 60_000,
     retry: false,
   });
-}
 
 /** Every item's field values in one repo — the prefix {@link itemFieldValuesKey}
  *  extends, and the only handle a writer without an item's lens/kind/number has. */
@@ -203,13 +215,24 @@ export function useItemFieldValues(
   lens: RemoteLens,
 ) {
   return useQuery({
+    ...itemFieldValuesOptions(repo, kind, number, lens),
+    enabled,
+  });
+}
+
+/** Shared by {@link useItemFieldValues} and a detail view's switch prefetch. */
+export const itemFieldValuesOptions = (
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) =>
+  queryOptions({
     queryKey: itemFieldValuesKey(repo, lens, kind, number),
     queryFn: () => api.ghItemFieldValues(repo, kind, number, lens),
-    enabled,
     staleTime: 60_000,
     retry: false,
   });
-}
 
 /** The picker's batched link/unlink, with an optimistic patch of the memberships
  *  cache. Adds land as `pending:`-prefixed placeholder item ids — the real item id

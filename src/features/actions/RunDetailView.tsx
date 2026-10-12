@@ -18,7 +18,6 @@ import { LogBlock } from "@/components/LogBlock";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   DegradedListNotice,
@@ -68,6 +67,11 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
+import {
+  RunSkeleton,
+  useReportRunSettled,
+  useRunSlotInteractive,
+} from "./run-slots";
 import {
   cancelLabel,
   cancelOffered,
@@ -428,6 +432,9 @@ export function RunDetailView({
   const playJob = usePlayCiJob(repoPath);
   const rerunJob = useRerunJob(repoPath);
   const approveRun = useApproveWorkflowRun(repoPath);
+  // False while this run is held or preparing in the Actions tab's two-slot
+  // host: `inert` misses the global hotkeys and the debug dialog's portal.
+  const interactive = useRunSlotInteractive();
   const aiEnabled = useAiEnabled();
   // Re-run and cancel are SHARED writes (GitHub + GitLab): `canWrite || …` keeps
   // GitHub's controls up while forge-status is pending and positively enables a
@@ -466,6 +473,9 @@ export function RunDetailView({
   // Dialog visibility is tracked separately from the debug session so closing
   // the dialog just hides it (the run keeps streaming) and reopening resumes.
   const [debugOpen, setDebugOpen] = useState(false);
+  // A slot leaving `shown` closes the dialog for good (a render-time state
+  // adjustment): returning to this run within the bound must not re-pop it.
+  if (!interactive && debugOpen) setDebugOpen(false);
   const [showLogs, setShowLogs] = useState(false);
   const logs = useRunFailedLogs(repoPath, runId, showLogs);
   // Jobs re-run from this view, each against the completion it carried at the
@@ -613,9 +623,9 @@ export function RunDetailView({
       ? pendingWriteReason(approvePending.paused, ACT_PENDING_REASON)
       : offlineHold);
 
-  // Awaited, not per-call callbacks: this view is keyed per run and unmounts the
-  // moment another run is selected, and react-query drops per-call callbacks once
-  // the observer has no listeners.
+  // Awaited, not per-call callbacks: this view is keyed per run and unmounts once
+  // another selected run takes its slot, and react-query drops per-call callbacks
+  // once the observer has no listeners.
   async function doRerun(failedOnly: boolean) {
     if (rerunFamilyBusy) return;
     if (rerunLockRef.current) return;
@@ -701,13 +711,18 @@ export function RunDetailView({
     }
   }
 
-  useHotkeyAction("approve-workflow-run", () => void doApprove(), canApprove);
+  useHotkeyAction(
+    "approve-workflow-run",
+    () => void doApprove(),
+    interactive && canApprove,
+  );
   // Palette routes to the primary offer: a full re-run (GitHub) or the single
   // retry/rerun the pipeline forges expose, which ignore the failed-only flag.
   useHotkeyAction(
     "rerun-run",
     () => void doRerun(false),
-    tabActive &&
+    interactive &&
+      tabActive &&
       !writeBlocked &&
       canRerun &&
       rerunChoices.length > 0 &&
@@ -718,7 +733,8 @@ export function RunDetailView({
   useHotkeyAction(
     "cancel-run",
     () => void doCancel(),
-    tabActive &&
+    interactive &&
+      tabActive &&
       !writeBlocked &&
       canCancel &&
       showCancel &&
@@ -744,13 +760,14 @@ export function RunDetailView({
   // for the skeleton. Every arm's root is the same host div, so React keeps that
   // node through the swap and on into the loaded run, and focus lands there.
   const { hostRef, retryRef } = useRetryFocusRescue(pane === "error");
+  // The error and offline arms are final answers, so only the skeleton keeps a
+  // preparing slot waiting.
+  useReportRunSettled(pane !== "skeleton");
 
   if (pane === "skeleton") {
     return (
       <div ref={hostRef} tabIndex={-1} className="space-y-3 p-4 outline-none">
-        <Skeleton className="h-7 w-2/3" />
-        <Skeleton className="h-4 w-1/2" />
-        <Skeleton className="h-24 w-full" />
+        <RunSkeleton />
       </div>
     );
   }

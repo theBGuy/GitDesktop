@@ -1,5 +1,5 @@
 import { WrenchIcon } from "@phosphor-icons/react";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { buildSolveIssuePrompt } from "@/lib/ai/prompt";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { handoffToAgent } from "./handoff";
@@ -16,18 +16,24 @@ export function SolveIssueButton({
   repoPath,
   title,
   body,
+  disabledReason,
 }: {
   repoPath: string;
   title: string;
   body: string;
+  /** Set while `title`/`body` can't seed a session yet (the issue is still
+   *  loading): the button stays in place, disabled, with this as its reason. */
+  disabledReason?: string;
 }) {
   const aiEnabled = useAiEnabled();
   if (!aiEnabled) return null;
 
   return (
-    <Button
+    <DisabledReasonButton
       variant="outline"
       size="xs"
+      disabled={!!disabledReason}
+      reason={disabledReason}
       title="Hand this issue to a write-capable agent to investigate and fix"
       onClick={() =>
         handoffToAgent(repoPath, buildSolveIssuePrompt({ title, body }))
@@ -35,6 +41,6 @@ export function SolveIssueButton({
     >
       <WrenchIcon data-icon="inline-start" />
       Solve with agent
-    </Button>
+    </DisabledReasonButton>
   );
 }

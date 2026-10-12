@@ -95,6 +95,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -229,7 +230,12 @@ export function DiscussionView({
     lens: "origin",
     provider: "github",
   });
-  const reactions = useDiscussionReactions(repoPath, number);
+  // The RENDERED discussion's reactions: a placeholder body must not show the
+  // selected discussion's reactions under it.
+  const reactions = useDiscussionReactions(
+    repoPath,
+    details.isPlaceholderData && details.data ? details.data.number : number,
+  );
   const addComment = useAddDiscussionComment(repoPath);
   const markAnswer = useMarkDiscussionAnswer(repoPath);
   const updateComment = useUpdateDiscussionComment(repoPath);
@@ -595,6 +601,9 @@ export function DiscussionView({
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
+    // The post and the close both start after awaits, so each re-checks that
+    // this repo is still the open one.
+    const closeIn = repoPath;
     // Ahead of the riding draft: a cancelled confirm must leave the comment
     // unposted.
     const ok = await useConfirm.getState().ask({
@@ -607,10 +616,26 @@ export function DiscussionView({
     });
     // Ahead of the riding draft too: a close refused offline posts nothing.
     if (!ok || refuseWhileOffline()) return;
+    if (
+      refuseIfSwitched(
+        closeIn,
+        withComment ? "nothing was posted or closed" : "nothing was closed",
+      )
+    )
+      return;
     // Again below the riding post: the connection can drop while it runs, and a
     // comment that went out is named in the refusal.
     if (!(await postRidingDraft(d.id))) return;
     if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
+      return;
+    if (
+      withComment &&
+      refuseIfSwitched(
+        closeIn,
+        "your comment was posted, but the discussion wasn't closed",
+        "before the close started",
+      )
+    )
       return;
     try {
       await closeDiscussion.mutateAsync({ discussionId: d.id, reason });
@@ -629,7 +654,19 @@ export function DiscussionView({
   async function doReopen() {
     if (!d || detailsStale || addComment.isPending) return;
     const withComment = draftRidesStateChange;
+    // The reopen starts after the riding post's await, so it re-checks that this
+    // repo is still the open one.
+    const reopenIn = repoPath;
     if (!(await postRidingDraft(d.id))) return;
+    if (
+      withComment &&
+      refuseIfSwitched(
+        reopenIn,
+        "your comment was posted, but the discussion wasn't reopened",
+        "before the reopen started",
+      )
+    )
+      return;
     try {
       await reopenDiscussion.mutateAsync(d.id);
     } catch (e) {

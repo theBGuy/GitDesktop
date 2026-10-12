@@ -494,6 +494,7 @@ export function MrTimeTracking({
   number,
   open,
   disabledReason,
+  held = false,
 }: {
   repoPath: string;
   number: number;
@@ -503,10 +504,16 @@ export function MrTimeTracking({
    *  spent controls disable, with this text as their hint. The summary is a
    *  read and stays live. */
   disabledReason?: string;
+  /** The view is holding this MR while another loads behind it. The view's
+   *  `inert` can't reach the portaled popover, so this shuts it, and the writes
+   *  refuse until the hold ends. */
+  held?: boolean;
 }) {
   const stats = useGlMrTimeStats(repoPath, number);
   const setEstimate = useSetMrTimeEstimate(repoPath);
   const addSpent = useAddMrSpentTime(repoPath);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  if (held && popoverOpen) setPopoverOpen(false);
 
   const data = stats.data;
   const humanEstimate = data?.humanTimeEstimate ?? "";
@@ -542,7 +549,7 @@ export function MrTimeTracking({
   }
 
   return (
-    <Popover>
+    <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
       <PopoverTrigger
         render={
           <Button
@@ -568,10 +575,12 @@ export function MrTimeTracking({
             pending={setEstimate.isPending || addSpent.isPending}
             disabledReason={disabledReason}
             idPrefix="mr"
-            onSetEstimate={(duration) =>
-              setEstimate.mutate({ number, duration })
-            }
-            onAddSpent={(duration) => addSpent.mutate({ number, duration })}
+            onSetEstimate={(duration) => {
+              if (!held) setEstimate.mutate({ number, duration });
+            }}
+            onAddSpent={(duration) => {
+              if (!held) addSpent.mutate({ number, duration });
+            }}
           />
         )}
       </PopoverContent>

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -281,8 +281,8 @@ export function CommitComments({
   /** Which repo the commit's comments live on: "origin" (the History surface, or
    *  a non-fork) or the parent under the upstream lens (PR-commit context). */
   lens: RemoteLens;
-  /** The parent is still showing the PREVIOUS commit's content (placeholder data)
-   *  while `sha` already names the new one — pass it so writes hold. */
+  /** The parent is mid-switch, showing placeholder data while another commit
+   *  loads — pass it so writes hold until the shown commit settles. */
   stale?: boolean;
   /** `enabled` is the PREVIOUS commit's held verdict, not yet confirmed for `sha`:
    *  the pane stays mounted, but the read and every write hold until it settles. */
@@ -338,6 +338,26 @@ export function CommitComments({
   });
   const whole = list.filter((c) => c.path == null);
   const anchored = list.filter((c) => c.path != null);
+
+  // While a commit's comments load, the pane keeps the height it last had with
+  // an answer (a list or a notice), so the diff above moves once, when the list
+  // lands, instead of collapsing to the loading line first. Measured after each
+  // render that shows an answer; the loading edge sets the floor in a layout
+  // effect, whose re-render lands before the collapsed frame paints.
+  const paneRef = useRef<HTMLDivElement>(null);
+  const answeredHeight = useRef<number | null>(null);
+  const [loadingFloor, setLoadingFloor] = useState<number | null>(null);
+  const listLoading = enabled && comments.data === undefined && notice === null;
+  useLayoutEffect(() => {
+    if (!enabled) {
+      answeredHeight.current = null;
+    } else if (!listLoading) {
+      answeredHeight.current = paneRef.current?.offsetHeight ?? null;
+      setLoadingFloor(null);
+    } else if (answeredHeight.current !== null) {
+      setLoadingFloor(answeredHeight.current);
+    }
+  });
 
   // Anchored comments NOT visible inline: one renders inline only when it's on the
   // selected file AND resolves to a new-side line. Everything else surfaces below
@@ -454,7 +474,17 @@ export function CommitComments({
   if (!enabled) return null;
 
   return (
-    <div className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t">
+    <div
+      ref={paneRef}
+      className="flex max-h-[45%] min-h-0 shrink-0 flex-col border-t"
+      // Capped at the same 45% as `max-h`, live, so a window shrink mid-load
+      // can't let the floor outgrow the pane's cap.
+      style={
+        listLoading && loadingFloor !== null
+          ? { minHeight: `min(${loadingFloor}px, 45%)` }
+          : undefined
+      }
+    >
       <div
         className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3"
         aria-busy={held || undefined}

@@ -280,15 +280,57 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   counts as settled once it has at least one reporting gate and every gate
   that HAS reported is settled, so a render-null arm that never reports lets
   the slot promote early onto blank content: every such arm under a slot calls
-  `useReportPaneSettled` before its early return. Other detail panes (the
-  History file rail, Compare) don't hold yet; they are follow-ups that would
-  adopt this. A placeholder across a key whose response can't prove identity
-  may drive RENDERING only, with every interactive or forge consumer gated on
-  `!isPlaceholderData` (commit-on-remote is the example); the Changes diff
-  takes none, since `FileDiff` echoes only the path and a same-path
-  staged/unstaged placeholder would put live buttons on the other side's
-  hunks. `inert` covers pointer, focus and AT but NOT global hotkeys (gate
-  `useHotkeyAction` on `interactive`) or portals (gate dialogs' `open`).
+  `useReportPaneSettled` before its early return. Entity detail views (PR,
+  issue, workflow run) hold through `useEntityHold`
+  (`src/lib/use-entity-hold.ts`; pure transitions in the import-free
+  `src/lib/entity-hold.ts`, pinned by `scripts/entity-hold.test.mjs`) and
+  `HeldFrame` (`src/components/held-frame.tsx`: the same dim, `inert`, and a
+  sibling focus sink; its non-inert parent spreads `heldParentProps` for
+  `aria-busy`). A single-instance host paints its held item from reads keyed
+  on the hold's `shownKey`, while the selection's own reads decide `settled`
+  (the PR and issue views read details on both keys), so no part of the new
+  item lands inside the held one; `canHold` means the same repo and lens over
+  a settled shown item, never "the target is a placeholder" (a hover-prefetched
+  target has none). The 400 ms bound runs from the hold's START, so a fast run
+  through a list holds the item it left once, never per step (the diff pane
+  re-arms per target). Phase `loading` (bound expired, target unanswered)
+  paints the target's loading frame, never a placeholder, which react-query
+  keeps serving as the item the hold left; phase `offline` (the target's read
+  paused) never holds and keeps the undimmed "showing the last opened …"
+  notice; a move made while the tab is hidden shows directly. A keyed two-slot
+  host renders `entityHoldSlots` (held, preparing, shown) over the same
+  transitions. Runs use `RunSlots` (`src/features/actions/run-slots.tsx`): one
+  keyed slot per run, promoted on `useReportRunSettled`, which the run view
+  calls before any early return so a render-null arm still reports. The PR and
+  issue views paint `loading` as a slot-shaped frame (`PrLoadingFrame`,
+  `IssueLoadingFrame`), never generic bars; the PR view reserves its strip line
+  and waits for its feed (`feedReady`), and the issue view's late sections
+  reserve their minimum loaded height with an error arm (`SectionReadLine`).
+  Each frame mirrors the loaded header's rows, titled from the cached list row
+  of the LIVE selection (the view's own number lags a reveal), latched when the
+  frame starts so a row that lands later never re-lays it. `RepositoryView`
+  feeds detail views `deferred ?? live`, never an empty state over a selection.
+  Every host computes `active` and its reveal frame through `useRevealGuard`
+  (same module), never a deferred tab flag: a navigator that reveals the tab
+  and moves the selection in one update leaves the deferred selection behind
+  the reveal, so while `revealing` the host paints its loading frame, never
+  the stale item, and `active` stays false until a visible commit painted the
+  view's item, so that move shows the new item directly instead of holding
+  one the user never saw on screen. The History file rail and Compare don't
+  hold yet; they are follow-ups that would adopt one of these. A placeholder
+  across a key whose response can't prove identity may drive RENDERING only,
+  with every interactive or forge consumer gated on `!isPlaceholderData`
+  (commit-on-remote is the example); the Changes diff takes none, since
+  `FileDiff` echoes only the path and a same-path staged/unstaged placeholder
+  would put live buttons on the other side's hunks. `inert` covers pointer,
+  focus and AT but NOT global hotkeys (gate `useHotkeyAction` on `interactive`)
+  or portals: gate dialogs' `open`; a menu or popover open when the hold starts
+  stays live, so it closes then (key it on the identity, or pass `held`) or its
+  handlers refuse, and per-item dialog state resets on both edges of the hold.
+  The held paint keeps its look: render gates read only the rendered item's
+  placeholder, while the hold and the deferred selection's one-render lag feed
+  interaction gates (handlers, hotkeys, palette); a render gate that reads the
+  lag flickers before the hold starts.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already

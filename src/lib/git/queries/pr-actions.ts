@@ -1,6 +1,7 @@
 import {
   type MutationCache,
   type QueryKey,
+  queryOptions,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -119,13 +120,19 @@ export function usePendingRunWrites(repo: string): PendingRunWrites {
  *  keyed under the "origin" lens segment (the lens switcher is GitHub-only). */
 export function usePrApprovals(repo: string, number: number | null) {
   return useQuery({
-    queryKey: ["repo", repo, "pr", "origin", number ?? 0, "approvals"] as const,
-    queryFn: () => api.forgePrApprovals(repo, number ?? 0),
+    ...prApprovalsOptions(repo, number ?? 0),
     enabled: number !== null,
+  });
+}
+
+/** Shared by {@link usePrApprovals} and the PR view's switch prefetch. */
+export const prApprovalsOptions = (repo: string, number: number) =>
+  queryOptions({
+    queryKey: ["repo", repo, "pr", "origin", number, "approvals"] as const,
+    queryFn: () => api.forgePrApprovals(repo, number),
     staleTime: 30_000,
     retry: false,
   });
-}
 
 export function useApprovePr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
@@ -140,13 +147,19 @@ export function useApprovePr(repo: string, lens: RemoteLens) {
  *  `usePrApprovals`). */
 export function usePrTasks(repo: string, number: number | null) {
   return useQuery({
-    queryKey: prTasksKey(repo, number ?? 0),
-    queryFn: () => api.forgeBbPrTasks(repo, number ?? 0),
+    ...prTasksOptions(repo, number ?? 0),
     enabled: number !== null,
+  });
+}
+
+/** Shared by {@link usePrTasks} and the PR view's switch prefetch. */
+export const prTasksOptions = (repo: string, number: number) =>
+  queryOptions({
+    queryKey: prTasksKey(repo, number),
+    queryFn: () => api.forgeBbPrTasks(repo, number),
     staleTime: 30_000,
     retry: false,
   });
-}
 
 // PR-task mutations invalidate the exact tasks key onSettled; the component patches its
 // own local state optimistically (like toggleApproval), so no optimistic logic lives in
@@ -585,18 +598,8 @@ export const PIPELINE_IN_FLIGHT = [
  *  "origin" lens segment. */
 export function useGlMrMergeState(repo: string, number: number | null) {
   return useQuery({
-    queryKey: [
-      "repo",
-      repo,
-      "pr",
-      "origin",
-      number ?? 0,
-      "gl-merge-state",
-    ] as const,
-    queryFn: () => api.forgeGlMrMergeState(repo, number ?? 0),
+    ...glMrMergeStateOptions(repo, number ?? 0),
     enabled: number !== null,
-    staleTime: 5_000,
-    retry: false,
     refetchInterval: (query) => {
       const d = query.state.data;
       if (!d) return false;
@@ -608,6 +611,16 @@ export function useGlMrMergeState(repo: string, number: number | null) {
     refetchIntervalInBackground: false,
   });
 }
+
+/** Shared by {@link useGlMrMergeState} and the PR view's switch prefetch, which
+ *  reads it once: the poll stays the hook's. */
+export const glMrMergeStateOptions = (repo: string, number: number) =>
+  queryOptions({
+    queryKey: ["repo", repo, "pr", "origin", number, "gl-merge-state"] as const,
+    queryFn: () => api.forgeGlMrMergeState(repo, number),
+    staleTime: 5_000,
+    retry: false,
+  });
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the

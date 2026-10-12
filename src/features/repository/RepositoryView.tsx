@@ -43,6 +43,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ActionsPanel } from "@/features/actions/ActionsPanel";
 import { RunDetailView } from "@/features/actions/RunDetailView";
+import { RunSlots } from "@/features/actions/run-slots";
 import { useRunNotifications } from "@/features/actions/useRunNotifications";
 import { CodeTodoDetailView } from "@/features/code-todos/CodeTodoDetailView";
 import { CodeTodosPanel } from "@/features/code-todos/CodeTodosPanel";
@@ -403,13 +404,30 @@ export function RepositoryView() {
   // The detail panes run off deferred selections so rapidly arrowing a list
   // (commits, PRs) only loads + renders the item landed on, not every one
   // passed. The lists' own highlights use the live values, so they stay snappy.
-  const deferredCommitHash = useDeferredValue(selectedCommitHash);
-  const deferredCompareCommitHash = useDeferredValue(compareCommitHash);
-  const deferredPr = useDeferredValue(selectedPr);
-  const deferredIssue = useDeferredValue(selectedIssue);
-  const deferredDiscussion = useDeferredValue(selectedDiscussion);
-  const deferredTag = useDeferredValue(selectedTag);
-  const deferredTodo = useDeferredValue(selectedTodo);
+  // With nothing on screen yet the lag buys nothing and would paint the empty
+  // state for a frame, so a null deferred value falls back to the live one; the
+  // lag stays whenever a previous item is shown (reveal guards and holds read it).
+  const deferredCommitHash =
+    useDeferredValue(selectedCommitHash) ?? selectedCommitHash;
+  const deferredCompareCommitHash =
+    useDeferredValue(compareCommitHash) ?? compareCommitHash;
+  const deferredPr = useDeferredValue(selectedPr) ?? selectedPr;
+  const deferredIssue = useDeferredValue(selectedIssue) ?? selectedIssue;
+  const deferredDiscussion =
+    useDeferredValue(selectedDiscussion) ?? selectedDiscussion;
+  const deferredTag = useDeferredValue(selectedTag) ?? selectedTag;
+  const deferredTodo = useDeferredValue(selectedTodo) ?? selectedTodo;
+  const deferredRunId = useDeferredValue(selectedRunId);
+  // A repo switch renders once with the new repo before the deferred run id
+  // catches up; that render shows no run, so the old id never fetches against
+  // the new repo. The live id needs no gate: the store sets it with its repo.
+  const deferredRunRepo = useDeferredValue(repoPath);
+  const runId =
+    deferredRunId === null
+      ? selectedRunId
+      : deferredRunRepo === repoPath
+        ? deferredRunId
+        : null;
   const status = useRepoStatus(repoPath ?? "");
   const alias = useRepoAlias(repoPath);
   // The write-capable agent is an AI feature — hide its tab when AI is hidden.
@@ -1065,12 +1083,19 @@ export function RepositoryView() {
             )}
           </TabPanel>
           <TabPanel active={repoTab === "actions"}>
-            {selectedRunId !== null ? (
-              <RunDetailView
-                key={selectedRunId}
-                repoPath={repoPath}
-                runId={selectedRunId}
-                active={repoTab === "actions"}
+            {runId !== null ? (
+              <RunSlots
+                key={repoPath}
+                runId={runId}
+                liveRunId={selectedRunId}
+                visible={repoTab === "actions"}
+                renderRun={(id) => (
+                  <RunDetailView
+                    repoPath={repoPath}
+                    runId={id}
+                    active={repoTab === "actions"}
+                  />
+                )}
               />
             ) : (
               <DiffPlaceholder

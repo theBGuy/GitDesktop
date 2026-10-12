@@ -618,6 +618,19 @@ export function usePrCommitDiff(
   });
 }
 
+/** Shared by {@link useCommitComments} and the commit prefetch so the two can't
+ *  drift. */
+export const commitCommentsOptions = (
+  repo: string,
+  sha: string,
+  lens: RemoteLens,
+) =>
+  queryOptions({
+    queryKey: commitCommentsKey(repo, sha, lens),
+    queryFn: () => api.forgeCommitComments(repo, sha, lens),
+    staleTime: 30_000,
+  });
+
 /** Comments on a commit (GitHub commit comments / GitLab commit notes). Pass
  *  `sha: null` when no commit is selected so the read doesn't fire. The `lens`
  *  scopes which repo the commit's comments come from — "origin" from the History
@@ -628,10 +641,8 @@ export function useCommitComments(
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: commitCommentsKey(repo, sha ?? "", lens),
-    queryFn: () => api.forgeCommitComments(repo, sha ?? "", lens),
+    ...commitCommentsOptions(repo, sha ?? "", lens),
     enabled: sha !== null,
-    staleTime: 30_000,
   });
 }
 
@@ -994,6 +1005,18 @@ export function usePrefetchPr(repo: string, lens: RemoteLens) {
   );
 }
 
+/** Shared by {@link usePrReactions} and the PR view's switch prefetch. */
+export const prReactionsOptions = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  queryOptions({
+    queryKey: repoKeys.reactions(repo, ["pr", lens, number]),
+    queryFn: () => api.forgePrReactions(repo, number, lens),
+    staleTime: 30_000,
+  });
+
 /** Reactions for a PR's body + comments — decoupled from the PR view so it
  *  loads in parallel and leaves the (untouched) PR query alone. */
 export function usePrReactions(
@@ -1002,10 +1025,8 @@ export function usePrReactions(
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: repoKeys.reactions(repo, ["pr", lens, number ?? 0]),
-    queryFn: () => api.forgePrReactions(repo, number ?? 0, lens),
+    ...prReactionsOptions(repo, number ?? 0, lens),
     enabled: number !== null,
-    staleTime: 30_000,
   });
 }
 

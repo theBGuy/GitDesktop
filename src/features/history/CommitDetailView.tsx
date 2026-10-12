@@ -112,20 +112,31 @@ export function CommitDetailView({
     !files.isPlaceholderData &&
     (files.data?.some((f) => f.path === deferredPath) ?? false);
   const diff = useCommitFileDiff(repoPath, hash, deferredPath, diffEnabled);
+  // The commit the header shows: while the selected one's details are still a
+  // placeholder, the last one whose details settled (the placeholder's source).
+  const [settledHash, setSettledHash] = useState(hash);
+  if (!details.isPlaceholderData && details.data && settledHash !== hash)
+    setSettledHash(hash);
+  const renderedHash = details.isPlaceholderData ? settledHash : hash;
 
   // Commit-comment surface — mirrors the PR Commits drill-in (PrCommitDetail),
   // shown only when the repo has a ready forge whose provider takes commit
-  // comments and a commit is on the remote. During a switch it renders on the
-  // PREVIOUS commit's held verdict, but every forge fetch and write waits for
-  // this commit's own. A local-only repo issues ZERO forge calls. All these hooks
-  // sit ABOVE the early returns to keep hook order stable across skeleton frames.
+  // comments and a commit is on the remote. It follows the RENDERED commit, so a
+  // switch keeps the shown commit's list until the next one's details land; from
+  // then it renders on that commit's held verdict, but every forge fetch and
+  // write waits for its own. A local-only repo issues ZERO forge calls. All these
+  // hooks sit ABOVE the early returns to keep hook order stable across skeleton
+  // frames.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const providerKey = provider ?? "github";
   const remoteLabel = providerLabel(provider);
   const { canCommentCommits } = usePrCapabilities(forge.data, provider);
   const gate = useCommitCommentsGate(repoPath);
-  const onRemote = useCommitOnRemote(repoPath, gate ? hash : null);
+  // Starts the selected commit's verdict while the previous one is still shown,
+  // so it is usually cached by the time the rendered verdict below moves to it.
+  useCommitOnRemote(repoPath, gate ? hash : null);
+  const onRemote = useCommitOnRemote(repoPath, gate ? renderedHash : null);
   // The held verdict drives RENDERING only: a held `true` can name a commit the
   // forge lacks. The settled gate is `commentsReady` here, and inside
   // CommitComments `enabled && !held` (its read) plus `writesHeld` (its writes).
@@ -136,7 +147,7 @@ export function CommitDetailView({
   // origin); the fork/upstream lens is a PR/Issues-tab affordance.
   const comments = useCommitComments(
     repoPath,
-    commentsReady ? hash : null,
+    commentsReady ? renderedHash : null,
     "origin",
   );
   // GitHub commit-comment `position` mapping must walk GitHub's OWN patch (local
@@ -144,7 +155,7 @@ export function CommitDetailView({
   // diff only for GitHub. GitLab/Bitbucket anchor by plain line and need none.
   const remoteDiff = useRemoteCommitDiff(
     repoPath,
-    providerKey === "github" && commentsReady ? hash : null,
+    providerKey === "github" && commentsReady ? renderedHash : null,
   );
   const remoteSections = useMemo(
     () => splitUnifiedDiff(remoteDiff.data ?? ""),
@@ -160,10 +171,14 @@ export function CommitDetailView({
   const commentRefs: MarkdownRefs | undefined = provider
     ? { provider, repoPath, lens: "origin" }
     : undefined;
+  // While the header lags the selection, the diff is still the rendered commit's
+  // only as long as the file list is a placeholder too: a settled list starts
+  // the selected commit's diff, which must not take the rendered one's anchors.
+  const anchorsMatchDiff = renderedHash === hash || files.isPlaceholderData;
   const lineAnchors = useCommitLineAnchors(
     comments.data,
     providerKey === "github" ? remoteSections : undefined,
-    commentsReady ? deferredPath : null,
+    commentsReady && anchorsMatchDiff ? deferredPath : null,
     commentRefs,
   );
   // Both commit queries keep serving the PREVIOUS commit while the selected one
@@ -380,7 +395,7 @@ export function CommitDetailView({
 
   return (
     <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
-      <header className="space-y-1 border-b px-4 py-3">
+      <header className="flex flex-col gap-1 border-b px-4 py-3">
         <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
           {commit.subject}
         </h2>
@@ -468,10 +483,18 @@ export function CommitDetailView({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        {/* Absent rather than faded while the details are a placeholder: these
-            are CLICKABLE links mined from the message text, and a dimmed one
-            still navigates to the previous commit's issue. */}
-        {!details.isPlaceholderData && (
+        {/* Inert as well as faded while the details are a placeholder: these
+            are CLICKABLE links mined from the previous commit's message, kept
+            only to hold their space. `empty:hidden` drops the wrapper when no
+            key matches, so the header's gap never spaces an empty row. */}
+        <div
+          inert={details.isPlaceholderData}
+          className={cn(
+            "empty:hidden",
+            PLACEHOLDER_FADE,
+            details.isPlaceholderData && "opacity-80",
+          )}
+        >
           <JiraRefRow
             repoPath={repoPath}
             sources={[
@@ -479,7 +502,7 @@ export function CommitDetailView({
               { label: "commit message body", text: commit.body },
             ]}
           />
-        )}
+        </div>
       </header>
 
       <DetailRailRow>
@@ -554,7 +577,7 @@ export function CommitDetailView({
         enabled={showComments}
         held={verdictHeld}
         repoPath={repoPath}
-        sha={hash}
+        sha={renderedHash}
         canComment={canCommentCommits}
         remoteLabel={remoteLabel}
         diffSections={providerKey === "github" ? remoteSections : undefined}
@@ -562,7 +585,9 @@ export function CommitDetailView({
         // GitHub has to wait for it; the others anchor by plain line and are always
         // ready.
         diffReady={providerKey !== "github" || remoteDiff.isSuccess}
-        selectedPath={deferredPath}
+        // Inline anchors are off while the diff isn't the rendered commit's, so
+        // the list keeps that file's comments too.
+        selectedPath={anchorsMatchDiff ? deferredPath : null}
         onSelectFile={selectFileFromComments}
         lens="origin"
         stale={stale}

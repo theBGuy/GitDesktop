@@ -1,5 +1,6 @@
 import {
   CaretDownIcon,
+  CheckCircleIcon,
   ClockIcon,
   InfoIcon,
   type Icon as PhosphorIcon,
@@ -17,6 +18,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
@@ -134,13 +137,19 @@ export const PR_SWITCH_LOADING_REASON = "Loading this pull request…";
 
 /** Which line the banner shows. `predicted` is the local fallback wherever the forge has
  *  no mergeability to give — Bitbucket by design, or a read that failed; `unknown` is a
- *  `checking` poll that gave up, `unreachable` a read that never landed at all,
+ *  poll on GitHub's still-computing answer that gave up, `unreachable` a read that never landed at all,
  *  `updating` the forge's queued update-branch job still running, and `blocked` a PR
- *  that merges cleanly but whose base branch rules are refusing it. */
+ *  that merges cleanly but whose base branch rules are refusing it. The three quiet
+ *  arms keep an open PR's line when nothing else applies: `pending` while the answers
+ *  load (the forge's still-computing answer included), `clean` on a positive one,
+ *  and `unchecked` where none can be had. `null` (no line) is for a closed or
+ *  merged PR. */
 export type PrMergeabilityArm =
+  | "pending"
+  | "clean"
+  | "unchecked"
   | "conflicting"
   | "predicted"
-  | "checking"
   | "unknown"
   | "unreachable"
   | "resume"
@@ -162,14 +171,28 @@ export const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
   configured: " is a promotion branch for this repository",
 };
 
+/** What each forge calls the request the strip describes. */
+const PR_NOUN: Record<ForgeProvider, string> = {
+  github: "pull request",
+  gitlab: "merge request",
+  bitbucket: "pull request",
+};
+
+/** An unresolved provider reads as GitHub, the app's default forge. */
+function prNounFor(provider: ForgeProvider | null | undefined): string {
+  return provider ? PR_NOUN[provider] : PR_NOUN.github;
+}
+
 /** Words carry the meaning; the icon and tone only reinforce it. */
 const ARM_ICON: Record<
   Exclude<PrMergeabilityArm, null>,
   PhosphorIcon | typeof Spinner
 > = {
+  pending: ClockIcon,
+  clean: CheckCircleIcon,
+  unchecked: InfoIcon,
   conflicting: WarningIcon,
   predicted: WarningIcon,
-  checking: ClockIcon,
   unknown: ClockIcon,
   unreachable: ClockIcon,
   resume: InfoIcon,
@@ -194,11 +217,32 @@ const ARM_MESSAGE: Record<
     blockedApprovals: number | null;
     blockedReason: string | null;
     promotionKind: PromotionKind;
+    pendingOffline: boolean;
   }) => ReactNode
 > = {
+  pending: ({ pendingOffline }) =>
+    pendingOffline
+      ? offlinePendingMessage("the conflict check")
+      : "Checking for conflicts…",
+  clean: ({ base }) => (
+    <>
+      {"No conflicts with "}
+      <span className="font-mono">{base}</span>
+      {"."}
+    </>
+  ),
+  // Neither the forge nor the local prediction has an answer to give: a fork's head
+  // can't be predicted from our remote, and Bitbucket reports no mergeability.
+  unchecked: ({ base, provider }) => (
+    <>
+      {"Conflicts with "}
+      <span className="font-mono">{base}</span>
+      {` can't be checked for this ${prNounFor(provider)}.`}
+    </>
+  ),
   conflicting: ({ base, provider }) => (
     <>
-      {"This pull request has conflicts with "}
+      {`This ${prNounFor(provider)} has conflicts with `}
       <span className="font-mono">{base}</span>
       {"."}
       {/* GitHub runs no pull_request checks on a conflicting PR, so an
@@ -219,7 +263,6 @@ const ARM_MESSAGE: Record<
       {" is predicted to conflict (checked locally from your last fetch)."}
     </>
   ),
-  checking: () => "Checking mergeability…",
   unknown: () => "Couldn't determine mergeability.",
   // The local prediction needs no network, so a clean one is a real answer even with
   // the forge unreachable — and the only one this arm can stand behind.
@@ -242,8 +285,8 @@ const ARM_MESSAGE: Record<
       {"…"}
     </>
   ),
-  resume: () =>
-    "An unfinished conflict resolution exists for this pull request.",
+  resume: ({ provider }) =>
+    `An unfinished conflict resolution exists for this ${prNounFor(provider)}.`,
   // The behind clause rides along in the `behind` arm's own words, because the update
   // controls come with it — a bare refusal beside an Update branch button would leave
   // the button unexplained.
@@ -306,8 +349,9 @@ const ARM_MESSAGE: Record<
 /**
  * One calm status strip above a remote PR's body: whether it merges into its base,
  * and the way into the isolated-worktree resolution when it doesn't. Dumb by design —
- * the view decides the arm; this only renders it. Renders nothing when there's
- * nothing to say (mergeable, or unavailable with no local prediction).
+ * the view decides the arm; this only renders it. An open PR always gets its line,
+ * so the strip never appears or vanishes under the header; it renders nothing only
+ * for the `null` arm (closed or merged).
  */
 export function PrMergeabilityBanner({
   arm,
@@ -326,6 +370,7 @@ export function PrMergeabilityBanner({
   blockedRequirements,
   blockedApprovals,
   blockedReason,
+  pendingOffline,
   updateBlockedReason,
   updateHeldReason,
   updateBusy,
@@ -380,6 +425,9 @@ export function PrMergeabilityBanner({
    *  (GitLab). Non-null replaces the rules-derived line — the two describe different
    *  refusals and only one provider can be answering. */
   blockedReason: string | null;
+  /** The `pending` arm's reads are parked offline, so it says so rather than claim
+   *  a check is running. */
+  pendingOffline: boolean;
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
   /** A transient hold (offline), ranked below the refusal AND below every
@@ -470,16 +518,20 @@ export function PrMergeabilityBanner({
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
+      {/* Every arm's first line is ONE line of one height (`min-h-6` matches a row
+          of xs buttons): the sentence takes the room left by its actions
+          (`basis-0`, so they never wrap under it) and truncates, titled only
+          when clipped. Swapping arms never moves what sits below the strip. */}
       <span
         className={cn(
-          "flex min-w-0 items-center gap-1.5",
+          "flex min-h-6 min-w-0 flex-1 basis-0 items-center gap-1.5",
           conflicting ? "text-warning" : "text-muted-foreground",
         )}
       >
         {/* Decorative throughout — the sentence carries the meaning, and the `updating`
             arm's spinner would otherwise announce a bare "Loading" beside it. */}
         <Icon aria-hidden className="size-3.5 shrink-0" />
-        <span className="min-w-0">
+        <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
           {ARM_MESSAGE[arm]({
             base,
             head,
@@ -491,12 +543,13 @@ export function PrMergeabilityBanner({
             blockedApprovals,
             blockedReason,
             promotionKind,
+            pendingOffline,
           })}
         </span>
       </span>
 
       {(conflicting || arm === "resume") && (
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {/* Only where a read FAILED — a forge with no mergeability to give (Bitbucket)
               answers without an HTTP call, so a Retry there would be a dead button.
               First in the row: the real answer outranks acting on a prediction. */}
@@ -554,7 +607,7 @@ export function PrMergeabilityBanner({
         arm === "updating" ||
         (arm === "blocked" && behindBy > 0)) &&
         promotionKind === null && (
-          <div className="flex items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1.5">
             <DisabledReasonButton
               variant="ghost"
               size="xs"
@@ -598,7 +651,7 @@ export function PrMergeabilityBanner({
         )}
 
       {(arm === "unknown" || arm === "unreachable") && (
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           <Button
             variant="ghost"
             size="xs"

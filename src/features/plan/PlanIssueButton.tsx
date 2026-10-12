@@ -1,5 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { clearAgentSelection } from "@/features/sessions/agentSelect";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -13,9 +13,13 @@ import { usePlanStore } from "./store";
 export function PlanIssueButton({
   title,
   body,
+  disabledReason,
 }: {
   title: string;
   body: string;
+  /** Set while `title`/`body` can't seed a plan yet (the issue is still
+   *  loading): the button stays in place, disabled, with this as its reason. */
+  disabledReason?: string;
 }) {
   const aiEnabled = useAiEnabled();
   const setPendingPlanSeed = usePlanStore((s) => s.setPendingPlanSeed);
@@ -23,9 +27,11 @@ export function PlanIssueButton({
   if (!aiEnabled) return null;
 
   return (
-    <Button
+    <DisabledReasonButton
       variant="outline"
       size="xs"
+      disabled={!!disabledReason}
+      reason={disabledReason}
       title="Plan an implementation for this issue with a read-only agent"
       onClick={() => {
         // The seed is keyed to the repo it was raised in, so read the live one
@@ -41,6 +47,6 @@ export function PlanIssueButton({
     >
       <SparkleIcon data-icon="inline-start" />
       Plan
-    </Button>
+    </DisabledReasonButton>
   );
 }

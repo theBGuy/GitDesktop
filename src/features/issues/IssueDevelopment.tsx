@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,8 +25,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { IssueDetails, RemoteLens } from "@/lib/git/types";
 import {
   pendingWriteReason,
   refuseWhileOffline,
@@ -36,6 +38,7 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { SectionReadLine, sectionReadFailed } from "./IssueRelations";
 
 /** GitHub's default linked-branch name: `<number>-<slugified title>`. */
 function defaultBranchName(number: number, title: string): string {
@@ -57,31 +60,51 @@ function defaultBranchName(number: number, title: string): string {
 export function IssueDevelopment({
   repoPath,
   number,
-  issueId,
-  issueTitle,
-  issueUrl,
+  issue,
   lens,
   disabledReason,
+  linkOutReason,
+  reserve = false,
+  held = false,
 }: {
   repoPath: string;
+  /** Whose development the section lists. */
   number: number;
-  issueId: string;
-  issueTitle: string;
-  issueUrl: string;
+  /** The issue on screen: a created branch is named from it AND linked to it,
+   *  so the name and the link can never come from two issues. */
+  issue: Pick<IssueDetails, "id" | "number" | "title" | "url">;
   /** The origin|upstream lens the parent issue view resolved. */
   lens: RemoteLens;
-  /** Set when the viewer may not push: creating a linked branch is a remote
-   *  branch write, so that item disables and appends this text to its label (a
-   *  disabled menu item drops pointer events, so a tooltip never shows).
-   *  Callers pass the compact write-axis reason; the link-out stays live. */
+  /** Set when creating a linked branch can't be used right now (the viewer may
+   *  not push, or the issue is still loading): that item disables and appends
+   *  this text to its label (a disabled menu item drops pointer events, so a
+   *  tooltip never shows). */
   disabledReason?: string;
+  /** Set while `issue` isn't the selected issue yet: the link-out to it
+   *  disables the same way. */
+  linkOutReason?: string;
+  /** The provider is known to carry this section: the empty state's line is
+   *  held while the read is out, and says so when it can't load. */
+  reserve?: boolean;
+  /** The host is holding this issue on screen while another loads. `inert`
+   *  can't reach the portaled dialog, so this shuts it. */
+  held?: boolean;
 }) {
   const dev = useIssueDevelopment(repoPath, number, lens);
   const createBranch = useCreateLinkedBranch(repoPath, lens);
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
   const [branchOpen, setBranchOpen] = useState(false);
+  // The issue the dialog was opened for, captured with the name it seeded.
+  const [branchFor, setBranchFor] = useState<{
+    id: string;
+    number: number;
+  } | null>(null);
   const [branchName, setBranchName] = useState("");
+  if (held && branchOpen) setBranchOpen(false);
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    reserve && sectionReadFailed(dev),
+  );
 
   const prs = dev.data?.prs ?? [];
   const branches = dev.data?.branches ?? [];
@@ -125,9 +148,10 @@ export function IssueDevelopment({
   async function submitBranch() {
     const name = branchName.trim();
     // The input's Enter submits past the held button, which stays focusable.
-    if (!name || createBranch.isPending || refuseWhileOffline()) return;
+    if (!branchFor || !name || createBranch.isPending || refuseWhileOffline())
+      return;
     try {
-      await createBranch.mutateAsync({ issueId, name });
+      await createBranch.mutateAsync({ issueId: branchFor.id, name });
     } catch (e) {
       toastError(e);
       return;
@@ -139,7 +163,7 @@ export function IssueDevelopment({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div ref={hostRef} tabIndex={-1} className="space-y-1.5 outline-none">
       <div className="flex items-center gap-2">
         <p className="text-xs font-medium text-muted-foreground">Development</p>
         <span className="flex-1" />
@@ -156,19 +180,27 @@ export function IssueDevelopment({
             <PlusIcon />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-56">
+            {/* Both rows flip with the issue's load while the menu can be open. */}
             <DropdownMenuItem
+              className={MENU_HELD_ROW_CLASS}
               disabled={!!disabledReason}
               onClick={() => {
-                setBranchName(defaultBranchName(number, issueTitle));
+                setBranchName(defaultBranchName(issue.number, issue.title));
+                setBranchFor({ id: issue.id, number: issue.number });
                 setBranchOpen(true);
               }}
             >
               Create a branch…
               {disabledReason ? ` — ${disabledReason}` : ""}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openUrl(issueUrl)}>
+            <DropdownMenuItem
+              className={MENU_HELD_ROW_CLASS}
+              disabled={!!linkOutReason}
+              onClick={() => openUrl(issue.url)}
+            >
               <ArrowSquareOutIcon />
               Link a pull request or branch on GitHub…
+              {linkOutReason ? ` — ${linkOutReason}` : ""}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -204,11 +236,20 @@ export function IssueDevelopment({
           <span className="min-w-0 flex-1 truncate font-mono">{b}</span>
         </div>
       ))}
-      {loaded && prs.length === 0 && branches.length === 0 && (
-        <p className="text-[11px] text-muted-foreground">
-          No linked pull requests or branches.
-        </p>
-      )}
+      {!loaded
+        ? reserve && (
+            <SectionReadLine
+              query={dev}
+              noun="linked pull requests and branches"
+              retryRef={retryRef}
+            />
+          )
+        : prs.length === 0 &&
+          branches.length === 0 && (
+            <p className="text-[11px] text-muted-foreground">
+              No linked pull requests or branches.
+            </p>
+          )}
 
       <Dialog open={branchOpen} onOpenChange={setBranchOpen}>
         <DialogContent>
@@ -223,7 +264,7 @@ export function IssueDevelopment({
               <DialogTitle>Create a branch</DialogTitle>
               <DialogDescription>
                 Creates a branch off the default branch on GitHub, linked to #
-                {number}. Fetch afterwards to check it out locally.
+                {branchFor?.number}. Fetch afterwards to check it out locally.
               </DialogDescription>
             </DialogHeader>
             <Input

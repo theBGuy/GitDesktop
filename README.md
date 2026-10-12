@@ -336,20 +336,24 @@ in one click.
   chips (Jira tickets aren't closed from PR text). Editing a PR peels any
   trailing `Closes #N` / `Relates to #N` lines back into chips, so the chips
   stay the single editor for the ref block.
-- **Conflicts with the base**: an in-flow strip under a PR's header when it
-  won't merge cleanly (**GitHub** and **GitLab** report it themselves;
-  **Bitbucket** falls back to a local prediction, named as such). A GitHub or
-  GitLab answer that can't be read names the forge it couldn't reach, offers
-  **Retry**, and falls back to that same prediction meanwhile. Plus a
-  **Conflicts** chip on open GitHub/GitLab rows in the list. **Resolve
-  conflicts** merges the base into the PR's head in a **hidden, isolated
-  worktree** (your branch and working tree untouched), hands you the
-  conflicted files in the in-app conflict editor, and **Finish & push**
-  updates the PR's head branch, **never force-pushed**: a head that moved
-  meanwhile refuses the push and keeps your work. **Discard** drops the
-  worktree and nothing else, and an unfinished resolution is offered back
-  from any checkout of the repository as **Continue resolving**. Fork PRs
-  are excluded, since their head lives in another repository.
+- **Conflicts with the base**: every open PR keeps a one-line strip under its
+  header, so you always know whether it merges into its base. It reads
+  **Checking for conflicts…** while the answers load, and **No conflicts with
+  `main`** once the forge or the local prediction finds none. When neither can
+  answer, it says the conflicts can't be checked, and a PR that won't merge
+  cleanly gets a warning naming its base. **GitHub** and **GitLab** report
+  conflicts themselves; **Bitbucket** falls back to a local prediction, named
+  as such. A GitHub or GitLab answer that can't be read names the forge it
+  couldn't reach, offers **Retry**, and falls back to that same prediction
+  meanwhile. Open GitHub and GitLab rows in the list carry a **Conflicts**
+  chip too. **Resolve conflicts** merges the base into the PR's head in a
+  **hidden, isolated worktree** (your branch and working tree untouched),
+  hands you the conflicted files in the in-app conflict editor, and **Finish &
+  push** updates the PR's head branch, **never force-pushed**: a head that
+  moved meanwhile refuses the push and keeps your work. **Discard** drops the
+  worktree and nothing else, and an unfinished resolution is offered back from
+  any checkout of the repository as **Continue resolving**. Fork PRs are
+  excluded, since their head lives in another repository.
 - **Blocked by branch protection**: a PR that merges cleanly but whose rules
   refuse it gets its own strip line naming the reason. On **GitHub** that's
   the required checks still outstanding (four, then *and N more*) plus the

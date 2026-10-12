@@ -58,6 +58,7 @@ import {
 import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
+import { ISSUE_SWITCH_LOADING_REASON } from "@/features/issues/RemoteIssueViewParts";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
@@ -1681,7 +1682,7 @@ export function JiraIssueView({
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
-        return "Loading this issue…";
+        return ISSUE_SWITCH_LOADING_REASON;
       case comment.isPending:
         return pendingWriteReason(
           comment.isPaused,
@@ -1696,7 +1697,7 @@ export function JiraIssueView({
   const transitionReason = (() => {
     switch (true) {
       case detailsStale:
-        return "Loading this issue…";
+        return ISSUE_SWITCH_LOADING_REASON;
       case transition.isPending:
         return pendingWriteReason(transition.isPaused, "Changing the status…");
       case transitionTo.isPending:

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues";
@@ -49,7 +50,12 @@ import {
   pendingWriteReason,
   SAVING_LAST_CHANGE_REASON,
 } from "@/lib/offline-writes";
+import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { IssueDevelopment } from "./IssueDevelopment";
 import {
@@ -64,6 +70,11 @@ import {
   RelatedRow,
   rowPending,
 } from "./IssueRelations";
+
+/** What a control held through an issue switch says: the issue on screen is
+ *  not the selected one yet. Shared by every issue view's stale-held controls so
+ *  the one wording can't drift. */
+export const ISSUE_SWITCH_LOADING_REASON = "Loading this issue…";
 
 /** A rail row's hold while its own write is pending: parked offline or saving. */
 function rowPendingReason(
@@ -90,8 +101,16 @@ export type IssueRailRow = {
  *  the GitHub-only rows fetch `gh_*` and the GitLab-only rows fetch GitLab on
  *  mount — an always-mounted list would fire both providers' APIs on every
  *  issue. This is why the per-provider rails existed, and why one list still
- *  can't be unconditional. */
-export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
+ *  can't be unconditional. `held` remounts the rows (never the aside, whose
+ *  scroll stays): their pickers' popups are portaled, out of `inert`'s reach,
+ *  so a held switch shuts them this way. */
+export function IssueRail({
+  rows,
+  held = false,
+}: {
+  rows: IssueRailRow[];
+  held?: boolean;
+}) {
   return (
     // Stacked below the body once RemoteIssueView's pane drops under 672px, where
     // it keeps its own scroller (the body's ScrollArea is a sibling, so a single
@@ -101,10 +120,11 @@ export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
     <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4 @max-2xl/issue-detail:max-h-[45%] @max-2xl/issue-detail:w-full @max-2xl/issue-detail:border-t @max-2xl/issue-detail:border-l-0">
       {rows.map((row) => {
         if (!row.when) return null;
+        const key = held ? `${row.key}:held` : row.key;
         return row.heading === undefined ? (
-          <Fragment key={row.key}>{row.render()}</Fragment>
+          <Fragment key={key}>{row.render()}</Fragment>
         ) : (
-          <div key={row.key} className="space-y-1.5">
+          <div key={key} className="space-y-1.5">
             <p className="text-xs font-medium text-muted-foreground">
               {row.heading}
             </p>
@@ -120,20 +140,43 @@ export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
  *  framing (Links / Notifications) differs per provider surface. */
 function RailLinkButton({
   url,
+  disabledReason,
   children,
 }: {
   url: string;
+  /** Set while `url` belongs to an issue that isn't the selected one yet. */
+  disabledReason?: string;
   children: ReactNode;
 }) {
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({
+      disabled: !!disabledReason,
+      reason: disabledReason,
+      onClick: () => void openUrl(url),
+    });
   return (
-    <button
-      type="button"
-      onClick={() => openUrl(url)}
-      className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+    <span
+      className={cn("flex", blockedReason && "cursor-not-allowed")}
+      title={wrapperTitle}
     >
-      <ArrowSquareOutIcon className="size-3" />
-      {children}
-    </button>
+      <button
+        type="button"
+        {...nativeProps}
+        aria-describedby={describedBy}
+        className={cn(
+          ARIA_DISABLED_CLASS,
+          "flex w-full cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline",
+        )}
+      >
+        <ArrowSquareOutIcon className="size-3" />
+        {children}
+      </button>
+      {blockedReason ? (
+        <span id={reasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -153,13 +196,16 @@ function viewOnRemoteRow(
   issue: IssueDetails,
   remoteLabel: string,
   when: boolean,
+  loadingReason: string | undefined,
 ): IssueRailRow {
   return {
     key: "links",
     when,
     heading: "Links",
     render: () => (
-      <RailLinkButton url={issue.url}>View on {remoteLabel}</RailLinkButton>
+      <RailLinkButton url={issue.url} disabledReason={loadingReason}>
+        View on {remoteLabel}
+      </RailLinkButton>
     ),
   };
 }
@@ -189,6 +235,9 @@ export function IssueSidebar({
   lens,
   pickerDisabledReason,
   writeItemReason,
+  loadingReason,
+  reserve = false,
+  held = false,
   paletteEnabled = false,
 }: {
   repoPath: string;
@@ -215,6 +264,15 @@ export function IssueSidebar({
   /** The compact WRITE-axis reason for the rail's one push-tier affordance
    *  (Development → create a linked branch), which triage doesn't cover. */
   writeItemReason?: string;
+  /** Set while `issue` is a placeholder for another selected issue: the
+   *  link-outs and the branch create hold on it, being `issue`'s own. */
+  loadingReason?: string;
+  /** The provider is known to be GitHub: its sections hold their empty
+   *  state's line while their reads are out. */
+  reserve?: boolean;
+  /** The host is holding this issue on screen while another loads: portaled
+   *  dialogs and picker popups, which `inert` can't reach, stay shut. */
+  held?: boolean;
   /** Whether the view hosting this rail owns the current selection, so its
    *  Projects popups may answer the palette. The provider/access term is the
    *  rows' own `when` gate, which is what decides they mount at all. */
@@ -250,7 +308,13 @@ export function IssueSidebar({
     !canTrackTime &&
     !canLinkIssues
   ) {
-    return <ReadOnlyIssueSidebar issue={issue} remoteLabel={remoteLabel} />;
+    return (
+      <ReadOnlyIssueSidebar
+        issue={issue}
+        remoteLabel={remoteLabel}
+        loadingReason={loadingReason}
+      />
+    );
   }
 
   // GitHub-only rows gate on `canWrite` ("not a known read-only provider", true
@@ -361,6 +425,7 @@ export function IssueSidebar({
           number={number}
           lens={lens}
           disabledReason={pickerDisabledReason}
+          reserve={reserve}
         />
       ),
     },
@@ -373,11 +438,12 @@ export function IssueSidebar({
         <IssueDevelopment
           repoPath={repoPath}
           number={number}
-          issueId={issue.id}
-          issueTitle={issue.title}
-          issueUrl={issue.url}
+          issue={issue}
           lens={lens}
-          disabledReason={writeItemReason}
+          disabledReason={writeItemReason ?? loadingReason}
+          linkOutReason={loadingReason}
+          reserve={reserve}
+          held={held}
         />
       ),
     },
@@ -386,7 +452,9 @@ export function IssueSidebar({
       when: canWrite,
       heading: "Notifications",
       render: () => (
-        <RailLinkButton url={issue.url}>Subscribe on GitHub</RailLinkButton>
+        <RailLinkButton url={issue.url} disabledReason={loadingReason}>
+          Subscribe on GitHub
+        </RailLinkButton>
       ),
     },
     {
@@ -442,10 +510,10 @@ export function IssueSidebar({
       ),
     },
     // GitHub frames its link out as Notifications above instead.
-    viewOnRemoteRow(issue, remoteLabel, !canWrite),
+    viewOnRemoteRow(issue, remoteLabel, !canWrite, loadingReason),
   ];
 
-  return <IssueRail rows={rows} />;
+  return <IssueRail rows={rows} held={held} />;
 }
 
 /** Whether a due date lies before today, in LOCAL time (`Date`/`toISOString`
@@ -969,9 +1037,11 @@ function toRelated(l: GitLabLinkedIssue) {
 function ReadOnlyIssueSidebar({
   issue,
   remoteLabel,
+  loadingReason,
 }: {
   issue: IssueDetails;
   remoteLabel: string;
+  loadingReason: string | undefined;
 }) {
   const hasMeta =
     issue.assignees.length > 0 ||
@@ -1032,11 +1102,126 @@ function ReadOnlyIssueSidebar({
         </p>
       ),
     },
-    viewOnRemoteRow(issue, remoteLabel, true),
+    viewOnRemoteRow(issue, remoteLabel, true, loadingReason),
   ];
 
   return <IssueRail rows={rows} />;
 }
+
+/**
+ * The issue view's loading arm, for an issue with no answer of its own yet (a
+ * first open, a lens flip, or a switch whose hold ran out): the loaded view's
+ * header, conversation, rail and composer boxes at their loaded positions, so
+ * the issue fills in where it will stand rather than reflowing from a stub.
+ * `actions` are the loaded header's own controls, held in place while it
+ * loads; the caller renders them disabled.
+ */
+export function IssueLoadingFrame({
+  title,
+  number,
+  actions,
+  composer,
+}: {
+  /** The issue's title from its cached list row, when there is one. The loaded
+   *  title wraps around the actions by its length, so the real text wraps this
+   *  row the same way; without it a typical title's width stands in. */
+  title?: string;
+  number: number;
+  actions?: ReactNode;
+  /** What the loaded view docks under the thread: the comment composer, the
+   *  close/reopen bar alone, or nothing. */
+  composer: "comment" | "bar" | null;
+}) {
+  // The composer's collapse is one global preference, read as it reads it.
+  const composerCollapsed =
+    useSettings().data?.commentComposerCollapsed ?? false;
+  return (
+    <>
+      <span role="status" className="sr-only">
+        {ISSUE_SWITCH_LOADING_REASON}
+      </span>
+      {/* The loaded header's rows, class for class: the title row wraps
+          around the same actions, and the meta row is its avatar's 24px. */}
+      <header className="space-y-2 border-b px-4 py-3">
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="min-w-0 flex-auto text-sm font-medium break-words">
+            {title === undefined ? (
+              <Skeleton
+                aria-hidden
+                className="inline-block h-4 w-80 max-w-full align-middle"
+              />
+            ) : (
+              <>
+                {title}{" "}
+                <span className="font-normal text-muted-foreground">
+                  #{number}
+                </span>
+              </>
+            )}
+          </div>
+          {actions}
+        </div>
+        <div aria-hidden className="flex flex-wrap items-center gap-2">
+          <Skeleton className="h-5 w-12" />
+          <Skeleton className="size-6 rounded-full" />
+          <Skeleton className="h-4 w-40" />
+        </div>
+      </header>
+      <div className="flex min-h-0 flex-1 @max-2xl/issue-detail:flex-col">
+        <div
+          aria-hidden
+          className="min-w-0 flex-1 space-y-2 overflow-hidden p-4 @max-2xl/issue-detail:min-h-0"
+        >
+          <Skeleton className="h-4 w-48" />
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-11/12" />
+          <Skeleton className="h-3 w-3/4" />
+        </div>
+        <aside
+          aria-hidden
+          className="w-64 shrink-0 space-y-4 overflow-hidden border-l p-4 @max-2xl/issue-detail:max-h-[45%] @max-2xl/issue-detail:w-full @max-2xl/issue-detail:border-t @max-2xl/issue-detail:border-l-0"
+        >
+          {LOADING_RAIL_BLOCKS.map((key) => (
+            <div key={key} className="space-y-1.5">
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-4 w-36" />
+            </div>
+          ))}
+        </aside>
+      </div>
+      {/* CommentComposer's boxes: border-t p-3, then (expanded) the editor
+          in an mb-2 wrapper (space-y-1.5: the Write/Preview row and the
+          toolbar row of xs buttons, 24 each, and the textarea's min-h-12),
+          then the h-7 actions row: 169px expanded, 53 collapsed. The state
+          bar alone is the same p-3 around one h-7 row. */}
+      {composer !== null && (
+        <div aria-hidden className="border-t p-3">
+          {composer === "comment" && !composerCollapsed && (
+            <div className="mb-2 space-y-1.5">
+              <div className="flex items-center gap-1">
+                <Skeleton className="h-6 w-12" />
+                <Skeleton className="h-6 w-14" />
+              </div>
+              <Skeleton className="h-6 w-56 max-w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-24" />
+            {composer === "comment" && (
+              <>
+                <span className="flex-1" />
+                <Skeleton className="h-7 w-20" />
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+const LOADING_RAIL_BLOCKS = ["a", "b", "c", "d"] as const;
 
 /** Transfer/move-to-another-repo dialog. Presentational — the parent owns the
  *  mutation, the destination text, and the repo suggestions. `move` switches

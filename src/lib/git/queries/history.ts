@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef } from "react";
 import * as api from "../api";
 import type { DiffStatEntry } from "../types";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
-import { commitOnRemoteOptions } from "./prs";
+import { commitCommentsOptions, commitOnRemoteOptions } from "./prs";
 
 export const HISTORY_PAGE_SIZE = 200;
 
@@ -109,15 +109,28 @@ export function useCommitFileDiff(
 
 /** Warms a commit's detail view (header + files + the first file's diff) on row
  *  hover; prefetchQuery skips any read still fresh in the cache. `withOnRemote`
- *  also warms the on-remote verdict; callers pass the comment surface's own gate,
- *  since each verdict read walks history per remote ref. */
+ *  also warms the on-remote verdict, and the commit's comments once that verdict
+ *  says the forge has it; callers pass the comment surface's own gate, since each
+ *  verdict read walks history per remote ref. */
 export function usePrefetchCommit(repo: string, withOnRemote: boolean) {
   const queryClient = useQueryClient();
   return useCallback(
     async (hash: string) => {
       queryClient.prefetchQuery(commitDetailsOptions(repo, hash));
       if (withOnRemote) {
-        queryClient.prefetchQuery(commitOnRemoteOptions(repo, hash));
+        // The History view reads comments under the origin lens, and only for a
+        // commit on the remote: an unpushed one would cost a failing forge call.
+        void queryClient
+          .prefetchQuery(commitOnRemoteOptions(repo, hash))
+          .then(() => {
+            const onRemote = queryClient.getQueryData(
+              commitOnRemoteOptions(repo, hash).queryKey,
+            );
+            if (onRemote === true)
+              queryClient.prefetchQuery(
+                commitCommentsOptions(repo, hash, "origin"),
+              );
+          });
       }
       await queryClient.prefetchQuery(commitFilesOptions(repo, hash));
       const files = queryClient.getQueryData<DiffStatEntry[]>(

@@ -6,7 +6,7 @@ import {
   PlusIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { type Ref, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,7 +23,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import {
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import {
   pendingIssueWrite,
   useAddSubIssue,
@@ -63,6 +69,74 @@ export function PendingWriteNote({ reason }: { reason: string | undefined }) {
     <p role="status" className="text-[11px] text-muted-foreground">
       {reason}
     </p>
+  );
+}
+
+/** What {@link SectionReadLine} reads off a section's query. */
+type SectionRead = {
+  isPaused: boolean;
+  isError: boolean;
+  isFetching: boolean;
+  refetch: () => unknown;
+};
+
+/** Whether a section's read failed with nothing loaded: the arm that shows
+ *  Retry, which the caller feeds to `useRetryFocusRescue`. */
+export function sectionReadFailed(q: SectionRead & { data: unknown }): boolean {
+  return q.data === undefined && refreshFailed(q);
+}
+
+/** What {@link SectionReadLine} says while the read has nothing loaded, for a
+ *  control that waits on the same read to name its hold in the same words. */
+export function sectionReadReason(query: SectionRead, noun: string): string {
+  if (query.isPaused) return offlinePendingMessage(noun);
+  if (refreshFailed(query)) return `Couldn't load ${noun}.`;
+  return `Loading ${noun}…`;
+}
+
+/** The line a section shows where its answer goes while its read has none: a
+ *  skeleton the height of the one-line empty state, so the answer grows the
+ *  section downward instead of popping a line in; the offline line for a read
+ *  parked with nothing loaded; or the failure with Retry, so a reserved slot
+ *  never sits loading forever. `noun` is plural and lowercase ("sub-issues"). */
+export function SectionReadLine({
+  query,
+  noun,
+  retryRef,
+}: {
+  query: SectionRead;
+  noun: string;
+  /** `useRetryFocusRescue`'s ref, for the Retry this renders on a failure. */
+  retryRef: Ref<HTMLButtonElement>;
+}) {
+  const line = sectionReadReason(query, noun);
+  if (query.isPaused)
+    return <p className="text-[11px] text-muted-foreground">{line}</p>;
+  if (refreshFailed(query))
+    return (
+      <p className="flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
+        {line}
+        <button
+          ref={retryRef}
+          type="button"
+          aria-label={`Retry loading ${noun}`}
+          className="cursor-pointer underline hover:text-foreground"
+          onClick={() => void query.refetch()}
+        >
+          Retry
+        </button>
+      </p>
+    );
+  // A div, not a p, since the skeleton is one. Its inline-block sits on a
+  // single line box, so the slot is exactly the empty state's line height.
+  return (
+    <div className="text-[11px]">
+      <Skeleton
+        aria-hidden
+        className="inline-block h-[1em] w-32 align-middle"
+      />
+      <span className="sr-only">{line}</span>
+    </div>
   );
 }
 
@@ -241,6 +315,8 @@ export function IssueSubIssues({
   number,
   lens,
   disabledReason,
+  reserve = false,
+  held = false,
 }: {
   repoPath: string;
   issueId: string;
@@ -252,6 +328,13 @@ export function IssueSubIssues({
    *  affordances stay visible but disabled, with this text as their hint. The
    *  parent breadcrumb and the checklist itself are reads and stay live. */
   disabledReason?: string;
+  /** The provider is known to carry sub-issues: the section holds its minimum
+   *  loaded height while the read is out, and says so when it can't load.
+   *  Otherwise it stays absent until the read answers. */
+  reserve?: boolean;
+  /** The host is holding this issue on screen while another loads. `inert`
+   *  can't reach a portaled dialog or popup, so this shuts them. */
+  held?: boolean;
 }) {
   const relations = useIssueRelations(repoPath, number, lens);
   const addSub = useAddSubIssue();
@@ -259,6 +342,10 @@ export function IssueSubIssues({
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [mode, setMode] = useState<null | "existing">(null);
   const [createOpen, setCreateOpen] = useState(false);
+  if (held && (createOpen || mode !== null)) {
+    setCreateOpen(false);
+    setMode(null);
+  }
   // From the cache, not the observers: this section remounts per issue, and a
   // write still pending on the issue switched back to must still show.
   const pendingWrites = usePendingIssueWrites(repoPath);
@@ -282,12 +369,26 @@ export function IssueSubIssues({
 
   const onError = (e: unknown) => toastError(e);
   const data = relations.data;
+  // A pressed Retry swaps the failure for the skeleton; the section root it
+  // sits in survives and takes focus.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    reserve && sectionReadFailed(relations),
+  );
 
-  // Wait for the first load so issues with no sub-issues don't flash an empty
-  // section before it resolves.
-  if (!data) return null;
+  // Unreserved, wait for the first load so issues with no sub-issues don't
+  // flash an empty section before it resolves.
+  if (!data && !reserve) return null;
 
-  const { parent, subIssues, completed, total } = data;
+  const parent = data?.parent ?? null;
+  const subIssues = data?.subIssues ?? [];
+  const completed = data?.completed ?? 0;
+  const total = data?.total ?? 0;
+  // "Add existing" excludes the loaded parent and sub-issues, so it waits for
+  // them, naming the wait as the line below does; the viewer's own reason
+  // outranks it.
+  const addHeldReason =
+    disabledReason ??
+    (data ? undefined : sectionReadReason(relations, "sub-issues"));
   const exclude = new Set<number>([
     number,
     ...(parent ? [parent.number] : []),
@@ -314,7 +415,11 @@ export function IssueSubIssues({
   }
 
   return (
-    <div className="space-y-2 border-y py-3">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className="space-y-2 border-y py-3 outline-none"
+    >
       {parent && (
         <button
           type="button"
@@ -350,8 +455,8 @@ export function IssueSubIssues({
                     variant="ghost"
                     size="xs"
                     aria-label="Add a sub-issue"
-                    disabled={!!disabledReason}
-                    reason={disabledReason}
+                    disabled={!!addHeldReason}
+                    reason={addHeldReason}
                   />
                 }
               >
@@ -396,10 +501,19 @@ export function IssueSubIssues({
         ))}
         <PendingWriteNote reason={addReason} />
 
-        {subIssues.length === 0 && mode === null && (
-          <p className="text-[11px] text-muted-foreground">
-            No sub-issues yet.
-          </p>
+        {!data ? (
+          <SectionReadLine
+            query={relations}
+            noun="sub-issues"
+            retryRef={retryRef}
+          />
+        ) : (
+          subIssues.length === 0 &&
+          mode === null && (
+            <p className="text-[11px] text-muted-foreground">
+              No sub-issues yet.
+            </p>
+          )
         )}
 
         {mode === "existing" && (
@@ -440,6 +554,7 @@ export function IssueRelationships({
   number,
   lens,
   disabledReason,
+  reserve = false,
 }: {
   repoPath: string;
   number: number;
@@ -448,6 +563,9 @@ export function IssueRelationships({
   /** Set when the viewer lacks the access dependency edits need: Add and the
    *  per-row removes disable, with this text as their hint. The lists stay live. */
   disabledReason?: string;
+  /** The provider is known to carry dependencies: the empty state's line is
+   *  held while the read is out, and says so when it can't load. */
+  reserve?: boolean;
 }) {
   const dependencies = useIssueDependencies(repoPath, number, lens);
   const setDep = useSetIssueDependency(repoPath, lens);
@@ -489,6 +607,9 @@ export function IssueRelationships({
     ) !== undefined;
 
   const onError = (e: unknown) => toastError(e);
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    reserve && sectionReadFailed(dependencies),
+  );
   const depsLoaded = dependencies.data !== undefined;
   const blockedBy = dependencies.data?.blockedBy ?? [];
   const blocking = dependencies.data?.blocking ?? [];
@@ -522,7 +643,7 @@ export function IssueRelationships({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div ref={hostRef} tabIndex={-1} className="space-y-1.5 outline-none">
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-muted-foreground">
           Relationships
@@ -580,12 +701,21 @@ export function IssueRelationships({
         />
       )}
       <PendingWriteNote reason={addReason} />
-      {depsLoaded &&
-        blockedBy.length === 0 &&
-        blocking.length === 0 &&
-        addRelation === null && (
-          <p className="text-[11px] text-muted-foreground">No linked issues.</p>
-        )}
+      {!depsLoaded
+        ? reserve && (
+            <SectionReadLine
+              query={dependencies}
+              noun="relationships"
+              retryRef={retryRef}
+            />
+          )
+        : blockedBy.length === 0 &&
+          blocking.length === 0 &&
+          addRelation === null && (
+            <p className="text-[11px] text-muted-foreground">
+              No linked issues.
+            </p>
+          )}
 
       {addRelation !== null && (
         <div className="space-y-1">

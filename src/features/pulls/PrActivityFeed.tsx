@@ -206,6 +206,7 @@ function ReviewAnchor({
 export function PrActivityFeed({
   pr,
   timeline,
+  stale,
   reactions,
   claims,
   providerKey,
@@ -247,6 +248,9 @@ export function PrActivityFeed({
     UseQueryResult<ForgeTimelineEvent[]>,
     "data" | "isError" | "isPaused" | "isFetching" | "refetch"
   >;
+  /** `pr` is another pull request's placeholder while the timeline is this one's:
+   *  its events wait, or the feed would interleave two pull requests. */
+  stale: boolean;
   reactions: IssueReactions | undefined;
   claims: PrThreadClaims;
   providerKey: ForgeProvider;
@@ -532,7 +536,7 @@ export function PrActivityFeed({
 
   // Timeline events — provider-neutral (GitHub, GitLab, Bitbucket);
   // empty otherwise.
-  for (const [i, ev] of (timeline.data ?? []).entries()) {
+  for (const [i, ev] of (stale ? [] : (timeline.data ?? [])).entries()) {
     entries.push({
       date: ev.date,
       sortKey: 3,
