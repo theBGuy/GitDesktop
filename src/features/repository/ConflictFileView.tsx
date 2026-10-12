@@ -33,6 +33,7 @@ import {
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { useUiStore } from "@/lib/stores/ui";
 import { type AppError, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -289,8 +290,15 @@ export function ConflictFileView({
   // Whether the view moved to another repo, or went away, while a prompt was
   // open, saying so: a mutate called then builds from options this view no
   // longer describes. Not the shared `refuseIfSwitched`, which compares against
-  // the live repo, never a worktree.
+  // the live repo, never a worktree. A close unmounts the view too, so it is
+  // checked first to name what actually happened.
   const refuseIfMoved = (startedIn: string, outcome: string) => {
+    if (useUiStore.getState().repoPath === null) {
+      toast.info(
+        `You closed the repository while the dialog was open — ${outcome}.`,
+      );
+      return true;
+    }
     if (!mountedRef.current) {
       toast.info(`You left this file while the dialog was open — ${outcome}.`);
       return true;

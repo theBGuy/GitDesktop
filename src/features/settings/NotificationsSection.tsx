@@ -419,6 +419,7 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
       body: "Its notifications return to the defaults above.",
       confirmLabel: "Clear overrides",
       confirmVariant: "destructive",
+      scope: "app",
     });
     if (!ok) return;
     // Aim focus before the row disappears: neighbour by position, else the

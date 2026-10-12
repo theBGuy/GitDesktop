@@ -17,7 +17,8 @@ paths:
 - Destructive paths confirm via the shared `useConfirm`/`ConfirmDialogHost` primitive;
   commit-level prompts share wording through `src/features/history/commit-confirms.ts`,
   stage-over-conflict-markers prompts through
-  `src/features/repository/conflict-confirms.ts`.
+  `src/features/repository/conflict-confirms.ts`. Prompts are repo-scoped by default
+  (a switch or close cancels them); app-level prompts pass `scope: "app"`.
 - Disabled actions explain why: `DisabledReasonButton`, or `useDisabledReason` +
   `ARIA_DISABLED_CLASS` on raw-button and form-wrapped-Button (`form.SubmitButton`)
   sites — never hide, never a bare `disabled`.

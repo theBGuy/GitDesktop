@@ -52,6 +52,7 @@ export async function confirmDiscardParkedWrites(
     body: `Some changes are waiting to send once you're back online. ${copy.consequence}`,
     confirmLabel: copy.confirmLabel,
     confirmVariant: "destructive",
+    scope: "app",
   });
 }
 

@@ -406,29 +406,43 @@ export function originNoteFor(repoPath: string): string | undefined {
 }
 
 /** Where a settle landed, from ONE store read: `live` is this repo still being the
- *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't.
- *  Both derive from that single read, so a caller deriving its gate and its copy
- *  from one call cannot have them disagree about where the work ended up. Call it
- *  AFTER the await, never before. */
-export function landedIn(repoPath: string): { live: boolean; away: string } {
-  const live = originNoteFor(repoPath) === undefined;
-  return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };
+ *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't, and
+ *  `closed` that no repository is open at all (the user closed it rather than
+ *  switching). All derive from that single read, so a caller deriving its gate and
+ *  its copy from one call cannot have them disagree about where the work ended up.
+ *  Call it AFTER the await, never before. */
+export function landedIn(repoPath: string): {
+  live: boolean;
+  away: string;
+  closed: boolean;
+} {
+  const current = useUiStore.getState().repoPath;
+  const live = normPath(current ?? "") === normPath(repoPath);
+  return {
+    live,
+    away: live ? "" : ` in ${repoNameFromPath(repoPath)}`,
+    closed: !live && current === null,
+  };
 }
 
 /** Whether an action begun in `startedIn` stops because the user has since
  *  switched repositories, saying so: "You switched repositories <when> —
- *  <outcome> in <repo>." A mutate called after an await, or from a dialog that
- *  outlived the switch, builds from the live repo's options, not the ones the
- *  action started under. Reads {@link landedIn} once, so call it at the point the
- *  write would start. */
+ *  <outcome> in <repo>.", or "You closed the repository …" when none is open.
+ *  A mutate called after an await, or from a dialog that outlived the switch,
+ *  builds from the live repo's options, not the ones the action started under.
+ *  Reads {@link landedIn} once, so call it at the point the write would start. */
 export function refuseIfSwitched(
   startedIn: string,
   outcome: string,
   when = "while the dialog was open",
 ): boolean {
-  const { live, away } = landedIn(startedIn);
-  if (!live)
-    toast.info(`You switched repositories ${when} — ${outcome}${away}.`);
+  const { live, away, closed } = landedIn(startedIn);
+  if (!live) {
+    const what = closed
+      ? "You closed the repository"
+      : "You switched repositories";
+    toast.info(`${what} ${when} — ${outcome}${away}.`);
+  }
   return !live;
 }
 

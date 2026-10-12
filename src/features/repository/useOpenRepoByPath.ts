@@ -138,6 +138,7 @@ export function useOpenRepoByPath() {
           title: `Relocate "${oldName}"?`,
           body: `GitDesktop will point this entry at ${info.root} — its alias, local PRs, issues, review history, and settings will follow the folder. If this is a different repository, that data is merged in and can't be undone.`,
           confirmLabel: "Relocate",
+          scope: "app",
         });
         if (!confirmed) return;
         // Claimed past the prompt, which the user answers in place: the window

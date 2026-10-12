@@ -161,6 +161,7 @@ export function TasksPanel() {
       body: DELETE_BODY[task.source.kind],
       confirmLabel: "Delete task",
       confirmVariant: "destructive",
+      scope: "app",
     });
     if (ok) await deleteTask(task.id);
   }

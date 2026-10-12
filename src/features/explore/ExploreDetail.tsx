@@ -178,6 +178,7 @@ function ExploreDetailBody({
       body: `Creates a fork on ${label} in the background. You can clone it once it's ready.`,
       confirmLabel: "Fork",
       holdOffline: true,
+      scope: "app",
     });
     if (!ok || refuseWhileOffline()) return;
     try {
