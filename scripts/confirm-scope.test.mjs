@@ -17,6 +17,14 @@ import {
   cancelsOnRepoChange,
   confirmStamp,
 } from "../src/lib/stores/confirm-scope.ts";
+import {
+  CLOSE,
+  lineOf,
+  maskNonCode,
+  matchBrace,
+  OPEN,
+  ScanError,
+} from "./lib/ts-mask.mjs";
 
 const source = (rel) =>
   readFileSync(new URL(`../${rel}`, import.meta.url), "utf8").replace(
@@ -131,51 +139,89 @@ const APP_SCOPED = [
   "src/features/settings/NotificationsSection.tsx",
 ];
 
-const INLINE_ASK =
-  /useConfirm\s*\.getState\(\)\s*\.(?:ask|askChecked)\(\{([\s\S]*?)\n\s*\}\)/g;
+const ASK_CALL = /useConfirm\s*\.getState\(\)\s*\.(?:ask|askChecked)\(/g;
+
+/** Every confirm ask in `text`, by line, with the raw text of its options'
+ *  TOP-LEVEL `scope` value (the key itself for the `{ scope }` shorthand), or
+ *  `null` when there is none. The scan runs on `maskNonCode`'s output, so comments
+ *  and string/template/regex/JSX text can neither supply a key nor end the
+ *  argument; it throws `ScanError` on input it can't read. An argument that isn't
+ *  an inline object literal reads as `null`: its scope can't be seen here. */
+function askScopes(text, jsx) {
+  const masked = maskNonCode(text, jsx);
+  const asks = [];
+  for (const m of masked.matchAll(ASK_CALL)) {
+    const line = lineOf(text, m.index);
+    let open = m.index + m[0].length;
+    while (/\s/.test(masked[open])) open++;
+    const close = masked[open] === "{" ? matchBrace(masked, open) : -1;
+    if (close === -1) {
+      asks.push({ line, scope: null });
+      continue;
+    }
+    asks.push({
+      line,
+      scope: topLevelValue(masked, text, open, close, "scope"),
+    });
+  }
+  return asks;
+}
+
+/** The raw text of property `key`'s value in the object literal spanning
+ *  `open`..`close` of `masked`, at that object's own depth only. */
+function topLevelValue(masked, text, open, close, key) {
+  let depth = 0;
+  let expectKey = true;
+  for (let i = open + 1; i < close; i++) {
+    const c = masked[i];
+    if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c)) depth--;
+    else if (depth === 0 && c === ",") expectKey = true;
+    else if (depth === 0 && expectKey && /[\w$]/.test(c)) {
+      const word = /^[\w$]+/.exec(masked.slice(i))[0];
+      let after = i + word.length;
+      while (/\s/.test(masked[after])) after++;
+      if (word === key && masked[after] === ":") {
+        let end = after + 1;
+        for (let d = 0; end < close; end++) {
+          if (OPEN.has(masked[end])) d++;
+          else if (CLOSE.has(masked[end])) d--;
+          else if (d === 0 && masked[end] === ",") break;
+        }
+        return text.slice(after + 1, end).trim();
+      }
+      if (word === key && (masked[after] === "," || after === close))
+        return key;
+      expectKey = false;
+      i += word.length - 1;
+    } else if (!/\s/.test(c)) expectKey = false;
+  }
+  return null;
+}
+
+const unscopedAsks = (text, jsx = false) =>
+  askScopes(text, jsx)
+    .filter((a) => a.scope === null)
+    .map((a) => a.line);
 
 for (const file of APP_SCOPED) {
   test(`${file} asks with scope "app"`, () => {
-    const asks = [...source(file).matchAll(INLINE_ASK)];
-    assert.ok(asks.length > 0, "no inline ask options found");
-    for (const [, options] of asks)
-      assert.match(options, /\bscope: "app"/, 'an ask lost scope: "app"');
+    const asks = askScopes(source(file), file.endsWith(".tsx"));
+    assert.ok(asks.length > 0, "no asks found");
+    for (const { scope } of asks)
+      assert.equal(scope, '"app"', 'an ask lost scope: "app"');
   });
 }
 
 // Folders that hold the app-level screens (Settings, Explore, Welcome, My work).
 // A prompt there acts outside the open repository, so the repo-scope default is
-// a trap: every ask under them must spell its `scope:` out.
+// a trap: every ask under them must spell its `scope` out.
 const APP_LEVEL_DIRS = [
   "src/features/settings",
   "src/features/explore",
   "src/features/welcome",
   "src/features/mywork",
 ];
-
-const ASK_CALL = /useConfirm\s*\.getState\(\)\s*\.(?:ask|askChecked)\(/g;
-
-/** Each confirm ask in `text` whose options don't name a `scope:`, by line. An
- *  argument that isn't an inline object literal is flagged too: its scope can't
- *  be read here, so it fails closed. Comment lines are skipped. */
-function unscopedAsks(text) {
-  const misses = [];
-  for (const m of text.matchAll(ASK_CALL)) {
-    const lineStart = text.lastIndexOf("\n", m.index) + 1;
-    if (/^\s*(\*|\/\/)/.test(text.slice(lineStart, m.index))) continue;
-    const open = m.index + m[0].length;
-    let depth = 1;
-    let end = open;
-    for (; end < text.length && depth > 0; end++) {
-      if (text[end] === "(") depth++;
-      else if (text[end] === ")") depth--;
-    }
-    const arg = text.slice(open, end - 1).trim();
-    if (!arg.startsWith("{") || !/\bscope:/.test(arg))
-      misses.push(text.slice(0, m.index).split("\n").length);
-  }
-  return misses;
-}
 
 function sourceFiles(rel) {
   const dir = new URL(`../${rel}/`, import.meta.url);
@@ -200,6 +246,47 @@ test("the app-level scan flags an ask without a scope", () => {
   assert.deepEqual(unscopedAsks(fixture), [2, 7]);
 });
 
+const ask = (options) => `useConfirm.getState().ask(${options});\n`;
+
+test("a scope key inside a comment doesn't count", () => {
+  assert.deepEqual(
+    unscopedAsks(ask('{ title: "X?", /* scope: "app" */ }')),
+    [1],
+  );
+});
+
+test("a scope key inside a string doesn't count", () => {
+  assert.deepEqual(
+    unscopedAsks(ask('{ title: "X?", body: "scope: global" }')),
+    [1],
+  );
+});
+
+test("a parenthesis inside a string doesn't end the options", () => {
+  assert.deepEqual(
+    unscopedAsks(ask('{ title: "Clear :)", scope: "app" }')),
+    [],
+  );
+});
+
+test("a nested scope key isn't the prompt's scope", () => {
+  assert.deepEqual(unscopedAsks(ask('{ meta: { scope: "app" } }')), [1]);
+});
+
+test("the shorthand scope key counts", () => {
+  assert.deepEqual(askScopes(ask("{ title, scope }"), false), [
+    { line: 1, scope: "scope" },
+  ]);
+});
+
+test("a scope key spelled inside a template literal doesn't count", () => {
+  assert.deepEqual(unscopedAsks(ask('{ title: `${"scope:"}` }')), [1]);
+});
+
+test("unreadable input fails the scan instead of passing", () => {
+  assert.throws(() => unscopedAsks(ask('{ title: "unterminated }')), ScanError);
+});
+
 test("every ask on an app-level screen passes an explicit scope", () => {
   let files = 0;
   let asks = 0;
@@ -207,9 +294,10 @@ test("every ask on an app-level screen passes an explicit scope", () => {
     for (const file of sourceFiles(dir)) {
       files++;
       const text = source(file);
-      asks += [...text.matchAll(ASK_CALL)].length;
+      const jsx = file.endsWith(".tsx");
+      asks += askScopes(text, jsx).length;
       assert.deepEqual(
-        unscopedAsks(text),
+        unscopedAsks(text, jsx),
         [],
         `${file}: an ask without scope: (repo-scoped by default)`,
       );
