@@ -7,12 +7,25 @@
 //
 // The import reaches straight into `src/` under Node's type stripping, so
 // `palette-dialog.ts` must stay free of runtime and aliased imports.
+// tailwind-merge is imported dynamically so the installless guards job still
+// runs the other tests and skips only the merge test; frontend.yml's installed
+// step sets GD_EXPECT_DEPS, which turns a missing package there into a failure.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { twMerge } from "tailwind-merge";
 
 import { PALETTE_DIALOG_CLASS } from "../src/features/shortcuts/palette-dialog.ts";
+
+let twMerge = null;
+let skip = false;
+try {
+  ({ twMerge } = await import("tailwind-merge"));
+} catch (err) {
+  if (process.env.GD_EXPECT_DEPS || err?.code !== "ERR_MODULE_NOT_FOUND")
+    throw err;
+  skip =
+    "needs node_modules — frontend.yml's installed step is the enforced run";
+}
 
 const read = (rel) =>
   readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
@@ -39,7 +52,9 @@ test("the constant carries the pinning classes", () => {
   );
 });
 
-test("merged over the vendored base, the centring on y is gone", () => {
+test("merged over the vendored base, the centring on y is gone", {
+  skip,
+}, () => {
   // The base is the first string literal inside DialogContent's `cn(` call.
   const dialog = read("src/components/ui/dialog.tsx");
   const m = dialog.match(

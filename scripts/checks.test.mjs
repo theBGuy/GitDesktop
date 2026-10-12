@@ -57,6 +57,11 @@ import {
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
 import {
+  SKIP_PHRASE as ENFORCED_SKIP_PHRASE,
+  parseEnforcedSuites,
+  unlistedCarriers,
+} from "./check-enforced-node-suites.mjs";
+import {
   verdict as dedupeVerdict,
   parsePackageVersions,
   SINGLETONS,
@@ -7255,5 +7260,135 @@ test("the review prompt cautions that newer reviewer notes may exist", async () 
     );
   } finally {
     hooks.deregister();
+  }
+});
+
+// ------------------------------------------------ check-enforced-node-suites
+
+const enforcedWorkflowFixture = (suites, extra = "") =>
+  [
+    "jobs:",
+    "  build:",
+    "    steps:",
+    "      - name: Node suites needing node_modules (enforced)",
+    "        env:",
+    '          GD_EXPECT_DEPS: "1"',
+    `        run: node --test ${suites.map((s) => `"${s}"`).join(" ")}`,
+    extra,
+    "      - name: Next step",
+    "        run: echo done",
+    "",
+  ].join("\n");
+
+test("enforced-node-suites reads the enforced step's list under both line endings", () => {
+  for (const ending of ["\n", "\r\n"]) {
+    assert.deepEqual(
+      parseEnforcedSuites(
+        enforcedWorkflowFixture([
+          "scripts/a.test.mjs",
+          "scripts/b.test.mjs",
+        ]).replaceAll("\n", ending),
+      ),
+      new Set(["scripts/a.test.mjs", "scripts/b.test.mjs"]),
+    );
+  }
+});
+
+test("enforced-node-suites fails closed on a step it cannot read", () => {
+  const ok = enforcedWorkflowFixture(["scripts/a.test.mjs"]);
+  for (const [workflow, message] of [
+    [ok.replace("(enforced)", "(renamed)"), /Could not find/],
+    [ok.replace('GD_EXPECT_DEPS: "1"', 'OTHER: "1"'), /GD_EXPECT_DEPS/],
+    [
+      ok.replace(/run: node --test .*/, "run: |\n          node --test x"),
+      /Could not parse the run line/,
+    ],
+    [
+      ok.replace('"scripts/a.test.mjs"', "scripts/a.test.mjs"),
+      /Could not parse the run line/,
+    ],
+    [ok.replace("scripts/a.test.mjs", "scripts/*.test.mjs"), /Not a single/],
+    [
+      enforcedWorkflowFixture(["scripts/a.test.mjs", "scripts/a.test.mjs"]),
+      /Listed twice/,
+    ],
+    [ok.replace(/run: node --test .*/, "run: node --test"), /Could not parse/],
+    [`${ok}\n${ok}`, /Found 2/],
+  ]) {
+    assert.throws(() => parseEnforcedSuites(workflow), message);
+  }
+});
+
+test("enforced-node-suites names carriers the step leaves out", () => {
+  assert.deepEqual(
+    unlistedCarriers(
+      ["scripts/b.test.mjs", "scripts/a.test.mjs"],
+      new Set(["scripts/a.test.mjs"]),
+    ),
+    ["scripts/b.test.mjs"],
+  );
+});
+
+test("enforced-node-suites CLI fails an unlisted carrier (negative control)", () => {
+  const root = mkdtempSync(join(tmpdir(), "gd-enforced-suites-"));
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-enforced-node-suites.mjs",
+  );
+  let lastOut = "";
+  const run = () => {
+    try {
+      lastOut = String(
+        execFileSync(process.execPath, [gate], {
+          env: { ...process.env, GD_ENFORCED_SUITES_ROOT: root },
+          stdio: "pipe",
+        }),
+      );
+      return 0;
+    } catch (err) {
+      lastOut = String(err.stdout || "") + String(err.stderr || "");
+      return err.status;
+    }
+  };
+  try {
+    mkdirSync(join(root, ".github/workflows"), { recursive: true });
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    const workflow = join(root, ".github/workflows/frontend.yml");
+    const carrier = `const skip = "${ENFORCED_SKIP_PHRASE}";\n`;
+    writeFileSync(join(root, "scripts/a.test.mjs"), carrier);
+    writeFileSync(join(root, "scripts/plain.test.mjs"), "// no deps\n");
+    writeFileSync(workflow, enforcedWorkflowFixture(["scripts/a.test.mjs"]));
+    assert.equal(run(), 0, lastOut);
+    assert.match(lastOut, /OK 1 skipping suites/);
+
+    writeFileSync(join(root, "scripts/b.test.mjs"), carrier);
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /missing from .*: scripts\/b\.test\.mjs/);
+
+    writeFileSync(
+      workflow,
+      enforcedWorkflowFixture([
+        "scripts/a.test.mjs",
+        "scripts/b.test.mjs",
+        "scripts/gone.test.mjs",
+      ]),
+    );
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /listed but not on disk: scripts\/gone\.test\.mjs/);
+
+    rmSync(join(root, "scripts/a.test.mjs"));
+    rmSync(join(root, "scripts/b.test.mjs"));
+    writeFileSync(
+      workflow,
+      enforcedWorkflowFixture(["scripts/plain.test.mjs"]),
+    );
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /refusing a vacuous pass/);
+
+    rmSync(workflow);
+    assert.equal(run(), 1, lastOut);
+    assert.match(lastOut, /FAIL/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

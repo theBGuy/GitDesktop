@@ -5377,48 +5377,39 @@ export function ProjectsBoardPanel({
     [forgeHostRef],
   );
 
-  // The selection hint mounts with the data while unseen; holding its strip in
-  // the loading frame keeps the columns still for a board that loads with two
-  // or more cards (its other gate, `shown >= 2`, isn't knowable yet).
-  const hintReserved =
-    settings.data !== undefined &&
-    settings.data.showBoardSelectionHint !== false;
-  const body = (() => {
+  // Each arm declares whether it is a loading arm: the chrome above the body
+  // draws the toolbar shell and the held selection hint only for those.
+  const settledArm = (node: ReactNode) => ({ node, loading: false });
+  const { node: body, loading: bodyLoading } = (() => {
     switch (true) {
       // A failed forge probe with nothing cached is not "still detecting":
       // without this arm the panel sits on a skeleton forever and nothing on
       // screen can refetch it. A failed REFETCH keeps its last good status in
       // `gh.data`, so the board stays mounted through it.
       case gh.error !== null && gh.data === undefined:
-        return (
+        return settledArm(
           <ErrorCard
             error={gh.error}
             onRetry={() => void gh.refetch()}
             retryRef={forgeRescue.retryRef}
-          />
+          />,
         );
       // Still detecting: `gh.data` undefined is not yet "not GitHub". The
-      // toolbar shell assumes GitHub, as most repos opening this tab are; any
-      // other provider's notice replaces the whole body once.
+      // loading chrome above the body assumes GitHub, as most repos opening
+      // this tab are; any other provider's notice replaces it once.
       case gh.data === undefined:
-        return (
-          <>
-            <BoardToolbarSkeleton />
-            {hintReserved && <SelectionHintStrip noun={noun} />}
-            <BoardSkeleton />
-          </>
-        );
+        return { node: <BoardSkeleton />, loading: true };
       // A KNOWN other provider is the one thing this tab can name precisely, so
       // it is checked ahead of the not-ready ladder: telling a GitLab user to
       // install `glab` would walk them toward a feature GitLab doesn't have.
       case provider !== null && !isGitHub:
-        return (
+        return settledArm(
           <BoardNotice>
             <p>
               This repository is on {providerLabel(provider)} — Projects boards
               are a GitHub feature.
             </p>
-          </BoardNotice>
+          </BoardNotice>,
         );
       // provider `null` ALSO means gh isn't installed, isn't signed in, or can't
       // resolve this remote — "no GitHub remote" misdiagnosed all three and
@@ -5426,17 +5417,17 @@ export function ProjectsBoardPanel({
       // it with the action that clears it, exactly as the Issues / Discussions /
       // Actions tabs do.
       case !forgeReady(gh.data):
-        return (
+        return settledArm(
           <div data-body-landing="">
             <ForgeNotReady
               repoPath={repoPath}
               feature="project boards"
               retryRef={forgeRescue.retryRef}
             />
-          </div>
+          </div>,
         );
       case scopeGap:
-        return (
+        return settledArm(
           // ScopeGapBlock carries POPUP padding (px-1 py-1) — it was written for
           // the Projects picker's popover. This is a full-pane state, so the call
           // site makes up the difference: px-2 py-3 here lands it on the px-3 py-4
@@ -5463,16 +5454,16 @@ export function ProjectsBoardPanel({
               <span className="font-mono">read:project</span> scope, and your
               GitHub sign-in has neither.
             </ScopeGapBlock>
-          </div>
+          </div>,
         );
       case boardParked:
-        return (
+        return settledArm(
           <BoardNotice>
             <p data-body-landing="">{offlinePendingMessage("this board")}</p>
-          </BoardNotice>
+          </BoardNotice>,
         );
       case fatalError !== null:
-        return (
+        return settledArm(
           <ErrorCard
             error={fatalError}
             onRetry={() => {
@@ -5481,25 +5472,15 @@ export function ProjectsBoardPanel({
               if (items.error !== null) void items.refetch();
             }}
             retryRef={forgeRescue.retryRef}
-          />
+          />,
         );
-      // The shell stands in until the real toolbar mounts (`showBoardChrome`,
-      // spelled out here: that const is declared below this IIFE).
       case loading || fatalRetrying:
-        return (
-          <>
-            {!(isGitHub && !scopeGap && projectId !== null) && (
-              <BoardToolbarSkeleton />
-            )}
-            {hintReserved && <SelectionHintStrip noun={noun} />}
-            <BoardSkeleton />
-          </>
-        );
+        return { node: <BoardSkeleton />, loading: true };
       // A capped or half-answered catalog can be empty while boards exist, so
       // the definitive "there are none" is held back for a complete read and the
       // hedged wording names what wasn't searched.
       case projectId === null && catalogTruncated:
-        return (
+        return settledArm(
           <BoardNotice>
             <p>
               No project came back for this repository or its owner, but the
@@ -5507,10 +5488,10 @@ export function ProjectsBoardPanel({
             </p>
             <p>Open the owner's Projects page on GitHub to see all of them.</p>
             <p data-body-landing="">{newProjectButton}</p>
-          </BoardNotice>
+          </BoardNotice>,
         );
       case projectId === null:
-        return (
+        return settledArm(
           <BoardNotice>
             <p>
               A GitHub Project is a board that gathers issues and pull requests
@@ -5520,154 +5501,160 @@ export function ProjectsBoardPanel({
               Neither this repository nor its owner has one yet. Start one here.
             </p>
             <p data-body-landing="">{newProjectButton}</p>
-          </BoardNotice>
+          </BoardNotice>,
         );
       // A filter that matched nothing is a different statement from an empty
       // board, and only the settled read may make it — the cards standing while
       // a lens loads are the previous view's. An unfiltered view can't reach
       // here: its empty board is the board's own, and the columns say so.
       case filterEmpty:
-        return (
+        return settledArm(
           <BoardNotice>
             <p>No items match this view's filter.</p>
             <p className="font-mono break-all">{lensQuery}</p>
             <p>
               <ClearViewButton onClear={clearView} landing />
             </p>
-          </BoardNotice>
+          </BoardNotice>,
         );
       // A saved TABLE view draws as a table, as GitHub draws it, under the same
       // menu, selection and verbs as the board — after every arm above, so an
       // empty catalog or a filter that matched nothing still says so.
       case tableView !== null:
-        return boardMenu(
-          "table",
-          <div
-            data-board-layout="table"
-            className="flex min-h-0 flex-1 flex-col"
-            onPointerDownCapture={handleCardPointerDown}
-            onMouseDownCapture={handleCardMouseDown}
-            onClickCapture={handleCardClickCapture}
-            onContextMenuCapture={handleCardContextMenu}
-          />,
-          <ProjectsTableView
-            label={view?.name || UNTITLED_VIEW}
-            columns={tableCols}
-            rows={tableEntries}
-            sortKeys={rowSortKeys}
-            cursor={tablePos}
-            focusNonce={focusNonce}
-            selectedIds={selectedIds}
-            selectionSize={selectionSize}
-            busyItemId={busyItemId}
-            peekItemId={peekItemId}
-            onCellFocus={onTableCellFocus}
-            onToggleGroup={toggleGroup}
-            onActivate={activateRow}
-            onPeekChange={setPeekItemId}
-            editHeld={cellBoardHeld}
-            editingCell={editingCell}
-            onEditCell={onEditCell}
-            onCellCommit={onCellCommit}
-            onCellCancel={onCellCancel}
-            onFocusLost={focusLanding}
-            onKeyDown={onTableKeyDown}
-          />,
+        return settledArm(
+          boardMenu(
+            "table",
+            <div
+              data-board-layout="table"
+              className="flex min-h-0 flex-1 flex-col"
+              onPointerDownCapture={handleCardPointerDown}
+              onMouseDownCapture={handleCardMouseDown}
+              onClickCapture={handleCardClickCapture}
+              onContextMenuCapture={handleCardContextMenu}
+            />,
+            <ProjectsTableView
+              label={view?.name || UNTITLED_VIEW}
+              columns={tableCols}
+              rows={tableEntries}
+              sortKeys={rowSortKeys}
+              cursor={tablePos}
+              focusNonce={focusNonce}
+              selectedIds={selectedIds}
+              selectionSize={selectionSize}
+              busyItemId={busyItemId}
+              peekItemId={peekItemId}
+              onCellFocus={onTableCellFocus}
+              onToggleGroup={toggleGroup}
+              onActivate={activateRow}
+              onPeekChange={setPeekItemId}
+              editHeld={cellBoardHeld}
+              editingCell={editingCell}
+              onEditCell={onEditCell}
+              onCellCommit={onCellCommit}
+              onCellCancel={onCellCancel}
+              onFocusLost={focusLanding}
+              onKeyDown={onTableKeyDown}
+            />,
+          ),
         );
       // A saved ROADMAP view draws as a timeline, under the table's own row
       // grammar — the same menu, selection, verbs and keyboard walk, with a lane
       // in place of the field columns.
       case roadmapView !== null:
-        return boardMenu(
-          "roadmap",
-          <div
-            data-board-layout="roadmap"
-            className="flex min-h-0 flex-1 flex-col"
-            onPointerDownCapture={handleCardPointerDown}
-            onMouseDownCapture={handleCardMouseDown}
-            onClickCapture={handleCardClickCapture}
-            onContextMenuCapture={handleCardContextMenu}
-          />,
-          <>
-            {/* In the flow above the grid, never over it: with nothing to place
+        return settledArm(
+          boardMenu(
+            "roadmap",
+            <div
+              data-board-layout="roadmap"
+              className="flex min-h-0 flex-1 flex-col"
+              onPointerDownCapture={handleCardPointerDown}
+              onMouseDownCapture={handleCardMouseDown}
+              onClickCapture={handleCardClickCapture}
+              onContextMenuCapture={handleCardContextMenu}
+            />,
+            <>
+              {/* In the flow above the grid, never over it: with nothing to place
                 items by, every lane reads "No dates" and this says what to do. */}
-            {dateSources.start === null && dateSources.target === null && (
-              <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                <span>{ROADMAP_NO_SOURCES_NOTE}</span>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => setViewOptionsOpen(true)}
-                >
-                  View options
-                </Button>
-              </div>
-            )}
-            <ProjectsRoadmapView
-              label={view?.name || UNTITLED_VIEW}
-              rows={tableEntries}
-              cursor={tablePos}
-              focusNonce={focusNonce}
-              todayNonce={todayNonce}
-              selectedIds={selectedIds}
-              selectionSize={selectionSize}
-              busyItemId={busyItemId}
-              peekItemId={peekItemId}
-              items={roadmapItems}
-              sources={dateSources}
-              datesOnIssues={datesAreIssueFields(dateSources, fieldDefs)}
-              calendars={calendars}
-              zoom={zoom}
-              onCellFocus={onTableCellFocus}
-              onToggleGroup={toggleGroup}
-              onActivate={activateRow}
-              onPeekChange={setPeekItemId}
-              onFocusLost={focusLanding}
-              onKeyDown={onTableKeyDown}
-            />
-          </>,
+              {dateSources.start === null && dateSources.target === null && (
+                <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                  <span>{ROADMAP_NO_SOURCES_NOTE}</span>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => setViewOptionsOpen(true)}
+                  >
+                    View options
+                  </Button>
+                </div>
+              )}
+              <ProjectsRoadmapView
+                label={view?.name || UNTITLED_VIEW}
+                rows={tableEntries}
+                cursor={tablePos}
+                focusNonce={focusNonce}
+                todayNonce={todayNonce}
+                selectedIds={selectedIds}
+                selectionSize={selectionSize}
+                busyItemId={busyItemId}
+                peekItemId={peekItemId}
+                items={roadmapItems}
+                sources={dateSources}
+                datesOnIssues={datesAreIssueFields(dateSources, fieldDefs)}
+                calendars={calendars}
+                zoom={zoom}
+                onCellFocus={onTableCellFocus}
+                onToggleGroup={toggleGroup}
+                onActivate={activateRow}
+                onPeekChange={setPeekItemId}
+                onFocusLost={focusLanding}
+                onKeyDown={onTableKeyDown}
+              />
+            </>,
+          ),
         );
       default:
-        return boardMenu(
-          "board",
-          // One horizontal scroll region for the whole board; each column
-          // owns its own vertical one.
-          <div
-            data-board-layout="board"
-            className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
-            onKeyDown={onBoardKeyDown}
-            onPointerDownCapture={handleCardPointerDown}
-            onMouseDownCapture={handleCardMouseDown}
-            onClickCapture={handleCardClickCapture}
-            onContextMenuCapture={handleCardContextMenu}
-          />,
-          columns.map((column, i) => (
-            <BoardColumn
-              key={column.id}
-              column={column}
-              columnIndex={i}
-              // The claim's target is the STORED slot, never the re-found one:
-              // mid-reorder the card still sits at its old index, and a claim
-              // index that changed under a pending frame would cancel it.
-              activeIndex={cursor?.col === i ? cursor.idx : null}
-              activeItemId={cursor?.col === i ? focusItemId : null}
-              cursorItemId={
-                liveCursor?.col === i ? (cursor?.itemId ?? null) : null
-              }
-              selectedIds={selectedIds}
-              selectionSize={selectionSize}
-              busyItemId={busyItemId}
-              peekItemId={peekItemId}
-              tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
-              focusNonce={focusNonce}
-              repoSlug={repoSlug}
-              ghHost={ghHost}
-              chipFields={chipFields}
-              onCardFocus={onCardFocus}
-              onPeekChange={setPeekItemId}
-              onOpen={openItem}
-            />
-          )),
+        return settledArm(
+          boardMenu(
+            "board",
+            // One horizontal scroll region for the whole board; each column
+            // owns its own vertical one.
+            <div
+              data-board-layout="board"
+              className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
+              onKeyDown={onBoardKeyDown}
+              onPointerDownCapture={handleCardPointerDown}
+              onMouseDownCapture={handleCardMouseDown}
+              onClickCapture={handleCardClickCapture}
+              onContextMenuCapture={handleCardContextMenu}
+            />,
+            columns.map((column, i) => (
+              <BoardColumn
+                key={column.id}
+                column={column}
+                columnIndex={i}
+                // The claim's target is the STORED slot, never the re-found one:
+                // mid-reorder the card still sits at its old index, and a claim
+                // index that changed under a pending frame would cancel it.
+                activeIndex={cursor?.col === i ? cursor.idx : null}
+                activeItemId={cursor?.col === i ? focusItemId : null}
+                cursorItemId={
+                  liveCursor?.col === i ? (cursor?.itemId ?? null) : null
+                }
+                selectedIds={selectedIds}
+                selectionSize={selectionSize}
+                busyItemId={busyItemId}
+                peekItemId={peekItemId}
+                tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
+                focusNonce={focusNonce}
+                repoSlug={repoSlug}
+                ghHost={ghHost}
+                chipFields={chipFields}
+                onCardFocus={onCardFocus}
+                onPeekChange={setPeekItemId}
+                onOpen={openItem}
+              />
+            )),
+          ),
         );
     }
   })();
@@ -5757,6 +5744,15 @@ export function ProjectsBoardPanel({
   })();
 
   const showBoardChrome = isGitHub && !scopeGap && projectId !== null;
+  // While the body is in a loading arm, the chrome draws its loading shapes in
+  // the real rows' own slots, so each row has ONE render location and the
+  // columns start at their final offset. The toolbar shell assumes GitHub while
+  // the forge is still detecting. The hint is held while unseen: its
+  // `shown >= 2` gate isn't knowable yet, so a board loading with fewer cards
+  // gives the strip's height back once.
+  const hintUnseen =
+    settings.data !== undefined &&
+    settings.data.showBoardSelectionHint !== false;
   const cappedNotes: string[] = [];
   if (catalogTruncated)
     cappedNotes.push("Some of this owner's projects aren't listed above.");
@@ -5901,6 +5897,7 @@ export function ProjectsBoardPanel({
       {project !== null && (
         <h2 className="sr-only">{project.title} project board</h2>
       )}
+      {!showBoardChrome && bodyLoading && <BoardToolbarSkeleton />}
       {showBoardChrome && (
         <div className="@container/toolbar mb-2 flex shrink-0 flex-wrap items-center gap-2">
           <Select
@@ -6581,9 +6578,11 @@ export function ProjectsBoardPanel({
           can't silently no-op during the cold load, and hidden the moment a real
           selection exists: the bar below is the better teacher by then.
           ChangesPanel's own hint, worded for cards and keyed on its own setting. */}
-      {showBoardChrome &&
+      {bodyLoading && hintUnseen && <SelectionHintStrip noun={noun} />}
+      {!bodyLoading &&
+        showBoardChrome &&
         settings.data &&
-        settings.data.showBoardSelectionHint !== false &&
+        hintUnseen &&
         shown >= 2 &&
         selectionSize <= 1 && (
           <SelectionHintStrip

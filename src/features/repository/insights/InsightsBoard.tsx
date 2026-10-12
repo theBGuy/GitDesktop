@@ -388,9 +388,11 @@ export function InsightsBoard({
                 <LinkOutsCard
                   repoPath={repoPath}
                   // Undefined while community loads, which holds the
-                  // public-only link's cell; a failed read hides it.
+                  // public-only link's cell; a failed read hides it, and so
+                  // does one parked offline, which could hold it for the
+                  // whole outage.
                   isPublic={
-                    community.isPending
+                    community.isPending && community.fetchStatus !== "paused"
                       ? undefined
                       : community.data
                         ? !community.data.private

@@ -105,14 +105,14 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Nine dependency-free Node scripts guard convention classes a past audit already
+Ten dependency-free Node scripts guard convention classes a past audit already
 paid to close once. Run them before pushing:
 
 ```sh
 # banned patterns · Rust invariants · OG card references ·
 # IPC surface drift · rule-mirror drift · skill-mirror drift ·
 # Tauri npm/crate parity · lockfile singleton dedupe · AppImage env twins ·
-# guard self-tests
+# installed-only suites enforced · guard self-tests
 pnpm run checks
 ```
 
@@ -130,7 +130,10 @@ for Claude Code, `.agents/skills/` for the other agent lanes), the major.minor
 parity of each Tauri package's npm and crate halves (each declared npm half
 needing a crate half to compare against), a single resolved version in
 `pnpm-lock.yaml` for each CodeMirror/Lezer core package, and parity between
-the AppImage guard's allowed exports and the Rust child-environment tables.
+the AppImage guard's allowed exports and the Rust child-environment tables,
+and that every node suite which skips without `node_modules` is listed in
+`frontend.yml`'s installed, enforced step (otherwise its skipped tests run in
+no CI job).
 
 The pattern, Rust-invariant, and surface checks carry allowlists; the AppImage
 environment-twins check carries an exemption map. They ratchet one way
