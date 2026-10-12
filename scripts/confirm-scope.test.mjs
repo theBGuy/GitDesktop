@@ -8,8 +8,10 @@
 // imports. The wiring the pure helpers can't see (the store's subscription and
 // the app-scoped call sites) is pinned by source scans at the bottom.
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { normPath as norm } from "../src/lib/git/path.ts";
 import {
@@ -24,6 +26,7 @@ import {
   matchBrace,
   OPEN,
   ScanError,
+  sourceFiles,
 } from "./lib/ts-mask.mjs";
 
 const source = (rel) =>
@@ -223,11 +226,15 @@ const APP_LEVEL_DIRS = [
   "src/features/mywork",
 ];
 
-function sourceFiles(rel) {
-  const dir = new URL(`../${rel}/`, import.meta.url);
-  return readdirSync(dir, { recursive: true })
-    .filter((f) => /\.(ts|tsx)$/.test(f))
-    .map((f) => `${rel}/${String(f).replace(/\\/g, "/")}`);
+/** Lines where `text` reaches the confirm store through a selector hook
+ *  (`useConfirm((s) => s.ask)`): the scope ratchet reads only
+ *  `useConfirm.getState().ask(…)` calls, so an ask behind a selector would pass
+ *  unchecked. Scanned on masked text, like the asks. */
+function selectorReaches(text, jsx = false) {
+  const masked = maskNonCode(text, jsx);
+  return [...masked.matchAll(/\buseConfirm\s*\(/g)].map((m) =>
+    lineOf(text, m.index),
+  );
 }
 
 test("the app-level scan flags an ask without a scope", () => {
@@ -287,14 +294,34 @@ test("unreadable input fails the scan instead of passing", () => {
   assert.throws(() => unscopedAsks(ask('{ title: "unterminated }')), ScanError);
 });
 
+test("the app-level scan flags a selector reach into the confirm store", () => {
+  const fixture = `
+    const ask = useConfirm((s) => s.ask);
+    const ok = await useConfirm.getState().ask({ title, scope: "app" });
+    // useConfirm((s) => s.ask) in a comment is not a reach
+  `;
+  assert.deepEqual(selectorReaches(fixture), [2]);
+  assert.deepEqual(selectorReaches(ask('{ title, scope: "app" }')), []);
+});
+
 test("every ask on an app-level screen passes an explicit scope", () => {
   let files = 0;
   let asks = 0;
   for (const dir of APP_LEVEL_DIRS) {
-    for (const file of sourceFiles(dir)) {
+    const root = fileURLToPath(new URL(`../${dir}/`, import.meta.url));
+    for (const abs of sourceFiles(root)) {
       files++;
-      const text = source(file);
-      const jsx = file.endsWith(".tsx");
+      const file = path.relative(
+        fileURLToPath(new URL("../", import.meta.url)),
+        abs,
+      );
+      const text = readFileSync(abs, "utf8").replace(/\r\n/g, "\n");
+      const jsx = abs.endsWith(".tsx");
+      assert.deepEqual(
+        selectorReaches(text, jsx),
+        [],
+        `${file}: reach the store via useConfirm.getState() so the scope ratchet can see it`,
+      );
       asks += askScopes(text, jsx).length;
       assert.deepEqual(
         unscopedAsks(text, jsx),

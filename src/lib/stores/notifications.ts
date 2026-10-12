@@ -399,8 +399,7 @@ export function repoNameFromPath(repoPath: string): string {
  *  both sides: callers pass paths from sources the store's own string need not
  *  match byte-for-byte. Read at settle time, never before the await. */
 export function originNoteFor(repoPath: string): string | undefined {
-  const live = useUiStore.getState().repoPath ?? "";
-  return normPath(live) === normPath(repoPath)
+  return landedIn(repoPath).live
     ? undefined
     : `In ${repoNameFromPath(repoPath)}`;
 }
