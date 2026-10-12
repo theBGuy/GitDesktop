@@ -17,42 +17,212 @@ export const ENFORCED_STEP = "Node suites needing node_modules (enforced)";
 
 const SUITE_PATH = /^scripts\/[A-Za-z0-9_.-]+\.test\.mjs$/;
 
-const indentOf = (line) => line.length - line.trimStart().length;
+const KEY = /^([A-Za-z_][\w.-]*):(?:\s+(.*))?$/;
+const BLOCK_SCALAR = /^[|>][0-9+-]*\s*(?:#.*)?$/;
+const EMPTY_VALUE = /^(?:#.*)?$/;
 
 /**
- * The suites the enforced step runs, read from its single-line
- * `run: node --test "…" "…"`. Throws on anything it can't read as that shape
- * (missing step, no GD_EXPECT_DEPS, a block scalar, an unquoted or non-suite
- * argument, a duplicate, an empty list) rather than passing on a misread.
+ * Classifies each line as blank, comment, block-scalar content, or a node:
+ * its indent, the column its key or item content starts at (after a `- `),
+ * and `key`/`value` when it is a `key: value` pair. Only nodes are structure,
+ * so text inside a comment or another key's block scalar is never read as a
+ * key. Throws on shapes the line model can't represent: tab indentation and
+ * quoted or flow values that continue onto another line.
+ */
+function scanYaml(workflow) {
+  const rows = [];
+  let blockParent = -1;
+  for (const [i, line] of workflow.split(/\r?\n/).entries()) {
+    const lead = line.match(/^[ \t]*/)[0];
+    const trimmed = line.trim();
+    if (blockParent >= 0) {
+      if (trimmed === "" || lead.length > blockParent) {
+        rows.push({ kind: "content" });
+        continue;
+      }
+      blockParent = -1;
+    }
+    if (lead.includes("\t"))
+      throw new Error(`Tab in indentation at line ${i + 1}`);
+    if (trimmed === "") {
+      rows.push({ kind: "blank" });
+      continue;
+    }
+    if (trimmed.startsWith("#")) {
+      rows.push({ kind: "comment" });
+      continue;
+    }
+    let rest = trimmed;
+    let seq = false;
+    if (rest === "-" || rest.startsWith("- ")) {
+      seq = true;
+      rest = rest.slice(1).trimStart();
+    }
+    const col = lead.length + (trimmed.length - rest.length);
+    const m = rest.match(KEY);
+    const key = m ? m[1] : null;
+    const value = m ? (m[2] ?? "").trim() : rest;
+    if (/^"/.test(value) && !/^"(?:[^"\\]|\\.)*"/.test(value))
+      throw new Error(`Multi-line quoted value at line ${i + 1}`);
+    if (/^'/.test(value) && !/^'(?:[^']|'')*'/.test(value))
+      throw new Error(`Multi-line quoted value at line ${i + 1}`);
+    const bare = value.replace(/\s+#.*$/, "");
+    if (/^[{[]/.test(bare) && !/[}\]]$/.test(bare))
+      throw new Error(`Multi-line flow value at line ${i + 1}`);
+    if (BLOCK_SCALAR.test(value)) blockParent = key ? col : lead.length;
+    rows.push({ kind: "node", i, indent: lead.length, col, seq, key, value });
+  }
+  return rows;
+}
+
+/** A single-line scalar's text: unquoted, trailing comment dropped. */
+function scalarText(value) {
+  const dq = value.match(/^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/);
+  if (dq) return dq[1];
+  const sq = value.match(/^'((?:[^']|'')*)'\s*(?:#.*)?$/);
+  if (sq) return sq[1].replaceAll("''", "'");
+  return value.replace(/\s+#.*$/, "").trim();
+}
+
+/** Values the guard reads must be plain one-line scalars it can see whole. */
+function assertReadable(row, what) {
+  if (/^[&*!]/.test(row.value))
+    throw new Error(`${what} uses an anchor, alias or tag`);
+  if (BLOCK_SCALAR.test(row.value))
+    throw new Error(`${what} is a block scalar`);
+  if (/^[{[]/.test(row.value)) throw new Error(`${what} is a flow collection`);
+}
+
+/**
+ * The direct `key: value` children of a block-mapping key: every node from
+ * `from` up to the next one at or above `parentIndent`, keyed at the first
+ * child's indent. A deeper node belongs to the child above it; a shallower
+ * one, a sequence item, a non-key or a repeated key fails closed. Returns
+ * `{ row, nested }` by key.
+ */
+function childKeys(rows, from, parentIndent, what) {
+  const out = new Map();
+  let level = -1;
+  let last = null;
+  for (let j = from; j < rows.length; j++) {
+    const row = rows[j];
+    if (row.kind !== "node") continue;
+    if (row.indent <= parentIndent) break;
+    if (level < 0) level = row.indent;
+    if (row.indent > level && last) {
+      last.nested.push(row);
+      continue;
+    }
+    if (row.indent !== level || row.seq || row.key === null)
+      throw new Error(`${what}: unreadable entry at line ${row.i + 1}`);
+    if (out.has(row.key))
+      throw new Error(`${what}: duplicate key '${row.key}'`);
+    last = { row, nested: [] };
+    out.set(row.key, last);
+  }
+  return out;
+}
+
+/**
+ * The suites the enforced step runs, read structurally: the step is the one
+ * sequence item under a `steps:` key whose direct `name:` is ENFORCED_STEP,
+ * its direct `env:` block mapping must hold a direct `GD_EXPECT_DEPS: "1"`, and
+ * its direct `run:` must be one line of `node --test "…" "…"`. Every shape it
+ * can't read that way (comments, block scalars, flow mappings, anchors, tabs,
+ * duplicate keys, an unquoted or non-suite argument, an empty list) throws
+ * rather than passing on a misread.
  */
 export function parseEnforcedSuites(workflow) {
-  const lines = workflow.split(/\r?\n/);
-  const heads = lines
-    .map((line, i) => [line, i])
-    .filter(([line]) =>
-      new RegExp(
-        `^\\s*-\\s+name:\\s*["']?${ENFORCED_STEP.replace(/[()]/g, "\\$&")}["']?\\s*$`,
-      ).test(line),
-    );
-  if (heads.length === 0)
-    throw new Error(`Could not find the '${ENFORCED_STEP}' step`);
-  if (heads.length > 1)
-    throw new Error(`Found ${heads.length} '${ENFORCED_STEP}' steps`);
-  const [head, start] = heads[0];
-  const stepIndent = indentOf(head);
-  const body = [];
-  for (const line of lines.slice(start + 1)) {
-    if (line.trim() !== "" && indentOf(line) <= stepIndent) break;
-    body.push(line);
+  const rows = scanYaml(workflow);
+  const steps = [];
+  for (const [at, row] of rows.entries()) {
+    if (row.kind !== "node" || !row.seq || row.key === null) continue;
+    // The item's own keys: its first line's, then its siblings at `col`.
+    const item = new Map([[row.key, { row, nested: [] }]]);
+    let last = item.get(row.key);
+    for (let j = at + 1; j < rows.length; j++) {
+      const next = rows[j];
+      if (next.kind !== "node") continue;
+      if (next.indent <= row.indent) break;
+      if (next.indent > row.col) {
+        last.nested.push(next);
+        continue;
+      }
+      if (next.indent !== row.col || next.seq || next.key === null) {
+        last = null;
+        item.set("\0malformed", { row: next, nested: [] });
+        break;
+      }
+      if (item.has(next.key)) {
+        item.set("\0duplicate", { row: next, nested: [] });
+        break;
+      }
+      last = { row: next, nested: [] };
+      item.set(next.key, last);
+    }
+    const name = item.get("name");
+    if (name && scalarText(name.row.value) === ENFORCED_STEP)
+      steps.push({ at, row, item });
   }
-  if (!body.some((line) => /^\s*GD_EXPECT_DEPS:\s*["']?1["']?\s*$/.test(line)))
+  if (steps.length === 0)
+    throw new Error(`Could not find the '${ENFORCED_STEP}' step`);
+  if (steps.length > 1)
+    throw new Error(`Found ${steps.length} '${ENFORCED_STEP}' steps`);
+  const { at, row: head, item } = steps[0];
+  if (item.has("\0malformed"))
+    throw new Error(
+      `'${ENFORCED_STEP}': unreadable key at line ${item.get("\0malformed").row.i + 1}`,
+    );
+  if (item.has("\0duplicate"))
+    throw new Error(
+      `'${ENFORCED_STEP}': duplicate key '${item.get("\0duplicate").row.key}'`,
+    );
+  // The item must be a step: its parent node is a `steps:` key holding a
+  // block sequence, not a continuation line of some other scalar.
+  let parent = null;
+  for (let j = at - 1; j >= 0; j--) {
+    if (rows[j].kind === "node" && rows[j].indent < head.indent) {
+      parent = rows[j];
+      break;
+    }
+  }
+  if (parent?.key !== "steps" || !EMPTY_VALUE.test(parent.value))
+    throw new Error(`'${ENFORCED_STEP}' is not an item of a steps: list`);
+  for (const [key, { row }] of item)
+    if (/^[&*]/.test(row.value))
+      throw new Error(`'${ENFORCED_STEP}': ${key} uses an anchor or alias`);
+  assertReadable(item.get("name").row, `'${ENFORCED_STEP}' name`);
+
+  const env = item.get("env");
+  if (!env) throw new Error(`'${ENFORCED_STEP}' has no env: mapping`);
+  assertReadable(env.row, `'${ENFORCED_STEP}' env`);
+  if (!EMPTY_VALUE.test(env.row.value))
+    throw new Error(`'${ENFORCED_STEP}' env: is not a block mapping`);
+  const envAt = rows.indexOf(env.row);
+  const vars = childKeys(
+    rows,
+    envAt + 1,
+    env.row.col,
+    `'${ENFORCED_STEP}' env`,
+  );
+  const deps = vars.get("GD_EXPECT_DEPS");
+  if (!deps)
     throw new Error(`'${ENFORCED_STEP}' does not set GD_EXPECT_DEPS: "1"`);
-  const runs = body.filter((line) => /^\s*run:/.test(line));
-  if (runs.length !== 1)
-    throw new Error(`'${ENFORCED_STEP}' needs exactly one run: line`);
-  const match = runs[0].match(/^\s*run:\s*node --test((?:\s+"[^"]*")+)\s*$/);
+  assertReadable(deps.row, "GD_EXPECT_DEPS");
+  if (
+    deps.nested.length > 0 ||
+    !/^(?:"1"|'1'|1)\s*(?:#.*)?$/.test(deps.row.value)
+  )
+    throw new Error(`'${ENFORCED_STEP}' does not set GD_EXPECT_DEPS: "1"`);
+
+  const run = item.get("run");
+  if (!run) throw new Error(`'${ENFORCED_STEP}' has no run: key`);
+  assertReadable(run.row, `'${ENFORCED_STEP}' run`);
+  if (run.nested.length > 0)
+    throw new Error(`'${ENFORCED_STEP}' run: continues past one line`);
+  const match = run.row.value.match(/^node --test((?:\s+"[^"]*")+)\s*$/);
   if (!match)
-    throw new Error(`Could not parse the run line: ${runs[0].trim()}`);
+    throw new Error(`Could not parse the run line: run: ${run.row.value}`);
   const suites = [...match[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
   const seen = new Set();
   for (const suite of suites) {

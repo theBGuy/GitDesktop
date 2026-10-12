@@ -7301,7 +7301,7 @@ test("enforced-node-suites fails closed on a step it cannot read", () => {
     [ok.replace('GD_EXPECT_DEPS: "1"', 'OTHER: "1"'), /GD_EXPECT_DEPS/],
     [
       ok.replace(/run: node --test .*/, "run: |\n          node --test x"),
-      /Could not parse the run line/,
+      /block scalar/,
     ],
     [
       ok.replace('"scripts/a.test.mjs"', "scripts/a.test.mjs"),
@@ -7314,6 +7314,159 @@ test("enforced-node-suites fails closed on a step it cannot read", () => {
     ],
     [ok.replace(/run: node --test .*/, "run: node --test"), /Could not parse/],
     [`${ok}\n${ok}`, /Found 2/],
+  ]) {
+    assert.throws(() => parseEnforcedSuites(workflow), message);
+  }
+});
+
+// Every element the guard reads is structural: a direct key of the step, or a
+// direct entry of its env: block mapping. Each fixture below is one way raw
+// text could look like enforcement while GitHub would not apply it.
+const enforcedStep = (...stepLines) =>
+  [
+    "jobs:",
+    "  build:",
+    "    steps:",
+    "      - name: Other step",
+    "        env:",
+    "          OTHER: x",
+    "        run: echo other",
+    "      - name: Node suites needing node_modules (enforced)",
+    ...stepLines.map((line) => (line === "" ? "" : `        ${line}`)),
+    "      - name: Next step",
+    "        run: echo done",
+    "",
+  ].join("\n");
+const ENFORCED_RUN = 'run: node --test "scripts/a.test.mjs"';
+
+test("enforced-node-suites: GD_EXPECT_DEPS inside another var's block scalar fails", () => {
+  assert.throws(
+    () =>
+      parseEnforcedSuites(
+        enforcedStep(
+          "env:",
+          "  UNUSED: |",
+          '    GD_EXPECT_DEPS: "1"',
+          ENFORCED_RUN,
+        ),
+      ),
+    /does not set GD_EXPECT_DEPS/,
+  );
+});
+
+test("enforced-node-suites: GD_EXPECT_DEPS only in a comment fails", () => {
+  assert.throws(
+    () =>
+      parseEnforcedSuites(
+        enforcedStep(
+          "env:",
+          "  OTHER: x",
+          '  # GD_EXPECT_DEPS: "1"',
+          ENFORCED_RUN,
+        ),
+      ),
+    /does not set GD_EXPECT_DEPS/,
+  );
+});
+
+test("enforced-node-suites: GD_EXPECT_DEPS in a different step's env fails", () => {
+  const workflow = enforcedStep(ENFORCED_RUN).replace(
+    "          OTHER: x",
+    '          GD_EXPECT_DEPS: "1"',
+  );
+  assert.throws(() => parseEnforcedSuites(workflow), /has no env: mapping/);
+});
+
+test("enforced-node-suites: a run list inside another key's block scalar fails", () => {
+  assert.throws(
+    () =>
+      parseEnforcedSuites(
+        enforcedStep(
+          "env:",
+          '  GD_EXPECT_DEPS: "1"',
+          "with:",
+          "  script: |",
+          `    ${ENFORCED_RUN}`,
+        ),
+      ),
+    /has no run: key/,
+  );
+});
+
+test("enforced-node-suites: a flow-mapping env: fails closed", () => {
+  assert.throws(
+    () =>
+      parseEnforcedSuites(
+        enforcedStep('env: { GD_EXPECT_DEPS: "1" }', ENFORCED_RUN),
+      ),
+    /env is a flow collection/,
+  );
+});
+
+test("enforced-node-suites: a duplicate GD_EXPECT_DEPS key fails closed", () => {
+  assert.throws(
+    () =>
+      parseEnforcedSuites(
+        enforcedStep(
+          "env:",
+          '  GD_EXPECT_DEPS: "1"',
+          '  GD_EXPECT_DEPS: "0"',
+          ENFORCED_RUN,
+        ),
+      ),
+    /duplicate key 'GD_EXPECT_DEPS'/,
+  );
+});
+
+test("enforced-node-suites: extra env vars and comments between keys pass", () => {
+  assert.deepEqual(
+    parseEnforcedSuites(
+      enforcedStep(
+        "# why this step exists",
+        "env:",
+        "  FORCE_COLOR: 0",
+        "  # the enforcement switch",
+        "  GD_EXPECT_DEPS: '1' # turns skips into failures",
+        "  NOTES: |",
+        "    free text",
+        "",
+        "# the list",
+        ENFORCED_RUN,
+        "shell: bash",
+      ),
+    ),
+    new Set(["scripts/a.test.mjs"]),
+  );
+});
+
+test("enforced-node-suites fails closed on anchors, tabs, stray names and bad parents", () => {
+  const valid = ["env:", '  GD_EXPECT_DEPS: "1"', ENFORCED_RUN];
+  for (const [workflow, message] of [
+    [
+      enforcedStep("env: &deps", '  GD_EXPECT_DEPS: "1"', ENFORCED_RUN),
+      /anchor or alias/,
+    ],
+    [enforcedStep("env:", "  <<: *deps", ENFORCED_RUN), /unreadable entry/],
+    [
+      enforcedStep("env:", '\tGD_EXPECT_DEPS: "1"', ENFORCED_RUN),
+      /Tab in indentation/,
+    ],
+    [enforcedStep(...valid, "env:"), /duplicate key 'env'/],
+    [
+      enforcedStep(...valid).replace(
+        "      - name: Node suites needing node_modules (enforced)",
+        "      # - name: Node suites needing node_modules (enforced)",
+      ),
+      /Could not find/,
+    ],
+    [
+      enforcedStep(...valid).replace("    steps:", "    services:"),
+      /not an item of a steps: list/,
+    ],
+    [
+      enforcedStep("env:", '  GD_EXPECT_DEPS: "1', ENFORCED_RUN),
+      /Multi-line quoted value/,
+    ],
   ]) {
     assert.throws(() => parseEnforcedSuites(workflow), message);
   }
