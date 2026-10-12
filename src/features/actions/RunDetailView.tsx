@@ -8,16 +8,22 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { type UseQueryResult, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  type UseQueryResult,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   DegradedListNotice,
@@ -43,7 +49,7 @@ import {
   useRepoWriteAccess,
   writeAccessReason,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import type { RunJob } from "@/lib/github/actions";
 import {
   isRunActive,
@@ -67,12 +73,14 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
+import { cachedRunRow, type RunRowSeed } from "./run-row-cache";
 import {
-  RunSkeleton,
   useReportRunSettled,
   useRunSlotInteractive,
+  useRunSlotShown,
 } from "./run-slots";
 import {
+  type CiRunNoun,
   cancelLabel,
   cancelOffered,
   cancelStartedMessage,
@@ -415,6 +423,269 @@ function JobRow({
   );
 }
 
+/** What a loading frame's controls say while a run switch loads, in the
+ *  provider's own noun. One wording for the frame's buttons and its status. */
+function runSwitchLoadingReason(noun: CiRunNoun): string {
+  return `Loading this ${noun}…`;
+}
+
+/** GitHub holds a first-time contributor's fork-PR run until a maintainer
+ *  approves it. Which field carries that state is unverified, so accept it on
+ *  either; a run that never reports it never shows the strip. Shared by the
+ *  loaded view and its loading frame so the two can't drift. */
+function approvalPendingFor(
+  provider: ForgeProvider | null | undefined,
+  status: string,
+  conclusion: string,
+): boolean {
+  return (
+    provider === "github" &&
+    (status === "action_required" || conclusion === "action_required")
+  );
+}
+
+/** This run's row in any cached runs list of the repo, for the loading frame's
+ *  header. Placeholder data lives on observers, never in a query's state, so a
+ *  borrowed placeholder can't read as a row. */
+function readCachedRunRow(
+  queryClient: QueryClient,
+  repoPath: string,
+  runId: number,
+): RunRowSeed | undefined {
+  const entries = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ["repo", repoPath, "actions"] })
+    .map((query) => ({
+      key: query.queryKey,
+      data: query.state.data,
+      dataUpdatedAt: query.state.dataUpdatedAt,
+    }));
+  return cachedRunRow(entries, runId);
+}
+
+/**
+ * The run's header: status, title, meta line, and the action row ending in
+ * View on <remote>. The loaded view and its loading frame render it at the same
+ * place under the host, so the frame already has the loaded geometry and a
+ * header button keeps its node (and focus) through the land. Without `run` (no
+ * cached row) the status, title and meta are skeletons of a typical width.
+ */
+function RunHeader({
+  run,
+  actions,
+  viewOn,
+  viewOnRef,
+}: {
+  run: RunRowSeed | undefined;
+  /** The leading Cancel or re-run offers. */
+  actions: ReactNode;
+  viewOn: {
+    remoteLabel: string;
+    disabled: boolean;
+    reason: string;
+    onClick?: () => void;
+  };
+  /** The view's keyless focus anchor (`handOffJobFocus`). A top-level prop:
+   *  React Compiler refuses a ref read off an object during render. */
+  viewOnRef: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <div className="border-b p-4">
+      <div className="flex items-start gap-2">
+        {run === undefined ? (
+          <Skeleton
+            aria-hidden
+            className="mt-0.5 size-5 shrink-0 rounded-full"
+          />
+        ) : (
+          <StatusIcon
+            status={run.status}
+            conclusion={run.conclusion}
+            className="mt-0.5 size-5"
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <h2
+            className="truncate text-sm font-semibold"
+            title={run?.displayTitle}
+          >
+            {run === undefined ? (
+              <Skeleton
+                aria-hidden
+                className="inline-block h-4 w-80 max-w-full align-middle"
+              />
+            ) : (
+              run.displayTitle
+            )}
+          </h2>
+          {run === undefined ? (
+            // A div, since the skeleton bar is one and can't nest in a <p>; the
+            // classes give it the meta line's box.
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              <Skeleton
+                aria-hidden
+                className="inline-block h-3 w-64 max-w-full align-middle"
+              />
+            </div>
+          ) : (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {run.workflowName} · #{run.number} · {run.headBranch} ·{" "}
+              {run.event} · {statusLabel(run.status, run.conclusion)}
+              {parseableDate(run.createdAt) && (
+                <>
+                  {" · "}
+                  <RelativeTime date={run.createdAt} />
+                </>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {actions}
+        <DisabledReasonButton
+          ref={viewOnRef}
+          variant="ghost"
+          size="sm"
+          wrapperClassName="ml-auto"
+          className="cursor-pointer"
+          disabled={viewOn.disabled}
+          reason={viewOn.reason}
+          title={`Open this run on ${viewOn.remoteLabel}`}
+          onClick={viewOn.onClick}
+        >
+          <ArrowSquareOutIcon data-icon="inline-start" />
+          View on {viewOn.remoteLabel}
+        </DisabledReasonButton>
+      </div>
+    </div>
+  );
+}
+
+/** GitHub's wait-for-approval strip. A persistent state belongs in the layout
+ *  flow: it pushes the jobs list down rather than floating over the header. */
+function RunApprovalStrip({
+  disabled,
+  reason,
+  busy,
+  onApprove,
+}: {
+  disabled: boolean;
+  reason: string | undefined;
+  busy: boolean;
+  onApprove?: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b bg-warning/10 px-4 py-2 text-xs">
+      <span className="flex min-w-0 items-center gap-1.5 text-warning">
+        <WarningIcon weight="fill" className="size-3.5 shrink-0" />
+        GitHub is waiting for a maintainer to approve this workflow run before
+        it starts.
+      </span>
+      <DisabledReasonButton
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        reason={reason}
+        onClick={onApprove}
+      >
+        {busy ? (
+          <Spinner data-icon="inline-start" />
+        ) : (
+          <PlayIcon data-icon="inline-start" />
+        )}
+        Approve and run
+      </DisabledReasonButton>
+    </div>
+  );
+}
+
+/** The loading frame's twins of the loaded action row: the same offer
+ *  builders and render gates, every button disabled with the frame's reason.
+ *  Same shapes and keys as the loaded row, so a surviving button keeps its node
+ *  through the land. */
+function frameRunActions({
+  provider,
+  row,
+  canCancel,
+  canRerun,
+  reason,
+}: {
+  provider: ForgeProvider | null | undefined;
+  row: RunRowSeed;
+  canCancel: boolean;
+  canRerun: boolean;
+  reason: string;
+}): ReactNode {
+  if (cancelOffered(provider, row.status, row.conclusion)) {
+    return (
+      canCancel && (
+        <DisabledReasonButton
+          variant="outline"
+          size="sm"
+          disabled
+          reason={reason}
+        >
+          <ProhibitIcon data-icon="inline-start" />
+          {cancelLabel(provider)}
+        </DisabledReasonButton>
+      )
+    );
+  }
+  return (
+    canRerun &&
+    rerunOffers(provider, row.status, row.conclusion).map((offer) => (
+      <DisabledReasonButton
+        key={offer.kind}
+        variant="outline"
+        size="sm"
+        disabled
+        reason={reason}
+        title={RERUN_TITLES[offer.kind]}
+      >
+        <ArrowClockwiseIcon data-icon="inline-start" />
+        {offer.label}
+      </DisabledReasonButton>
+    ))
+  );
+}
+
+/**
+ * The run view's loading frame under its `RunHeader`: the jobs section's own
+ * chrome, so when the run lands only the count and the rows fill in. `notice`
+ * stands in for the rows when the read failed or parked under a cached row's
+ * header.
+ */
+function RunLoadingFrame({
+  noun,
+  notice,
+}: {
+  noun: CiRunNoun;
+  notice: ReactNode;
+}) {
+  const shown = useRunSlotShown();
+  return (
+    <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+      <div className="p-4">
+        <h3 className="mb-2 text-xs font-medium text-muted-foreground">Jobs</h3>
+        {notice ?? (
+          <div className="border">
+            {/* Remounted when the slot shows: a status inserted while the slot
+                prepares out of sight isn't reliably announced. */}
+            <ListRowSkeletons
+              key={shown ? "shown" : "hidden"}
+              rows={3}
+              lines={1}
+              name={`this ${noun}`}
+            />
+          </div>
+        )}
+      </div>
+    </ScrollArea>
+  );
+}
+
 export function RunDetailView({
   repoPath,
   runId,
@@ -601,13 +872,9 @@ export function RunDetailView({
   const showCancel = run
     ? cancelOffered(provider, run.status, run.conclusion)
     : false;
-  // GitHub holds a first-time contributor's fork-PR run until a maintainer
-  // approves it. Which field carries that state is unverified, so accept it on
-  // either — a run that never reports it simply never shows the strip.
   const approvalPending =
-    provider === "github" &&
-    (run?.status === "action_required" ||
-      run?.conclusion === "action_required");
+    run !== undefined &&
+    approvalPendingFor(provider, run.status, run.conclusion);
   // Approving starts the contributor's code, so it holds offline as its prompt
   // does; cancel and the re-runs may park, and say so on their controls.
   const offlineHold = useOfflineHold();
@@ -767,45 +1034,127 @@ export function RunDetailView({
   // preparing slot waiting.
   useReportRunSettled(pane !== "skeleton");
 
-  if (pane === "skeleton") {
-    return (
-      <div ref={hostRef} tabIndex={-1} className="space-y-3 p-4 outline-none">
-        <RunSkeleton />
-      </div>
-    );
+  // The loading frame stands in for this view's run until its detail lands,
+  // its header seeded from a cached list row. Read once per run and latched: a
+  // list poll landing mid-frame would re-lay the header. Cleared once the run
+  // renders.
+  const [frameSeed, setFrameSeed] = useState<{
+    forRun: number;
+    row: RunRowSeed | undefined;
+  } | null>(null);
+  let seed = frameSeed;
+  if (run !== undefined) {
+    if (frameSeed !== null) setFrameSeed(null);
+  } else if (frameSeed === null || frameSeed.forRun !== runId) {
+    seed = {
+      forRun: runId,
+      row: readCachedRunRow(queryClient, repoPath, runId),
+    };
+    setFrameSeed(seed);
   }
 
-  if (pane === "offline") {
-    return (
-      <div
-        ref={hostRef}
-        tabIndex={-1}
-        className="p-6 text-center text-sm text-muted-foreground outline-none"
+  if (run === undefined) {
+    const row = seed?.row;
+    const offlineMessage = offlinePendingMessage(`this ${runNoun}`);
+    const loadFailedMessage = `Couldn't load this ${runNoun}.`;
+    const retryButton = (
+      <Button
+        ref={retryRef}
+        variant="outline"
+        size="sm"
+        className="cursor-pointer"
+        disabled={detail.isFetching}
+        onClick={() => void detail.refetch()}
       >
-        {offlinePendingMessage(`this ${runNoun}`)}
-      </div>
+        {detail.isFetching ? "Retrying…" : "Retry"}
+      </Button>
     );
-  }
 
-  // `pane === "error"` exactly here: with no run, every other arm returned above.
-  if (!run) {
-    return (
-      <div
-        ref={hostRef}
-        tabIndex={-1}
-        className="flex flex-col items-center gap-2 p-6 text-center text-sm text-muted-foreground outline-none"
-      >
-        Couldn't load this {runNoun}.
-        <Button
-          ref={retryRef}
-          variant="outline"
-          size="sm"
-          className="cursor-pointer"
-          disabled={detail.isFetching}
-          onClick={() => void detail.refetch()}
+    // With no cached row there is no header to keep, so a final answer takes
+    // the whole pane rather than sitting beside loading bars.
+    if (row === undefined && pane === "offline") {
+      return (
+        <div
+          ref={hostRef}
+          tabIndex={-1}
+          className="p-6 text-center text-sm text-muted-foreground outline-none"
         >
-          {detail.isFetching ? "Retrying…" : "Retry"}
-        </Button>
+          {offlineMessage}
+        </div>
+      );
+    }
+    if (row === undefined && pane === "error") {
+      return (
+        <div
+          ref={hostRef}
+          tabIndex={-1}
+          className="flex flex-col items-center gap-2 p-6 text-center text-sm text-muted-foreground outline-none"
+        >
+          {loadFailedMessage}
+          {retryButton}
+        </div>
+      );
+    }
+
+    // The frame's controls never claim a load that isn't running: an offline
+    // or failed read says so instead.
+    const frame = (() => {
+      switch (pane) {
+        case "offline":
+          return {
+            reason: offlineMessage,
+            notice: (
+              <p className="text-xs text-muted-foreground">{offlineMessage}</p>
+            ),
+          };
+        case "error":
+          return {
+            reason: loadFailedMessage,
+            notice: (
+              <div className="flex flex-col items-start gap-2 text-xs text-muted-foreground">
+                {loadFailedMessage}
+                {retryButton}
+              </div>
+            ),
+          };
+        default:
+          return { reason: runSwitchLoadingReason(runNoun), notice: null };
+      }
+    })();
+
+    // The loaded view's boxes in its order, the empty notice included, so the
+    // header keeps its place (and React its nodes) when the run lands.
+    return (
+      <div
+        ref={hostRef}
+        tabIndex={-1}
+        className="flex h-full min-h-0 flex-col outline-none"
+      >
+        <DegradedListNotice noun={`this ${runNoun}`} degraded={false} />
+        <RunHeader
+          run={row}
+          actions={
+            row &&
+            frameRunActions({
+              provider,
+              row,
+              canCancel,
+              canRerun,
+              reason: frame.reason,
+            })
+          }
+          viewOn={{
+            remoteLabel,
+            disabled: true,
+            reason: frame.reason,
+          }}
+          viewOnRef={viewOnRemoteRef}
+        />
+        {row !== undefined &&
+          approvalPendingFor(provider, row.status, row.conclusion) && (
+            <RunApprovalStrip disabled reason={frame.reason} busy={false} />
+          )}
+        <RunLoadingFrame noun={runNoun} notice={frame.notice} />
       </div>
     );
   }
@@ -829,35 +1178,10 @@ export function RunDetailView({
         onRetry={detailFailed ? () => void detail.refetch() : undefined}
         className="shrink-0 border-b px-4 py-1.5"
       />
-      <div className="border-b p-4">
-        <div className="flex items-start gap-2">
-          <StatusIcon
-            status={run.status}
-            conclusion={run.conclusion}
-            className="mt-0.5 size-5"
-          />
-          <div className="min-w-0 flex-1">
-            <h2
-              className="truncate text-sm font-semibold"
-              title={run.displayTitle}
-            >
-              {run.displayTitle}
-            </h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              {run.workflowName} · #{run.number} · {run.headBranch} ·{" "}
-              {run.event} · {statusLabel(run.status, run.conclusion)}
-              {parseableDate(run.createdAt) && (
-                <>
-                  {" · "}
-                  <RelativeTime date={run.createdAt} />
-                </>
-              )}
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {showCancel
+      <RunHeader
+        run={run}
+        actions={
+          showCancel
             ? canCancel && (
                 <DisabledReasonButton
                   variant="outline"
@@ -921,50 +1245,26 @@ export function RunDetailView({
                     {offer.label}
                   </DisabledReasonButton>
                 );
-              })}
-          <DisabledReasonButton
-            ref={viewOnRemoteRef}
-            variant="ghost"
-            size="sm"
-            wrapperClassName="ml-auto"
-            className="cursor-pointer"
-            disabled={!run.url}
-            reason="No URL for this run"
-            title={`Open this run on ${remoteLabel}`}
-            onClick={() => run.url && openUrl(run.url)}
-          >
-            <ArrowSquareOutIcon data-icon="inline-start" />
-            View on {remoteLabel}
-          </DisabledReasonButton>
-        </div>
-      </div>
+              })
+        }
+        viewOn={{
+          remoteLabel,
+          disabled: !run.url,
+          reason: "No URL for this run",
+          onClick: () => run.url && openUrl(run.url),
+        }}
+        viewOnRef={viewOnRemoteRef}
+      />
 
       {approvalPending && (
-        // A persistent state belongs in the layout flow: the strip pushes the
-        // jobs list down rather than floating over the run header.
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b bg-warning/10 px-4 py-2 text-xs">
-          <span className="flex min-w-0 items-center gap-1.5 text-warning">
-            <WarningIcon weight="fill" className="size-3.5 shrink-0" />
-            GitHub is waiting for a maintainer to approve this workflow run
-            before it starts.
-          </span>
-          <DisabledReasonButton
-            variant="outline"
-            size="sm"
-            disabled={
-              approvePending !== undefined || writeBlocked || !!offlineHold
-            }
-            reason={approveHeldReason}
-            onClick={() => void doApprove()}
-          >
-            {approvePending && !approvePending.paused ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <PlayIcon data-icon="inline-start" />
-            )}
-            Approve and run
-          </DisabledReasonButton>
-        </div>
+        <RunApprovalStrip
+          disabled={
+            approvePending !== undefined || writeBlocked || !!offlineHold
+          }
+          reason={approveHeldReason}
+          busy={approvePending !== undefined && !approvePending.paused}
+          onApprove={() => void doApprove()}
+        />
       )}
 
       {/* overflow-hidden contains the content's natural height (vendored Root is

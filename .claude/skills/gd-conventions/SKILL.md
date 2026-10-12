@@ -311,11 +311,17 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   host renders `entityHoldSlots` (held, preparing, shown) over the same
   transitions. Runs use `RunSlots` (`src/features/actions/run-slots.tsx`): one
   keyed slot per run, promoted on `useReportRunSettled`, which the run view
-  calls before any early return so a render-null arm still reports. The PR and
-  issue views paint `loading` as a slot-shaped frame (`PrLoadingFrame`,
-  `IssueLoadingFrame`), never generic bars; the PR view reserves its strip line
-  and waits for its feed (`feedReady`), and the issue view's late sections
-  reserve their minimum loaded height with an error arm (`SectionReadLine`).
+  calls before any early return so a render-null arm still reports. A
+  preparing slot hides by a full clip (`[clip-path:inset(50%)]`) plus `inert`,
+  never `invisible`: the vendored Button's `transition-all` transitions the
+  inherited visibility, so its buttons paint a frame late when the slot shows.
+  The PR, issue and workflow-run views paint `loading` as a slot-shaped frame
+  (`PrLoadingFrame`, `IssueLoadingFrame`, and the run view's shared
+  `RunHeader` over `RunLoadingFrame` for its jobs slot), never generic bars;
+  the PR view reserves its strip line and waits for its feed
+  (`feedReady`), the issue view's late sections reserve their minimum loaded
+  height with an error arm (`SectionReadLine`), and the run frame's jobs slot
+  fills downward under a header whose geometry is final.
   Each frame mirrors the loaded header's rows, titled from the cached list row
   of the LIVE selection (the view's own number lags a reveal), latched when the
   frame starts so a row that lands later never re-lays it. `RepositoryView`

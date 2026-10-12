@@ -18,10 +18,13 @@ export function heldParentProps(holding: boolean): { "aria-busy"?: true } {
  */
 export function HeldFrame({
   holding,
+  inert = false,
   className,
   children,
 }: {
   holding: boolean;
+  /** Inert without the held dim, for a slot preparing out of sight. */
+  inert?: boolean;
   className?: string;
   children: ReactNode;
 }) {
@@ -47,7 +50,7 @@ export function HeldFrame({
           holding && "opacity-80 delay-100",
           className,
         )}
-        inert={holding}
+        inert={holding || inert}
       >
         {children}
       </div>

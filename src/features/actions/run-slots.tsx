@@ -8,8 +8,7 @@ import {
   useState,
 } from "react";
 import { HeldFrame, heldParentProps } from "@/components/held-frame";
-import { Skeleton } from "@/components/ui/skeleton";
-import type { EntitySlotRole } from "@/lib/entity-hold";
+import type { EntityHoldSlot, EntitySlotRole } from "@/lib/entity-hold";
 import { useEntityHold, useRevealGuard } from "@/lib/use-entity-hold";
 
 /** What a run slot tells the run view inside it. Its own context, not the diff
@@ -20,6 +19,9 @@ export interface RunSlotHoldValue {
    *  Gates the global hotkeys `inert` and `invisible` miss, and the debug
    *  dialog's permanent close. */
   interactive: boolean;
+  /** This slot is the shown one (not held or preparing). Outside a slot: true.
+   *  Gates the loading frame's announcement mount. */
+  shown: boolean;
   /** Records the slot's settle state and returns its release. */
   reportSettled: (settled: boolean) => () => void;
 }
@@ -28,6 +30,7 @@ const release = () => undefined;
 
 const OUTSIDE_SLOT: RunSlotHoldValue = {
   interactive: true,
+  shown: true,
   reportSettled: () => release,
 };
 
@@ -36,6 +39,12 @@ const RunSlotHold = createContext<RunSlotHoldValue>(OUTSIDE_SLOT);
 /** For interaction gates: handlers, hotkeys, palette rows. */
 export function useRunSlotInteractive(): boolean {
   return useContext(RunSlotHold).interactive;
+}
+
+/** For the loading frame: its status mounts afresh when the slot shows, since
+ *  a live region inserted while out of sight is not reliably announced. */
+export function useRunSlotShown(): boolean {
+  return useContext(RunSlotHold).shown;
 }
 
 /** Reports whether the run view has an answer to show (a final error or
@@ -47,24 +56,14 @@ export function useReportRunSettled(settled: boolean): void {
   useLayoutEffect(() => reportSettled(settled), [reportSettled, settled]);
 }
 
-/** The run view's loading bars, shared by its skeleton arm and the reveal
- *  frame in `RunSlots` so the two read as one loading state. */
-export function RunSkeleton() {
-  return (
-    <>
-      <Skeleton className="h-7 w-2/3" />
-      <Skeleton className="h-4 w-1/2" />
-      <Skeleton className="h-24 w-full" />
-    </>
-  );
-}
-
 const SLOT_CLASS: Record<EntitySlotRole, string> = {
   shown: "h-full",
   held: "h-full",
-  // Stacked invisibly over the held run at full size, so it lays out before it
-  // shows; `invisible` also keeps it out of pointer, focus and AT.
-  preparing: "invisible absolute inset-0",
+  // Stacked over the held run at full size, so it lays out before it shows,
+  // and hidden by a full clip (inert keeps it out of pointer, focus and AT).
+  // Never `invisible`: the vendored Button transitions inherited visibility, so
+  // every button would paint a frame late when the slot shows.
+  preparing: "absolute inset-0 [clip-path:inset(50%)]",
 };
 
 /**
@@ -73,8 +72,9 @@ const SLOT_CLASS: Record<EntitySlotRole, string> = {
  * sight, promoted on its first settled report or the entity-hold bound. Each
  * slot is its own keyed instance, so per-run state never crosses runs. Callers
  * key this on the repo: a repo switch starts over without a hold. A reveal that
- * also moves the run (openRun, the branch CI badge) paints the loading frame
- * and then the new run directly, never the one a hold would keep.
+ * also moves the run (openRun, the branch CI badge) renders the live run as the
+ * shown slot (its view paints the loading frame until it loads), never the one
+ * a hold would keep.
  */
 export function RunSlots({
   runId,
@@ -131,18 +131,20 @@ export function RunSlots({
       }),
     [],
   );
-  if (reveal.revealing) {
-    return (
-      <div aria-busy className="space-y-3 p-4">
-        <RunSkeleton />
-      </div>
-    );
-  }
+  // The reveal slot shares the key and position of the shown slot the hold
+  // lands on once the deferred id catches up, so that view never remounts.
+  const revealSlots: EntityHoldSlot[] =
+    liveRunId === null ? [] : [{ key: String(liveRunId), role: "shown" }];
+  const slots = reveal.revealing ? revealSlots : hold.slots;
   return (
     // The busy signal lives here: the held slot is inert, and an inert subtree
-    // is out of the accessibility tree along with its aria-busy.
-    <div className="relative h-full" {...heldParentProps(hold.holding)}>
-      {hold.slots.map(({ key: slotKey, role }) => (
+    // is out of the accessibility tree along with its aria-busy. A reveal paints
+    // no held slot, so it never claims busy over the frame's own status.
+    <div
+      className="relative h-full"
+      {...heldParentProps(hold.holding && !reveal.revealing)}
+    >
+      {slots.map(({ key: slotKey, role }) => (
         <RunSlot
           key={slotKey}
           slotKey={slotKey}
@@ -182,11 +184,19 @@ function RunSlot({
   );
   // Memoized for identity: the context reaches the whole run view.
   const value = useMemo<RunSlotHoldValue>(
-    () => ({ interactive: role === "shown" && live, reportSettled }),
+    () => ({
+      interactive: role === "shown" && live,
+      shown: role === "shown",
+      reportSettled,
+    }),
     [role, live, reportSettled],
   );
   return (
-    <HeldFrame holding={role === "held"} className={SLOT_CLASS[role]}>
+    <HeldFrame
+      holding={role === "held"}
+      inert={role === "preparing"}
+      className={SLOT_CLASS[role]}
+    >
       <RunSlotHold value={value}>{children}</RunSlotHold>
     </HeldFrame>
   );
