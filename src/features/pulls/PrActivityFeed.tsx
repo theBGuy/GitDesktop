@@ -239,6 +239,7 @@ export function PrActivityFeed({
   onToggleReaction,
   reactionsHeld = false,
   reactionsReason,
+  reactionPickerHeld = false,
   mentions,
 }: {
   pr: PrDetails;
@@ -307,6 +308,9 @@ export function PrActivityFeed({
   /** Why `reactionsHeld` holds — shown and announced on every control it
    *  disables. Absent leaves a plain disable no viewer can interrogate. */
   reactionsReason?: string | null;
+  /** Closes every open comment emoji picker while the view holds this PR (see
+   *  ReactionBar's `held`). */
+  reactionPickerHeld?: boolean;
   /** Opt in to `@`/`#`/`!` autocomplete in every editor this feed opens (comment
    *  edits, review-thread replies) — only surfaces whose forge autolinks the
    *  completed reference pass one. */
@@ -505,6 +509,7 @@ export function PrActivityFeed({
             disabledReason={disabledReason}
             reactionsHeld={reactionsHeld}
             reactionsReason={reactionsReason}
+            reactionPickerHeld={reactionPickerHeld}
             reactions={canReact ? reactions?.comments[c.id] : undefined}
             onToggleReaction={
               canReact

@@ -89,6 +89,7 @@ export function ReactionBar({
   onToggle,
   disabled,
   reason,
+  held = false,
 }: {
   reactions: Reaction[];
   onToggle: (content: string, active: boolean) => void;
@@ -96,8 +97,13 @@ export function ReactionBar({
   /** Why the toggles are held — shown and announced on every control `disabled`
    *  turns off. Absent leaves a native disable, which explains nothing. */
   reason?: string | null;
+  /** The host's subject is held on screen while another loads. The picker is
+   *  portaled out of the host's `inert`, so it closes rather than stay live and
+   *  re-target the item that lands; the at-rest controls keep their look. */
+  held?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  if (held && open) setOpen(false);
   const portalContainer = usePanelPortalContainer();
   const reacted = new Set(
     reactions.filter((r) => r.viewerReacted).map((r) => r.content),

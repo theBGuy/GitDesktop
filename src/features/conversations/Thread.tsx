@@ -100,6 +100,7 @@ export function Thread({
   onToggleReaction,
   reactionsHeld = false,
   reactionsReason,
+  reactionPickerHeld = false,
   renderBody,
   copyMarkdown,
   disabledReason,
@@ -145,6 +146,9 @@ export function Thread({
   /** Why `reactionsHeld` holds — the bar shows and announces it on every control
    *  it disables. Absent leaves a plain disable no viewer can interrogate. */
   reactionsReason?: string | null;
+  /** Closes an open emoji picker: the caller's view is holding this thread on
+   *  screen while another item loads (see ReactionBar's `held`). */
+  reactionPickerHeld?: boolean;
   /** Opt in to `@`/`#`/`!` autocomplete in the edit-in-place editor — only
    *  surfaces whose forge autolinks the completed reference pass one. */
   mentions?: MentionSource;
@@ -316,6 +320,7 @@ export function Thread({
           reactions={reactions ?? []}
           disabled={reactionsHeld}
           reason={reactionsReason}
+          held={reactionPickerHeld}
           onToggle={onToggleReaction}
         />
       )}

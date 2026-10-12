@@ -71,6 +71,7 @@ import {
   RunSkeleton,
   useReportRunSettled,
   useRunSlotInteractive,
+  useRunSlotShown,
 } from "./run-slots";
 import {
   cancelLabel,
@@ -433,8 +434,10 @@ export function RunDetailView({
   const rerunJob = useRerunJob(repoPath);
   const approveRun = useApproveWorkflowRun(repoPath);
   // False while this run is held or preparing in the Actions tab's two-slot
-  // host: `inert` misses the global hotkeys and the debug dialog's portal.
+  // host, or isn't the live selection yet: `inert` misses the global hotkeys
+  // and the debug dialog's portal. `slotShown` ignores that lag, for render.
   const interactive = useRunSlotInteractive();
+  const slotShown = useRunSlotShown();
   const aiEnabled = useAiEnabled();
   // Re-run and cancel are SHARED writes (GitHub + GitLab): `canWrite || …` keeps
   // GitHub's controls up while forge-status is pending and positively enables a
@@ -475,7 +478,7 @@ export function RunDetailView({
   const [debugOpen, setDebugOpen] = useState(false);
   // A slot leaving `shown` closes the dialog for good (a render-time state
   // adjustment): returning to this run within the bound must not re-pop it.
-  if (!interactive && debugOpen) setDebugOpen(false);
+  if (!slotShown && debugOpen) setDebugOpen(false);
   const [showLogs, setShowLogs] = useState(false);
   const logs = useRunFailedLogs(repoPath, runId, showLogs);
   // Jobs re-run from this view, each against the completion it carried at the

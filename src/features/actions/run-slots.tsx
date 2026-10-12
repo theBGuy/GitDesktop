@@ -15,9 +15,12 @@ import { useEntityHold, useRevealGuard } from "@/lib/use-entity-hold";
 /** What a run slot tells the run view inside it. Its own context, not the diff
  *  pane's: DiffSurfaces nested in other detail views read that one. */
 export interface RunSlotHoldValue {
-  /** False while the slot is held or preparing. `inert` and `invisible` cover
-   *  pointer, focus and AT there, but not global hotkeys or portaled dialogs,
-   *  so those gate on this. */
+  /** The slot is the painted one (not held or preparing). Render gates read
+   *  this: it ignores the deferred selection's lag, so it never flickers. */
+  shown: boolean;
+  /** Shown AND its run is the live selection. `inert` and `invisible` cover
+   *  pointer, focus and AT, but not global hotkeys or portaled dialogs, and
+   *  the shown slot still names the old run until the deferred id catches up. */
   interactive: boolean;
   /** Records the slot's settle state and returns its release. */
   reportSettled: (settled: boolean) => () => void;
@@ -26,14 +29,21 @@ export interface RunSlotHoldValue {
 const release = () => undefined;
 
 const OUTSIDE_SLOT: RunSlotHoldValue = {
+  shown: true,
   interactive: true,
   reportSettled: () => release,
 };
 
 const RunSlotHold = createContext<RunSlotHoldValue>(OUTSIDE_SLOT);
 
+/** For interaction gates: handlers, hotkeys, palette rows, dialogs' `open`. */
 export function useRunSlotInteractive(): boolean {
   return useContext(RunSlotHold).interactive;
+}
+
+/** For render gates and render-time state adjustments. */
+export function useRunSlotShown(): boolean {
+  return useContext(RunSlotHold).shown;
 }
 
 /** Reports whether the run view has an answer to show (a final error or
@@ -145,6 +155,7 @@ export function RunSlots({
           key={slotKey}
           slotKey={slotKey}
           role={role}
+          live={liveRunId !== null && String(liveRunId) === slotKey}
           onReport={onReport}
         >
           {renderRun(Number(slotKey))}
@@ -157,11 +168,14 @@ export function RunSlots({
 function RunSlot({
   slotKey,
   role,
+  live,
   onReport,
   children,
 }: {
   slotKey: string;
   role: EntitySlotRole;
+  /** This slot's run is the store's (urgent) selection. */
+  live: boolean;
   onReport: (slotKey: string, settled: boolean | null) => void;
   children: ReactNode;
 }) {
@@ -176,8 +190,12 @@ function RunSlot({
   );
   // Memoized for identity: the context reaches the whole run view.
   const value = useMemo<RunSlotHoldValue>(
-    () => ({ interactive: role === "shown", reportSettled }),
-    [role, reportSettled],
+    () => ({
+      shown: role === "shown",
+      interactive: role === "shown" && live,
+      reportSettled,
+    }),
+    [role, live, reportSettled],
   );
   return (
     <HeldFrame holding={role === "held"} className={SLOT_CLASS[role]}>

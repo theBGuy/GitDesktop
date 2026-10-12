@@ -2551,6 +2551,9 @@ export function RemotePrView({
     if (revealReviewId !== null) setRevealReviewId(null);
   }, [revealReviewId]);
 
+  // An open emoji picker is portaled out of the hold's `inert`, so it closes
+  // while the view is stale or still catching up to the selection.
+  const reactionPickerHeld = detailsStale || !isSelectedPr;
   const threadActive =
     isSelectedPr &&
     section === "conversation" &&
@@ -3933,6 +3936,7 @@ export function RemotePrView({
                     reactions={reactions.data?.body ?? []}
                     disabled={detailsPlaceholder}
                     reason={staleReason}
+                    held={reactionPickerHeld}
                     onToggle={(content, active) =>
                       toggleReaction(pr.id, content, active)
                     }
@@ -4012,8 +4016,8 @@ export function RemotePrView({
                     }
                     pendingThreadWrites={pendingThreadWrites}
                     // All four pair a rendered comment id with `number`, so they're
-                    // withheld through a switch; `editHeld` covers an editor already
-                    // open when it began.
+                    // withheld over a placeholder, and `editHeld` holds an editor
+                    // already open then; during a hold the inert frame covers it.
                     onEditThreadComment={
                       detailsPlaceholder ? undefined : saveThreadCommentEdit
                     }
@@ -4032,6 +4036,7 @@ export function RemotePrView({
                     onToggleReaction={toggleReaction}
                     reactionsHeld={detailsPlaceholder}
                     reactionsReason={staleReason ?? null}
+                    reactionPickerHeld={reactionPickerHeld}
                   />
                   {/* Residual review threads — those NOT shown inline under a review
                       above: all threads on GitLab/Bitbucket (no reviewId), plus

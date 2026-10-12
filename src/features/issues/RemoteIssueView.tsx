@@ -1163,8 +1163,9 @@ export function RemoteIssueView({
               ? (body) => saveCommentEdit(c.id, body)
               : undefined
           }
-          // Withholding the handler only drops the menu entry; an editor
-          // already open when the switch began needs its Save held too.
+          // Withholding the handler only drops the menu entry: an editor already
+          // open when a placeholder took over holds its Save here. During a hold
+          // the inert frame covers it (no focus or pointer reaches it).
           editHeld={detailsPlaceholder}
           onDelete={
             canEditOwnComments && c.viewerDidAuthor && !detailsStale
@@ -1193,6 +1194,8 @@ export function RemoteIssueView({
           }
           reactionsHeld={detailsPlaceholder}
           reactionsReason={staleReason}
+          // The picker is portaled out of the hold's `inert`, so it closes then.
+          reactionPickerHeld={detailsStale}
           mentions={mentions}
         />
       ),
@@ -1613,6 +1616,7 @@ export function RemoteIssueView({
                     reactions={reactions.data?.body ?? []}
                     disabled={detailsPlaceholder}
                     reason={staleReason}
+                    held={detailsStale}
                     onToggle={(content, active) =>
                       toggleReaction(issue.id, content, active)
                     }
