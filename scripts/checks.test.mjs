@@ -2072,17 +2072,29 @@ test("preparing-slot-hide fails a slot host without a clipped preparing entry", 
     ),
     [],
   );
-  // The clip may sit in a clsx object key.
-  assert.deepEqual(
-    run(
-      [
-        'import type { SlotPhase } from "@/features/diff/diff-pane-slots";',
-        'const C = { shown: "h-full", held: "h-full", preparing: cn({ "absolute [clip-path:inset(50%)]": true }) };',
-        "export const F = ({ phase }: { phase: SlotPhase }) => <div className={C[phase]} />;",
-      ].join("\n"),
-    ),
-    [],
-  );
+  // The clip must be carried unconditionally: on every path the preparing
+  // entry's class expression can take for the slot.
+  const entry = (value) =>
+    [
+      'import type { SlotPhase } from "@/features/diff/diff-pane-slots";',
+      'const CLIP = "absolute inset-0 [clip-path:inset(50%)]";',
+      `const C = { shown: "h-full", held: "h-full", preparing: ${value} };`,
+      "export const F = ({ phase }: { phase: SlotPhase }) => <div className={C[phase]} />;",
+    ].join("\n");
+  for (const value of [
+    'cn({ "absolute [clip-path:inset(50%)]": false })',
+    'cn("absolute", compact && "[clip-path:inset(50%)]")',
+    'compact ? "absolute [clip-path:inset(50%)]" : "absolute"',
+  ])
+    assert.deepEqual(run(entry(value)), [`${file}:1`], value);
+  for (const value of [
+    'cn({ "absolute [clip-path:inset(50%)]": true })',
+    'compact ? "absolute [clip-path:inset(50%)]" : "fixed [clip-path:inset(50%)]"',
+    'cn("absolute", "[clip-path:inset(50%)]")',
+    "CLIP",
+    "cn(\"absolute\", CLIP, wide && CLIP)",
+  ])
+    assert.deepEqual(run(entry(value)), [], value);
   // The vocabulary alone, rendering no classes, is a definition module.
   assert.deepEqual(
     run('export type SlotPhase = "shown" | "held" | "preparing";'),

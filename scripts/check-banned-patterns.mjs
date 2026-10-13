@@ -2402,7 +2402,8 @@ function readSlotsUnguarded(source, file) {
   };
 
   /** U2: a class expression's reachable operands, each read or failed. An
-   *  entry site also records whether it read the clip, for S5. */
+   *  entry site also records whether some path read the clip (`mayClip`);
+   *  S5 itself reads `definiteClip`. */
   function evalClass(node, ctx, site, seen) {
     if (!(ctx & PREPARING)) return;
     const n = unwrapSlot(node);
@@ -2412,7 +2413,7 @@ function readSlotsUnguarded(source, file) {
     };
     const text = (t) => {
       if (textHides(t)) fail();
-      if (t.includes(SLOT_CLIP)) site.clip = true;
+      if (t.includes(SLOT_CLIP)) site.mayClip = true;
     };
     switch (n.k) {
       case "str":
@@ -2502,6 +2503,66 @@ function readSlotsUnguarded(source, file) {
     }
   }
 
+  /** Whether a condition is true whenever the preparing slot is in force: a
+   *  literal `true`, or a role condition that cannot be false for it. */
+  const definitelyTrue = (node) => {
+    const n = unwrapSlot(node);
+    if (n?.k === "id" && n.name === "true") return true;
+    const r = roles(node);
+    return r.atoms.length > 0 && !(r.not & PREPARING);
+  };
+  /** S5's evidence: whether a class expression carries the clip on EVERY path
+   *  it can take for the preparing slot (hides stay a may-analysis). A combiner
+   *  or array needs one definite part; `C && E` a definitely true C; a
+   *  conditional every arm the slot can reach; `L || R` / `L ?? R` a definite
+   *  non-empty literal L, or both sides; a clsx entry a clipped key whose
+   *  value is definitely true. Anything else is not definite. */
+  function definiteClip(node, seen = new Set()) {
+    const n = unwrapSlot(node);
+    if (!n) return false;
+    const clip = (x) => definiteClip(x, seen);
+    switch (n.k) {
+      case "str":
+        return n.v.includes(SLOT_CLIP);
+      case "tpl":
+        return n.quasis.some((q) => q.includes(SLOT_CLIP));
+      case "call":
+        return isCombiner(n.callee) && n.args.some(clip);
+      case "arr":
+        return n.elems.some(clip);
+      case "bin": {
+        if (n.op === "&&") return definitelyTrue(n.l) && clip(n.r);
+        if (n.op !== "||" && n.op !== "??") return false;
+        const left = unwrapSlot(n.l);
+        if (left?.k === "str" && left.v !== "" && clip(left)) return true;
+        return clip(n.l) && clip(n.r);
+      }
+      case "cond": {
+        const r = roles(n.test);
+        const arms = [];
+        if (r.may & PREPARING) arms.push(n.cons);
+        if (r.not & PREPARING) arms.push(n.alt);
+        return arms.length > 0 && arms.every(clip);
+      }
+      case "obj":
+        return n.members.some((m) => {
+          if (m.kind !== "init" && m.kind !== "shorthand") return false;
+          const keyClip =
+            m.key.kind === "computed"
+              ? clip(m.key.node)
+              : String(m.key.name).includes(SLOT_CLIP);
+          return keyClip && definitelyTrue(m.value);
+        });
+      case "id": {
+        const init = decls.resolve(n.name);
+        if (init === null || seen.has(n.name)) return false;
+        return definiteClip(init, new Set([...seen, n.name]));
+      }
+      default:
+        return false;
+    }
+  }
+
   /** The return arguments of a callable's body, nested callables excluded. */
   function returnsOf(node) {
     if (!node) return [];
@@ -2529,6 +2590,7 @@ function readSlotsUnguarded(source, file) {
       const site = addSite("entry", m.body ?? m.value ?? m.key, m.key.s);
       const values = m.body ? returnsOf(m.body.body) : [m.value];
       for (const v of values) evalClass(v, set, site, new Set());
+      site.clip = values.length > 0 && values.every((v) => definiteClip(v));
       return;
     }
     if (m.body) walk(m.body, set, m.body, false);
@@ -2773,7 +2835,8 @@ function readSlotsUnguarded(source, file) {
   if (hostFile) variantSites(tokenLiterals(toks));
 
   // S5: a file that names the slot vocabulary and renders classes is a host,
-  // and keeps a preparing entry that reads the clip (through a const too).
+  // and keeps a preparing entry that carries the clip unconditionally (on
+  // every path for the preparing slot, through a const too).
   const isHost = hostFile && rendersClasses;
   const clipped = sites.some((s) => s.kind === "entry" && s.clip);
   return {
@@ -2804,7 +2867,7 @@ export function isPreparingSlotHost(source, file) {
 }
 
 /** Scanner: every failed site's line, plus a host's first vocabulary line
- *  when it keeps no clipped preparing entry. */
+ *  when no preparing entry carries the clip unconditionally. */
 const preparingSlotHide = ({ source }, file) => {
   const { sites, host, hostFailed } = readPreparingSlots(source, file);
   const lines = new Set();
@@ -4691,7 +4754,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set as the `preparing` entry of the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%, and any opacity the scan cannot read, such as `opacity-[var(…)]` or Tailwind v4's `opacity-(--x)`) fades the slot in instead of showing it at once; and `hidden`, `[display:none]`, `[content-visibility:hidden]` or `sr-only` (a 1px box) skips the full-size layout the slot prepares. A `[visibility:…]` or `[display:…]` value that is not a plain keyword (`var(…)`, `calc(…)`) is unreadable and counts as a hide. Each counts after its variant prefixes, its `!` marker and an arbitrary value's `!important`, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. Scope: only slot context is analysed, meaning a slot-host file (its code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots`) or, anywhere, a slot-shaped object literal or class body (a `preparing` key beside a `held` or `shown` member whose value is a class value: a string or template, a combiner call, or a conditional or array of those) with everything nested in it; outside it nothing is reported, since \"preparing\" is also a merge status and `isPreparing` a common loading flag. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, a `preparing`/`isPreparing` flag read through a name, member or literal element access, or a const holding such a condition) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); a guard naming a role-condition const the scan cannot resolve, because another binding shares its name, fails closed; (S3) a `switch` clause labelled `\"preparing\"` (`default` when no clause names it), a `switch (true)` clause whose condition can be true for the slot (`default` when every case condition can be false for it, wherever `default` sits), or an `if`/`else` arm that applies to the slot, where every literal counts; a clause's roles carry into the next clause unless its last statement ends it (`return`, `throw`, a `break` or `continue` that is unlabelled or names a label outside the clause, a block whose last statement ends it, or an `if`/`else` whose two arms both do; a `try` never ends a clause); (S4) inside slot context, any class token whose variant names the role, in any letter case (`data-[role=preparing]:invisible`); and (S5) a host: a slot-host file that renders classes (`className`, `cn(`, `clsx(`) fails unless a preparing entry reads the clip, through a const too. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, `||` and `??`, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. The left operand of `||` and `??` is a class value too, unless it is boolean by syntax (a comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const holding one); a flag-named read there is a value like any other. A const is readable only when nothing else in the file binds its name (an import, a destructured or catch binding, a function or class name, a parameter, a `let`/`var` or a second const). A role condition anywhere in the arguments of a helper call in class code (`className={slotClass({ hide: role === \"preparing\" })}`) fails: the scan cannot read the helper. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. A file ts-mask cannot lex fails with \"cannot lex\", and one the reader cannot read (a nesting deep enough to exhaust the stack) with \"cannot read\"; an allowlist entry does not rescue either, since the scan runs before the allowlist is consulted, so rewrite the shape ts-mask refuses (its documented ambiguities: a postfix `x++ / y`, a `<const T,>` arrow, a generic function type in .tsx) or extend ts-mask. Not handled (ordinary code the scan does not read yet): a preparing entry outside a slot-host file that is not in a role-keyed map; slot code outside a slot-host file that is not a role-keyed map (for example a frame component branching on a `preparing` prop); outside a slot-host file, a slot map whose sibling values are not class literals (`{ shown: SHOWN_CLS, preparing: HIDE }`); a class variant naming the role, outside slot context; a helper's result hoisted out of the class position (`const cls = slotClass(role === \"preparing\")`, then `className={cls}`); cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); collapsed-size hides (`size-0`, `h-0`/`w-0` with an overflow clip, `scale-0`, `max-h-0`), left out because they are common layout idioms; a flag tested only in a loop condition; a role literal spelled with escapes; and stylesheets (selectors and `@apply`, which the guard never reads). Fails closed (false positives): a label or prose string reading a hide utility inside a site; a map that is not a slot but keys `preparing` beside a class-valued `held` or `shown`; a role-literal comparison on a value that is not a slot role in a slot-host file (`plan.kind === \"held\"`); an unrelated hide in the extent a role mention climbs to (`isRole(r, \"preparing\")` beside `\"hidden\"` in one statement); a JSX spread in a preparing class arm; and a const whose name is bound anywhere else in the file. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
+      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set as the `preparing` entry of the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%, and any opacity the scan cannot read, such as `opacity-[var(…)]` or Tailwind v4's `opacity-(--x)`) fades the slot in instead of showing it at once; and `hidden`, `[display:none]`, `[content-visibility:hidden]` or `sr-only` (a 1px box) skips the full-size layout the slot prepares. A `[visibility:…]` or `[display:…]` value that is not a plain keyword (`var(…)`, `calc(…)`) is unreadable and counts as a hide. Each counts after its variant prefixes, its `!` marker and an arbitrary value's `!important`, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. Scope: only slot context is analysed, meaning a slot-host file (its code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots`) or, anywhere, a slot-shaped object literal or class body (a `preparing` key beside a `held` or `shown` member whose value is a class value: a string or template, a combiner call, or a conditional or array of those) with everything nested in it; outside it nothing is reported, since \"preparing\" is also a merge status and `isPreparing` a common loading flag. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, a `preparing`/`isPreparing` flag read through a name, member or literal element access, or a const holding such a condition) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); a guard naming a role-condition const the scan cannot resolve, because another binding shares its name, fails closed; (S3) a `switch` clause labelled `\"preparing\"` (`default` when no clause names it), a `switch (true)` clause whose condition can be true for the slot (`default` when every case condition can be false for it, wherever `default` sits), or an `if`/`else` arm that applies to the slot, where every literal counts; a clause's roles carry into the next clause unless its last statement ends it (`return`, `throw`, a `break` or `continue` that is unlabelled or names a label outside the clause, a block whose last statement ends it, or an `if`/`else` whose two arms both do; a `try` never ends a clause); (S4) inside slot context, any class token whose variant names the role, in any letter case (`data-[role=preparing]:invisible`); and (S5) a host: a slot-host file that renders classes (`className`, `cn(`, `clsx(`) fails unless a preparing entry carries the clip unconditionally, on every path its class expression can take for the preparing slot (each arm of a conditional the slot can reach, and a `&&` or clsx-object guard only when it is definitely true for the slot), through a const too. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, `||` and `??`, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. The left operand of `||` and `??` is a class value too, unless it is boolean by syntax (a comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const holding one); a flag-named read there is a value like any other. A const is readable only when nothing else in the file binds its name (an import, a destructured or catch binding, a function or class name, a parameter, a `let`/`var` or a second const). A role condition anywhere in the arguments of a helper call in class code (`className={slotClass({ hide: role === \"preparing\" })}`) fails: the scan cannot read the helper. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. A file ts-mask cannot lex fails with \"cannot lex\", and one the reader cannot read (a nesting deep enough to exhaust the stack) with \"cannot read\"; an allowlist entry does not rescue either, since the scan runs before the allowlist is consulted, so rewrite the shape ts-mask refuses (its documented ambiguities: a postfix `x++ / y`, a `<const T,>` arrow, a generic function type in .tsx) or extend ts-mask. Not handled (ordinary code the scan does not read yet): a preparing entry outside a slot-host file that is not in a role-keyed map; slot code outside a slot-host file that is not a role-keyed map (for example a frame component branching on a `preparing` prop); outside a slot-host file, a slot map whose sibling values are not class literals (`{ shown: SHOWN_CLS, preparing: HIDE }`); a class variant naming the role, outside slot context; a helper's result hoisted out of the class position (`const cls = slotClass(role === \"preparing\")`, then `className={cls}`); cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); collapsed-size hides (`size-0`, `h-0`/`w-0` with an overflow clip, `scale-0`, `max-h-0`), left out because they are common layout idioms; a flag tested only in a loop condition; a role literal spelled with escapes; and stylesheets (selectors and `@apply`, which the guard never reads). Fails closed (false positives): a label or prose string reading a hide utility inside a site; a map that is not a slot but keys `preparing` beside a class-valued `held` or `shown`; a role-literal comparison on a value that is not a slot role in a slot-host file (`plan.kind === \"held\"`); an unrelated hide in the extent a role mention climbs to (`isRole(r, \"preparing\")` beside `\"hidden\"` in one statement); a JSX spread in a preparing class arm; and a const whose name is bound anywhere else in the file. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
   },
   {
     name: "bare-group-label",
