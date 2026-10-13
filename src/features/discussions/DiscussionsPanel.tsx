@@ -183,13 +183,15 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (t) => String(t.number),
   });
 
-  // The probes paint the list arm's row count so the probe→list flip never
-  // grows the list. A retry after either probe failed flips error card ↔
-  // skeleton each time, so 1 row keeps that flip small.
+  // The probes paint the list arm's row count, so a load that hasn't failed
+  // never grows at the probe→list flip. While either probe has failed with
+  // nothing loaded, each retry flips error card ↔ skeleton, so 1 row keeps that
+  // flip small; a recovered read (data in hand) no longer counts.
   const probeSkeleton = (
     <ListRowSkeletons
       rows={
-        gh.errorUpdateCount > 0 || meta.errorUpdateCount > 0
+        (gh.data === undefined && gh.errorUpdateCount > 0) ||
+        (meta.data === undefined && meta.errorUpdateCount > 0)
           ? 1
           : DISCUSSION_SKELETON_ROWS
       }

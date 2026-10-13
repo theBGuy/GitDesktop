@@ -274,8 +274,9 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
   not a call-site component.
 - A panel with a probe arm and a list arm paints the SAME skeleton row count in
-  both (one shared constant or prop), so the probe→list flip never grows the
-  list; after a failed probe, retries may pin 1 row.
+  both (one shared constant or prop), so a load whose probe hasn't failed
+  never grows at the probe→list flip; while a probe has failed with nothing
+  loaded, its retries may pin 1 row.
 - The Changes pane swaps files through a two-slot hold: `FileSlot` in
   `src/features/diff/DiffViewer.tsx` is the reference implementation, with its
   transitions in `diff-pane-slots.ts` and the `DiffPaneHold` context
@@ -283,8 +284,11 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   the surfaces. The held view (the last settled one) stays in flow and
   `inert`; a held FILE slot is also dimmed (`PLACEHOLDER_FADE` +
   `opacity-80` + `delay-100`), while a held placeholder stays undimmed. The
-  target prepares out of sight, stacked invisibly over the held view at full
-  size, and is promoted on its first settled report or a 400 ms bound. A slot
+  target prepares out of sight at full size, clipped over the held view: its
+  slot hides by a full clip (`[clip-path:inset(50%)]`) plus `inert`, never
+  `invisible`, because the vendored Button's `transition-all` transitions the
+  inherited visibility and its buttons paint a frame late when the slot shows.
+  It is promoted on its first settled report or a 400 ms bound. A slot
   reports both edges of its settle, so a shown file that is not settled right
   now (one the bound promoted, or one loading again after Raw to Preview or a
   rebuild) is replaced outright on the next click, never held; it is held

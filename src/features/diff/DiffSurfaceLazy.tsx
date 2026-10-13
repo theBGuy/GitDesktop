@@ -7,9 +7,10 @@ import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 // diff is actually shown. Loading the real module lazily keeps that whole
 // chunk off the boot path: it splits into its own bundle and loads on first
 // use. Every runtime consumer OUTSIDE src/features/diff/ routes through these
-// wrappers so the entry chunk no longer eagerly pulls the library in. Files
-// inside src/features/diff/ (DiffViewer &c.) keep importing ./DiffSurface
-// directly.
+// wrappers so the entry chunk no longer eagerly pulls the library in. Inside
+// it, only files already in DiffViewer's lazy chunk (DiffViewer,
+// MarkdownPreview) import ./DiffSurface directly; boot-path files here
+// (DiffRestingFallback, DiffPlaceholder) must not.
 //
 // Prop types are derived from the real components via a type-only import of
 // the module below — types erase at build time, so this does NOT drag the
@@ -33,8 +34,8 @@ export type {
 } from "./DiffSurface";
 
 // The panes these render into paint their own placeholders and skeletons, so
-// the fallback stays blank (rows={[]}) while marking the region busy and naming
-// the wait for assistive tech.
+// the fallback stays blank (rows={[]}, ~300 ms on first use) while marking the
+// region busy and naming the wait for assistive tech.
 const fallback = <LazyPanelFallback name="the diff" rows={[]} />;
 
 const DiffSurfaceLazyImpl = lazy(() =>

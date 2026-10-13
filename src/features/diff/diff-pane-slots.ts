@@ -10,7 +10,7 @@ export type PaneView<F> =
   | { kind: "file"; key: string; repo: string; file: F };
 
 /** `shown` differs from `target` only while a file prepares out of sight,
- *  stacked invisibly over the shown view. */
+ *  clipped over the shown view. */
 export interface PaneHold<F> {
   shown: PaneView<F>;
   target: PaneView<F>;
@@ -65,10 +65,10 @@ export function isHolding<F>(hold: PaneHold<F>): boolean {
   return paneViewKey(hold.shown) !== paneViewKey(hold.target);
 }
 
-/** A file prepares out of sight, stacked invisibly over the placeholder or
- *  another SETTLED file of the same repo. Conflict views keep their own
- *  lifecycle, a slot never crosses repos, and a file still loading is replaced,
- *  since holding it would paint it in before the target swaps over it. */
+/** A file prepares out of sight, clipped over the placeholder or another
+ *  SETTLED file of the same repo. Conflict views keep their own lifecycle, a
+ *  slot never crosses repos, and a file still loading is replaced, since
+ *  holding it would paint it in before the target swaps over it. */
 function preparesOutOfSight<F>(
   hold: PaneHold<F>,
   target: PaneView<F>,
@@ -132,7 +132,7 @@ export function expirePane<F>(hold: PaneHold<F>, key: string): PaneHold<F> {
 }
 
 /** The slots to render, in paint order: a held view stays in flow while the
- *  target lays out invisibly over it. */
+ *  target lays out, clipped, over it. */
 export function paneSlots<F>(hold: PaneHold<F>): PaneSlot<F>[] {
   return isHolding(hold)
     ? [

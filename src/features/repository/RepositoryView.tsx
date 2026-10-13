@@ -987,7 +987,7 @@ export function RepositoryView() {
         </aside>
         <main className="min-w-0 flex-1">
           <TabPanel active={repoTab === "changes"}>
-            {/* The reveal lands ≥300 ms after the fallback commits (react-dom's
+            {/* The reveal lands ~300 ms after the fallback commits (react-dom's
                 fallback throttle), so the fallback must equal DiffViewer's
                 settled empty state or first open lands in two steps. */}
             <Suspense fallback={<DiffRestingFallback repoPath={repoPath} />}>

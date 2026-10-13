@@ -221,6 +221,19 @@ export function useRemoteListFilter(opts: {
     teamCount: chosenTeams.length,
     valueAxisCount: authors.length + labelFilter.size,
   });
+  // The same scope read from the prefs with no capability gate: while the forge
+  // is unanswered every gate is false and `preset` reads "all", but a waiting
+  // toolbar should press what a supporting host will settle on.
+  const storedPreset = derivePreset({
+    isPulls,
+    assignedToMe: isPulls
+      ? prefs.pulls.assignedToMe
+      : prefs.issues.assignedToMe,
+    reviewRequestedMe: isPulls && prefs.pulls.reviewRequestedMe,
+    groupByReview: isPulls && prefs.pulls.groupByReview,
+    teamCount: isPulls ? prefs.pulls.teams.length : 0,
+    valueAxisCount: authorFilter.size + labelFilter.size,
+  });
 
   /**
    * Persist a whole prefs object. The mutation owns the optimistic cache patch
@@ -339,6 +352,7 @@ export function useRemoteListFilter(opts: {
      *  to the remote rows, or a label pick would silently do nothing to them. */
     labelsServerSide: canFilterLabel,
     preset,
+    storedPreset,
     setPreset,
     assignedToMe,
     setAssignedToMe,

@@ -48,6 +48,7 @@ import { presentError } from "@/lib/error-summary";
 import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
+  forgeAwaitingFirstAnswer,
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
@@ -988,15 +989,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           <ConversationPresetSwitcher
             feature="pulls"
             preset={listFilter.preset}
+            storedPreset={listFilter.storedPreset}
             onPreset={listFilter.setPreset}
             canFilterMine={canFilterMine}
             canGroupByReview={canGroupByReview}
             disabledReason={listFilter.prefsReason}
-            // Only before the first failure: a refetch of an errored probe with
-            // no data reads "checking" again, and would re-flash the row.
             probeReason={
-              probe === "checking" && gh.errorUpdateCount === 0
-                ? forgeProbeReason(probe, "switch the list's scope")
+              forgeAwaitingFirstAnswer(gh)
+                ? forgeProbeReason("checking", "switch the list's scope")
                 : null
             }
           />

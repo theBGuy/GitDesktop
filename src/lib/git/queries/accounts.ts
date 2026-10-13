@@ -333,6 +333,19 @@ export function forgeProbeState(q: {
   return null;
 }
 
+/** Whether a control may still wait on the forge's FIRST answer: "checking" and
+ *  never failed. A refetch of a read that failed with nothing cached goes
+ *  pending again and reads "checking", so without the never-failed axis every
+ *  focus or reconnect would re-show a waiting control the failure had settled. */
+export function forgeAwaitingFirstAnswer(q: {
+  data: ForgeStatus | undefined;
+  isError: boolean;
+  isPending: boolean;
+  errorUpdateCount: number;
+}): boolean {
+  return forgeProbeState(q) === "checking" && q.errorUpdateCount === 0;
+}
+
 const FORGE_PROBE_REASONS: Record<ForgeProbe, (action: string) => string> = {
   unreachable: (action) =>
     `GitDesktop couldn't reach this repository's host, so you can't ${action} right now. Check your network connection.`,

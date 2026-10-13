@@ -288,8 +288,9 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   onRemoteHover: (item: R) => void;
   renderRemoteRow: (item: R) => ReactNode;
   /** Skeleton rows while the forge probe and then the list load (PR=2,
-   *  issue=3), one count for both so the probe→list flip never grows the list.
-   *  The row COUNT, not lines; see `skeletonRowLines`. */
+   *  issue=3), one count for both, so a load whose probe hasn't failed never
+   *  grows at the probe→list flip. The row COUNT, not lines; see
+   *  `skeletonRowLines`. */
   remoteSkeletonRows: number;
   /** Lines per skeleton row: match the panel's real row layout (three-line
    *  PR rows vs two-line issue rows); `remoteSkeletonRows` sets the count. */

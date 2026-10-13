@@ -77,8 +77,8 @@ import {
  *  The cap is GitHub's, so other providers' totals render as reported. */
 const FILTERED_RUN_WINDOW = 1000;
 
-/** Loading rows for the run list, shared by the forge probe and the list read
- *  so the probe→list flip never grows the list. */
+/** Loading rows for the run list, shared by the forge probe and the list read,
+ *  so a load whose probe hasn't failed never grows at the probe→list flip. */
 const RUN_SKELETON_ROWS = 3;
 
 /** The loaded pages as one list, deduped by run id with the first occurrence

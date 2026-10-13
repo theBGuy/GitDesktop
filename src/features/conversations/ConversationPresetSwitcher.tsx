@@ -32,17 +32,20 @@ const SEGMENTS: Record<
  * triple of `aria-pressed` buttons mirroring the Open/Closed state filter and the
  * Fork/Upstream lens.
  *
- * Nothing renders once the forge check settles on a provider that can't express
- * the "mine" axes server-side: the popover's disabled rows carry that
- * explanation, so the toolbar stays calm. While that check runs, the feature's
- * whole segment set holds with `probeReason`, so the row is in place from the
- * first frame and only trims or drops segments once, at settle.
+ * Nothing renders while the "mine" axes aren't filterable here and the caller
+ * passes no `probeReason`: a provider that can't express them, a host that isn't
+ * set up or signed in, or one that couldn't be reached. The popover's disabled
+ * rows carry that explanation, so the toolbar stays calm. While the forge's
+ * first check runs, the feature's whole segment set holds with `probeReason`,
+ * pressed as stored, so the row is in place from the first frame and only trims
+ * or drops segments once, at settle.
  * `preset` is null when the user has hand-picked axes matching no segment — every
  * button then reads unpressed, and the funnel badge carries the detail.
  */
 export function ConversationPresetSwitcher({
   feature,
   preset,
+  storedPreset,
   onPreset,
   canFilterMine,
   canGroupByReview,
@@ -51,6 +54,10 @@ export function ConversationPresetSwitcher({
 }: {
   feature: ConversationFeature;
   preset: ConversationPreset | null;
+  /** The segment the stored prefs spell with no capability gates. `preset`
+   *  reads "all" while the forge is unanswered (every mine axis gated off), so
+   *  the waiting row presses this one: what a supporting host settles on. */
+  storedPreset: ConversationPreset | null;
   onPreset: (next: ConversationPreset) => void;
   canFilterMine: boolean;
   /** Gates the "Needs review" segment: without the review timestamps the
@@ -63,7 +70,8 @@ export function ConversationPresetSwitcher({
   disabledReason?: string | null;
   /** Non-null while the forge check has no answer yet: which segments exist is
    *  still unknown, so every one holds with this reason, ahead of
-   *  `disabledReason`. Required, so no caller can skip the waiting arm. */
+   *  `disabledReason`. Required (null when not waiting), so a caller can't
+   *  leave out the waiting arm by accident. */
   probeReason: string | null;
 }) {
   if (!canFilterMine && probeReason === null) return null;
@@ -76,16 +84,17 @@ export function ConversationPresetSwitcher({
         (s) => s.value !== "needs-review" || canGroupByReview,
       );
   const heldReason = waiting ? probeReason : disabledReason;
+  const pressed = waiting ? storedPreset : preset;
 
   return (
     <div className="flex items-center gap-1">
       {segments.map((s) => (
         <DisabledReasonButton
           key={s.value}
-          variant={preset === s.value ? "secondary" : "ghost"}
+          variant={pressed === s.value ? "secondary" : "ghost"}
           size="xs"
           className="px-1.5"
-          aria-pressed={preset === s.value}
+          aria-pressed={pressed === s.value}
           title={s.title}
           disabled={!!heldReason}
           reason={heldReason}
