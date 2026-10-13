@@ -424,7 +424,8 @@ function JobRow({
 }
 
 /** What a loading frame's controls say while a run switch loads, in the
- *  provider's own noun. One wording for the frame's buttons and its status. */
+ *  provider's own noun. Matches the frame's `ListRowSkeletons` status, which
+ *  composes "Loading {name}…" from the same noun. */
 function runSwitchLoadingReason(noun: CiRunNoun): string {
   return `Loading this ${noun}…`;
 }
@@ -466,17 +467,22 @@ function readCachedRunRow(
 /**
  * The run's header: status, title, meta line, and the action row ending in
  * View on <remote>. The loaded view and its loading frame render it at the same
- * place under the host, so the frame already has the loaded geometry and a
- * header button keeps its node (and focus) through the land. Without `run` (no
- * cached row) the status, title and meta are skeletons of a typical width.
+ * place under the host, so a header button keeps its node (and focus) through
+ * the land, and a frame seeded from a cached row already has the loaded
+ * geometry (a stale row may still re-wrap its meta or swap an offer at the
+ * land). Without `run` (no cached row) the status, title and meta are
+ * skeletons of a typical width.
  */
 function RunHeader({
   run,
+  noun,
   actions,
   viewOn,
   viewOnRef,
 }: {
   run: RunRowSeed | undefined;
+  /** The provider's CI noun, for the header's own copy. */
+  noun: CiRunNoun;
   /** The leading Cancel or re-run offers. */
   actions: ReactNode;
   viewOn: {
@@ -552,7 +558,7 @@ function RunHeader({
           className="cursor-pointer"
           disabled={viewOn.disabled}
           reason={viewOn.reason}
-          title={`Open this run on ${viewOn.remoteLabel}`}
+          title={`Open this ${noun} on ${viewOn.remoteLabel}`}
           onClick={viewOn.onClick}
         >
           <ArrowSquareOutIcon data-icon="inline-start" />
@@ -1133,6 +1139,7 @@ export function RunDetailView({
         <DegradedListNotice noun={`this ${runNoun}`} degraded={false} />
         <RunHeader
           run={row}
+          noun={runNoun}
           actions={
             row &&
             frameRunActions({
@@ -1180,6 +1187,7 @@ export function RunDetailView({
       />
       <RunHeader
         run={run}
+        noun={runNoun}
         actions={
           showCancel
             ? canCancel && (
@@ -1250,7 +1258,7 @@ export function RunDetailView({
         viewOn={{
           remoteLabel,
           disabled: !run.url,
-          reason: "No URL for this run",
+          reason: `No URL for this ${runNoun}`,
           onClick: () => run.url && openUrl(run.url),
         }}
         viewOnRef={viewOnRemoteRef}

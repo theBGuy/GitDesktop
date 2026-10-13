@@ -16,7 +16,7 @@ import { useEntityHold, useRevealGuard } from "@/lib/use-entity-hold";
 export interface RunSlotHoldValue {
   /** Shown (not held or preparing) AND its run is the live selection, since
    *  the shown slot still names the old run until the deferred id catches up.
-   *  Gates the global hotkeys `inert` and `invisible` miss, and the debug
+   *  Gates the global hotkeys, which `inert` doesn't stop, and the debug
    *  dialog's permanent close. */
   interactive: boolean;
   /** This slot is the shown one (not held or preparing). Outside a slot: true.
