@@ -2085,6 +2085,9 @@ test("preparing-slot-hide fails a slot host without a clipped preparing entry", 
     'cn({ "absolute [clip-path:inset(50%)]": false })',
     'cn("absolute", compact && "[clip-path:inset(50%)]")',
     'compact ? "absolute [clip-path:inset(50%)]" : "absolute"',
+    '"absolute " + (compact ? "[clip-path:inset(50%)]" : "")',
+    // A falsy interpolation prints "false", so the clip is conditional.
+    "`absolute ${compact && CLIP}`",
   ])
     assert.deepEqual(run(entry(value)), [`${file}:1`], value);
   for (const value of [
@@ -2093,6 +2096,10 @@ test("preparing-slot-hide fails a slot host without a clipped preparing entry", 
     'cn("absolute", "[clip-path:inset(50%)]")',
     "CLIP",
     "cn(\"absolute\", CLIP, wide && CLIP)",
+    // Concatenation and templates always print every part.
+    '"absolute " + "[clip-path:inset(50%)]"',
+    "`absolute ${CLIP}`",
+    '"absolute [clip-path:" + "inset(50%)]"',
   ])
     assert.deepEqual(run(entry(value)), [], value);
   // The vocabulary alone, rendering no classes, is a definition module.
