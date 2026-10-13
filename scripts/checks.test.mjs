@@ -36,6 +36,7 @@ import {
   cookStringBody,
   generateChordCalls,
   okReportLine,
+  preparingSlotSites,
   reachesGitQueriesInternal,
   reachesQueriesInternalFromSibling,
   runCheck,
@@ -244,6 +245,7 @@ const diffStatPair = scanner("hand-rolled-diff-stat");
 const diffStatSlot = scanner("list-row-diff-stat-slot");
 const kindBadge = scanner("kind-badge-single-source");
 const nullFallback = scanner("null-suspense-fallback");
+const preparingSlotHide = scanner("preparing-slot-hide");
 const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
@@ -1455,6 +1457,184 @@ test("null-suspense-fallback leaves a real fallback and a forwarded prop alone",
     "<Suspense fallback={compact ? null : <Skeleton />}>{kids}</Suspense>",
   ])
     assert.deepEqual(nullFallback(source), [], `should ignore ${source}`);
+});
+
+/** Every hide utility the preparing-slot-hide check bans, in plain spelling and
+ *  behind the variant prefixes and `!` markers a Tailwind token can carry. */
+const SLOT_HIDE_TOKENS = [
+  "invisible",
+  "[visibility:hidden]",
+  "[visibility:collapse]",
+  "opacity-0",
+  "opacity-[0]",
+  "opacity-[0%]",
+  "[opacity:0]",
+  "hidden",
+  "[display:none]",
+];
+const slotHideSpellings = (token) => [
+  token,
+  `md:${token}`,
+  `data-[x]:${token}`,
+  `!${token}`,
+  `${token}!`,
+  `md:!${token}`,
+];
+
+test("preparing-slot-hide flags every hide utility in a preparing entry", () => {
+  for (const token of SLOT_HIDE_TOKENS) {
+    for (const cls of slotHideSpellings(token)) {
+      // The real hosts' Record spelling.
+      const record = `const SLOT_CLASS: Record<EntitySlotRole, string> = { shown: "h-full", held: "h-full", preparing: "absolute inset-0 ${cls}" };`;
+      assert.deepEqual(preparingSlotHide(record), [1], record);
+      // Quoted keys, either quote.
+      for (const key of ['"preparing"', "'preparing'"]) {
+        const quoted = `const C = { shown: "", ${key}: "absolute ${cls}" };`;
+        assert.deepEqual(preparingSlotHide(quoted), [1], quoted);
+      }
+      // A cn(...) value; its commas stay inside the entry.
+      const composed = `const C = { shown: "h-full", preparing: cn("absolute inset-0", x && "${cls}"), held: "h-full" };`;
+      assert.deepEqual(preparingSlotHide(composed), [1], composed);
+      // A template value.
+      const template = `const C = { preparing: \`absolute \${x} ${cls}\` };`;
+      assert.deepEqual(preparingSlotHide(template), [1], template);
+    }
+    // The formatter's multi-line map, with a comment between entries.
+    const wrapped = [
+      "const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {",
+      '  shown: "h-full",',
+      '  held: "h-full",',
+      "  // Stacked over the held slot at full size.",
+      "  preparing: cn(",
+      '    "absolute inset-0",',
+      `    "${token}",`,
+      "  ),",
+      "};",
+    ].join("\n");
+    assert.deepEqual(preparingSlotHide(wrapped), [5], wrapped);
+  }
+});
+
+test("preparing-slot-hide flags a literal guarded by the preparing role", () => {
+  for (const source of [
+    'cn("h-full", role === "preparing" && "invisible")',
+    'cn("h-full", role == "preparing" && "invisible")',
+    'cn("h-full", role === "preparing" ? "absolute invisible" : "h-full")',
+    'cn("h-full", role == "preparing" ? "invisible" : "")',
+    'cn("h-full", "preparing" === role && "invisible")',
+    'cn("h-full", "preparing" == slot.role ? "invisible" : "")',
+    "cn('h-full', role === 'preparing' && 'invisible')",
+    "cn('h-full', 'preparing' === role ? 'invisible' : '')",
+    'cn("h-full", (role === "preparing") && "invisible")',
+    'cn("h-full", ("preparing" === role) ? "invisible" : "")',
+    "cn(\"h-full\", role === \"preparing\" && `absolute ${x} invisible`)",
+    'cn("h-full", preparing && "invisible")',
+    'cn("h-full", preparing ? "absolute invisible" : "h-full")',
+    'cn("h-full", isPreparing && "invisible")',
+    'cn("h-full", isPreparing ? "invisible" : "")',
+    'cn("h-full", (isPreparing) && "invisible")',
+  ])
+    assert.deepEqual(preparingSlotHide(source), [1], source);
+});
+
+test("preparing-slot-hide leaves a clipped slot and every non-site alone", () => {
+  for (const source of [
+    // The real hosts' value.
+    'const C = { shown: "h-full", held: "h-full", preparing: "absolute inset-0 [clip-path:inset(50%)]" };',
+    // The held dim beside a clean preparing entry.
+    'const C = { held: cn(PLACEHOLDER_FADE, "opacity-80 delay-100"), preparing: "absolute inset-0 [clip-path:inset(50%)]" };',
+    // A hide in a SIBLING entry is not the preparing slot's.
+    'const C = { held: "invisible", preparing: "absolute [clip-path:inset(50%)]", shown: "hidden" };',
+    // A non-class label.
+    'const LABELS = { preparing: "Preparing merge…", ready: "Ready" };',
+    // The key is `role`, not `preparing`.
+    'const slot = { key: hold.target, role: "preparing" };',
+    "<div inert={role === \"preparing\"} className=\"invisible\" />",
+    'cn("h-full", role !== "preparing" && "invisible")',
+    'cn("h-full", role != "preparing" ? "invisible" : "")',
+    'cn("h-full", "preparing" !== role && "invisible")',
+    'cn("h-full", !preparing && "invisible")',
+    'cn("h-full", !isPreparing ? "invisible" : "")',
+    'cn("h-full", slot.preparing && "invisible")',
+    'const c = preparing?.x ? "invisible" : "";',
+    'const c = preparing ?? "invisible";',
+    'const c = ready ? preparing : "invisible";',
+    'const c = { a: ready ? preparing : "invisible" };',
+    // An optional type member is a type, not an entry.
+    'type Slots = { preparing?: "hidden" };',
+    // The real hosts' comment shape, naming the banned utilities.
+    [
+      "const SLOT_CLASS: Record<EntitySlotRole, string> = {",
+      '  shown: "h-full",',
+      "  // Never `invisible`, never opacity-0, never hidden: see the rule.",
+      '  preparing: "absolute inset-0 [clip-path:inset(50%)]", // not "invisible"',
+      "};",
+    ].join("\n"),
+  ])
+    assert.deepEqual(preparingSlotHide(source), [], source);
+  // Tokens that only look like hides.
+  for (const cls of [
+    "visible",
+    "overflow-hidden",
+    "aria-hidden:flex",
+    "data-[hidden]:block",
+    "opacity-80",
+    "opacity-50",
+    "opacity-05",
+    "hidden-x",
+    "md:visible",
+    "group-hover:opacity-100",
+  ]) {
+    const source = `const C = { preparing: "absolute inset-0 ${cls}" };`;
+    assert.deepEqual(preparingSlotHide(source), [], source);
+  }
+});
+
+test("preparing-slot-hide reports the line a wrapped site starts on", () => {
+  const source = [
+    "import { cn } from '@/lib/utils';",
+    "",
+    "const SLOT_CLASS = {",
+    '  shown: "h-full",',
+    "  preparing:",
+    "    cond",
+    '      ? "absolute inset-0"',
+    '      : "absolute inset-0 invisible",',
+    '  held: "h-full",',
+    "};",
+    'const other = cn("a", isPreparing',
+    '  && "opacity-0");',
+  ].join("\n");
+  assert.deepEqual(preparingSlotHide(source), [5, 11]);
+});
+
+test("preparing-slot-hide sees both real two-slot hosts, clipped", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const check = CHECKS.find((c) => c.name === "preparing-slot-hide");
+  assert.deepEqual(check.allowlist, []);
+  assert.ok(check.expectScanned.atLeast >= 500);
+  const hosts = [
+    "src/features/diff/DiffViewer.tsx",
+    "src/features/actions/run-slots.tsx",
+  ];
+  for (const file of hosts) {
+    const fileView = view(readFileSync(join(root, file), "utf8"));
+    const sites = preparingSlotSites(fileView.text);
+    assert.equal(sites.length, 1, `${file}: ${JSON.stringify(sites)}`);
+    assert.ok(sites[0].value.includes("[clip-path:inset(50%)]"), file);
+    assert.deepEqual(check.scan(fileView, file), [], file);
+  }
+  // Contains, not equals: a third host adopting the pattern is welcome.
+  const withSites = readdirSync(join(root, "src"), { recursive: true })
+    .map((entry) => `src/${String(entry).split("\\").join("/")}`)
+    .filter((file) => /\.tsx?$/.test(file))
+    .filter(check.appliesTo)
+    .filter(
+      (file) =>
+        preparingSlotSites(view(readFileSync(join(root, file), "utf8")).text)
+          .length > 0,
+    );
+  for (const file of hosts) assert.ok(withSites.includes(file), file);
 });
 
 test("bare-group-label flags an attribute-less Label caption", () => {

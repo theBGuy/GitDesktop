@@ -290,10 +290,8 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   the surfaces. The held view (the last settled one) stays in flow and
   `inert`; a held FILE slot is also dimmed (`PLACEHOLDER_FADE` +
   `opacity-80` + `delay-100`), while a held placeholder stays undimmed. The
-  target prepares out of sight at full size, clipped over the held view: its
-  slot hides by a full clip (`[clip-path:inset(50%)]`) plus `inert`, never
-  `invisible`, because the vendored Button's `transition-all` transitions the
-  inherited visibility and its buttons paint a frame late when the slot shows.
+  target prepares out of sight at full size, clipped over the held view (the
+  preparing-slot rule below).
   It is promoted on its first settled report or a 400 ms bound. A slot
   reports both edges of its settle, so a shown file that is not settled right
   now (one the bound promoted, or one loading again after Raw to Preview or a
@@ -324,18 +322,15 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   host renders `entityHoldSlots` (held, preparing, shown) over the same
   transitions. Runs use `RunSlots` (`src/features/actions/run-slots.tsx`): one
   keyed slot per run, promoted on `useReportRunSettled`, which the run view
-  calls before any early return so a render-null arm still reports. The run
-  view's preparing slot hides by a full clip (`[clip-path:inset(50%)]`) plus
-  `inert`, never `invisible`: the vendored Button's `transition-all` transitions
-  the inherited visibility, so its buttons paint a frame late when the slot
-  shows. The PR, issue and workflow-run views paint `loading` as a slot-shaped
+  calls before any early return so a render-null arm still reports.
+  The PR, issue and workflow-run views paint `loading` as a slot-shaped
   frame (`PrLoadingFrame`, `IssueLoadingFrame`, and the run view's shared
   `RunHeader` over `RunLoadingFrame` for its jobs slot), never generic bars; the
   PR view reserves its strip line and waits for its feed (`feedReady`), the
   issue view's late sections reserve their minimum loaded height with an error
   arm (`SectionReadLine`), and the run frame's jobs slot fills downward under a
   header seeded from a cached row and latched for the frame (a late forge-status
-  answer, or a stale row at the land, can still re-lay it).
+  answer, or a stale row when the run's detail lands, can still re-lay it).
   Each frame mirrors the loaded header's rows, titled from the cached list row
   of the LIVE selection (the view's own number lags a reveal), latched when the
   frame starts so a row that lands later never re-lays it. `RepositoryView`
@@ -361,6 +356,15 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   placeholder, while the hold and the deferred selection's one-render lag feed
   interaction gates (handlers, hotkeys, palette); a render gate that reads the
   lag flickers before the hold starts.
+- Every two-slot host's preparing slot (the Changes pane's `FileSlot`, the
+  Actions tab's `RunSlots`, and any host that adopts the pattern) hides only
+  by a full clip (`[clip-path:inset(50%)]`) plus `inert`. Never `invisible`:
+  the vendored Button's `transition-all` transitions the inherited visibility,
+  so its buttons paint a frame late when the slot shows. Never opacity: the
+  slot frame's `PLACEHOLDER_FADE` would fade it in instead of showing it at
+  once. Never `hidden`: the slot must lay out at full size before it shows.
+  The `preparing-slot-hide` guard in `pnpm run checks` fails on any of these
+  in a preparing slot's classes.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already

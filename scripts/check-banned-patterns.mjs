@@ -433,6 +433,118 @@ const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 // converted site had.
 const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 
+// A two-slot host's PREPARING slot hides only by a full clip plus `inert`: a
+// visibility hide makes the vendored Button paint a frame late at promotion, an
+// opacity hide fades the slot in under its frame's PLACEHOLDER_FADE, and
+// `display:none` skips the full-size layout the slot exists to do.
+/** Each hide utility, matched after variant prefixes and `!` are stripped. */
+const SLOT_HIDE_UTILITIES = new Set([
+  "invisible",
+  "[visibility:hidden]",
+  "[visibility:collapse]",
+  "opacity-0",
+  "opacity-[0]",
+  "opacity-[0%]",
+  "[opacity:0]",
+  "hidden",
+  "[display:none]",
+]);
+/** An object entry keyed `preparing`, bare or quoted, opening at `{` or `,`. */
+const PREPARING_KEY_RE =
+  /(?<=[{,]\s*)(?:preparing|"preparing"|'preparing')\s*:/g;
+/** The role literal, for a `==`/`===` comparison on either side. */
+const PREPARING_LITERAL_RE = /(["'])preparing\1/g;
+/** The bare guard identifiers; a member read (`slot.preparing`) is not one. */
+const PREPARING_IDENT_RE = /(?<![\w$.])(?:preparing|isPreparing)(?![\w$])/g;
+/** A guard's link to a string or template consequent: wrapping parens, then
+ *  `&&` or a ternary `?` (never `?.` or `??`). */
+const GUARD_CONSEQUENT_RE = /^\s*(?:\)\s*)*(?:&&|\?(?![.?]))\s*(?=["'`])/;
+/** A literal-first comparison's operator and operand (`=== role`, `== a.b`). */
+const LITERAL_FIRST_CMP_RE =
+  /^\s*===?(?!=)\s*[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*/;
+
+/** End (exclusive) of the entry value starting at `from`: the first top-level
+ *  `,` `;` or closing bracket, strings and nested brackets skipped. A string or
+ *  bracket that never closes runs the value to the text's end. */
+function entryValueEnd(text, from) {
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    let next = i;
+    if (c === '"' || c === "'" || c === "`") next = stringEnd(text, i);
+    else if (c === "{" || c === "(" || c === "[") next = literalEnd(text, i);
+    else if (",;})]".includes(c)) return i;
+    if (next === -1) return text.length;
+    i = next;
+  }
+  return text.length;
+}
+
+/** Every preparing-slot site in a view's normalized `text`, as
+ *  `{ index, value }`: an object entry keyed `preparing` (value = the entry's
+ *  expression), or a string or template literal guarded by the preparing role
+ *  through `&&` or a ternary `?` (value = that literal). The guard is a
+ *  `==`/`===` comparison with `"preparing"` on either side, or a bare
+ *  `preparing` / `isPreparing`; a negated comparison or identifier is the
+ *  other slots' arm. */
+export function preparingSlotSites(text) {
+  const sites = [];
+  for (const m of text.matchAll(PREPARING_KEY_RE)) {
+    const from = m.index + m[0].length;
+    const value = text.slice(from, entryValueEnd(text, from)).trim();
+    sites.push({ index: m.index, value });
+  }
+  const guarded = (index, after) => {
+    const link = GUARD_CONSEQUENT_RE.exec(text.slice(after, after + 200));
+    if (!link) return;
+    const open = after + link[0].length;
+    const close = stringEnd(text, open);
+    const end = close === -1 ? text.length : close + 1;
+    sites.push({ index, value: text.slice(open, end) });
+  };
+  for (const m of text.matchAll(PREPARING_LITERAL_RE)) {
+    const after = m.index + m[0].length;
+    const head = text.slice(Math.max(0, m.index - 16), m.index).trimEnd();
+    if (/(?<![!=])===?$/.test(head)) guarded(m.index, after);
+    const cmp = LITERAL_FIRST_CMP_RE.exec(text.slice(after, after + 200));
+    if (cmp) guarded(m.index, after + cmp[0].length);
+  }
+  for (const m of text.matchAll(PREPARING_IDENT_RE)) {
+    const head = text.slice(Math.max(0, m.index - 16), m.index).trimEnd();
+    if (!head.endsWith("!")) guarded(m.index, m.index + m[0].length);
+  }
+  return sites;
+}
+
+/** A class token's utility: the part after its last variant `:` outside
+ *  brackets, with the `!` important marker stripped from either end. */
+function utilityOf(cls) {
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < cls.length; i++) {
+    if (cls[i] === "[") depth++;
+    else if (cls[i] === "]") depth--;
+    else if (cls[i] === ":" && depth === 0) start = i + 1;
+  }
+  return cls.slice(start).replace(/^!|!$/g, "");
+}
+
+/** Whether any string or template literal in `value` carries a hide utility. */
+const carriesSlotHide = (value) =>
+  [...value.matchAll(STRING_LITERAL_RE)].some((lit) =>
+    lit[2]
+      .split(/[\s"'`{}]+/)
+      .some((cls) => SLOT_HIDE_UTILITIES.has(utilityOf(cls))),
+  );
+
+/** Scanner: every preparing-slot site whose value carries a hide utility. */
+const preparingSlotHide = ({ text, starts }) => [
+  ...new Set(
+    preparingSlotSites(text)
+      .filter((site) => carriesSlotHide(site.value))
+      .map((site) => lineAt(starts, site.index)),
+  ),
+];
+
 // A `<Label>` open tag carrying no ASSOCIATION. Only two attributes associate a
 // label with what it names — `htmlFor` for a single control, `id` for a caption
 // an `aria-labelledby` points at — so the key is those, not attribute-vs-bare:
@@ -2302,6 +2414,16 @@ export const CHECKS = [
     allowlist: [],
     message:
       "`fallback={null}` blanks the region while the boundary is active, with no aria-busy and nothing announced to assistive tech — lazy panels use LazyPanelFallback (src/components/lazy-panel-fallback.tsx), or, at a boot-path boundary over a panel with a settled resting state, that state itself (DiffRestingFallback, src/features/diff/DiffRestingFallback.tsx); any other fallback-taking host, or a boundary whose absence is genuinely invisible, needs an allowlist entry with rationale",
+  },
+  {
+    name: "preparing-slot-hide",
+    // Repo-wide: any host can adopt the two-slot pattern.
+    appliesTo: notVendoredUi,
+    scan: preparingSlotHide,
+    allowlist: [],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
+    message:
+      "a two-slot host's preparing slot hides only by a full clip plus `inert` (gd-conventions, the preparing-slot rule) — a visibility hide (`invisible`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity hide (`opacity-0`, `opacity-[0]`, `opacity-[0%]`, `[opacity:0]`) fades the slot in under its frame's PLACEHOLDER_FADE instead of showing it at once; and `hidden` or `[display:none]` skips the full-size layout the slot prepares out of sight. Hide it with `[clip-path:inset(50%)]` and set `inert` on the slot. A site is an object entry keyed `preparing` (bare or quoted), or a string or template literal guarded through `&&` or a ternary `?` by a `==`/`===` comparison with `\"preparing\"` on either side (parenthesized too) or by a bare `preparing` / `isPreparing`; a hide utility counts in any string or template literal of the value, after its variant prefixes (`md:`, `data-[x]:`) and `!` marker. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: hides without a hide utility (`sr-only`, a zero or collapsed size, `scale-0`, an off-screen translate), style-object hides (`style={{ visibility: \"hidden\" }}`), hides applied through a constant or helper the scan cannot read (`preparing: SLOT_HIDE`, `cn(base, hideClass)`), a computed `[\"preparing\"]` key or a guard on any other name, a negated guard's ternary alternate (`role !== \"preparing\" ? a : \"invisible\"`), a `switch` case or `if` branch that returns the class, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): a hide token in a string of a `preparing` entry or guarded literal that is not a class list (a label or prose reading `hidden`), a descendant-targeting variant (`[&_svg]:hidden`, `*:hidden`), a `preparing` / `isPreparing` flag naming some other state (the PR mergeability `preparing` status), and a `preparing:` entry or guard spelled inside a string literal; an allowlist entry with rationale is the remedy",
   },
   {
     name: "bare-group-label",
