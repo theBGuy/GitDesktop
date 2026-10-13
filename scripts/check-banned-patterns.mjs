@@ -433,117 +433,2040 @@ const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 // converted site had.
 const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 
-// A two-slot host's PREPARING slot hides only by a full clip plus `inert`: a
-// visibility hide makes the vendored Button paint a frame late at promotion, an
-// opacity hide fades the slot in under its frame's PLACEHOLDER_FADE, and
-// `display:none` skips the full-size layout the slot exists to do.
-/** Each hide utility, matched after variant prefixes and `!` are stripped. */
-const SLOT_HIDE_UTILITIES = new Set([
+// ---------------------------------------------------- preparing-slot-hide
+// A two-slot host's PREPARING slot hides only by a full clip plus `inert`
+// (gd-conventions, 'The preparing-slot rule'). The reader lexes with ts-mask,
+// parses statements and expressions tolerantly (an unparsed region is still
+// walked, never skipped), and tracks which slot roles each class expression
+// can apply to, so negations, `&&` chains and `!== "shown"` resolve by role.
+
+/** The slot roles: the members of EntitySlotRole and SlotPhase, pinned equal
+ *  to both unions by scripts/checks.test.mjs. */
+export const SLOT_ROLES = ["held", "preparing", "shown"];
+const ROLE_BITS = new Map(SLOT_ROLES.map((role, i) => [role, 1 << i]));
+const ALL_ROLES = (1 << SLOT_ROLES.length) - 1;
+const PREPARING = ROLE_BITS.get("preparing");
+/** Names that read as the preparing flag (`isPreparing`, `slot.preparing`). */
+const FLAG_NAMES = new Set(["preparing", "isPreparing"]);
+const CLASS_COMBINERS = new Set(["cn", "clsx", "cx", "classNames", "twMerge"]);
+/** Identifiers that contribute no class and need no resolving. */
+const INERT_IDS = new Set(["undefined", "null", "true", "false"]);
+/** Files whose text can hold no site skip the parse (they are still lexed):
+ *  every site needs a role literal, a flag, or the host vocabulary. */
+const SLOT_CANDIDATE_RE =
+  /preparing|Preparing|["'`](?:held|shown)["'`]|EntitySlotRole|SlotPhase|entityHoldSlots/;
+const SLOT_HOST_VOCABULARY = new Set([
+  "EntitySlotRole",
+  "SlotPhase",
+  "entityHoldSlots",
+]);
+const SLOT_CLIP = "[clip-path:inset(50%)]";
+const SLOT_HIDE_EXACT = new Set([
   "invisible",
+  "collapse",
   "[visibility:hidden]",
   "[visibility:collapse]",
-  "opacity-0",
-  "opacity-[0]",
-  "opacity-[0%]",
-  "[opacity:0]",
   "hidden",
   "[display:none]",
+  "[content-visibility:hidden]",
 ]);
-/** An object entry keyed `preparing`, bare or quoted, opening at `{` or `,`. */
-const PREPARING_KEY_RE =
-  /(?<=[{,]\s*)(?:preparing|"preparing"|'preparing')\s*:/g;
-/** The role literal, for a `==`/`===` comparison on either side. */
-const PREPARING_LITERAL_RE = /(["'])preparing\1/g;
-/** The bare guard identifiers; a member read (`slot.preparing`) is not one. */
-const PREPARING_IDENT_RE = /(?<![\w$.])(?:preparing|isPreparing)(?![\w$])/g;
-/** A guard's link to a string or template consequent: wrapping parens, then
- *  `&&` or a ternary `?` (never `?.` or `??`). */
-const GUARD_CONSEQUENT_RE = /^\s*(?:\)\s*)*(?:&&|\?(?![.?]))\s*(?=["'`])/;
-/** A literal-first comparison's operator and operand (`=== role`, `== a.b`). */
-const LITERAL_FIRST_CMP_RE =
-  /^\s*===?(?!=)\s*[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*/;
 
-/** End (exclusive) of the entry value starting at `from`: the first top-level
- *  `,` `;` or closing bracket, strings and nested brackets skipped. A string or
- *  bracket that never closes runs the value to the text's end. */
-function entryValueEnd(text, from) {
-  for (let i = from; i < text.length; i++) {
-    const c = text[i];
-    let next = i;
-    if (c === '"' || c === "'" || c === "`") next = stringEnd(text, i);
-    else if (c === "{" || c === "(" || c === "[") next = literalEnd(text, i);
-    else if (",;})]".includes(c)) return i;
-    if (next === -1) return text.length;
-    i = next;
-  }
-  return text.length;
-}
-
-/** Every preparing-slot site in a view's normalized `text`, as
- *  `{ index, value }`: an object entry keyed `preparing` (value = the entry's
- *  expression), or a string or template literal guarded by the preparing role
- *  through `&&` or a ternary `?` (value = that literal). The guard is a
- *  `==`/`===` comparison with `"preparing"` on either side, or a bare
- *  `preparing` / `isPreparing`; a negated comparison or identifier is the
- *  other slots' arm. */
-export function preparingSlotSites(text) {
-  const sites = [];
-  for (const m of text.matchAll(PREPARING_KEY_RE)) {
-    const from = m.index + m[0].length;
-    const value = text.slice(from, entryValueEnd(text, from)).trim();
-    sites.push({ index: m.index, value });
-  }
-  const guarded = (index, after) => {
-    const link = GUARD_CONSEQUENT_RE.exec(text.slice(after, after + 200));
-    if (!link) return;
-    const open = after + link[0].length;
-    const close = stringEnd(text, open);
-    const end = close === -1 ? text.length : close + 1;
-    sites.push({ index, value: text.slice(open, end) });
-  };
-  for (const m of text.matchAll(PREPARING_LITERAL_RE)) {
-    const after = m.index + m[0].length;
-    const head = text.slice(Math.max(0, m.index - 16), m.index).trimEnd();
-    if (/(?<![!=])===?$/.test(head)) guarded(m.index, after);
-    const cmp = LITERAL_FIRST_CMP_RE.exec(text.slice(after, after + 200));
-    if (cmp) guarded(m.index, after + cmp[0].length);
-  }
-  for (const m of text.matchAll(PREPARING_IDENT_RE)) {
-    const head = text.slice(Math.max(0, m.index - 16), m.index).trimEnd();
-    if (!head.endsWith("!")) guarded(m.index, m.index + m[0].length);
-  }
-  return sites;
-}
-
-/** A class token's utility: the part after its last variant `:` outside
- *  brackets, with the `!` important marker stripped from either end. */
-function utilityOf(cls) {
+/** A class token split at its top-level `:` into variant segments and the
+ *  utility, the `!` important marker stripped from either end. */
+function splitClassToken(cls) {
+  const variants = [];
   let depth = 0;
   let start = 0;
   for (let i = 0; i < cls.length; i++) {
     if (cls[i] === "[") depth++;
     else if (cls[i] === "]") depth--;
-    else if (cls[i] === ":" && depth === 0) start = i + 1;
+    else if (cls[i] === ":" && depth === 0) {
+      variants.push(cls.slice(start, i));
+      start = i + 1;
+    }
   }
-  return cls.slice(start).replace(/^!|!$/g, "");
+  return { variants, utility: cls.slice(start).replace(/^!|!$/g, "") };
 }
 
-/** Whether any string or template literal in `value` carries a hide utility. */
-const carriesSlotHide = (value) =>
-  [...value.matchAll(STRING_LITERAL_RE)].some((lit) =>
-    lit[2]
-      .split(/[\s"'`{}]+/)
-      .some((cls) => SLOT_HIDE_UTILITIES.has(utilityOf(cls))),
-  );
+/** Whether `value` (an arbitrary opacity) is below full. */
+function partialOpacity(value) {
+  const percent = /^(\d*\.?\d+)%$/.exec(value);
+  if (percent) return Number(percent[1]) < 100;
+  return /^\d*\.?\d+$/.test(value) && Number(value) < 1;
+}
 
-/** Scanner: every preparing-slot site whose value carries a hide utility. */
-const preparingSlotHide = ({ text, starts }) => [
-  ...new Set(
-    preparingSlotSites(text)
-      .filter((site) => carriesSlotHide(site.value))
-      .map((site) => lineAt(starts, site.index)),
-  ),
+/** Whether a utility hides: visibility, opacity below full, or display. */
+function isSlotHide(utility) {
+  if (SLOT_HIDE_EXACT.has(utility)) return true;
+  const scale = /^opacity-(\d+)$/.exec(utility);
+  if (scale) return Number(scale[1]) < 100;
+  const arbitrary = /^(?:opacity-\[|\[opacity:)([^\]]*)\]$/.exec(utility);
+  return arbitrary !== null && partialOpacity(arbitrary[1]);
+}
+
+/** The class tokens of a literal's text. */
+const classTokens = (text) => text.split(/\s+/).filter(Boolean);
+const textHides = (text) =>
+  classTokens(text).some((cls) => isSlotHide(splitClassToken(cls).utility));
+
+/** Punctuators, longest first. `>` is always one token (generics close with
+ *  it), so the parser re-joins `>=` and shifts from adjacent tokens. */
+const SLOT_PUNCTUATORS = [
+  "...",
+  "===",
+  "!==",
+  "**=",
+  "<<=",
+  "&&=",
+  "||=",
+  "??=",
+  "=>",
+  "==",
+  "!=",
+  "<=",
+  "&&",
+  "||",
+  "??",
+  "?.",
+  "++",
+  "--",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "&=",
+  "|=",
+  "^=",
+  "**",
+  "<<",
 ];
+/** ts-mask's expression-start test: after these a `/` opens a regex and, in
+ *  .tsx, a `<` opens JSX. Mirrored so both read one source the same way. */
+const SLOT_EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
+const SLOT_EXPR_KEYWORDS = new Set([
+  "return",
+  "throw",
+  "case",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "yield",
+  "await",
+  "else",
+  "do",
+]);
+const SLOT_IDENT_RE = /[\p{ID_Start}$_#][\p{ID_Continue}$\u200c\u200d]*/uy;
+const SLOT_NUMBER_RE =
+  /(?:0[xXoObB][\da-fA-F_]+n?|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?n?|\.\d[\d_]*(?:[eE][+-]?\d+)?)/y;
+
+/**
+ * Tokens of `source`, read over ts-mask's `masked` text (comment, string,
+ * template, regex and JSX text bodies blanked), so the same decisions ts-mask
+ * made locate every literal. A template is one token (its quasis plus each
+ * interpolation's tokens), and so is a JSX element (attributes and children).
+ */
+function lexSlotTokens(source, masked, jsx) {
+  const fail = (what, at) => {
+    throw new ScanError(`${what} at line ${lineOf(source, at)}`);
+  };
+  const ws = (i) => {
+    while (i < masked.length && /\s/.test(masked[i])) i++;
+    return i;
+  };
+  const exprStartAt = (i) => {
+    let k = i - 1;
+    while (k >= 0 && /\s/.test(masked[k])) k--;
+    if (k < 0) return true;
+    if (/[\w$]/.test(masked[k])) {
+      let s = k;
+      while (s > 0 && /[\w$]/.test(masked[s - 1])) s--;
+      return SLOT_EXPR_KEYWORDS.has(masked.slice(s, k + 1));
+    }
+    return SLOT_EXPR_OPENERS.has(masked[k]);
+  };
+  const quotedEnd = (i) => {
+    const end = masked.indexOf(masked[i], i + 1);
+    if (end === -1) fail("unterminated string", i);
+    return end;
+  };
+
+  function template(start) {
+    const quasis = [];
+    const exprs = [];
+    let from = start + 1;
+    for (let i = start + 1; i < masked.length; i++) {
+      if (masked[i] === "`") {
+        quasis.push(source.slice(from, i));
+        return { t: "tpl", s: start, e: i + 1, quasis, exprs };
+      }
+      if (masked[i] === "$" && masked[i + 1] === "{") {
+        quasis.push(source.slice(from, i));
+        const inner = code(i + 2, true);
+        exprs.push(inner.toks);
+        i = inner.end;
+        from = i + 1;
+      }
+    }
+    return fail("unterminated template literal", start);
+  }
+
+  /** A JSX element at `start`, or null for a TS generic's `<T,>`. */
+  function element(start) {
+    let i = ws(start + 1);
+    const name = /[\w$.:-]*/y;
+    name.lastIndex = i;
+    const tag = name.exec(masked)[0];
+    i += tag.length;
+    if (tag && /^\s*(,|extends\b)/.test(masked.slice(i, i + 40))) return null;
+    if (tag && masked[i] === "<") {
+      let depth = 0;
+      for (; i < masked.length; i++) {
+        if (masked[i] === "<") depth++;
+        else if (masked[i] === ">" && masked[i - 1] !== "=" && --depth === 0)
+          break;
+      }
+      if (depth !== 0) fail("unreadable JSX type arguments", start);
+      i++;
+    }
+    const attrs = [];
+    for (;;) {
+      i = ws(i);
+      const c = masked[i];
+      if (c === "/" && masked[i + 1] === ">")
+        return { t: "jsx", s: start, e: i + 2, attrs, children: [] };
+      if (c === ">") break;
+      if (!tag || i >= masked.length) fail("unreadable JSX tag", start);
+      if (c === "{") {
+        const inner = code(i + 1, true);
+        attrs.push({ spread: inner.toks, s: i });
+        i = inner.end + 1;
+        continue;
+      }
+      const attrName = /[\w$:-]+/y;
+      attrName.lastIndex = i;
+      const m = attrName.exec(masked);
+      if (!m) fail("unreadable JSX attribute", i);
+      const attr = { name: m[0], s: i, value: null };
+      i = ws(i + m[0].length);
+      if (masked[i] === "=") {
+        i = ws(i + 1);
+        if (masked[i] === '"' || masked[i] === "'") {
+          const end = quotedEnd(i);
+          attr.value = { t: "str", s: i, e: end + 1, v: source.slice(i + 1, end) };
+          i = end + 1;
+        } else if (masked[i] === "{") {
+          const inner = code(i + 1, true);
+          attr.value = { t: "expr", s: i, e: inner.end + 1, toks: inner.toks };
+          i = inner.end + 1;
+        } else if (masked[i] === "<") {
+          attr.value = element(i) ?? fail("unreadable JSX attribute", i);
+          i = attr.value.e;
+        } else fail("unreadable JSX attribute value", i);
+      }
+      attrs.push(attr);
+    }
+    const children = [];
+    for (i++; i < masked.length; ) {
+      if (masked[i] === "{") {
+        const inner = code(i + 1, true);
+        children.push({ t: "expr", s: i, e: inner.end + 1, toks: inner.toks });
+        i = inner.end + 1;
+      } else if (masked[i] === "<") {
+        const next = ws(i + 1);
+        if (masked[next] === "/") {
+          const end = masked.indexOf(">", next);
+          if (end === -1) fail("unterminated JSX closing tag", i);
+          return { t: "jsx", s: start, e: end + 1, attrs, children };
+        }
+        const child = element(i) ?? fail("unreadable JSX child", i);
+        children.push(child);
+        i = child.e;
+      } else i++;
+    }
+    return fail("unterminated JSX element", start);
+  }
+
+  /** Tokens from `i`; inside a `${…}` or JSX `{…}` (`inExpr`) it stops at the
+   *  `}` closing the expression and returns its index as `end`. */
+  function code(i, inExpr) {
+    const toks = [];
+    let depth = 0;
+    let nl = false;
+    const push = (tok) => {
+      tok.nl = nl;
+      nl = false;
+      toks.push(tok);
+      return tok.e;
+    };
+    while (i < masked.length) {
+      const c = masked[i];
+      if (c === "\n") {
+        nl = true;
+        i++;
+      } else if (/\s/.test(c)) {
+        i++;
+      } else if (c === '"' || c === "'") {
+        const end = quotedEnd(i);
+        i = push({ t: "str", s: i, e: end + 1, v: source.slice(i + 1, end) });
+      } else if (c === "`") {
+        i = push(template(i));
+      } else if (c === "/" && exprStartAt(i)) {
+        const end = masked.indexOf("/", i + 1);
+        if (end === -1) fail("unterminated regex literal", i);
+        let k = end + 1;
+        while (k < masked.length && /[a-z]/i.test(masked[k])) k++;
+        i = push({ t: "regex", s: i, e: k });
+      } else {
+        const el = jsx && c === "<" && exprStartAt(i) ? element(i) : null;
+        if (el) {
+          i = push(el);
+          continue;
+        }
+        if (inExpr && c === "}" && depth === 0) {
+          return { toks, end: i };
+        }
+        if (inExpr && c === "{") depth++;
+        else if (inExpr && c === "}") depth--;
+        SLOT_IDENT_RE.lastIndex = i;
+        SLOT_NUMBER_RE.lastIndex = i;
+        const id = SLOT_IDENT_RE.exec(masked);
+        const num = !id && /[\d.]/.test(c) ? SLOT_NUMBER_RE.exec(masked) : null;
+        if (id) {
+          i = push({ t: "id", s: i, e: i + id[0].length, v: id[0] });
+        } else if (num && num[0] !== ".") {
+          i = push({ t: "num", s: i, e: i + num[0].length });
+        } else {
+          let p = SLOT_PUNCTUATORS.find((x) => masked.startsWith(x, i)) ?? c;
+          if (p === "?." && /\d/.test(masked[i + 2] ?? "")) p = "?";
+          i = push({ t: "punct", s: i, e: i + p.length, v: p });
+        }
+      }
+    }
+    if (inExpr) fail("unterminated `{…}` expression", i);
+    return { toks, end: i };
+  }
+
+  return code(0, false).toks;
+}
+
+const OPENERS = new Set(["(", "[", "{"]);
+const CLOSERS = { "(": ")", "[": "]", "{": "}" };
+const bracketCache = new WeakMap();
+
+/** Each bracket token's partner index in `toks`. */
+function bracketMatches(toks) {
+  let m = bracketCache.get(toks);
+  if (m) return m;
+  m = new Map();
+  const stack = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.t !== "punct") continue;
+    if (OPENERS.has(t.v)) stack.push(i);
+    else if (t.v === ")" || t.v === "]" || t.v === "}") {
+      const open = stack.pop();
+      if (open === undefined || CLOSERS[toks[open].v] !== t.v)
+        throw new ScanError(`unbalanced \`${t.v}\` at offset ${t.s}`);
+      m.set(open, i);
+      m.set(i, open);
+    }
+  }
+  if (stack.length > 0)
+    throw new ScanError(`unclosed \`${toks[stack[0]].v}\` at offset ${toks[stack[0]].s}`);
+  bracketCache.set(toks, m);
+  return m;
+}
+
+const ASSIGN_OPS = new Set([
+  "=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "**=",
+  "<<=",
+  "&=",
+  "|=",
+  "^=",
+  "&&=",
+  "||=",
+  "??=",
+]);
+const BINARY_PRECEDENCE = {
+  "??": 1,
+  "||": 1,
+  "&&": 2,
+  "|": 3,
+  "^": 4,
+  "&": 5,
+  "==": 6,
+  "!=": 6,
+  "===": 6,
+  "!==": 6,
+  "<": 7,
+  ">": 7,
+  "<=": 7,
+  ">=": 7,
+  instanceof: 7,
+  in: 7,
+  "<<": 8,
+  ">>": 8,
+  ">>>": 8,
+  "+": 9,
+  "-": 9,
+  "*": 10,
+  "/": 10,
+  "%": 10,
+  "**": 11,
+};
+const EQUALITY_OPS = new Set(["===", "==", "!==", "!="]);
+const MEMBER_MODIFIERS = new Set([
+  "public",
+  "private",
+  "protected",
+  "static",
+  "readonly",
+  "abstract",
+  "override",
+  "declare",
+  "accessor",
+]);
+const TYPE_PREFIXES = new Set([
+  "keyof",
+  "typeof",
+  "readonly",
+  "unique",
+  "infer",
+  "asserts",
+]);
+const UNARY_KEYWORDS = new Set(["typeof", "void", "delete", "await"]);
+/** Statement kinds: each child is its own mention extent. */
+const SLOT_STATEMENTS = new Set(["block", "if", "switch", "loop", "func"]);
+
+/**
+ * A tolerant recursive-descent parser over one token array (a range of it).
+ * Types are skipped wherever TS allows them (annotations, `as`, generics,
+ * interfaces, type aliases, `declare`, enums), so a type literal never reads as
+ * an object. Anything it cannot parse becomes an `opaque` node whose bracket
+ * groups are still parsed and walked. `decls` collects every binding's kind.
+ */
+class SlotParser {
+  constructor(toks, from, to, decls) {
+    this.toks = toks;
+    this.p = from;
+    this.end = to;
+    this.m = bracketMatches(toks);
+    this.decls = decls;
+  }
+  sub(from, to) {
+    return new SlotParser(this.toks, from, to, this.decls);
+  }
+  peek(k = 0) {
+    const i = this.p + k;
+    return i < this.end ? this.toks[i] : null;
+  }
+  is(v, k = 0) {
+    const t = this.peek(k);
+    return t !== null && t.t === "punct" && t.v === v;
+  }
+  isId(v, k = 0) {
+    const t = this.peek(k);
+    return t !== null && t.t === "id" && (v === undefined || t.v === v);
+  }
+  last() {
+    return this.toks[this.p - 1].e;
+  }
+  close() {
+    return this.m.get(this.p);
+  }
+  semi() {
+    if (this.is(";")) this.p++;
+  }
+  /** Skips a bracket group at `p`, returning its close index. */
+  skipGroup() {
+    const close = this.close();
+    this.p = close + 1;
+    return close;
+  }
+
+  statements() {
+    const out = [];
+    while (this.p < this.end) {
+      const before = this.p;
+      const s = this.statement();
+      if (s) out.push(s);
+      if (this.p === before) out.push(this.skipOne());
+    }
+    return out;
+  }
+  stmtOrSkip() {
+    if (this.p >= this.end) return null;
+    const before = this.p;
+    const s = this.statement();
+    return this.p === before ? this.skipOne() : s;
+  }
+  /** One token the grammar couldn't place: a bracket group is parsed as
+   *  statements so its contents are still walked. */
+  skipOne() {
+    const t = this.peek();
+    if (t.t === "punct" && OPENERS.has(t.v)) {
+      const close = this.close();
+      const children = this.sub(this.p + 1, close).statements();
+      this.p = close + 1;
+      return { k: "opaque", s: t.s, e: this.last(), children };
+    }
+    this.p++;
+    const node = this.tokenNode(t);
+    return node ?? { k: "opaque", s: t.s, e: t.e, children: [] };
+  }
+  tokenNode(t) {
+    if (t.t === "str") return { k: "str", v: t.v, s: t.s, e: t.e };
+    if (t.t === "tpl") return this.templateNode(t);
+    if (t.t === "jsx") return this.jsxNode(t);
+    if (t.t === "id") return { k: "id", name: t.v, s: t.s, e: t.e };
+    if (t.t === "num" || t.t === "regex") return { k: t.t, s: t.s, e: t.e };
+    return null;
+  }
+
+  statement() {
+    const t = this.peek();
+    if (t.t === "punct") {
+      if (t.v === ";") {
+        this.p++;
+        return null;
+      }
+      if (t.v === "{") return this.block();
+      if (t.v === "@") {
+        this.decorator();
+        return null;
+      }
+    }
+    if (t.t === "id") {
+      const n1 = this.peek(1);
+      switch (t.v) {
+        case "import":
+          if (this.is("(", 1) || this.is(".", 1)) break;
+          this.skipModuleClause();
+          return null;
+        case "export":
+          this.p++;
+          if (this.isId("default")) {
+            this.p++;
+            const expr = this.assign();
+            this.semi();
+            return expr && { k: "expr", expr, s: expr.s, e: expr.e };
+          }
+          if (this.isId("type") && this.is("{", 1)) this.p++;
+          if (this.is("{") || this.is("*")) {
+            this.skipModuleClause();
+            return null;
+          }
+          if (this.is("=")) this.p++;
+          return this.p < this.end ? this.stmtOrSkip() : null;
+        case "interface":
+          if (n1?.t !== "id") break;
+          while (this.p < this.end && !this.is("{")) {
+            if (this.is("<")) this.skipAngles();
+            else this.p++;
+          }
+          if (this.is("{")) this.skipGroup();
+          return null;
+        case "type":
+          if (n1?.t !== "id" || !(this.is("=", 2) || this.is("<", 2))) break;
+          this.p += 2;
+          if (this.is("<")) this.skipAngles();
+          if (this.is("=")) this.p++;
+          this.skipType();
+          this.semi();
+          return null;
+        case "declare":
+          if (n1?.t !== "id") break;
+          this.skipDeclare();
+          return null;
+        case "enum":
+          if (n1?.t !== "id") break;
+          this.skipEnum();
+          return null;
+        case "namespace":
+        case "module":
+          if (n1?.t !== "id" && n1?.t !== "str") break;
+          this.p++;
+          while (this.p < this.end && !this.is("{")) this.p++;
+          return this.p < this.end ? this.block() : null;
+        case "abstract":
+          if (!this.isId("class", 1)) break;
+          this.p++;
+          return this.classNode();
+        case "const":
+          if (this.isId("enum", 1)) {
+            this.p++;
+            this.skipEnum();
+            return null;
+          }
+          return this.varDecl();
+        case "let":
+        case "var":
+          if (n1?.t === "id" || this.is("{", 1) || this.is("[", 1))
+            return this.varDecl();
+          break;
+        case "function":
+          return this.functionNode();
+        case "async":
+          if (!this.isId("function", 1)) break;
+          this.p++;
+          return this.functionNode();
+        case "class":
+          return this.classNode();
+        case "if":
+          return this.ifStatement();
+        case "switch":
+          return this.switchStatement();
+        case "for":
+        case "while":
+          return this.loopStatement();
+        case "do": {
+          this.p++;
+          const body = this.stmtOrSkip();
+          const node = { k: "loop", head: [], test: null, body, s: t.s };
+          if (this.isId("while") && this.is("(", 1)) {
+            this.p++;
+            node.test = this.groupExpression();
+          }
+          this.semi();
+          node.e = this.last();
+          return node;
+        }
+        case "try": {
+          this.p++;
+          const body = [];
+          while (this.p < this.end) {
+            if (this.is("{")) body.push(this.block());
+            else if (this.isId("catch") || this.isId("finally")) {
+              this.p++;
+              if (this.is("(")) this.skipGroup();
+            } else break;
+          }
+          return { k: "block", body, s: t.s, e: this.last() };
+        }
+        case "return":
+        case "throw": {
+          this.p++;
+          const n = this.peek();
+          const arg =
+            n && !n.nl && !this.is(";") && !this.is("}")
+              ? this.expression()
+              : null;
+          this.semi();
+          return { k: "return", arg, s: t.s, e: this.last() };
+        }
+        case "break":
+        case "continue":
+          this.p++;
+          if (this.isId() && !this.peek().nl) this.p++;
+          this.semi();
+          return null;
+      }
+      if (this.is(":", 1) && !SLOT_EXPR_KEYWORDS.has(t.v)) {
+        this.p += 2;
+        return this.stmtOrSkip();
+      }
+    }
+    const expr = this.expression();
+    if (!expr) return null;
+    this.semi();
+    return { k: "expr", expr, s: expr.s, e: expr.e };
+  }
+  block() {
+    const t = this.peek();
+    const close = this.close();
+    const body = this.sub(this.p + 1, close).statements();
+    this.p = close + 1;
+    return { k: "block", body, s: t.s, e: this.last() };
+  }
+  /** An import or re-export clause, through its module specifier. */
+  skipModuleClause() {
+    this.p++;
+    while (this.p < this.end && !this.is(";")) {
+      const t = this.peek();
+      if (t.t === "punct" && OPENERS.has(t.v)) {
+        this.skipGroup();
+        if (!this.isId("from") && !this.isId("as")) break;
+        continue;
+      }
+      this.p++;
+      if (t.t === "str") {
+        if (this.isId("with") || this.isId("assert")) {
+          this.p++;
+          if (this.is("{")) this.skipGroup();
+        }
+        break;
+      }
+    }
+    this.semi();
+  }
+  skipDeclare() {
+    while (this.p < this.end && !this.is(";")) {
+      if (this.is("{")) {
+        this.skipGroup();
+        if (!this.is("[") && !this.is("|") && !this.is("&")) return;
+        continue;
+      }
+      if (this.is("(") || this.is("[")) this.skipGroup();
+      else this.p++;
+    }
+    this.semi();
+  }
+  skipEnum() {
+    while (this.p < this.end && !this.is("{")) this.p++;
+    if (this.is("{")) this.skipGroup();
+  }
+  decorator() {
+    this.p++;
+    this.postfix();
+  }
+  varDecl() {
+    const kw = this.peek();
+    this.p++;
+    const decls = [];
+    while (this.p < this.end) {
+      let name = null;
+      if (this.isId()) {
+        name = this.peek().v;
+        this.p++;
+      } else if (this.is("{") || this.is("[")) this.skipGroup();
+      else break;
+      if (this.is("!")) this.p++;
+      if (this.is(":")) {
+        this.p++;
+        this.skipType();
+      }
+      let init = null;
+      if (this.is("=")) {
+        this.p++;
+        init = this.assign();
+      }
+      if (name !== null) this.decls.note(name, kw.v === "const" ? init : null);
+      decls.push({ name, init });
+      if (!this.is(",")) break;
+      this.p++;
+    }
+    this.semi();
+    return { k: "var", decls, s: kw.s, e: this.last() };
+  }
+  /** A parameter list's range; returns its default-value expressions. */
+  params(from, to) {
+    const q = this.sub(from, to);
+    const defaults = [];
+    while (q.p < q.end) {
+      if (q.is(",")) {
+        q.p++;
+        continue;
+      }
+      while (q.is("@")) q.decorator();
+      while (
+        q.isId() &&
+        MEMBER_MODIFIERS.has(q.peek().v) &&
+        (q.peek(1)?.t === "id" || q.is("{", 1) || q.is("[", 1))
+      )
+        q.p++;
+      if (q.is("...")) q.p++;
+      if (q.is("{") || q.is("[")) q.skipGroup();
+      else if (q.isId()) {
+        this.decls.note(q.peek().v, null);
+        q.p++;
+      } else {
+        q.p++;
+        continue;
+      }
+      if (q.is("?")) q.p++;
+      if (q.is(":")) {
+        q.p++;
+        q.skipType();
+      }
+      if (q.is("=")) {
+        q.p++;
+        const d = q.assign();
+        if (d) defaults.push(d);
+      }
+      while (q.p < q.end && !q.is(",")) q.p++;
+    }
+    return defaults;
+  }
+  /** After a method or function name: generics, params, return type, body. */
+  callableRest(start) {
+    if (this.is("<")) this.skipAngles();
+    let defaults = [];
+    if (this.is("(")) {
+      const close = this.close();
+      defaults = this.params(this.p + 1, close);
+      this.p = close + 1;
+    }
+    if (this.is(":")) {
+      this.p++;
+      this.skipType();
+    }
+    const body = this.is("{") ? this.block() : null;
+    if (!body) this.semi();
+    return { k: "func", defaults, body, s: start, e: this.last() };
+  }
+  functionNode() {
+    const start = this.peek().s;
+    this.p++;
+    if (this.is("*")) this.p++;
+    if (this.isId()) this.p++;
+    return this.callableRest(start);
+  }
+  classNode() {
+    const start = this.peek().s;
+    this.p++;
+    while (this.p < this.end && !this.is("{")) {
+      if (this.is("<")) this.skipAngles();
+      else if (this.is("(") || this.is("[")) this.skipGroup();
+      else this.p++;
+    }
+    if (!this.is("{")) return { k: "class", members: [], s: start, e: this.last() };
+    const close = this.close();
+    const members = this.sub(this.p + 1, close).classMembers();
+    this.p = close + 1;
+    return { k: "class", members, s: start, e: this.last() };
+  }
+  /** Whether a property key starts at offset `k`. */
+  keyAhead(k) {
+    const t = this.peek(k);
+    if (t === null) return false;
+    if (t.t === "id" || t.t === "str" || t.t === "num") return true;
+    return t.t === "punct" && (t.v === "[" || t.v === "*");
+  }
+  propertyKey() {
+    const t = this.peek();
+    if (t === null) return null;
+    if (t.t === "id" || t.t === "str" || t.t === "num") {
+      this.p++;
+      return { kind: t.t === "id" ? "id" : t.t, name: t.v, s: t.s, e: t.e };
+    }
+    if (t.t === "tpl") {
+      this.p++;
+      return { kind: "computed", node: this.templateNode(t), s: t.s, e: t.e };
+    }
+    if (this.is("[")) {
+      const close = this.close();
+      const node = this.expressionIn(this.p + 1, close);
+      this.p = close + 1;
+      return { kind: "computed", node, s: t.s, e: this.last() };
+    }
+    return null;
+  }
+  classMembers() {
+    const members = [];
+    while (this.p < this.end) {
+      const before = this.p;
+      if (this.is(";") || this.is(",")) {
+        this.p++;
+        continue;
+      }
+      while (this.is("@")) this.decorator();
+      while (this.isId() && MEMBER_MODIFIERS.has(this.peek().v) && this.keyAhead(1))
+        this.p++;
+      if (this.isId("static") && this.is("{", 1)) {
+        this.p++;
+        members.push({ kind: "block", body: this.block() });
+        continue;
+      }
+      // An index signature, `[key: string]: T`.
+      if (this.is("[") && this.peek(1)?.t === "id" && this.is(":", 2)) {
+        this.skipGroup();
+        if (this.is(":")) {
+          this.p++;
+          this.skipType();
+        }
+        this.semi();
+        continue;
+      }
+      const member = this.member(true);
+      if (member) members.push(member);
+      if (this.p === before) members.push({ kind: "junk", value: this.skipOne() });
+    }
+    return members;
+  }
+  /** One object or class member: `kind` is init, shorthand, method, get, set
+   *  or spread; `value` is its expression, `body` a callable's node. */
+  member(inClass) {
+    const start = this.peek();
+    if (this.is("...")) {
+      this.p++;
+      return { kind: "spread", value: this.assign(), s: start.s };
+    }
+    let kind = "init";
+    if ((this.isId("get") || this.isId("set")) && this.keyAhead(1)) {
+      kind = this.peek().v;
+      this.p++;
+    } else if (this.isId("async") && this.keyAhead(1) && !this.peek(1).nl) {
+      kind = "method";
+      this.p++;
+    }
+    if (this.is("*")) {
+      kind = "method";
+      this.p++;
+    }
+    const key = this.propertyKey();
+    if (!key) return null;
+    if (this.is("?") || (inClass && this.is("!"))) this.p++;
+    if (this.is("(") || this.is("<")) {
+      const body = this.callableRest(key.s);
+      return { kind: kind === "init" ? "method" : kind, key, body, s: key.s };
+    }
+    if (inClass) {
+      if (this.is(":")) {
+        this.p++;
+        this.skipType();
+      }
+      let value = null;
+      if (this.is("=")) {
+        this.p++;
+        value = this.assign();
+      }
+      this.semi();
+      return { kind: "init", key, value, s: key.s };
+    }
+    if (this.is(":")) {
+      this.p++;
+      return { kind: "init", key, value: this.assign(), s: key.s };
+    }
+    if (this.is("=")) {
+      this.p++;
+      this.assign();
+    }
+    if (key.kind !== "id") return { kind: "junk", value: null, s: key.s };
+    const value = { k: "id", name: key.name, s: key.s, e: key.e };
+    return { kind: "shorthand", key, value, s: key.s };
+  }
+  objectMembers() {
+    const members = [];
+    while (this.p < this.end) {
+      if (this.is(",")) {
+        this.p++;
+        continue;
+      }
+      const before = this.p;
+      const member = this.member(false);
+      if (member) members.push(member);
+      if (this.p === before) members.push({ kind: "junk", value: this.skipOne() });
+      else if (!this.is(",") && this.p < this.end)
+        members.push({ kind: "junk", value: this.skipOne() });
+    }
+    return members;
+  }
+  ifStatement() {
+    const start = this.peek().s;
+    this.p++;
+    const test = this.is("(") ? this.groupExpression() : null;
+    const cons = this.stmtOrSkip();
+    let alt = null;
+    if (this.isId("else")) {
+      this.p++;
+      alt = this.stmtOrSkip();
+    }
+    return { k: "if", test, cons, alt, s: start, e: this.last() };
+  }
+  switchStatement() {
+    const start = this.peek().s;
+    this.p++;
+    const disc = this.is("(") ? this.groupExpression() : null;
+    const cases = [];
+    if (this.is("{")) {
+      const close = this.close();
+      const q = this.sub(this.p + 1, close);
+      this.p = close + 1;
+      while (q.p < q.end) {
+        const head = q.peek();
+        let test = null;
+        if (q.isId("case")) {
+          q.p++;
+          test = q.expression();
+        } else if (q.isId("default")) q.p++;
+        else {
+          q.skipOne();
+          continue;
+        }
+        if (q.is(":")) q.p++;
+        const body = [];
+        while (
+          q.p < q.end &&
+          !q.isId("case") &&
+          !(q.isId("default") && q.is(":", 1))
+        ) {
+          const s = q.stmtOrSkip();
+          if (s) body.push(s);
+        }
+        cases.push({ test, body, s: head.s });
+      }
+    }
+    return { k: "switch", disc, cases, s: start, e: this.last() };
+  }
+  loopStatement() {
+    const start = this.peek();
+    this.p++;
+    if (this.isId("await")) this.p++;
+    let head = [];
+    let test = null;
+    if (this.is("(")) {
+      const close = this.close();
+      if (start.v === "while") test = this.expressionIn(this.p + 1, close);
+      else head = this.sub(this.p + 1, close).statements();
+      this.p = close + 1;
+    }
+    const body = this.stmtOrSkip();
+    return { k: "loop", head, test, body, s: start.s, e: this.last() };
+  }
+  /** The expression inside the parenthesized group at `p`. */
+  groupExpression() {
+    const close = this.close();
+    const node = this.expressionIn(this.p + 1, close);
+    this.p = close + 1;
+    return node;
+  }
+  /** A range parsed as one expression; leftovers become an opaque wrapper. */
+  expressionIn(from, to) {
+    const q = this.sub(from, to);
+    const node = q.expression();
+    if (q.p >= to) return node;
+    const children = node ? [node, ...q.statements()] : q.statements();
+    return { k: "opaque", s: this.toks[from].s, e: this.toks[to - 1].e, children };
+  }
+  /** A comma-separated range (arguments, array elements); holes skipped. */
+  listIn(from, to) {
+    const q = this.sub(from, to);
+    const out = [];
+    while (q.p < q.end) {
+      if (q.is(",")) {
+        q.p++;
+        continue;
+      }
+      const start = q.peek();
+      let node;
+      if (q.is("...")) {
+        q.p++;
+        const arg = q.assign();
+        node = arg && { k: "spread", arg, s: start.s, e: arg.e };
+      } else node = q.assign();
+      out.push(node ?? q.skipOne());
+      if (q.p < q.end && !q.is(",")) out.push(q.skipOne());
+    }
+    return out;
+  }
+
+  expression() {
+    const first = this.assign();
+    if (!first || !this.is(",")) return first;
+    const list = [first];
+    while (this.is(",")) {
+      this.p++;
+      const next = this.assign();
+      if (!next) break;
+      list.push(next);
+    }
+    return { k: "seq", list, s: first.s, e: list.at(-1).e };
+  }
+  assign() {
+    const arrow = this.arrow();
+    if (arrow) return arrow;
+    if (this.isId("yield")) {
+      const t = this.peek();
+      this.p++;
+      if (this.is("*")) this.p++;
+      const arg = this.peek()?.nl ? null : this.assign();
+      return { k: "unary", op: "yield", arg, s: t.s, e: this.last() };
+    }
+    const left = this.conditional();
+    if (!left) return null;
+    const t = this.peek();
+    if (t && t.t === "punct" && ASSIGN_OPS.has(t.v)) {
+      this.p++;
+      const r = this.assign();
+      return { k: "assign", l: left, r, s: left.s, e: this.last() };
+    }
+    return left;
+  }
+  /** The `=>` index when an arrow function starts at `i`, else -1. */
+  arrowAt(i) {
+    const t = this.toks[i];
+    if (!t || i >= this.end) return -1;
+    if (t.t === "id") {
+      const n = this.toks[i + 1];
+      return i + 1 < this.end && n.t === "punct" && n.v === "=>" ? i + 1 : -1;
+    }
+    if (t.t !== "punct") return -1;
+    let open = i;
+    if (t.v === "<") {
+      const j = this.typeArgsEnd(i);
+      if (j === -1) return -1;
+      open = j;
+    }
+    const o = this.toks[open];
+    if (!o || o.t !== "punct" || o.v !== "(") return -1;
+    let j = this.m.get(open) + 1;
+    const after = this.toks[j];
+    if (j < this.end && after.t === "punct" && after.v === ":") {
+      const save = this.p;
+      this.p = j + 1;
+      this.skipType();
+      j = this.p;
+      this.p = save;
+    }
+    const arrow = this.toks[j];
+    return j < this.end && arrow.t === "punct" && arrow.v === "=>" ? j : -1;
+  }
+  arrow() {
+    const start = this.peek();
+    if (!start) return null;
+    let i = this.p;
+    if (this.isId("async") && !this.peek(1)?.nl && this.arrowAt(i + 1) !== -1) i++;
+    const arrowIdx = this.arrowAt(i);
+    if (arrowIdx === -1) return null;
+    let defaults = [];
+    const first = this.toks[i];
+    if (first.t === "punct") {
+      const open = first.v === "<" ? this.typeArgsEnd(i) : i;
+      defaults = this.params(open + 1, this.m.get(open));
+    } else this.decls.note(first.v, null);
+    this.p = arrowIdx + 1;
+    const body = this.is("{") ? this.block() : this.assign();
+    return { k: "func", defaults, body, s: start.s, e: this.last() };
+  }
+  conditional() {
+    const test = this.binary(0);
+    if (!test || !this.is("?")) return test;
+    this.p++;
+    const cons = this.assign();
+    if (this.is(":")) this.p++;
+    const alt = this.assign();
+    return { k: "cond", test, cons, alt, s: test.s, e: this.last() };
+  }
+  /** The binary operator at `p` and its token count, re-joining `>` runs. */
+  binaryOp() {
+    const t = this.peek();
+    if (t === null) return null;
+    if (t.t === "id")
+      return t.v === "instanceof" || t.v === "in" ? [t.v, 1] : null;
+    if (t.t !== "punct") return null;
+    if (t.v !== ">") return [t.v, 1];
+    const adjacent = (k) => {
+      const next = this.peek(k);
+      return next?.t === "punct" && next.s === this.peek(k - 1).e ? next.v : null;
+    };
+    let op = ">";
+    while (op.length < 3 && adjacent(op.length) === ">") op += ">";
+    if (adjacent(op.length) === "=") return [`${op}=`, op.length + 1];
+    return [op, op.length];
+  }
+  binary(minPrec) {
+    let left = this.unary();
+    if (!left) return null;
+    for (;;) {
+      if (this.isId("as") || this.isId("satisfies")) {
+        this.p++;
+        this.skipType();
+        left = { k: "wrap", expr: left, s: left.s, e: this.last() };
+        continue;
+      }
+      const found = this.binaryOp();
+      if (!found) break;
+      const [op, n] = found;
+      const prec = BINARY_PRECEDENCE[op];
+      if (prec === undefined || prec < minPrec) break;
+      this.p += n;
+      const right = this.binary(op === "**" ? prec : prec + 1);
+      if (!right) break;
+      left = { k: "bin", op, l: left, r: right, s: left.s, e: right.e };
+    }
+    return left;
+  }
+  unary() {
+    const t = this.peek();
+    if (t === null) return null;
+    if (t.t === "punct" && ["!", "-", "+", "~", "++", "--"].includes(t.v)) {
+      this.p++;
+      const arg = this.unary();
+      return arg && { k: "unary", op: t.v, arg, s: t.s, e: arg.e };
+    }
+    if (t.t === "id" && UNARY_KEYWORDS.has(t.v) && this.peek(1)) {
+      const n = this.peek(1);
+      if (!(n.t === "punct" && /^[),;\]}:=?.]/.test(n.v))) {
+        this.p++;
+        const arg = this.unary();
+        return arg && { k: "unary", op: t.v, arg, s: t.s, e: arg.e };
+      }
+    }
+    if (t.t === "punct" && t.v === "<") {
+      const j = this.angleEnd(this.p);
+      if (j === -1) return null;
+      this.p = j;
+      return this.unary();
+    }
+    return this.postfix();
+  }
+  postfix() {
+    let e = this.primary();
+    if (!e) return null;
+    for (;;) {
+      const t = this.peek();
+      if (t === null) break;
+      if (t.t === "tpl") {
+        this.p++;
+        e = { k: "call", callee: e, args: [this.templateNode(t)], s: e.s, e: t.e };
+        continue;
+      }
+      if (t.t !== "punct") break;
+      if (t.v === "." || t.v === "?.") {
+        this.p++;
+        if (t.v === "?." && this.is("(")) {
+          e = this.callArgs(e);
+          continue;
+        }
+        if (t.v === "?." && this.is("[")) {
+          e = this.computedMember(e);
+          continue;
+        }
+        if (!this.isId()) break;
+        const n = this.peek();
+        this.p++;
+        e = { k: "member", obj: e, name: n.v, s: e.s, e: n.e };
+      } else if (t.v === "[") e = this.computedMember(e);
+      else if (t.v === "(") e = this.callArgs(e);
+      else if (t.v === "!" && !t.nl) {
+        this.p++;
+        e = { k: "wrap", expr: e, s: e.s, e: t.e };
+      } else if ((t.v === "++" || t.v === "--") && !t.nl) this.p++;
+      else if (t.v === "<") {
+        const j = this.typeArgsEnd(this.p);
+        const n = this.toks[j];
+        if (j === -1 || j >= this.end) break;
+        if (!(n.t === "tpl" || (n.t === "punct" && n.v === "("))) break;
+        this.p = j;
+      } else break;
+    }
+    return e;
+  }
+  computedMember(obj) {
+    const close = this.close();
+    const prop = this.expressionIn(this.p + 1, close);
+    this.p = close + 1;
+    return { k: "member", obj, prop, s: obj.s, e: this.last() };
+  }
+  callArgs(callee) {
+    const close = this.close();
+    const args = this.listIn(this.p + 1, close);
+    this.p = close + 1;
+    return { k: "call", callee, args, s: callee.s, e: this.last() };
+  }
+  primary() {
+    const t = this.peek();
+    if (t === null) return null;
+    if (t.t === "id") {
+      if (t.v === "function") return this.functionNode();
+      if (t.v === "class") return this.classNode();
+      if (t.v === "async" && this.isId("function", 1)) {
+        this.p++;
+        return this.functionNode();
+      }
+      if (t.v === "new" && !this.is(".", 1)) {
+        this.p++;
+        const callee = this.unary();
+        if (!callee) return { k: "id", name: "new", s: t.s, e: t.e };
+        return { k: "new", callee, s: t.s, e: this.last() };
+      }
+      this.p++;
+      return { k: "id", name: t.v, s: t.s, e: t.e };
+    }
+    if (t.t === "punct") {
+      if (t.v === "(") {
+        const close = this.close();
+        const expr = this.expressionIn(this.p + 1, close);
+        this.p = close + 1;
+        return { k: "wrap", expr, s: t.s, e: this.last() };
+      }
+      if (t.v === "[") {
+        const close = this.close();
+        const elems = this.listIn(this.p + 1, close);
+        this.p = close + 1;
+        return { k: "arr", elems, s: t.s, e: this.last() };
+      }
+      if (t.v === "{") {
+        const close = this.close();
+        const members = this.sub(this.p + 1, close).objectMembers();
+        this.p = close + 1;
+        return { k: "obj", members, s: t.s, e: this.last() };
+      }
+      if (t.v === "@") {
+        this.decorator();
+        return this.primary();
+      }
+      return null;
+    }
+    this.p++;
+    return this.tokenNode(t);
+  }
+  /** A nested token array (a template interpolation, a JSX `{…}`). */
+  nested(toks) {
+    if (toks.length === 0) return null;
+    return new SlotParser(toks, 0, toks.length, this.decls).expressionIn(
+      0,
+      toks.length,
+    );
+  }
+  templateNode(t) {
+    const exprs = t.exprs.map((toks) => this.nested(toks)).filter(Boolean);
+    return { k: "tpl", quasis: t.quasis, exprs, s: t.s, e: t.e };
+  }
+  jsxNode(t) {
+    const attrs = t.attrs.map((a) => {
+      if (a.spread) return { spread: this.nested(a.spread) };
+      let value = null;
+      if (a.value?.t === "str")
+        value = { k: "str", v: a.value.v, s: a.value.s, e: a.value.e };
+      else if (a.value?.t === "jsx") value = this.jsxNode(a.value);
+      else if (a.value) value = this.nested(a.value.toks);
+      return { name: a.name, value };
+    });
+    const children = t.children
+      .map((c) => (c.t === "jsx" ? this.jsxNode(c) : this.nested(c.toks)))
+      .filter(Boolean);
+    return { k: "jsx", attrs, children, s: t.s, e: t.e };
+  }
+
+  /** Skips a `<…>` run at `p`, or only its `<` when it never closes. */
+  skipAngles() {
+    const j = this.angleEnd(this.p);
+    this.p = j === -1 ? this.p + 1 : j;
+  }
+  /** Index past a `<…>` run at `i` (types are lenient), or -1. */
+  angleEnd(i) {
+    let depth = 0;
+    for (let j = i; j < this.end; j++) {
+      const t = this.toks[j];
+      if (t.t !== "punct") continue;
+      if (OPENERS.has(t.v)) j = this.m.get(j);
+      else if (t.v === "<") depth++;
+      else if (t.v === ">" && --depth === 0) return j + 1;
+      else if (t.v === ";") return -1;
+    }
+    return -1;
+  }
+  /** Index past a call's type arguments at `i`: only type grammar inside, so
+   *  `a < b && c > (d)` stays a comparison. -1 when not type arguments. */
+  typeArgsEnd(i) {
+    let depth = 0;
+    for (let j = i; j < this.end; j++) {
+      const t = this.toks[j];
+      if (t.t !== "punct") continue;
+      if (OPENERS.has(t.v)) j = this.m.get(j);
+      else if (t.v === "<") depth++;
+      else if (t.v === ">") {
+        if (--depth === 0) return j + 1;
+      } else if (![",", ".", "|", "&", "=>", "?", ":", "...", "-"].includes(t.v))
+        return -1;
+    }
+    return -1;
+  }
+  /** Skips one type at `p`. */
+  skipType() {
+    for (;;) {
+      while (this.is("|") || this.is("&")) this.p++;
+      while (
+        this.isId() &&
+        TYPE_PREFIXES.has(this.peek().v) &&
+        (this.peek(1)?.t === "id" ||
+          this.is("(", 1) ||
+          this.is("[", 1) ||
+          this.is("{", 1))
+      )
+        this.p++;
+      const t = this.peek();
+      if (t === null) return;
+      if (t.t === "punct") {
+        if (t.v === "(") {
+          this.skipGroup();
+          if (this.is("=>")) {
+            this.p++;
+            continue;
+          }
+        } else if (t.v === "[" || t.v === "{") this.skipGroup();
+        else if (t.v === "<") {
+          const j = this.angleEnd(this.p);
+          if (j === -1) return;
+          this.p = j;
+          continue;
+        } else if (t.v === "-") {
+          this.p++;
+          continue;
+        } else return;
+      } else if (t.t === "id") {
+        this.p++;
+        if (t.v === "new" || t.v === "abstract") continue;
+        while (this.is(".") && this.isId(undefined, 1)) this.p += 2;
+        if (t.v === "import" && this.is("(")) this.skipGroup();
+      } else if (t.t === "str" || t.t === "num" || t.t === "tpl") this.p++;
+      else return;
+      for (;;) {
+        if (this.is("<")) {
+          const j = this.angleEnd(this.p);
+          if (j === -1) break;
+          this.p = j;
+        } else if (this.is("[") && !this.peek().nl) this.skipGroup();
+        else if (this.is(".") && this.isId(undefined, 1)) this.p += 2;
+        else break;
+      }
+      if (this.isId("is") || this.isId("extends")) {
+        const conditional = this.peek().v === "extends";
+        this.p++;
+        this.skipType();
+        if (conditional && this.is("?")) {
+          this.p++;
+          this.skipType();
+          if (this.is(":")) {
+            this.p++;
+            continue;
+          }
+        }
+        return;
+      }
+      if (this.is("|") || this.is("&")) continue;
+      return;
+    }
+  }
+}
+
+/** Every binding name the file declares: a `const` with an initializer is
+ *  resolvable; any other binding of the name (let, var, a second const, a
+ *  parameter) makes it unresolvable. */
+function slotDeclarations() {
+  const consts = new Map();
+  const others = new Set();
+  return {
+    note(name, init) {
+      if (init) consts.set(name, [...(consts.get(name) ?? []), init]);
+      else others.add(name);
+    },
+    resolve(name) {
+      const list = consts.get(name);
+      return list && list.length === 1 && !others.has(name) ? list[0] : null;
+    },
+  };
+}
+
+/** The child nodes of any statement or expression node. */
+function slotChildren(n) {
+  switch (n.k) {
+    case "block":
+      return n.body;
+    case "expr":
+      return [n.expr];
+    case "return":
+      return [n.arg];
+    case "var":
+      return n.decls.map((d) => d.init);
+    case "if":
+      return [n.test, n.cons, n.alt];
+    case "switch":
+      return [n.disc, ...n.cases.flatMap((c) => [c.test, ...c.body])];
+    case "loop":
+      return [...n.head, n.test, n.body];
+    case "func":
+      return [...n.defaults, n.body];
+    case "class":
+    case "obj":
+      return (n.members ?? []).flatMap((m) => [
+        m.key?.node,
+        m.value,
+        m.body,
+      ]);
+    case "opaque":
+      return n.children;
+    case "tpl":
+      return n.exprs;
+    case "jsx":
+      return [
+        ...n.attrs.map((a) => (a.spread !== undefined ? a.spread : a.value)),
+        ...n.children,
+      ];
+    case "member":
+      return [n.obj, n.prop];
+    case "call":
+      return [n.callee, ...n.args];
+    case "new":
+      return [n.callee];
+    case "unary":
+      return [n.arg];
+    case "bin":
+    case "assign":
+      return [n.l, n.r];
+    case "cond":
+      return [n.test, n.cons, n.alt];
+    case "seq":
+      return n.list;
+    case "wrap":
+      return [n.expr];
+    case "arr":
+      return n.elems;
+    case "spread":
+      return [n.arg];
+    default:
+      return [];
+  }
+}
+
+/** Whether any string or template literal under `node` carries a hide. */
+function literalsHide(node) {
+  if (!node) return false;
+  if (node.k === "str") return textHides(node.v);
+  if (node.k === "tpl" && node.quasis.some(textHides)) return true;
+  return slotChildren(node).some(literalsHide);
+}
+
+const unwrapSlot = (n) => {
+  while (n && n.k === "wrap") n = n.expr;
+  return n;
+};
+/** The role bit of a role literal (a string, or a template with no
+ *  interpolation), else undefined. */
+function roleLiteral(node) {
+  const n = unwrapSlot(node);
+  if (n?.k === "str") return ROLE_BITS.get(n.v);
+  if (n?.k === "tpl" && n.exprs.length === 0) return ROLE_BITS.get(n.quasis[0]);
+  return undefined;
+}
+/** A preparing-flag read: an identifier or member whose last name is a flag. */
+function isFlagRead(node) {
+  const n = unwrapSlot(node);
+  return (
+    (n?.k === "id" && FLAG_NAMES.has(n.name)) ||
+    (n?.k === "member" && n.name !== undefined && FLAG_NAMES.has(n.name))
+  );
+}
+const isCombiner = (callee) => {
+  const n = unwrapSlot(callee);
+  return n?.k === "id" && CLASS_COMBINERS.has(n.name);
+};
+/** A string, template, JSX, combiner or composition of them: an arm that
+ *  produces class code even outside a className or combiner argument. */
+function classLike(node) {
+  const n = unwrapSlot(node);
+  if (!n) return false;
+  switch (n.k) {
+    case "str":
+    case "tpl":
+    case "jsx":
+      return true;
+    case "arr":
+      return n.elems.some((el) => classLike(el?.k === "spread" ? el.arg : el));
+    case "call":
+      return isCombiner(n.callee);
+    case "cond":
+      return classLike(n.cons) || classLike(n.alt);
+    case "bin":
+      if (n.op === "&&" || n.op === "||") return classLike(n.r);
+      return (n.op === "??" || n.op === "+") && (classLike(n.l) || classLike(n.r));
+    default:
+      return false;
+  }
+}
+
+const UNKNOWN_ROLES = { may: ALL_ROLES, not: ALL_ROLES, atoms: [] };
+/** Swaps the roles a condition may be true and false for. */
+const swapRoles = (x) => ({ may: x.not, not: x.may, atoms: x.atoms });
+/** The roles an arm can apply to: the guard's set inside the enclosing one. */
+const narrowRoles = (set, context) => set & context;
+
+/** Which roles a condition may be true for (`may`) and false for (`not`),
+ *  with the role atoms it read. Anything that is not a role atom, `!`, `&&`,
+ *  `||` or parentheses is unknown: true and false for every role. */
+function roleSets(node) {
+  const n = unwrapSlot(node);
+  if (!n) return UNKNOWN_ROLES;
+  if (n.k === "unary" && n.op === "!") return swapRoles(roleSets(n.arg));
+  if (n.k === "bin" && (n.op === "&&" || n.op === "||")) {
+    const a = roleSets(n.l);
+    const b = roleSets(n.r);
+    const atoms = [...a.atoms, ...b.atoms];
+    return n.op === "&&"
+      ? { may: a.may & b.may, not: a.not | b.not, atoms }
+      : { may: a.may | b.may, not: a.not & b.not, atoms };
+  }
+  if (n.k === "bin" && EQUALITY_OPS.has(n.op)) {
+    const negated = n.op === "!==" || n.op === "!=";
+    for (const side of [n.l, n.r]) {
+      const bit = roleLiteral(side);
+      if (bit === undefined) continue;
+      const atom = { may: bit, not: ALL_ROLES & ~bit, atoms: [unwrapSlot(side)] };
+      return negated ? swapRoles(atom) : atom;
+    }
+    for (const [flag, other] of [
+      [n.l, n.r],
+      [n.r, n.l],
+    ]) {
+      const o = unwrapSlot(other);
+      if (!isFlagRead(flag) || o?.k !== "id") continue;
+      if (o.name !== "true" && o.name !== "false") continue;
+      const sets = roleSets(flag);
+      return (o.name === "true") !== negated ? sets : swapRoles(sets);
+    }
+    return UNKNOWN_ROLES;
+  }
+  if (isFlagRead(n))
+    return { may: PREPARING, not: ALL_ROLES & ~PREPARING, atoms: [n] };
+  return UNKNOWN_ROLES;
+}
+
+/** Flag reads anywhere in a condition the guard grammar did not read. */
+function flagReadsIn(node) {
+  const n = unwrapSlot(node);
+  if (!n) return [];
+  if (isFlagRead(n)) return [n];
+  if (n.k === "member") return n.prop ? flagReadsIn(n.prop) : [];
+  return slotChildren(n).flatMap(flagReadsIn);
+}
+
+/**
+ * The preparing-slot reading of one file: every site (`index` an offset in
+ * `source`), whether each failed, and the host verdict. Throws when ts-mask
+ * cannot lex the file, so the check refuses rather than passing unread code.
+ */
+function readPreparingSlots(source, file) {
+  const jsx = file ? file.endsWith(".tsx") : true;
+  let masked;
+  let toks = null;
+  try {
+    masked = maskNonCode(source, jsx);
+    if (SLOT_CANDIDATE_RE.test(source))
+      toks = lexSlotTokens(source, masked, jsx);
+  } catch (e) {
+    if (e instanceof ScanError)
+      throw new Error(
+        `preparing-slot-hide: cannot lex ${file ?? "<input>"}: ${e.message}`,
+      );
+    throw e;
+  }
+  const sites = [];
+  if (toks === null) return { sites, host: null, hostFailed: false };
+  const decls = slotDeclarations();
+  let program;
+  try {
+    program = new SlotParser(toks, 0, toks.length, decls).statements();
+  } catch (e) {
+    if (e instanceof ScanError)
+      throw new Error(
+        `preparing-slot-hide: cannot lex ${file ?? "<input>"}: ${e.message}`,
+      );
+    throw e;
+  }
+  const consumed = new Set();
+  const mentions = [];
+  const addSite = (kind, span, index) => {
+    const s = { index, kind, value: source.slice(span.s, span.e), failed: false };
+    sites.push(s);
+    return s;
+  };
+  const consume = (atoms) => {
+    for (const atom of atoms) consumed.add(atom);
+  };
+
+  /** U2: a class expression's reachable operands, each read or failed. */
+  function evalClass(node, ctx, site, seen) {
+    if (!(ctx & PREPARING)) return;
+    const n = unwrapSlot(node);
+    if (!n) return;
+    const fail = () => {
+      site.failed = true;
+    };
+    switch (n.k) {
+      case "str":
+        if (textHides(n.v)) fail();
+        return;
+      case "tpl":
+        if (n.quasis.some(textHides)) fail();
+        for (const x of n.exprs) evalClass(x, ctx, site, seen);
+        return;
+      case "num":
+        return;
+      case "id": {
+        if (INERT_IDS.has(n.name)) return;
+        const init = decls.resolve(n.name);
+        if (init === null) return fail();
+        if (seen.has(n.name)) return;
+        seen.add(n.name);
+        evalClass(init, ctx, site, seen);
+        return;
+      }
+      case "cond": {
+        const r = roleSets(n.test);
+        const known = r.atoms.length > 0;
+        evalClass(n.cons, known ? narrowRoles(r.may, ctx) : ctx, site, seen);
+        evalClass(n.alt, known ? narrowRoles(r.not, ctx) : ctx, site, seen);
+        return;
+      }
+      case "bin": {
+        if (n.op === "&&" || n.op === "||") {
+          const r = roleSets(n.l);
+          const set = n.op === "&&" ? r.may : r.not;
+          const arm = r.atoms.length > 0 ? narrowRoles(set, ctx) : ctx;
+          evalClass(n.r, arm, site, seen);
+          return;
+        }
+        if (n.op === "??" || n.op === "+") {
+          evalClass(n.l, ctx, site, seen);
+          evalClass(n.r, ctx, site, seen);
+          return;
+        }
+        if (EQUALITY_OPS.has(n.op)) return;
+        return fail();
+      }
+      case "unary":
+        if (n.op !== "!") fail();
+        return;
+      case "arr":
+        for (const el of n.elems) evalClass(el, ctx, site, seen);
+        return;
+      case "spread":
+        evalClass(n.arg, ctx, site, seen);
+        return;
+      case "call":
+        if (!isCombiner(n.callee)) return fail();
+        for (const arg of n.args) evalClass(arg, ctx, site, seen);
+        return;
+      case "obj":
+        for (const m of n.members) {
+          if (m.kind === "spread") evalClass(m.value, ctx, site, seen);
+          if (m.kind !== "init" && m.kind !== "shorthand") continue;
+          const r = roleSets(m.value);
+          const set = r.atoms.length > 0 ? narrowRoles(r.may, ctx) : ctx;
+          if (!(set & PREPARING)) continue;
+          if (m.key.kind === "computed") evalClass(m.key.node, set, site, seen);
+          else if (textHides(String(m.key.name))) fail();
+        }
+        return;
+      case "jsx":
+        for (const a of n.attrs) {
+          if (a.spread !== undefined) fail();
+          else if (a.name === "className" || a.name === "class")
+            evalClass(a.value, ctx, site, seen);
+          else if (a.value) walk(a.value, ctx, a.value, false);
+        }
+        for (const c of n.children) {
+          if (c.k === "jsx") evalClass(c, ctx, site, seen);
+          else walk(c, ctx, c, false);
+        }
+        return;
+      default:
+        fail();
+    }
+  }
+
+  /** The return arguments of a callable's body, nested callables excluded. */
+  function returnsOf(node) {
+    if (!node) return [];
+    if (node.k === "return") return node.arg ? [node.arg] : [];
+    if (node.k === "func" || node.k === "class") return [];
+    if (!["block", "if", "switch", "loop", "opaque"].includes(node.k)) return [];
+    return slotChildren(node).flatMap(returnsOf);
+  }
+
+  /** An object or class member: role keys narrow the context, and a
+   *  preparing key is an entry site. */
+  function member(m, ctx) {
+    if (m.kind === "block") return walk(m.body, ctx, m.body, false);
+    if (m.kind === "spread" || m.kind === "junk")
+      return m.value && walk(m.value, ctx, m.value, false);
+    let role;
+    if (m.key.kind === "computed") {
+      role = roleLiteral(m.key.node);
+      if (role === undefined) walk(m.key.node, ctx, m.key.node, false);
+      else consume([unwrapSlot(m.key.node)]);
+    } else role = ROLE_BITS.get(String(m.key.name));
+    const set = role === undefined ? ctx : narrowRoles(role, ctx);
+    if (role === PREPARING && set & PREPARING) {
+      const site = addSite("entry", m.body ?? m.value ?? m.key, m.key.s);
+      const values = m.body ? returnsOf(m.body.body) : [m.value];
+      for (const v of values) evalClass(v, set, site, new Set());
+      return;
+    }
+    if (m.body) walk(m.body, set, m.body, false);
+    else if (m.value) walk(m.value, set, m.value, false);
+  }
+
+  /** A guard's arm: a site when it can apply to the preparing slot and holds
+   *  class code; otherwise walked under its narrowed context. */
+  function arm(node, set, classPos, root, guard) {
+    if (!node) return;
+    if (set & PREPARING && (classPos || classLike(node))) {
+      evalClass(node, set, addSite("guard", node, guard.s), new Set());
+    } else walk(node, set, root, classPos);
+  }
+
+  /** A statement-level branch (S3): every literal in it is its class code. */
+  function branch(node, set) {
+    if (!node) return;
+    if (set & PREPARING) {
+      const site = addSite("branch", node, node.s);
+      if (literalsHide(node)) site.failed = true;
+    }
+    walk(node, set, node, false);
+  }
+
+  /** A guard whose condition read no role atom may still hide a flag inside
+   *  an unrecognized test (`Boolean(isPreparing)`): those are mentions. */
+  function unreadGuard(test, root) {
+    for (const flag of flagReadsIn(test)) mentions.push({ node: flag, root });
+  }
+
+  /** The generic walk: `ctx` is the role set in force, `root` the extent a
+   *  mention climbs to, `classPos` whether the node is class code. */
+  function walk(node, ctx, root, classPos) {
+    const n = node;
+    if (!n) return;
+    switch (n.k) {
+      case "str":
+        if (n.v === "preparing" && !consumed.has(n))
+          mentions.push({ node: n, root });
+        return;
+      case "tpl":
+        if (n.exprs.length === 0 && n.quasis[0] === "preparing" && !consumed.has(n))
+          mentions.push({ node: n, root });
+        for (const x of n.exprs) walk(x, ctx, root, classPos);
+        return;
+      case "expr":
+        return walk(n.expr, ctx, n.expr, false);
+      case "return":
+        return walk(n.arg, ctx, n.arg, false);
+      case "var":
+        for (const d of n.decls) walk(d.init, ctx, d.init, false);
+        return;
+      case "func":
+        for (const d of n.defaults) walk(d, ctx, d, false);
+        return walk(n.body, ctx, n.body, false);
+      case "if": {
+        const r = roleSets(n.test);
+        if (r.atoms.length > 0) {
+          consume(r.atoms);
+          branch(n.cons, narrowRoles(r.may, ctx));
+          branch(n.alt, narrowRoles(r.not, ctx));
+          return walk(n.test, ctx, n.test, false);
+        }
+        break;
+      }
+      case "switch": {
+        let labelled = 0;
+        for (const c of n.cases) labelled |= roleLiteral(c.test) ?? 0;
+        if (labelled === 0) break;
+        walk(n.disc, ctx, n.disc, false);
+        let pending = 0;
+        for (const c of n.cases) {
+          if (c.test === null) pending |= ALL_ROLES & ~labelled;
+          else if (roleLiteral(c.test) !== undefined) {
+            consume([unwrapSlot(c.test)]);
+            pending |= roleLiteral(c.test);
+          } else walk(c.test, ctx, c.test, false);
+          if (c.body.length === 0) continue;
+          const set = narrowRoles(pending, ctx);
+          pending = 0;
+          const span = { s: c.body[0].s, e: c.body.at(-1).e };
+          if (set & PREPARING) {
+            const site = addSite("branch", span, c.s);
+            if (c.body.some(literalsHide)) site.failed = true;
+          }
+          for (const s of c.body) walk(s, set, s, false);
+        }
+        return;
+      }
+      case "cond": {
+        const r = roleSets(n.test);
+        if (r.atoms.length > 0) {
+          consume(r.atoms);
+          arm(n.cons, narrowRoles(r.may, ctx), classPos, root, n);
+          arm(n.alt, narrowRoles(r.not, ctx), classPos, root, n);
+          return walk(n.test, ctx, root, false);
+        }
+        unreadGuard(n.test, root);
+        walk(n.test, ctx, root, false);
+        walk(n.cons, ctx, root, classPos);
+        return walk(n.alt, ctx, root, classPos);
+      }
+      case "bin": {
+        if (n.op === "&&" || n.op === "||") {
+          const r = roleSets(n.l);
+          if (r.atoms.length > 0) {
+            consume(r.atoms);
+            const set = n.op === "&&" ? r.may : r.not;
+            arm(n.r, narrowRoles(set, ctx), classPos, root, n);
+            return walk(n.l, ctx, root, false);
+          }
+          unreadGuard(n.l, root);
+          walk(n.l, ctx, root, false);
+          return walk(n.r, ctx, root, classPos);
+        }
+        const keeps = n.op === "??" || n.op === "+";
+        walk(n.l, ctx, root, classPos && keeps);
+        return walk(n.r, ctx, root, classPos && keeps);
+      }
+      case "call":
+        walk(n.callee, ctx, root, false);
+        if (!isCombiner(n.callee)) {
+          for (const a of n.args) walk(a, ctx, root, false);
+          return;
+        }
+        for (const a of n.args) {
+          const arg = unwrapSlot(a);
+          if (arg?.k !== "obj") {
+            walk(a, ctx, a, true);
+            continue;
+          }
+          // A clsx object: each key's classes apply when its value is true.
+          for (const m of arg.members) {
+            if (m.kind !== "init" && m.kind !== "shorthand") {
+              member(m, ctx);
+              continue;
+            }
+            const r = roleSets(m.value);
+            if (r.atoms.length === 0) {
+              if (m.key.kind === "computed") walk(m.key.node, ctx, a, true);
+              walk(m.value, ctx, m.value, false);
+              continue;
+            }
+            consume(r.atoms);
+            const set = narrowRoles(r.may, ctx);
+            if (set & PREPARING) {
+              const site = addSite("guard", m.key, m.s);
+              if (m.key.kind === "computed")
+                evalClass(m.key.node, set, site, new Set());
+              else if (textHides(String(m.key.name))) site.failed = true;
+            }
+            walk(m.value, ctx, m.value, false);
+          }
+        }
+        return;
+      case "obj":
+      case "class":
+        for (const m of n.members) member(m, ctx);
+        return;
+      case "jsx":
+        for (const a of n.attrs) {
+          const v = a.spread !== undefined ? a.spread : a.value;
+          const cls = a.name === "className" || a.name === "class";
+          walk(v, ctx, v, cls);
+        }
+        for (const c of n.children) walk(c, ctx, c, false);
+        return;
+      case "wrap":
+      case "arr":
+      case "spread":
+        for (const c of slotChildren(n)) walk(c, ctx, root, classPos);
+        return;
+    }
+    const own = SLOT_STATEMENTS.has(n.k);
+    for (const c of slotChildren(n)) walk(c, ctx, own ? c : root, false);
+  }
+
+  for (const s of program) walk(s, ALL_ROLES, s, false);
+
+  for (const { node, root } of mentions) {
+    const site = addSite("mention", root ?? node, node.s);
+    if (literalsHide(root)) site.failed = true;
+  }
+
+  // S4: a class token whose variant names the preparing role, anywhere.
+  const literals = (list) =>
+    list.flatMap((t) => {
+      if (t.t === "str") return [[t.s, t.v]];
+      if (t.t === "tpl")
+        return [...t.quasis.map((q) => [t.s, q]), ...t.exprs.flatMap(literals)];
+      if (t.t !== "jsx") return [];
+      return [
+        ...t.attrs.flatMap((a) => {
+          if (a.spread) return literals(a.spread);
+          if (a.value?.t === "str") return [[a.value.s, a.value.v]];
+          if (a.value?.t === "jsx") return literals([a.value]);
+          return a.value ? literals(a.value.toks) : [];
+        }),
+        ...t.children.flatMap((c) => (c.t === "jsx" ? literals([c]) : literals(c.toks))),
+      ];
+    });
+  for (const [at, text] of literals(toks)) {
+    for (const cls of classTokens(text)) {
+      const { variants, utility } = splitClassToken(cls);
+      if (!variants.some((v) => v.includes("preparing")) || !isSlotHide(utility))
+        continue;
+      sites.push({ index: at, kind: "variant", value: cls, failed: true });
+    }
+  }
+
+  // S5: a file that names the slot vocabulary and renders classes is a host,
+  // and keeps a clipped preparing entry.
+  let host = null;
+  let rendersClasses = false;
+  const scanTokens = (list) => {
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (t.t === "id" && host === null && SLOT_HOST_VOCABULARY.has(t.v))
+        host = t.s;
+      if (
+        t.t === "id" &&
+        (t.v === "cn" || t.v === "clsx") &&
+        list[i + 1]?.t === "punct" &&
+        list[i + 1].v === "("
+      )
+        rendersClasses = true;
+      if (t.t === "tpl") for (const x of t.exprs) scanTokens(x);
+      if (t.t === "jsx") {
+        for (const a of t.attrs) {
+          if (a.name === "className") rendersClasses = true;
+          if (a.spread) scanTokens(a.spread);
+          else if (a.value?.t === "expr") scanTokens(a.value.toks);
+          else if (a.value?.t === "jsx") scanTokens([a.value]);
+        }
+        for (const c of t.children) scanTokens(c.t === "jsx" ? [c] : c.toks);
+      }
+    }
+  };
+  scanTokens(toks);
+  const isHost = host !== null && rendersClasses;
+  const clipped = sites.some(
+    (s) => s.kind === "entry" && s.value.includes(SLOT_CLIP),
+  );
+  return { sites, host: isHost ? host : null, hostFailed: isHost && !clipped };
+}
+
+/** Every preparing-slot site in `source` as `{ index, kind, value }`: kind
+ *  entry (a role-keyed preparing entry), guard (a role-guarded class arm or
+ *  clsx entry), branch (a role `switch` clause or `if` arm), variant (a class
+ *  token whose variant names the role) or mention (a `"preparing"` literal or
+ *  flag read no other kind consumed, valued by the extent it climbs to). */
+export function preparingSlotSites(source, file) {
+  return readPreparingSlots(source, file).sites.map(({ index, kind, value }) => ({
+    index,
+    kind,
+    value,
+  }));
+}
+
+/** Whether S5 treats `source` as a two-slot host. */
+export function isPreparingSlotHost(source, file) {
+  return readPreparingSlots(source, file).host !== null;
+}
+
+/** Scanner: every failed site's line, plus a host's first vocabulary line
+ *  when it keeps no clipped preparing entry. */
+const preparingSlotHide = ({ source }, file) => {
+  const { sites, host, hostFailed } = readPreparingSlots(source, file);
+  const lines = new Set();
+  for (const s of sites) if (s.failed) lines.add(lineOf(source, s.index));
+  if (hostFailed) lines.add(lineOf(source, host));
+  return [...lines];
+};
 
 // A `<Label>` open tag carrying no ASSOCIATION. Only two attributes associate a
 // label with what it names — `htmlFor` for a single control, `id` for a caption
@@ -2417,13 +4340,13 @@ export const CHECKS = [
   },
   {
     name: "preparing-slot-hide",
-    // Repo-wide: any host can adopt the two-slot pattern.
+    // Every non-vendored source file: any host can adopt the two-slot pattern.
     appliesTo: notVendoredUi,
     scan: preparingSlotHide,
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "a two-slot host's preparing slot hides only by a full clip plus `inert` (gd-conventions, the preparing-slot rule) — a visibility hide (`invisible`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity hide (`opacity-0`, `opacity-[0]`, `opacity-[0%]`, `[opacity:0]`) fades the slot in under its frame's PLACEHOLDER_FADE instead of showing it at once; and `hidden` or `[display:none]` skips the full-size layout the slot prepares out of sight. Hide it with `[clip-path:inset(50%)]` and set `inert` on the slot. A site is an object entry keyed `preparing` (bare or quoted), or a string or template literal guarded through `&&` or a ternary `?` by a `==`/`===` comparison with `\"preparing\"` on either side (parenthesized too) or by a bare `preparing` / `isPreparing`; a hide utility counts in any string or template literal of the value, after its variant prefixes (`md:`, `data-[x]:`) and `!` marker. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: hides without a hide utility (`sr-only`, a zero or collapsed size, `scale-0`, an off-screen translate), style-object hides (`style={{ visibility: \"hidden\" }}`), hides applied through a constant or helper the scan cannot read (`preparing: SLOT_HIDE`, `cn(base, hideClass)`), a computed `[\"preparing\"]` key or a guard on any other name, a negated guard's ternary alternate (`role !== \"preparing\" ? a : \"invisible\"`), a `switch` case or `if` branch that returns the class, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives): a hide token in a string of a `preparing` entry or guarded literal that is not a class list (a label or prose reading `hidden`), a descendant-targeting variant (`[&_svg]:hidden`, `*:hidden`), a `preparing` / `isPreparing` flag naming some other state (the PR mergeability `preparing` status), and a `preparing:` entry or guard spelled inside a string literal; an allowlist entry with rationale is the remedy",
+      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set in the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%) fades the slot in instead of showing it at once; and `hidden`, `[display:none]` or `[content-visibility:hidden]` skips the full-size layout the slot prepares. Each counts after its variant prefixes and `!` marker, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. The scan reads each file through ts-mask's lexer and fails one it cannot lex. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, or a `preparing`/`isPreparing` flag) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); (S3) a `switch` clause labelled `\"preparing\"` (fall-through included, and `default` when no clause names it) or an `if`/`else` arm that applies to the slot, where every literal counts; (S4) any class token whose variant names the role (`data-[role=preparing]:invisible`); and (S5) a host: a file whose code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots` and renders classes (`className`, `cn(`, `clsx(`) fails unless it keeps an S1 entry carrying the clip. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. Not handled (ordinary code the scan does not read yet): cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); a flag tested only in a loop condition; a role literal spelled with escapes; and a destructured or catch binding that shadows a readable same-file const (it resolves to the const). Fails closed (false positives): a label or prose string reading `hidden` or `collapse` inside a site; an unrelated hide in the same extent as a role mention (`isRole(r, \"preparing\") && open` in a statement that also holds `\"hidden\"`); a JSX spread in a preparing class arm; and a const whose name is bound twice in the file (a second const, a parameter), which reads as unreadable. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
   },
   {
     name: "bare-group-label",

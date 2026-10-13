@@ -290,8 +290,8 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   the surfaces. The held view (the last settled one) stays in flow and
   `inert`; a held FILE slot is also dimmed (`PLACEHOLDER_FADE` +
   `opacity-80` + `delay-100`), while a held placeholder stays undimmed. The
-  target prepares out of sight at full size, clipped over the held view (the
-  preparing-slot rule below).
+  target prepares out of sight at full size, clipped over the held view (how
+  the slot hides, and what the guard enforces: the preparing-slot rule below).
   It is promoted on its first settled report or a 400 ms bound. A slot
   reports both edges of its settle, so a shown file that is not settled right
   now (one the bound promoted, or one loading again after Raw to Preview or a
@@ -356,15 +356,20 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   placeholder, while the hold and the deferred selection's one-render lag feed
   interaction gates (handlers, hotkeys, palette); a render gate that reads the
   lag flickers before the hold starts.
-- Every two-slot host's preparing slot (the Changes pane's `FileSlot`, the
-  Actions tab's `RunSlots`, and any host that adopts the pattern) hides only
-  by a full clip (`[clip-path:inset(50%)]`) plus `inert`. Never `invisible`:
-  the vendored Button's `transition-all` transitions the inherited visibility,
-  so its buttons paint a frame late when the slot shows. Never opacity: the
-  slot frame's `PLACEHOLDER_FADE` would fade it in instead of showing it at
-  once. Never `hidden`: the slot must lay out at full size before it shows.
-  The `preparing-slot-hide` guard in `pnpm run checks` fails on any of these
-  in a preparing slot's classes.
+- The preparing-slot rule: every two-slot host's preparing slot (the Changes
+  pane's `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts
+  the pattern) hides only by a full clip (`[clip-path:inset(50%)]`) plus
+  `inert`, set in the host's role-keyed class map (`preparing: "absolute
+  inset-0 [clip-path:inset(50%)]"`). Never `invisible` or `collapse`: the
+  vendored Button's `transition-all` transitions the inherited visibility, so
+  its buttons paint a frame late when the slot shows. Never an opacity below
+  full: the slot would fade in instead of showing at once (both hosts' frames
+  carry `PLACEHOLDER_FADE`). Never `hidden`: the slot must lay out at full
+  size before it shows. The `preparing-slot-hide` guard in `pnpm run checks`
+  fails on those utilities in any preparing-slot class it reads (role-keyed
+  entries, role guards, role branches), on class code it cannot read there,
+  and on a slot host without a clipped preparing entry; its message names the
+  spellings it does not read yet.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already
