@@ -1704,6 +1704,10 @@ test("preparing-slot-hide flags a class arm guarded by the preparing role", () =
   );
   assertHostPasses([
     'const isShown = role === "shown";\nconst C = cn("h-full", isShown && "invisible");',
+    // A repeated reference to one alias is no cycle.
+    'const shown = role === "shown";\nconst C = cn(((shown && compact) || (shown && wide)) && "invisible");',
+    // A true alias cycle terminates, as an unknown condition.
+    'const a = b; const b = a; const C = cn("h-full", a && "invisible");',
   ]);
   // A role condition handed to a class helper the scan cannot read.
   assertHostFlags(
@@ -1715,6 +1719,10 @@ test("preparing-slot-hide flags a class arm guarded by the preparing role", () =
   // The role condition may sit anywhere in the helper's arguments.
   assertHostFlags([
     'const E = () => <div className={slotClass({ hide: role === "preparing" })} />;',
+  ]);
+  // A cycle through an alias still reads the atom beside it.
+  assertHostFlags([
+    'const a = b || role === "preparing"; const b = a; const C = cn("h-full", a && "invisible");',
   ]);
   // An alias the scan cannot resolve fails closed, whatever its arm holds.
   for (const arm of ['"invisible"', '"absolute"'])
@@ -1752,6 +1760,8 @@ test("preparing-slot-hide flags a role branch's literals", () => {
     // `break` ends the preparing clause, so nothing falls through.
     'const f = (role) => { switch (role) { case "preparing": break; case "shown": return "invisible"; } return "h-full"; };',
     'switch (true) { case r === "held": return "invisible"; default: return "h-full"; }',
+    // Every case is tested before `default`, wherever it sits.
+    'switch (true) { default: return "invisible"; case role === "preparing": return "absolute [clip-path:inset(50%)]"; }',
     // An if/else whose two arms both return ends the clause.
     'switch (role) { case "preparing": if (a) return "x"; else return "y"; case "shown": return "invisible"; }',
   ]);
@@ -2057,6 +2067,17 @@ test("preparing-slot-hide fails a slot host without a clipped preparing entry", 
         'import type { SlotPhase } from "@/features/diff/diff-pane-slots";',
         'const CLIP = "absolute inset-0 [clip-path:inset(50%)]";',
         'const C = { shown: "h-full", held: "h-full", preparing: CLIP };',
+        "export const F = ({ phase }: { phase: SlotPhase }) => <div className={C[phase]} />;",
+      ].join("\n"),
+    ),
+    [],
+  );
+  // The clip may sit in a clsx object key.
+  assert.deepEqual(
+    run(
+      [
+        'import type { SlotPhase } from "@/features/diff/diff-pane-slots";',
+        'const C = { shown: "h-full", held: "h-full", preparing: cn({ "absolute [clip-path:inset(50%)]": true }) };',
         "export const F = ({ phase }: { phase: SlotPhase }) => <div className={C[phase]} />;",
       ].join("\n"),
     ),
