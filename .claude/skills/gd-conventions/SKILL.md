@@ -359,17 +359,18 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
 - The preparing-slot rule: every two-slot host's preparing slot (the Changes
   pane's `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts
   the pattern) hides only by a full clip (`[clip-path:inset(50%)]`) plus
-  `inert`, set in the host's role-keyed class map (`preparing: "absolute
-  inset-0 [clip-path:inset(50%)]"`). Never `invisible` or `collapse`: the
-  vendored Button's `transition-all` transitions the inherited visibility, so
-  its buttons paint a frame late when the slot shows. Never an opacity below
-  full: the slot would fade in instead of showing at once (both hosts' frames
-  carry `PLACEHOLDER_FADE`). Never `hidden`: the slot must lay out at full
-  size before it shows. The `preparing-slot-hide` guard in `pnpm run checks`
-  fails on those utilities in any preparing-slot class it reads (role-keyed
-  entries, role guards, role branches), on class code it cannot read there,
-  and on a slot host without a clipped preparing entry; its message names the
-  spellings it does not read yet.
+  `inert`, set as the `preparing` entry of the host's role-keyed class map.
+  Never `invisible` or `collapse`: the vendored Button's `transition-all`
+  transitions the inherited visibility, so its buttons paint a frame late when
+  the slot shows. Never an opacity below full: the slot would fade in instead
+  of showing at once (both hosts' frames carry `PLACEHOLDER_FADE`). Never
+  `hidden` or `sr-only`: the slot must lay out at full size before it shows.
+  The `preparing-slot-hide` guard in `pnpm run checks` reads slot-host files
+  and slot-shaped class maps (a `preparing` key beside a class-valued `held` or
+  `shown`), and fails on those utilities in any preparing-slot class it reads
+  (role-keyed entries, role guards, role branches), on class code it cannot
+  read there, and on a slot host without a clipped preparing entry; its message
+  names the spellings it does not read yet.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already

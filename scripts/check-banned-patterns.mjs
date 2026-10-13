@@ -14,7 +14,8 @@ import { lineOf, maskNonCode, ScanError } from "./lib/ts-mask.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "src");
-const EXTENSIONS = [".ts", ".tsx"];
+/** The extensions every check reads; stylesheets are never scanned. */
+export const EXTENSIONS = [".ts", ".tsx"];
 
 // Widest gap (normalized chars) still counted as "the same expression" for a
 // two-token match. Sized so a formatter-wrapped class list stays one match while
@@ -436,9 +437,11 @@ const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 // ---------------------------------------------------- preparing-slot-hide
 // A two-slot host's PREPARING slot hides only by a full clip plus `inert`
 // (gd-conventions, 'The preparing-slot rule'). The reader lexes with ts-mask,
-// parses statements and expressions tolerantly (an unparsed region is still
-// walked, never skipped), and tracks which slot roles each class expression
-// can apply to, so negations, `&&` chains and `!== "shown"` resolve by role.
+// parses statements and expressions tolerantly (only type syntax and module
+// clauses are skipped; code it cannot parse is still walked), and tracks which
+// slot roles each class expression can apply to, so negations, `&&` chains
+// and `!== "shown"` resolve by role. Only slot context is analysed: a file
+// naming the slot vocabulary, or a slot-shaped map.
 
 /** The slot roles: the members of EntitySlotRole and SlotPhase, pinned equal
  *  to both unions by scripts/checks.test.mjs. */
@@ -469,6 +472,8 @@ const SLOT_HIDE_EXACT = new Set([
   "hidden",
   "[display:none]",
   "[content-visibility:hidden]",
+  // Collapses the slot to 1px, so it never lays out at full size.
+  "sr-only",
 ]);
 
 /** A class token split at its top-level `:` into variant segments and the
@@ -488,19 +493,28 @@ function splitClassToken(cls) {
   return { variants, utility: cls.slice(start).replace(/^!|!$/g, "") };
 }
 
-/** Whether `value` (an arbitrary opacity) is below full. */
+/** Whether an arbitrary opacity may be below full: a number under 1, a
+ *  percentage under 100, or anything the scan cannot read (`var(…)`). */
 function partialOpacity(value) {
   const percent = /^(\d*\.?\d+)%$/.exec(value);
   if (percent) return Number(percent[1]) < 100;
-  return /^\d*\.?\d+$/.test(value) && Number(value) < 1;
+  if (/^\d*\.?\d+$/.test(value)) return Number(value) < 1;
+  return true;
 }
 
-/** Whether a utility hides: visibility, opacity below full, or display. */
-function isSlotHide(utility) {
+/** Whether a utility hides: visibility, opacity below full, display, or a
+ *  collapsed size. An arbitrary value's `!important` is stripped first, and a
+ *  value the scan cannot read hides: Tailwind v4's `opacity-(--x)` variable
+ *  shorthand, and a visibility or display value that is not a plain keyword. */
+function isSlotHide(raw) {
+  const utility = raw.replace(/_?!important\]$/, "]");
   if (SLOT_HIDE_EXACT.has(utility)) return true;
+  if (/^opacity-\(.*\)$/.test(utility)) return true;
+  const property = /^\[(?:content-)?(?:visibility|display):(.*)\]$/.exec(utility);
+  if (property && !/^[a-z-]+$/.test(property[1])) return true;
   const scale = /^opacity-(\d+)$/.exec(utility);
   if (scale) return Number(scale[1]) < 100;
-  const arbitrary = /^(?:opacity-\[|\[opacity:)([^\]]*)\]$/.exec(utility);
+  const arbitrary = /^(?:opacity-\[|\[opacity:)(.*)\]$/.exec(utility);
   return arbitrary !== null && partialOpacity(arbitrary[1]);
 }
 
@@ -846,15 +860,28 @@ const TYPE_PREFIXES = new Set([
   "asserts",
 ]);
 const UNARY_KEYWORDS = new Set(["typeof", "void", "delete", "await"]);
+/** Import-clause words that bind nothing. */
+const IMPORT_WORDS = new Set(["type", "typeof", "as", "from", "with", "assert"]);
 /** Statement kinds: each child is its own mention extent. */
-const SLOT_STATEMENTS = new Set(["block", "if", "switch", "loop", "func"]);
+const SLOT_STATEMENTS = new Set([
+  "block",
+  "if",
+  "switch",
+  "loop",
+  "func",
+  "try",
+  "labeled",
+]);
 
 /**
  * A tolerant recursive-descent parser over one token array (a range of it).
- * Types are skipped wherever TS allows them (annotations, `as`, generics,
- * interfaces, type aliases, `declare`, enums), so a type literal never reads as
- * an object. Anything it cannot parse becomes an `opaque` node whose bracket
- * groups are still parsed and walked. `decls` collects every binding's kind.
+ * Only type syntax and module clauses are skipped (annotations, `as`,
+ * generics, interfaces, type aliases, `declare`, `implements`, import and
+ * export clauses), so a type literal never reads as an object. Every other
+ * region is parsed (decorators, enum initializers, pattern defaults and the
+ * `extends` expression included), and anything it cannot parse becomes an
+ * `opaque` node whose bracket groups are still parsed and walked. `decls`
+ * collects every binding's kind.
  */
 class SlotParser {
   constructor(toks, from, to, decls) {
@@ -943,8 +970,8 @@ class SlotParser {
       }
       if (t.v === "{") return this.block();
       if (t.v === "@") {
-        this.decorator();
-        return null;
+        const expr = this.decorator();
+        return expr && { k: "expr", expr, s: expr.s, e: expr.e };
       }
     }
     if (t.t === "id") {
@@ -952,7 +979,7 @@ class SlotParser {
       switch (t.v) {
         case "import":
           if (this.is("(", 1) || this.is(".", 1)) break;
-          this.skipModuleClause();
+          this.skipModuleClause(true);
           return null;
         case "export":
           this.p++;
@@ -991,8 +1018,7 @@ class SlotParser {
           return null;
         case "enum":
           if (n1?.t !== "id") break;
-          this.skipEnum();
-          return null;
+          return this.enumNode();
         case "namespace":
         case "module":
           if (n1?.t !== "id" && n1?.t !== "str") break;
@@ -1006,8 +1032,7 @@ class SlotParser {
         case "const":
           if (this.isId("enum", 1)) {
             this.p++;
-            this.skipEnum();
-            return null;
+            return this.enumNode();
           }
           return this.varDecl();
         case "let":
@@ -1049,10 +1074,13 @@ class SlotParser {
             if (this.is("{")) body.push(this.block());
             else if (this.isId("catch") || this.isId("finally")) {
               this.p++;
-              if (this.is("(")) this.skipGroup();
+              if (this.is("(")) {
+                body.push(...this.bindingNames(this.p + 1, this.close()));
+                this.skipGroup();
+              }
             } else break;
           }
-          return { k: "block", body, s: t.s, e: this.last() };
+          return { k: "try", body, s: t.s, e: this.last() };
         }
         case "return":
         case "throw": {
@@ -1068,13 +1096,15 @@ class SlotParser {
         case "break":
         case "continue":
           this.p++;
-          if (this.isId() && !this.peek().nl) this.p++;
+          let label = null;
+          if (this.isId() && !this.peek().nl) label = this.toks[this.p++].v;
           this.semi();
-          return null;
+          return { k: "jump", label, s: t.s, e: this.last() };
       }
       if (this.is(":", 1) && !SLOT_EXPR_KEYWORDS.has(t.v)) {
         this.p += 2;
-        return this.stmtOrSkip();
+        const body = this.stmtOrSkip();
+        return { k: "labeled", label: t.v, body, s: t.s, e: this.last() };
       }
     }
     const expr = this.expression();
@@ -1089,17 +1119,26 @@ class SlotParser {
     this.p = close + 1;
     return { k: "block", body, s: t.s, e: this.last() };
   }
-  /** An import or re-export clause, through its module specifier. */
-  skipModuleClause() {
+  /** An import or re-export clause, through its module specifier. An import
+   *  notes every name in its clause as a binding (a renamed specifier's
+   *  exported name too, which only makes resolution stricter). */
+  skipModuleClause(importing = false) {
     this.p++;
+    const note = (t) => {
+      if (importing && t.t === "id" && !IMPORT_WORDS.has(t.v))
+        this.decls.note(t.v, null);
+    };
     while (this.p < this.end && !this.is(";")) {
       const t = this.peek();
       if (t.t === "punct" && OPENERS.has(t.v)) {
+        const close = this.close();
+        for (let i = this.p + 1; i < close; i++) note(this.toks[i]);
         this.skipGroup();
         if (!this.isId("from") && !this.isId("as")) break;
         continue;
       }
       this.p++;
+      note(t);
       if (t.t === "str") {
         if (this.isId("with") || this.isId("assert")) {
           this.p++;
@@ -1122,13 +1161,65 @@ class SlotParser {
     }
     this.semi();
   }
-  skipEnum() {
+  /** An enum: its member initializers are code, parsed and walked. */
+  enumNode() {
+    const start = this.peek().s;
     while (this.p < this.end && !this.is("{")) this.p++;
-    if (this.is("{")) this.skipGroup();
+    if (!this.is("{")) return null;
+    const close = this.close();
+    const children = this.sub(this.p + 1, close).statements();
+    this.p = close + 1;
+    return { k: "opaque", s: start, e: this.last(), children };
   }
+  /** A decorator's expression, kept so it is walked like any other code. */
   decorator() {
     this.p++;
-    this.postfix();
+    return this.postfix();
+  }
+  /** Notes the names one binding target at `p` binds (an identifier or a
+   *  destructuring pattern, nested ones included), stopping before its own
+   *  annotation or default. Returns the pattern's inner default values and
+   *  computed keys, which are code. */
+  bindingTarget() {
+    if (this.isId()) {
+      this.decls.note(this.peek().v, null);
+      this.p++;
+      return [];
+    }
+    if (!this.is("{") && !this.is("[")) return [];
+    const object = this.is("{");
+    const close = this.close();
+    const q = this.sub(this.p + 1, close);
+    this.p = close + 1;
+    const code = [];
+    while (q.p < q.end) {
+      if (q.is(",")) {
+        q.p++;
+        continue;
+      }
+      if (q.is("...")) {
+        q.p++;
+        code.push(...q.bindingTarget());
+      } else if (object) {
+        const key = q.propertyKey();
+        if (key?.kind === "computed") code.push(key.node);
+        if (key && q.is(":")) {
+          q.p++;
+          code.push(...q.bindingTarget());
+        } else if (key?.kind === "id") q.decls.note(key.name, null);
+      } else code.push(...q.bindingTarget());
+      if (q.is("=")) {
+        q.p++;
+        const value = q.assign();
+        if (value) code.push(value);
+      }
+      while (q.p < q.end && !q.is(",")) code.push(q.skipOne());
+    }
+    return code.filter(Boolean);
+  }
+  /** The names a binding range [from, to) binds (a catch clause's). */
+  bindingNames(from, to) {
+    return this.sub(from, to).bindingTarget();
   }
   varDecl() {
     const kw = this.peek();
@@ -1139,8 +1230,9 @@ class SlotParser {
       if (this.isId()) {
         name = this.peek().v;
         this.p++;
-      } else if (this.is("{") || this.is("[")) this.skipGroup();
-      else break;
+      } else if (this.is("{") || this.is("[")) {
+        for (const init of this.bindingTarget()) decls.push({ name, init });
+      } else break;
       if (this.is("!")) this.p++;
       if (this.is(":")) {
         this.p++;
@@ -1168,7 +1260,10 @@ class SlotParser {
         q.p++;
         continue;
       }
-      while (q.is("@")) q.decorator();
+      while (q.is("@")) {
+        const d = q.decorator();
+        if (d) defaults.push(d);
+      }
       while (
         q.isId() &&
         MEMBER_MODIFIERS.has(q.peek().v) &&
@@ -1176,11 +1271,8 @@ class SlotParser {
       )
         q.p++;
       if (q.is("...")) q.p++;
-      if (q.is("{") || q.is("[")) q.skipGroup();
-      else if (q.isId()) {
-        this.decls.note(q.peek().v, null);
-        q.p++;
-      } else {
+      if (q.is("{") || q.is("[") || q.isId()) defaults.push(...q.bindingTarget());
+      else {
         q.p++;
         continue;
       }
@@ -1219,20 +1311,38 @@ class SlotParser {
     const start = this.peek().s;
     this.p++;
     if (this.is("*")) this.p++;
-    if (this.isId()) this.p++;
+    if (this.isId()) {
+      this.decls.note(this.peek().v, null);
+      this.p++;
+    }
     return this.callableRest(start);
   }
   classNode() {
     const start = this.peek().s;
     this.p++;
+    if (this.isId() && !this.isId("extends") && !this.isId("implements")) {
+      this.decls.note(this.peek().v, null);
+      this.p++;
+    }
+    // The `extends` expression is code; type parameters and `implements`
+    // lists are types.
+    const heritage = [];
     while (this.p < this.end && !this.is("{")) {
-      if (this.is("<")) this.skipAngles();
+      if (this.isId("extends")) {
+        this.p++;
+        const base = this.postfix();
+        if (base) heritage.push({ kind: "junk", value: base });
+      } else if (this.is("<")) this.skipAngles();
       else if (this.is("(") || this.is("[")) this.skipGroup();
       else this.p++;
     }
-    if (!this.is("{")) return { k: "class", members: [], s: start, e: this.last() };
+    if (!this.is("{"))
+      return { k: "class", members: heritage, s: start, e: this.last() };
     const close = this.close();
-    const members = this.sub(this.p + 1, close).classMembers();
+    const members = [
+      ...heritage,
+      ...this.sub(this.p + 1, close).classMembers(),
+    ];
     this.p = close + 1;
     return { k: "class", members, s: start, e: this.last() };
   }
@@ -1270,7 +1380,7 @@ class SlotParser {
         this.p++;
         continue;
       }
-      while (this.is("@")) this.decorator();
+      while (this.is("@")) members.push({ kind: "junk", value: this.decorator() });
       while (this.isId() && MEMBER_MODIFIERS.has(this.peek().v) && this.keyAhead(1))
         this.p++;
       if (this.isId("static") && this.is("{", 1)) {
@@ -1704,8 +1814,11 @@ class SlotParser {
         return { k: "obj", members, s: t.s, e: this.last() };
       }
       if (t.v === "@") {
-        this.decorator();
-        return this.primary();
+        const decorator = this.decorator();
+        const next = this.primary();
+        if (!decorator || !next) return next ?? decorator;
+        const children = [decorator, next];
+        return { k: "opaque", s: t.s, e: next.e, children };
       }
       return null;
     }
@@ -1842,9 +1955,11 @@ class SlotParser {
   }
 }
 
-/** Every binding name the file declares: a `const` with an initializer is
- *  resolvable; any other binding of the name (let, var, a second const, a
- *  parameter) makes it unresolvable. */
+/** Every binding name the file declares. A name resolves only when exactly
+ *  one `const` with an initializer binds it and nothing else in the file does:
+ *  an import specifier, a destructured or catch binding, a function or class
+ *  name, a parameter, a `let`/`var` or a second const each make it
+ *  unresolvable. */
 function slotDeclarations() {
   const consts = new Map();
   const others = new Set();
@@ -1857,6 +1972,10 @@ function slotDeclarations() {
       const list = consts.get(name);
       return list && list.length === 1 && !others.has(name) ? list[0] : null;
     },
+    /** Every const initializer bound to the name, resolvable or not. */
+    candidates(name) {
+      return consts.get(name) ?? [];
+    },
   };
 }
 
@@ -1864,7 +1983,10 @@ function slotDeclarations() {
 function slotChildren(n) {
   switch (n.k) {
     case "block":
+    case "try":
       return n.body;
+    case "labeled":
+      return [n.body];
     case "expr":
       return [n.expr];
     case "return":
@@ -1929,25 +2051,52 @@ function literalsHide(node) {
   return slotChildren(node).some(literalsHide);
 }
 
+/** Whether a statement always ends its clause: `return` or `throw`, a
+ *  `break`/`continue` that is unlabelled or names a label outside it, a
+ *  block whose last statement ends it, or an `if`/`else` whose two arms
+ *  both do. A labelled statement only adds its label; `try` never ends a
+ *  clause (conservative: its roles fall through). */
+function endsClause(s, labels) {
+  if (!s) return false;
+  switch (s.k) {
+    case "return":
+      return true;
+    case "jump":
+      return s.label === null || !labels.has(s.label);
+    case "block":
+      return endsClause(s.body.at(-1), labels);
+    case "if":
+      return endsClause(s.cons, labels) && endsClause(s.alt, labels);
+    case "labeled":
+      return endsClause(s.body, new Set([...labels, s.label]));
+    default:
+      return false;
+  }
+}
+/** Whether a clause body ends the clause: only its last statement counts, so
+ *  no role set falls through it into the next clause. */
+const terminates = (body) => endsClause(body.at(-1), new Set());
+
 const unwrapSlot = (n) => {
   while (n && n.k === "wrap") n = n.expr;
   return n;
 };
-/** The role bit of a role literal (a string, or a template with no
- *  interpolation), else undefined. */
-function roleLiteral(node) {
+/** A string, or a template with no interpolation: its text, else undefined. */
+function literalText(node) {
   const n = unwrapSlot(node);
-  if (n?.k === "str") return ROLE_BITS.get(n.v);
-  if (n?.k === "tpl" && n.exprs.length === 0) return ROLE_BITS.get(n.quasis[0]);
+  if (n?.k === "str") return n.v;
+  if (n?.k === "tpl" && n.exprs.length === 0) return n.quasis[0];
   return undefined;
 }
-/** A preparing-flag read: an identifier or member whose last name is a flag. */
+/** The role bit of a role literal, else undefined. */
+const roleLiteral = (node) => ROLE_BITS.get(literalText(node));
+/** A preparing-flag read: an identifier, member or literal element access
+ *  (`x["isPreparing"]`) whose last name is a flag. */
 function isFlagRead(node) {
   const n = unwrapSlot(node);
-  return (
-    (n?.k === "id" && FLAG_NAMES.has(n.name)) ||
-    (n?.k === "member" && n.name !== undefined && FLAG_NAMES.has(n.name))
-  );
+  if (n?.k === "id") return FLAG_NAMES.has(n.name);
+  if (n?.k !== "member") return false;
+  return FLAG_NAMES.has(n.name ?? literalText(n.prop));
 }
 const isCombiner = (callee) => {
   const n = unwrapSlot(callee);
@@ -1970,40 +2119,62 @@ function classLike(node) {
     case "cond":
       return classLike(n.cons) || classLike(n.alt);
     case "bin":
-      if (n.op === "&&" || n.op === "||") return classLike(n.r);
-      return (n.op === "??" || n.op === "+") && (classLike(n.l) || classLike(n.r));
+      if (n.op === "&&") return classLike(n.r);
+      return (
+        (n.op === "||" || n.op === "??" || n.op === "+") &&
+        (classLike(n.l) || classLike(n.r))
+      );
     default:
       return false;
   }
 }
 
-const UNKNOWN_ROLES = { may: ALL_ROLES, not: ALL_ROLES, atoms: [] };
+const UNKNOWN_ROLES = { may: ALL_ROLES, not: ALL_ROLES, atoms: [], broken: [] };
 /** Swaps the roles a condition may be true and false for. */
-const swapRoles = (x) => ({ may: x.not, not: x.may, atoms: x.atoms });
+const swapRoles = (x) => ({ ...x, may: x.not, not: x.may });
 /** The roles an arm can apply to: the guard's set inside the enclosing one. */
 const narrowRoles = (set, context) => set & context;
+const NO_RESOLVE = () => null;
+const NO_CANDIDATES = () => [];
+const RELATIONAL_OPS = new Set(["<", ">", "<=", ">=", "instanceof", "in"]);
 
 /** Which roles a condition may be true for (`may`) and false for (`not`),
- *  with the role atoms it read. Anything that is not a role atom, `!`, `&&`,
- *  `||` or parentheses is unknown: true and false for every role. */
-function roleSets(node) {
+ *  with the role atoms it read. An identifier `resolve` maps to a const whose
+ *  condition reads atoms is that condition (an alias). An identifier naming
+ *  such a const that does not resolve (another binding shares the name) is
+ *  listed in `broken`, and the caller fails it closed. Anything that is not
+ *  a role atom, an alias, `!`, `&&`, `||` or parentheses is unknown: true
+ *  and false for every role. */
+function roleSets(
+  node,
+  resolve = NO_RESOLVE,
+  seen = new Set(),
+  candidates = NO_CANDIDATES,
+) {
   const n = unwrapSlot(node);
   if (!n) return UNKNOWN_ROLES;
-  if (n.k === "unary" && n.op === "!") return swapRoles(roleSets(n.arg));
+  const sets = (x) => roleSets(x, resolve, seen, candidates);
+  if (n.k === "unary" && n.op === "!") return swapRoles(sets(n.arg));
   if (n.k === "bin" && (n.op === "&&" || n.op === "||")) {
-    const a = roleSets(n.l);
-    const b = roleSets(n.r);
+    const a = sets(n.l);
+    const b = sets(n.r);
     const atoms = [...a.atoms, ...b.atoms];
+    const broken = [...a.broken, ...b.broken];
     return n.op === "&&"
-      ? { may: a.may & b.may, not: a.not | b.not, atoms }
-      : { may: a.may | b.may, not: a.not & b.not, atoms };
+      ? { may: a.may & b.may, not: a.not | b.not, atoms, broken }
+      : { may: a.may | b.may, not: a.not & b.not, atoms, broken };
   }
   if (n.k === "bin" && EQUALITY_OPS.has(n.op)) {
     const negated = n.op === "!==" || n.op === "!=";
     for (const side of [n.l, n.r]) {
       const bit = roleLiteral(side);
       if (bit === undefined) continue;
-      const atom = { may: bit, not: ALL_ROLES & ~bit, atoms: [unwrapSlot(side)] };
+      const atom = {
+        may: bit,
+        not: ALL_ROLES & ~bit,
+        atoms: [unwrapSlot(side)],
+        broken: [],
+      };
       return negated ? swapRoles(atom) : atom;
     }
     for (const [flag, other] of [
@@ -2013,13 +2184,25 @@ function roleSets(node) {
       const o = unwrapSlot(other);
       if (!isFlagRead(flag) || o?.k !== "id") continue;
       if (o.name !== "true" && o.name !== "false") continue;
-      const sets = roleSets(flag);
-      return (o.name === "true") !== negated ? sets : swapRoles(sets);
+      const flagSets = sets(flag);
+      return (o.name === "true") !== negated ? flagSets : swapRoles(flagSets);
     }
     return UNKNOWN_ROLES;
   }
-  if (isFlagRead(n))
-    return { may: PREPARING, not: ALL_ROLES & ~PREPARING, atoms: [n] };
+  if (isFlagRead(n)) {
+    const not = ALL_ROLES & ~PREPARING;
+    return { may: PREPARING, not, atoms: [n], broken: [] };
+  }
+  if (n.k === "id" && !seen.has(n.name)) {
+    seen.add(n.name);
+    const init = resolve(n.name);
+    if (init === null) {
+      const held = candidates(n.name).some((c) => sets(c).atoms.length > 0);
+      return held ? { ...UNKNOWN_ROLES, atoms: [n], broken: [n] } : UNKNOWN_ROLES;
+    }
+    const alias = sets(init);
+    if (alias.atoms.length > 0) return { ...alias, atoms: [n] };
+  }
   return UNKNOWN_ROLES;
 }
 
@@ -2032,39 +2215,130 @@ function flagReadsIn(node) {
   return slotChildren(n).flatMap(flagReadsIn);
 }
 
+/** The role keys of an object literal's members, as one bit set. */
+function memberRoles(members) {
+  let roles = 0;
+  for (const m of members) {
+    if (!m.key) continue;
+    const role =
+      m.key.kind === "computed"
+        ? roleLiteral(m.key.node)
+        : ROLE_BITS.get(String(m.key.name));
+    roles |= role ?? 0;
+  }
+  return roles;
+}
+/** A class value: a string or template, a combiner call, or a conditional
+ *  or array of those. */
+function classValue(node) {
+  const n = unwrapSlot(node);
+  if (!n) return false;
+  if (n.k === "str" || n.k === "tpl") return true;
+  if (n.k === "call") return isCombiner(n.callee);
+  if (n.k === "cond") return classValue(n.cons) && classValue(n.alt);
+  if (n.k === "arr") return n.elems.length > 0 && n.elems.every(classValue);
+  return false;
+}
+/** A slot-shaped object or class body: a `preparing` key beside a `held` or
+ *  `shown` member whose value is a class value. */
+const slotShaped = (members) =>
+  (memberRoles(members) & PREPARING) !== 0 &&
+  members.some(
+    (m) =>
+      m.value != null &&
+      (memberRoles([m]) & ~PREPARING) !== 0 &&
+      classValue(m.value),
+  );
+
 /**
  * The preparing-slot reading of one file: every site (`index` an offset in
- * `source`), whether each failed, and the host verdict. Throws when ts-mask
- * cannot lex the file, so the check refuses rather than passing unread code.
+ * `source`), whether each failed, and the host verdict. A file ts-mask cannot
+ * lex, or one the reader itself cannot read (a nesting deep enough to exhaust
+ * the stack), throws with its path, so the check refuses rather than passing
+ * unread code.
  */
 function readPreparingSlots(source, file) {
+  try {
+    return readSlotsUnguarded(source, file);
+  } catch (e) {
+    const what = e instanceof ScanError ? "cannot lex" : "cannot read";
+    throw new Error(
+      `preparing-slot-hide: ${what} ${file ?? "<input>"}: ${e.message}`,
+    );
+  }
+}
+
+/** Every literal under a token list (strings, template quasis, JSX attribute
+ *  strings), as `[offset, text]`. */
+const tokenLiterals = (list) =>
+  list.flatMap((t) => {
+    if (t.t === "str") return [[t.s, t.v]];
+    if (t.t === "tpl")
+      return [...t.quasis.map((q) => [t.s, q]), ...t.exprs.flatMap(tokenLiterals)];
+    if (t.t !== "jsx") return [];
+    return [
+      ...t.attrs.flatMap((a) => {
+        if (a.spread) return tokenLiterals(a.spread);
+        if (a.value?.t === "str") return [[a.value.s, a.value.v]];
+        if (a.value?.t === "jsx") return tokenLiterals([a.value]);
+        return a.value ? tokenLiterals(a.value.toks) : [];
+      }),
+      ...t.children.flatMap((c) =>
+        c.t === "jsx" ? tokenLiterals([c]) : tokenLiterals(c.toks),
+      ),
+    ];
+  });
+/** Every literal under an AST node, as `[offset, text]`. */
+function nodeLiterals(node) {
+  if (!node) return [];
+  if (node.k === "str") return [[node.s, node.v]];
+  const own = node.k === "tpl" ? node.quasis.map((q) => [node.s, q]) : [];
+  return [...own, ...slotChildren(node).flatMap(nodeLiterals)];
+}
+
+function readSlotsUnguarded(source, file) {
   const jsx = file ? file.endsWith(".tsx") : true;
-  let masked;
-  let toks = null;
-  try {
-    masked = maskNonCode(source, jsx);
-    if (SLOT_CANDIDATE_RE.test(source))
-      toks = lexSlotTokens(source, masked, jsx);
-  } catch (e) {
-    if (e instanceof ScanError)
-      throw new Error(
-        `preparing-slot-hide: cannot lex ${file ?? "<input>"}: ${e.message}`,
-      );
-    throw e;
-  }
+  const masked = maskNonCode(source, jsx);
   const sites = [];
-  if (toks === null) return { sites, host: null, hostFailed: false };
+  if (!SLOT_CANDIDATE_RE.test(source))
+    return { sites, host: null, hostFailed: false };
+  const toks = lexSlotTokens(source, masked, jsx);
   const decls = slotDeclarations();
-  let program;
-  try {
-    program = new SlotParser(toks, 0, toks.length, decls).statements();
-  } catch (e) {
-    if (e instanceof ScanError)
-      throw new Error(
-        `preparing-slot-hide: cannot lex ${file ?? "<input>"}: ${e.message}`,
-      );
-    throw e;
-  }
+  const program = new SlotParser(toks, 0, toks.length, decls).statements();
+
+  // S5's vocabulary, and whether the file renders classes.
+  let vocabulary = null;
+  let rendersClasses = false;
+  const scanTokens = (list) => {
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (t.t === "id" && vocabulary === null && SLOT_HOST_VOCABULARY.has(t.v))
+        vocabulary = t.s;
+      if (
+        t.t === "id" &&
+        (t.v === "cn" || t.v === "clsx") &&
+        list[i + 1]?.t === "punct" &&
+        list[i + 1].v === "("
+      )
+        rendersClasses = true;
+      if (t.t === "tpl") for (const x of t.exprs) scanTokens(x);
+      if (t.t === "jsx") {
+        for (const a of t.attrs) {
+          if (a.name === "className") rendersClasses = true;
+          if (a.spread) scanTokens(a.spread);
+          else if (a.value?.t === "expr") scanTokens(a.value.toks);
+          else if (a.value?.t === "jsx") scanTokens([a.value]);
+        }
+        for (const c of t.children) scanTokens(c.t === "jsx" ? [c] : c.toks);
+      }
+    }
+  };
+  scanTokens(toks);
+  const hostFile = vocabulary !== null;
+
+  // Slot context: the whole of a host file, or a slot-shaped object literal
+  // or class body and everything nested in it. Outside it nothing is reported.
+  let inSlot = hostFile;
   const consumed = new Set();
   const mentions = [];
   const addSite = (kind, span, index) => {
@@ -2072,11 +2346,62 @@ function readPreparingSlots(source, file) {
     sites.push(s);
     return s;
   };
+  // A role-condition alias the scan cannot resolve fails closed, once.
+  const brokenAliases = new Set();
+  const roles = (n) => {
+    const r = roleSets(n, decls.resolve, new Set(), decls.candidates);
+    for (const id of r.broken) {
+      if (brokenAliases.has(id)) continue;
+      brokenAliases.add(id);
+      addSite("guard", id, id.s).failed = true;
+    }
+    return r;
+  };
+  /** Every role atom anywhere under a node. */
+  const roleAtomsIn = (node) => {
+    const n = unwrapSlot(node);
+    if (!n) return [];
+    const r = roles(n);
+    return r.atoms.length > 0 ? r.atoms : slotChildren(n).flatMap(roleAtomsIn);
+  };
   const consume = (atoms) => {
-    for (const atom of atoms) consumed.add(atom);
+    for (const atom of atoms) {
+      consumed.add(atom);
+      if (atom.k === "member" && atom.prop) consumed.add(unwrapSlot(atom.prop));
+    }
+  };
+  /** S4: a class token whose variant names the preparing role. */
+  const variantSites = (literals) => {
+    for (const [at, text] of literals) {
+      for (const cls of classTokens(text)) {
+        const { variants, utility } = splitClassToken(cls);
+        const named = variants.some((v) => v.toLowerCase().includes("preparing"));
+        if (named && isSlotHide(utility))
+          sites.push({ index: at, kind: "variant", value: cls, failed: true });
+      }
+    }
+  };
+  /** Whether an operand only yields a boolean, by syntax alone: a
+   *  comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const
+   *  whose initializer is one. A flag-named read is a value like any other. */
+  const booleanValued = (node, seen = new Set()) => {
+    const n = unwrapSlot(node);
+    if (!n) return true;
+    if (n.k === "unary" && n.op === "!") return true;
+    if (n.k === "bin" && (EQUALITY_OPS.has(n.op) || RELATIONAL_OPS.has(n.op)))
+      return true;
+    if (n.k === "bin" && (n.op === "&&" || n.op === "||"))
+      return booleanValued(n.l, seen) && booleanValued(n.r, seen);
+    if (n.k !== "id") return false;
+    if (n.name === "true" || n.name === "false") return true;
+    const init = decls.resolve(n.name);
+    if (init === null || seen.has(n.name)) return false;
+    seen.add(n.name);
+    return booleanValued(init, seen);
   };
 
-  /** U2: a class expression's reachable operands, each read or failed. */
+  /** U2: a class expression's reachable operands, each read or failed. An
+   *  entry site also records whether it read the clip, for S5. */
   function evalClass(node, ctx, site, seen) {
     if (!(ctx & PREPARING)) return;
     const n = unwrapSlot(node);
@@ -2084,12 +2409,16 @@ function readPreparingSlots(source, file) {
     const fail = () => {
       site.failed = true;
     };
+    const text = (t) => {
+      if (textHides(t)) fail();
+      if (t.includes(SLOT_CLIP)) site.clip = true;
+    };
     switch (n.k) {
       case "str":
-        if (textHides(n.v)) fail();
+        text(n.v);
         return;
       case "tpl":
-        if (n.quasis.some(textHides)) fail();
+        n.quasis.forEach(text);
         for (const x of n.exprs) evalClass(x, ctx, site, seen);
         return;
       case "num":
@@ -2104,26 +2433,31 @@ function readPreparingSlots(source, file) {
         return;
       }
       case "cond": {
-        const r = roleSets(n.test);
+        const r = roles(n.test);
         const known = r.atoms.length > 0;
         evalClass(n.cons, known ? narrowRoles(r.may, ctx) : ctx, site, seen);
         evalClass(n.alt, known ? narrowRoles(r.not, ctx) : ctx, site, seen);
         return;
       }
       case "bin": {
+        // `||` and `??` yield their left operand when it is truthy or
+        // non-nullish, so its classes apply; `&&` yields it only when falsy.
+        if ((n.op === "||" || n.op === "??") && !booleanValued(n.l))
+          evalClass(n.l, ctx, site, seen);
         if (n.op === "&&" || n.op === "||") {
-          const r = roleSets(n.l);
+          const r = roles(n.l);
           const set = n.op === "&&" ? r.may : r.not;
           const arm = r.atoms.length > 0 ? narrowRoles(set, ctx) : ctx;
           evalClass(n.r, arm, site, seen);
           return;
         }
-        if (n.op === "??" || n.op === "+") {
+        if (n.op === "??") return evalClass(n.r, ctx, site, seen);
+        if (n.op === "+") {
           evalClass(n.l, ctx, site, seen);
           evalClass(n.r, ctx, site, seen);
           return;
         }
-        if (EQUALITY_OPS.has(n.op)) return;
+        if (EQUALITY_OPS.has(n.op) || RELATIONAL_OPS.has(n.op)) return;
         return fail();
       }
       case "unary":
@@ -2143,7 +2477,7 @@ function readPreparingSlots(source, file) {
         for (const m of n.members) {
           if (m.kind === "spread") evalClass(m.value, ctx, site, seen);
           if (m.kind !== "init" && m.kind !== "shorthand") continue;
-          const r = roleSets(m.value);
+          const r = roles(m.value);
           const set = r.atoms.length > 0 ? narrowRoles(r.may, ctx) : ctx;
           if (!(set & PREPARING)) continue;
           if (m.key.kind === "computed") evalClass(m.key.node, set, site, seen);
@@ -2172,12 +2506,13 @@ function readPreparingSlots(source, file) {
     if (!node) return [];
     if (node.k === "return") return node.arg ? [node.arg] : [];
     if (node.k === "func" || node.k === "class") return [];
-    if (!["block", "if", "switch", "loop", "opaque"].includes(node.k)) return [];
+    const statements = ["block", "if", "switch", "loop", "opaque", "try", "labeled"];
+    if (!statements.includes(node.k)) return [];
     return slotChildren(node).flatMap(returnsOf);
   }
 
-  /** An object or class member: role keys narrow the context, and a
-   *  preparing key is an entry site. */
+  /** An object or class member: role keys narrow the context, and in slot
+   *  context a preparing key is an entry site. */
   function member(m, ctx) {
     if (m.kind === "block") return walk(m.body, ctx, m.body, false);
     if (m.kind === "spread" || m.kind === "junk")
@@ -2189,7 +2524,7 @@ function readPreparingSlots(source, file) {
       else consume([unwrapSlot(m.key.node)]);
     } else role = ROLE_BITS.get(String(m.key.name));
     const set = role === undefined ? ctx : narrowRoles(role, ctx);
-    if (role === PREPARING && set & PREPARING) {
+    if (inSlot && role === PREPARING && set & PREPARING) {
       const site = addSite("entry", m.body ?? m.value ?? m.key, m.key.s);
       const values = m.body ? returnsOf(m.body.body) : [m.value];
       for (const v of values) evalClass(v, set, site, new Set());
@@ -2224,18 +2559,73 @@ function readPreparingSlots(source, file) {
     for (const flag of flagReadsIn(test)) mentions.push({ node: flag, root });
   }
 
+  /** S3 over a `switch`: a role switch labels its clauses with role literals,
+   *  and a `switch (true)` gives each clause a role condition. A clause's
+   *  roles carry into the next one only through a body that falls through. */
+  function roleSwitch(n, ctx) {
+    const disc = unwrapSlot(n.disc);
+    const truthSwitch = disc?.k === "id" && disc.name === "true";
+    const hasRoles = n.cases.some((c) =>
+      truthSwitch
+        ? c.test !== null && roles(c.test).atoms.length > 0
+        : roleLiteral(c.test) !== undefined,
+    );
+    if (!hasRoles) return false;
+    walk(n.disc, ctx, n.disc, false);
+    let labelled = 0;
+    if (!truthSwitch)
+      for (const c of n.cases) labelled |= roleLiteral(c.test) ?? 0;
+    let remaining = ALL_ROLES;
+    let pending = 0;
+    for (const c of n.cases) {
+      let set;
+      if (c.test === null) set = truthSwitch ? remaining : ALL_ROLES & ~labelled;
+      else if (truthSwitch) {
+        const r = roles(c.test);
+        if (r.atoms.length > 0) consume(r.atoms);
+        else walk(c.test, ctx, c.test, false);
+        set = r.may & remaining;
+        remaining &= r.not;
+      } else if (roleLiteral(c.test) !== undefined) {
+        consume([unwrapSlot(c.test)]);
+        set = roleLiteral(c.test);
+      } else {
+        walk(c.test, ctx, c.test, false);
+        set = 0;
+      }
+      pending |= set;
+      if (c.body.length === 0) continue;
+      const applies = narrowRoles(pending, ctx);
+      if (terminates(c.body)) pending = 0;
+      const span = { s: c.body[0].s, e: c.body.at(-1).e };
+      if (applies & PREPARING) {
+        const site = addSite("branch", span, c.s);
+        if (c.body.some(literalsHide)) site.failed = true;
+      }
+      for (const s of c.body) walk(s, applies, s, false);
+    }
+    return true;
+  }
+
   /** The generic walk: `ctx` is the role set in force, `root` the extent a
-   *  mention climbs to, `classPos` whether the node is class code. */
+   *  mention climbs to, `classPos` whether the node is class code. Role
+   *  analysis runs only in slot context. */
   function walk(node, ctx, root, classPos) {
     const n = node;
     if (!n) return;
+    const slot = inSlot;
     switch (n.k) {
       case "str":
-        if (n.v === "preparing" && !consumed.has(n))
+        if (slot && n.v === "preparing" && !consumed.has(n))
           mentions.push({ node: n, root });
         return;
       case "tpl":
-        if (n.exprs.length === 0 && n.quasis[0] === "preparing" && !consumed.has(n))
+        if (
+          slot &&
+          n.exprs.length === 0 &&
+          n.quasis[0] === "preparing" &&
+          !consumed.has(n)
+        )
           mentions.push({ node: n, root });
         for (const x of n.exprs) walk(x, ctx, root, classPos);
         return;
@@ -2250,7 +2640,7 @@ function readPreparingSlots(source, file) {
         for (const d of n.defaults) walk(d, ctx, d, false);
         return walk(n.body, ctx, n.body, false);
       case "if": {
-        const r = roleSets(n.test);
+        const r = slot ? roles(n.test) : UNKNOWN_ROLES;
         if (r.atoms.length > 0) {
           consume(r.atoms);
           branch(n.cons, narrowRoles(r.may, ctx));
@@ -2259,63 +2649,51 @@ function readPreparingSlots(source, file) {
         }
         break;
       }
-      case "switch": {
-        let labelled = 0;
-        for (const c of n.cases) labelled |= roleLiteral(c.test) ?? 0;
-        if (labelled === 0) break;
-        walk(n.disc, ctx, n.disc, false);
-        let pending = 0;
-        for (const c of n.cases) {
-          if (c.test === null) pending |= ALL_ROLES & ~labelled;
-          else if (roleLiteral(c.test) !== undefined) {
-            consume([unwrapSlot(c.test)]);
-            pending |= roleLiteral(c.test);
-          } else walk(c.test, ctx, c.test, false);
-          if (c.body.length === 0) continue;
-          const set = narrowRoles(pending, ctx);
-          pending = 0;
-          const span = { s: c.body[0].s, e: c.body.at(-1).e };
-          if (set & PREPARING) {
-            const site = addSite("branch", span, c.s);
-            if (c.body.some(literalsHide)) site.failed = true;
-          }
-          for (const s of c.body) walk(s, set, s, false);
-        }
-        return;
-      }
+      case "switch":
+        if (slot && roleSwitch(n, ctx)) return;
+        break;
       case "cond": {
-        const r = roleSets(n.test);
+        const r = slot ? roles(n.test) : UNKNOWN_ROLES;
         if (r.atoms.length > 0) {
           consume(r.atoms);
           arm(n.cons, narrowRoles(r.may, ctx), classPos, root, n);
           arm(n.alt, narrowRoles(r.not, ctx), classPos, root, n);
           return walk(n.test, ctx, root, false);
         }
-        unreadGuard(n.test, root);
+        if (slot) unreadGuard(n.test, root);
         walk(n.test, ctx, root, false);
         walk(n.cons, ctx, root, classPos);
         return walk(n.alt, ctx, root, classPos);
       }
       case "bin": {
+        // `||` and `??` yield their left operand as a value.
+        const leftValue = n.op === "||" || n.op === "??" || n.op === "+";
         if (n.op === "&&" || n.op === "||") {
-          const r = roleSets(n.l);
+          const r = slot ? roles(n.l) : UNKNOWN_ROLES;
           if (r.atoms.length > 0) {
             consume(r.atoms);
             const set = n.op === "&&" ? r.may : r.not;
             arm(n.r, narrowRoles(set, ctx), classPos, root, n);
-            return walk(n.l, ctx, root, false);
+            const value = n.op === "||" && !booleanValued(n.l);
+            return walk(n.l, ctx, root, classPos && value);
           }
-          unreadGuard(n.l, root);
-          walk(n.l, ctx, root, false);
-          return walk(n.r, ctx, root, classPos);
+          if (slot) unreadGuard(n.l, root);
         }
-        const keeps = n.op === "??" || n.op === "+";
-        walk(n.l, ctx, root, classPos && keeps);
+        const keeps = leftValue || n.op === "&&";
+        walk(n.l, ctx, root, classPos && leftValue);
         return walk(n.r, ctx, root, classPos && keeps);
       }
       case "call":
         walk(n.callee, ctx, root, false);
         if (!isCombiner(n.callee)) {
+          // A role condition handed to a helper in class code, anywhere in
+          // its arguments: the helper's classes depend on it, and the scan
+          // cannot read the helper.
+          const fed = slot && classPos ? n.args.flatMap(roleAtomsIn) : [];
+          if (fed.length > 0) {
+            consume(fed);
+            addSite("guard", n, n.s).failed = true;
+          }
           for (const a of n.args) walk(a, ctx, root, false);
           return;
         }
@@ -2331,7 +2709,7 @@ function readPreparingSlots(source, file) {
               member(m, ctx);
               continue;
             }
-            const r = roleSets(m.value);
+            const r = slot ? roles(m.value) : UNKNOWN_ROLES;
             if (r.atoms.length === 0) {
               if (m.key.kind === "computed") walk(m.key.node, ctx, a, true);
               walk(m.value, ctx, m.value, false);
@@ -2350,9 +2728,16 @@ function readPreparingSlots(source, file) {
         }
         return;
       case "obj":
-      case "class":
+      case "class": {
+        const shaped = !slot && slotShaped(n.members);
+        if (shaped) {
+          inSlot = true;
+          variantSites(nodeLiterals(n));
+        }
         for (const m of n.members) member(m, ctx);
+        if (shaped) inSlot = false;
         return;
+      }
       case "jsx":
         for (const a of n.attrs) {
           const v = a.spread !== undefined ? a.spread : a.value;
@@ -2377,74 +2762,26 @@ function readPreparingSlots(source, file) {
     const site = addSite("mention", root ?? node, node.s);
     if (literalsHide(root)) site.failed = true;
   }
-
-  // S4: a class token whose variant names the preparing role, anywhere.
-  const literals = (list) =>
-    list.flatMap((t) => {
-      if (t.t === "str") return [[t.s, t.v]];
-      if (t.t === "tpl")
-        return [...t.quasis.map((q) => [t.s, q]), ...t.exprs.flatMap(literals)];
-      if (t.t !== "jsx") return [];
-      return [
-        ...t.attrs.flatMap((a) => {
-          if (a.spread) return literals(a.spread);
-          if (a.value?.t === "str") return [[a.value.s, a.value.v]];
-          if (a.value?.t === "jsx") return literals([a.value]);
-          return a.value ? literals(a.value.toks) : [];
-        }),
-        ...t.children.flatMap((c) => (c.t === "jsx" ? literals([c]) : literals(c.toks))),
-      ];
-    });
-  for (const [at, text] of literals(toks)) {
-    for (const cls of classTokens(text)) {
-      const { variants, utility } = splitClassToken(cls);
-      if (!variants.some((v) => v.includes("preparing")) || !isSlotHide(utility))
-        continue;
-      sites.push({ index: at, kind: "variant", value: cls, failed: true });
-    }
-  }
+  if (hostFile) variantSites(tokenLiterals(toks));
 
   // S5: a file that names the slot vocabulary and renders classes is a host,
-  // and keeps a clipped preparing entry.
-  let host = null;
-  let rendersClasses = false;
-  const scanTokens = (list) => {
-    for (let i = 0; i < list.length; i++) {
-      const t = list[i];
-      if (t.t === "id" && host === null && SLOT_HOST_VOCABULARY.has(t.v))
-        host = t.s;
-      if (
-        t.t === "id" &&
-        (t.v === "cn" || t.v === "clsx") &&
-        list[i + 1]?.t === "punct" &&
-        list[i + 1].v === "("
-      )
-        rendersClasses = true;
-      if (t.t === "tpl") for (const x of t.exprs) scanTokens(x);
-      if (t.t === "jsx") {
-        for (const a of t.attrs) {
-          if (a.name === "className") rendersClasses = true;
-          if (a.spread) scanTokens(a.spread);
-          else if (a.value?.t === "expr") scanTokens(a.value.toks);
-          else if (a.value?.t === "jsx") scanTokens([a.value]);
-        }
-        for (const c of t.children) scanTokens(c.t === "jsx" ? [c] : c.toks);
-      }
-    }
+  // and keeps a preparing entry that reads the clip (through a const too).
+  const isHost = hostFile && rendersClasses;
+  const clipped = sites.some((s) => s.kind === "entry" && s.clip);
+  return {
+    sites,
+    host: isHost ? vocabulary : null,
+    hostFailed: isHost && !clipped,
   };
-  scanTokens(toks);
-  const isHost = host !== null && rendersClasses;
-  const clipped = sites.some(
-    (s) => s.kind === "entry" && s.value.includes(SLOT_CLIP),
-  );
-  return { sites, host: isHost ? host : null, hostFailed: isHost && !clipped };
 }
 
 /** Every preparing-slot site in `source` as `{ index, kind, value }`: kind
- *  entry (a role-keyed preparing entry), guard (a role-guarded class arm or
- *  clsx entry), branch (a role `switch` clause or `if` arm), variant (a class
- *  token whose variant names the role) or mention (a `"preparing"` literal or
- *  flag read no other kind consumed, valued by the extent it climbs to). */
+ *  entry (a role-keyed preparing entry), guard (a role-guarded class arm, a
+ *  clsx entry, or a role condition fed to a class helper), branch (a role
+ *  `switch` clause or `if` arm), variant (a class token whose variant names
+ *  the role) or mention (a `"preparing"` literal or flag read no other kind
+ *  consumed, valued by the extent it climbs to). Slot context only: a slot
+ *  host file, or a slot-shaped object. */
 export function preparingSlotSites(source, file) {
   return readPreparingSlots(source, file).sites.map(({ index, kind, value }) => ({
     index,
@@ -4346,7 +4683,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set in the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%) fades the slot in instead of showing it at once; and `hidden`, `[display:none]` or `[content-visibility:hidden]` skips the full-size layout the slot prepares. Each counts after its variant prefixes and `!` marker, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. The scan reads each file through ts-mask's lexer and fails one it cannot lex. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, or a `preparing`/`isPreparing` flag) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); (S3) a `switch` clause labelled `\"preparing\"` (fall-through included, and `default` when no clause names it) or an `if`/`else` arm that applies to the slot, where every literal counts; (S4) any class token whose variant names the role (`data-[role=preparing]:invisible`); and (S5) a host: a file whose code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots` and renders classes (`className`, `cn(`, `clsx(`) fails unless it keeps an S1 entry carrying the clip. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. Not handled (ordinary code the scan does not read yet): cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); a flag tested only in a loop condition; a role literal spelled with escapes; and a destructured or catch binding that shadows a readable same-file const (it resolves to the const). Fails closed (false positives): a label or prose string reading `hidden` or `collapse` inside a site; an unrelated hide in the same extent as a role mention (`isRole(r, \"preparing\") && open` in a statement that also holds `\"hidden\"`); a JSX spread in a preparing class arm; and a const whose name is bound twice in the file (a second const, a parameter), which reads as unreadable. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
+      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set as the `preparing` entry of the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%, and any opacity the scan cannot read, such as `opacity-[var(…)]` or Tailwind v4's `opacity-(--x)`) fades the slot in instead of showing it at once; and `hidden`, `[display:none]`, `[content-visibility:hidden]` or `sr-only` (a 1px box) skips the full-size layout the slot prepares. A `[visibility:…]` or `[display:…]` value that is not a plain keyword (`var(…)`, `calc(…)`) is unreadable and counts as a hide. Each counts after its variant prefixes, its `!` marker and an arbitrary value's `!important`, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. Scope: only slot context is analysed, meaning a slot-host file (its code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots`) or, anywhere, a slot-shaped object literal or class body (a `preparing` key beside a `held` or `shown` member whose value is a class value: a string or template, a combiner call, or a conditional or array of those) with everything nested in it; outside it nothing is reported, since \"preparing\" is also a merge status and `isPreparing` a common loading flag. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, a `preparing`/`isPreparing` flag read through a name, member or literal element access, or a const holding such a condition) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); a guard naming a role-condition const the scan cannot resolve, because another binding shares its name, fails closed; (S3) a `switch` clause labelled `\"preparing\"` (`default` when no clause names it), a `switch (true)` clause whose condition can be true for the slot (`default` when every earlier condition can be false for it), or an `if`/`else` arm that applies to the slot, where every literal counts; a clause's roles carry into the next clause unless its last statement ends it (`return`, `throw`, a `break` or `continue` that is unlabelled or names a label outside the clause, a block whose last statement ends it, or an `if`/`else` whose two arms both do; a `try` never ends a clause); (S4) inside slot context, any class token whose variant names the role, in any letter case (`data-[role=preparing]:invisible`); and (S5) a host: a slot-host file that renders classes (`className`, `cn(`, `clsx(`) fails unless a preparing entry reads the clip, through a const too. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, `||` and `??`, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. The left operand of `||` and `??` is a class value too, unless it is boolean by syntax (a comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const holding one); a flag-named read there is a value like any other. A const is readable only when nothing else in the file binds its name (an import, a destructured or catch binding, a function or class name, a parameter, a `let`/`var` or a second const). A role condition anywhere in the arguments of a helper call in class code (`className={slotClass({ hide: role === \"preparing\" })}`) fails: the scan cannot read the helper. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. A file ts-mask cannot lex fails with \"cannot lex\", and one the reader cannot read (a nesting deep enough to exhaust the stack) with \"cannot read\"; an allowlist entry does not rescue either, since the scan runs before the allowlist is consulted, so rewrite the shape ts-mask refuses (its documented ambiguities: a postfix `x++ / y`, a `<const T,>` arrow, a generic function type in .tsx) or extend ts-mask. Not handled (ordinary code the scan does not read yet): a preparing entry outside a slot-host file that is not in a role-keyed map; slot code outside a slot-host file that is not a role-keyed map (for example a frame component branching on a `preparing` prop); outside a slot-host file, a slot map whose sibling values are not class literals (`{ shown: SHOWN_CLS, preparing: HIDE }`); a class variant naming the role, outside slot context; a helper's result hoisted out of the class position (`const cls = slotClass(role === \"preparing\")`, then `className={cls}`); cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); collapsed-size hides (`size-0`, `h-0`/`w-0` with an overflow clip, `scale-0`, `max-h-0`), left out because they are common layout idioms; a flag tested only in a loop condition; a role literal spelled with escapes; and stylesheets (selectors and `@apply`, which the guard never reads). Fails closed (false positives): a label or prose string reading a hide utility inside a site; a map that is not a slot but keys `preparing` beside a class-valued `held` or `shown`; a role-literal comparison on a value that is not a slot role in a slot-host file (`plan.kind === \"held\"`); an unrelated hide in the extent a role mention climbs to (`isRole(r, \"preparing\")` beside `\"hidden\"` in one statement); a JSX spread in a preparing class arm; and a const whose name is bound anywhere else in the file. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
   },
   {
     name: "bare-group-label",
