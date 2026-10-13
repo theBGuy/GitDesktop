@@ -29,7 +29,10 @@ paths:
   — no hardcoded green/amber/red classes; never meaning by color alone.
 - Per-variant copy/labels/glyphs are `Record` lookups, never ternary chains.
 - Loading: `ListRowSkeletons` for bordered row lists, `LazyPanelFallback` for Suspense —
-  never `fallback={null}`, no spinner where skeletons exist.
+  never `fallback={null}`, no spinner where skeletons exist. A boot-path boundary over a
+  panel with a settled resting state renders that state as its fallback instead
+  (`DiffRestingFallback`, message shared via `diff-resting-message.ts`), with an
+  aria-busy region and its sr-only status beside it rather than inside it.
 - Queries with identity axes beyond the repo use `keepPreviousDataForKeyAxes`; callers
   gate derived UI on `!isPlaceholderData`.
 - A mutation whose host can unmount mid-flight rides `await mutateAsync` continuations,

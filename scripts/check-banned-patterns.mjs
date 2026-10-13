@@ -2301,7 +2301,7 @@ export const CHECKS = [
     scan: perFile(NULL_FALLBACK_RE),
     allowlist: [],
     message:
-      "`fallback={null}` blanks the region while the boundary is active, with no aria-busy and nothing announced to assistive tech — lazy panels use LazyPanelFallback (src/components/lazy-panel-fallback.tsx); any other fallback-taking host, or a boundary whose absence is genuinely invisible, needs an allowlist entry with rationale",
+      "`fallback={null}` blanks the region while the boundary is active, with no aria-busy and nothing announced to assistive tech — lazy panels use LazyPanelFallback (src/components/lazy-panel-fallback.tsx), or, at a boot-path boundary over a panel with a settled resting state, that state itself (DiffRestingFallback, src/features/diff/DiffRestingFallback.tsx); any other fallback-taking host, or a boundary whose absence is genuinely invisible, needs an allowlist entry with rationale",
   },
   {
     name: "bare-group-label",

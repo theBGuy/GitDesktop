@@ -265,7 +265,13 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   McpServersSection's `role="group"` scope groups.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
-  region has no aria-busy and announces nothing to assistive tech.
+  region has no aria-busy and announces nothing to assistive tech. The
+  carve-out: a boot-path boundary over a panel with a settled resting state
+  renders that state as its fallback (`DiffRestingFallback`, sharing its
+  message with DiffViewer through `diff-resting-message.ts`), with an aria-busy
+  region and its sr-only status beside it rather than inside it, so the first
+  frame already shows the panel's own resting message; still never
+  `fallback={null}`.
 - Loading placeholders for a bordered row list are `ListRowSkeletons`
   (`src/components/list-row-skeleton.tsx`), with `lines` matching the real row's
   line count and `name` naming the content ("Loading pull requests…") — flush

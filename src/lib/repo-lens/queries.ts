@@ -4,7 +4,12 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { useForgeStatus, useRemotes, useRemoteUrl } from "@/lib/git/queries";
+import {
+  forgeAwaitingFirstAnswer,
+  useForgeStatus,
+  useRemotes,
+  useRemoteUrl,
+} from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -18,9 +23,9 @@ import { loadRepoLens, saveRepoLens } from "./store";
 // other lens's pull request under the selected number.
 export const lensKey = (repo: string) => ["repo-lens", repo] as const;
 
-/** The raw persisted lens for a repo, unfiltered by the gate. Prefer
- *  {@link useRepoLens} in surfaces — this exists so the setter and the switcher
- *  can read/write the stored preference directly. */
+/** The cached lens for a repo, unfiltered by the gate: the persisted choice, or
+ *  a session-only lens a navigation applied over it. Read only by
+ *  {@link useLensState}; surfaces take its projections. */
 export function useRepoLensRaw(repo: string) {
   return useQuery({
     queryKey: lensKey(repo),
@@ -46,11 +51,17 @@ const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
  *  order). `settled` is owned here rather than re-derived by consumers — the reads behind
  *  the lens are this module's implementation detail, and a consumer re-deriving them
  *  drifts the moment the lens gains an input. The single-value exports below are
- *  projections of this and nothing else; consumers needing more than one take this. */
+ *  projections of this and nothing else; consumers needing more than one take this.
+ *  `waiting` is the window before the forge's FIRST answer on a repo with an
+ *  upstream remote, when the gate can't be known yet; never `!settled`, which
+ *  flips on every background refetch. `storedLens` is the cached lens choice,
+ *  ungated: what a supported fork settles on. */
 export function useLensState(repo: string): {
   gate: boolean;
   lens: RemoteLens;
   settled: boolean;
+  waiting: boolean;
+  storedLens: RemoteLens;
 } {
   const forge = useForgeStatus(repo);
   const remotes = useRemotes(repo);
@@ -68,6 +79,11 @@ export function useLensState(repo: string): {
       lensReadSettled(forge) &&
       lensReadSettled(remotes) &&
       lensReadSettled(raw),
+    waiting:
+      !gate &&
+      forgeAwaitingFirstAnswer(forge) &&
+      Boolean(remotes.data?.includes("upstream")),
+    storedLens: raw.data ?? "origin",
   };
 }
 

@@ -1,16 +1,9 @@
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import {
-  forgeAwaitingFirstAnswer,
-  forgeProbeReason,
-  useForgeStatus,
-  useRemotes,
-} from "@/lib/git/queries";
+import { forgeProbeReason } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import {
-  useLensGate,
+  useLensState,
   useRemoteSlug,
-  useRepoLens,
-  useRepoLensRaw,
   useSetRepoLens,
 } from "@/lib/repo-lens/queries";
 
@@ -18,30 +11,20 @@ import {
  * The per-repo Fork | Upstream lens switch, shared by the Pull Requests and
  * Issues panels. A segmented pair of `aria-pressed` buttons mirroring the
  * Open/Closed state filter in ConversationListPanel. Once the forge answers it
- * renders only on a GitHub fork (useLensGate), hidden on GitLab/Bitbucket or a
- * repo with no upstream remote, and each button's `title` names the repo it
- * targets (the resolved slug). Before that first answer, any repo with an
- * upstream remote shows the pair disabled with its reason and no titles (the
- * slugs resolve only behind the gate), so the scope row is in place from the
- * first frame; the Fork / Upstream labels carry the meaning either way.
+ * renders only on a GitHub fork (useLensState's `gate`), hidden on
+ * GitLab/Bitbucket or a repo with no upstream remote, and each button's
+ * `title` names the repo it targets (the resolved slug). Before that first
+ * answer (`waiting`), any repo with an upstream remote shows the pair disabled
+ * with its reason and no titles (the slugs resolve only behind the gate), so
+ * the scope row is in place from the first frame; the Fork / Upstream labels
+ * carry the meaning either way.
  */
 export function RepoLensSwitcher({ repoPath }: { repoPath: string }) {
-  const gate = useLensGate(repoPath);
-  const lens = useRepoLens(repoPath);
+  const { gate, lens, waiting, storedLens } = useLensState(repoPath);
   const setLens = useSetRepoLens(repoPath);
   // Resolve both slugs only while the switcher is shown.
   const forkSlug = useRemoteSlug(repoPath, "origin", gate);
   const upstreamSlug = useRemoteSlug(repoPath, "upstream", gate);
-  // The wait reads the forge's first answer, never useLensState's `settled`,
-  // which flips on every background refetch and would re-flash the pair. The
-  // local upstream remote limits the wait to repos that can be forks.
-  const forge = useForgeStatus(repoPath);
-  const remotes = useRemotes(repoPath);
-  const stored = useRepoLensRaw(repoPath);
-  const waiting =
-    !gate &&
-    forgeAwaitingFirstAnswer(forge) &&
-    Boolean(remotes.data?.includes("upstream"));
 
   if (!gate && !waiting) return null;
 
@@ -51,7 +34,7 @@ export function RepoLensSwitcher({ repoPath }: { repoPath: string }) {
   ];
   // The gated lens reads "origin" until the gate opens, so the wait shows the
   // stored lens, which is what a supported fork settles on.
-  const pressed = waiting ? (stored.data ?? "origin") : lens;
+  const pressed = waiting ? storedLens : lens;
   const reason = waiting
     ? forgeProbeReason("checking", "switch between fork and upstream")
     : null;
