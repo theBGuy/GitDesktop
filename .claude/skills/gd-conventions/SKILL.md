@@ -321,7 +321,8 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   PR view reserves its strip line and waits for its feed (`feedReady`), the
   issue view's late sections reserve their minimum loaded height with an error
   arm (`SectionReadLine`), and the run frame's jobs slot fills downward under a
-  header whose geometry is final once a cached row seeds it.
+  header seeded from a cached row and latched for the frame (a late forge-status
+  answer, or a stale row at the land, can still re-lay it).
   Each frame mirrors the loaded header's rows, titled from the cached list row
   of the LIVE selection (the view's own number lags a reveal), latched when the
   frame starts so a row that lands later never re-lays it. `RepositoryView`

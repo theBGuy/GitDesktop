@@ -34,9 +34,9 @@ function run(id, over = {}) {
   };
 }
 
-function entry(family, data, dataUpdatedAt = 1000, extra = [""]) {
+function entry(family, data, dataUpdatedAt = 1000) {
   return {
-    key: ["repo", REPO, "actions", family, ...extra],
+    key: ["repo", REPO, "actions", family, ""],
     data,
     dataUpdatedAt,
   };
@@ -107,8 +107,12 @@ test("a workflows entry whose id equals the run id never seeds", () => {
   // A Workflow carrying every run seed field: only the family name keeps it out.
   const workflow = { ...run(RUN_ID), name: "CI", path: ".github/ci.yml" };
   const entries = [
-    { key: ["repo", REPO, "actions", "workflows"], data: [workflow] },
-  ].map((e) => ({ ...e, dataUpdatedAt: 1000 }));
+    {
+      key: ["repo", REPO, "actions", "workflows"],
+      data: [workflow],
+      dataUpdatedAt: 1000,
+    },
+  ];
   assert.equal(cachedRunRow(entries, RUN_ID), undefined);
 });
 
