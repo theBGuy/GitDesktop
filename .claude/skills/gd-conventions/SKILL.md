@@ -357,19 +357,22 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   interaction gates (handlers, hotkeys, palette); a render gate that reads the
   lag flickers before the hold starts.
 - The preparing-slot rule: every two-slot host's preparing slot (the Changes
-  pane's `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts
-  the pattern) hides only by a full clip (`[clip-path:inset(50%)]`) plus
-  `inert`, set as the `preparing` entry of the host's role-keyed class map.
-  Never `invisible` or `collapse`: the vendored Button's `transition-all`
+  pane's `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts the
+  pattern) hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`,
+  set as the `preparing` entry of the host's role-keyed class map, written as a
+  plain class string (a literal, a literal-only `+` chain or interpolation-free
+  template, or a same-file const of one) whose only clip-path token is the
+  clip. Never `invisible` or `collapse`: the vendored Button's `transition-all`
   transitions the inherited visibility, so its buttons paint a frame late when
   the slot shows. Never an opacity below full: the slot would fade in instead
   of showing at once (both hosts' frames carry `PLACEHOLDER_FADE`). Never
   `hidden` or `sr-only`: the slot must lay out at full size before it shows.
-  The `preparing-slot-hide` guard in `pnpm run checks` reads slot-host files
-  and slot-shaped class maps (a `preparing` key beside a class-valued `held` or
-  `shown`), and fails on those utilities in any preparing-slot class it reads
-  (role-keyed entries, role guards, role branches), on class code it cannot
-  read there, and on a slot host without a clipped preparing entry; its message
+  The `preparing-slot-hide` guard in `pnpm run checks` reads slot-host files and
+  slot-shaped class maps (a `preparing` key beside `held` or `shown`; outside a
+  host, a class-valued one), and fails on those utilities in any preparing-slot
+  class it reads (role-keyed entries, role guards, role branches), on class code
+  it cannot read there, and on a slot host whose slot maps' `preparing` entries
+  aren't plain clipped class strings, or that keeps no slot map; its message
   names the spellings it does not read yet.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7

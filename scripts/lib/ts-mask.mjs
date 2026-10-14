@@ -12,9 +12,9 @@ export const lineOf = (src, index) => src.slice(0, index).split("\n").length;
 
 /** Punctuation after which an expression starts, so a `/` opens a regex literal
  *  and, in .tsx, a `<` opens a JSX element. */
-const EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
+export const EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
 /** Keywords after which an expression starts. */
-const EXPR_KEYWORDS = new Set([
+export const EXPR_KEYWORDS = new Set([
   "return",
   "throw",
   "case",

@@ -10,7 +10,13 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { lineOf, maskNonCode, ScanError } from "./lib/ts-mask.mjs";
+import {
+  EXPR_KEYWORDS,
+  EXPR_OPENERS,
+  lineOf,
+  maskNonCode,
+  ScanError,
+} from "./lib/ts-mask.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "src");
@@ -457,13 +463,135 @@ const INERT_IDS = new Set(["undefined", "null", "true", "false"]);
 /** Files whose text can hold no site skip the parse (they are still lexed):
  *  every site needs a role literal, a flag, or the host vocabulary. */
 const SLOT_CANDIDATE_RE =
-  /preparing|Preparing|["'`](?:held|shown)["'`]|EntitySlotRole|SlotPhase|entityHoldSlots/;
+  /preparing|Preparing|["'`](?:held|shown)["'`]|EntitySlotRole|EntityHoldSlot|SlotPhase|entityHoldSlots/;
 const SLOT_HOST_VOCABULARY = new Set([
   "EntitySlotRole",
   "SlotPhase",
   "entityHoldSlots",
+  "EntityHoldSlot",
 ]);
 const SLOT_CLIP = "[clip-path:inset(50%)]";
+/** Tailwind 4.3.3's own utilities that set `clip-path` (both set it beside
+ *  their 1px or static box); every other clip-path token is an arbitrary
+ *  `[clip-path:…]` or `[-webkit-clip-path:…]` property. */
+const CLIP_PATH_UTILITIES = new Set(["sr-only", "not-sr-only"]);
+/** What DOM class parsing splits on: ASCII whitespace only. */
+const CLASS_SEPARATOR = /[\t\n\f\r ]+/;
+const LINE_TERMINATORS = new Set([
+  "\n",
+  "\r",
+  String.fromCharCode(0x2028),
+  String.fromCharCode(0x2029),
+]);
+
+/** A string or template literal's raw source body cooked as JS reads it,
+ *  through cookStringBody. That helper reads the joined view, where a line
+ *  continuation is a backslash before a space; raw source spells it as a
+ *  backslash before a line terminator, and a backslash-escaped space is just a
+ *  space, so both are rewritten into its terms first. */
+function cookLiteral(raw) {
+  let body = "";
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== "\\") {
+      body += raw[i];
+      continue;
+    }
+    const next = raw[i + 1] ?? "";
+    if (next === "\r" && raw[i + 2] === "\n") {
+      body += "\\ ";
+      i += 2;
+    } else if (LINE_TERMINATORS.has(next)) {
+      body += "\\ ";
+      i++;
+    } else if (next === " ") {
+      body += "\\x20";
+      i++;
+    } else {
+      body += `\\${next}`;
+      i++;
+    }
+  }
+  return cookStringBody(body);
+}
+
+/** Arbitrary properties that set or reset `clip-path`. */
+const CLIP_DEFEATING_PROPERTIES = new Set(["clip-path", "-webkit-clip-path", "all"]);
+/** Whether a utility is an arbitrary property that sets or resets
+ *  `clip-path`. The property name is lowercased first: CSS names are
+ *  case-insensitive, and Tailwind emits `[cLIP-PATH:none]` (a name starting
+ *  `-` or a-z) as a working rule. */
+function clipDefeating(utility) {
+  const property = /^\[([^:\]]+):/.exec(utility);
+  return property !== null && CLIP_DEFEATING_PROPERTIES.has(property[1].toLowerCase());
+}
+/** Whether a plain class string's only clip-path token is the bare clip: no
+ *  variant, the `!` marker at one end at most, an arbitrary value's
+ *  `!important` stripped. An `[all:…]` token resets clip-path as well, so it
+ *  counts as a second clip-path token, and so do `sr-only`/`not-sr-only`. */
+function soleBareClip(text) {
+  const clips = text
+    .split(CLASS_SEPARATOR)
+    .filter(Boolean)
+    .map((token) => ({ token, ...splitClassToken(token) }))
+    .map((c) => ({ ...c, utility: c.utility.replace(/_?!important\]$/, "]") }))
+    .filter(
+      (c) => clipDefeating(c.utility) || CLIP_PATH_UTILITIES.has(c.utility),
+    );
+  if (clips.length !== 1) return false;
+  const [{ token, variants, utility }] = clips;
+  const bothEnds = token.startsWith("!") && token.endsWith("!");
+  return variants.length === 0 && utility === SLOT_CLIP && !bothEnds;
+}
+/** Whether a class token is an arbitrary property that sets or resets
+ *  clip-path, with any variant or `!` marker. */
+const arbitraryClipPath = (token) =>
+  clipDefeating(splitClassToken(token).utility);
+
+/** A string, or a template with no interpolation: its cooked text. */
+function cookedLiteralText(node) {
+  const n = unwrapSlot(node);
+  if (n?.k === "str") return n.text;
+  if (n?.k === "tpl" && n.exprs.length === 0) return n.texts[0];
+  return undefined;
+}
+/** The slot role a member key names, read cooked. A computed key resolves
+ *  to a literal, directly or through `resolve` to a same-file const of one;
+ *  any other computed key is `unreadable`. */
+function keyRole(key, resolve = NO_RESOLVE) {
+  if (key.kind !== "computed")
+    return { role: ROLE_BITS.get(key.text), unreadable: false };
+  let n = unwrapSlot(key.node);
+  if (n?.k === "id") {
+    const init = resolve(n.name);
+    n = init === null ? null : init;
+  }
+  const text = cookedLiteralText(n);
+  if (text === undefined) return { role: undefined, unreadable: true };
+  return { role: ROLE_BITS.get(text), unreadable: false };
+}
+
+/** The five XML named character references; JSX decodes these and numeric
+ *  ones in attribute strings. */
+const XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+/** A JSX attribute string's text: no backslash escapes, but HTML character
+ *  references decode. A numeric reference or one of the five XML names is
+ *  read; any other reference is `unknown`, and fails closed in slot context. */
+function decodeJsxEntities(raw) {
+  let unknown = false;
+  const text = raw.replace(
+    /&(#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/g,
+    (whole, ref) => {
+      if (ref[0] === "#") {
+        const hex = ref[1] === "x" || ref[1] === "X";
+        const code = hex ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
+        if (code <= 0x10ffff) return String.fromCodePoint(code);
+      } else if (XML_ENTITIES[ref] !== undefined) return XML_ENTITIES[ref];
+      unknown = true;
+      return whole;
+    },
+  );
+  return { text, unknown };
+}
 const SLOT_HIDE_EXACT = new Set([
   "invisible",
   "collapse",
@@ -502,12 +630,15 @@ function partialOpacity(value) {
   return true;
 }
 
-/** Whether a utility hides: visibility, opacity below full, display, or a
- *  collapsed size. An arbitrary value's `!important` is stripped first, and a
- *  value the scan cannot read hides: Tailwind v4's `opacity-(--x)` variable
- *  shorthand, and a visibility or display value that is not a plain keyword. */
-function isSlotHide(raw) {
+/** Whether a utility hides: visibility, opacity below full, display, or
+ *  `sr-only`'s 1px box. An arbitrary value's `!important` is stripped first,
+ *  and a value the scan cannot read hides: Tailwind v4's `opacity-(--x)`
+ *  variable shorthand, and a visibility or display value that is not a plain
+ *  keyword. `srOnly` false reads `sr-only` as screen-reader text, not a hide:
+ *  only the slot's own classes (a map entry, a class-position arm) count it. */
+function isSlotHide(raw, srOnly = true) {
   const utility = raw.replace(/_?!important\]$/, "]");
+  if (utility === "sr-only") return srOnly;
   if (SLOT_HIDE_EXACT.has(utility)) return true;
   if (/^opacity-\(.*\)$/.test(utility)) return true;
   const property = /^\[(?:content-)?(?:visibility|display):(.*)\]$/.exec(utility);
@@ -520,8 +651,10 @@ function isSlotHide(raw) {
 
 /** The class tokens of a literal's text. */
 const classTokens = (text) => text.split(/\s+/).filter(Boolean);
-const textHides = (text) =>
-  classTokens(text).some((cls) => isSlotHide(splitClassToken(cls).utility));
+const textHides = (text, srOnly = true) =>
+  classTokens(text).some((cls) =>
+    isSlotHide(splitClassToken(cls).utility, srOnly),
+  );
 
 /** Punctuators, longest first. `>` is always one token (generics close with
  *  it), so the parser re-joins `>=` and shifts from adjacent tokens. */
@@ -555,25 +688,6 @@ const SLOT_PUNCTUATORS = [
   "**",
   "<<",
 ];
-/** ts-mask's expression-start test: after these a `/` opens a regex and, in
- *  .tsx, a `<` opens JSX. Mirrored so both read one source the same way. */
-const SLOT_EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
-const SLOT_EXPR_KEYWORDS = new Set([
-  "return",
-  "throw",
-  "case",
-  "typeof",
-  "instanceof",
-  "in",
-  "of",
-  "new",
-  "delete",
-  "void",
-  "yield",
-  "await",
-  "else",
-  "do",
-]);
 const SLOT_IDENT_RE = /[\p{ID_Start}$_#][\p{ID_Continue}$\u200c\u200d]*/uy;
 const SLOT_NUMBER_RE =
   /(?:0[xXoObB][\da-fA-F_]+n?|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?n?|\.\d[\d_]*(?:[eE][+-]?\d+)?)/y;
@@ -599,9 +713,9 @@ function lexSlotTokens(source, masked, jsx) {
     if (/[\w$]/.test(masked[k])) {
       let s = k;
       while (s > 0 && /[\w$]/.test(masked[s - 1])) s--;
-      return SLOT_EXPR_KEYWORDS.has(masked.slice(s, k + 1));
+      return EXPR_KEYWORDS.has(masked.slice(s, k + 1));
     }
-    return SLOT_EXPR_OPENERS.has(masked[k]);
+    return EXPR_OPENERS.has(masked[k]);
   };
   const quotedEnd = (i) => {
     const end = masked.indexOf(masked[i], i + 1);
@@ -753,7 +867,7 @@ function lexSlotTokens(source, masked, jsx) {
         if (id) {
           i = push({ t: "id", s: i, e: i + id[0].length, v: id[0] });
         } else if (num && num[0] !== ".") {
-          i = push({ t: "num", s: i, e: i + num[0].length });
+          i = push({ t: "num", s: i, e: i + num[0].length, v: num[0] });
         } else {
           let p = SLOT_PUNCTUATORS.find((x) => masked.startsWith(x, i)) ?? c;
           if (p === "?." && /\d/.test(masked[i + 2] ?? "")) p = "?";
@@ -785,13 +899,15 @@ function bracketMatches(toks) {
     else if (t.v === ")" || t.v === "]" || t.v === "}") {
       const open = stack.pop();
       if (open === undefined || CLOSERS[toks[open].v] !== t.v)
-        throw new ScanError(`unbalanced \`${t.v}\` at offset ${t.s}`);
+        throw Object.assign(new ScanError(`unbalanced \`${t.v}\``), { at: t.s });
       m.set(open, i);
       m.set(i, open);
     }
   }
-  if (stack.length > 0)
-    throw new ScanError(`unclosed \`${toks[stack[0]].v}\` at offset ${toks[stack[0]].s}`);
+  if (stack.length > 0) {
+    const open = toks[stack[0]];
+    throw Object.assign(new ScanError(`unclosed \`${open.v}\``), { at: open.s });
+  }
   bracketCache.set(toks, m);
   return m;
 }
@@ -953,7 +1069,8 @@ class SlotParser {
     return node ?? { k: "opaque", s: t.s, e: t.e, children: [] };
   }
   tokenNode(t) {
-    if (t.t === "str") return { k: "str", v: t.v, s: t.s, e: t.e };
+    if (t.t === "str")
+      return { k: "str", v: t.v, text: cookLiteral(t.v), s: t.s, e: t.e };
     if (t.t === "tpl") return this.templateNode(t);
     if (t.t === "jsx") return this.jsxNode(t);
     if (t.t === "id") return { k: "id", name: t.v, s: t.s, e: t.e };
@@ -1101,7 +1218,7 @@ class SlotParser {
           this.semi();
           return { k: "jump", label, s: t.s, e: this.last() };
       }
-      if (this.is(":", 1) && !SLOT_EXPR_KEYWORDS.has(t.v)) {
+      if (this.is(":", 1) && !EXPR_KEYWORDS.has(t.v)) {
         this.p += 2;
         const body = this.stmtOrSkip();
         return { k: "labeled", label: t.v, body, s: t.s, e: this.last() };
@@ -1358,7 +1475,9 @@ class SlotParser {
     if (t === null) return null;
     if (t.t === "id" || t.t === "str" || t.t === "num") {
       this.p++;
-      return { kind: t.t === "id" ? "id" : t.t, name: t.v, s: t.s, e: t.e };
+      const kind = t.t === "id" ? "id" : t.t;
+      const text = t.t === "str" ? cookLiteral(t.v) : t.v;
+      return { kind, name: t.v, text, s: t.s, e: t.e };
     }
     if (t.t === "tpl") {
       this.p++;
@@ -1752,7 +1871,10 @@ class SlotParser {
       else if (t.v === "!" && !t.nl) {
         this.p++;
         e = { k: "wrap", expr: e, s: e.s, e: t.e };
-      } else if ((t.v === "++" || t.v === "--") && !t.nl) this.p++;
+      } else if ((t.v === "++" || t.v === "--") && !t.nl) {
+        this.p++;
+        e = { k: "unary", op: t.v, arg: e, s: e.s, e: t.e };
+      }
       else if (t.v === "<") {
         const j = this.typeArgsEnd(this.p);
         const n = this.toks[j];
@@ -1835,14 +1957,22 @@ class SlotParser {
   }
   templateNode(t) {
     const exprs = t.exprs.map((toks) => this.nested(toks)).filter(Boolean);
-    return { k: "tpl", quasis: t.quasis, exprs, s: t.s, e: t.e };
+    const texts = t.quasis.map(cookLiteral);
+    return { k: "tpl", quasis: t.quasis, texts, exprs, s: t.s, e: t.e };
   }
   jsxNode(t) {
     const attrs = t.attrs.map((a) => {
       if (a.spread) return { spread: this.nested(a.spread) };
       let value = null;
-      if (a.value?.t === "str")
-        value = { k: "str", v: a.value.v, s: a.value.s, e: a.value.e };
+      if (a.value?.t === "str") {
+        // No backslash escapes here, but character references decode; an
+        // unreadable one matters only where the string is classes.
+        const { text, unknown } = decodeJsxEntities(a.value.v);
+        const { s, e } = a.value;
+        const cls = a.name === "className" || a.name === "class";
+        const badEntity = unknown && cls;
+        value = { k: "str", v: a.value.v, text, badEntity, s, e };
+      }
       else if (a.value?.t === "jsx") value = this.jsxNode(a.value);
       else if (a.value) value = this.nested(a.value.toks);
       return { name: a.name, value };
@@ -2043,11 +2173,14 @@ function slotChildren(n) {
   }
 }
 
-/** Whether any string or template literal under `node` carries a hide. */
+/** Whether any string or template literal under `node` carries a hide
+ *  (`sr-only` excepted: a branch or mention extent renders other elements,
+ *  where it is screen-reader text). */
 function literalsHide(node) {
   if (!node) return false;
-  if (node.k === "str") return textHides(node.v);
-  if (node.k === "tpl" && node.quasis.some(textHides)) return true;
+  if (node.k === "str") return textHides(node.text, false);
+  if (node.k === "tpl" && node.texts.some((q) => textHides(q, false)))
+    return true;
   return slotChildren(node).some(literalsHide);
 }
 
@@ -2081,22 +2214,15 @@ const unwrapSlot = (n) => {
   while (n && n.k === "wrap") n = n.expr;
   return n;
 };
-/** A string, or a template with no interpolation: its text, else undefined. */
-function literalText(node) {
-  const n = unwrapSlot(node);
-  if (n?.k === "str") return n.v;
-  if (n?.k === "tpl" && n.exprs.length === 0) return n.quasis[0];
-  return undefined;
-}
-/** The role bit of a role literal, else undefined. */
-const roleLiteral = (node) => ROLE_BITS.get(literalText(node));
+/** The role bit of a role literal, read cooked, else undefined. */
+const roleLiteral = (node) => ROLE_BITS.get(cookedLiteralText(node));
 /** A preparing-flag read: an identifier, member or literal element access
  *  (`x["isPreparing"]`) whose last name is a flag. */
 function isFlagRead(node) {
   const n = unwrapSlot(node);
   if (n?.k === "id") return FLAG_NAMES.has(n.name);
   if (n?.k !== "member") return false;
-  return FLAG_NAMES.has(n.name ?? literalText(n.prop));
+  return FLAG_NAMES.has(n.name ?? cookedLiteralText(n.prop));
 }
 const isCombiner = (callee) => {
   const n = unwrapSlot(callee);
@@ -2217,17 +2343,12 @@ function flagReadsIn(node) {
   return slotChildren(n).flatMap(flagReadsIn);
 }
 
-/** The role keys of an object literal's members, as one bit set. */
-function memberRoles(members) {
+/** The role keys of an object literal's members, read cooked, as one bit
+ *  set. */
+function memberRoles(members, resolve = NO_RESOLVE) {
   let roles = 0;
-  for (const m of members) {
-    if (!m.key) continue;
-    const role =
-      m.key.kind === "computed"
-        ? roleLiteral(m.key.node)
-        : ROLE_BITS.get(String(m.key.name));
-    roles |= role ?? 0;
-  }
+  for (const m of members)
+    if (m.key) roles |= keyRole(m.key, resolve).role ?? 0;
   return roles;
 }
 /** A class value: a string or template, a combiner call, or a conditional
@@ -2257,31 +2378,46 @@ const slotShaped = (members) =>
  * `source`), whether each failed, and the host verdict. A file ts-mask cannot
  * lex, or one the reader itself cannot read (a nesting deep enough to exhaust
  * the stack), throws with its path, so the check refuses rather than passing
- * unread code.
+ * unread code; any other throw is reported as the reader's own bug.
  */
 function readPreparingSlots(source, file) {
+  const name = file ?? "<input>";
   try {
     return readSlotsUnguarded(source, file);
   } catch (e) {
-    const what = e instanceof ScanError ? "cannot lex" : "cannot read";
+    if (e instanceof ScanError) {
+      const where = e.at === undefined ? "" : ` at line ${lineOf(source, e.at)}`;
+      throw new Error(
+        `preparing-slot-hide: cannot lex ${name}: ${e.message}${where}`,
+      );
+    }
+    if (e instanceof RangeError)
+      throw new Error(`preparing-slot-hide: cannot read ${name}: ${e.message}`);
+    // Anything else is a reader bug, not a file shape.
     throw new Error(
-      `preparing-slot-hide: ${what} ${file ?? "<input>"}: ${e.message}`,
+      `preparing-slot-hide: internal error reading ${name}: ${e.message}`,
+      { cause: e },
     );
   }
 }
 
 /** Every literal under a token list (strings, template quasis, JSX attribute
- *  strings), as `[offset, text]`. */
+ *  strings), as `[offset, text]`, cooked as JS reads it (a JSX attribute
+ *  string takes no backslash escapes but decodes character references). */
 const tokenLiterals = (list) =>
   list.flatMap((t) => {
-    if (t.t === "str") return [[t.s, t.v]];
+    if (t.t === "str") return [[t.s, cookLiteral(t.v)]];
     if (t.t === "tpl")
-      return [...t.quasis.map((q) => [t.s, q]), ...t.exprs.flatMap(tokenLiterals)];
+      return [
+        ...t.quasis.map((q) => [t.s, cookLiteral(q)]),
+        ...t.exprs.flatMap(tokenLiterals),
+      ];
     if (t.t !== "jsx") return [];
     return [
       ...t.attrs.flatMap((a) => {
         if (a.spread) return tokenLiterals(a.spread);
-        if (a.value?.t === "str") return [[a.value.s, a.value.v]];
+        if (a.value?.t === "str")
+          return [[a.value.s, decodeJsxEntities(a.value.v).text]];
         if (a.value?.t === "jsx") return tokenLiterals([a.value]);
         return a.value ? tokenLiterals(a.value.toks) : [];
       }),
@@ -2293,8 +2429,8 @@ const tokenLiterals = (list) =>
 /** Every literal under an AST node, as `[offset, text]`. */
 function nodeLiterals(node) {
   if (!node) return [];
-  if (node.k === "str") return [[node.s, node.v]];
-  const own = node.k === "tpl" ? node.quasis.map((q) => [node.s, q]) : [];
+  if (node.k === "str") return [[node.s, node.text]];
+  const own = node.k === "tpl" ? node.texts.map((q) => [node.s, q]) : [];
   return [...own, ...slotChildren(node).flatMap(nodeLiterals)];
 }
 
@@ -2303,12 +2439,12 @@ function readSlotsUnguarded(source, file) {
   const masked = maskNonCode(source, jsx);
   const sites = [];
   if (!SLOT_CANDIDATE_RE.test(source))
-    return { sites, host: null, hostFailed: false };
+    return { sites, host: null, hostFailed: false, shapeFailures: [] };
   const toks = lexSlotTokens(source, masked, jsx);
   const decls = slotDeclarations();
   const program = new SlotParser(toks, 0, toks.length, decls).statements();
 
-  // S5's vocabulary, and whether the file renders classes.
+  // The host check's vocabulary, and whether the file renders classes.
   let vocabulary = null;
   let rendersClasses = false;
   const scanTokens = (list) => {
@@ -2337,6 +2473,202 @@ function readSlotsUnguarded(source, file) {
   };
   scanTokens(toks);
   const hostFile = vocabulary !== null;
+
+  // A plain class string: a string literal, an interpolation-free template, a
+  // `+` chain of those (parenthesized or not), or a same-file const of one.
+  const plainLiteral = (node) => {
+    const n = unwrapSlot(node);
+    if (n?.k === "str") return n.badEntity ? null : n.text;
+    if (n?.k === "tpl" && n.exprs.length === 0) return n.texts[0];
+    if (n?.k !== "bin" || n.op !== "+") return null;
+    const l = plainLiteral(n.l);
+    const r = plainLiteral(n.r);
+    return l === null || r === null ? null : l + r;
+  };
+  /** A plain class string's cooked text and the node holding it, or null. */
+  const plainClass = (node) => {
+    const n = unwrapSlot(node);
+    const target = n?.k === "id" ? decls.resolve(n.name) : n;
+    const text = target === null ? null : plainLiteral(target);
+    return text === null ? null : { text, target };
+  };
+
+  // A slot-host file's slot maps, found before the walk so the class
+  // reader can accept a read of a map entry. In a host a map is a slot map by
+  // its KEYS, counting a spread of a const object as that object's keys. A
+  // preparing key makes it one beside another role key, any spread, or a
+  // computed key the scan cannot read. Without one, computed keys the scan
+  // cannot read whose values are class strings count as possible roles: two
+  // of them, or one beside a role key, make a slot map too.
+  /** A spread member's object, when it resolves to a same-file literal. */
+  const spreadObject = (m) => {
+    let n = unwrapSlot(m.value);
+    if (n?.k === "id") n = unwrapSlot(decls.resolve(n.name));
+    return n?.k === "obj" ? n : null;
+  };
+  /** A value that is class code: a class value or a plain class string. */
+  const classString = (value) =>
+    classValue(value) || (value != null && plainClass(value) !== null);
+  const slotKeyed = (members) => {
+    let roles = memberRoles(members, decls.resolve);
+    let unread = 0;
+    for (const m of members) {
+      if (m.kind === "spread") {
+        const obj = spreadObject(m);
+        if (obj) roles |= memberRoles(obj.members, decls.resolve);
+      } else if (
+        m.key &&
+        keyRole(m.key, decls.resolve).unreadable &&
+        classString(m.value)
+      )
+        unread++;
+    }
+    const spread = members.some((m) => m.kind === "spread");
+    const preparing = (roles & PREPARING) !== 0;
+    const other = (roles & ~PREPARING) !== 0;
+    // A spread the scan cannot read is evidence only beside a known
+    // preparing key: `{ ...state, [key]: value }` is ordinary state.
+    if (preparing) return other || spread || unread > 0;
+    return unread > 0 && (other || unread > 1);
+  };
+  const slotMaps = [];
+  // Offsets of a host's failures outside the walk's sites (map entries and
+  // keys, writes to a preparing member, stray clip-path tokens, unreadable
+  // character references), each reported by its line.
+  const shapeFailures = [];
+  // Literal offsets whose clip-path tokens are allowed: a slot map's preparing
+  // entry and the const it resolves to.
+  const allowedClips = new Set();
+  const allowLiterals = (node) => {
+    for (const [at] of nodeLiterals(node)) allowedClips.add(at);
+  };
+  if (hostFile) {
+    const collect = (node) => {
+      if (!node) return;
+      const map = node.k === "obj" || node.k === "class";
+      if (map && slotKeyed(node.members)) slotMaps.push(node);
+      for (const c of slotChildren(node)) collect(c);
+    };
+    for (const s of program) collect(s);
+  }
+  const slotMapNodes = new Set(slotMaps);
+  /** Whether a node resolves, directly or through a same-file const, to one
+   *  of the host's slot maps. */
+  const isSlotMap = (node) => {
+    let n = unwrapSlot(node);
+    if (n?.k === "id") n = unwrapSlot(decls.resolve(n.name));
+    return slotMapNodes.has(n);
+  };
+  /** A computed key or prop's role, read cooked through same-file consts. */
+  const computedRole = (node) =>
+    keyRole({ kind: "computed", node }, decls.resolve);
+  /** Whether a write keyed by `key` on `object` may set the preparing entry:
+   *  the key is the preparing role, or a key the scan cannot read on an
+   *  object that is a slot map. */
+  const preparingKey = (object, key) => {
+    const { role, unreadable } = computedRole(key);
+    return role === PREPARING || (unreadable && isSlotMap(object));
+  };
+  /** Whether a write target is, or holds in its destructuring pattern, a
+   *  member that may be the preparing entry. */
+  function preparingTarget(target) {
+    const n = unwrapSlot(target);
+    if (!n) return false;
+    if (n.k === "member")
+      return n.prop ? preparingKey(n.obj, n.prop) : n.name === "preparing";
+    if (n.k === "assign") return preparingTarget(n.l);
+    if (n.k === "spread") return preparingTarget(n.arg);
+    if (n.k === "arr") return n.elems.some(preparingTarget);
+    if (n.k === "obj")
+      return n.members.some((m) => preparingTarget(m.value ?? null));
+    return false;
+  }
+  /** `Global.name(…)` or `Global["name"](…)`. */
+  const globalCall = (callee, global, names) => {
+    const n = unwrapSlot(callee);
+    if (n?.k !== "member" || unwrapSlot(n.obj)?.name !== global) return false;
+    return names.includes(n.name ?? cookedLiteralText(n.prop));
+  };
+  /** An `Object.assign` source's verdict: "preparing" when its object
+   *  (directly, through a const, or through a spread in it) carries a
+   *  preparing key, "unread" when part of it cannot be read, else "clear". */
+  function assignSource(arg, seen = new Set()) {
+    let n = unwrapSlot(arg);
+    if (n?.k === "spread") return "unread";
+    if (n?.k === "id") {
+      if (seen.has(n.name)) return "unread";
+      seen.add(n.name);
+      n = unwrapSlot(decls.resolve(n.name));
+    }
+    if (n?.k !== "obj") return "unread";
+    let verdict = "clear";
+    for (const m of n.members) {
+      const v =
+        m.kind === "spread"
+          ? assignSource(m.value, seen)
+          : !m.key
+            ? "clear"
+            : keyRole(m.key, decls.resolve).role === PREPARING
+              ? "preparing"
+              : keyRole(m.key, decls.resolve).unreadable
+                ? "unread"
+                : "clear";
+      if (v === "preparing") return v;
+      if (v === "unread") verdict = v;
+    }
+    return verdict;
+  }
+  /** Whether a node may write the preparing entry: an assignment or update
+   *  of such a member, or `Object.assign` / `Object.defineProperty` /
+   *  `Reflect.set` / `Reflect.defineProperty` naming one. What the scan cannot
+   *  read fails closed when it lands on a slot map. */
+  function preparingWrite(node) {
+    if (node.k === "assign") return preparingTarget(node.l);
+    if (node.k === "unary" && (node.op === "++" || node.op === "--"))
+      return preparingTarget(node.arg);
+    if (node.k !== "call") return false;
+    if (globalCall(node.callee, "Object", ["assign"])) {
+      const verdicts = node.args.slice(1).map((a) => assignSource(a));
+      if (verdicts.includes("preparing")) return true;
+      return verdicts.includes("unread") && isSlotMap(node.args[0]);
+    }
+    const keyed =
+      globalCall(node.callee, "Object", ["defineProperty"]) ||
+      globalCall(node.callee, "Reflect", ["set", "defineProperty"]);
+    return keyed && node.args.length > 1 && preparingKey(node.args[0], node.args[1]);
+  }
+  if (hostFile) {
+    const writes = (node) => {
+      if (!node) return;
+      if (preparingWrite(node)) shapeFailures.push(node.s);
+      for (const c of slotChildren(node)) writes(c);
+    };
+    for (const s of program) writes(s);
+    for (const map of slotMaps)
+      for (const m of map.members)
+        if (m.key && keyRole(m.key, decls.resolve).role === PREPARING) {
+          allowLiterals(m.value ?? m.body);
+          const plain = m.value ? plainClass(m.value) : null;
+          if (plain) allowLiterals(plain.target);
+        }
+  }
+  /** Whether a node reads a slot map's entry for the preparing slot or for
+   *  whichever role is in force (`D[r]`, `D.preparing`). A read keyed by
+   *  another role (`D.held`, `D["shown"]`) is not one. The class reader
+   *  accepts it as readable: the shape rule holds the entry itself. */
+  const slotEntryRead = (node) => {
+    const n = unwrapSlot(node);
+    if (n?.k !== "member") return false;
+    let obj = unwrapSlot(n.obj);
+    if (obj?.k === "id") obj = unwrapSlot(decls.resolve(obj.name));
+    if (!slotMapNodes.has(obj)) return false;
+    if (!n.prop) return n.name === "preparing";
+    const { role, unreadable } = keyRole(
+      { kind: "computed", node: n.prop },
+      decls.resolve,
+    );
+    return unreadable || role === PREPARING;
+  };
 
   // Slot context: the whole of a host file, or a slot-shaped object literal
   // or class body and everything nested in it. Outside it nothing is reported.
@@ -2372,7 +2704,7 @@ function readSlotsUnguarded(source, file) {
       if (atom.k === "member" && atom.prop) consumed.add(unwrapSlot(atom.prop));
     }
   };
-  /** S4: a class token whose variant names the preparing role. */
+  /** A class token whose variant names the preparing role. */
   const variantSites = (literals) => {
     for (const [at, text] of literals) {
       for (const cls of classTokens(text)) {
@@ -2401,9 +2733,10 @@ function readSlotsUnguarded(source, file) {
     return booleanValued(init, new Set([...seen, n.name]));
   };
 
-  /** U2: a class expression's reachable operands, each read or failed. An
-   *  entry site also records whether some path read the clip (`mayClip`);
-   *  S5 itself reads `definiteClip`. */
+  // How deep the class reader is inside JSX elements an arm renders.
+  let jsxDepth = 0;
+  /** The class-expression reader: a class expression's reachable operands,
+   *  each read or failed, and its hides (a may-analysis). */
   function evalClass(node, ctx, site, seen) {
     if (!(ctx & PREPARING)) return;
     const n = unwrapSlot(node);
@@ -2412,15 +2745,15 @@ function readSlotsUnguarded(source, file) {
       site.failed = true;
     };
     const text = (t) => {
-      if (textHides(t)) fail();
-      if (t.includes(SLOT_CLIP)) site.mayClip = true;
+      if (textHides(t, jsxDepth === 0)) fail();
     };
     switch (n.k) {
       case "str":
-        text(n.v);
+        if (n.badEntity) fail();
+        text(n.text);
         return;
       case "tpl":
-        n.quasis.forEach(text);
+        n.texts.forEach(text);
         for (const x of n.exprs) evalClass(x, ctx, site, seen);
         return;
       case "num":
@@ -2483,10 +2816,12 @@ function readSlotsUnguarded(source, file) {
           const set = r.atoms.length > 0 ? narrowRoles(r.may, ctx) : ctx;
           if (!(set & PREPARING)) continue;
           if (m.key.kind === "computed") evalClass(m.key.node, set, site, seen);
-          else text(String(m.key.name));
+          else text(m.key.text);
         }
         return;
       case "jsx":
+        // An element an arm renders: `sr-only` there is screen-reader text.
+        jsxDepth++;
         for (const a of n.attrs) {
           if (a.spread !== undefined) fail();
           else if (a.name === "className" || a.name === "class")
@@ -2497,93 +2832,14 @@ function readSlotsUnguarded(source, file) {
           if (c.k === "jsx") evalClass(c, ctx, site, seen);
           else walk(c, ctx, c, false);
         }
+        jsxDepth--;
+        return;
+      case "member":
+        // A read of a slot map's entry: the shape rule holds the entry itself.
+        if (!slotEntryRead(n)) fail();
         return;
       default:
         fail();
-    }
-  }
-
-  /** Whether a condition is true whenever the preparing slot is in force: a
-   *  literal `true`, or a role condition that cannot be false for it. */
-  const definitelyTrue = (node) => {
-    const n = unwrapSlot(node);
-    if (n?.k === "id" && n.name === "true") return true;
-    const r = roles(node);
-    return r.atoms.length > 0 && !(r.not & PREPARING);
-  };
-  /** S5's evidence: whether a class expression carries the clip on EVERY path
-   *  it can take for the preparing slot (hides stay a may-analysis). A combiner
-   *  or array needs one definite part; `C && E` a definitely true C; a
-   *  conditional every arm the slot can reach; `L || R` / `L ?? R` a definite
-   *  non-empty literal L, or both sides; a clsx entry a clipped key whose
-   *  value is definitely true. A concatenation or template always prints
-   *  every part: its literal pieces joined in order, or any definite part,
-   *  carry it (a falsy `${x && CLIP}` prints "false", so it does not).
-   *  Anything else is not definite. */
-  function definiteClip(node, seen = new Set()) {
-    const n = unwrapSlot(node);
-    if (!n) return false;
-    const clip = (x) => definiteClip(x, seen);
-    // Literal pieces joined in order; a non-literal piece breaks the join.
-    const joined = (pieces) =>
-      pieces
-        .map((p) => (typeof p === "string" ? p : (literalText(p) ?? "\n")))
-        .join("");
-    switch (n.k) {
-      case "str":
-        return n.v.includes(SLOT_CLIP);
-      case "tpl": {
-        const pieces = n.quasis.flatMap((q, i) =>
-          i < n.exprs.length ? [q, n.exprs[i]] : [q],
-        );
-        return joined(pieces).includes(SLOT_CLIP) || n.exprs.some(clip);
-      }
-      case "call":
-        return isCombiner(n.callee) && n.args.some(clip);
-      case "arr":
-        return n.elems.some(clip);
-      case "bin": {
-        if (n.op === "+") {
-          const operands = [];
-          const flatten = (x) => {
-            const u = unwrapSlot(x);
-            if (u?.k === "bin" && u.op === "+") {
-              flatten(u.l);
-              flatten(u.r);
-            } else operands.push(u);
-          };
-          flatten(n);
-          return joined(operands).includes(SLOT_CLIP) || operands.some(clip);
-        }
-        if (n.op === "&&") return definitelyTrue(n.l) && clip(n.r);
-        if (n.op !== "||" && n.op !== "??") return false;
-        const left = unwrapSlot(n.l);
-        if (left?.k === "str" && left.v !== "" && clip(left)) return true;
-        return clip(n.l) && clip(n.r);
-      }
-      case "cond": {
-        const r = roles(n.test);
-        const arms = [];
-        if (r.may & PREPARING) arms.push(n.cons);
-        if (r.not & PREPARING) arms.push(n.alt);
-        return arms.length > 0 && arms.every(clip);
-      }
-      case "obj":
-        return n.members.some((m) => {
-          if (m.kind !== "init" && m.kind !== "shorthand") return false;
-          const keyClip =
-            m.key.kind === "computed"
-              ? clip(m.key.node)
-              : String(m.key.name).includes(SLOT_CLIP);
-          return keyClip && definitelyTrue(m.value);
-        });
-      case "id": {
-        const init = decls.resolve(n.name);
-        if (init === null || seen.has(n.name)) return false;
-        return definiteClip(init, new Set([...seen, n.name]));
-      }
-      default:
-        return false;
     }
   }
 
@@ -2603,18 +2859,16 @@ function readSlotsUnguarded(source, file) {
     if (m.kind === "block") return walk(m.body, ctx, m.body, false);
     if (m.kind === "spread" || m.kind === "junk")
       return m.value && walk(m.value, ctx, m.value, false);
-    let role;
+    const { role } = keyRole(m.key, decls.resolve);
     if (m.key.kind === "computed") {
-      role = roleLiteral(m.key.node);
       if (role === undefined) walk(m.key.node, ctx, m.key.node, false);
       else consume([unwrapSlot(m.key.node)]);
-    } else role = ROLE_BITS.get(String(m.key.name));
+    }
     const set = role === undefined ? ctx : narrowRoles(role, ctx);
     if (inSlot && role === PREPARING && set & PREPARING) {
       const site = addSite("entry", m.body ?? m.value ?? m.key, m.key.s);
       const values = m.body ? returnsOf(m.body.body) : [m.value];
       for (const v of values) evalClass(v, set, site, new Set());
-      site.clip = values.length > 0 && values.every((v) => definiteClip(v));
       return;
     }
     if (m.body) walk(m.body, set, m.body, false);
@@ -2630,7 +2884,7 @@ function readSlotsUnguarded(source, file) {
     } else walk(node, set, root, classPos);
   }
 
-  /** A statement-level branch (S3): every literal in it is its class code. */
+  /** A statement-level role branch: every literal in it is its class code. */
   function branch(node, set) {
     if (!node) return;
     if (set & PREPARING) {
@@ -2646,11 +2900,11 @@ function readSlotsUnguarded(source, file) {
     for (const flag of flagReadsIn(test)) mentions.push({ node: flag, root });
   }
 
-  /** S3 over a `switch`: a role switch labels its clauses with role literals,
-   *  and a `switch (true)` gives each clause a role condition, true for the
-   *  roles no earlier case condition took; `default` applies where every case
-   *  condition can be false. A clause's roles carry into the next one, in
-   *  source order, only through a body that falls through. */
+  /** Role branches over a `switch`: a role switch labels its clauses with
+   *  role literals, and a `switch (true)` gives each clause a role condition,
+   *  true for the roles no earlier case condition took; `default` applies
+   *  where every case condition can be false. A clause's roles carry into the
+   *  next one, in source order, only through a body that falls through. */
   function roleSwitch(n, ctx) {
     const disc = unwrapSlot(n.disc);
     const truthSwitch = disc?.k === "id" && disc.name === "true";
@@ -2710,14 +2964,15 @@ function readSlotsUnguarded(source, file) {
     const slot = inSlot;
     switch (n.k) {
       case "str":
-        if (slot && n.v === "preparing" && !consumed.has(n))
+        if (slot && n.badEntity) shapeFailures.push(n.s);
+        if (slot && n.text === "preparing" && !consumed.has(n))
           mentions.push({ node: n, root });
         return;
       case "tpl":
         if (
           slot &&
           n.exprs.length === 0 &&
-          n.quasis[0] === "preparing" &&
+          n.texts[0] === "preparing" &&
           !consumed.has(n)
         )
           mentions.push({ node: n, root });
@@ -2815,7 +3070,7 @@ function readSlotsUnguarded(source, file) {
               const site = addSite("guard", m.key, m.s);
               if (m.key.kind === "computed")
                 evalClass(m.key.node, set, site, new Set());
-              else if (textHides(String(m.key.name))) site.failed = true;
+              else if (textHides(m.key.text)) site.failed = true;
             }
             walk(m.value, ctx, m.value, false);
           }
@@ -2858,15 +3113,81 @@ function readSlotsUnguarded(source, file) {
   }
   if (hostFile) variantSites(tokenLiterals(toks));
 
-  // S5: a file that names the slot vocabulary and renders classes is a host,
-  // and keeps a preparing entry that carries the clip unconditionally (on
-  // every path for the preparing slot, through a const too).
+  // The host check is a shape rule. In a slot-host file every slot map's
+  // preparing entry (a spread of a const object included) is a plain class
+  // string whose cooked text holds exactly one clip-path token, the bare clip,
+  // with no spread after it; a key the scan cannot read fails; a host that
+  // renders classes keeps at least one slot map; and no arbitrary clip-path
+  // token sits anywhere but a slot map's preparing entry.
+  /** Whether a preparing value is a plain string holding only the bare clip. */
+  const clippedEntry = (value) => {
+    const plain = value ? plainClass(value) : null;
+    return plain !== null && soleBareClip(plain.text);
+  };
+  if (hostFile) {
+    const perMap = slotMaps.map((map) =>
+      map.members.flatMap((m, i) => {
+        if (m.kind === "spread") {
+          // A const object spread in acts as its own preparing entries.
+          const obj = spreadObject(m);
+          const entries = (obj?.members ?? []).filter(
+            (x) => x.key && keyRole(x.key, decls.resolve).role === PREPARING,
+          );
+          for (const x of entries) {
+            allowLiterals(x.value ?? x.body);
+            const plain = x.value ? plainClass(x.value) : null;
+            if (plain) allowLiterals(plain.target);
+          }
+          const plainValue = (x) =>
+            (x.kind === "init" || x.kind === "shorthand") && clippedEntry(x.value);
+          return entries.every(plainValue) ? [] : [m.s];
+        }
+        if (!m.key) return [];
+        const { role, unreadable } = keyRole(m.key, decls.resolve);
+        if (unreadable) return [m.key.s];
+        if (role !== PREPARING) return [];
+        const value = m.kind === "init" || m.kind === "shorthand";
+        const spreadAfter = map.members
+          .slice(i + 1)
+          .some((x) => x.kind === "spread");
+        const fails = !value || spreadAfter || !clippedEntry(m.value);
+        return fails ? [m.key.s] : [];
+      }),
+    );
+    // Every slot map counts, not just one of them.
+    shapeFailures.push(...perMap.flat());
+    outsideClips();
+  }
+
+  /** A host's arbitrary clip-path or `[all:…]` tokens outside its slot map
+   *  entries (string keys included): each fails. */
+  function outsideClips() {
+    const literals = (node) => {
+      if (!node) return [];
+      const own =
+        node.k === "str"
+          ? [[node.s, node.text]]
+          : node.k === "tpl"
+            ? node.texts.map((q) => [node.s, q])
+            : [];
+      const keys =
+        node.k === "obj" || node.k === "class"
+          ? node.members
+              .filter((m) => m.key?.kind === "str")
+              .map((m) => [m.key.s, m.key.text])
+          : [];
+      return [...own, ...keys, ...slotChildren(node).flatMap(literals)];
+    };
+    for (const [at, text] of program.flatMap(literals))
+      if (!allowedClips.has(at) && classTokens(text).some(arbitraryClipPath))
+        shapeFailures.push(at);
+  }
   const isHost = hostFile && rendersClasses;
-  const clipped = sites.some((s) => s.kind === "entry" && s.clip);
   return {
     sites,
     host: isHost ? vocabulary : null,
-    hostFailed: isHost && !clipped,
+    hostFailed: isHost && slotMaps.length === 0,
+    shapeFailures,
   };
 }
 
@@ -2885,17 +3206,23 @@ export function preparingSlotSites(source, file) {
   }));
 }
 
-/** Whether S5 treats `source` as a two-slot host. */
+/** Whether the host check treats `source` as a two-slot host. */
 export function isPreparingSlotHost(source, file) {
   return readPreparingSlots(source, file).host !== null;
 }
 
-/** Scanner: every failed site's line, plus a host's first vocabulary line
- *  when no preparing entry carries the clip unconditionally. */
+/** Scanner: every failed site's line; every slot map entry or key the shape
+ *  rule refuses, stray clip-path token, preparing assignment and unreadable
+ *  character reference; and a host's first vocabulary line when it keeps no
+ *  slot map. */
 const preparingSlotHide = ({ source }, file) => {
-  const { sites, host, hostFailed } = readPreparingSlots(source, file);
+  const { sites, host, hostFailed, shapeFailures } = readPreparingSlots(
+    source,
+    file,
+  );
   const lines = new Set();
   for (const s of sites) if (s.failed) lines.add(lineOf(source, s.index));
+  for (const at of shapeFailures) lines.add(lineOf(source, at));
   if (hostFailed) lines.add(lineOf(source, host));
   return [...lines];
 };
@@ -4778,7 +5105,7 @@ export const CHECKS = [
     allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set as the `preparing` entry of the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%, and any opacity the scan cannot read, such as `opacity-[var(…)]` or Tailwind v4's `opacity-(--x)`) fades the slot in instead of showing it at once; and `hidden`, `[display:none]`, `[content-visibility:hidden]` or `sr-only` (a 1px box) skips the full-size layout the slot prepares. A `[visibility:…]` or `[display:…]` value that is not a plain keyword (`var(…)`, `calc(…)`) is unreadable and counts as a hide. Each counts after its variant prefixes, its `!` marker and an arbitrary value's `!important`, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. Scope: only slot context is analysed, meaning a slot-host file (its code names `EntitySlotRole`, `SlotPhase` or `entityHoldSlots`) or, anywhere, a slot-shaped object literal or class body (a `preparing` key beside a `held` or `shown` member whose value is a class value: a string or template, a combiner call, or a conditional or array of those) with everything nested in it; outside it nothing is reported, since \"preparing\" is also a merge status and `isPreparing` a common loading flag. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal on either side, a `preparing`/`isPreparing` flag read through a name, member or literal element access, or a const holding such a condition) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); a guard naming a role-condition const the scan cannot resolve, because another binding shares its name, fails closed; (S3) a `switch` clause labelled `\"preparing\"` (`default` when no clause names it), a `switch (true)` clause whose condition can be true for the slot (`default` when every case condition can be false for it, wherever `default` sits), or an `if`/`else` arm that applies to the slot, where every literal counts; a clause's roles carry into the next clause unless its last statement ends it (`return`, `throw`, a `break` or `continue` that is unlabelled or names a label outside the clause, a block whose last statement ends it, or an `if`/`else` whose two arms both do; a `try` never ends a clause); (S4) inside slot context, any class token whose variant names the role, in any letter case (`data-[role=preparing]:invisible`); and (S5) a host: a slot-host file that renders classes (`className`, `cn(`, `clsx(`) fails unless a preparing entry carries the clip unconditionally, on every path its class expression can take for the preparing slot (each arm of a conditional the slot can reach, and a `&&` or clsx-object guard only when it is definitely true for the slot; a concatenation or template literal counts when its literal pieces joined in order, or any part or interpolation, carry it unconditionally), through a const too. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, `||` and `??`, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails. The left operand of `||` and `??` is a class value too, unless it is boolean by syntax (a comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const holding one); a flag-named read there is a value like any other. A const is readable only when nothing else in the file binds its name (an import, a destructured or catch binding, a function or class name, a parameter, a `let`/`var` or a second const). A role condition anywhere in the arguments of a helper call in class code (`className={slotClass({ hide: role === \"preparing\" })}`) fails: the scan cannot read the helper. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. A file ts-mask cannot lex fails with \"cannot lex\", and one the reader cannot read (a nesting deep enough to exhaust the stack) with \"cannot read\"; an allowlist entry does not rescue either, since the scan runs before the allowlist is consulted, so rewrite the shape ts-mask refuses (its documented ambiguities: a postfix `x++ / y`, a `<const T,>` arrow, a generic function type in .tsx) or extend ts-mask. Not handled (ordinary code the scan does not read yet): a preparing entry outside a slot-host file that is not in a role-keyed map; slot code outside a slot-host file that is not a role-keyed map (for example a frame component branching on a `preparing` prop); outside a slot-host file, a slot map whose sibling values are not class literals (`{ shown: SHOWN_CLS, preparing: HIDE }`); a class variant naming the role, outside slot context; a helper's result hoisted out of the class position (`const cls = slotClass(role === \"preparing\")`, then `className={cls}`); cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or constant roles (`SlotRole.Preparing`); control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); collapsed-size hides (`size-0`, `h-0`/`w-0` with an overflow clip, `scale-0`, `max-h-0`), left out because they are common layout idioms; a flag tested only in a loop condition; a role literal spelled with escapes; and stylesheets (selectors and `@apply`, which the guard never reads). Fails closed (false positives): a label or prose string reading a hide utility inside a site; a map that is not a slot but keys `preparing` beside a class-valued `held` or `shown`; a role-literal comparison on a value that is not a slot role in a slot-host file (`plan.kind === \"held\"`); an unrelated hide in the extent a role mention climbs to (`isRole(r, \"preparing\")` beside `\"hidden\"` in one statement); a JSX spread in a preparing class arm; and a const whose name is bound anywhere else in the file. Remedy: a non-host file may take an allowlist entry with rationale; a host restructures the flagged expression into its role-keyed class map",
+      "a two-slot host's preparing slot hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`, set as the `preparing` entry of the host's role-keyed class map (gd-conventions, 'The preparing-slot rule'). A visibility hide (`invisible`, `collapse`, `[visibility:hidden]`, `[visibility:collapse]`) makes every vendored Button inside paint a frame late when the slot shows, since its `transition-all` transitions the inherited visibility; an opacity below full (`opacity-<n>` under 100, `opacity-[v]` or `[opacity:v]` under 1 or 100%, and any opacity the scan cannot read, such as `opacity-[var(…)]` or Tailwind v4's `opacity-(--x)`) fades the slot in instead of showing it at once; and `hidden`, `[display:none]`, `[content-visibility:hidden]` or `sr-only` (a 1px box) skips the full-size layout the slot prepares. A `[visibility:…]` or `[display:…]` value that is not a plain keyword (`var(…)`, `calc(…)`) is unreadable and counts as a hide. Each counts after its variant prefixes, its `!` marker and an arbitrary value's `!important`, descendant variants included (`[&_svg]:invisible`, `*:hidden`): they hide the slot's content the same way. Scope: only slot context is analysed, meaning a slot-host file (its code names `EntitySlotRole`, `EntityHoldSlot`, `SlotPhase` or `entityHoldSlots`) or, anywhere, a slot-shaped object literal or class body (a `preparing` key beside a `held` or `shown` member whose value is a class value: a string or template, a combiner call, or a conditional or array of those) with everything nested in it; outside it nothing is reported, since \"preparing\" is also a merge status and `isPreparing` a common loading flag. Sites: (S1) an object or class entry keyed by the preparing role (bare, quoted, computed or `as const` keys, methods and getters; interface, type-alias and annotation literals are types and are skipped); (S2) a class arm of `&&`, `||` or `?:`, or a clsx-object key in a cn/clsx/cx/classNames/twMerge call, whose condition reads a role atom (a `==`/`===`/`!=`/`!==` comparison with a role literal, read cooked, on either side, a `preparing`/`isPreparing` flag read through a name, member or literal element access, or a const holding such a condition) and can apply to the preparing slot, worked out over the held, preparing and shown roles through `!`, `&&`, `||` and every enclosing role guard, entry or branch (an arm is class code in a className or combiner argument, or when it holds a literal, JSX, an array or a combiner call); a guard naming a role-condition const the scan cannot resolve, because another binding shares its name, fails closed; (S3) a `switch` clause labelled `\"preparing\"` (`default` when no clause names it), a `switch (true)` clause whose condition can be true for the slot (`default` when every case condition can be false for it, wherever `default` sits), or an `if`/`else` arm that applies to the slot, where every literal counts; a clause's roles carry into the next clause unless its last statement ends it (`return`, `throw`, a `break` or `continue` that is unlabelled or names a label outside the clause, a block whose last statement ends it, or an `if`/`else` whose two arms both do; a `try` never ends a clause); (S4) inside slot context, any class token whose variant names the role, in any letter case (`data-[role=preparing]:invisible`); and (S5) a host shape rule: in a slot-host file a slot map is any object literal or class body with a `preparing`-role key (a spread of a same-file const object counts as its keys) beside a `held` or `shown` key (whatever its value), any spread, or a computed key the scan cannot read; or, without one, two computed keys the scan cannot read whose values are class strings, or one beside a role key. Its keys read cooked, and a same-file const key resolves. A spread of a same-file const object holding a `preparing` key is held to the entry rule below. Every slot map's `preparing` entry must be a plain class string (a string literal, a template literal with no interpolation, a `+` chain of those, or a same-file const of one) with no spread after the key; its text, cooked as JS reads it (escapes decoded, line continuations dropped) and split on ASCII whitespace, must hold exactly one clip-path token (an arbitrary `[clip-path:…]` or `[-webkit-clip-path:…]` property, `sr-only`, `not-sr-only`, or an `[all:…]` reset, with the property name read case-insensitively since Tailwind emits `[cLIP-PATH:none]`), and that token must be the bare `[clip-path:inset(50%)]` (no variant of any kind, descendant variants included; the `!` marker at one end at most, an arbitrary value's `!important` stripped); a computed key in a slot map that does not resolve to a literal fails as a key the scan cannot read; the remedy is to write the preparing entry as a plain class string. Beyond the maps, in a slot-host file: no arbitrary clip-path or `[all:…]` token may sit anywhere but a slot map's `preparing` entry or the const it resolves to (`sr-only` and `not-sr-only` excluded); and no write may set a member that may be the preparing entry: an assignment or update (`++`, `--`, compound forms) of `X.preparing` or `X[P]` (with `P` a same-file const), a destructuring assignment target, `Object.assign` with a source carrying a `preparing` key (directly, through a same-file const, or through a spread in it), `Object.defineProperty`, `Reflect.set` or `Reflect.defineProperty` naming it; a key or source the scan cannot read fails when the target is a slot map. A JSX attribute string takes no backslash escapes but decodes numeric and the five XML character references before it is read; in a `className` or `class` attribute in slot context any other named reference (`&nbsp;`) fails (\"write the class without character references\"). A map that is not a slot map is exempt, and a slot-host file that renders classes (`className`, `cn(`, `clsx(`) with no slot map fails on its first vocabulary line. Hides are read from every literal's cooked text. Inside an S1 or S2 class expression, class code the scan cannot read fails: only literals, `undefined`/`null`/booleans, conditionals, arrays, concatenation, `||` and `??`, combiner calls and identifiers naming a readable same-file `const` are read, so an import, a `let`, a parameter, a member read, a spread of any of those, or any other call fails; in a slot-host file, a read of a slot map's entry for the preparing slot (`D[r]`, `D.preparing`) is readable, while one keyed by another role (`D.held`) is not. The left operand of `||` and `??` is a class value too, unless it is boolean by syntax (a comparison, a `!`, a boolean literal, `&&`/`||` of those, or a const holding one); a flag-named read there is a value like any other. A const is readable only when nothing else in the file binds its name (an import, a destructured or catch binding, a function or class name, a parameter, a `let`/`var` or a second const). A role condition anywhere in the arguments of a helper call in class code (`className={slotClass({ hide: role === \"preparing\" })}`) fails: the scan cannot read the helper. Any other `\"preparing\"` literal, or a flag read inside a condition the guard grammar did not read (`Boolean(isPreparing)`, `isPreparing(slot)`), fails when a hide sits in a literal of the expression it climbs to, stopping at an entry value, a JSX attribute, a statement or a combiner argument. A file ts-mask cannot lex fails with \"cannot lex\", and one the reader cannot read (a nesting deep enough to exhaust the stack) with \"cannot read\"; an allowlist entry does not rescue either, since the scan runs before the allowlist is consulted, so rewrite the shape ts-mask refuses (its documented ambiguities: a postfix `x++ / y`, a `<const T,>` arrow, a generic function type in .tsx) or extend ts-mask. Not handled (ordinary code the scan does not read yet): a preparing entry outside a slot-host file that is not in a role-keyed map; slot code outside a slot-host file that is not a role-keyed map (for example a frame component branching on a `preparing` prop); outside a slot-host file, a slot map whose sibling values are not class literals (`{ shown: SHOWN_CLS, preparing: HIDE }`); a class variant naming the role, outside slot context; a helper's result hoisted out of the class position (`const cls = slotClass(role === \"preparing\")`, then `className={cls}`); cva `compoundVariants` keyed `role: \"preparing\"`; JSX props named for the role (`role=\"preparing\"`, `preparing=…`, `preparingClassName=…`); enum or member roles in a comparison (`SlotRole.Preparing`; a same-file const key does resolve); a render-site arm that replaces the map entry for the preparing slot without a hide (`r === \"preparing\" ? \"absolute inset-0\" : D[r]`), a statement-level branch that renders the slot without a className, and an inline `style={{ clipPath: \"none\" }}`; `sr-only` set on the preparing slot from a statement-level branch or an element an arm renders, where it reads as screen-reader text; control-flow narrowing (an early `return` under `role !== \"preparing\"`); an `inert:` variant; style objects (`style={{ visibility: \"hidden\" }}`); collapsed-size hides (`size-0`, `h-0`/`w-0` with an overflow clip, `scale-0`, `max-h-0`), left out because they are common layout idioms; a flag tested only in a loop condition; a `delete` of a preparing member; a spread the scan cannot read after a spread of a slot map (`{ ...D, ...makeOverride() }`); and stylesheets (selectors and `@apply`, which the guard never reads). Fails closed (false positives): a label or prose string reading a hide utility inside a site; a map that is not a slot but keys `preparing` beside a class-valued `held` or `shown`; a role-literal comparison on a value that is not a slot role in a slot-host file (`plan.kind === \"held\"`); an unrelated hide in the extent a role mention climbs to (`isRole(r, \"preparing\")` beside `\"hidden\"` in one statement); a JSX spread in a preparing class arm; `Object.assign` copying a slot map into another object (`Object.assign({}, D)`); a const whose name is bound anywhere else in the file; in a slot-host file, any role-keyed map or state object (text, counts, icons, reducer state, such as `{ held: \"Previous file\", shown: \"Current file\", preparing: \"Loading\" }`), which is a slot map there (use keys other than the slot roles, or keep it outside the host file); in a slot-host file, a clip-path animation on an element that is not the slot, and a clipped render-site arm (move the element out of the host file, or put the clip in the map entry); and a slot-host file's merge-status class map keyed `preparing` (`{ preparing: \"opacity-60 animate-pulse\", clean: \"…\" }`), read as a preparing entry. Remedy: a non-host file may take an allowlist entry with rationale; a host writes the slot's classes as the plain clipped `preparing` entry of a slot map and reads that entry wherever it renders the slot",
   },
   {
     name: "bare-group-label",
