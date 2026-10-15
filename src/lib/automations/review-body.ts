@@ -58,7 +58,6 @@ export function bodyReadPlan({
     remoteNumber !== undefined &&
     Number.isInteger(remoteNumber) &&
     remoteNumber > 0;
-  const read =
-    remoteNumber !== undefined && validNumber && (needsBody || !hasEventNotes);
+  const read = validNumber && (needsBody || !hasEventNotes);
   return { read, needsBody };
 }
