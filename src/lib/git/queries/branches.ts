@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { reloadLocalPrs } from "@/lib/pulls/local";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
@@ -134,6 +135,15 @@ export function useRenameBranch(repo: string) {
           )
           .catch(() => {
             // Best-effort: a failed reload just leaves the last known state.
+          });
+        // The same for the local pull requests the backend moved to the new name,
+        // so an open local-PR view acts on the new head.
+        void reloadLocalPrs()
+          .then(() =>
+            queryClient.invalidateQueries({ queryKey: ["local-prs"] }),
+          )
+          .catch(() => {
+            // Best-effort, as above.
           });
       },
       // Local branch write — never park it offline.

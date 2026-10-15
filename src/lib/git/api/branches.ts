@@ -43,11 +43,23 @@ export const gitSetBranchArchived = (
   archived: boolean,
 ) => invoke<void>("git_set_branch_archived", { repoPath, name, archived });
 
+/** What a completed rename reports beyond success. */
+export interface RenameBranchOutcome {
+  /** Set when the branch was renamed but its local pull requests couldn't all be
+   *  moved to the new name; shown as the success toast's description. */
+  warning: string | null;
+}
+
 export const gitRenameBranch = (
   repoPath: string,
   oldName: string,
   newName: string,
-) => invoke<void>("git_rename_branch", { repoPath, oldName, newName });
+) =>
+  invoke<RenameBranchOutcome>("git_rename_branch", {
+    repoPath,
+    oldName,
+    newName,
+  });
 
 export const gitDeleteBranch = (repoPath: string, name: string) =>
   invoke<void>("git_delete_branch", { repoPath, name });

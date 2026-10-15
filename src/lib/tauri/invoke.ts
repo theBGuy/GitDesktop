@@ -51,6 +51,15 @@ export type AppError =
       branch: string;
       reason: "session" | "mid-op" | "dirty" | "conflict" | "moved" | "failed";
     }
+  /** A bare push git refused because the branch's upstream tracks a differently-named
+   *  branch; `message` is already the complete sentence a toast shows. */
+  | {
+      kind: "pushUpstreamNameMismatch";
+      message: string;
+      branch: string;
+      remote: string;
+      remoteBranch: string;
+    }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

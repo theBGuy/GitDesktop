@@ -482,12 +482,7 @@ impl ServerHandler for GitDesktopMcp {
 // ---- Shared helpers ------------------------------------------------------
 // Multi-module helpers live here (ancestor-private to the domain modules).
 
-/// The reserved prefix for GitDesktop agent-session branches. Every branch surface
-/// (GUI lists, pickers, worktree guards) filters `gd/session/*`; deleting or renaming
-/// one breaks session Resume, so the branch-mutating MCP tools refuse it (see
-/// `write_git::ensure_not_session_branch`) and `list_branches` filters it out. Mirrors
-/// the `starts_with("gd/session/")` checks in `crate::git::worktree` / `crate::sessions`.
-pub(super) const SESSION_BRANCH_PREFIX: &str = "gd/session/";
+pub(super) use crate::git::branches::SESSION_BRANCH_PREFIX;
 
 /// Maps a backend [`AppError`] to an MCP tool error.
 fn app_err(e: AppError) -> McpError {

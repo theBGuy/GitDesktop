@@ -30,6 +30,10 @@ const head = (over = {}) => ({
   ahead: 0,
   behind: 0,
   upstreamGone: false,
+  upstreamRemote: null,
+  upstreamBranch: null,
+  pushNameMismatch: false,
+  upstreamIsRemoteDefault: null,
   ...over,
 });
 
@@ -43,6 +47,7 @@ const input = (over = {}) => ({
   remoteRebased: false,
   mixedRewrite: false,
   localAtRisk: 0,
+  remoteNewExists: false,
   ...over,
 });
 
@@ -500,4 +505,244 @@ test("Publish branch only for a measured, untracked, non-diverged branch", () =>
       s.statusKnown && !s.hasUpstream && !s.diverged,
     );
   }
+});
+
+// A renamed tracking branch: local feat/y tracks origin/feat/x, and the backend
+// says a bare push would be refused for the differing names.
+const renamed = (over = {}) =>
+  head({
+    name: "feat/y",
+    upstream: "origin/feat/x",
+    upstreamRemote: "origin",
+    upstreamBranch: "feat/x",
+    pushNameMismatch: true,
+    upstreamIsRemoteDefault: false,
+    ahead: 1,
+    ...over,
+  });
+
+test("mismatch: Push opens a menu of named destinations, its description says why", () => {
+  const two = deriveSyncControls(input({ head: renamed({ ahead: 2 }) }));
+  assert.equal(two.mismatch, true);
+  assert.equal(two.pushLabel, "Push");
+  assert.equal(
+    two.pushName,
+    "Push — 2 commits to push; feat/y tracks origin/feat/x, which has a different name — choose where from the menu",
+  );
+  assert.deepEqual(two.mismatchMenu, {
+    branch: "feat/y",
+    remote: "origin",
+    remoteBranch: "feat/x",
+    groupLabel: "feat/y tracks origin/feat/x",
+    pushToTracked: { label: "Push to origin/feat/x", disabled: false },
+    publish: { label: "Publish as origin/feat/y", disabled: false },
+  });
+  assert.deepEqual(two.push, { disabled: false, reason: two.pushName });
+  assert.equal(two.hotkeys.push, true);
+  const one = deriveSyncControls(input({ head: renamed({ ahead: 1 }) }));
+  assert.equal(
+    one.pushName,
+    "Push — 1 commit to push; feat/y tracks origin/feat/x, which has a different name — choose where from the menu",
+  );
+  // Nothing ahead drops the count clause and holds the tracked item.
+  const zero = deriveSyncControls(input({ head: renamed({ ahead: 0 }) }));
+  assert.equal(
+    zero.pushName,
+    "Push — feat/y tracks origin/feat/x, which has a different name — choose where from the menu",
+  );
+  assert.deepEqual(zero.mismatchMenu.pushToTracked, {
+    label: "Push to origin/feat/x (nothing to push)",
+    disabled: true,
+  });
+  // Publishing is still on offer, so the trigger stays live.
+  assert.equal(zero.push.disabled, false);
+  assert.equal(zero.hotkeys.push, true);
+});
+
+test("mismatch: the tracked item is omitted only for the remote's known default branch", () => {
+  const onDefault = deriveSyncControls(
+    input({
+      head: renamed({
+        name: "topic",
+        upstream: "origin/main",
+        upstreamBranch: "main",
+        upstreamIsRemoteDefault: true,
+      }),
+    }),
+  );
+  assert.equal(onDefault.mismatchMenu.pushToTracked, null);
+  assert.deepEqual(onDefault.mismatchMenu.publish, {
+    label: "Publish as origin/topic",
+    disabled: false,
+  });
+  for (const unknownOrNot of [false, null]) {
+    const s = deriveSyncControls(
+      input({ head: renamed({ upstreamIsRemoteDefault: unknownOrNot }) }),
+    );
+    assert.deepEqual(s.mismatchMenu.pushToTracked, {
+      label: "Push to origin/feat/x",
+      disabled: false,
+    });
+  }
+});
+
+test("mismatch beats divergence: no Force push, the tracked push and publish hold", () => {
+  const s = deriveSyncControls(
+    input({ head: renamed({ ahead: 2, behind: 1 }), remoteRebased: true }),
+  );
+  assert.equal(s.diverged, true);
+  assert.equal(s.pushLabel, "Push");
+  assert.equal(
+    s.pushName,
+    "Push — 2 commits to push; feat/y tracks origin/feat/x, which has a different name — use the Pull menu first",
+  );
+  assert.deepEqual(s.mismatchMenu.pushToTracked, {
+    label: "Push to origin/feat/x (diverged — use the Pull menu first)",
+    disabled: true,
+  });
+  assert.deepEqual(s.mismatchMenu.publish, {
+    label: "Publish as origin/feat/y (pull first)",
+    disabled: true,
+  });
+  // Everything held: the trigger itself holds with the description, and so
+  // does the hotkey.
+  assert.deepEqual(s.push, { disabled: true, reason: s.pushName });
+  assert.equal(s.hotkeys.push, false);
+});
+
+test("mismatch: behind holds the publish item whether or not diverged", () => {
+  const behind = deriveSyncControls(
+    input({ head: renamed({ ahead: 0, behind: 1 }) }),
+  );
+  assert.deepEqual(behind.mismatchMenu.publish, {
+    label: "Publish as origin/feat/y (pull first)",
+    disabled: true,
+  });
+  // Nothing to push and the publish held: the whole menu is held.
+  assert.deepEqual(behind.push, { disabled: true, reason: behind.pushName });
+  assert.equal(behind.hotkeys.push, false);
+  // With the tracked item omitted, a held publish holds the trigger too.
+  const onDefault = deriveSyncControls(
+    input({
+      head: renamed({ ahead: 1, behind: 1, upstreamIsRemoteDefault: true }),
+    }),
+  );
+  assert.equal(onDefault.mismatchMenu.pushToTracked, null);
+  assert.equal(onDefault.push.disabled, true);
+  assert.equal(onDefault.hotkeys.push, false);
+  // Ahead-only with the tracked item live keeps the trigger live.
+  const aheadOnly = deriveSyncControls(input({ head: renamed({ ahead: 1 }) }));
+  assert.equal(aheadOnly.push.disabled, false);
+});
+
+test("mismatch: an all-held menu's trigger names the pull remedy, never the menu", () => {
+  // checkout -b topic origin/main, then fall behind: the tracked item is omitted
+  // and the publish item holds, so the menu has nothing to choose from.
+  const behindOnDefault = deriveSyncControls(
+    input({
+      head: renamed({
+        name: "topic",
+        upstream: "origin/main",
+        upstreamBranch: "main",
+        upstreamIsRemoteDefault: true,
+        ahead: 0,
+        behind: 1,
+      }),
+    }),
+  );
+  assert.equal(behindOnDefault.mismatchMenu.pushToTracked, null);
+  assert.equal(
+    behindOnDefault.pushName,
+    "Push — topic tracks origin/main, which has a different name — pull first",
+  );
+  assert.deepEqual(behindOnDefault.push, {
+    disabled: true,
+    reason: behindOnDefault.pushName,
+  });
+  // Behind with nothing to push: both items held, not diverged.
+  const behind = deriveSyncControls(
+    input({ head: renamed({ ahead: 0, behind: 2 }) }),
+  );
+  assert.equal(
+    behind.push.reason,
+    "Push — feat/y tracks origin/feat/x, which has a different name — pull first",
+  );
+  // Diverged: the count clause stays and the remedy points at the Pull menu.
+  const diverged = deriveSyncControls(
+    input({
+      head: renamed({ ahead: 1, behind: 1, upstreamIsRemoteDefault: true }),
+    }),
+  );
+  assert.deepEqual(diverged.push, {
+    disabled: true,
+    reason:
+      "Push — 1 commit to push; feat/y tracks origin/feat/x, which has a different name — use the Pull menu first",
+  });
+  // Any enabled item keeps the menu wording.
+  for (const h of [renamed({ ahead: 1 }), renamed({ ahead: 0 })]) {
+    const s = deriveSyncControls(input({ head: h }));
+    assert.equal(s.push.disabled, false);
+    assert.match(s.pushName, / — choose where from the menu$/);
+  }
+});
+
+test("mismatch: an existing remote branch under the new name relabels the publish item", () => {
+  const s = deriveSyncControls(
+    input({ head: renamed(), remoteNewExists: true }),
+  );
+  assert.deepEqual(s.mismatchMenu.publish, {
+    label: "Push to origin/feat/y and track it",
+    disabled: false,
+  });
+  const held = deriveSyncControls(
+    input({ head: renamed({ behind: 1 }), remoteNewExists: true }),
+  );
+  assert.equal(
+    held.mismatchMenu.publish.label,
+    "Push to origin/feat/y and track it (pull first)",
+  );
+});
+
+test("mismatch: busy, offline, and an unknown read keep their precedence over the description", () => {
+  const busy = deriveSyncControls(
+    input({ head: renamed(), busy: true, offlineHold: "offline" }),
+  );
+  assert.deepEqual(busy.push, { disabled: true, reason: SYNC_BUSY_REASON });
+  assert.equal(busy.hotkeys.push, false);
+  const offline = deriveSyncControls(
+    input({ head: renamed(), offlineHold: "offline" }),
+  );
+  assert.deepEqual(offline.push, { disabled: true, reason: "offline" });
+  assert.equal(offline.hotkeys.push, false);
+  const unread = deriveSyncControls(
+    input({ head: renamed(), remotes: undefined }),
+  );
+  assert.deepEqual(unread.push, {
+    disabled: true,
+    reason: REMOTES_PENDING_REASON,
+  });
+});
+
+test("no mismatch without the backend's verdict, a live upstream, and both names", () => {
+  const cases = [
+    renamed({ pushNameMismatch: false }),
+    renamed({ upstreamGone: true }),
+    renamed({ upstreamRemote: null }),
+    renamed({ upstreamBranch: null }),
+    renamed({ upstream: null }),
+  ];
+  for (const h of cases) {
+    const s = deriveSyncControls(input({ head: h }));
+    assert.equal(s.mismatch, false, JSON.stringify(h));
+    assert.equal(s.mismatchMenu, null);
+  }
+  // Without a mismatch, a diverged branch keeps its Force push.
+  const forced = deriveSyncControls(
+    input({ head: renamed({ pushNameMismatch: false, ahead: 1, behind: 1 }) }),
+  );
+  assert.equal(forced.pushLabel, "Force push");
+  assert.equal(
+    deriveSyncControls(input({ head: undefined })).mismatchMenu,
+    null,
+  );
 });

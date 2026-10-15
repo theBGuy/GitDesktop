@@ -1,7 +1,12 @@
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+use crate::git::branches::validate_ref_name;
+use crate::git::remote::{
+    is_named_remote, parse_upstream_tracking, remote_head_branch, Upstream,
+    UPSTREAM_TRACKING_FORMAT,
+};
+use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
 use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus};
 use crate::state::AppState;
 
@@ -33,12 +38,168 @@ pub async fn status_core(repo_path: &str) -> AppResult<RepoStatus> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(parse_status_v2(&out.stdout_lossy()))
+    let mut status = parse_status_v2(&out.stdout_lossy());
+    fill_upstream_facts(repo_path, &mut status.branch).await;
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppResult<RepoStatus> {
     status_core(&repo_path).await
+}
+
+/// Fills the upstream's remote/branch split and the bare-push mismatch facts, which the
+/// porcelain's short `branch.upstream` can't carry (remote names may contain `/`).
+/// Advisory, failing toward inaction: any failed read leaves the facts at their parse
+/// defaults. One spawn when there is an upstream; the config reads and the remote-HEAD
+/// probe run only for a live, differently-named branch upstream.
+async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
+    let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
+        return;
+    };
+    // A for-each-ref pattern globs, so the name is checked first; git's own branch
+    // names always pass.
+    if validate_ref_name(&name).is_err() {
+        return;
+    }
+    let refname = format!("refs/heads/{name}");
+    let Ok(out) = run_git(
+        Some(repo_path),
+        &["for-each-ref", &refname, UPSTREAM_TRACKING_FORMAT],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return;
+    };
+    let split = upstream_split(
+        &name,
+        parse_upstream_tracking(&out.stdout_lossy(), &refname),
+    );
+    head.upstream_remote.clone_from(&split.remote);
+    head.upstream_branch.clone_from(&split.branch);
+    let (true, Some(remote), Some(up)) = (split.candidate, split.remote, split.branch) else {
+        return;
+    };
+    if bare_push_refused(repo_path, &name, &remote).await != Some(true) {
+        return;
+    }
+    head.push_name_mismatch = true;
+    head.upstream_is_remote_default = match remote_head_branch(repo_path, &remote).await {
+        Ok(Some(default)) => Some(default == up),
+        _ => None,
+    };
+}
+
+/// What one tracking line says about the upstream, before any config read.
+#[derive(Debug, PartialEq)]
+struct UpstreamSplit {
+    remote: Option<String>,
+    branch: Option<String>,
+    /// A live branch upstream on a real remote whose name differs from the local one:
+    /// the only shape a bare push can be refused for by name. Implies both fields Some.
+    candidate: bool,
+}
+
+/// Pure: an unborn branch (no line), an untracked branch, and a local (`.`) upstream
+/// yield nothing; a non-branch upstream (`refs/pull/N/head`) yields its remote alone;
+/// a gone branch upstream keeps both names but is never a candidate.
+fn upstream_split(name: &str, tracking: Option<(Upstream, String, bool)>) -> UpstreamSplit {
+    let none = UpstreamSplit {
+        remote: None,
+        branch: None,
+        candidate: false,
+    };
+    let Some((upstream, remote, gone)) = tracking else {
+        return none;
+    };
+    if !is_named_remote(&remote) {
+        return none;
+    }
+    match upstream {
+        Upstream::Branch(up) => UpstreamSplit {
+            candidate: !gone && up != name,
+            remote: Some(remote),
+            branch: Some(up),
+        },
+        Upstream::NotABranch => UpstreamSplit {
+            remote: Some(remote),
+            ..none
+        },
+        Upstream::Untracked => none,
+    }
+}
+
+/// `git config --get <key>`: the value when set, `None` when unset (exit 1). Exact keys
+/// only: a branch name can carry regex metacharacters, and a subsection is case-sensitive.
+async fn config_value(repo_path: &str, key: &str) -> Option<Option<String>> {
+    let out = run_git_raw(Some(repo_path), &["config", "--get", key], DEFAULT_TIMEOUT)
+        .await
+        .ok()?;
+    match out.code {
+        0 => Some(Some(
+            out.stdout_lossy()
+                .trim_end_matches(['\r', '\n'])
+                .to_string(),
+        )),
+        1 => Some(None),
+        _ => None,
+    }
+}
+
+/// Reads the push config [`bare_push_would_be_refused`] decides on; `None` when any read
+/// failed (not merely unset), which the caller treats as "not refused".
+async fn bare_push_refused(repo_path: &str, name: &str, upstream_remote: &str) -> Option<bool> {
+    let push_default = config_value(repo_path, "push.default").await?;
+    if push_default.as_deref().is_some_and(|d| d != "simple") {
+        return Some(false);
+    }
+    let branch_push_remote = config_value(repo_path, &format!("branch.{name}.pushRemote")).await?;
+    let remote_push_default = config_value(repo_path, "remote.pushDefault").await?;
+    let branch_remote = config_value(repo_path, &format!("branch.{name}.remote")).await?;
+    let Some(push_remote) = branch_push_remote
+        .as_deref()
+        .or(remote_push_default.as_deref())
+        .or(branch_remote.as_deref())
+    else {
+        return Some(false);
+    };
+    let refspecs = run_git_raw(
+        Some(repo_path),
+        &["config", "--get-all", &format!("remote.{push_remote}.push")],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let remote_has_push_refspec = match refspecs.code {
+        0 => !refspecs.stdout_lossy().trim().is_empty(),
+        1 => false,
+        _ => return None,
+    };
+    Some(bare_push_would_be_refused(
+        push_default.as_deref(),
+        branch_push_remote.as_deref(),
+        remote_push_default.as_deref(),
+        branch_remote.as_deref(),
+        upstream_remote,
+        remote_has_push_refspec,
+    ))
+}
+
+/// push.default unset/`simple` refuses a bare push when the upstream's name differs
+/// and the push lands on the upstream's own remote with no push refspec of its own
+/// (git-config push.default; measured in `bare_push_refusal_matrix`).
+fn bare_push_would_be_refused(
+    push_default: Option<&str>,
+    branch_push_remote: Option<&str>,
+    remote_push_default: Option<&str>,
+    branch_remote: Option<&str>,
+    upstream_remote: &str,
+    remote_has_push_refspec: bool,
+) -> bool {
+    let simple = matches!(push_default, None | Some("simple"));
+    let push_remote = branch_push_remote.or(remote_push_default).or(branch_remote);
+    simple && push_remote == Some(upstream_remote) && !remote_has_push_refspec
 }
 
 fn change_kind(c: char) -> Option<ChangeKind> {
@@ -65,6 +226,10 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
         ahead: 0,
         behind: 0,
         upstream_gone: false,
+        upstream_remote: None,
+        upstream_branch: None,
+        push_name_mismatch: false,
+        upstream_is_remote_default: None,
     };
     let mut entries = Vec::new();
     // Porcelain v2 has no `[gone]` token. When the upstream ref is gone git still
@@ -285,6 +450,462 @@ mod tests {
         assert_eq!(s.entries[0].orig_path.as_deref(), Some("util.js"));
         assert_eq!(s.entries[0].staged, Some(ChangeKind::Renamed));
         assert_eq!(s.entries[1].path, "app.js");
+    }
+
+    #[test]
+    fn parse_leaves_the_upstream_facts_at_their_defaults() {
+        let text = z(&[
+            "# branch.oid abc123",
+            "# branch.head feat/y",
+            "# branch.upstream origin/feat/x",
+            "# branch.ab +1 -0",
+            "",
+        ]);
+        let b = parse_status_v2(&text).branch;
+        assert_eq!(b.upstream_remote, None);
+        assert_eq!(b.upstream_branch, None);
+        assert!(!b.push_name_mismatch);
+        assert_eq!(b.upstream_is_remote_default, None);
+    }
+
+    /// Every parameter axis, both polarities, against the all-defaults refusal.
+    #[test]
+    fn bare_push_would_be_refused_decision_table() {
+        let refused = |pd, bpr, rpd, br, has_refspec| {
+            bare_push_would_be_refused(pd, bpr, rpd, br, "origin", has_refspec)
+        };
+        // Unset and explicit `simple` both refuse on the upstream's own remote.
+        assert!(refused(None, None, None, Some("origin"), false));
+        assert!(refused(Some("simple"), None, None, Some("origin"), false));
+        // Any other push.default doesn't.
+        for other in [
+            "upstream", "tracking", "current", "matching", "nothing", "Simple",
+        ] {
+            assert!(
+                !refused(Some(other), None, None, Some("origin"), false),
+                "{other}"
+            );
+        }
+        // branch.<n>.pushRemote outranks remote.pushDefault, which outranks branch.<n>.remote.
+        assert!(!refused(None, Some("fork"), None, Some("origin"), false));
+        assert!(refused(
+            None,
+            Some("origin"),
+            Some("fork"),
+            Some("fork"),
+            false
+        ));
+        assert!(!refused(None, None, Some("fork"), Some("origin"), false));
+        assert!(refused(None, None, Some("origin"), Some("fork"), false));
+        assert!(!refused(None, None, None, Some("fork"), false));
+        assert!(!refused(None, None, None, None, false));
+        // A push refspec of the push remote's own replaces the default push.
+        assert!(!refused(None, None, None, Some("origin"), true));
+        assert!(!refused(Some("simple"), None, None, Some("origin"), true));
+    }
+
+    #[test]
+    fn upstream_split_arms() {
+        use crate::git::remote::Upstream;
+        let split = |t: Option<(Upstream, &str, bool)>| {
+            upstream_split("feat/y", t.map(|(u, r, g)| (u, r.to_string(), g)))
+        };
+        let branch = |b: &str| Upstream::Branch(b.to_string());
+        let both = |candidate| UpstreamSplit {
+            remote: Some("origin".into()),
+            branch: Some("feat/x".into()),
+            candidate,
+        };
+        let nothing = UpstreamSplit {
+            remote: None,
+            branch: None,
+            candidate: false,
+        };
+        // Live, differently named: the one candidate shape.
+        assert_eq!(split(Some((branch("feat/x"), "origin", false))), both(true));
+        // Gone keeps both names but is never a candidate.
+        assert_eq!(split(Some((branch("feat/x"), "origin", true))), both(false));
+        // Same name: no mismatch.
+        assert_eq!(
+            split(Some((branch("feat/y"), "origin", false))),
+            UpstreamSplit {
+                remote: Some("origin".into()),
+                branch: Some("feat/y".into()),
+                candidate: false,
+            }
+        );
+        // A non-branch upstream names its remote only.
+        assert_eq!(
+            split(Some((Upstream::NotABranch, "origin", false))),
+            UpstreamSplit {
+                remote: Some("origin".into()),
+                branch: None,
+                candidate: false,
+            }
+        );
+        // Local `.` upstream, empty remotename, untracked, and no line (unborn) yield nothing.
+        assert_eq!(split(Some((branch("main"), ".", false))), nothing);
+        assert_eq!(split(Some((branch("main"), "", false))), nothing);
+        assert_eq!(split(Some((Upstream::Untracked, "", false))), nothing);
+        assert_eq!(split(None), nothing);
+    }
+
+    /// The camelCase keys the TS `BranchHead` mirror reads, and none of the snake_case
+    /// spellings.
+    #[test]
+    fn branch_head_serializes_the_upstream_facts_in_camel_case() {
+        let text = z(&[
+            "# branch.head feat/y",
+            "# branch.upstream origin/feat/x",
+            "",
+        ]);
+        let mut head = parse_status_v2(&text).branch;
+        head.upstream_remote = Some("origin".into());
+        head.upstream_branch = Some("feat/x".into());
+        head.push_name_mismatch = true;
+        head.upstream_is_remote_default = Some(false);
+        let wire = serde_json::to_value(&head).unwrap();
+        assert_eq!(wire["upstreamRemote"], "origin");
+        assert_eq!(wire["upstreamBranch"], "feat/x");
+        assert_eq!(wire["pushNameMismatch"], true);
+        assert_eq!(wire["upstreamIsRemoteDefault"], false);
+        let keys = wire.as_object().unwrap();
+        for snake in [
+            "upstream_remote",
+            "upstream_branch",
+            "push_name_mismatch",
+            "upstream_is_remote_default",
+        ] {
+            assert!(!keys.contains_key(snake), "{snake}");
+        }
+        let unknown = serde_json::to_value(parse_status_v2(&text).branch).unwrap();
+        assert!(unknown["upstreamIsRemoteDefault"].is_null());
+    }
+
+    // --- Real-repo tests: the predicate pinned against git's own verdict. ---
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?} in {repo}: {e}"))
+            .stdout_lossy()
+    }
+
+    fn temp_base(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-status-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
+    }
+
+    /// A clone of a bare `origin.git` carrying `main` (its HEAD) and `feat/x`, with a
+    /// second remote, standing on `feat/x` checked out tracking `origin/feat/x` and then
+    /// renamed to `feat/y`, one commit ahead. Returns the clone's path.
+    async fn renamed_branch_fixture(base: &std::path::Path, tag: &str) -> String {
+        let dir = base.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        git(&d, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&d, &["init", "-q", "--bare", "-b", "main", "second.git"]).await;
+        git(&d, &["init", "-q", "-b", "main", "seed"]).await;
+        let seed = path("seed");
+        git(&seed, &["config", "user.email", "t@t.local"]).await;
+        git(&seed, &["config", "user.name", "T"]).await;
+        std::fs::write(dir.join("seed").join("a.txt"), "a\n").unwrap();
+        git(&seed, &["add", "-A"]).await;
+        git(&seed, &["commit", "-qm", "seed"]).await;
+        let origin = path("origin.git");
+        git(
+            &seed,
+            &["push", "-q", &origin, "main", "main:refs/heads/feat/x"],
+        )
+        .await;
+        git(&seed, &["push", "-q", &path("second.git"), "main"]).await;
+        git(
+            &d,
+            &["-c", "core.autocrlf=false", "clone", "-q", &origin, "work"],
+        )
+        .await;
+        let work = path("work");
+        git(&work, &["config", "user.email", "t@t.local"]).await;
+        git(&work, &["config", "user.name", "T"]).await;
+        git(&work, &["remote", "add", "second", &path("second.git")]).await;
+        git(&work, &["fetch", "-q", "second"]).await;
+        git(
+            &work,
+            &["switch", "-q", "-c", "feat/x", "--track", "origin/feat/x"],
+        )
+        .await;
+        git(&work, &["branch", "-m", "feat/x", "feat/y"]).await;
+        commit_one(&work, "work.txt").await;
+        work
+    }
+
+    async fn commit_one(repo: &str, file: &str) {
+        std::fs::write(std::path::Path::new(repo).join(file), "x\n").unwrap();
+        git(repo, &["add", "-A"]).await;
+        git(repo, &["commit", "-qm", file]).await;
+    }
+
+    /// Whether every key reads unset in `repo` (exit 1) — a check that needs an axis unset
+    /// skips, naming itself (`what`) and the key, when the developer's global config leaks
+    /// a value in.
+    async fn all_unset(repo: &str, what: &str, keys: &[&str]) -> bool {
+        for key in keys {
+            let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            if out.code != 1 {
+                eprintln!("skipping {what}: {key} is set outside the fixture");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A bare `git push`'s verdict: whether git refused it for the name mismatch.
+    async fn bare_push_refused_by_git(repo: &str) -> bool {
+        let out = run_git_raw(Some(repo), &["push", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let collapsed = out.stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+        let refused = collapsed.contains("does not match the name of your current branch");
+        assert!(
+            refused || out.code == 0,
+            "push failed otherwise: {}",
+            out.stderr
+        );
+        refused
+    }
+
+    /// The decision table measured against git itself: per push-config row, the status
+    /// flag must equal git's own bare-push verdict on a renamed tracking branch. Every axis
+    /// a row relies on is written to the repo-local config; the ones it needs unset are
+    /// checked unset first.
+    #[tokio::test]
+    async fn bare_push_refusal_matrix() {
+        let (_guard, base) = temp_base("matrix");
+        let pd = "push.default";
+        let push_remote = "branch.feat/y.pushRemote";
+        let remote_pd = "remote.pushDefault";
+        let origin_push = "remote.origin.push";
+        // (row tag, config to write, keys that must read unset, expected mismatch)
+        type Row<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str], bool);
+        let rows: [Row<'_>; 8] = [
+            (
+                "a-defaults",
+                &[],
+                &[pd, push_remote, remote_pd, origin_push],
+                true,
+            ),
+            (
+                "b-simple",
+                &[(pd, "simple")],
+                &[push_remote, remote_pd, origin_push],
+                true,
+            ),
+            (
+                "c-push-remote",
+                &[(pd, "simple"), (push_remote, "second")],
+                &["remote.second.push"],
+                false,
+            ),
+            (
+                "d-remote-push-default",
+                &[(pd, "simple"), (remote_pd, "second")],
+                &[push_remote, "remote.second.push"],
+                false,
+            ),
+            (
+                "e-upstream",
+                &[(pd, "upstream")],
+                &[push_remote, remote_pd],
+                false,
+            ),
+            (
+                "f-current",
+                &[(pd, "current")],
+                &[push_remote, remote_pd],
+                false,
+            ),
+            (
+                "g-push-refspec",
+                &[
+                    (pd, "simple"),
+                    (origin_push, "refs/heads/feat/y:refs/heads/feat/y"),
+                ],
+                &[push_remote, remote_pd],
+                false,
+            ),
+            // remote.pushDefault names the second remote, but the branch's own pushRemote
+            // names origin again and outranks it, so git refuses.
+            (
+                "i-push-remote-outranks",
+                &[
+                    (pd, "simple"),
+                    (remote_pd, "second"),
+                    (push_remote, "origin"),
+                ],
+                &[origin_push],
+                true,
+            ),
+        ];
+        for (tag, config, unset, expect) in rows {
+            let work = renamed_branch_fixture(&base, tag).await;
+            for (key, value) in config {
+                git(&work, &["config", key, value]).await;
+            }
+            if !all_unset(&work, &format!("row {tag}"), unset).await {
+                continue;
+            }
+            let head = status_core(&work).await.unwrap().branch;
+            assert_eq!(head.push_name_mismatch, expect, "row {tag}");
+            assert_eq!(head.upstream_remote.as_deref(), Some("origin"), "row {tag}");
+            assert_eq!(head.upstream_branch.as_deref(), Some("feat/x"), "row {tag}");
+            let probed = if expect { Some(false) } else { None };
+            assert_eq!(head.upstream_is_remote_default, probed, "row {tag}");
+            assert_eq!(
+                bare_push_refused_by_git(&work).await,
+                expect,
+                "git's verdict, row {tag}"
+            );
+        }
+    }
+
+    /// A branch tracking the remote's DEFAULT branch under another name (`checkout -b x
+    /// origin/main`): still a mismatch, and the remote-HEAD probe says so.
+    #[tokio::test]
+    async fn a_mismatch_onto_the_remote_default_branch_is_flagged_as_such() {
+        let (_guard, base) = temp_base("default");
+        let work = renamed_branch_fixture(&base, "w").await;
+        git(&work, &["config", "push.default", "simple"]).await;
+        if !all_unset(
+            &work,
+            "the default-branch check",
+            &[
+                "branch.topic.pushRemote",
+                "remote.pushDefault",
+                "remote.origin.push",
+            ],
+        )
+        .await
+        {
+            return;
+        }
+        git(
+            &work,
+            &["switch", "-q", "-c", "topic", "--track", "origin/main"],
+        )
+        .await;
+        commit_one(&work, "topic.txt").await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.push_name_mismatch);
+        assert_eq!(head.upstream_branch.as_deref(), Some("main"));
+        assert_eq!(head.upstream_is_remote_default, Some(true));
+    }
+
+    /// The shapes that are never a mismatch, each read off a real repository. The
+    /// pull-request row is the measured residual: git refuses its bare push by name, but
+    /// with no branch to name it keeps a plain Push and git's own message.
+    #[tokio::test]
+    async fn status_fill_arms_on_real_repositories() {
+        let (_guard, base) = temp_base("arms");
+        let work = renamed_branch_fixture(&base, "w").await;
+        git(&work, &["config", "push.default", "simple"]).await;
+        let origin = base
+            .join("w")
+            .join("origin.git")
+            .to_string_lossy()
+            .into_owned();
+
+        // Same name: both names, no mismatch.
+        git(
+            &work,
+            &["switch", "-q", "-c", "feat/x", "--track", "origin/feat/x"],
+        )
+        .await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert_eq!(head.upstream_remote.as_deref(), Some("origin"));
+        assert_eq!(head.upstream_branch.as_deref(), Some("feat/x"));
+        assert!(!head.push_name_mismatch);
+
+        // Untracked: nothing.
+        git(&work, &["switch", "-q", "-c", "loose"]).await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert_eq!((head.upstream_remote, head.upstream_branch), (None, None));
+
+        // Local `.` upstream: nothing.
+        git(
+            &work,
+            &["switch", "-q", "-c", "local-up", "--track", "main"],
+        )
+        .await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.upstream.is_some());
+        assert_eq!((head.upstream_remote, head.upstream_branch), (None, None));
+        assert!(!head.push_name_mismatch);
+
+        // A pull-request upstream: its remote only, never a mismatch — git still refuses
+        // the bare push, which keeps its own message.
+        git(
+            &origin,
+            &["update-ref", "refs/pull/7/head", "refs/heads/main"],
+        )
+        .await;
+        git(
+            &work,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/pull/*/head:refs/remotes/origin/pr/*",
+            ],
+        )
+        .await;
+        git(&work, &["fetch", "-q", "origin"]).await;
+        git(
+            &work,
+            &["switch", "-q", "--no-track", "-c", "pr-7", "origin/pr/7"],
+        )
+        .await;
+        git(&work, &["config", "branch.pr-7.remote", "origin"]).await;
+        git(&work, &["config", "branch.pr-7.merge", "refs/pull/7/head"]).await;
+        commit_one(&work, "pr.txt").await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.upstream.is_some());
+        assert_eq!(head.upstream_remote.as_deref(), Some("origin"));
+        assert_eq!(head.upstream_branch, None);
+        assert!(!head.push_name_mismatch);
+        if all_unset(
+            &work,
+            "the pr-7 bare-push check",
+            &[
+                "branch.pr-7.pushRemote",
+                "remote.pushDefault",
+                "remote.origin.push",
+            ],
+        )
+        .await
+        {
+            assert!(bare_push_refused_by_git(&work).await);
+        }
+
+        // Gone: both names kept, no mismatch.
+        git(&work, &["switch", "-q", "feat/y"]).await;
+        git(&work, &["update-ref", "-d", "refs/remotes/origin/feat/x"]).await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.upstream_gone);
+        assert_eq!(head.upstream_remote.as_deref(), Some("origin"));
+        assert_eq!(head.upstream_branch.as_deref(), Some("feat/x"));
+        assert!(!head.push_name_mismatch);
+
+        // Detached: nothing.
+        git(&work, &["switch", "-q", "--detach"]).await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert_eq!((head.upstream_remote, head.upstream_branch), (None, None));
     }
 
     #[test]

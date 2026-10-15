@@ -2,6 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { gitBranchMergeStates } from "@/lib/git/api";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
+import {
+  applyReconcileVerdict,
+  reconcileKey,
+  reconcileVerdict,
+} from "@/lib/pulls/reconcile";
 
 /**
  * Keeps open local PRs honest with git when the work happens outside the app
@@ -22,7 +27,7 @@ export function useReconcileLocalPrs(repo: string) {
       "repo",
       repo,
       "local-pr-merge-states",
-      open.map((p) => `${p.id}:${p.base}:${p.head}`),
+      open.map(reconcileKey),
     ] as const,
     queryFn: () =>
       gitBranchMergeStates(
@@ -41,24 +46,18 @@ export function useReconcileLocalPrs(repo: string) {
     if (!data) return;
     open.forEach((pr, i) => {
       const s = data[i];
-      if (!s || done.current.has(pr.id)) return;
-      if (s.merged) {
-        done.current.add(pr.id);
-        mutate({
-          id: pr.id,
-          mutate: (cur) => ({
-            ...cur,
-            status: "merged",
-            mergedAt: cur.mergedAt ?? new Date().toISOString(),
-          }),
-        });
-      } else if (!s.headExists) {
-        done.current.add(pr.id);
-        mutate({
-          id: pr.id,
-          mutate: (cur) => ({ ...cur, status: "closed" }),
-        });
-      }
+      const key = reconcileKey(pr);
+      if (!s || done.current.has(key)) return;
+      const verdict = reconcileVerdict(s);
+      if (!verdict) return;
+      done.current.add(key);
+      // updateLocalPr runs `mutate` on the record it re-reads under the store lock,
+      // so the compare-and-set sees a rename's migration that this read predates.
+      mutate({
+        id: pr.id,
+        mutate: (cur) =>
+          applyReconcileVerdict(cur, pr, verdict, new Date().toISOString()),
+      });
     });
   }, [states.data, open, mutate]);
 }

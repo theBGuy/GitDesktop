@@ -12,6 +12,20 @@ export interface BranchHead {
    *  decisions: offer Publish over Push/Pull, allow undo-commit, don't demand a
    *  force-push on amend. */
   upstreamGone: boolean;
+  /** The upstream's remote (`%(upstream:remotename)`); null when untracked,
+   *  detached/unborn, a local (`.`) upstream, or the tracking read failed. */
+  upstreamRemote: string | null;
+  /** The upstream branch's name on its remote (`refs/heads/` stripped); null for
+   *  a non-branch upstream (`refs/pull/N/head`) or when `upstreamRemote` is null. */
+  upstreamBranch: string | null;
+  /** A bare `git push` would be refused because the branch upstream has a
+   *  different name (push.default unset/simple, pushed to the upstream's own
+   *  remote, no push refspec). When true, `upstreamRemote` and `upstreamBranch`
+   *  are both set. */
+  pushNameMismatch: boolean;
+  /** Whether `upstreamBranch` is its remote's default branch; probed only while
+   *  `pushNameMismatch`, null = unknown. */
+  upstreamIsRemoteDefault: boolean | null;
 }
 
 export interface Branch {
@@ -36,6 +50,10 @@ export interface Branch {
    *  `origin` — null when untracked. Authoritative source for which remote a push
    *  targets; the UI must never re-derive it from the upstream string. */
   upstreamRemote: string | null;
+  /** The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
+   *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
+   *  never the short `upstream` string (remote names may contain `/`). */
+  upstreamRemoteRef: string | null;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so

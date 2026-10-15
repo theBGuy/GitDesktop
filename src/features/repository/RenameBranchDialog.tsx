@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/dialog";
 import { required, useAppForm } from "@/lib/form";
 import { useRenameBranch } from "@/lib/git/queries";
-import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
+import {
+  isSessionBranchName,
+  refNameWarning,
+  sanitizeRefName,
+} from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -33,6 +37,14 @@ import {
  *  already been sent. */
 const RENAME_PENDING_GENERATE_REASON = "Wait for the rename to finish";
 
+/** The field's warning for a name in the agent-session namespace. A warning, not
+ *  a validator: validator messages never render, and the backend refuses it. */
+function sessionNameWarning(name: string): string | null {
+  return isSessionBranchName(name)
+    ? "gd/session/ is reserved for agent sessions — choose another name"
+    : null;
+}
+
 /**
  * Rename-branch dialog. Open when `target` is the branch being renamed (null =
  * closed). Owns its own form + the rename mutation; seeds the field with the
@@ -43,6 +55,7 @@ const RENAME_PENDING_GENERATE_REASON = "Wait for the rename to finish";
 export function RenameBranchDialog({
   repoPath,
   target,
+  targetUpstream,
   currentName,
   onClose,
   aiEnabled,
@@ -57,6 +70,9 @@ export function RenameBranchDialog({
 }: {
   repoPath: string;
   target: string | null;
+  /** `target`'s live upstream branch, by its remote and its name there; null when
+   *  unpublished, gone, a local upstream, or not a branch. */
+  targetUpstream: { remote: string; branch: string } | null;
   /** The checked-out branch — decides whether `target`'s working tree is its
    *  own (null when HEAD is detached, which is never the rename target). */
   currentName: string | null;
@@ -111,6 +127,7 @@ export function RenameBranchDialog({
     target !== null,
   );
   const shownCommittedStatus = useRetained(committedStatus, target !== null);
+  const shownUpstream = useRetained(targetUpstream, target !== null);
   // Only the checked-out branch's own working tree describes it.
   const targetIsCurrent = shownTarget !== null && shownTarget === currentName;
 
@@ -125,8 +142,13 @@ export function RenameBranchDialog({
       const newName = sanitizeRefName(value.name);
       const session = sessionRef.current;
       try {
-        await renameBranch.mutateAsync({ oldName: target, newName });
-        toast.success(`Renamed to ${newName}`);
+        const outcome = await renameBranch.mutateAsync({
+          oldName: target,
+          newName,
+        });
+        toast.success(`Renamed to ${newName}`, {
+          description: outcome.warning ?? undefined,
+        });
         if (sessionRef.current === session) {
           sessionRef.current = null;
           onClose();
@@ -210,9 +232,29 @@ export function RenameBranchDialog({
         >
           <DialogHeader>
             <DialogTitle>Rename branch</DialogTitle>
+            {/* The popup's aria-describedby, so the upstream note is announced
+                on open. It promises nothing about Push: that depends on the
+                push config. */}
             <DialogDescription>
               Renames{" "}
               <span className="font-mono wrap-break-word">{shownTarget}</span>.
+              {shownUpstream && (
+                <>
+                  {" "}
+                  <span className="font-mono wrap-break-word">
+                    {shownTarget}
+                  </span>{" "}
+                  tracks{" "}
+                  <span className="font-mono wrap-break-word">
+                    {shownUpstream.remote}/{shownUpstream.branch}
+                  </span>
+                  . Renaming changes only the local name; the branch on{" "}
+                  <span className="font-mono wrap-break-word">
+                    {shownUpstream.remote}
+                  </span>{" "}
+                  keeps its name.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
           <renameForm.AppField
@@ -224,7 +266,13 @@ export function RenameBranchDialog({
             }}
           >
             {(field) => (
-              <field.TextField label="New name" warning={refNameWarning} />
+              <field.TextField
+                label="New name"
+                warning={(value) =>
+                  sessionNameWarning(sanitizeRefName(value)) ??
+                  refNameWarning(value)
+                }
+              />
             )}
           </renameForm.AppField>
           <GenerateBranchNameButton

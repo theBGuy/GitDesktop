@@ -684,6 +684,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`) starts from the
   remote tip and leaves the new branch with **no upstream**, so its first push publishes it
   under its own name — pairs with pushing a branch without switching to it (below).
+  Renaming changes only the local name: a branch already on a remote keeps its name there
+  (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
+  for agent sessions.
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
   sweep of stale branches: those **merged** into the default branch — directly, or, where
   the repository's forge connection can supply them, through a recent pull request, so
@@ -757,8 +760,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
   with the **branches** list open it targets the **highlighted** branch, otherwise the
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
-  remote, has diverged, or has nothing to push says so in a short message — for those, use
-  the branch's context menu.
+  remote, has diverged, or has nothing to push says so in a short message; for those, use
+  the branch's context menu. One that tracks a branch with a different name says so too:
+  for the current branch, use **Push** to choose where; for a highlighted one, push it
+  from its context menu.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -915,7 +920,10 @@ right on the **Push** and **Pull** buttons.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
   commits; the menu's caret offers rebase and merge for reconciling a diverged branch.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
-  see **Publish branch** instead.
+  see **Publish branch** instead. When the branch tracks a remote branch with a different
+  name (after renaming a pushed branch, say) and Git would refuse a plain push, **Push**
+  opens a small menu: push to the branch it tracks, or publish under the new name and
+  track that. Setups that route pushes elsewhere keep a plain **Push**.
 
 ## Publish a local repo
 

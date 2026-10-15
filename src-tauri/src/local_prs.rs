@@ -99,22 +99,40 @@ fn swap_test_store_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     std::mem::replace(&mut *slot, dir)
 }
 
-/// Resolve the absolute path of the `local-prs.json` the frontend store writes.
-/// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
-/// (`dirs::data_dir()/<identifier>`) — see the module contract. Under `cfg(test)` an
-/// installed [`TEST_STORE_DIR`] wins.
+/// Pure resolution of the store's directory, in precedence order (mirroring
+/// `review_notes::resolve_store_base`):
+/// 1. an installed test override ([`TEST_STORE_DIR`]);
+/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can reach the user's real
+///    store (the branch-rename migration runs for real under `cargo test`);
+/// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring
+///    `tauri-plugin-store` v2's `BaseDirectory::AppData` — see the module contract.
+pub(crate) fn resolve_store_dir(
+    test_override: Option<PathBuf>,
+    is_test: bool,
+) -> AppResult<PathBuf> {
+    match test_override {
+        Some(dir) => Ok(dir),
+        None if is_test => Ok(std::env::temp_dir().join("gd-local-prs-test")),
+        None => {
+            let data = dirs::data_dir().ok_or_else(|| {
+                AppError::Command("could not resolve the app-data directory".to_string())
+            })?;
+            Ok(data.join(APP_IDENTIFIER))
+        }
+    }
+}
+
+/// Resolve the absolute path of the `local-prs.json` the frontend store writes — see
+/// [`resolve_store_dir`] for how the directory is chosen.
 pub fn store_path() -> AppResult<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = TEST_STORE_DIR
+    let test_override = TEST_STORE_DIR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-    {
-        return Ok(dir.join(STORE_FILE));
-    }
-    let data = dirs::data_dir()
-        .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
-    Ok(data.join(APP_IDENTIFIER).join(STORE_FILE))
+        .clone();
+    #[cfg(not(test))]
+    let test_override = None;
+    Ok(resolve_store_dir(test_override, cfg!(test))?.join(STORE_FILE))
 }
 
 /// Read the whole store file as a JSON object. A missing file is an empty object;
@@ -432,6 +450,58 @@ fn fold_legacy_key(store: &mut Map<String, Value>, identity: &str, legacy: &str)
     true
 }
 
+/// Repoint OPEN local PRs' `head`/`base` from `from` to `to` under `identity`,
+/// after folding any legacy checkout-path key (`consolidate`) so records minted
+/// under an old path are not missed. Closed/merged records keep their history.
+/// Returns how many records changed.
+pub async fn rename_branch(identity: &str, legacy: &str, from: &str, to: &str) -> AppResult<u32> {
+    consolidate(identity, legacy).await?;
+    let (identity, from, to) = (identity.to_string(), from.to_string(), to.to_string());
+    crate::store_lock::locked_store_task(move || rename_branch_sync(&identity, &from, &to)).await
+}
+
+/// The locked read-modify-write behind [`rename_branch`], on the caller's own thread.
+/// A repo with no entry is the common case, so a missing key is `Ok(0)`.
+fn rename_branch_sync(identity: &str, from: &str, to: &str) -> AppResult<u32> {
+    let path = store_path()?;
+    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
+    let mut store = read_store(&path)?;
+    let Some(key) = existing_key(&store, identity) else {
+        return Ok(0);
+    };
+    let changed = rename_refs_in(&mut store, &key, from, to);
+    if changed > 0 {
+        write_store(&path, &store)?;
+    }
+    Ok(changed)
+}
+
+/// The pure edit behind [`rename_branch`]: in `key`'s array, every record whose
+/// `status` is `"open"` gets an exact-match `head` and/or `base` of `from` set to `to`,
+/// edited as `Value` maps so unknown fields survive. Returns how many records changed;
+/// a non-array entry or non-object record is left alone.
+fn rename_refs_in(store: &mut Map<String, Value>, key: &str, from: &str, to: &str) -> u32 {
+    let Some(list) = store.get_mut(key).and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for pr in list.iter_mut().filter_map(Value::as_object_mut) {
+        if pr.get("status").and_then(Value::as_str) != Some("open") {
+            continue;
+        }
+        let mut touched = false;
+        for field in ["head", "base"] {
+            if pr.get(field).and_then(Value::as_str) == Some(from) {
+                pr.insert(field.to_string(), Value::String(to.to_string()));
+                touched = true;
+            }
+        }
+        changed += u32::from(touched);
+    }
+    changed
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -464,10 +534,10 @@ pub(crate) mod tests {
     /// Points the store at `dir` for as long as it's held and restores the prior override
     /// on drop — panics included, so a failing test can't leave one standing for whichever
     /// test is next through the lock.
-    struct StoreDirOverride(Option<PathBuf>);
+    pub(crate) struct StoreDirOverride(Option<PathBuf>);
 
     impl StoreDirOverride {
-        fn set(dir: &Path) -> Self {
+        pub(crate) fn set(dir: &Path) -> Self {
             Self(swap_test_store_dir(Some(dir.to_path_buf())))
         }
     }
@@ -658,6 +728,143 @@ pub(crate) mod tests {
         // Unchanged.
         assert_eq!(store[identity].as_array().unwrap().len(), 1);
         assert_eq!(store.len(), 1);
+    }
+
+    /// Negative control for the `cfg(test)` default: with no override installed, the
+    /// store resolves to the temp subdir, never under the real app-data dir — while the
+    /// production arm still resolves exactly where the store plugin writes.
+    #[test]
+    fn store_path_under_test_never_resolves_to_the_real_app_data_dir() {
+        let _serialized = store_dir_lock();
+        let path = store_path().unwrap();
+        assert_eq!(
+            path,
+            std::env::temp_dir()
+                .join("gd-local-prs-test")
+                .join(STORE_FILE)
+        );
+        let real_root = dirs::data_dir().expect("app-data dir");
+        assert!(
+            !path.starts_with(&real_root),
+            "{} is under the real app-data dir",
+            path.display()
+        );
+        assert_eq!(
+            resolve_store_dir(None, false).unwrap(),
+            real_root.join(APP_IDENTIFIER)
+        );
+        let over = PathBuf::from("C:/tmp/x");
+        assert_eq!(resolve_store_dir(Some(over.clone()), true).unwrap(), over);
+    }
+
+    fn pr(id: &str, status: &str, base: &str, head: &str) -> Value {
+        json!({ "id": id, "status": status, "base": base, "head": head })
+    }
+
+    #[test]
+    fn rename_refs_in_moves_open_heads_and_bases_only() {
+        let key = "C:/repo/.git";
+        let mut store = Map::new();
+        store.insert(
+            key.to_string(),
+            json!([
+                pr("head-match", "open", "main", "feat/x"),
+                pr("base-match", "open", "feat/x", "topic"),
+                pr("both-match", "open", "feat/x", "feat/x"),
+                pr("no-match", "open", "main", "feat/xy"),
+                pr("closed", "closed", "main", "feat/x"),
+                pr("merged", "merged", "feat/x", "feat/x"),
+                { "id": "extra", "status": "open", "base": "main", "head": "feat/x",
+                  "futureField": { "keep": [1, 2] } },
+            ]),
+        );
+        store.insert(
+            "C:/other/.git".to_string(),
+            json!([pr("other", "open", "main", "feat/x")]),
+        );
+
+        assert_eq!(rename_refs_in(&mut store, key, "feat/x", "feat/y"), 4);
+        let arr = store[key].as_array().unwrap();
+        let get = |id: &str| arr.iter().find(|p| p["id"] == id).unwrap().clone();
+        assert_eq!(get("head-match")["head"], "feat/y");
+        assert_eq!(get("head-match")["base"], "main");
+        assert_eq!(get("base-match")["base"], "feat/y");
+        assert_eq!(get("base-match")["head"], "topic");
+        assert_eq!(get("both-match")["base"], "feat/y");
+        assert_eq!(get("both-match")["head"], "feat/y");
+        assert_eq!(get("no-match")["head"], "feat/xy");
+        assert_eq!(get("closed")["head"], "feat/x");
+        assert_eq!(get("merged")["base"], "feat/x");
+        assert_eq!(get("merged")["head"], "feat/x");
+        assert_eq!(get("extra")["head"], "feat/y");
+        assert_eq!(get("extra")["futureField"], json!({ "keep": [1, 2] }));
+        // Another repo's records are untouched.
+        assert_eq!(store["C:/other/.git"][0]["head"], "feat/x");
+    }
+
+    #[test]
+    fn rename_refs_in_counts_zero_when_nothing_matches() {
+        let key = "C:/repo/.git";
+        let mut store = Map::new();
+        store.insert(key.to_string(), json!([pr("a", "open", "main", "topic")]));
+        let before = store.clone();
+        assert_eq!(rename_refs_in(&mut store, key, "feat/x", "feat/y"), 0);
+        assert_eq!(store, before);
+        assert_eq!(
+            rename_refs_in(&mut store, "C:/missing/.git", "main", "x"),
+            0
+        );
+    }
+
+    /// Seeds a store whose open PR lives under a LEGACY checkout-path key, the shape a
+    /// worktree-opened repo left before identity keying.
+    fn legacy_keyed_store(dir: &Path, legacy: &str, identity: &str) {
+        let mut store = Map::new();
+        store.insert(
+            legacy.to_string(),
+            json!([pr("legacy-pr", "open", "main", "feat/x")]),
+        );
+        store.insert(
+            identity.to_string(),
+            json!([pr("identity-pr", "open", "feat/x", "topic")]),
+        );
+        write_store(&dir.join(STORE_FILE), &store).unwrap();
+    }
+
+    /// End to end through the public fn and both locks: the legacy-keyed record is folded
+    /// in first, so both PRs follow the rename. The negative control runs the same fixture
+    /// through the locked step alone and misses the legacy record, which is what makes the
+    /// consolidate step load-bearing.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rename_branch_consolidates_legacy_keys_first() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let (legacy, identity) = ("C:/wt/harbor", "C:/ProjectRepos/demo/harbor/.git");
+
+        legacy_keyed_store(tmp.path(), legacy, identity);
+        assert_eq!(
+            rename_branch(identity, legacy, "feat/x", "feat/y")
+                .await
+                .unwrap(),
+            2
+        );
+        let back = list(identity).unwrap();
+        let get = |id: &str| back.iter().find(|p| p["id"] == id).unwrap().clone();
+        assert_eq!(get("legacy-pr")["head"], "feat/y");
+        assert_eq!(get("identity-pr")["base"], "feat/y");
+        assert!(!read_store(&store_path().unwrap())
+            .unwrap()
+            .contains_key(legacy));
+
+        legacy_keyed_store(tmp.path(), legacy, identity);
+        assert_eq!(rename_branch_sync(identity, "feat/x", "feat/y").unwrap(), 1);
+        let raw = read_store(&store_path().unwrap()).unwrap();
+        assert_eq!(
+            raw[legacy][0]["head"], "feat/x",
+            "missed without consolidate"
+        );
     }
 
     #[test]

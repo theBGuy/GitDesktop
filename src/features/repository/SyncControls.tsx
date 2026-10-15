@@ -23,7 +23,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -46,6 +48,7 @@ import {
   useHardResetToCommit,
   usePull,
   usePush,
+  useRemoteBranches,
   useRemotes,
   useRepoStatus,
   useUpdateFromUpstream,
@@ -79,7 +82,12 @@ import {
   publishPendingReason,
   usePublishProviders,
 } from "./PublishRepoControl";
-import { deriveSyncControls, headFacts } from "./sync-controls-state";
+import {
+  deriveSyncControls,
+  headFacts,
+  type MismatchMenu,
+  type MismatchMenuItem,
+} from "./sync-controls-state";
 import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
 
@@ -172,17 +180,26 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     Readonly<Record<string, number>>
   >({});
   const detecting = (detections[repoPath] ?? 0) > 0;
+  // The mismatch Push menu, controlled so the push hotkey and the palette open
+  // it too. Its destinations are pinned when it opens, with the repo they belong
+  // to: a status poll under the open menu can't change what a click pushes.
+  const [pushMenuOpen, setPushMenuOpen] = useState(false);
+  const [pushMenuCapture, setPushMenuCapture] = useState<{
+    repo: string;
+    menu: MismatchMenu;
+  } | null>(null);
   // This component survives repo switches (RepoHeader mounts unkeyed), so both
   // confirm dialogs close in the render that switches. Left open, the force
   // confirm would force-push the live HEAD on the old repo's divergence
   // verdict, and the fork guard would offer a push for a repository the user
   // has left (defense in depth beside its per-open pin). Reset in render: an
-  // effect would paint them open first.
+  // effect would paint them open first. The Push menu closes with them.
   const [dialogsRepo, setDialogsRepo] = useState(repoPath);
   if (dialogsRepo !== repoPath) {
     setDialogsRepo(repoPath);
     setForceConfirm((c) => c && { ...c, open: false });
     setForkGuard((g) => g && { ...g, open: false });
+    setPushMenuOpen(false);
   }
 
   // Data, never isPending/isFetching: undefined means unknown for THIS repo
@@ -239,6 +256,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // the connection returns. Reset to upstream is local and stays live.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
+  // Read only while the backend reports a mismatch, to say whether publishing
+  // under the new name would land on a branch the last fetch already saw there.
+  const remoteBranches = useRemoteBranches(
+    repoPath,
+    head?.pushNameMismatch === true,
+  );
+  const remoteNewExists =
+    remoteBranches.data?.some(
+      (r) => r.remote === head?.upstreamRemote && r.name === head?.name,
+    ) ?? false;
   // Sticky failure predicates, never `isError`: a never-loaded query that errored
   // goes back to pending on every refetch, which would flip the reason per poll.
   const sync = deriveSyncControls({
@@ -251,7 +278,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     remoteRebased,
     mixedRewrite,
     localAtRisk,
+    remoteNewExists,
   });
+  // The menu's trigger unmounts when the mismatch clears, closing the menu with
+  // it; a menu left "open" would reappear by itself the next time it mounts.
+  if (pushMenuOpen && !sync.mismatchMenu) setPushMenuOpen(false);
   const {
     noOrigin,
     hasOrigin,
@@ -272,6 +303,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const controlsRef = useRef<HTMLDivElement>(null);
   useFocusOnControlsSwap(noOrigin, controlsRef);
   useFocusOnControlsSwap(publish.providers.length >= 2, controlsRef);
+  // The plain Push button and the mismatch menu's trigger swap whenever the
+  // mismatch flips (a successful publish retracks the branch), so focus lands on
+  // whichever push control replaced the one that held it.
+  const pushControlRef = useRef<HTMLButtonElement>(null);
+  useFocusOnControlsSwap(sync.mismatch, pushControlRef);
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
@@ -639,17 +675,95 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     } else void doPush(false, branch);
   }
 
+  function openPushMenu() {
+    const menu = sync.mismatchMenu;
+    if (!menu) return;
+    setPushMenuCapture({ repo: repoPath, menu });
+    setPushMenuOpen(true);
+  }
+
+  // Each item pushes the destination the menu showed when it opened, by name:
+  // never the HEAD arm, whose bare push git refuses here and whose `-u` names
+  // origin. "Publish" retracks to the SAME remote; the tracked push never does.
+  async function pushFromMenu(target: "tracked" | "publish") {
+    const capture = pushMenuCapture;
+    if (!capture) return;
+    if (refuseWhileOffline()) return;
+    if (
+      refuseIfSwitched(
+        capture.repo,
+        "nothing was pushed",
+        "while the menu was open",
+      )
+    )
+      return;
+    const { branch, remote, remoteBranch } = capture.menu;
+    if (headNameRef.current !== branch) {
+      toast.info("HEAD moved — nothing was pushed.");
+      return;
+    }
+    try {
+      if (target === "tracked") {
+        await push.mutateAsync({
+          setUpstream: false,
+          branch,
+          remote,
+          remoteBranch,
+        });
+        toast.success(`Pushed ${branch} to ${remote}/${remoteBranch}`);
+      } else {
+        await push.mutateAsync({ setUpstream: true, branch, remote });
+        toast.success(
+          `Published ${branch} to ${remote} — Push now sends to ${remote}/${branch}`,
+        );
+      }
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  // One dispatch for the button and the hotkey. A mismatch outranks divergence:
+  // force through a cross-name refspec would bypass the push routing the force
+  // confirm relies on.
+  function pressPush() {
+    if (sync.mismatchMenu) openPushMenu();
+    else if (diverged) openForceConfirm();
+    else void beginPush(false);
+  }
+
+  // An open menu row, live while the status still names the pinned destinations
+  // (so its hold reason matches its state); held with its pinned label once HEAD
+  // or the upstream moved under it. A click always pushes the pinned names.
+  const pinnedMenu = pushMenuCapture?.menu;
+  const liveMenu = sync.mismatchMenu;
+  const sameTarget =
+    liveMenu !== null &&
+    pinnedMenu !== undefined &&
+    head?.name === pinnedMenu.branch &&
+    liveMenu.branch === pinnedMenu.branch &&
+    liveMenu.remote === pinnedMenu.remote &&
+    liveMenu.remoteBranch === pinnedMenu.remoteBranch;
+  const menuRow = (
+    pinned: MismatchMenuItem,
+    live: MismatchMenuItem | null | undefined,
+  ): MismatchMenuItem => {
+    if (!sameTarget || !live) return { label: pinned.label, disabled: true };
+    if (live.disabled) return live;
+    return {
+      label: `${live.label}${offlineSuffix}`,
+      disabled: !!offlineHold,
+    };
+  };
+  const trackedRow =
+    pinnedMenu?.pushToTracked &&
+    menuRow(pinnedMenu.pushToTracked, liveMenu?.pushToTracked);
+  const publishRow =
+    pinnedMenu && menuRow(pinnedMenu.publish, liveMenu?.publish);
+
   // Hotkeys mirror the buttons' holds exactly (sync-controls-state.ts).
   useHotkeyAction("fetch", () => void doFetch(false), sync.hotkeys.fetch);
   useHotkeyAction("pull", () => void doPull("ffOnly"), sync.hotkeys.pull);
-  useHotkeyAction(
-    "push",
-    () => {
-      if (diverged) openForceConfirm();
-      else void beginPush(false);
-    },
-    sync.hotkeys.push,
-  );
+  useHotkeyAction("push", pressPush, sync.hotkeys.push);
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
   // to sync from or nowhere to merge into.
@@ -824,40 +938,107 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             )}
           </DropdownMenuContent>
         </DropdownMenu>
-        <DisabledReasonButton
-          variant="outline"
-          size="sm"
-          disabled={sync.push.disabled}
-          reason={sync.push.reason}
-          title={pushTitle}
-          aria-label={sync.pushName}
-          aria-keyshortcuts={pushKeyshortcuts}
-          className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
-          onClick={() => {
-            if (diverged) {
-              openForceConfirm();
-            } else {
-              void beginPush(false);
-            }
-          }}
-        >
-          {push.isPending || detecting ? (
-            <Spinner data-icon="inline-start" className="size-3.5" />
-          ) : diverged ? (
-            <WarningIcon data-icon="inline-start" />
-          ) : (
-            <ArrowUpIcon data-icon="inline-start" />
-          )}
-          <span className="hidden md:inline">{pushLabel}</span>
-          {aheadCount > 0 && (
-            <span
-              aria-hidden="true"
-              className="text-muted-foreground tabular-nums"
-            >
-              {aheadCount}
-            </span>
-          )}
-        </DisabledReasonButton>
+        {sync.mismatchMenu ? (
+          // git would refuse a bare push here, so Push is a menu of named
+          // destinations. The trigger never pushes, and shows no diverged warning:
+          // there is no force arm in this state.
+          <DropdownMenu
+            open={pushMenuOpen}
+            onOpenChange={(o) => {
+              if (o) openPushMenu();
+              else setPushMenuOpen(false);
+            }}
+          >
+            <DropdownMenuTrigger
+              render={
+                <DisabledReasonButton
+                  ref={pushControlRef}
+                  variant="outline"
+                  size="sm"
+                  disabled={sync.push.disabled}
+                  reason={sync.push.reason}
+                  title={pushTitle}
+                  aria-label={sync.pushName}
+                  aria-keyshortcuts={pushKeyshortcuts}
+                  className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
+                >
+                  {push.isPending || detecting ? (
+                    <Spinner data-icon="inline-start" className="size-3.5" />
+                  ) : (
+                    <ArrowUpIcon data-icon="inline-start" />
+                  )}
+                  <span className="hidden md:inline">{pushLabel}</span>
+                  {aheadCount > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className="text-muted-foreground tabular-nums"
+                    >
+                      {aheadCount}
+                    </span>
+                  )}
+                  <CaretDownIcon data-icon="inline-end" />
+                </DisabledReasonButton>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-48">
+              {pinnedMenu && (
+                // The label names the group for assistive tech; Base UI's
+                // GroupLabel must sit inside a group.
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>{pinnedMenu.groupLabel}</DropdownMenuLabel>
+                  {trackedRow && (
+                    <DropdownMenuItem
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={trackedRow.disabled}
+                      onClick={() => void pushFromMenu("tracked")}
+                    >
+                      {trackedRow.label}
+                    </DropdownMenuItem>
+                  )}
+                  {publishRow && (
+                    <DropdownMenuItem
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={publishRow.disabled}
+                      onClick={() => void pushFromMenu("publish")}
+                    >
+                      {publishRow.label}
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuGroup>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <DisabledReasonButton
+            ref={pushControlRef}
+            variant="outline"
+            size="sm"
+            disabled={sync.push.disabled}
+            reason={sync.push.reason}
+            title={pushTitle}
+            aria-label={sync.pushName}
+            aria-keyshortcuts={pushKeyshortcuts}
+            className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
+            onClick={pressPush}
+          >
+            {push.isPending || detecting ? (
+              <Spinner data-icon="inline-start" className="size-3.5" />
+            ) : diverged ? (
+              <WarningIcon data-icon="inline-start" />
+            ) : (
+              <ArrowUpIcon data-icon="inline-start" />
+            )}
+            <span className="hidden md:inline">{pushLabel}</span>
+            {aheadCount > 0 && (
+              <span
+                aria-hidden="true"
+                className="text-muted-foreground tabular-nums"
+              >
+                {aheadCount}
+              </span>
+            )}
+          </DisabledReasonButton>
+        )}
       </ButtonGroup>
 
       <Dialog

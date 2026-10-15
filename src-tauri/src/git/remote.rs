@@ -1071,8 +1071,66 @@ pub(crate) async fn git_push_core(
             run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
             Ok(PushGuard::LeaseOnlyNoReflog)
         }
+        // Only the bare HEAD push reaches git's push.default=simple name check: every
+        // named arm passes an explicit refspec.
+        Err(AppError::Git { code, stderr })
+            if branch.is_none() && !set_upstream && is_push_simple_name_refusal(&stderr) =>
+        {
+            Err(confirmed_name_mismatch(&repo_path)
+                .await
+                .unwrap_or(AppError::Git { code, stderr }))
+        }
         Err(other) => Err(other),
     }
+}
+
+/// git's `push.default=simple` refusal for an upstream with a different name
+/// (`die_push_simple`). git wraps it across lines, so it is matched with every
+/// whitespace run collapsed; the runner's `LC_ALL=C` keeps it English.
+const PUSH_SIMPLE_NAME_REFUSAL: &str = "does not match the name of your current branch";
+
+fn is_push_simple_name_refusal(stderr: &str) -> bool {
+    stderr
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .contains(PUSH_SIMPLE_NAME_REFUSAL)
+}
+
+/// The typed refusal for HEAD's branch, built only from tracking re-read now: a live
+/// BRANCH upstream on a real remote whose name differs. Anything unconfirmed (detached,
+/// a failed read, a non-branch or local `.` upstream) is `None`, so the caller keeps
+/// git's own error rather than naming unverified refs.
+async fn confirmed_name_mismatch(repo_path: &str) -> Option<AppError> {
+    // git's own full ref for HEAD, so the lookup pattern is never rebuilt from a name.
+    let refname = crate::git::branches::current_branch_ref(repo_path)
+        .await
+        .ok()
+        .flatten()?;
+    let head = refname.strip_prefix("refs/heads/")?.to_string();
+    let out = run_git(
+        Some(repo_path),
+        &["for-each-ref", &refname, UPSTREAM_TRACKING_FORMAT],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    match parse_upstream_tracking(&out.stdout_lossy(), &refname)? {
+        (Upstream::Branch(up), remote, false) if up != head && is_named_remote(&remote) => {
+            Some(AppError::PushUpstreamNameMismatch {
+                branch: head,
+                remote,
+                remote_branch: up,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether `%(upstream:remotename)` names a real remote: empty is untracked, and `.`
+/// is a local upstream (measured, git 2.51.1), neither of which has a remote to push to.
+pub(crate) fn is_named_remote(remotename: &str) -> bool {
+    !remotename.is_empty() && remotename != "."
 }
 
 /// Companion to `--force-with-lease`: git refuses the push unless the remote tip
@@ -1138,12 +1196,12 @@ fn without_force_if_includes<'a>(argv: &[&'a str]) -> Vec<&'a str> {
 /// tag named `origin/<x>` turns it into `remotes/origin/<x>`, which the push would
 /// then create as a new remote branch. The remote-side name also needs no knowledge
 /// of the remote's fetch-refspec layout, and covers a local (`.`) upstream.
-const UPSTREAM_TRACKING_FORMAT: &str =
+pub(crate) const UPSTREAM_TRACKING_FORMAT: &str =
     "--format=%(refname)%00%(upstream:remoteref)%00%(upstream:remotename)%00%(upstream:track)";
 
 /// What a local branch tracks, as [`build_push_args`] needs it.
 #[derive(Debug, Clone, PartialEq)]
-enum Upstream {
+pub(crate) enum Upstream {
     /// No upstream configured.
     Untracked,
     /// A branch on the upstream remote, by its name there.
@@ -1161,7 +1219,10 @@ enum Upstream {
 /// line's refname isn't `expected_ref`. An *untracked* branch still emits
 /// `refs/heads/<b>\0\0\0`, which (refname matches) parses to
 /// `Some((Upstream::Untracked, "", false))`.
-fn parse_upstream_tracking(stdout: &str, expected_ref: &str) -> Option<(Upstream, String, bool)> {
+pub(crate) fn parse_upstream_tracking(
+    stdout: &str,
+    expected_ref: &str,
+) -> Option<(Upstream, String, bool)> {
     let line = stdout.lines().next()?;
     let mut parts = line.split('\0');
     let refname = parts.next().unwrap_or("");
@@ -1323,13 +1384,13 @@ mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
         git_push_core, git_remote_add_core, git_remote_remove_core, git_remote_set_url_core,
-        is_auth_class_failure, is_push_default_left, is_unknown_push_option,
-        parse_upstream_tracking, publish_refspec, push_upstream_branch, push_upstream_target,
-        remove_busy_tail, remove_remote, resolve_push_target, run_git_mutating_with_creds,
-        with_busy_tail, without_force_if_includes, PushGuard, Upstream, FORCE_IF_INCLUDES,
-        IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK, REMOTE_BRANCH_UNSET_LOST,
-        REMOTE_PUSH_DEFAULT_LEFT, REMOTE_PUSH_DEFAULT_LOST, REMOTE_SECTION_LOST, REMOTE_UNCHANGED,
-        UPSTREAM_TRACKING_FORMAT,
+        is_auth_class_failure, is_push_default_left, is_push_simple_name_refusal,
+        is_unknown_push_option, parse_upstream_tracking, publish_refspec, push_upstream_branch,
+        push_upstream_target, remove_busy_tail, remove_remote, resolve_push_target,
+        run_git_mutating_with_creds, with_busy_tail, without_force_if_includes, PushGuard,
+        Upstream, FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK,
+        REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LEFT, REMOTE_PUSH_DEFAULT_LOST,
+        REMOTE_SECTION_LOST, REMOTE_UNCHANGED, UPSTREAM_TRACKING_FORMAT,
     };
     use crate::error::AppError;
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
@@ -3434,6 +3495,269 @@ mod tests {
             theirs,
             "clone2's commit is still origin's tip"
         );
+    }
+
+    /// A bare push from a renamed tracking branch: git's push.default=simple refusal maps
+    /// to the typed error carrying the re-read names, forced or not, and nothing moves on
+    /// the remote. Then the two explicit destinations the sync bar's menu offers land
+    /// exactly where they say: the tracked branch with tracking untouched, and the new
+    /// name on the SAME remote, retracked.
+    #[tokio::test]
+    async fn a_bare_push_refused_for_a_name_mismatch_names_both_branches() {
+        let (_guard, base, origin_s, _url) = seeded_origin("name-mismatch").await;
+        let work_s = base.join("work").to_string_lossy().into_owned();
+        run(&work_s, &["config", "push.default", "simple"]).await;
+        for key in [
+            "branch.feat/y.pushRemote",
+            "remote.pushDefault",
+            "remote.origin.push",
+        ] {
+            let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            if out.code != 1 {
+                eprintln!("skipping: {key} is set outside the fixture");
+                return;
+            }
+        }
+        run(&work_s, &["push", "-q", "origin", "main:refs/heads/feat/x"]).await;
+        run(&work_s, &["fetch", "-q", "origin"]).await;
+        run(
+            &work_s,
+            &["switch", "-q", "-c", "feat/x", "--track", "origin/feat/x"],
+        )
+        .await;
+        run(&work_s, &["branch", "-m", "feat/x", "feat/y"]).await;
+        std::fs::write(base.join("work").join("y.txt"), "y\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "on feat/y"]).await;
+        let tip = run(&work_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let main_tip = run(&origin_s, &["rev-parse", "refs/heads/main"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        for force in [false, true] {
+            let err = git_push_core(&state, work_s.clone(), false, force, None, None, None)
+                .await
+                .expect_err("git refuses the bare push");
+            let AppError::PushUpstreamNameMismatch {
+                branch,
+                remote,
+                remote_branch,
+            } = &err
+            else {
+                panic!("force={force}: expected the typed refusal, got {err:?}")
+            };
+            assert_eq!(
+                (branch.as_str(), remote.as_str(), remote_branch.as_str()),
+                ("feat/y", "origin", "feat/x")
+            );
+        }
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/feat/x"])
+                .await
+                .trim(),
+            main_tip
+        );
+
+        // "Push to origin/feat/x": the named destination, tracking untouched.
+        git_push_core(
+            &state,
+            work_s.clone(),
+            false,
+            false,
+            Some("feat/y".into()),
+            Some("origin".into()),
+            Some("feat/x".into()),
+        )
+        .await
+        .expect("push to the tracked branch");
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/feat/x"])
+                .await
+                .trim(),
+            tip
+        );
+        let upstream = || {
+            let work_s = work_s.clone();
+            async move {
+                run(
+                    &work_s,
+                    &["rev-parse", "--symbolic-full-name", "feat/y@{upstream}"],
+                )
+                .await
+                .trim()
+                .to_string()
+            }
+        };
+        assert_eq!(upstream().await, "refs/remotes/origin/feat/x");
+
+        // "Publish as origin/feat/y": the same remote, retracked to the new name.
+        git_push_core(
+            &state,
+            work_s.clone(),
+            true,
+            false,
+            Some("feat/y".into()),
+            Some("origin".into()),
+            None,
+        )
+        .await
+        .expect("publish under the new name");
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/feat/y"])
+                .await
+                .trim(),
+            tip
+        );
+        assert_eq!(upstream().await, "refs/remotes/origin/feat/y");
+        git_push_core(&state, work_s.clone(), false, false, None, None, None)
+            .await
+            .expect("a bare push works again once the names match");
+    }
+
+    /// "Push to origin/<new> and track it" when that branch already exists: the publish
+    /// arm fast-forwards it, and refuses rather than overwrite one holding other work.
+    #[tokio::test]
+    async fn publishing_onto_an_existing_remote_branch_fast_forwards_or_refuses() {
+        let (_guard, base, origin_s, _url) = seeded_origin("publish-existing").await;
+        let work_s = base.join("work").to_string_lossy().into_owned();
+        let main_tip = run(&work_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let seeds = [
+            "HEAD:refs/heads/feat/x",
+            "HEAD:refs/heads/feat/y",
+            "HEAD:refs/heads/feat/z",
+        ];
+        run(
+            &work_s,
+            &[&["push", "-q", "origin"][..], &seeds[..]].concat(),
+        )
+        .await;
+        run(&work_s, &["fetch", "-q", "origin"]).await;
+        // feat/z on the remote gets work the local branch never saw.
+        run(
+            &work_s,
+            &["switch", "-q", "-c", "other", "--no-track", "origin/feat/z"],
+        )
+        .await;
+        std::fs::write(base.join("work").join("z.txt"), "z\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "remote-only"]).await;
+        run(&work_s, &["push", "-q", "origin", "HEAD:refs/heads/feat/z"]).await;
+        let z_tip = run(&work_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        for (local, full, existing_tip) in [
+            ("feat/y", "refs/heads/feat/y", &main_tip),
+            ("feat/z", "refs/heads/feat/z", &z_tip),
+        ] {
+            run(
+                &work_s,
+                &["switch", "-q", "-c", local, "--track", "origin/feat/x"],
+            )
+            .await;
+            std::fs::write(base.join("work").join("w.txt"), local).unwrap();
+            run(&work_s, &["add", "-A"]).await;
+            run(&work_s, &["commit", "-qm", local]).await;
+            let tip = run(&work_s, &["rev-parse", "HEAD"])
+                .await
+                .trim()
+                .to_string();
+            let published = git_push_core(
+                &state,
+                work_s.clone(),
+                true,
+                false,
+                Some(local.to_string()),
+                Some("origin".into()),
+                None,
+            )
+            .await;
+            let remote_tip = run(&origin_s, &["rev-parse", full])
+                .await
+                .trim()
+                .to_string();
+            if existing_tip == &main_tip {
+                published.expect("an ancestor fast-forwards");
+                assert_eq!(remote_tip, tip);
+            } else {
+                assert!(published.is_err(), "a diverged remote branch is refused");
+                assert_eq!(&remote_tip, existing_tip, "never overwritten");
+            }
+        }
+    }
+
+    /// git refuses a pull-request upstream's bare push with the same message, but there
+    /// is no branch to name, so the error passes through untouched. Canary for the
+    /// whitespace-collapsed match against git's real, line-wrapped text.
+    #[tokio::test]
+    async fn a_name_refusal_without_a_branch_upstream_keeps_gits_own_error() {
+        let (_guard, base, origin_s, _url) = seeded_origin("pull-upstream").await;
+        let work_s = base.join("work").to_string_lossy().into_owned();
+        run(&work_s, &["config", "push.default", "simple"]).await;
+        for key in [
+            "branch.pr-7.pushRemote",
+            "remote.pushDefault",
+            "remote.origin.push",
+        ] {
+            let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            if out.code != 1 {
+                eprintln!("skipping: {key} is set outside the fixture");
+                return;
+            }
+        }
+        run(
+            &origin_s,
+            &["update-ref", "refs/pull/7/head", "refs/heads/main"],
+        )
+        .await;
+        run(
+            &work_s,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/pull/*/head:refs/remotes/origin/pr/*",
+            ],
+        )
+        .await;
+        run(&work_s, &["fetch", "-q", "origin"]).await;
+        run(
+            &work_s,
+            &["switch", "-q", "--no-track", "-c", "pr-7", "origin/pr/7"],
+        )
+        .await;
+        run(&work_s, &["config", "branch.pr-7.remote", "origin"]).await;
+        run(
+            &work_s,
+            &["config", "branch.pr-7.merge", "refs/pull/7/head"],
+        )
+        .await;
+
+        let state = AppState::default();
+        let err = git_push_core(&state, work_s.clone(), false, false, None, None, None)
+            .await
+            .expect_err("git refuses the bare push");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's own error, got {err:?}")
+        };
+        assert!(is_push_simple_name_refusal(stderr), "{stderr}");
+        assert!(!is_push_simple_name_refusal(
+            "does not match\nthe name of another branch"
+        ));
     }
 
     /// A push GitHub's secret push protection refused, from a real GH013

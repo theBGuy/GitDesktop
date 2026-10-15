@@ -276,9 +276,10 @@ mod tests {
             Some(crate::local_prs::APP_IDENTIFIER)
         );
 
-        // Hold the override lock so no concurrent test's temp store is installed.
-        let _guard = crate::local_prs::tests::store_dir_lock();
-        let path = crate::local_prs::store_path().expect("app-data dir resolves");
+        // The production arm directly: under cfg(test) `store_path` resolves a temp dir.
+        let path = crate::local_prs::resolve_store_dir(None, false)
+            .expect("app-data dir resolves")
+            .join("local-prs.json");
         let expected = dirs::data_dir()
             .expect("app-data dir")
             .join(crate::local_prs::APP_IDENTIFIER)

@@ -35,6 +35,15 @@ pub enum AppError {
         /// "session" | "mid-op" | "dirty" | "conflict" | "moved" | "failed"
         reason: String,
     },
+    /// A bare push git refused because HEAD's upstream tracks a differently-named
+    /// branch (push.default=simple). Carries the names so each surface composes its
+    /// own remedy; the Display line is the GUI toast verbatim.
+    #[error("Push blocked — {branch} tracks {remote}/{remote_branch}, which has a different name. Choose where to push from the Push menu.")]
+    PushUpstreamNameMismatch {
+        branch: String,
+        remote: String,
+        remote_branch: String,
+    },
     #[error("not a git repository: {0}")]
     NotARepo(String),
     #[error("git executable not found")]
@@ -117,6 +126,7 @@ impl Serialize for AppError {
             AppError::PullRebaseWouldDrop(_) => "pullRebaseWouldDrop",
             AppError::Busy { .. } => "busy",
             AppError::BranchHeld { .. } => "branchHeld",
+            AppError::PushUpstreamNameMismatch { .. } => "pushUpstreamNameMismatch",
             AppError::NotARepo(_) => "notARepo",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
@@ -155,6 +165,15 @@ impl Serialize for AppError {
                 map.serialize_entry("holder", holder)?;
                 map.serialize_entry("branch", branch)?;
                 map.serialize_entry("reason", reason)?;
+            }
+            AppError::PushUpstreamNameMismatch {
+                branch,
+                remote,
+                remote_branch,
+            } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("remote", remote)?;
+                map.serialize_entry("remoteBranch", remote_branch)?;
             }
             AppError::Conflict { op, paths, report } => {
                 map.serialize_entry("op", op)?;
@@ -294,6 +313,23 @@ mod tests {
             serde_json::to_string(&err).unwrap(),
             r#"{"kind":"branchHeld","message":"The checkout at C:/wt/feature has uncommitted changes. feature is unchanged.","holder":"C:/wt/feature","branch":"feature","reason":"dirty"}"#
         );
+    }
+
+    /// The frontend toasts `message` and the TS union reads the three names by key, so
+    /// the kind string, the camelCase `remoteBranch`, and the sentence are the contract.
+    #[test]
+    fn push_upstream_name_mismatch_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushUpstreamNameMismatch {
+            branch: "feat/y".to_string(),
+            remote: "origin".to_string(),
+            remote_branch: "feat/x".to_string(),
+        };
+        let wire = serde_json::to_string(&err).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"kind":"pushUpstreamNameMismatch","message":"Push blocked — feat/y tracks origin/feat/x, which has a different name. Choose where to push from the Push menu.","branch":"feat/y","remote":"origin","remoteBranch":"feat/x"}"#
+        );
+        assert!(!wire.contains("remote_branch"), "{wire}");
     }
 
     /// A payload-free variant carries kind + message and nothing else.

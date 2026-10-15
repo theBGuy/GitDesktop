@@ -170,6 +170,12 @@ const REFSPEC_ALLOWLIST = [
     rationale: "#[cfg(test)] fixture — the branch name is a test literal",
   },
   {
+    file: "git/status.rs",
+    fn: "fill_upstream_facts",
+    rationale:
+      "read-only for-each-ref tracking read of HEAD's branch (never a refspec); the name is git's own status branch.head, checked with validate_ref_name first",
+  },
+  {
     file: "git/worktree.rs",
     fn: "read_branch_tip",
     rationale:

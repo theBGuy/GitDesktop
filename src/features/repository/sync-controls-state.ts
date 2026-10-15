@@ -48,6 +48,14 @@ export interface SyncHead {
   ahead: number;
   behind: number;
   upstreamGone: boolean;
+  /** The upstream's remote and its branch name there, read off the merge ref. */
+  upstreamRemote: string | null;
+  upstreamBranch: string | null;
+  /** The backend's verdict that a bare push would be refused for the names
+   *  differing (it alone can read the push config). */
+  pushNameMismatch: boolean;
+  /** Whether `upstreamBranch` is its remote's default branch; null = unknown. */
+  upstreamIsRemoteDefault: boolean | null;
 }
 
 export interface SyncControlsInput {
@@ -71,12 +79,39 @@ export interface SyncControlsInput {
   remoteRebased: boolean;
   mixedRewrite: boolean;
   localAtRisk: number;
+  /** Whether refs/remotes/<R>/<new> already exists locally (last-fetch state), from
+   *  the remote-branches read; false while unknown — the label upgrade is cosmetic. */
+  remoteNewExists: boolean;
 }
 
 export interface Hold {
   disabled: boolean;
   /** Read by DisabledReasonButton only while `disabled`. */
   reason: string | undefined;
+}
+
+/** One destination in the mismatch Push menu; a held item carries its reason in
+ *  the label (a disabled menu item can't show a tooltip). */
+export interface MismatchMenuItem {
+  label: string;
+  disabled: boolean;
+}
+
+/** The Push menu shown while the branch's upstream has a different name: every
+ *  push from it names its destination outright. */
+export interface MismatchMenu {
+  /** The local branch (HEAD). */
+  branch: string;
+  /** The upstream's remote. */
+  remote: string;
+  /** The upstream's branch name on `remote`. */
+  remoteBranch: string;
+  groupLabel: string;
+  /** Push into the tracked branch; null (omitted) when that branch is known to be
+   *  the remote's default — never a one-click push into it. */
+  pushToTracked: MismatchMenuItem | null;
+  /** Push under the local name on the same remote and track it. */
+  publish: MismatchMenuItem;
 }
 
 /** The branch facts the rewrite probe needs before the full derivation runs. A
@@ -116,9 +151,65 @@ export function deriveSyncControls(input: SyncControlsInput) {
   const aheadCount = head?.ahead ?? 0;
   const behindCount = head?.behind ?? 0;
   const upstream = head?.upstream;
+  // git would refuse a bare push here, so Push becomes a menu of explicit
+  // destinations. It wins over divergence everywhere: no force arm exists in it.
+  const mismatch = Boolean(
+    statusKnown &&
+      hasUpstream &&
+      head.pushNameMismatch &&
+      head.name &&
+      head.upstreamRemote &&
+      head.upstreamBranch,
+  );
+  const mismatchMenu = ((): MismatchMenu | null => {
+    if (
+      !mismatch ||
+      !head?.name ||
+      !head.upstreamRemote ||
+      !head.upstreamBranch
+    )
+      return null;
+    const branch = head.name;
+    const remote = head.upstreamRemote;
+    const remoteBranch = head.upstreamBranch;
+    const tracked = `Push to ${remote}/${remoteBranch}`;
+    const pushToTracked = ((): MismatchMenuItem | null => {
+      if (head.upstreamIsRemoteDefault === true) return null;
+      if (aheadCount === 0)
+        return { label: `${tracked} (nothing to push)`, disabled: true };
+      if (diverged)
+        return {
+          label: `${tracked} (diverged — use the Pull menu first)`,
+          disabled: true,
+        };
+      return { label: tracked, disabled: false };
+    })();
+    // The re-track starts the new upstream at the local tip, so commits only on
+    // the old one would silently drop out of the Pull count.
+    const publishBase = input.remoteNewExists
+      ? `Push to ${remote}/${branch} and track it`
+      : `Publish as ${remote}/${branch}`;
+    const publish =
+      behindCount > 0
+        ? { label: `${publishBase} (pull first)`, disabled: true }
+        : { label: publishBase, disabled: false };
+    return {
+      branch,
+      remote,
+      remoteBranch,
+      groupLabel: `${branch} tracks ${remote}/${remoteBranch}`,
+      pushToTracked,
+      publish,
+    };
+  })();
+  const mismatchAllHeld =
+    mismatchMenu !== null &&
+    (mismatchMenu.pushToTracked?.disabled ?? true) &&
+    mismatchMenu.publish.disabled;
   // "Publish branch" sends `-u origin`, so it is offered only for a branch the
   // status has MEASURED as untracked — never for one still loading.
   const pushLabel = (() => {
+    if (mismatch) return "Push";
     if (diverged) return "Force push";
     if (statusKnown && !hasUpstream) return "Publish branch";
     return "Push";
@@ -171,6 +262,21 @@ export function deriveSyncControls(input: SyncControlsInput) {
       return `${pushLabel} — you're on a detached HEAD; check out a branch to push`;
     if (unborn)
       return `${pushLabel} — ${head.name} has no commits yet; make your first commit to publish it`;
+    // Never `aheadLabel`: its "to push to <upstream>" is exactly what a bare
+    // push can't do here.
+    if (mismatchMenu) {
+      // A menu with every item held can't open, so the trigger names the remedy
+      // instead; the publish item holds only while behind, so pulling always is.
+      const remedy = !mismatchAllHeld
+        ? "choose where from the menu"
+        : diverged
+          ? "use the Pull menu first"
+          : "pull first";
+      const names = `${mismatchMenu.groupLabel}, which has a different name — ${remedy}`;
+      return aheadCount > 0
+        ? `Push — ${aheadCount} commit${plural(aheadCount)} to push; ${names}`
+        : `Push — ${names}`;
+    }
     if (input.remoteRebased)
       return `${pushLabel} — ${upstream} already has your commits under different ids; force pushing would replace them with your copies`;
     return aheadLabel;
@@ -201,7 +307,13 @@ export function deriveSyncControls(input: SyncControlsInput) {
     !hasUpstream || diverged,
     pullDescription,
   );
-  const push = hold(unknownRead(true), detached || unborn, pushDescription);
+  // A mismatch menu with nothing to offer holds the trigger itself, as the Pull
+  // caret holds an empty menu.
+  const push = hold(
+    unknownRead(true),
+    detached || unborn || mismatchAllHeld,
+    pushDescription,
+  );
   // The caret stays live offline: its items carry their own offline holds.
   const pullOptions = ((): Hold => {
     const pending = unknownRead(true);
@@ -235,6 +347,8 @@ export function deriveSyncControls(input: SyncControlsInput) {
     pushLabel,
     pullDescription,
     pushDescription,
+    mismatch,
+    mismatchMenu,
     /** Accessible names: the description, else the bare visible label — never
      *  the button's CONTENT, whose text label is hidden below `md`. */
     pullName: pullDescription ?? "Pull",
@@ -260,6 +374,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
         !busy &&
         !detached &&
         !unborn &&
+        !mismatchAllHeld &&
         !offlineHold,
       updateFromUpstream:
         statusKnown && canUpdateUpstream && !busy && !offlineHold,

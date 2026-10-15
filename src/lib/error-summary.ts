@@ -25,6 +25,7 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   pullRebaseWouldDrop: "Pull blocked",
   busy: "Operation in progress",
   branchHeld: "Branch in use",
+  pushUpstreamNameMismatch: "Push blocked",
   notARepo: "Not a Git repository",
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",

@@ -55,6 +55,36 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
     Ok(())
 }
 
+/// Rewords a push refused for an upstream name mismatch with this tool's own remedy in
+/// place of the GUI's Push-menu one; every other error passes through untouched.
+fn with_mcp_remedy(e: AppError, remedy: fn(&str, &str) -> String) -> AppError {
+    match e {
+        AppError::PushUpstreamNameMismatch {
+            branch,
+            remote,
+            remote_branch,
+        } => AppError::Command(format!(
+            "Push blocked — {branch} tracks {remote}/{remote_branch}, which has a different name. {}",
+            remedy(&branch, &remote)
+        )),
+        other => other,
+    }
+}
+
+/// `push`'s way out: a named publish, which goes to the upstream's OWN remote.
+fn push_remedy(branch: &str, remote: &str) -> String {
+    format!(
+        "Retry with branch: \"{branch}\" and set_upstream: true to publish it as \
+         {remote}/{branch} and track that, or push from GitDesktop to choose the destination."
+    )
+}
+
+fn force_push_remedy(_branch: &str, _remote: &str) -> String {
+    "Force push isn't available while the names differ; push to an explicit destination \
+     with the push tool instead."
+        .to_string()
+}
+
 impl GitDesktopMcp {
     /// The promote gate for a tool that moves HEAD, a branch, or the stash list (the
     /// module doc lists them): refuses while a GitDesktop worktree promote is
@@ -678,7 +708,7 @@ impl GitDesktopMcp {
         ensure_not_session_branch(&args.from)?;
         ensure_not_session_branch(&args.to)?;
         let _promote = self.promote_gate().await?;
-        crate::git::branches::git_rename_branch_core(
+        let outcome = crate::git::branches::git_rename_branch_core(
             &self.state,
             self.repo.clone(),
             args.from.clone(),
@@ -686,7 +716,10 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        ok_text(format!("renamed {} -> {}", args.from, args.to))
+        ok_text(match outcome.warning {
+            Some(w) => format!("renamed {} -> {}\nwarning: {}", args.from, args.to, w),
+            None => format!("renamed {} -> {}", args.from, args.to),
+        })
     }
 
     #[tool(
@@ -723,7 +756,7 @@ impl GitDesktopMcp {
             None,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(|e| app_err(with_mcp_remedy(e, push_remedy)))?;
         ok_text("pushed")
     }
 
@@ -1179,7 +1212,7 @@ impl GitDesktopMcp {
             None,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(|e| app_err(with_mcp_remedy(e, force_push_remedy)))?;
         // The tool's result text names the guarantee the push ACTUALLY ran under —
         // a static "with lease + if-includes" overclaims on either fallback.
         ok_text(match guard {
@@ -1286,6 +1319,31 @@ mod tests {
         );
         // literal:false is the escape hatch for a caller that means the glob.
         assert_eq!(literal_pathspecs(paths(), false), paths());
+    }
+
+    /// Each tool words its own way out of a name-mismatch refusal; other errors keep
+    /// theirs.
+    #[test]
+    fn name_mismatch_refusals_carry_each_tools_own_remedy() {
+        let refusal = || AppError::PushUpstreamNameMismatch {
+            branch: "feat/y".into(),
+            remote: "origin".into(),
+            remote_branch: "feat/x".into(),
+        };
+        assert_eq!(
+            with_mcp_remedy(refusal(), push_remedy).to_string(),
+            "Push blocked — feat/y tracks origin/feat/x, which has a different name. Retry with \
+             branch: \"feat/y\" and set_upstream: true to publish it as origin/feat/y and track \
+             that, or push from GitDesktop to choose the destination."
+        );
+        assert_eq!(
+            with_mcp_remedy(refusal(), force_push_remedy).to_string(),
+            "Push blocked — feat/y tracks origin/feat/x, which has a different name. Force push \
+             isn't available while the names differ; push to an explicit destination with the \
+             push tool instead."
+        );
+        let other = with_mcp_remedy(AppError::Timeout(5), push_remedy);
+        assert!(matches!(other, AppError::Timeout(5)), "{other:?}");
     }
 
     /// With ALL flags false, every gated tool must error before doing work. Destructive

@@ -50,6 +50,24 @@ pub struct BranchHead {
     /// Consumers treat this like "no upstream" for decisions — Publish instead of
     /// Push/Pull, undo-commit allowed, no force-push demanded on amend.
     pub upstream_gone: bool,
+    /// The remote of the upstream (`%(upstream:remotename)`); None when untracked,
+    /// detached/unborn, a local (`.`) upstream, or the tracking read failed.
+    pub upstream_remote: Option<String>,
+    /// The upstream branch's name ON its remote (`%(upstream:remoteref)` with exactly
+    /// `refs/heads/` stripped); None when the upstream is not a branch
+    /// (e.g. `refs/pull/N/head`) or `upstream_remote` is None.
+    pub upstream_branch: Option<String>,
+    /// A branch-name mismatch on a BRANCH upstream that a bare `git push` would be
+    /// refused for: live branch upstream whose name differs from the local one,
+    /// push.default unset or `simple`, effective push remote == the upstream's
+    /// remote, and no `remote.<R>.push` refspec. Never set for a non-branch
+    /// upstream (`refs/pull/N/head`), which keeps a plain Push whose refusal shows
+    /// git's own message. When true, `upstream_remote` and `upstream_branch` are
+    /// always Some (the UI builds its labels from them).
+    pub push_name_mismatch: bool,
+    /// Whether `upstream_branch` is the upstream remote's default branch (its
+    /// `refs/remotes/<R>/HEAD`). Only probed while `push_name_mismatch`; None = unknown.
+    pub upstream_is_remote_default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +100,10 @@ pub struct Branch {
     /// `origin` — null when untracked. Authoritative source for which remote a
     /// push targets; the UI must never re-derive it from the upstream string.
     pub upstream_remote: Option<String>,
+    /// The upstream's ref on its remote (`%(upstream:remoteref)`, e.g.
+    /// `refs/heads/main`); None when untracked. Cross-name decisions read this,
+    /// never the short `upstream` string (remote names may contain `/`).
+    pub upstream_remote_ref: Option<String>,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in

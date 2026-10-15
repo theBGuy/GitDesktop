@@ -174,7 +174,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         &[
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)",
+            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)",
         ],
         DEFAULT_TIMEOUT,
     )
@@ -184,7 +184,8 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let mut branches = Vec::new();
     for line in text.lines() {
         let mut parts = line.split('\0');
-        let (Some(refname), upstream, head, date, track, upstream_remote) = (
+        let (Some(refname), upstream, head, date, track, upstream_remote, upstream_remote_ref) = (
+            parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
@@ -212,6 +213,9 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             upstream_behind,
             upstream_gone,
             upstream_remote: upstream_remote.filter(|r| !r.is_empty()).map(str::to_string),
+            upstream_remote_ref: upstream_remote_ref
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
         });
     }
     Ok(branches)
@@ -383,13 +387,49 @@ fn archive_config_busy(name: &str, archived: bool) -> AppError {
     ))
 }
 
+/// The reserved prefix for GitDesktop agent-session branches. Every branch surface
+/// (GUI lists, pickers, worktree guards) filters `gd/session/*`; deleting or renaming
+/// one breaks session Resume, so the branch-mutating MCP tools refuse it
+/// (`mcp_server::write_git::ensure_not_session_branch`), `list_branches` filters it
+/// out, and the rename core refuses renames into or out of it. Mirrors the
+/// `starts_with("gd/session/")` checks in `crate::git::worktree` / `crate::sessions`.
+pub(crate) const SESSION_BRANCH_PREFIX: &str = "gd/session/";
+
+/// What a completed rename reports beyond success.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameBranchOutcome {
+    /// Set when the local-PR migration could not complete after git renamed the
+    /// branch — the rename itself succeeded. Shown verbatim in the GUI success
+    /// toast's description and appended to the MCP text.
+    pub warning: Option<String>,
+}
+
+/// Refuses a rename into or out of the agent-session namespace, compared
+/// case-insensitively: a case-insensitive filesystem can land `GD/Session/x` inside
+/// an existing `gd/session/` ref folder.
+fn refuse_session_rename(old_name: &str, new_name: &str) -> AppResult<()> {
+    let in_session = |name: &str| name.to_ascii_lowercase().starts_with(SESSION_BRANCH_PREFIX);
+    if in_session(old_name) {
+        return Err(AppError::InvalidArgument(format!(
+            "\"{old_name}\" is an agent-session branch — renaming it would break its session's Resume."
+        )));
+    }
+    if in_session(new_name) {
+        return Err(AppError::InvalidArgument(format!(
+            "\"{new_name}\" is in gd/session/, which is reserved for agent sessions — choose another name."
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn git_rename_branch(
     state: State<'_, AppState>,
     repo_path: String,
     old_name: String,
     new_name: String,
-) -> AppResult<()> {
+) -> AppResult<RenameBranchOutcome> {
     git_rename_branch_core(&state, repo_path, old_name, new_name).await
 }
 
@@ -398,9 +438,10 @@ pub(crate) async fn git_rename_branch_core(
     repo_path: String,
     old_name: String,
     new_name: String,
-) -> AppResult<()> {
+) -> AppResult<RenameBranchOutcome> {
     validate_ref_name(&old_name)?;
     validate_ref_name(&new_name)?;
+    refuse_session_rename(&old_name, &new_name)?;
     // `branch -m` does NOT refuse a branch checked out elsewhere — it retargets that
     // worktree's HEAD silently, which under a running update means renaming the branch
     // out from under it.
@@ -439,7 +480,25 @@ pub(crate) async fn git_rename_branch_core(
     if let Err(e) = note_result {
         eprintln!("gitdesktop: reviewer-note rename failed (branch renamed anyway): {e}");
     }
-    Ok(())
+    // Open local PRs follow the rename, under the same best-effort rule. A failed locked
+    // write may have counted nothing, so the warning names no number.
+    // The note move's gaps above apply here too: no hook for a terminal `git branch -m`,
+    // and a cold-start instance's move edits the shared store, not its own aliased one.
+    let pr_result = async {
+        let identity = crate::git::repo::repo_identity(&repo_path).await?;
+        crate::local_prs::rename_branch(&identity, &repo_path, &old_name, &new_name).await
+    }
+    .await;
+    let warning = match pr_result {
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("gitdesktop: local-PR rename migration failed (branch renamed anyway): {e}");
+            Some(format!(
+                "Some local pull requests may still point at {old_name}."
+            ))
+        }
+    };
+    Ok(RenameBranchOutcome { warning })
 }
 
 /// If `name` is checked out in a LINKED worktree (one other than `repo_path`
@@ -1857,7 +1916,7 @@ fn is_session_holder(
 ) -> bool {
     use crate::git::worktree::normalize_wt_path;
     let holder = normalize_wt_path(holder);
-    branch.starts_with("gd/session/")
+    branch.starts_with(SESSION_BRANCH_PREFIX)
         || session_paths.iter().any(|p| normalize_wt_path(p) == holder)
         || app_data_root.is_some_and(|root| holder.starts_with(&format!("{root}/")))
 }
@@ -2468,9 +2527,10 @@ mod tests {
         divergence_out_of_range, git_branch_merge_states, git_branches,
         git_checkout_remote_branch_core, git_create_branch_core, git_default_branch,
         git_delete_branch_core, git_rename_branch_core, is_config_lock_contention,
-        merge_diverged_in_worktree, parse_cherry_counts, parse_upstream_track, update_branch_from,
-        update_worktree_path, validate_branch_name, validate_ref_name, BranchRewriteStatus,
-        MergePair, UpdatePins, RENAMED_CONFIG_LEFT_BEHIND, UPSTREAM_WRITE_FAILED,
+        merge_diverged_in_worktree, parse_cherry_counts, parse_upstream_track,
+        refuse_session_rename, update_branch_from, update_worktree_path, validate_branch_name,
+        validate_ref_name, BranchRewriteStatus, MergePair, RenameBranchOutcome, UpdatePins,
+        RENAMED_CONFIG_LEFT_BEHIND, UPSTREAM_WRITE_FAILED,
     };
     use super::{
         branch_tip_sha, current_branch_name, is_session_holder, name_paths, update_in_holder,
@@ -3238,6 +3298,147 @@ mod tests {
         );
         assert_eq!(crate::review_notes::note_body(&identity, "renamed"), None);
         assert_eq!(crate::review_notes::note_body(&repo, "renamed"), None);
+    }
+
+    /// Both directions refused, any case, the old name first; ordinary names pass.
+    #[test]
+    fn rename_refuses_the_agent_session_namespace_both_ways() {
+        let refusal = |old: &str, new: &str| match refuse_session_rename(old, new) {
+            Err(AppError::InvalidArgument(m)) => m,
+            other => panic!("{old} -> {new}: expected a refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refusal("gd/session/abc", "feature"),
+            "\"gd/session/abc\" is an agent-session branch — renaming it would break its session's Resume."
+        );
+        assert_eq!(
+            refusal("feature", "gd/session/abc"),
+            "\"gd/session/abc\" is in gd/session/, which is reserved for agent sessions — choose another name."
+        );
+        assert_eq!(
+            refusal("feature", "GD/Session/x"),
+            "\"GD/Session/x\" is in gd/session/, which is reserved for agent sessions — choose another name."
+        );
+        assert!(refusal("Gd/SESSION/a", "gd/session/b")
+            .starts_with("\"Gd/SESSION/a\" is an agent-session"));
+        for (old, new) in [
+            ("feature", "renamed"),
+            ("gd/sessions/x", "gd/session"),
+            ("feat/x", "feat/y"),
+        ] {
+            assert!(refuse_session_rename(old, new).is_ok(), "{old} -> {new}");
+        }
+    }
+
+    /// The guard runs before git: a refused rename leaves the branch where it was.
+    #[tokio::test]
+    async fn a_session_rename_is_refused_before_git_runs() {
+        let (_base, base) = temp_base("rename-session");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+        let state = AppState::default();
+        let err = git_rename_branch_core(
+            &state,
+            repo_s.clone(),
+            "feature".into(),
+            "GD/Session/x".into(),
+        )
+        .await
+        .expect_err("renaming into the namespace is refused");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert!(run(&repo_s, &["branch", "--list", "feature"])
+            .await
+            .contains("feature"));
+    }
+
+    #[test]
+    fn rename_outcome_serializes_its_warning_in_camel_case() {
+        let some = RenameBranchOutcome {
+            warning: Some("Some local pull requests may still point at feat/x.".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&some).unwrap(),
+            r#"{"warning":"Some local pull requests may still point at feat/x."}"#
+        );
+        let none = RenameBranchOutcome { warning: None };
+        assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"warning":null}"#);
+    }
+
+    /// Open local PRs follow a real rename through the core; closed ones and the reply's
+    /// warning stay as they were.
+    // The serializing guard spans the awaits on purpose — it keeps the store override
+    // installed for the whole body (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rename_carries_open_local_prs_to_the_new_branch() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_base, base) = temp_base("rename-local-prs");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "feat/x"]).await;
+        let identity = crate::git::repo::repo_identity(&repo_s).await.unwrap();
+        let open = crate::local_prs::create(&identity, "Open", "", "main", "feat/x")
+            .await
+            .unwrap();
+        let closed = crate::local_prs::create(&identity, "Closed", "", "main", "feat/x")
+            .await
+            .unwrap();
+        let (open_id, closed_id) = (
+            open["id"].as_str().unwrap().to_string(),
+            closed["id"].as_str().unwrap().to_string(),
+        );
+        crate::local_prs::set_status(&identity, &closed_id, "closed")
+            .await
+            .unwrap();
+
+        let state = AppState::default();
+        let outcome =
+            git_rename_branch_core(&state, repo_s.clone(), "feat/x".into(), "feat/y".into())
+                .await
+                .expect("rename succeeds");
+        assert_eq!(outcome.warning, None);
+        assert_eq!(
+            crate::local_prs::get(&identity, &open_id).unwrap()["head"],
+            "feat/y"
+        );
+        assert_eq!(
+            crate::local_prs::get(&identity, &closed_id).unwrap()["head"],
+            "feat/x"
+        );
+    }
+
+    /// A migration that cannot run never fails the completed rename; it rides back as the
+    /// warning both surfaces show.
+    #[tokio::test]
+    async fn a_failed_local_pr_migration_returns_the_warning() {
+        let (_base, base) = temp_base("rename-local-prs-fail");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "feat/x"]).await;
+        let state = AppState::default();
+        let outcome = crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(
+                || AppError::Timeout(30),
+                git_rename_branch_core(&state, repo_s.clone(), "feat/x".into(), "feat/y".into()),
+            )
+            .await
+            .expect("the rename itself succeeds");
+        assert_eq!(
+            outcome.warning.as_deref(),
+            Some("Some local pull requests may still point at feat/x.")
+        );
+        assert!(run(&repo_s, &["branch", "--list", "feat/y"])
+            .await
+            .contains("feat/y"));
     }
 
     // --- Rewrite-aware divergence (`git_branch_rewrite_status`). ---
