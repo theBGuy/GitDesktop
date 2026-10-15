@@ -74,21 +74,41 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
 }
 
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
-/// Returns `None` when that stage is absent (a side added or deleted the file).
-async fn stage_blob(repo: &str, stage: u8, path: &str) -> AppResult<Option<String>> {
+/// `present` is the caller's `unmerged_stages` listing: a stage missing from it
+/// (a side added or deleted the file) is `None` without a spawn. A listed stage
+/// whose read fails is re-listed once: gone now means an outside resolve landed
+/// after the listing (`None`, agreeing with the index); still listed is an
+/// `AppError::Git`, never `None`, so a failed read can't pass for an absent side.
+async fn stage_blob(
+    repo: &str,
+    present: &[u8],
+    stage: u8,
+    path: &str,
+) -> AppResult<Option<String>> {
+    if !present.contains(&stage) {
+        return Ok(None);
+    }
     // `:N:path` is a single rev-spec arg; a leading `-` in the path can't be read
     // as a flag because the `:N:` prefix comes first. validate_rel_path already
     // refused absolute/traversal paths.
     let spec = format!(":{stage}:{path}");
     let out = run_git_raw(Some(repo), &["show", &spec], DEFAULT_TIMEOUT).await?;
-    Ok((out.code == 0).then(|| out.stdout_lossy()))
+    if out.code != 0
+        && !unmerged_stages(repo, &crate::git::pathspec::literal(path))
+            .await?
+            .contains(&stage)
+    {
+        return Ok(None);
+    }
+    Ok(Some(out.exit_verdict()?.stdout_lossy()))
 }
 
 /// The unmerged index stages present for `spec` (1 = base, 2 = ours, 3 = theirs).
-/// Empty when the path isn't conflicted at all.
+/// Empty when the path isn't conflicted at all. The presence truth for both the
+/// take-a-side removal gate and `git_conflict_sides`' blob reads.
 ///
 /// One `ls-files -u` spawn answers for every stage and returns only mode/sha/stage
-/// metadata; `stage_blob` costs the same spawn but materializes the whole blob
+/// metadata; `git show :N:` costs the same spawn but materializes the whole blob
 /// (up to the 256 KB cap, binary bytes included) just to test for presence.
 async fn unmerged_stages(repo: &str, spec: &str) -> AppResult<Vec<u8>> {
     let out = run_git(Some(repo), &["ls-files", "-u", "--", spec], DEFAULT_TIMEOUT).await?;
@@ -138,6 +158,10 @@ async fn is_ai_ignored(repo: &str, path: &str, exclude: &[String]) -> AppResult<
 /// The base/ours/theirs blobs plus the marked working file for a conflicted
 /// path, and whether the path is AI-ignored. `exclude` is the user's combined
 /// (repo + global) AI-ignore pattern list.
+///
+/// The stages are listed once, before the working-file and blob reads: a side
+/// reads `None` only when the index says it's absent, and a resolve landing
+/// after the listing is noticed by the stage reads (see `stage_blob`).
 #[tauri::command]
 pub async fn git_conflict_sides(
     repo_path: String,
@@ -147,6 +171,10 @@ pub async fn git_conflict_sides(
     validate_rel_path(&path)?;
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
+
+    let present = unmerged_stages(&repo_path, &crate::git::pathspec::literal(&path)).await?;
+    #[cfg(test)]
+    let _ = CONFLICT_SIDES_LISTED_HOOK.try_with(|hook| hook());
 
     // NotFound means the file is gone (a side or the user deleted it): it reads
     // as "" with `working_exists` false. Every other read failure refuses the
@@ -174,12 +202,19 @@ pub async fn git_conflict_sides(
 
     Ok(ConflictSides {
         working,
-        base: stage_blob(&repo_path, 1, &path).await?,
-        ours: stage_blob(&repo_path, 2, &path).await?,
-        theirs: stage_blob(&repo_path, 3, &path).await?,
+        base: stage_blob(&repo_path, &present, 1, &path).await?,
+        ours: stage_blob(&repo_path, &present, 2, &path).await?,
+        theirs: stage_blob(&repo_path, &present, 3, &path).await?,
         ai_ignored,
         working_exists,
     })
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs just after `git_conflict_sides` lists the stages, so a test can change
+    /// the index between that listing and the blob reads.
+    static CONFLICT_SIDES_LISTED_HOOK: std::sync::Arc<dyn Fn() + Send + Sync>;
 }
 
 /// Writes a resolution to the working file, and (when `stage`) stages it.
@@ -714,6 +749,103 @@ mod tests {
             .await
             .unwrap();
         assert_deleted_and_resolved(&repo, "file.txt").await;
+    }
+
+    /// A modify/delete has no stage for the deleting side: it reads `None` while
+    /// the surviving side and the base keep their content.
+    #[tokio::test]
+    async fn modify_delete_reads_the_deleted_side_as_absent() {
+        let (_dir, repo) = modify_delete_repo("md-sides", "file.txt", "ours").await;
+        assert_modify_delete(&repo, "file.txt", 3, 2).await;
+
+        let sides = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(sides.ours, None);
+        assert_eq!(sides.theirs.as_deref(), Some("theirs\n"));
+        assert_eq!(sides.base.as_deref(), Some("base\n"));
+    }
+
+    /// A stage the index still lists but whose blob can't be read is an error:
+    /// `None` would tell the frontend that side is absent, and with every read
+    /// failing a still-conflicted file would read as resolved. A deleted loose
+    /// object is the fixture.
+    #[tokio::test]
+    async fn an_unreadable_present_stage_fails_the_read() {
+        let (_dir, repo) = conflicted_repo("unreadable-stage", "file.txt", &[]).await;
+        let listing = stdout_of(&repo, &["ls-files", "-u", "--", "file.txt"]).await;
+        let sha = listing
+            .lines()
+            .find_map(|line| {
+                let meta = line.split('\t').next()?;
+                let mut fields = meta.split_whitespace();
+                let sha = fields.nth(1)?;
+                (fields.next()? == "2").then(|| sha.to_string())
+            })
+            .unwrap_or_else(|| panic!("no stage 2 listed: {listing}"));
+        let object = Path::new(&repo)
+            .join(".git")
+            .join("objects")
+            .join(&sha[..2])
+            .join(&sha[2..]);
+        // git writes loose objects read-only, which Windows refuses to delete.
+        let mut perms = std::fs::metadata(&object).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&object, perms).unwrap();
+        std::fs::remove_file(&object).unwrap();
+
+        let err = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("a present stage that can't be read must not read as Ok");
+        assert!(
+            matches!(err, AppError::Git { .. }),
+            "expected AppError::Git, got {err:?}"
+        );
+    }
+
+    /// A resolve landing between the stage listing and the blob reads: every
+    /// listed stage's read fails, the re-list finds the path resolved, and the
+    /// sides read absent rather than failing.
+    #[tokio::test]
+    async fn a_resolve_after_the_listing_reads_every_side_absent() {
+        let (_dir, repo) = conflicted_repo("resolve-mid-read", "file.txt", &[]).await;
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let repo = repo.clone();
+            let ran = std::sync::Arc::clone(&ran);
+            std::sync::Arc::new(move || {
+                let status = std::process::Command::new("git")
+                    .args(["add", "--", "file.txt"])
+                    .current_dir(&repo)
+                    .status()
+                    .expect("spawn git add");
+                assert!(status.success(), "git add failed: {status}");
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        let sides = CONFLICT_SIDES_LISTED_HOOK
+            .scope(
+                hook,
+                git_conflict_sides(repo.clone(), "file.txt".into(), vec![]),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the hook never ran"
+        );
+        let unmerged = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(
+            unmerged.trim().is_empty(),
+            "fixture still conflicted: {unmerged}"
+        );
+        assert_eq!(sides.base, None);
+        assert_eq!(sides.ours, None);
+        assert_eq!(sides.theirs, None);
     }
 
     /// `working_exists` is what separates an emptied working file from a deleted

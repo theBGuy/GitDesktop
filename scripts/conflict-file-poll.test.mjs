@@ -9,7 +9,10 @@
 // since a cached entry can be as old as the time off-screen. Only an `io` read
 // failure retries, once, so a transient io failure never flashes the
 // read-error pane. Each write handler holds a synchronous in-flight ref, since
-// a second click before the disabling render would write from stale segments.
+// a second click before the disabling render would write from stale segments,
+// and re-reads the file when its write fails. Mark resolved asks its marker
+// question from a read taken at the click, and the no-longer-conflicted status
+// nudge restarts a status read already in flight.
 //
 // A source scan over MASKED code (comments and string text blanked), not an
 // import test: the hook's options only exist inside a React render, and CI's
@@ -134,10 +137,9 @@ function hookAt(src, index) {
 
 test("the conflict file polls on an interval gated on the panel and the error kind", () => {
   const src = load(WORKINGTREE);
-  const decl =
-    /\bexport\s+const\s+CONFLICT_FILE_POLL_MS\s*=\s*([\d_]+)\s*;/.exec(
-      src.masked,
-    );
+  const decl = /\bconst\s+CONFLICT_FILE_POLL_MS\s*=\s*([\d_]+)\s*;/.exec(
+    src.masked,
+  );
   assert.ok(decl, "CONFLICT_FILE_POLL_MS is not declared as a number literal");
   assert.ok(
     Number(decl[1].replaceAll("_", "")) > 0,
@@ -296,6 +298,86 @@ test("every conflict write handler holds a synchronous in-flight guard", () => {
       `${name}: inFlightRef must clear in a finally that ends the handler, after the write and re-read`,
     );
   }
+});
+
+test("every conflict write handler re-reads the file when its write fails", () => {
+  const src = load(VIEW);
+  for (const name of ["acceptRegion", "acceptAll", "markResolved"]) {
+    const { open, close } = functionBody(src, name);
+    const catches = [
+      ...src.masked.slice(open, close).matchAll(/\bcatch\s*\(\s*e\s*\)\s*\{/g),
+    ];
+    assert.equal(
+      catches.length,
+      1,
+      `${name}: expected one \`catch (e) {\` block, found ${catches.length}`,
+    );
+    const catchOpen = open + catches[0].index + catches[0][0].length - 1;
+    assert.match(
+      src.masked.slice(catchOpen + 1, matchBrace(src.masked, catchOpen)),
+      /(?<![\w$.])await\s+refreshAfterError\s*\(\s*\)/,
+      `${name}: its catch must await refreshAfterError(), or a failed write leaves live buttons over stale segments`,
+    );
+  }
+});
+
+test("Mark resolved decides its marker confirm from a read taken at the click", () => {
+  const src = load(VIEW);
+  const { open, close } = functionBody(src, "markResolved");
+  const body = src.masked.slice(open + 1, close);
+  const read =
+    /(?<![\w$.])([\w$]+)\s*=\s*await\s+conflictSides\s*\(\s*repoPath\s*,\s*path\s*,\s*\[\s*\]\s*\)/.exec(
+      body,
+    );
+  assert.ok(
+    read,
+    "markResolved must assign a fresh `await conflictSides(repoPath, path, [])` read",
+  );
+  const checks = [
+    ...body.matchAll(/(?<![\w$.])markNeedsConfirm\s*\(([^()]*)\)/g),
+  ];
+  assert.equal(
+    checks.length,
+    1,
+    `markResolved: expected one markNeedsConfirm(…) call, found ${checks.length}`,
+  );
+  assert.ok(
+    read.index < checks[0].index,
+    "markResolved must re-read before it decides the marker confirm",
+  );
+  assert.equal(
+    checks[0][1].trim(),
+    read[1],
+    `markNeedsConfirm must take the fresh read (\`${read[1]}\`), not the view's last read`,
+  );
+});
+
+test("the no-longer-conflicted nudge restarts the status read", () => {
+  const src = load(VIEW);
+  const effects = [...src.masked.matchAll(/\buseEffect\s*\(\s*\(\)\s*=>\s*\{/g)]
+    .map((m) => {
+      const open = m.index + m[0].length - 1;
+      return src.masked.slice(open + 1, matchBrace(src.masked, open));
+    })
+    .filter((body) =>
+      /^\s*if\s*\(\s*!notConflicted\s*\)\s*return\s*;/.test(body),
+    );
+  assert.equal(
+    effects.length,
+    1,
+    `expected one effect gated on \`if (!notConflicted) return;\`, found ${effects.length}`,
+  );
+  const [body] = effects;
+  assert.match(
+    body,
+    /^\s*if\s*\(\s*!notConflicted\s*\)\s*return\s*;\s*void\s+queryClient\.invalidateQueries\s*\(\s*\{\s*queryKey\s*:\s*repoKeys\.status\s*\(/,
+    "the nudge must invalidate repoKeys.status(…) right after its gate",
+  );
+  assert.doesNotMatch(
+    body,
+    /(?<![\w$])cancelRefetch(?![\w$])/,
+    "the nudge must restart an in-flight status read: one begun before an outside `git add` still lists the path as unmerged",
+  );
 });
 
 test("the conflict view's busy hold reads no fetch state", () => {

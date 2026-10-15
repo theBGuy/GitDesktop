@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
-import type { ConflictSides } from "@/lib/git/conflict";
+import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
   deletedSide,
@@ -305,26 +305,26 @@ export function ConflictFileView({
     };
   }, []);
   // Whether the view moved to another repo, or went away, while a prompt was
-  // open, saying so: a mutate called then builds from options this view no
-  // longer describes. Not the shared `refuseIfSwitched`, which compares against
-  // the live repo, never a worktree. The closed arm is defense in depth: the
-  // confirm store already cancels a repo-scoped prompt on a close, so neither
-  // caller reaches it today.
-  const refuseIfMoved = (startedIn: string, outcome: string) => {
+  // open or Mark resolved's re-read ran, saying so: a mutate called then builds
+  // from options this view no longer describes. Not the shared `refuseIfSwitched`,
+  // which compares against the live repo, never a worktree. A prompt never
+  // reaches the closed arm (the confirm store cancels a repo-scoped prompt on a
+  // close); the re-read can.
+  const refuseIfMoved = (
+    startedIn: string,
+    outcome: string,
+    during = "while the dialog was open",
+  ) => {
     if (useUiStore.getState().repoPath === null) {
-      toast.info(
-        `You closed the repository while the dialog was open — ${outcome}.`,
-      );
+      toast.info(`You closed the repository ${during} — ${outcome}.`);
       return true;
     }
     if (!mountedRef.current) {
-      toast.info(`You left this file while the dialog was open — ${outcome}.`);
+      toast.info(`You left this file ${during} — ${outcome}.`);
       return true;
     }
     if (repoPathRef.current === startedIn) return false;
-    toast.info(
-      `You switched repositories while the dialog was open — ${outcome}.`,
-    );
+    toast.info(`You switched repositories ${during} — ${outcome}.`);
     return true;
   };
   const aiEnabled = useAiEnabled();
@@ -488,25 +488,41 @@ export function ConflictFileView({
 
   // A staging write's re-read lands before git status is even requested, and an
   // outside `git add` can beat the status poll: refresh status once, so the host
-  // drops this pane. Joins a status read already in flight.
+  // drops this pane. Restarts a status read already in flight, since one begun
+  // before an outside `git add` still lists the path as unmerged.
   const notConflicted = arm === "notConflicted";
   useEffect(() => {
     if (!notConflicted) return;
-    void queryClient.invalidateQueries(
-      { queryKey: repoKeys.status(repoPath) },
-      { cancelRefetch: false },
-    );
+    void queryClient.invalidateQueries({ queryKey: repoKeys.status(repoPath) });
   }, [notConflicted, queryClient, repoPath]);
 
   // The button and the palette action both land here, so this is the one gate:
   // staging is a plain `git add`, which would take any remaining markers along.
-  // It asks the generic stage routes' question, from their shared builder.
+  // It asks the generic stage routes' question, from their shared builder. The
+  // question is decided by a read taken at the click, called straight: the
+  // view's last read (or a poll joined via fetchQuery) can predate the save.
   async function markResolved() {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      if (file.data && markNeedsConfirm(file.data)) {
-        const markIn = repoPath;
+      const markIn = repoPath;
+      let fresh: ConflictSides;
+      try {
+        fresh = await conflictSides(repoPath, path, []);
+      } catch {
+        toast.info("Couldn't re-read the file — nothing was marked resolved.");
+        await refreshAfterError();
+        return;
+      }
+      if (
+        refuseIfMoved(
+          markIn,
+          "nothing was marked resolved",
+          "before the check finished",
+        )
+      )
+        return;
+      if (markNeedsConfirm(fresh)) {
         const flag = { name: baseName(path), unchecked: false };
         const ok = await useConfirm
           .getState()
