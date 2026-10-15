@@ -153,14 +153,14 @@ const CONFLICT_FILE_RETRY_MS = 300;
  * Polls while its panel shows: the file is edited outside any app mutation (the
  * terminal, an agent, an external editor), and git status still lists an
  * on-disk resolve as unmerged. A tick costs one `git ls-files -u`, a `git show`
- * per present stage, and a whole-file read, hence the panel gate. The document-visibility pause applies
- * only where the webview reports hidden; a minimized Windows window does not,
- * so it keeps polling like the status poll does. An `io` failure (a read
- * colliding with an editor's save) retries once quickly, since any error swaps
- * the pane to the read-error copy. A failed read also re-runs on the next tick
- * (retry limits only one fetch), so that pane heals without a Retry, except
- * `invalidArgument` (binary or oversized): it can't clear by itself, and each
- * tick would re-read the whole file.
+ * per present stage, and a whole-file read, hence the panel gate. The
+ * document-visibility pause applies only where the webview reports hidden; a
+ * minimized Windows window does not, so it keeps polling like the status poll
+ * does. An `io` failure (a read colliding with an editor's save) retries once
+ * quickly, since any error swaps the pane to the read-error copy. A failed read
+ * also re-runs on the next tick (retry limits only one fetch), so that pane
+ * heals without a Retry, except `invalidArgument` (binary or oversized): it
+ * can't clear by itself, and each tick would re-read the whole file.
  */
 export function useConflictFile(repo: string, path: string) {
   const panelActive = usePanelActive();

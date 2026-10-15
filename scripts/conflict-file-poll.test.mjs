@@ -399,6 +399,37 @@ test("the conflict view's busy hold reads no fetch state", () => {
     /(?<![\w$.])awaitingRead(?![\w$])/,
     "busy no longer holds through the first read after a mount or show (`awaitingRead`)",
   );
+  assert.match(
+    busy[1],
+    /(?<![\w$.])checking(?![\w$])/,
+    "busy no longer holds through Mark resolved's click-time read (`checking`)",
+  );
+});
+
+test("Mark resolved holds the buttons through its click-time read", () => {
+  const src = load(VIEW);
+  assert.match(
+    src.masked,
+    /\bconst\s+\[\s*checking\s*,\s*setChecking\s*\]\s*=\s*useState\s*\(\s*false\s*\)\s*;/,
+    "ConflictFileView's `const [checking, setChecking] = useState(false)` is gone",
+  );
+  const { open, close } = functionBody(src, "markResolved");
+  const body = src.masked.slice(open + 1, close);
+  const hold =
+    /(?<![\w$.])setChecking\s*\(\s*true\s*\)\s*;\s*try\s*\{[^{}]*?=\s*await\s+conflictSides\s*\(/.exec(
+      body,
+    );
+  assert.ok(
+    hold,
+    "markResolved must set checking right before the try holding its conflictSides read",
+  );
+  const tryOpen = open + 1 + body.indexOf("{", hold.index);
+  const rest = src.masked.slice(pastTryAndCatch(src.masked, tryOpen));
+  assert.match(
+    rest,
+    /^\s*finally\s*\{\s*setChecking\s*\(\s*false\s*\)\s*;\s*\}/,
+    "the click-time read's try must clear checking in a finally, so its failure arm releases the hold too",
+  );
 });
 
 test("a mount or show holds the buttons until a read requested then lands", () => {

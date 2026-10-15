@@ -333,6 +333,7 @@ export function ConflictFileView({
   const settings = useSettings();
   const queryClient = useQueryClient();
   const [recovering, setRecovering] = useState(false);
+  const [checking, setChecking] = useState(false);
   // Set synchronously by every write handler and cleared only after its write
   // and re-read: a second click inside the render that disables the buttons
   // would otherwise resolve against the segments the first write replaced.
@@ -373,15 +374,17 @@ export function ConflictFileView({
   );
 
   // Each mutation re-reads the conflict file before its isPending drops, a
-  // failed one re-reads under `recovering`, and a mount or show waits for its
-  // own read (`awaitingRead`), so the buttons stay disabled until fresh
-  // segments land: a click on stale segments would resurrect a resolved
-  // region. Fetch state stays out of it, so poll ticks neither flicker the
-  // buttons nor re-render the view.
+  // failed one re-reads under `recovering`, Mark resolved's click-time read
+  // holds under `checking`, and a mount or show waits for its own read
+  // (`awaitingRead`), so the buttons stay disabled until fresh segments land:
+  // a click on stale segments would resurrect a resolved region. Fetch state
+  // stays out of it, so poll ticks neither flicker the buttons nor re-render
+  // the view.
   const busy =
     resolve.isPending ||
     checkoutSide.isPending ||
     markResolve.isPending ||
+    checking ||
     recovering ||
     awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
@@ -507,12 +510,15 @@ export function ConflictFileView({
     try {
       const markIn = repoPath;
       let fresh: ConflictSides;
+      setChecking(true);
       try {
         fresh = await conflictSides(repoPath, path, []);
       } catch {
         toast.info("Couldn't re-read the file — nothing was marked resolved.");
         await refreshAfterError();
         return;
+      } finally {
+        setChecking(false);
       }
       if (
         refuseIfMoved(

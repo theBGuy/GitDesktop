@@ -223,7 +223,8 @@ export function deletedSide(sides: ConflictSides): "ours" | "theirs" | null {
 
 /** Whether the read found no unmerged index stage: the path is no longer
  *  conflicted. Every live conflict keeps one of stages 1-3 (both-deleted keeps
- *  the base), though a stage read git refuses also reads absent for that read. */
+ *  the base), and a stage git can't read while the index still lists it fails
+ *  the read rather than reading absent (`stage_blob`). */
 export function noLongerConflicted(sides: ConflictSides): boolean {
   return sides.base == null && sides.ours == null && sides.theirs == null;
 }
