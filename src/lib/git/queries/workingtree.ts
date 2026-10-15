@@ -1,6 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { type QueryClient, useQuery } from "@tanstack/react-query";
+import { usePanelActive } from "@/components/panel-portal";
 import { ignoreLines } from "@/lib/ai/ignore";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import {
   checkoutConflictSide,
@@ -140,29 +142,79 @@ export function useOpContinue(repo: string) {
   });
 }
 
-/** The conflicted file's sides + marked working text, for the conflict editor.
- *  Re-fetches after each per-region resolve (the mutations invalidate this). */
+/** How often an open conflict file re-reads from disk while its panel shows. */
+export const CONFLICT_FILE_POLL_MS = 2000;
+
+/** The pause before a conflict-file read's one retry after an `io` failure. */
+const CONFLICT_FILE_RETRY_MS = 300;
+
+/**
+ * The conflicted file's sides + marked working text, for the conflict editor.
+ * Polls while its panel shows: the file is edited outside any app mutation (the
+ * terminal, an agent, an external editor), and git status still lists an
+ * on-disk resolve as unmerged. A tick costs ≈4 git spawns plus a whole-file
+ * read, hence the panel gate. The document-visibility pause applies only where
+ * the webview reports hidden; a minimized Windows window does not, so it keeps
+ * polling like the status poll does. An `io` failure (a read colliding with an
+ * editor's save) retries once quickly, since any error swaps the pane to the
+ * read-error copy. A failed read also re-runs on the next tick (retry limits
+ * only one fetch), so that pane heals without a Retry, except
+ * `invalidArgument` (binary or oversized): it can't clear by itself, and each
+ * tick would re-read the whole file.
+ */
 export function useConflictFile(repo: string, path: string) {
+  const panelActive = usePanelActive();
   return useQuery({
     queryKey: ["repo", repo, "conflict-file", path] as const,
     queryFn: () => conflictSides(repo, path, []),
-    retry: false,
+    retry: (failureCount, error) =>
+      failureCount < 1 && isAppError(error) && error.kind === "io",
+    retryDelay: CONFLICT_FILE_RETRY_MS,
+    refetchInterval: (query) =>
+      panelActive &&
+      !(
+        isAppError(query.state.error) &&
+        query.state.error.kind === "invalidArgument"
+      )
+        ? CONFLICT_FILE_POLL_MS
+        : false,
+    refetchIntervalInBackground: false,
     networkMode: "always",
   });
 }
 
-const conflictFileKeys = (repo: string) =>
-  [...workingTreeKeys(repo), ["repo", repo, "conflict-file"]] as const;
+const conflictFileKey = (repo: string) =>
+  ["repo", repo, "conflict-file"] as const;
+
+/** Re-reads the conflict editor (awaited) and the working tree (not), the same
+ *  split the conflict mutations make; shared with the view's error-path refresh
+ *  so the keys stay in this package. */
+export async function refreshConflictFile(
+  queryClient: QueryClient,
+  repo: string,
+): Promise<void> {
+  const refresh = queryClient.invalidateQueries({
+    queryKey: conflictFileKey(repo),
+  });
+  for (const queryKey of workingTreeKeys(repo))
+    void queryClient.invalidateQueries({ queryKey });
+  await refresh;
+}
 
 /** Writes a conflict resolution, staging it when `stage` (marks resolved).
- *  Invalidates the working tree + conflict editor so they refresh. */
+ *  The conflict editor's re-read lands before `isPending` drops, so its buttons
+ *  never act on pre-write segments; the working tree refreshes behind it. On
+ *  error nothing is invalidated: ConflictFileView re-reads itself, and the AI
+ *  resolve view renders its own proposal, not the disk. */
 export function useResolveConflict(repo: string) {
   return useRepoMutation(
     repo,
     (args: { path: string; content: string; stage: boolean }) =>
       resolveConflict(repo, args.path, args.content, args.stage),
     {
-      invalidate: conflictFileKeys(repo),
+      invalidate: [conflictFileKey(repo)],
+      invalidateAfter: workingTreeKeys(repo),
+      refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
     },
@@ -176,7 +228,9 @@ export function useCheckoutConflictSide(repo: string) {
     (args: { path: string; side: "ours" | "theirs" }) =>
       checkoutConflictSide(repo, args.path, args.side),
     {
-      invalidate: conflictFileKeys(repo),
+      invalidate: [conflictFileKey(repo)],
+      invalidateAfter: workingTreeKeys(repo),
+      refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
     },
@@ -190,7 +244,9 @@ export function useMarkConflictResolved(repo: string) {
     repo,
     (path: string) => api.gitStage(repo, [literalPathspec(path)]),
     {
-      invalidate: conflictFileKeys(repo),
+      invalidate: [conflictFileKey(repo)],
+      invalidateAfter: workingTreeKeys(repo),
+      refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
     },

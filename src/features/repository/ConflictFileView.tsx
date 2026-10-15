@@ -1,5 +1,6 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import {
   resolveBlock,
 } from "@/lib/git/conflict-parse";
 import {
+  refreshConflictFile,
   useCheckoutConflictSide,
   useConflictFile,
   useMarkConflictResolved,
@@ -314,20 +316,28 @@ export function ConflictFileView({
   const reviewConfigured = useReviewConfigured();
   const startResolveAi = useConflictResolve((s) => s.startOne);
   const settings = useSettings();
+  const queryClient = useQueryClient();
+  const [recovering, setRecovering] = useState(false);
+  // Set synchronously by every write handler and cleared only after its write
+  // and re-read: a second click inside the render that disables the buttons
+  // would otherwise resolve against the segments the first write replaced.
+  const inFlightRef = useRef(false);
 
   const segments = useMemo(
     () => (file.data ? parseConflictSegments(file.data.working) : null),
     [file.data],
   );
 
-  // Include the post-accept refetch (file.isFetching) so the per-region buttons
-  // stay disabled until fresh segments land — otherwise a fast second click
-  // resolves against stale segments and resurrects an already-resolved region.
+  // Each mutation re-reads the conflict file before its isPending drops, and a
+  // failed one re-reads under `recovering`, so the buttons stay disabled until
+  // fresh segments land: a fast second click on stale segments would resurrect
+  // a resolved region. Fetch state stays out of it, so poll ticks neither
+  // flicker the buttons nor re-render the view.
   const busy =
     resolve.isPending ||
     checkoutSide.isPending ||
     markResolve.isPending ||
-    file.isFetching;
+    recovering;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
@@ -344,16 +354,33 @@ export function ConflictFileView({
     open.catch(toastError);
   }
 
+  // A failed write invalidates nothing (the mutations refresh only on success),
+  // and a partial failure (content written, stage failed) must not leave the
+  // buttons enabled over stale segments. Keys follow the prop: a PR's resolve
+  // worktree hosts this view as well as the open repo.
+  async function refreshAfterError() {
+    setRecovering(true);
+    try {
+      await refreshConflictFile(queryClient, repoPath);
+    } finally {
+      setRecovering(false);
+    }
+  }
+
   async function acceptRegion(index: number, choice: ConflictChoice) {
-    if (!segments) return;
+    if (inFlightRef.current || !segments) return;
     const content = resolveBlock(segments, index, choice);
     // Stage once the last marker is gone — same end state as the AI flow.
     const stage = !hasConflictMarkers(content);
+    inFlightRef.current = true;
     try {
       await resolve.mutateAsync({ path, content, stage });
       if (stage) toast.success(`Resolved ${baseName(path)}`);
     } catch (e) {
       toastError(e);
+      await refreshAfterError();
+    } finally {
+      inFlightRef.current = false;
     }
   }
 
@@ -361,38 +388,46 @@ export function ConflictFileView({
     // Nothing records which regions were resolved by hand, so every arm warns
     // unconditionally: taking a side re-checks the file out from the index and
     // any manual work in it goes with the other side. Classifies from the last
-    // successful read; when none has landed (the first read failed) a deleting
-    // side can't be ruled out, so the unclassified arm names both outcomes.
-    const copy = ACCEPT_ALL_COPY[side];
-    const name = baseName(path);
-    const deleted = file.data ? deletedSide(file.data) : null;
-    const arm: AcceptAllArm = (() => {
-      switch (true) {
-        case !file.data:
-          return "unclassified";
-        case deleted === null:
-          return "content";
-        case deleted === side:
-          return "takesDeletion";
-        default:
-          return "keepsFile";
-      }
-    })();
-    const acceptIn = repoPath;
-    const ok = await useConfirm.getState().ask({
-      title: `Accept all ${copy.side} in ${name}?`,
-      body: ACCEPT_ALL_BODY[arm](name, copy.side, copy.other),
-      confirmLabel: `Accept all ${copy.side}`,
-      confirmVariant: "destructive",
-    });
-    if (!ok || refuseIfMoved(acceptIn, "nothing was resolved")) return;
+    // successful read; when none has landed (the first read failed, or is still
+    // in flight) a deleting side can't be ruled out, so the unclassified arm
+    // names both outcomes.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
-      await checkoutSide.mutateAsync({ path, side });
-      toast.success(
-        `Resolved ${baseName(path)} — took ${side === "ours" ? "current" : "incoming"}`,
-      );
-    } catch (e) {
-      toastError(e);
+      const copy = ACCEPT_ALL_COPY[side];
+      const name = baseName(path);
+      const deleted = file.data ? deletedSide(file.data) : null;
+      const arm: AcceptAllArm = (() => {
+        switch (true) {
+          case !file.data:
+            return "unclassified";
+          case deleted === null:
+            return "content";
+          case deleted === side:
+            return "takesDeletion";
+          default:
+            return "keepsFile";
+        }
+      })();
+      const acceptIn = repoPath;
+      const ok = await useConfirm.getState().ask({
+        title: `Accept all ${copy.side} in ${name}?`,
+        body: ACCEPT_ALL_BODY[arm](name, copy.side, copy.other),
+        confirmLabel: `Accept all ${copy.side}`,
+        confirmVariant: "destructive",
+      });
+      if (!ok || refuseIfMoved(acceptIn, "nothing was resolved")) return;
+      try {
+        await checkoutSide.mutateAsync({ path, side });
+        toast.success(
+          `Resolved ${baseName(path)} — took ${side === "ours" ? "current" : "incoming"}`,
+        );
+      } catch (e) {
+        toastError(e);
+        await refreshAfterError();
+      }
+    } finally {
+      inFlightRef.current = false;
     }
   }
 
@@ -410,29 +445,39 @@ export function ConflictFileView({
   // staging is a plain `git add`, which would take any remaining markers along.
   // It asks the generic stage routes' question, from their shared builder.
   async function markResolved() {
-    if (file.data && markNeedsConfirm(file.data)) {
-      const markIn = repoPath;
-      const flag = { name: baseName(path), unchecked: false };
-      const ok = await useConfirm
-        .getState()
-        .ask(markerStagePrompt([flag], false));
-      if (!ok || refuseIfMoved(markIn, "nothing was marked resolved")) return;
-    }
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
-      await markResolve.mutateAsync(path);
-      toast.success(`Resolved ${baseName(path)}`);
-    } catch (e) {
-      // A stale click: the path can be resolved elsewhere (an AI walk, another
-      // window) between render and click, leaving NO index entry, and `git add`
-      // then exits 128 on a pathspec matching nothing. Only a still-conflicted
-      // path is a real failure; a failed status read falls back to the error.
-      const status = await gitStatus(repoPath).catch(() => null);
-      const resolvedElsewhere = status?.entries.every(
-        (entry) =>
-          entry.path !== path ||
-          (entry.staged !== "conflicted" && entry.unstaged !== "conflicted"),
-      );
-      if (!resolvedElsewhere) toastError(e);
+      if (file.data && markNeedsConfirm(file.data)) {
+        const markIn = repoPath;
+        const flag = { name: baseName(path), unchecked: false };
+        const ok = await useConfirm
+          .getState()
+          .ask(markerStagePrompt([flag], false));
+        if (!ok || refuseIfMoved(markIn, "nothing was marked resolved")) return;
+      }
+      try {
+        await markResolve.mutateAsync(path);
+        toast.success(`Resolved ${baseName(path)}`);
+      } catch (e) {
+        // A stale click: the path can be resolved elsewhere (an AI walk, another
+        // window) between render and click, leaving NO index entry, and `git
+        // add` then exits 128 on a pathspec matching nothing. Only a
+        // still-conflicted path is a real failure; a failed status read falls
+        // back to the error. The hold starts before that read, so the buttons
+        // stay disabled across it.
+        setRecovering(true);
+        const status = await gitStatus(repoPath).catch(() => null);
+        const resolvedElsewhere = status?.entries.every(
+          (entry) =>
+            entry.path !== path ||
+            (entry.staged !== "conflicted" && entry.unstaged !== "conflicted"),
+        );
+        if (!resolvedElsewhere) toastError(e);
+        await refreshAfterError();
+      }
+    } finally {
+      inFlightRef.current = false;
     }
   }
 
