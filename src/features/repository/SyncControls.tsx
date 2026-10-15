@@ -256,11 +256,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // the connection returns. Reset to upstream is local and stays live.
   const offlineHold = useOfflineHold();
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
-  // Read only while the backend reports a mismatch, to say whether publishing
-  // under the new name would land on a branch the last fetch already saw there.
+  // Says whether publishing under the new name would land on a branch the last
+  // fetch already saw there. Read only while the mismatch menu is open, as the
+  // hook's doc requires; a disabled query still serves the warm-up's cached list,
+  // so a list still refreshing at open can relabel that item once.
   const remoteBranches = useRemoteBranches(
     repoPath,
-    head?.pushNameMismatch === true,
+    pushMenuOpen && head?.pushNameMismatch === true,
   );
   const remoteNewExists =
     remoteBranches.data?.some(

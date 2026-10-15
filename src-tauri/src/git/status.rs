@@ -50,9 +50,12 @@ pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppRe
 
 /// Fills the upstream's remote/branch split and the bare-push mismatch facts, which the
 /// porcelain's short `branch.upstream` can't carry (remote names may contain `/`).
-/// Advisory, failing toward inaction: any failed read leaves the facts at their parse
-/// defaults. One spawn when there is an upstream; the config reads and the remote-HEAD
-/// probe run only for a live, differently-named branch upstream.
+/// Advisory, failing toward inaction, as [`BranchHead`] documents: a failed tracking read
+/// leaves the remote/branch split None; a failed push-config read keeps the split but
+/// leaves `push_name_mismatch` false and `upstream_is_remote_default` None; a failed
+/// remote-HEAD probe leaves `upstream_is_remote_default` None (unknown). One spawn when
+/// there is an upstream; the config reads and the remote-HEAD probe run only for a live,
+/// differently-named branch upstream.
 async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
         return;

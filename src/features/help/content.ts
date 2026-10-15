@@ -762,8 +762,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
   remote, has diverged, or has nothing to push says so in a short message; for those, use
   the branch's context menu. One that tracks a branch with a different name says so too:
-  for the current branch, use **Push** to choose where; for a highlighted one, push it
-  from its context menu.
+  push the current branch with **Push** in the sync bar, or a highlighted one from its
+  context menu. If a branch or what it tracks just changed outside the app, the shortcut
+  may ask you to press it again while the branch list catches up.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -922,8 +923,11 @@ right on the **Push** and **Pull** buttons.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead. When the branch tracks a remote branch with a different
   name (after renaming a pushed branch, say) and Git would refuse a plain push, **Push**
-  opens a small menu: push to the branch it tracks, or publish under the new name and
-  track that. Setups that route pushes elsewhere keep a plain **Push**.
+  opens a small menu: push to the branch it tracks, or publish under its own name and
+  track that. When Git knows the tracked branch is the remote's default branch, only the
+  publish item appears. While the names differ there's no force push: a diverged branch
+  is reconciled from the **Pull** menu first. Setups that route pushes elsewhere keep a
+  plain **Push**.
 
 ## Publish a local repo
 
@@ -1674,7 +1678,8 @@ written into the repo. When you're ready, **promote** a local PR to a real pull 
 on GitHub or Bitbucket, or a merge request on GitLab, in one click, history preserved.
 On a GitHub or GitLab repo the description and comment box complete **@** mentions and
 **#** references (**!** merge requests too on GitLab) like the hosted ones, and render
-them as links you can click through.
+them as links you can click through. Rename a branch in GitDesktop (in the app or through
+its MCP server) and open local PRs whose head or base used the old name follow it.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA

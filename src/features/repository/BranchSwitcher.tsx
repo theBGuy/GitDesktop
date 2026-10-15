@@ -42,8 +42,12 @@ import {
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
-import { forgeDetectForkPrForBranch } from "@/lib/git/api";
+import { forgeDetectForkPrForBranch, gitBranches } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
+import {
+  headTrackingMatchesRow,
+  rowTrackingMatches,
+} from "@/lib/git/push-tracking";
 import {
   branchRewriteStatusOptions,
   forgeFeatureReady,
@@ -84,7 +88,12 @@ import {
   useUserWorktrees,
 } from "@/lib/git/queries";
 import { isSessionBranchName } from "@/lib/git/ref-name";
-import type { Branch, ForkPrMatch, RemoteBranch } from "@/lib/git/types";
+import type {
+  Branch,
+  BranchHead,
+  ForkPrMatch,
+  RemoteBranch,
+} from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -1905,23 +1914,32 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // and a non-actionable invocation gives an honest info toast rather than
   // silence.
   const currentBranch = branches.data?.find((b) => b.isCurrent);
-  // Held while the current-branch route confirms HEAD: a second press during the
-  // read would otherwise start a second read and push twice.
+  // Held while either push-to-origin route confirms its branch: a second press
+  // during the read would otherwise start a second read and push twice. It guards
+  // only that read: an operation started meanwhile runs alongside the push, which
+  // names its branch explicitly.
   const pushHotkeyChecking = useRef(false);
+  function refuseWhileListCatchesUp(pushIn: string) {
+    toast.info("The branch list is catching up — try again in a moment.");
+    void queryClient.invalidateQueries({
+      queryKey: repoKeys.branches(pushIn),
+    });
+  }
   // The branch list refreshes on focus and after in-app actions, never on the
-  // status poll, so its current row can lag a checkout made outside the app; a
-  // fresh status read confirms HEAD before the current-branch route acts.
+  // status poll, so its current row can lag a checkout or tracking change made
+  // outside the app; a fresh status read confirms HEAD before this route acts.
   async function pushCurrentBranchToOrigin(listed: Branch) {
     if (pushHotkeyChecking.current) return;
     // Every value the continuation acts on, pinned before the read: the repo, and
-    // the listed row whose name and upstream facts decide the push.
+    // the listed row whose name and destination facts decide the push. The fresh
+    // read confirms both, since the backend re-reads tracking when it pushes.
     const pushIn = repoPath;
     pushHotkeyChecking.current = true;
-    let readName: string | null;
+    let fresh: BranchHead;
     try {
       // The factory's queryFn straight, never fetchQuery: that joins an
       // in-flight poll, which may have been spawned before the press.
-      readName = (await repoStatusOptions(pushIn).queryFn()).branch.name;
+      fresh = (await repoStatusOptions(pushIn).queryFn()).branch;
     } catch {
       toast.info("Couldn't confirm the current branch — nothing was pushed.");
       return;
@@ -1938,14 +1956,43 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const liveRow = queryClient
       .getQueryData<Branch[]>(repoKeys.branches(pushIn))
       ?.find((b) => b.isCurrent);
-    if (readName !== listed.name || liveRow !== listed) {
-      toast.info("The branch list is catching up — try again in a moment.");
-      void queryClient.invalidateQueries({
-        queryKey: repoKeys.branches(pushIn),
-      });
+    if (
+      fresh.name !== listed.name ||
+      liveRow !== listed ||
+      !headTrackingMatchesRow(fresh, listed)
+    ) {
+      refuseWhileListCatchesUp(pushIn);
       return;
     }
     pushBranchToOrigin(listed, false);
+  }
+  // Opening the list doesn't refetch it, so the highlighted row's tracking can
+  // be just as stale; a fresh branch-list read confirms it before this route acts.
+  async function pushListedBranchToOrigin(row: Branch) {
+    if (pushHotkeyChecking.current) return;
+    const pushIn = repoPath;
+    pushHotkeyChecking.current = true;
+    let freshRows: Branch[];
+    try {
+      // The api read straight, never fetchQuery: that can join a refetch spawned
+      // before the press.
+      freshRows = await gitBranches(pushIn);
+    } catch {
+      toast.info("Couldn't confirm the branch — nothing was pushed.");
+      return;
+    } finally {
+      pushHotkeyChecking.current = false;
+    }
+    if (
+      refuseIfSwitched(pushIn, "nothing was pushed", "before the push started")
+    )
+      return;
+    const freshRow = freshRows.find((b) => b.name === row.name);
+    if (!freshRow || !rowTrackingMatches(freshRow, row)) {
+      refuseWhileListCatchesUp(pushIn);
+      return;
+    }
+    pushBranchToOrigin(row, true);
   }
   // `fromRow`: the highlighted row of the open list, rather than the current
   // branch; it picks where the different-name toast sends the user.
@@ -1974,7 +2021,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.info(
         fromRow
           ? `${branch.name} tracks ${branch.upstream}, which has a different name — push it from its context menu`
-          : `${branch.name} tracks ${branch.upstream}, which has a different name — use Push to choose where`,
+          : `${branch.name} tracks ${branch.upstream}, which has a different name — use the sync bar's Push instead`,
       );
     } else if (
       tracksOrigin &&
@@ -2029,7 +2076,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           toast.info("Only local branches can be pushed from here");
           return;
         }
-        pushBranchToOrigin(row, true);
+        void pushListedBranchToOrigin(row);
         return;
       }
       if (!currentBranch) {

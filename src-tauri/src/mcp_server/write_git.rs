@@ -79,10 +79,12 @@ fn push_remedy(branch: &str, remote: &str) -> String {
     )
 }
 
-fn force_push_remedy(_branch: &str, _remote: &str) -> String {
-    "Force push isn't available while the names differ; push to an explicit destination \
-     with the push tool instead."
-        .to_string()
+fn force_push_remedy(branch: &str, remote: &str) -> String {
+    format!(
+        "Force push isn't available while the names differ. Retry with the push tool \
+         (branch: \"{branch}\", set_upstream: true) to publish it as {remote}/{branch} and \
+         track that, or push from GitDesktop to choose the destination."
+    )
 }
 
 impl GitDesktopMcp {
@@ -751,8 +753,9 @@ impl GitDesktopMcp {
             false,
             args.branch.clone(),
             args.remote.clone(),
-            // The MCP push tool has no cross-name destination — the local branch's
-            // own name is always the target.
+            // No explicit destination: a named push follows the branch's tracking
+            // (`build_push_args`' tracked arm), so it can land on a differently-named
+            // upstream on the same remote.
             None,
         )
         .await
@@ -1336,12 +1339,18 @@ mod tests {
              branch: \"feat/y\" and set_upstream: true to publish it as origin/feat/y and track \
              that, or push from GitDesktop to choose the destination."
         );
+        let force = with_mcp_remedy(refusal(), force_push_remedy).to_string();
         assert_eq!(
-            with_mcp_remedy(refusal(), force_push_remedy).to_string(),
+            force,
             "Push blocked — feat/y tracks origin/feat/x, which has a different name. Force push \
-             isn't available while the names differ; push to an explicit destination with the \
-             push tool instead."
+             isn't available while the names differ. Retry with the push tool (branch: \
+             \"feat/y\", set_upstream: true) to publish it as origin/feat/y and track that, or \
+             push from GitDesktop to choose the destination."
         );
+        assert!(force.contains("set_upstream: true"), "{force}");
+        assert!(force.contains("branch: \"feat/y\""), "{force}");
+        assert!(force.contains("origin/feat/y"), "{force}");
+        assert!(!force.contains("explicit destination"), "{force}");
         let other = with_mcp_remedy(AppError::Timeout(5), push_remedy);
         assert!(matches!(other, AppError::Timeout(5)), "{other:?}");
     }

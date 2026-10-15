@@ -39,10 +39,12 @@
 //! locks give lost-update safety. The GUI's plugin-store writes hold the same
 //! cross-process lock through [`crate::store_lock_commands`]; cold-start instances are
 //! the exception, writing a `coldstart-*` alias no second process touches. Branch
-//! renames are ordered by a separate [`RenameLock`], which fails closed instead.
+//! renames are ordered per repository by a separate [`RenameLock`], which refuses on
+//! contention instead of failing open.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -83,29 +85,34 @@ fn prs_lock() -> &'static Mutex<()> {
     PRS_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// The rename-ordering lock, beside the store so both processes resolve it through the
-/// same seam. Never the store's own `.lock`, which a waiter evicts by age.
-const RENAME_LOCK_FILE: &str = "branch-rename.lock";
-
 /// How often a waiting rename re-tries the OS lock.
 const RENAME_LOCK_POLL: Duration = Duration::from_millis(25);
 
 /// What a rename refused for contention reports it queued behind.
 const RENAME_BUSY_HOLDER: &str = "another branch rename";
 
-/// Orders branch renames, in this process and across processes, from before a rename's
-/// git step until both of its app-data moves have written. It holds no store lock.
-/// Field order is release order: the OS file lock, then the in-process mutex.
+/// Orders one repository's branch renames, in this process and across processes, from
+/// before a rename's git step until both of its app-data moves have written. It holds no
+/// store lock. Field order is release order: the OS file lock, then the in-process mutex.
+/// The file is `None` when its location was unusable: ordering is then in-process only.
 pub(crate) struct RenameLock {
-    _file: std::fs::File,
-    _in_process: tokio::sync::MutexGuard<'static, ()>,
+    _file: Option<std::fs::File>,
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Same-process renames queue here, fairly, before contending for the file, whose OS
-/// lock would order them only by polling.
-fn rename_mutex() -> &'static tokio::sync::Mutex<()> {
-    static RENAME_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    RENAME_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+/// One repository's in-process rename mutex, keyed by its identity. Same-process renames
+/// queue here, fairly, before contending for the file, whose OS lock would order them
+/// only by polling. Entries are never removed: one per repository renamed in this process.
+fn rename_mutex(identity: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static RENAME_MUTEXES: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    RENAME_MUTEXES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(identity.to_string())
+        .or_default()
+        .clone()
 }
 
 #[cfg(test)]
@@ -114,11 +121,13 @@ tokio::task_local! {
     pub(crate) static RENAME_LOCK_WAIT: Duration;
 }
 
-/// Take the [`RenameLock`] within the repo lock's wait bound, or refuse with
-/// [`AppError::Busy`]: unlike the store writers it fails CLOSED, since a rename run
-/// unordered can land its moves on a dead name. Any failure other than contention (an
-/// unresolvable or unwritable app-data dir) is returned as itself, never as busy.
-pub(crate) async fn lock_for_rename() -> AppResult<RenameLock> {
+/// Take `identity`'s [`RenameLock`] within the repo lock's wait bound, or refuse with
+/// [`AppError::Busy`]: contention refuses before git runs, since a rename run unordered
+/// can land its moves on a dead name. A lock file opened read-only still orders. Only an
+/// unusable one (an unusable app-data dir, a file that can't be opened at all, a lock
+/// error other than contention) falls back to in-process ordering: a directory at fault
+/// leaves the moves' store beside it unusable too.
+pub(crate) async fn lock_for_rename(identity: &str) -> AppResult<RenameLock> {
     #[cfg(test)]
     let wait = RENAME_LOCK_WAIT
         .try_with(|wait| *wait)
@@ -129,11 +138,25 @@ pub(crate) async fn lock_for_rename() -> AppResult<RenameLock> {
     let busy = || AppError::Busy {
         holder: RENAME_BUSY_HOLDER.to_string(),
     };
-    let in_process = tokio::time::timeout_at(deadline, rename_mutex().lock())
+    let in_process = tokio::time::timeout_at(deadline, rename_mutex(identity).lock_owned())
         .await
         .map_err(|_| busy())?;
-    let path = rename_lock_path()?;
-    let file = open_rename_lock(&path).map_err(|e| rename_lock_error(&path, e))?;
+    let path = match rename_lock_path(identity) {
+        Ok(path) => path,
+        Err(e) => return Ok(in_process_only(in_process, e)),
+    };
+    // A file another account left read-only still locks: neither flock nor LockFileEx
+    // needs write access.
+    let file = match open_rename_lock(&path) {
+        Ok(file) => file,
+        Err(rw) => match std::fs::OpenOptions::new().read(true).open(&path) {
+            Ok(file) => file,
+            Err(ro) => {
+                let why = format!("{}: {rw}; read-only: {ro}", path.display());
+                return Ok(in_process_only(in_process, why));
+            }
+        },
+    };
     // Polled here, not on a blocking thread: `try_lock` never blocks, and a dropped
     // caller then leaves no poller behind to take the lock after it is gone.
     loop {
@@ -143,18 +166,41 @@ pub(crate) async fn lock_for_rename() -> AppResult<RenameLock> {
                 tokio::time::sleep(RENAME_LOCK_POLL).await;
             }
             Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
-            Err(std::fs::TryLockError::Error(e)) => return Err(rename_lock_error(&path, e)),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Ok(in_process_only(in_process, lock_file_failure(&path, e)));
+            }
         }
     }
     Ok(RenameLock {
-        _file: file,
+        _file: Some(file),
         _in_process: in_process,
     })
 }
 
-/// [`RENAME_LOCK_FILE`] in the store's directory.
-fn rename_lock_path() -> AppResult<PathBuf> {
-    Ok(store_path()?.with_file_name(RENAME_LOCK_FILE))
+/// The degraded [`RenameLock`]: logged once, never refused (see [`lock_for_rename`]).
+fn in_process_only(
+    in_process: tokio::sync::OwnedMutexGuard<()>,
+    why: impl std::fmt::Display,
+) -> RenameLock {
+    eprintln!("gitdesktop: branch-rename lock file unusable, ordering in this process only: {why}");
+    RenameLock {
+        _file: None,
+        _in_process: in_process,
+    }
+}
+
+fn lock_file_failure(path: &Path, e: std::io::Error) -> String {
+    format!("{}: {e}", path.display())
+}
+
+/// `identity`'s lock file, beside the store so both processes resolve it through the same
+/// seam, and never the store's own `.lock`, which a waiter evicts by age. Hashed with the
+/// build-stable [`crate::automation_claims::fnv1a_64`], so every build names it alike.
+fn rename_lock_path(identity: &str) -> AppResult<PathBuf> {
+    Ok(store_path()?.with_file_name(format!(
+        "branch-rename-{:016x}.lock",
+        crate::automation_claims::fnv1a_64(identity.as_bytes())
+    )))
 }
 
 /// Opens (creating it and its directory when absent) the lock file. It is never deleted:
@@ -170,13 +216,6 @@ fn open_rename_lock(path: &Path) -> std::io::Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(path)
-}
-
-fn rename_lock_error(path: &Path, e: std::io::Error) -> AppError {
-    AppError::Command(format!(
-        "could not take the branch-rename lock at {}: {e}",
-        path.display()
-    ))
 }
 
 /// In-process test override, consulted by [`store_path`] before the real app-data
@@ -955,7 +994,7 @@ pub(crate) mod tests {
         let (legacy, identity) = ("C:/wt/harbor", "C:/ProjectRepos/demo/harbor/.git");
 
         legacy_keyed_store(tmp.path(), legacy, identity);
-        let ordered = lock_for_rename().await.unwrap();
+        let ordered = lock_for_rename(identity).await.unwrap();
         assert_eq!(
             rename_branch(&ordered, identity, legacy, "feat/x", "feat/y")
                 .await
@@ -993,7 +1032,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let ordered = lock_for_rename().await.unwrap();
+        let ordered = lock_for_rename(identity).await.unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             create(identity, "During", "", "main", "feat/x"),
@@ -1010,39 +1049,89 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(changed, 2, "both writes landed before the move");
         drop(ordered);
-        assert!(rename_lock_takeable(Duration::from_secs(5)));
+        assert!(rename_lock_takeable(identity, Duration::from_secs(5)));
     }
 
-    /// An app-data dir that cannot hold the lock file refuses with that failure, never as
-    /// busy, and leaves the in-process mutex free for the next rename.
+    /// An app-data dir that cannot hold the lock file still yields the lock, which keeps
+    /// ordering this process's renames of that repository, and only that repository's.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn an_unwritable_lock_dir_refuses_with_its_error_not_busy() {
+    async fn an_unwritable_lock_dir_falls_back_to_in_process_ordering() {
         let _serialized = store_dir_lock();
         let (tmp, _unused) = tmp_store();
         let blocker = tmp.path().join("not-a-dir");
         std::fs::write(&blocker, "a file where the app-data dir should be").unwrap();
         let _override = StoreDirOverride::set(&blocker.join("app-data"));
+        let (identity, other) = ("C:/ProjectRepos/demo/fallback/.git", "C:/elsewhere/.git");
 
-        let err = lock_for_rename()
+        let ordered = lock_for_rename(identity)
+            .await
+            .expect("an unusable lock file never refuses");
+        let second = RENAME_LOCK_WAIT
+            .scope(Duration::from_millis(100), lock_for_rename(identity))
             .await
             .err()
-            .expect("no lock file, no rename");
+            .expect("the same repository's next rename still queues");
         assert!(
-            matches!(&err, AppError::Command(m) if m.contains(RENAME_LOCK_FILE)),
-            "{err:?}"
+            matches!(&second, AppError::Busy { holder } if holder == RENAME_BUSY_HOLDER),
+            "{second:?}"
         );
+        let unrelated = RENAME_LOCK_WAIT
+            .scope(Duration::from_millis(100), lock_for_rename(other))
+            .await;
+        assert!(unrelated.is_ok(), "another repository's rename is not held");
+        drop(ordered);
         assert!(
-            rename_mutex().try_lock().is_ok(),
-            "the refusal released the mutex"
+            rename_mutex(identity).try_lock().is_ok(),
+            "released on drop"
         );
     }
 
-    /// Takes the rename lock through a handle of the test's own, the stand-in for another
-    /// process's live hold; dropping the handle releases it. Waits out a concurrent
-    /// rename that still holds it.
-    pub(crate) fn hold_rename_lock_elsewhere() -> std::fs::File {
-        let held = open_rename_lock(&rename_lock_path().unwrap()).unwrap();
+    /// A lock file that can't be opened for writing still orders across processes. On
+    /// Unix, root bypasses the permission check, so there the read-write open succeeds and
+    /// the assertions hold all the same.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_read_only_lock_file_still_orders_across_processes() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let identity = "C:/ProjectRepos/demo/read-only-lock/.git";
+        let path = rename_lock_path(identity).unwrap();
+        drop(open_rename_lock(&path).unwrap());
+        let set_readonly = |readonly: bool| {
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(readonly);
+            std::fs::set_permissions(&path, perms).unwrap();
+        };
+        set_readonly(true);
+
+        let ordered = lock_for_rename(identity).await.unwrap();
+        let held = !rename_lock_takeable(identity, Duration::ZERO);
+        drop(ordered);
+        let freed = rename_lock_takeable(identity, Duration::from_secs(5));
+        // Before any assert: Windows can't delete a read-only file with its tempdir.
+        set_readonly(false);
+        assert!(held, "the read-only handle holds the cross-process lock");
+        assert!(freed, "released on drop");
+    }
+
+    /// `identity`'s lock file, for a test that has to occupy its path.
+    pub(crate) fn rename_lock_file(identity: &str) -> PathBuf {
+        rename_lock_path(identity).unwrap()
+    }
+
+    /// Whether this process holds `identity`'s in-process rename mutex: a rename that has
+    /// it is past its own pre-lock steps and is waiting on, or holding, the file.
+    pub(crate) fn rename_mutex_held(identity: &str) -> bool {
+        rename_mutex(identity).try_lock().is_err()
+    }
+
+    /// Takes `identity`'s rename lock through a handle of the test's own, the stand-in for
+    /// another process's live hold; dropping the handle releases it. Waits out a
+    /// concurrent rename that still holds it.
+    pub(crate) fn hold_rename_lock_elsewhere(identity: &str) -> std::fs::File {
+        let held = open_rename_lock(&rename_lock_path(identity).unwrap()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while held.try_lock().is_err() {
             assert!(
@@ -1054,14 +1143,17 @@ pub(crate) mod tests {
         held
     }
 
-    /// Whether a fresh handle can take the rename lock within `wait` (`ZERO` probes once).
-    /// Polled because on Linux a released flock can read held for a moment, while a
+    /// Whether a fresh handle can take `identity`'s rename lock within `wait` (`ZERO` probes
+    /// once). Polled because on Linux a released flock can read held for a moment, while a
     /// concurrently spawned child has yet to exec.
-    pub(crate) fn rename_lock_takeable(wait: Duration) -> bool {
-        let path = rename_lock_path().unwrap();
+    pub(crate) fn rename_lock_takeable(identity: &str, wait: Duration) -> bool {
+        let path = rename_lock_path(identity).unwrap();
         let deadline = std::time::Instant::now() + wait;
         loop {
-            match open_rename_lock(&path).unwrap().try_lock() {
+            let probe = open_rename_lock(&path)
+                .or_else(|_| std::fs::File::open(&path))
+                .unwrap();
+            match probe.try_lock() {
                 Ok(()) => return true,
                 Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20));

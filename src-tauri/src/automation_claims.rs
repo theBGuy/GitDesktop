@@ -59,7 +59,7 @@ const CLAIMS_DIR: &str = "automation-claims";
 /// FNV-1a-64 of the bytes. Inlined with the canonical constants (offset basis
 /// `0xcbf29ce484222325`, prime `0x100000001b3`) so the hash is identical across
 /// compiler versions and builds — a `DefaultHasher` would not be (see module docs).
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         hash ^= b as u64;
