@@ -1965,6 +1965,7 @@ test("preparing-slot-hide lexes JSX text with an apostrophe", () => {
 });
 
 test("preparing-slot-hide known gaps stay unread", () => {
+  const bs = String.fromCharCode(92);
   // Not handled yet; each is pinned at its current result, so a change here
   // is deliberate. In a slot-host file, so slot context is no excuse.
   assertHostPasses([
@@ -1996,6 +1997,8 @@ test("preparing-slot-hide known gaps stay unread", () => {
     'function f(r) { if (r === "preparing") return <div className="absolute" />; }',
     'function f(r) { if (r === "preparing") return <Skeleton />; return <div className={SLOT[r]} />; }',
     'const E = ({ r }) => <div className={SLOT[r]} style={{ clipPath: "none" }} />;',
+    // An identifier-escaped key: the identifier lexer stops at the backslash.
+    `const R = { shown: "h-full", ${bs}u0070reparing: "absolute inset-0" };`,
     // A delete of a preparing member; a spread the scan cannot read after a
     // spread of a slot map.
     "delete SLOT.preparing;",
@@ -2009,6 +2012,9 @@ test("preparing-slot-hide known gaps stay unread", () => {
     'export const H = () => <div className="h-full group-data-[slot=preparing]:invisible" />;',
     // A lone preparing entry.
     'const C = { preparing: "invisible" };',
+    // A file whose only preparing spelling is escaped: the parse prefilter
+    // reads raw source.
+    `const C = { shown: "h-full", "prep${bs}x61ring": "absolute invisible" };`,
     // Slot code that is not a role-keyed map (a frame branching on a prop).
     'const Frame = ({ preparing }) => <div className={preparing ? "absolute invisible" : "h-full"} />;',
   ]);
@@ -2108,6 +2114,27 @@ test("preparing-slot-hide holds a host's keys, writes and stray clips to the sha
     'const x = <div className="data-[role=preparing]:&#105;nvisible" />;',
     // In a class attribute, any other named reference is unreadable.
     'const x = <div className="a&nbsp;b" />;',
+  ]);
+  // A map-entry read keyed by anything but the preparing role or the role
+  // variable is unreadable; a defineProperties descriptor is a write; a
+  // reference named on Object.prototype is no known entity.
+  const held =
+    'const S2 = { shown: "h-full", held: "h-full invisible", preparing: "absolute [clip-path:inset(50%)]" };';
+  assertHostFlags([
+    `${held} const c = cn(role === "preparing" && S2[flag ? "held" : "shown"]);`,
+    `${held} const c = cn(role === "preparing" && S2[pick(role)]);`,
+    'Object.defineProperties(SLOT, { preparing: { value: "absolute" } });',
+    'const x = <div className="h-full a&constructor;b" />;',
+    'const x = <div className="h-full a&toString;b" />;',
+  ]);
+  assertHostPasses([
+    `${held} const E = ({ role }) => <div className={S2[role]} />;`,
+    `${held} const E = ({ slot }) => <div className={S2[slot.role]} />;`,
+    `${held} const c = cn(role === "preparing" ? S2.preparing : S2[role]);`,
+    `${held} const c = cn(role === "preparing" && S2["preparing"]);`,
+    'const x = <div className="h-full a&amp;b" />;',
+    // Not a character reference (a name starts with a letter): literal text.
+    'const x = <div className="h-full a&__proto__;b" />;',
   ]);
   // A write through a const key, a const source, and a const spread override.
   assertHostFlags(['const P = "preparing";\nSLOT[P] = "absolute";'], [3]);
@@ -2237,14 +2264,14 @@ test("preparing-slot-hide holds a slot host's preparing entries to a plain clipp
   for (const value of [
     // Not a plain class string: the remedy is to write one.
     'cn("absolute", "[clip-path:inset(50%)]")',
-    "`absolute ${CLIP}`",
+    '`absolute ${"[clip-path:inset(50%)]"}`',
     'compact ? "absolute [clip-path:inset(50%)]" : "fixed [clip-path:inset(50%)]"',
     'cn({ "absolute [clip-path:inset(50%)]": true })',
     'cn({ "absolute [clip-path:inset(50%)]": false })',
     'cn("absolute", compact && "[clip-path:inset(50%)]")',
     'compact ? "absolute [clip-path:inset(50%)]" : "absolute"',
     '"absolute " + (compact ? "[clip-path:inset(50%)]" : "")',
-    "`absolute ${compact && CLIP}`",
+    '`absolute ${compact && "[clip-path:inset(50%)]"}`',
     '`absolute ${{ "[clip-path:inset(50%)]": true }}`',
     '"absolute " + { "[clip-path:inset(50%)]": true }',
     '"absolute " + ["a", "[clip-path:inset(50%)]"]',
@@ -2252,7 +2279,7 @@ test("preparing-slot-hide holds a slot host's preparing entries to a plain clipp
     '"absolute " + ["[clip-path:inset(50%)]"]',
     "`absolute ${MD}[clip-path:inset(50%)]`",
     '`absolute ${cn("[clip-path:inset(50%)]")}`',
-    'cn("absolute", CLIP, wide && CLIP)',
+    'cn("absolute", "[clip-path:inset(50%)]", wide && "[clip-path:inset(50%)]")',
     // Plain, but the clip is missing, glued, overridden (by another clip-path
     // token or an `[all:…]` reset), behind a variant (a descendant one too),
     // or marked `!` at both ends.
