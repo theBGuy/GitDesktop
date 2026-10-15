@@ -2296,9 +2296,9 @@ export function RemotePrView({
       // end short of it, and a wrong head here re-fires pr-sync's paid review.
       headSha,
       title: pr.title,
-      // No body/commit subjects on this path — the PR diff is the source of
-      // truth (catch-up + pr-sync fire them empty the same way).
-      body: "",
+      // The loaded description rides the event; commit subjects stay empty, as
+      // on the catch-up and pr-sync paths.
+      body: pr.body,
       commitSubjects: [],
       target: { type: "remote", number },
     });

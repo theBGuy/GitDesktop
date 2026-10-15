@@ -218,8 +218,8 @@ export function maybeCatchUpMissedOpen(
           head: pick.head,
           headSha: pick.currentHeadSha,
           title: pick.title,
-          // The poll payload carries no body/commit subjects; the PR diff is the
-          // source of truth (pr-sync already fires them empty the same way).
+          // The poll payload carries no body/commit subjects; the runner reads the
+          // description from the forge at review time.
           body: "",
           commitSubjects: [],
           target: { type: "remote", number: Number(pick.ref) },

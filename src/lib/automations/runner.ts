@@ -89,6 +89,7 @@ import {
 } from "./history";
 import { localRefsFresh as refsFresh } from "./pure";
 import { type AutomationRunResult, useAutomationResults } from "./results";
+import { type ReviewBodyFetch, reviewBody } from "./review-body";
 import {
   loadAutomations,
   loadAutomationsFresh,
@@ -1659,6 +1660,24 @@ async function generateReviewText(
       : undefined;
 
   const isRemotePr = event.kind !== "commit" && event.target.type === "remote";
+  const remoteNumber = isRemotePr
+    ? (event.target as { type: "remote"; number: number }).number
+    : undefined;
+  // Mirrors the notes resolver's own early-return gate, so a built `prView`
+  // always reaches a consumer.
+  const validNumber =
+    remoteNumber !== undefined &&
+    Number.isInteger(remoteNumber) &&
+    remoteNumber > 0;
+  // Poll-fired PR events carry no description; an empty one is re-read from the
+  // forge (a non-empty event body is trusted as-is).
+  const needsBody = isRemotePr && !event.body.trim();
+  // ONE PR read shared by the body arm and the notes resolver. Each consumer
+  // awaits it under its own catch, and its creation condition guarantees one does.
+  const prView =
+    remoteNumber !== undefined && validNumber && (needsBody || !eventNotes)
+      ? forgePrView(event.repoPath, remoteNumber, "origin")
+      : undefined;
   // Repo-level review context: the doc-surface roster + the repo's instructions
   // file. Both read the LOCAL working tree — whatever branch is checked out (see
   // `repoInstructionsClause`, guardrail 3) — and apply to commit and local-PR
@@ -1670,12 +1689,14 @@ async function generateReviewText(
     resolveDocSurfacesContext(event.repoPath),
     readRepoInstructions(event.repoPath).catch(() => null),
   ]);
-  // Resolve external + own + (when not event-carried) reviewer-notes context in
-  // parallel — all three are independent, best-effort remote harvests.
-  const [external, own, resolvedNotes]: [
+  // Resolve external + own + (when not event-carried) reviewer-notes context and
+  // the description in parallel — all four are independent, best-effort remote
+  // harvests.
+  const [external, own, resolvedNotes, fetchedBody]: [
     ExternalContext,
     OwnCommentsContext,
     ReviewerNotesContext,
+    ReviewBodyFetch | undefined,
   ] = isRemotePr
     ? await Promise.all([
         resolveExternalContext(
@@ -1700,14 +1721,20 @@ async function generateReviewText(
           },
         ),
         // Skip the fetch when the event already carries the notes.
-        eventNotes
+        eventNotes || remoteNumber === undefined
           ? Promise.resolve({})
-          : resolveReviewerNotesContext(
-              event.repoPath,
-              (event.target as { type: "remote"; number: number }).number,
-            ),
+          : resolveReviewerNotesContext(event.repoPath, remoteNumber, prView),
+        // An invalid number can never be read, so it lands on "unreadable",
+        // never on the authoritatively-empty arm.
+        needsBody
+          ? prView
+            ? prView
+                .then((p) => ({ ok: true as const, body: p.body }))
+                .catch(() => ({ ok: false as const }))
+            : Promise.resolve({ ok: false as const })
+          : Promise.resolve(undefined),
       ])
-    : [{}, {}, {}];
+    : [{}, {}, {}, undefined];
   const [docs, repoInstructions] = await repoContext;
   if (signal.aborted) return null;
 
@@ -1715,10 +1742,18 @@ async function generateReviewText(
   // resolved read, not the event payload, so it must not ride along when the event wins.
   const notes: ReviewerNotesContext = eventNotes ?? resolvedNotes;
 
+  // Commit reviews keep an empty body with no state, so their prompt omits the
+  // section as before.
+  const description =
+    event.kind === "commit"
+      ? { body: "", bodyState: undefined }
+      : reviewBody(event.body, fetchedBody);
+
   const { system, prompt } = buildReviewPrompt(
     {
       title: event.title,
-      body: event.kind === "commit" ? "" : event.body,
+      body: description.body,
+      bodyState: description.bodyState,
       commitSubjects: event.kind === "commit" ? [] : event.commitSubjects,
       commitsUnknown:
         event.kind === "commit" ? undefined : event.commitsUnknown,

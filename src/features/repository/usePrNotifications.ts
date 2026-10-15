@@ -127,7 +127,7 @@ export function usePrNotifications(repoPath: string) {
     // pr-sync: auto re-review open remote PRs whose head advanced — covers PRs whose
     // head branch isn't local (forks / pushed elsewhere). Gated on hasPrSync so
     // notification-only users get no fan-out. The poll payload has no body/commit
-    // subjects — the PR diff is the source of truth.
+    // subjects; the runner reads the description from the forge at review time.
     if (hasPrSync && aiEnabled) {
       for (const pr of snapshot.values()) {
         if (pr.state === "OPEN" && pr.headSha) {

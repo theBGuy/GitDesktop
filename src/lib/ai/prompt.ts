@@ -886,8 +886,20 @@ export function buildReviewPrompt(
   if (input.title.trim()) {
     promptParts.push(`# ${input.title.trim()}`);
   }
-  if (input.body.trim()) {
-    promptParts.push(`## Author's description\n${input.body.trim()}`);
+  // Author input, capped like the notes below so an over-long description
+  // discloses its cut. The system prompts direct the model at this section, so
+  // an empty or unread description is stated rather than left silent.
+  const bodyText = input.body.trim();
+  if (bodyText) {
+    promptParts.push(`## Author's description\n${capBody(bodyText, 8000)}`);
+  } else if (input.bodyState === "empty") {
+    promptParts.push(
+      "## Author's description\n(none — the author left the description empty)",
+    );
+  } else if (input.bodyState === "unreadable") {
+    promptParts.push(
+      "## Author's description\n(could not be read for this review — treat it as unknown, not as empty)",
+    );
   }
   // Author's deliberate "Notes for reviewers" — author input like the description
   // above, NOT bot soft-context, so it lives OUTSIDE `budgetReviewExtras`, capped
