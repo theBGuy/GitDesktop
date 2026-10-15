@@ -178,6 +178,10 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label: "Local PRs follow a branch renamed in GitDesktop",
+  },
+  {
+    group: "Pull requests & review",
     label:
       "Local-PR merges pre-show conflicts, resolved in an isolated worktree",
   },
@@ -515,6 +519,11 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label: "--force-with-lease + --force-if-includes (Git 2.30+) by default",
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Push menu for a branch tracking a differently named branch — push to it, or publish under its own name",
   },
   {
     group: "Repository & workspace",

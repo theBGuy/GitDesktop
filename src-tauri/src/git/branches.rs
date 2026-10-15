@@ -452,14 +452,14 @@ pub(crate) async fn git_rename_branch_core(
     // must outlive git's waits and timeouts with no stale age a waiter could evict it by; the
     // OS frees it if its holder dies. Each move takes its store's own lock pair only for its
     // write, never across git. Contention refuses before git runs; an unusable lock file
-    // falls back to in-process ordering (`lock_for_rename` says why). No identity means no
-    // key and no lock; both moves need that identity too, so each skips, logged, and the
-    // local-PR one warns.
+    // falls back to in-process ordering (`lock_for_rename` says why).
     let keyed = match crate::git::repo::repo_identity(&repo_path).await {
         Ok(identity) => {
             let ordered = crate::local_prs::lock_for_rename(&identity).await?;
             Ok((identity, ordered))
         }
+        // No identity means no key and no lock; both moves need that identity too, so
+        // each skips, logged, and the local-PR one warns.
         Err(e) => Err(e),
     };
     // The lock's wait reopens the window the check above guards.
@@ -528,7 +528,7 @@ pub(crate) async fn git_rename_branch_core(
 }
 
 /// Where a rename can be held from a test: rename lock taken but git not yet run, and git
-/// done but neither app-data move run (the gap a second rename used to slip into).
+/// done but neither app-data move run.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenamePhase {

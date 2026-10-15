@@ -160,11 +160,12 @@ PR's commits are available locally.
 ### Branches
 
 Switch (with a bring-changes / stash prompt), create, rename, delete, and
-**archive** (hide from the switcher without deleting). Each switcher row
-shows the branch's push/pull state vs. its upstream (↑ to push, ↓ to pull,
-plus markers for never-published and upstream-deleted branches), its +/−
-divergence vs. the default branch (labeled with the default's name), and a
-PR badge.
+**archive** (hide from the switcher without deleting); renaming a branch in
+GitDesktop moves its open local pull requests to the new name. Each
+switcher row shows the branch's push/pull state vs. its upstream (↑ to
+push, ↓ to pull, plus markers for never-published and upstream-deleted
+branches), its +/− divergence vs. the default branch (labeled with the
+default's name), and a PR badge.
 
 - **Clean up branches** ⭐: one reviewed list that archives or deletes your
   stale branches — merged into the default branch (directly, or, where the
@@ -264,13 +265,16 @@ and Pull buttons. The Pull button is `--ff-only`; the menu's rebase and
 merge modes reconcile a diverged branch. Divergence routes to a guarded
 force push with `--force-with-lease --force-if-includes` (lease-only on
 Git releases older than 2.30, or when the branch has no reflog for the
-check to read). When the *remote* itself was rewritten (a server-side
-rebase) and every local commit already landed there under new ids, the
-Pull menu offers a confirmed **Reset to _origin/…_** that lines the two
-up instead. Pulling with rebase pre-checks the upstream for a rewrite
-that would take commits of yours off the branch, names them, and asks
-whether to keep or drop them, recording a drop in **Operation history**.
-When a repo has an `upstream` remote, the Pull menu adds
+check to read). When a branch tracks a remote branch with a different
+name and Git would refuse a plain push, **Push** opens a menu to push to
+the tracked branch or publish under the branch's own name; there's no
+force push until the names match. When the *remote* itself was rewritten
+(a server-side rebase) and every local commit already landed there under
+new ids, the Pull menu offers a confirmed **Reset to _origin/…_** that
+lines the two up instead. Pulling with rebase pre-checks the upstream for
+a rewrite that would take commits of yours off the branch, names them, and
+asks whether to keep or drop them, recording a drop in **Operation
+history**. When a repo has an `upstream` remote, the Pull menu adds
 **Update from upstream**: one click fetches upstream and brings your
 branch up to date (fast-forward when it can, a merge commit when cleanly
 diverged, the conflict editor otherwise), for keeping a fork current.

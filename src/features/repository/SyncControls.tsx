@@ -741,7 +741,6 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const sameTarget =
     liveMenu !== null &&
     pinnedMenu !== undefined &&
-    head?.name === pinnedMenu.branch &&
     liveMenu.branch === pinnedMenu.branch &&
     liveMenu.remote === pinnedMenu.remote &&
     liveMenu.remoteBranch === pinnedMenu.remoteBranch;

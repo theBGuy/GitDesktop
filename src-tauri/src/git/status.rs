@@ -6,7 +6,7 @@ use crate::git::remote::{
     is_named_remote, parse_upstream_tracking, remote_head_branch, Upstream,
     UPSTREAM_TRACKING_FORMAT,
 };
-use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus};
 use crate::state::AppState;
 
@@ -54,8 +54,8 @@ pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppRe
 /// leaves the remote/branch split None; a failed push-config read keeps the split but
 /// leaves `push_name_mismatch` false and `upstream_is_remote_default` None; a failed
 /// remote-HEAD probe leaves `upstream_is_remote_default` None (unknown). One spawn when
-/// there is an upstream; the config reads and the remote-HEAD probe run only for a live,
-/// differently-named branch upstream.
+/// there is an upstream; a live, differently-named branch upstream adds one config listing,
+/// plus the remote-HEAD probe when that listing says a bare push is refused.
 async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
         return;
@@ -133,57 +133,77 @@ fn upstream_split(name: &str, tracking: Option<(Upstream, String, bool)>) -> Ups
     }
 }
 
-/// `git config --get <key>`: the value when set, `None` when unset (exit 1). Exact keys
-/// only: a branch name can carry regex metacharacters, and a subsection is case-sensitive.
-async fn config_value(repo_path: &str, key: &str) -> Option<Option<String>> {
-    let out = run_git_raw(Some(repo_path), &["config", "--get", key], DEFAULT_TIMEOUT)
-        .await
-        .ok()?;
-    match out.code {
-        0 => Some(Some(
-            out.stdout_lossy()
-                .trim_end_matches(['\r', '\n'])
-                .to_string(),
-        )),
-        1 => Some(None),
-        _ => None,
+/// One `git config -z --list` entry: its key in git's canonical form, and its value, `None`
+/// for a valueless boolean entry.
+type ConfigEntry = (String, Option<String>);
+
+/// Parses `git config -z --list`: NUL-terminated entries, each split at its FIRST newline
+/// into key and value (a value may itself hold newlines); no newline is a valueless entry.
+fn parse_config_list(text: &str) -> Vec<ConfigEntry> {
+    text.split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('\n') {
+            Some((key, value)) => (canonical_config_key(key), Some(value.to_string())),
+            None => (canonical_config_key(entry), None),
+        })
+        .collect()
+}
+
+/// git's canonical key form: section and variable name lowercased, the subsection between
+/// them kept exact, since it is case-sensitive.
+fn canonical_config_key(key: &str) -> String {
+    match (key.find('.'), key.rfind('.')) {
+        (Some(first), Some(last)) if first < last => format!(
+            "{}{}{}",
+            key[..first].to_ascii_lowercase(),
+            &key[first..last],
+            key[last..].to_ascii_lowercase()
+        ),
+        _ => key.to_ascii_lowercase(),
     }
 }
 
-/// Reads the push config [`bare_push_would_be_refused`] decides on; `None` when any read
-/// failed (not merely unset), which the caller treats as "not refused".
+/// Every value set for `key`, in config order; a valueless entry reads as empty. Exact keys
+/// only, never a pattern: a branch name can carry regex metacharacters, and a subsection
+/// is case-sensitive.
+fn config_values<'a>(entries: &'a [ConfigEntry], key: &str) -> impl Iterator<Item = &'a str> {
+    let key = canonical_config_key(key);
+    entries
+        .iter()
+        .filter(move |(k, _)| *k == key)
+        .map(|(_, v)| v.as_deref().unwrap_or(""))
+}
+
+/// A single-valued key's effective value: the last one set wins.
+fn config_last<'a>(entries: &'a [ConfigEntry], key: &str) -> Option<&'a str> {
+    config_values(entries, key).last()
+}
+
+/// Reads the push config [`bare_push_would_be_refused`] decides on from one config listing;
+/// `None` when the listing failed, which the caller treats as "not refused". The branch's
+/// own remote is the upstream's, which exists only while `branch.<n>.remote` is set.
 async fn bare_push_refused(repo_path: &str, name: &str, upstream_remote: &str) -> Option<bool> {
-    let push_default = config_value(repo_path, "push.default").await?;
-    if push_default.as_deref().is_some_and(|d| d != "simple") {
-        return Some(false);
-    }
-    let branch_push_remote = config_value(repo_path, &format!("branch.{name}.pushRemote")).await?;
-    let remote_push_default = config_value(repo_path, "remote.pushDefault").await?;
-    let branch_remote = config_value(repo_path, &format!("branch.{name}.remote")).await?;
-    let Some(push_remote) = branch_push_remote
-        .as_deref()
-        .or(remote_push_default.as_deref())
-        .or(branch_remote.as_deref())
-    else {
-        return Some(false);
-    };
-    let refspecs = run_git_raw(
+    let out = run_git(
         Some(repo_path),
-        &["config", "--get-all", &format!("remote.{push_remote}.push")],
+        &["config", "-z", "--list"],
         DEFAULT_TIMEOUT,
     )
     .await
     .ok()?;
-    let remote_has_push_refspec = match refspecs.code {
-        0 => !refspecs.stdout_lossy().trim().is_empty(),
-        1 => false,
-        _ => return None,
-    };
+    let config = parse_config_list(&out.stdout_lossy());
+    let push_default = config_last(&config, "push.default");
+    let branch_push_remote = config_last(&config, &format!("branch.{name}.pushRemote"));
+    let remote_push_default = config_last(&config, "remote.pushDefault");
+    let push_remote = branch_push_remote
+        .or(remote_push_default)
+        .unwrap_or(upstream_remote);
+    let remote_has_push_refspec = config_values(&config, &format!("remote.{push_remote}.push"))
+        .any(|refspec| !refspec.trim().is_empty());
     Some(bare_push_would_be_refused(
-        push_default.as_deref(),
-        branch_push_remote.as_deref(),
-        remote_push_default.as_deref(),
-        branch_remote.as_deref(),
+        push_default,
+        branch_push_remote,
+        remote_push_default,
+        Some(upstream_remote),
         upstream_remote,
         remote_has_push_refspec,
     ))
@@ -349,6 +369,7 @@ fn entry_from_xy(xy: &str, path: &str, orig_path: Option<String>) -> FileEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::run_git_raw;
 
     fn z(parts: &[&str]) -> String {
         parts.join("\0")
@@ -505,6 +526,54 @@ mod tests {
         // A push refspec of the push remote's own replaces the default push.
         assert!(!refused(None, None, None, Some("origin"), true));
         assert!(!refused(Some("simple"), None, None, Some("origin"), true));
+    }
+
+    #[test]
+    fn config_lookup_folds_section_and_variable_but_not_subsection() {
+        let config = parse_config_list("push.default\nsimple\0remote.Origin.push\nrefs/x\0");
+        assert_eq!(config_last(&config, "Push.Default"), Some("simple"));
+        assert_eq!(config_last(&config, "PUSH.DEFAULT"), Some("simple"));
+        assert_eq!(config_last(&config, "REMOTE.Origin.PUSH"), Some("refs/x"));
+        assert_eq!(config_last(&config, "remote.origin.push"), None);
+        let lower = parse_config_list("remote.origin.push\nrefs/y\0");
+        assert_eq!(config_last(&lower, "remote.Origin.push"), None);
+        // A dotted subsection keeps its dots: the variable is after the LAST one.
+        let dotted = parse_config_list("branch.Feat.Y.pushremote\nfork\0");
+        assert_eq!(
+            config_last(&dotted, "branch.Feat.Y.pushRemote"),
+            Some("fork")
+        );
+        assert_eq!(config_last(&dotted, "branch.feat.y.pushRemote"), None);
+    }
+
+    #[test]
+    fn config_list_parse_arms() {
+        // Only the first newline splits key from value.
+        let config = parse_config_list("alias.two\nline1\nline2\0");
+        assert_eq!(
+            config,
+            vec![("alias.two".to_string(), Some("line1\nline2".to_string()))]
+        );
+        // A valueless boolean entry has no newline at all; it reads as empty.
+        let config = parse_config_list("push.autosetupremote\0");
+        assert_eq!(config, vec![("push.autosetupremote".to_string(), None)]);
+        assert_eq!(config_last(&config, "push.autoSetupRemote"), Some(""));
+        // Last wins for a single-valued key.
+        let config = parse_config_list("push.default\nupstream\0push.default\nsimple\0");
+        assert_eq!(config_last(&config, "push.default"), Some("simple"));
+        // A multi-valued key yields every value, in order.
+        let config = parse_config_list(
+            "remote.origin.push\nrefs/heads/a:refs/heads/a\0core.bare\nfalse\0remote.origin.push\nrefs/heads/b:refs/heads/b\0",
+        );
+        assert_eq!(
+            config_values(&config, "remote.origin.push").collect::<Vec<_>>(),
+            ["refs/heads/a:refs/heads/a", "refs/heads/b:refs/heads/b"]
+        );
+        // An empty listing has nothing.
+        let config = parse_config_list("");
+        assert!(config.is_empty());
+        assert_eq!(config_last(&config, "push.default"), None);
+        assert_eq!(config_values(&config, "remote.origin.push").count(), 0);
     }
 
     #[test]
