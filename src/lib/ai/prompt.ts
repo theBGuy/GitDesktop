@@ -890,9 +890,10 @@ function neutralizeAuthorFences(text: string): string {
   return text.replace(AUTHOR_FENCE_LOOKALIKE, "&lt;");
 }
 
-/** Fences (already capped) author text in `tag` for the review prompt. The text
- *  and every soft-context section are neutralized with the same pattern, so the
- *  builder's two fences are the only real ones in the prompt. */
+/** Fences (already capped) author text in `tag` for the review prompt. The text and
+ *  the previous-review, own-comment and external sections are neutralized with the
+ *  same pattern; tags left verbatim in the diff, delta, title or commit subjects
+ *  fall under `AUTHOR_TEXT_AS_DATA_RULE`'s fence-only sentence. */
 function fenceAuthorText(
   tag: "author_description" | "author_notes",
   text: string,
@@ -973,8 +974,9 @@ export function buildReviewPrompt(
   // comments, and third-party AI findings — each gated independently. Placed AFTER
   // the file summary and BEFORE the full diff so the authoritative diff stays the
   // last large block. Shared budget, drop order: external, own, prior, delta.
-  // Other people's text renders through `neutralizeAuthorFences`, so none of it
-  // can forge an author fence.
+  // The previous-review, own and external text renders through
+  // `neutralizeAuthorFences`; the delta stays verbatim like the diff, covered by
+  // the rule's fence-only sentence.
   const hasPrior = Boolean(input.priorFindings?.trim());
   const hasOwn = Boolean(input.ownItems?.some((t) => t.trim()));
   const hasExternal = Boolean(input.externalFindings?.trim());
