@@ -1852,6 +1852,9 @@ test("preparing-slot-hide analyses only slot context", () => {
     "const X = ({ className }) => <div>{isPreparing && <Loader className={className} />}</div>;",
     // A preparing key beside a held or shown key whose value is no class.
     "setState({ preparing: isLoading, shown: isOpen });",
+    // The same const-keyed maps with only the clip.
+    'const k = "preparing"; export const C = { shown: "h-full", held: "h-full", [k]: "absolute [clip-path:inset(50%)]" };',
+    'const k0 = "preparing"; const k = k0; export const C = { shown: "h-full", held: "h-full", [k]: "absolute [clip-path:inset(50%)]" };',
     'const c = cn("h-full", isPreparing && "opacity-50");',
   ]);
   // A slot shape flags without the vocabulary.
@@ -1859,6 +1862,9 @@ test("preparing-slot-hide analyses only slot context", () => {
     'const C = { shown: "h-full", held: "h-full", preparing: "absolute invisible" };',
     'const C = { preparing: "invisible", shown: "h-full" };',
     '@Comp({ shown: "h-full", held: "h-full", preparing: "absolute invisible" }) class A {}',
+    // A preparing key read through same-file consts, one hop or two.
+    'const k = "preparing"; export const C = { shown: "h-full", held: "h-full", [k]: "absolute invisible" };',
+    'const k0 = "preparing"; const k = k0; export const C = { shown: "h-full", held: "h-full", [k]: "absolute invisible" };',
     // A class body takes the same shape test.
     'class S { shown = "h-full"; preparing = "absolute invisible"; }',
     // A catch clause's pattern default.
@@ -1966,6 +1972,8 @@ test("preparing-slot-hide lexes JSX text with an apostrophe", () => {
 
 test("preparing-slot-hide known gaps stay unread", () => {
   const bs = String.fromCharCode(92);
+  const held =
+    'const S2 = { shown: "h-full", held: "h-full invisible", preparing: "absolute [clip-path:inset(50%)]" };';
   // Not handled yet; each is pinned at its current result, so a change here
   // is deliberate. In a slot-host file, so slot context is no excuse.
   assertHostPasses([
@@ -1999,6 +2007,17 @@ test("preparing-slot-hide known gaps stay unread", () => {
     'const E = ({ r }) => <div className={SLOT[r]} style={{ clipPath: "none" }} />;',
     // An identifier-escaped key: the identifier lexer stops at the backslash.
     `const R = { shown: "h-full", ${bs}u0070reparing: "absolute inset-0" };`,
+    // A map-entry key the scan cannot pin to one value is taken as the role
+    // in force: a parameter (with a default, or not the one the guard tests),
+    // a destructured binding, a `let`, an import, a name bound twice, and a
+    // member chain whose root is never resolved.
+    `${held} function f(role, prev) { return cn(role === "preparing" && S2[prev]); }`,
+    `${held} function g(role, k = "held") { return cn(role === "preparing" && S2[k]); }`,
+    `${held} const { k } = { k: "held" }; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} let k = "held"; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} import { k } from "./keys"; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const k = "held"; function g() { const k = "shown"; return k; } const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const x = { role: "held" }; const c = cn(role === "preparing" && S2[x.role]);`,
     // A delete of a preparing member; a spread the scan cannot read after a
     // spread of a slot map.
     "delete SLOT.preparing;",
@@ -2123,6 +2142,12 @@ test("preparing-slot-hide holds a host's keys, writes and stray clips to the sha
   assertHostFlags([
     `${held} const c = cn(role === "preparing" && S2[flag ? "held" : "shown"]);`,
     `${held} const c = cn(role === "preparing" && S2[pick(role)]);`,
+    // A const of an expression the scan cannot read, or of another role.
+    `${held} const k = flag ? "held" : "shown"; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const k = pick(role); const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const k0 = flag ? "held" : "shown"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const k0 = "held"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const k = roles[i]; const c = cn(role === "preparing" && S2[k]);`,
     'Object.defineProperties(SLOT, { preparing: { value: "absolute" } });',
     'const x = <div className="h-full a&constructor;b" />;',
     'const x = <div className="h-full a&toString;b" />;',
@@ -2132,6 +2157,10 @@ test("preparing-slot-hide holds a host's keys, writes and stray clips to the sha
     `${held} const E = ({ slot }) => <div className={S2[slot.role]} />;`,
     `${held} const c = cn(role === "preparing" ? S2.preparing : S2[role]);`,
     `${held} const c = cn(role === "preparing" && S2["preparing"]);`,
+    // A const of a member chain, of "preparing", or of an unresolved name.
+    `${held} const role = slot.role; const c = cn(role === "preparing" && S2[role]);`,
+    `${held} const k0 = "preparing"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} function f(r) { const k = r; return cn(r === "preparing" && S2[k]); }`,
     'const x = <div className="h-full a&amp;b" />;',
     // Not a character reference (a name starts with a letter): literal text.
     'const x = <div className="h-full a&__proto__;b" />;',
@@ -2198,6 +2227,9 @@ test("preparing-slot-hide fails closed on its listed residue", () => {
     // entry.
     'const E = () => <div className="[clip-path:circle(0)] transition-[clip-path]" />;',
     'const E = ({ r }) => <div className={r === "preparing" ? "absolute inset-0 [clip-path:inset(50%)]" : SLOT[r]} />;',
+    // A map-entry key read from a const of a call: read the role from a
+    // prop or a destructured binding instead.
+    'const role = useRole(); const c = cn(role === "preparing" && SLOT[role]);',
     // Object.assign copying a slot map into another object.
     'const copy = Object.assign({}, SLOT, { shown: "x" });',
     // A host's merge-status class map keyed `preparing`.
