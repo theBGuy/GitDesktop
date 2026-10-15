@@ -38,10 +38,14 @@
 //! OS-level file lock, which fails open. `atomic_write` gives torn-file safety; the
 //! locks give lost-update safety. The GUI's plugin-store writes hold the same
 //! cross-process lock through [`crate::store_lock_commands`]; cold-start instances are
-//! the exception, writing a `coldstart-*` alias no second process touches.
+//! the exception, writing a `coldstart-*` alias no second process touches. A branch
+//! rename holds both locks across its git step as a [`RenameBoundary`], which fails
+//! closed instead.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -75,10 +79,52 @@ struct NewLocalPr {
 /// Guards the whole read-modify-write of the shared store file within THIS process
 /// (mirroring [`crate::oplog`]'s lock). It sits OUTSIDE the cross-process file lock
 /// deliberately: same-process serialization is exact and free, where the file lock fails
-/// open after its retry budget.
-fn prs_lock() -> &'static Mutex<()> {
-    static PRS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    PRS_LOCK.get_or_init(|| Mutex::new(()))
+/// open after its retry budget. Async so a [`RenameBoundary`] can hold it across an
+/// `.await`; the sync writers take it with `blocking_lock`, which panics on a runtime
+/// worker, so they run only on blocking threads ([`crate::store_lock::locked_store_task`]).
+fn prs_lock() -> &'static tokio::sync::Mutex<()> {
+    static PRS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    PRS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// What a rename refused at the boundary reports it queued behind: the only holder that
+/// outlasts the wait is another rename's git step.
+const RENAME_BUSY_HOLDER: &str = "another branch rename";
+
+/// Both of this store's locks, held by a branch rename from before its git step until its
+/// local-PR move has written ([`rename_branch`] consumes it). Field order is release
+/// order: the file lock, then the in-process mutex taken before it.
+pub(crate) struct RenameBoundary {
+    _store_lock: crate::store_lock::StoreLock,
+    _in_process: tokio::sync::MutexGuard<'static, ()>,
+    /// The store file the lock was taken on; the move writes exactly this file.
+    path: PathBuf,
+}
+
+/// Take a [`RenameBoundary`]: the in-process mutex within the repo lock's wait bound,
+/// then the cross-process lock on a blocking thread. Unlike every other writer here it
+/// fails CLOSED with [`AppError::Busy`]: a rename run without it could land its moves out
+/// of order, so the caller must not rename at all.
+pub(crate) async fn lock_for_rename() -> AppResult<RenameBoundary> {
+    let path = store_path()?;
+    let busy = || AppError::Busy {
+        holder: RENAME_BUSY_HOLDER.to_string(),
+    };
+    let in_process = tokio::time::timeout(crate::git::runner::LOCK_WAIT_TIMEOUT, prs_lock().lock())
+        .await
+        .map_err(|_| busy())?;
+    let lock_path = path.clone();
+    let store_lock =
+        crate::store_lock::locked_store_task(move || Ok(crate::store_lock::lock_store(&lock_path)))
+            .await?;
+    if !store_lock.acquired() {
+        return Err(busy());
+    }
+    Ok(RenameBoundary {
+        _store_lock: store_lock,
+        _in_process: in_process,
+        path,
+    })
 }
 
 /// In-process test override, consulted by [`store_path`] before the real app-data
@@ -263,7 +309,7 @@ pub async fn create(
 /// The locked read-modify-write behind [`create`], on the caller's own thread.
 fn create_sync(repo: &str, title: &str, body: &str, base: &str, head: &str) -> AppResult<Value> {
     let path = store_path()?;
-    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = prs_lock().blocking_lock();
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let record = NewLocalPr {
@@ -310,7 +356,7 @@ where
     F: FnOnce(&mut Map<String, Value>) -> AppResult<()>,
 {
     let path = store_path()?;
-    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = prs_lock().blocking_lock();
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let key = existing_key(&store, repo).ok_or_else(|| {
@@ -399,7 +445,7 @@ pub async fn consolidate(identity: &str, legacy: &str) -> AppResult<()> {
 /// The locked read-modify-write behind [`consolidate`], on the caller's own thread.
 fn consolidate_sync(identity: &str, legacy: &str) -> AppResult<()> {
     let path = store_path()?;
-    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = prs_lock().blocking_lock();
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     if fold_legacy_key(&mut store, identity, legacy) {
@@ -450,29 +496,43 @@ fn fold_legacy_key(store: &mut Map<String, Value>, identity: &str, legacy: &str)
     true
 }
 
-/// Repoint OPEN local PRs' `head`/`base` from `from` to `to` under `identity`,
-/// after folding any legacy checkout-path key (`consolidate`) so records minted
-/// under an old path are not missed. Closed/merged records keep their history.
+/// Repoint OPEN local PRs' `head`/`base` from `from` to `to` under `identity`, after
+/// folding any legacy checkout-path key ([`consolidate`]'s fold) so records minted under
+/// an old path are not missed. Closed/merged records keep their history. Runs under the
+/// rename's `boundary` and releases it, never re-taking either lock: the file lock is not
+/// reentrant, and the in-process mutex would wait on its own holder forever.
 /// Returns how many records changed.
-pub async fn rename_branch(identity: &str, legacy: &str, from: &str, to: &str) -> AppResult<u32> {
-    consolidate(identity, legacy).await?;
-    let (identity, from, to) = (identity.to_string(), from.to_string(), to.to_string());
-    crate::store_lock::locked_store_task(move || rename_branch_sync(&identity, &from, &to)).await
+pub(crate) async fn rename_branch(
+    boundary: RenameBoundary,
+    identity: &str,
+    legacy: &str,
+    from: &str,
+    to: &str,
+) -> AppResult<u32> {
+    let (identity, legacy, from, to) = (
+        identity.to_string(),
+        legacy.to_string(),
+        from.to_string(),
+        to.to_string(),
+    );
+    crate::store_lock::locked_store_task(move || {
+        // Bound whole so the release's file I/O happens here, off the runtime, after the write.
+        let held = boundary;
+        rename_held(&held.path, &identity, &legacy, &from, &to)
+    })
+    .await
 }
 
-/// The locked read-modify-write behind [`rename_branch`], on the caller's own thread.
-/// A repo with no entry is the common case, so a missing key is `Ok(0)`.
-fn rename_branch_sync(identity: &str, from: &str, to: &str) -> AppResult<u32> {
-    let path = store_path()?;
-    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _store_lock = crate::store_lock::lock_store(&path);
-    let mut store = read_store(&path)?;
-    let Some(key) = existing_key(&store, identity) else {
-        return Ok(0);
-    };
-    let changed = rename_refs_in(&mut store, &key, from, to);
-    if changed > 0 {
-        write_store(&path, &store)?;
+/// The read-modify-write behind [`rename_branch`]: fold, then rename, in one pass that
+/// takes no lock — its caller holds both. A repo with no entry is the common case, so a
+/// missing key is `Ok(0)`.
+fn rename_held(path: &Path, identity: &str, legacy: &str, from: &str, to: &str) -> AppResult<u32> {
+    let mut store = read_store(path)?;
+    let folded = fold_legacy_key(&mut store, identity, legacy);
+    let changed =
+        existing_key(&store, identity).map_or(0, |key| rename_refs_in(&mut store, &key, from, to));
+    if folded || changed > 0 {
+        write_store(path, &store)?;
     }
     Ok(changed)
 }
@@ -831,10 +891,10 @@ pub(crate) mod tests {
         write_store(&dir.join(STORE_FILE), &store).unwrap();
     }
 
-    /// End to end through the public fn and both locks: the legacy-keyed record is folded
-    /// in first, so both PRs follow the rename. The negative control runs the same fixture
-    /// through the locked step alone and misses the legacy record, which is what makes the
-    /// consolidate step load-bearing.
+    /// End to end through the boundary and the move: the legacy-keyed record is folded in
+    /// first, so both PRs follow the rename. The negative control runs the same fixture
+    /// through the rename step alone and misses the legacy record, which is what makes the
+    /// fold load-bearing.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn rename_branch_consolidates_legacy_keys_first() {
@@ -844,8 +904,9 @@ pub(crate) mod tests {
         let (legacy, identity) = ("C:/wt/harbor", "C:/ProjectRepos/demo/harbor/.git");
 
         legacy_keyed_store(tmp.path(), legacy, identity);
+        let boundary = lock_for_rename().await.unwrap();
         assert_eq!(
-            rename_branch(identity, legacy, "feat/x", "feat/y")
+            rename_branch(boundary, identity, legacy, "feat/x", "feat/y")
                 .await
                 .unwrap(),
             2
@@ -859,12 +920,102 @@ pub(crate) mod tests {
             .contains_key(legacy));
 
         legacy_keyed_store(tmp.path(), legacy, identity);
-        assert_eq!(rename_branch_sync(identity, "feat/x", "feat/y").unwrap(), 1);
-        let raw = read_store(&store_path().unwrap()).unwrap();
+        let mut raw = read_store(&store_path().unwrap()).unwrap();
+        assert_eq!(rename_refs_in(&mut raw, identity, "feat/x", "feat/y"), 1);
         assert_eq!(
             raw[legacy][0]["head"], "feat/x",
             "missed without consolidate"
         );
+    }
+
+    /// A write from another task queues behind a held boundary and lands after the move:
+    /// had it landed first, the move would have repointed its `feat/x` head too. The
+    /// timeout turns a move that re-took the lock it runs under (a self-deadlock) into a
+    /// red test rather than a hung run.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_write_during_a_rename_waits_and_the_move_never_relocks() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let identity = "C:/ProjectRepos/demo/boundary/.git";
+        let moved = create(identity, "Moved", "", "main", "feat/x")
+            .await
+            .unwrap();
+
+        let boundary = lock_for_rename().await.unwrap();
+        let late = tokio::spawn(create(identity, "Late", "", "main", "feat/x"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !late.is_finished(),
+            "a write must wait while the boundary is held"
+        );
+
+        let changed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rename_branch(boundary, identity, identity, "feat/x", "feat/y"),
+        )
+        .await
+        .expect("the move must not re-take the lock it runs under")
+        .unwrap();
+        assert_eq!(
+            changed, 1,
+            "only the record written before the boundary moved"
+        );
+        let late = tokio::time::timeout(std::time::Duration::from_secs(10), late)
+            .await
+            .expect("the queued write completes once the boundary is released")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            get(identity, moved["id"].as_str().unwrap()).unwrap()["head"],
+            "feat/y"
+        );
+        assert_eq!(
+            get(identity, late["id"].as_str().unwrap()).unwrap()["head"],
+            "feat/x"
+        );
+        assert_eq!(list(identity).unwrap().len(), 2, "neither write was lost");
+    }
+
+    /// A store lock another process holds refuses the boundary as busy, rather than letting
+    /// a rename run unordered, and the refusal leaves the in-process mutex free.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_held_store_lock_refuses_the_boundary_as_busy() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let held = hold_store_lock_elsewhere();
+
+        let err = lock_for_rename()
+            .await
+            .err()
+            .expect("a held lock refuses the boundary");
+        assert!(
+            matches!(&err, AppError::Busy { holder } if holder == RENAME_BUSY_HOLDER),
+            "{err:?}"
+        );
+        assert!(
+            prs_lock().try_lock().is_ok(),
+            "the refusal released the mutex"
+        );
+        std::fs::remove_file(held).unwrap();
+        assert!(
+            lock_for_rename().await.is_ok(),
+            "a released lock is takeable"
+        );
+    }
+
+    /// Plants a FRESH lock file beside the current store, the shape a second process's
+    /// live hold leaves, and returns its path for the caller to remove.
+    pub(crate) fn hold_store_lock_elsewhere() -> PathBuf {
+        let mut lock = store_path().unwrap().into_os_string();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(&lock, "1:another-process").unwrap();
+        lock
     }
 
     #[test]
