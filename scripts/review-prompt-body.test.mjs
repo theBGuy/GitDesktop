@@ -1,7 +1,7 @@
 // Pins the review prompt's "Author's description" section: the runner's body
-// resolution (`reviewBody`) and the three arms `buildReviewPrompt` renders from
-// it, plus the omission an absent `bodyState` keeps for commit and interactive
-// reviews.
+// resolution (`reviewBody`, `bodyFetchFrom`) and the three arms
+// `buildReviewPrompt` renders from it, plus the omission an absent `bodyState`
+// keeps for commit and interactive reviews.
 //
 // `prompt.ts` imports extensionless and through `@/`, so the shared src hooks
 // go in first and the imports are dynamic.
@@ -12,7 +12,9 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const { reviewBody } = await import("@/lib/automations/review-body");
+const { bodyFetchFrom, reviewBody } = await import(
+  "@/lib/automations/review-body"
+);
 const { buildReviewPrompt } = await import("@/lib/ai/prompt");
 
 const HEADING = "## Author's description\n";
@@ -42,11 +44,25 @@ function sectionBody(prompt) {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
-test("reviewBody: a non-empty event body wins untouched", () => {
+test("reviewBody: a settled read wins over a stale non-empty event body", () => {
+  assert.deepEqual(reviewBody("stale body", { ok: true, body: "fresh body" }), {
+    body: "fresh body",
+    bodyState: undefined,
+  });
+  assert.deepEqual(reviewBody("stale body", { ok: true, body: "   " }), {
+    body: "   ",
+    bodyState: "empty",
+  });
+});
+
+test("reviewBody: a failed read falls back to a non-empty event body", () => {
   assert.deepEqual(reviewBody("  real body ", { ok: false }), {
     body: "  real body ",
     bodyState: undefined,
   });
+});
+
+test("reviewBody: with no read a non-empty event body stands", () => {
   assert.deepEqual(reviewBody("real", undefined), {
     body: "real",
     bodyState: undefined,
@@ -83,7 +99,7 @@ test("reviewBody: a fetched whitespace-only body is empty", () => {
   });
 });
 
-test("reviewBody: a failed forge read is unreadable", () => {
+test("reviewBody: a failed read over an empty event body is unreadable", () => {
   assert.deepEqual(reviewBody("", { ok: false }), {
     body: "",
     bodyState: "unreadable",
@@ -92,6 +108,22 @@ test("reviewBody: a failed forge read is unreadable", () => {
     body: "",
     bodyState: "unreadable",
   });
+});
+
+test("bodyFetchFrom: a settled read is ok, a rejected one is not", async () => {
+  assert.deepEqual(
+    await bodyFetchFrom(Promise.resolve({ body: "fresh" }), false),
+    { ok: true, body: "fresh" },
+  );
+  assert.deepEqual(
+    await bodyFetchFrom(Promise.reject(new Error("forge down")), true),
+    { ok: false },
+  );
+});
+
+test("bodyFetchFrom: no read is unreadable only when the event needs a body", async () => {
+  assert.deepEqual(await bodyFetchFrom(undefined, true), { ok: false });
+  assert.equal(await bodyFetchFrom(undefined, false), undefined);
 });
 
 test("prompt: a non-empty body renders verbatim under the one heading", () => {

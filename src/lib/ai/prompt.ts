@@ -887,8 +887,9 @@ export function buildReviewPrompt(
     promptParts.push(`# ${input.title.trim()}`);
   }
   // Author input, capped like the notes below so an over-long description
-  // discloses its cut. The system prompts direct the model at this section, so
-  // an empty or unread description is stated rather than left silent.
+  // discloses its cut. The system prompts direct the model at this section, so a
+  // caller passing `bodyState` gets an empty or unread description stated rather
+  // than left silent.
   const bodyText = input.body.trim();
   if (bodyText) {
     promptParts.push(`## Author's description\n${capBody(bodyText, 8000)}`);

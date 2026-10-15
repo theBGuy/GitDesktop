@@ -24,8 +24,8 @@ export function safeSlice(s: string, max: number): string {
 
 /** The note appended in place of the text `capBody` cuts — split so its fixed length
  *  can be charged against the cap before the omitted count is known. Deliberately
- *  source-neutral: only two of the four things cut with it live on a PR thread, so
- *  naming a thread would send an agentic reviewer looking for text that isn't there.
+ *  source-neutral: not everything cut with it lives on a PR thread, so naming a
+ *  thread would send an agentic reviewer looking for text that isn't there.
  *  Module-private on purpose — `capBody` and `stripTruncationNote` are the contract,
  *  so no producer or consumer re-derives the note's shape. */
 const TRUNCATION_NOTE_HEAD = "[content truncated — ";

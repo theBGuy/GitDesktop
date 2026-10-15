@@ -161,9 +161,9 @@ export interface ReviewPromptInput {
   title: string;
   body: string;
   /** How an ABSENT `body` reads in the prompt: "empty" renders an explicit
-   *  "(none …)" line, "unreadable" says the forge read failed. Absent ⇒ the
-   *  section is omitted as before (commit reviews and the interactive path are
-   *  byte-identical). Ignored when `body` is non-empty. */
+   *  "(none …)" line, "unreadable" says the description couldn't be obtained.
+   *  Absent ⇒ the section is omitted as before (commit reviews and the
+   *  interactive path are byte-identical). Ignored when `body` is non-empty. */
   bodyState?: "empty" | "unreadable";
   commitSubjects: string[];
   /** The forge's commits read failed or hit a cap, so `commitSubjects` may be

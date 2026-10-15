@@ -89,7 +89,7 @@ import {
 } from "./history";
 import { localRefsFresh as refsFresh } from "./pure";
 import { type AutomationRunResult, useAutomationResults } from "./results";
-import { type ReviewBodyFetch, reviewBody } from "./review-body";
+import { bodyFetchFrom, type ReviewBodyFetch, reviewBody } from "./review-body";
 import {
   loadAutomations,
   loadAutomationsFresh,
@@ -1669,11 +1669,12 @@ async function generateReviewText(
     remoteNumber !== undefined &&
     Number.isInteger(remoteNumber) &&
     remoteNumber > 0;
-  // Poll-fired PR events carry no description; an empty one is re-read from the
-  // forge (a non-empty event body is trusted as-is).
+  // Remote poll-fired PR events carry no description, so an empty one is read
+  // from the forge.
   const needsBody = isRemotePr && !event.body.trim();
-  // ONE PR read shared by the body arm and the notes resolver. Each consumer
-  // awaits it under its own catch, and its creation condition guarantees one does.
+  // ONE PR read shared by the body arm and the notes resolver. The body arm
+  // awaits it under its own catch whenever it exists, and prefers it over the
+  // event's body, which can be stale.
   const prView =
     remoteNumber !== undefined && validNumber && (needsBody || !eventNotes)
       ? forgePrView(event.repoPath, remoteNumber, "origin")
@@ -1690,8 +1691,8 @@ async function generateReviewText(
     readRepoInstructions(event.repoPath).catch(() => null),
   ]);
   // Resolve external + own + (when not event-carried) reviewer-notes context and
-  // the description in parallel — all four are independent, best-effort remote
-  // harvests.
+  // the description in parallel — best-effort remote harvests; the notes and
+  // description arms share one PR read.
   const [external, own, resolvedNotes, fetchedBody]: [
     ExternalContext,
     OwnCommentsContext,
@@ -1724,15 +1725,7 @@ async function generateReviewText(
         eventNotes || remoteNumber === undefined
           ? Promise.resolve({})
           : resolveReviewerNotesContext(event.repoPath, remoteNumber, prView),
-        // An invalid number can never be read, so it lands on "unreadable",
-        // never on the authoritatively-empty arm.
-        needsBody
-          ? prView
-            ? prView
-                .then((p) => ({ ok: true as const, body: p.body }))
-                .catch(() => ({ ok: false as const }))
-            : Promise.resolve({ ok: false as const })
-          : Promise.resolve(undefined),
+        bodyFetchFrom(prView, needsBody),
       ])
     : [{}, {}, {}, undefined];
   const [docs, repoInstructions] = await repoContext;
