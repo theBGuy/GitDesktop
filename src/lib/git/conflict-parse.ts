@@ -221,8 +221,17 @@ export function deletedSide(sides: ConflictSides): "ours" | "theirs" | null {
   return ourGone ? "ours" : "theirs";
 }
 
-/** The states a conflicted file can be in once the parser found no regions. */
+/** Whether the read found no unmerged index stage: the path is no longer
+ *  conflicted. Every live conflict keeps one of stages 1-3 (both-deleted keeps
+ *  the base), though a stage read git refuses also reads absent for that read. */
+export function noLongerConflicted(sides: ConflictSides): boolean {
+  return sides.base == null && sides.ours == null && sides.theirs == null;
+}
+
+/** The states a conflicted file can be in once the parser found no regions, or
+ *  once its read shows it {@link noLongerConflicted} (`notConflicted`). */
 export type FallbackArm =
+  | "notConflicted"
   | "deletion"
   | "deletionEdited"
   | "bothDeleted"
@@ -245,7 +254,11 @@ export const MARK_RESOLVED_ARMS: ReadonlySet<FallbackArm> =
   ]);
 
 export function fallbackArm(sides: ConflictSides): FallbackArm {
-  // The index stages decide first: a modify/delete leaves the SURVIVING side's
+  // Ahead of every arm below: a read taken after the path was staged has no
+  // stages at all, and would otherwise land on bothDeleted or unparsed.
+  if (noLongerConflicted(sides)) return "notConflicted";
+
+  // The index stages decide next: a modify/delete leaves the SURVIVING side's
   // content in the tree, marker-free, so the parser's null here means a removal
   // to accept rather than markers it failed on. Ordered ahead of the empty-file
   // check, which is a heuristic and would swallow a surviving side that is empty.
@@ -262,8 +275,9 @@ export function fallbackArm(sides: ConflictSides): FallbackArm {
   }
 
   // Both stage checks are explicit rather than left to the arms above: an entry
-  // with no stages at all but real content is a file we can't classify, and it
-  // must land on the couldn't-parse arm instead of being called resolved.
+  // with only its base stage but real content (deleted on both sides, then
+  // recreated) is a file we can't classify, and it must land on the
+  // couldn't-parse arm instead of being called resolved.
   if (
     sides.ours != null &&
     sides.theirs != null &&

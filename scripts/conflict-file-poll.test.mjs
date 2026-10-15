@@ -4,8 +4,10 @@
 // or oversized: it can't heal, and each tick re-reads the whole file). The
 // three conflict mutations await only the conflict-file re-read before their
 // isPending drops, with the working tree refreshing behind it, so the view's
-// `busy` needs no fetch state, and a poll tick never toggles the buttons. Only
-// an `io` read failure retries, once, so a transient one never flashes the
+// `busy` needs no fetch state, and a poll tick never toggles the buttons. A
+// mount or panel show holds `busy` until a read joined or started then lands,
+// since a cached entry can be as old as the time off-screen. Only an `io` read
+// failure retries, once, so a transient io failure never flashes the
 // read-error pane. Each write handler holds a synchronous in-flight ref, since
 // a second click before the disabling render would write from stale segments.
 //
@@ -309,5 +311,143 @@ test("the conflict view's busy hold reads no fetch state", () => {
     busy[1],
     /(?<![\w$.])recovering(?![\w$])/,
     "busy no longer holds through the error-path re-read (`recovering`)",
+  );
+  assert.match(
+    busy[1],
+    /(?<![\w$.])awaitingRead(?![\w$])/,
+    "busy no longer holds through the first read after a mount or show (`awaitingRead`)",
+  );
+});
+
+test("a mount or show holds the buttons until a read requested then lands", () => {
+  const src = load(VIEW);
+  assert.match(
+    src.masked,
+    /\bconst\s+refetchFile\s*=\s*file\.refetch\s*;/,
+    "the hold no longer re-reads through the conflict file's own observer",
+  );
+  const effects = [...src.masked.matchAll(/\buseEffect\s*\(\s*\(\)\s*=>\s*\{/g)]
+    .map((m) => {
+      const open = m.index + m[0].length - 1;
+      return src.masked.slice(open + 1, matchBrace(src.masked, open));
+    })
+    .filter((body) => /(?<![\w$.])refetchFile\s*\(/.test(body));
+  assert.equal(
+    effects.length,
+    1,
+    `expected one effect re-reading through refetchFile, found ${effects.length}`,
+  );
+  const [body] = effects;
+  assert.match(
+    body,
+    /^\s*if\s*\(\s*!panelActive\s*\)\s*return\s*;/,
+    "the read effect must start only while the panel shows",
+  );
+  assert.match(
+    body,
+    /refetchFile\s*\(\s*\{\s*cancelRefetch\s*:\s*false\s*\}\s*\)/,
+    "the read must join one in flight (cancelRefetch: false), not restart it",
+  );
+  assert.match(
+    body,
+    /setFreshFor\s*\(\s*\{\s*repoPath\s*,\s*path\s*\}\s*\)/,
+    "a landed read must release the hold for this view's file",
+  );
+  assert.match(
+    body,
+    /return\s*\(\)\s*=>\s*\{[^{}]*setFreshFor\s*\(\s*null\s*\)/,
+    "the effect's cleanup must re-arm the hold on every hide and unmount",
+  );
+  const awaiting = /\bconst\s+awaitingRead\s*=([^;]*);/.exec(src.masked);
+  assert.ok(awaiting, "ConflictFileView's `const awaitingRead =` is gone");
+  for (const name of ["freshFor", "repoPath", "path"]) {
+    assert.match(
+      awaiting[1],
+      new RegExp(String.raw`(?<![\w$])${name}(?![\w$])`),
+      `awaitingRead no longer compares ${name}`,
+    );
+  }
+});
+
+test("a read with no index stages never reaches the region view", () => {
+  const src = load(VIEW);
+  const memo = /\bconst\s+segments\s*=\s*useMemo\s*\(([^;]*)\)\s*;/.exec(
+    src.masked,
+  );
+  assert.ok(memo, "ConflictFileView's `const segments = useMemo(` is gone");
+  assert.match(
+    memo[1],
+    /(?<![\w$.])noLongerConflicted\s*\(/,
+    "segments must stay null for a read with no index stages",
+  );
+});
+
+test("the header's whole-file actions hold, with a reason, on a path no longer conflicted", () => {
+  const src = load(VIEW);
+  assert.match(
+    src.masked,
+    /\bconst\s+notConflicted\s*=\s*arm\s*===\s*"\s*"\s*;/,
+    "ConflictFileView's `const notConflicted = arm === …` is gone",
+  );
+  assert.match(
+    src.source,
+    /\bconst\s+notConflicted\s*=\s*arm\s*===\s*"notConflicted"\s*;/,
+    'notConflicted must test the "notConflicted" arm',
+  );
+  for (const label of [
+    "Accept all current",
+    "Accept all incoming",
+    "Resolve with AI",
+  ]) {
+    // JSX text is blanked in the mask, so the label is found in the source and
+    // only a masked-blank offset counts (a comment or string can't pose as it);
+    // of those, the header action is the one whose nearest opening tag (past
+    // the AI button's icon) is a DisabledReasonButton.
+    const buttons = [
+      ...src.source.matchAll(new RegExp(String.raw`>\s*${label}\s*<`, "g")),
+    ]
+      .map((m) => m.index + m[0].indexOf(label))
+      .filter((at) => src.masked.slice(at, at + label.length).trim() === "")
+      .map((at) => {
+        const last = [
+          ...src.masked
+            .slice(0, at)
+            .matchAll(/<(?!SparkleIcon\b)([A-Za-z]\w*)/g),
+        ].at(-1);
+        return last?.[1] === "DisabledReasonButton"
+          ? { tag: last.index, at }
+          : null;
+      })
+      .filter(Boolean);
+    assert.equal(
+      buttons.length,
+      1,
+      `expected one DisabledReasonButton labeled "${label}", found ${buttons.length}`,
+    );
+    const [{ tag, at }] = buttons;
+    const opening = src.masked.slice(tag, at);
+    const prop = (name) => {
+      const m = new RegExp(String.raw`(?<![\w$-])${name}\s*=\s*\{`).exec(
+        opening,
+      );
+      assert.ok(m, `"${label}": no ${name}={…} prop`);
+      const open = tag + m.index + m[0].length - 1;
+      return src.masked.slice(open + 1, matchBrace(src.masked, open));
+    };
+    assert.match(
+      prop("disabled"),
+      /(?<![\w$.])notConflicted(?![\w$])/,
+      `"${label}" must be disabled while the arm is notConflicted`,
+    );
+    assert.match(
+      prop("reason"),
+      /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*null\s*$/,
+      `"${label}" must explain its notConflicted hold`,
+    );
+  }
+  assert.match(
+    src.source,
+    /\bconst\s+NOT_CONFLICTED_COPY\s*=\s*"This file is no longer conflicted\."\s*;/,
+    "NOT_CONFLICTED_COPY must keep the reason copy",
   );
 });

@@ -2,6 +2,8 @@ import { SparkleIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { usePanelActive } from "@/components/panel-portal";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -16,11 +18,13 @@ import {
   hasConflictMarkers,
   MARK_RESOLVED_ARMS,
   markNeedsConfirm,
+  noLongerConflicted,
   parseConflictSegments,
   resolveBlock,
 } from "@/lib/git/conflict-parse";
 import {
   refreshConflictFile,
+  repoKeys,
   useCheckoutConflictSide,
   useConflictFile,
   useMarkConflictResolved,
@@ -42,6 +46,10 @@ import { useLatestRef } from "@/lib/use-latest-ref";
 import { markerStagePrompt } from "./conflict-confirms";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** The `notConflicted` line, and the reason the header's whole-file actions
+ *  hold under it. */
+const NOT_CONFLICTED_COPY = "This file is no longer conflicted.";
 
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
@@ -124,7 +132,8 @@ const EMPTIED_COPY: Record<
  * side with no version at this path, an empty file, content already resolved
  * outside the app, or markers it can't trust. Each keeps the header's
  * whole-file actions as the way through; the arms in `MARK_RESOLVED_ARMS` also
- * offer Mark resolved, which confirms first while markers remain.
+ * offer Mark resolved, which confirms first while markers remain. A path that
+ * is no longer conflicted gets a plain line until the host drops this pane.
  */
 function ConflictFallback({
   path,
@@ -150,6 +159,12 @@ function ConflictFallback({
     </Button>
   ) : null;
   const markersRemain = markNeedsConfirm(sides);
+
+  if (arm === "notConflicted") {
+    return (
+      <p className="p-4 text-xs text-muted-foreground">{NOT_CONFLICTED_COPY}</p>
+    );
+  }
 
   if (arm === "deletion" || arm === "deletionEdited") {
     // The arm doesn't carry WHICH side removed the file, and the notice names
@@ -228,7 +243,7 @@ function ConflictFallback({
 
   // Couldn't parse the markers cleanly (malformed or ambiguous, e.g. a bare
   // 7-char marker inside the content) — show the raw file so nothing is hidden.
-  // The markerless form is an entry with no index stages but real content.
+  // The markerless form is an entry with only its base stage but real content.
   return (
     <>
       <div className="flex items-center gap-2 border-b bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
@@ -323,21 +338,52 @@ export function ConflictFileView({
   // would otherwise resolve against the segments the first write replaced.
   const inFlightRef = useRef(false);
 
+  // The file this view last saw a read land for since it mounted or its panel
+  // last showed. Cleared on every hide and unmount, so a cached entry, as old
+  // as the time off-screen, never reaches live buttons. Joins a read already
+  // in flight (the mount's own) rather than spawning a second one.
+  const panelActive = usePanelActive();
+  const refetchFile = file.refetch;
+  const [freshFor, setFreshFor] = useState<{
+    repoPath: string;
+    path: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!panelActive) return;
+    let current = true;
+    void refetchFile({ cancelRefetch: false }).then(() => {
+      if (current) setFreshFor({ repoPath, path });
+    });
+    return () => {
+      current = false;
+      setFreshFor(null);
+    };
+  }, [panelActive, refetchFile, repoPath, path]);
+  const awaitingRead =
+    freshFor?.repoPath !== repoPath || freshFor.path !== path;
+
+  // A read with no index stages renders the no-longer-conflicted line whatever
+  // the text holds, so no region offers an Accept on a path git calls merged.
   const segments = useMemo(
-    () => (file.data ? parseConflictSegments(file.data.working) : null),
+    () =>
+      file.data && !noLongerConflicted(file.data)
+        ? parseConflictSegments(file.data.working)
+        : null,
     [file.data],
   );
 
-  // Each mutation re-reads the conflict file before its isPending drops, and a
-  // failed one re-reads under `recovering`, so the buttons stay disabled until
-  // fresh segments land: a fast second click on stale segments would resurrect
-  // a resolved region. Fetch state stays out of it, so poll ticks neither
-  // flicker the buttons nor re-render the view.
+  // Each mutation re-reads the conflict file before its isPending drops, a
+  // failed one re-reads under `recovering`, and a mount or show waits for its
+  // own read (`awaitingRead`), so the buttons stay disabled until fresh
+  // segments land: a click on stale segments would resurrect a resolved
+  // region. Fetch state stays out of it, so poll ticks neither flicker the
+  // buttons nor re-render the view.
   const busy =
     resolve.isPending ||
     checkoutSide.isPending ||
     markResolve.isPending ||
-    recovering;
+    recovering ||
+    awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
@@ -388,9 +434,8 @@ export function ConflictFileView({
     // Nothing records which regions were resolved by hand, so every arm warns
     // unconditionally: taking a side re-checks the file out from the index and
     // any manual work in it goes with the other side. Classifies from the last
-    // successful read; when none has landed (the first read failed, or is still
-    // in flight) a deleting side can't be ruled out, so the unclassified arm
-    // names both outcomes.
+    // successful read; when none has landed (the first read failed) a deleting
+    // side can't be ruled out, so the unclassified arm names both outcomes.
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
@@ -440,6 +485,18 @@ export function ConflictFileView({
       ? fallbackArm(file.data)
       : null;
   const canMarkResolved = arm !== null && MARK_RESOLVED_ARMS.has(arm);
+
+  // A staging write's re-read lands before git status is even requested, and an
+  // outside `git add` can beat the status poll: refresh status once, so the host
+  // drops this pane. Joins a status read already in flight.
+  const notConflicted = arm === "notConflicted";
+  useEffect(() => {
+    if (!notConflicted) return;
+    void queryClient.invalidateQueries(
+      { queryKey: repoKeys.status(repoPath) },
+      { cancelRefetch: false },
+    );
+  }, [notConflicted, queryClient, repoPath]);
 
   // The button and the palette action both land here, so this is the one gate:
   // staging is a plain `git add`, which would take any remaining markers along.
@@ -510,33 +567,38 @@ export function ConflictFileView({
           <Button size="xs" variant="ghost" onClick={openInEditor}>
             Open in editor
           </Button>
-          <Button
+          {/* Held on a path git calls merged: Accept all re-checks the file out
+              from the index, over any edits made after an outside `git add`. */}
+          <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy}
+            disabled={busy || notConflicted}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
             onClick={() => acceptAll("ours")}
           >
             Accept all current
-          </Button>
-          <Button
+          </DisabledReasonButton>
+          <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy}
+            disabled={busy || notConflicted}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
             onClick={() => acceptAll("theirs")}
           >
             Accept all incoming
-          </Button>
+          </DisabledReasonButton>
           {canAi && (
             // This view's OWN repoPath scopes the walk — the main repo on the
             // Changes tab, the hidden worktree in a PR takeover.
-            <Button
+            <DisabledReasonButton
               size="xs"
-              disabled={busy}
+              disabled={busy || notConflicted}
+              reason={notConflicted ? NOT_CONFLICTED_COPY : null}
               onClick={() => startResolveAi(path, repoPath)}
             >
               <SparkleIcon data-icon="inline-start" />
               Resolve with AI
-            </Button>
+            </DisabledReasonButton>
           )}
         </span>
       </div>

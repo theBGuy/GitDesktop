@@ -14,6 +14,7 @@ import {
   hasConflictMarkers,
   MARK_RESOLVED_ARMS,
   markNeedsConfirm,
+  noLongerConflicted,
   parseConflictSegments,
 } from "../src/lib/git/conflict-parse.ts";
 
@@ -63,15 +64,16 @@ test("CRLF input is handled", () => {
 // the arm offers Mark resolved, and whether staging it must confirm first. The
 // confirm rides the shared `hasConflictMarkers`, so these cases also pin that
 // the view's gate and the accept gate can't disagree on what a marker is.
-const sides = (working, ours, theirs, workingExists = true) => ({
+const sides = (working, ours, theirs, workingExists = true, base = null) => ({
   working,
-  base: null,
+  base,
   ours,
   theirs,
   aiIgnored: { ignored: false, unreadable: false },
   workingExists,
 });
 const SURVIVOR = "fn keep() {}\n";
+const BASE = "fn base() {}\n";
 
 test("Mark resolved: arm, offer, and marker confirm per fallback shape", () => {
   for (const [name, s, arm, confirm] of [
@@ -110,8 +112,8 @@ test("Mark resolved: arm, offer, and marker confirm per fallback shape", () => {
       true,
     ],
     [
-      "no index stages, real content, no markers",
-      sides("content\n", null, null),
+      "deleted on both sides, recreated, no markers",
+      sides("content\n", null, null, true, BASE),
       "unparsed",
       false,
     ],
@@ -143,9 +145,47 @@ test("Mark resolved is withheld where the header's accepts are the way through",
   const untouched = sides(SURVIVOR.replace("\n", "\r\n"), null, SURVIVOR);
   assert.equal(fallbackArm(untouched), "deletion");
   assert.equal(MARK_RESOLVED_ARMS.has("deletion"), false);
-  const both = sides("", null, null);
+  const both = sides("", null, null, false, BASE);
   assert.equal(fallbackArm(both), "bothDeleted");
   assert.equal(MARK_RESOLVED_ARMS.has("bothDeleted"), false);
+});
+
+// A read taken once the path is staged (the last region's Accept, Mark
+// resolved, an outside `git add`) has no index stages. Without the predicate
+// these land on unparsed (with Mark resolved) or bothDeleted.
+test("a read with no index stages is no longer conflicted, whatever the text holds", () => {
+  for (const [name, s] of [
+    ["resolved content", sides("merged\n", null, null)],
+    [
+      "staged with markers",
+      sides("<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n", null, null),
+    ],
+    ["staged empty", sides("", null, null)],
+    ["staged removal", sides("", null, null, false)],
+  ]) {
+    assert.equal(noLongerConflicted(s), true, `predicate: ${name}`);
+    assert.equal(fallbackArm(s), "notConflicted", `arm: ${name}`);
+  }
+  assert.equal(MARK_RESOLVED_ARMS.has("notConflicted"), false);
+});
+
+// Every unmerged entry type keeps at least one of stages 1-3, so none of them
+// reads as no longer conflicted.
+test("every live conflict shape keeps a stage", () => {
+  const A = "a\n";
+  const B = "b\n";
+  for (const [name, s] of [
+    ["both deleted (1)", sides("", null, null, false, BASE)],
+    ["added by us (2)", sides(A, A, null)],
+    ["deleted by them (1, 2)", sides(A, A, null, true, BASE)],
+    ["added by them (3)", sides(B, null, B)],
+    ["deleted by us (1, 3)", sides(B, null, B, true, BASE)],
+    ["both added (2, 3)", sides("merged\n", A, B)],
+    ["both modified (1, 2, 3)", sides("merged\n", A, B, true, BASE)],
+  ]) {
+    assert.equal(noLongerConflicted(s), false, `predicate: ${name}`);
+    assert.notEqual(fallbackArm(s), "notConflicted", `arm: ${name}`);
+  }
 });
 
 // The two AI-proposal shapes the accept gate branches on.
