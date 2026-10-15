@@ -2010,7 +2010,7 @@ test("preparing-slot-hide known gaps stay unread", () => {
     // A map-entry key the scan cannot pin to one value is taken as the role
     // in force: a parameter (with a default, or not the one the guard tests),
     // a destructured binding, a `let`, an import, a name bound twice, and a
-    // member chain whose root is never resolved.
+    // member chain of `.name` reads whose root is never resolved.
     `${held} function f(role, prev) { return cn(role === "preparing" && S2[prev]); }`,
     `${held} function g(role, k = "held") { return cn(role === "preparing" && S2[k]); }`,
     `${held} const { k } = { k: "held" }; const c = cn(role === "preparing" && S2[k]);`,
@@ -2148,6 +2148,7 @@ test("preparing-slot-hide holds a host's keys, writes and stray clips to the sha
     `${held} const k0 = flag ? "held" : "shown"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
     `${held} const k0 = "held"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
     `${held} const k = roles[i]; const c = cn(role === "preparing" && S2[k]);`,
+    `${held} const c = cn(role === "preparing" && S2[roles[i]]);`,
     'Object.defineProperties(SLOT, { preparing: { value: "absolute" } });',
     'const x = <div className="h-full a&constructor;b" />;',
     'const x = <div className="h-full a&toString;b" />;',
@@ -2157,7 +2158,8 @@ test("preparing-slot-hide holds a host's keys, writes and stray clips to the sha
     `${held} const E = ({ slot }) => <div className={S2[slot.role]} />;`,
     `${held} const c = cn(role === "preparing" ? S2.preparing : S2[role]);`,
     `${held} const c = cn(role === "preparing" && S2["preparing"]);`,
-    // A const of a member chain, of "preparing", or of an unresolved name.
+    // A const of a `.name` member chain, of "preparing", or of an
+    // unresolved name.
     `${held} const role = slot.role; const c = cn(role === "preparing" && S2[role]);`,
     `${held} const k0 = "preparing"; const k = k0; const c = cn(role === "preparing" && S2[k]);`,
     `${held} function f(r) { const k = r; return cn(r === "preparing" && S2[k]); }`,
