@@ -89,7 +89,12 @@ import {
 } from "./history";
 import { localRefsFresh as refsFresh } from "./pure";
 import { type AutomationRunResult, useAutomationResults } from "./results";
-import { bodyFetchFrom, type ReviewBodyFetch, reviewBody } from "./review-body";
+import {
+  bodyFetchFrom,
+  bodyReadPlan,
+  type ReviewBodyFetch,
+  reviewBody,
+} from "./review-body";
 import {
   loadAutomations,
   loadAutomationsFresh,
@@ -1663,20 +1668,16 @@ async function generateReviewText(
   const remoteNumber = isRemotePr
     ? (event.target as { type: "remote"; number: number }).number
     : undefined;
-  // Mirrors the notes resolver's own early-return gate, so a built `prView`
-  // always reaches a consumer.
-  const validNumber =
-    remoteNumber !== undefined &&
-    Number.isInteger(remoteNumber) &&
-    remoteNumber > 0;
-  // Remote poll-fired PR events carry no description, so an empty one is read
-  // from the forge.
-  const needsBody = isRemotePr && !event.body.trim();
+  const { read: readPr, needsBody } = bodyReadPlan({
+    remoteNumber,
+    eventBody: isRemotePr ? event.body : "",
+    hasEventNotes: Boolean(eventNotes),
+  });
   // ONE PR read shared by the body arm and the notes resolver. The body arm
   // awaits it under its own catch whenever it exists, and prefers it over the
   // event's body, which can be stale.
   const prView =
-    remoteNumber !== undefined && validNumber && (needsBody || !eventNotes)
+    readPr && remoteNumber !== undefined
       ? forgePrView(event.repoPath, remoteNumber, "origin")
       : undefined;
   // Repo-level review context: the doc-surface roster + the repo's instructions
@@ -1735,8 +1736,8 @@ async function generateReviewText(
   // resolved read, not the event payload, so it must not ride along when the event wins.
   const notes: ReviewerNotesContext = eventNotes ?? resolvedNotes;
 
-  // Commit reviews keep an empty body with no state, so their prompt omits the
-  // section as before.
+  // Commit reviews have no description: an empty body with no state omits the
+  // section.
   const description =
     event.kind === "commit"
       ? { body: "", bodyState: undefined }

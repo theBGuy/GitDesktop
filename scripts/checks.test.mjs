@@ -8299,7 +8299,8 @@ test("the review prompt cautions that newer reviewer notes may exist", async () 
   try {
     const { buildReviewPrompt } = await import("@/lib/ai/prompt");
     const base = { ...reviewPromptBase(), reviewNotes: "Keep the retry." };
-    const notesHead = "## Author's notes for reviewers\nKeep the retry.";
+    const notesHead =
+      "## Author's notes for reviewers\n<author_notes>\nKeep the retry.\n</author_notes>";
     const complete = buildReviewPrompt(base, "general").prompt;
     assert.equal(
       buildReviewPrompt({ ...base, reviewNotesIncomplete: false }, "general")

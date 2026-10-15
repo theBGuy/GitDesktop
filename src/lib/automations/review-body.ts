@@ -38,3 +38,27 @@ export function bodyFetchFrom(
   if (needsBody) return Promise.resolve({ ok: false as const });
   return Promise.resolve(undefined);
 }
+
+/** Whether the runner reads the PR, and whether the event needs that read for its
+ *  description. Remote poll-fired PR events carry no description, so an empty one
+ *  is read from the forge; with event-carried notes and a description, nothing is.
+ *  Same positive-integer gate as the notes resolver: an unreadable PR number makes
+ *  no doomed forge read, and the body arm reports it as unreadable. */
+export function bodyReadPlan({
+  remoteNumber,
+  eventBody,
+  hasEventNotes,
+}: {
+  remoteNumber: number | undefined;
+  eventBody: string;
+  hasEventNotes: boolean;
+}): { read: boolean; needsBody: boolean } {
+  const needsBody = remoteNumber !== undefined && !eventBody.trim();
+  const validNumber =
+    remoteNumber !== undefined &&
+    Number.isInteger(remoteNumber) &&
+    remoteNumber > 0;
+  const read =
+    remoteNumber !== undefined && validNumber && (needsBody || !hasEventNotes);
+  return { read, needsBody };
+}
