@@ -1492,13 +1492,32 @@ mod tests {
         assert_ne!(repo.get().await.unwrap().path(), old);
     }
 
+    /// A repo missing HEAD is replaced at a fresh path before check-ignore.
+    #[tokio::test]
+    async fn neutral_repo_missing_head_heals() {
+        let (_caller, repo_path) = seed_repo("missing-head").await;
+        let repo = NeutralRepo::new();
+        let old = repo.get().await.unwrap().path().to_path_buf();
+        tokio::fs::remove_file(old.join(".git/HEAD")).await.unwrap();
+
+        let (stdout, _) = run_check_ignore_in(
+            &repo,
+            &repo_path,
+            &[b"a.env".to_vec(), b"b.txt".to_vec()],
+            &["*.env"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stdout, b"a.env\0");
+        assert_ne!(repo.get().await.unwrap().path(), old);
+    }
+
     /// Non-owner-only roots are replaced before matching the next AI pattern.
     /// The uid arm is the attacker case, not reproducible without a second user.
     #[cfg(unix)]
     #[tokio::test]
     async fn neutral_repo_non_private_directory_heals() {
-        use std::os::unix::fs::PermissionsExt;
-
         let (_caller, repo_path) = seed_repo("permissions").await;
         let repo = NeutralRepo::new();
         let old = repo.get().await.unwrap().path().to_path_buf();
@@ -1537,7 +1556,14 @@ mod tests {
             .unwrap();
         let child = child_dir.path().to_path_buf();
         let neutral = child.to_string_lossy().into_owned();
-        run_git(Some(&neutral), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(
+            Some(&neutral),
+            &["init", "-q", "--template="],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        tokio::fs::create_dir_all(child.join(".git/info"))
             .await
             .unwrap();
         tokio::fs::write(child.join(".git/info/exclude"), "")
