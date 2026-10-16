@@ -181,9 +181,10 @@ struct CreateBranchArgs {
     from: Option<String>,
     /// Create the branch with no upstream (git --no-track). Recommended when
     /// `from` is a remote-tracking ref (e.g. origin/epic/x) and this branch is a
-    /// NEW line of work: without it the branch tracks that ref, and a later push
-    /// would fast-forward the tracked branch instead of publishing under this
-    /// branch's own name. Defaults to false (git's normal tracking behavior).
+    /// NEW line of work: without it the branch tracks that ref, and a later push of
+    /// this branch is refused while the two names differ (set_upstream: true then
+    /// publishes it under its own name). Defaults to false (git's normal tracking
+    /// behavior).
     // The struct has no `rename_all`, so the wire name is spelled explicitly to
     // match the documented `noTrack` flag (and the Tauri UI's camelCase key).
     #[serde(default, rename = "noTrack")]
@@ -214,10 +215,10 @@ struct PushArgs {
     set_upstream: bool,
     /// Local branch to push instead of the current one (pushed by name — no
     /// checkout, no working-tree changes; an untracked branch is published with
-    /// `-u origin <branch>`). Defaults to the current branch.
+    /// `-u`, to `remote` or else origin). Defaults to the current branch.
     branch: Option<String>,
-    /// Remote to push to; defaults to the branch's own upstream remote (or origin
-    /// when publishing). Requires branch.
+    /// Remote to push to; defaults to the branch's own upstream remote (origin when
+    /// it has none, or its upstream is gone). Requires branch.
     // Single word, so camelCase == snake_case — no rename attr needed.
     #[serde(default)]
     remote: Option<String>,
@@ -730,7 +731,7 @@ impl GitDesktopMcp {
         description = "Push the current branch (default) or a named local `branch` in the bound \
                        repository — pushing a named branch never switches to it or touches the \
                        working tree; an untracked branch is published with `-u`. A named branch \
-                       targets its own upstream remote (or origin when publishing) unless `remote` \
+                       targets its own upstream remote (origin when it has none) unless `remote` \
                        overrides it. A named branch that tracks a differently named branch on \
                        that remote is refused; set_upstream: true publishes it under its own \
                        name instead. Uses git's native credential flow. Never force-pushes — use \
@@ -1204,17 +1205,9 @@ impl GitDesktopMcp {
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        let guard = crate::git::remote::git_push_core(
-            &self.state,
-            self.repo.clone(),
-            false,
-            true,
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| app_err(with_mcp_remedy(e, force_push_remedy)))?;
+        let guard = crate::git::remote::git_force_push_head_core(&self.state, self.repo.clone())
+            .await
+            .map_err(|e| app_err(with_mcp_remedy(e, force_push_remedy)))?;
         // The tool's result text names the guarantee the push ACTUALLY ran under —
         // a static "with lease + if-includes" overclaims on either fallback.
         ok_text(match guard {

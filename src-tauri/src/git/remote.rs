@@ -203,7 +203,7 @@ fn push_upstream_target<'a>(sub: &[&'a str]) -> Option<(&'a str, &'a str)> {
 /// The `(remote, local branch)` a `push -u` will track, read from the argv alone and
 /// only for `publish_refspec`'s same-name pair. A literal `HEAD` gets no repair: git
 /// resolves it at spawn, so no earlier reading can be proven to name the branch that
-/// was pushed (`git_push_core` pins its HEAD publishes to the explicit pair instead).
+/// was pushed (`git_push_with_policy` pins its HEAD publishes to the explicit pair instead).
 fn push_upstream_branch(sub: &[&str]) -> Option<(String, String)> {
     let (remote, refspec) = push_upstream_target(sub)?;
     let (src, dst) = refspec.split_once(':')?;
@@ -907,7 +907,11 @@ pub(crate) enum PushGuard {
 /// (pushing a maintainer's local work back to a contributor's fork head). It only
 /// means anything alongside an explicit `branch` and `remote`, so any other
 /// combination is rejected rather than silently ignored.
-pub(crate) async fn git_push_core(
+///
+/// Private to this module on purpose: MCP tools push only through the refusing
+/// entries ([`git_push_same_name_core`], [`git_force_push_head_core`]), so an
+/// agent's push can never follow a differently named upstream.
+async fn git_push_core(
     state: &AppState,
     repo_path: String,
     set_upstream: bool,
@@ -947,6 +951,24 @@ pub(crate) async fn git_push_same_name_core(
         false,
         branch,
         remote,
+        None,
+        CrossNameUpstream::Refuse,
+    )
+    .await
+}
+
+/// The MCP `force_push` tool's entry: HEAD only, so git's own push.default applies.
+pub(crate) async fn git_force_push_head_core(
+    state: &AppState,
+    repo_path: String,
+) -> AppResult<PushGuard> {
+    git_push_with_policy(
+        state,
+        repo_path,
+        false,
+        true,
+        None,
+        None,
         None,
         CrossNameUpstream::Refuse,
     )
@@ -1321,8 +1343,9 @@ pub(crate) fn parse_upstream_tracking(
 }
 
 /// Resolve the remote a named-branch push targets. Pure so the decision table
-/// stays unit-testable, and shared by `git_push_core` (for the credential
-/// config) and [`build_push_args`] (for the argv) so there's one source of truth.
+/// stays unit-testable, and shared by `git_push_with_policy` (for the credential
+/// config), [`build_push_args`] (for the argv) and [`tracked_push_upstream`] (for
+/// the tracked arm) so there's one source of truth.
 ///
 /// - An explicit `requested_remote` always wins.
 /// - Otherwise a branch tracked (and not gone) targets its OWN upstream remote;
@@ -2942,7 +2965,7 @@ mod tests {
 
     /// `push -u` that loses `.git/config.lock` exits 0 with the push landed and the
     /// upstream unwritten (measured, git 2.51.1) — the canary half. Through
-    /// `git_push_core`'s two `-u` arms (named branch, HEAD) and a forge-shaped argv
+    /// `git_push_with_policy`'s two `-u` arms (named branch, HEAD) and a forge-shaped argv
     /// straight into the runner, every publish still ends tracking.
     #[tokio::test]
     async fn a_publish_that_loses_the_config_lock_still_sets_the_upstream() {

@@ -151,7 +151,7 @@ const REFSPEC_ALLOWLIST = [
     file: "git/remote.rs",
     fn: "build_push_args",
     rationale:
-      "the push-refspec chokepoint; its only caller (git_push_core) validates every interpolated name first",
+      "the push-refspec chokepoint; its only caller (git_push_with_policy) validates every interpolated name first",
   },
   {
     file: "git/remote.rs",
@@ -162,7 +162,7 @@ const REFSPEC_ALLOWLIST = [
     file: "git/remote.rs",
     fn: "branch_has_reflog",
     rationale:
-      "read-only `reflog exists` probe (never a refspec); the name is either git_push_core's branch, validated with validate_ref_name at the arm entry, or HEAD's full `symbolic-ref` output stripped of `refs/heads/` — git's own ref name",
+      "read-only `reflog exists` probe (never a refspec); the name is either git_push_with_policy's branch, validated with validate_ref_name at the arm entry, or HEAD's full `symbolic-ref` output stripped of `refs/heads/` — git's own ref name",
   },
   {
     file: "git/remote.rs",
