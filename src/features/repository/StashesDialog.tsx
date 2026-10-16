@@ -32,6 +32,7 @@ import {
   useStashList,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
@@ -148,6 +149,8 @@ export function StashesDialog({
       toast.info("The stash list changed — nothing was applied.");
       return;
     }
+    // A conflict here must not read as a recorded reapply's.
+    useStashReapplyMarker.getState().clearFor(repoPath);
     try {
       await apply.mutateAsync({ index, pop });
       toast.success(pop ? "Stash applied and dropped" : "Stash applied");
@@ -370,6 +373,8 @@ function RecoverableView({
   // Awaited: a view swap or a dialog close unmounts this mid-restore, and
   // per-call mutation callbacks don't survive that — the outcome would be lost.
   async function restoreSha(sha: string) {
+    // Restore applies the commit, so it can conflict like any reapply.
+    useStashReapplyMarker.getState().clearFor(repoPath);
     try {
       await restore.mutateAsync(sha);
       toast.success("Restored to working tree");

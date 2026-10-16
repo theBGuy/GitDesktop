@@ -30,13 +30,19 @@ interface StashReapplyMarkerState {
   marker: StashReapplyMarker | null;
   record: (marker: StashReapplyMarker) => void;
   clear: () => void;
+  /** Retires `repoPath`'s marker: a later stash or reapply in that repo makes it
+   *  describe the wrong event (and its backup no longer sits on top). */
+  clearFor: (repoPath: string) => void;
 }
 
 export const useStashReapplyMarker = create<StashReapplyMarkerState>()(
-  (set) => ({
+  (set, get) => ({
     marker: null,
     record: (marker) => set({ marker }),
     clear: () => set({ marker: null }),
+    clearFor: (repoPath) => {
+      if (get().marker?.repoPath === repoPath) set({ marker: null });
+    },
   }),
 );
 

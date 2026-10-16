@@ -1,7 +1,7 @@
 // Pins the conflict banner's stash-reapply states
-// (src/features/repository/conflict-banner-state.ts): which copy shows, when the
-// freshness gate lets a marker-derived state through, when the marker clears,
-// and the op precedence shared with ChangesPanel's focus rescue.
+// (src/features/repository/conflict-banner-state.ts): which copy shows, when
+// the freshness gate lets a marker-derived state through, when the marker
+// clears, and the banner's op precedence.
 //
 // Not testable here: the banner's rendering, the confirm flow, and the focus
 // rescues. Those need the live app.

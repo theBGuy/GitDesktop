@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   useDropStashBySha,
   useOpAbort,
@@ -201,6 +202,9 @@ export function ConflictBanner({
   });
   const resolvedShown = op === null && state.kind === "resolved";
   const markerRows = op === null && state.kind !== "none";
+  // When Drop, Keep or a refusal unmounts the reapply rows and focus fell to
+  // <body>, land it on the panel's landing target. Change-only: never on mount.
+  useFocusOnControlsSwap(markerRows, landingRef);
 
   const clearSha = clearMarker ? marker?.stashSha : undefined;
   useEffect(() => {
@@ -367,7 +371,7 @@ export function ConflictBanner({
     // Every verdict retires this offer: a refusal would only refuse again. The
     // clear waits out the confirm's exit so Base UI returns focus to a mounted
     // Drop button (an earlier unmount sends it to an older element instead);
-    // the strip then unmounts onto <body>, which ChangesPanel's rescue catches.
+    // the strip then unmounts onto <body>, which the marker-rows rescue catches.
     await dialogClosed();
     clearMarkerIfStill(recorded.stashSha);
     rescueOrphanedFocus();

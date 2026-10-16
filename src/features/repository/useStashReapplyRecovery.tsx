@@ -82,11 +82,14 @@ export function reportAutostashOutcome(
       toast.success(copy.plain);
       return;
     case "stashedOnly":
+      // A new stash sits on top of any earlier backup, so its offer is stale.
+      useStashReapplyMarker.getState().clearFor(context.repoPath);
       if (copy.stashedOnly) toast.success(copy.stashedOnly);
       return;
     case "reapplyConflicted":
       // The banner names the cause and later offers the backup. Only a conflicted
-      // pop leaves files to resolve, and only a measured sha can target the drop.
+      // pop leaves files to resolve, and only a measured sha can target the drop;
+      // otherwise an earlier marker would describe this reapply, so it retires.
       if (
         outcome.conflicted &&
         outcome.stashSha !== null &&
@@ -100,6 +103,8 @@ export function reportAutostashOutcome(
           detailPreposition: context.detailPreposition,
           recordedAt: Date.now(),
         });
+      } else {
+        useStashReapplyMarker.getState().clearFor(context.repoPath);
       }
       // Not success-styled: the operation landed, but the changes did not come
       // back on their own. Only a conflicted pop leaves anything to resolve.
@@ -111,6 +116,7 @@ export function reportAutostashOutcome(
       );
       return;
     case "opFailedStashKept":
+      useStashReapplyMarker.getState().clearFor(context.repoPath);
       toast(
         outcome.inProgress
           ? `${copy.operation} hit conflicts — continue or abort in the banner. Your changes are safely stashed; pop them after.`

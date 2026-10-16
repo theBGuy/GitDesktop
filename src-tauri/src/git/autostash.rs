@@ -47,9 +47,8 @@ pub enum AutostashOutcome {
         stderr: String,
         conflicted: bool,
         /// Full hex object id (40, or 64 in SHA-256 repos) of the kept backup stash
-        /// entry, read from `refs/stash` under the compound's working-tree hold,
-        /// immediately before the pop. None when that read failed; the UI then keeps
-        /// its marker-less behavior.
+        /// entry. None unless the pop left conflicts and `refs/stash` read the same id
+        /// before and after it; the UI then keeps its marker-less behavior.
         stash_sha: Option<String>,
     },
     /// Op failed with no in-progress state; the stash was popped back cleanly.
@@ -585,30 +584,35 @@ pub(crate) async fn git_drop_stash_by_sha_core(
     let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
     let printed = dropped_sha(&out.stdout_lossy()).or_else(|| dropped_sha(&out.stderr));
     match printed {
-        Some(printed) if printed != sha => {
-            let message = listing
-                .lines()
-                .find_map(|line| {
-                    line.split_once('\t')
-                        .filter(|(id, _)| *id == printed)
-                        .map(|(_, msg)| msg.to_string())
-                })
-                .unwrap_or_else(|| "Restored by GitDesktop".to_string());
-            let restore = run_git(
-                Some(repo),
-                &["stash", "store", "-m", &message, &printed],
-                DEFAULT_TIMEOUT,
-            )
-            .await;
-            Ok(match restore {
-                Ok(_) => StashDropOutcome::Moved,
-                Err(_) => StashDropOutcome::RestoreFailed {
-                    dropped_sha: printed,
-                },
-            })
-        }
+        Some(printed) if printed != sha => Ok(restore_dropped(repo, &listing, printed).await),
         // A missing confirmation is fail-open; the real-repo test pins its format.
         _ => Ok(StashDropOutcome::Dropped),
+    }
+}
+
+/// Stores back an entry a racing drop removed, under the message `listing` (a
+/// pre-drop `stash list --format=%H%x09%gs`) gave it. Moved when it is back on top,
+/// RestoreFailed naming it when git refused (e.g. "is not a stash-like commit").
+async fn restore_dropped(repo: &str, listing: &str, printed: String) -> StashDropOutcome {
+    let message = listing
+        .lines()
+        .find_map(|line| {
+            line.split_once('\t')
+                .filter(|(id, _)| *id == printed)
+                .map(|(_, msg)| msg.to_string())
+        })
+        .unwrap_or_else(|| "Restored by GitDesktop".to_string());
+    let restore = run_git(
+        Some(repo),
+        &["stash", "store", "-m", &message, &printed],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    match restore {
+        Ok(_) => StashDropOutcome::Moved,
+        Err(_) => StashDropOutcome::RestoreFailed {
+            dropped_sha: printed,
+        },
     }
 }
 
@@ -1935,6 +1939,57 @@ mod tests {
             .unwrap();
         assert!(matches!(verdict, StashDropOutcome::Dropped), "{verdict:?}");
         assert_eq!(stash_shas(&repo).await, vec![older]);
+    }
+
+    /// The compensation arm, driven directly since the race it repairs can't be
+    /// staged: an entry dropped from the top goes back on top under its own
+    /// message.
+    #[tokio::test]
+    async fn restore_dropped_stores_the_raced_entry_back() {
+        let (dir, repo) = setup_repo("drop-restore").await;
+        let older = push_stash(dir.path(), &repo, "older\n").await;
+        write(dir.path(), "b.txt", "raced\n");
+        git(&repo, &["stash", "push", "-m", "raced push"]).await;
+        let raced = git(&repo, &["rev-parse", "refs/stash"])
+            .await
+            .trim()
+            .to_string();
+        let listing = git(&repo, &["stash", "list", "--format=%H%x09%gs"]).await;
+        async fn top_subject(repo: &str) -> String {
+            git(repo, &["stash", "list", "-1", "--format=%gs"])
+                .await
+                .trim()
+                .to_string()
+        }
+        let before = top_subject(&repo).await;
+        assert_eq!(before, "On main: raced push");
+        git(&repo, &["stash", "drop", "stash@{0}"]).await;
+        assert_eq!(stash_shas(&repo).await, vec![older.clone()]);
+
+        let verdict = restore_dropped(&repo, &listing, raced.clone()).await;
+        assert!(matches!(verdict, StashDropOutcome::Moved), "{verdict:?}");
+        assert_eq!(stash_shas(&repo).await, vec![raced, older]);
+        assert_eq!(top_subject(&repo).await, before);
+    }
+
+    /// git refuses to store an id with no object behind it ("is not a stash-like
+    /// commit", exit 128), so the lost entry is named rather than reported moved.
+    #[tokio::test]
+    async fn restore_dropped_names_an_entry_it_could_not_store() {
+        let (dir, repo) = setup_repo("drop-restore-fails").await;
+        let older = push_stash(dir.path(), &repo, "older\n").await;
+        let missing = "f".repeat(40);
+
+        let verdict = restore_dropped(&repo, "", missing.clone()).await;
+        assert!(
+            matches!(&verdict, StashDropOutcome::RestoreFailed { dropped_sha } if *dropped_sha == missing),
+            "{verdict:?}"
+        );
+        assert_eq!(
+            stash_shas(&repo).await,
+            vec![older],
+            "the list is untouched"
+        );
     }
 
     #[tokio::test]

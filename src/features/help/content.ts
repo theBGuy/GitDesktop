@@ -956,13 +956,14 @@ banner in **Changes** says so, the conflicted files appear there to resolve as u
 the stash is kept as a backup. Once every conflict is resolved, the banner offers
 **Drop backup stash…**, which asks first, or **Keep it**, which leaves the stash in
 **View stashes**; the command palette offers both too. The offer lasts until you switch
-repositories or restart; the stash itself stays in **View stashes** either way. If they
-can't go back at all (say the pull brought in a file with the same name), they stay safely
-in the stash. The same recovery covers **Update from upstream**, updating the branch you're
-on from another branch, **merging** a branch into the one you're on, and **rebasing** (the
-branch menu's **Rebase** and **Change base…** alike). A **squash**, **no-fast-forward**, or
-strategy merge reports the refusal instead: the recovery redoes the merge plainly, so
-offering it there would drop the option you chose.
+repositories, restart, or start another stash or reapply; the stash itself stays in
+**View stashes** either way. If they can't go back at all (say the pull brought in a file
+with the same name), they stay safely in the stash. The same recovery covers
+**Update from upstream**, updating the branch you're on from another branch, **merging** a
+branch into the one you're on, and **rebasing** (the branch menu's **Rebase** and
+**Change base…** alike). A **squash**, **no-fast-forward**, or strategy merge reports the
+refusal instead: the recovery redoes the merge plainly, so offering it there would drop the
+option you chose.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
 reapply on pull, merge, rebase, and branch updates** under **Settings → General** — and

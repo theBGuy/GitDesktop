@@ -1,4 +1,4 @@
-// Import-free on purpose: scripts/conflict-banner-state.test.mjs loads this module
+// Runtime-import-free on purpose: scripts/conflict-banner-state.test.mjs loads this module
 // under Node's type stripping, which resolves no path aliases. The statement-level
 // type imports below are erased; an inline `import { type … }` would not be.
 import type { RepoOp, RepoOpState } from "@/lib/git/types";
@@ -38,8 +38,8 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
   ["reverting", "revert"],
 ];
 
-/** The banner's op-precedence read, shared so ChangesPanel's marker-row focus
- *  rescue and ConflictBanner can't disagree on whether an op is in progress. */
+/** Which op the banner names: kept beside the deriver, whose `opActive` input it
+ *  feeds, so the pure suite pins its precedence. */
 export function activeRepoOp(opState: RepoOpState | undefined): RepoOp | null {
   return OP_BY_FLAG.find(([flag]) => opState?.[flag])?.[1] ?? null;
 }

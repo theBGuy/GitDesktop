@@ -124,6 +124,7 @@ import {
   refuseIfSwitched,
   repoNameFromPath,
 } from "@/lib/stores/notifications";
+import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
@@ -1324,6 +1325,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     try {
       if (!stashAllIn || refuseIfSwitched(stashAllIn, "nothing was stashed"))
         return;
+      // A new stash buries the recorded backup, so its offer can only refuse.
+      useStashReapplyMarker.getState().clearFor(stashAllIn);
       await stashAll.mutateAsync(undefined);
       toast.success("Changes stashed");
     } catch (e) {
@@ -1337,6 +1340,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     try {
       if (!stashPopIn || refuseIfSwitched(stashPopIn, "no stash was popped"))
         return;
+      // A conflict here must not read as the recorded reapply's.
+      useStashReapplyMarker.getState().clearFor(stashPopIn);
       await stashPop.mutateAsync(undefined);
       toast.success("Stash restored");
     } catch (e) {

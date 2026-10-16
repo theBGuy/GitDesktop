@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
@@ -51,7 +50,6 @@ import {
   useDiscardAll,
   useDiscardPaths,
   useForgeStatus,
-  useOpState,
   useRepoStatus,
   useStage,
   useStashAll,
@@ -85,7 +83,6 @@ import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
-import { activeRepoOp, deriveStashBannerState } from "./conflict-banner-state";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
@@ -367,21 +364,6 @@ export function ChangesPanel({
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
-  // The banner derives the same state; reading the same helpers keeps the two
-  // in step, and op-state is the banner's own cache entry, so no extra fetch.
-  const opState = useOpState(repoPath);
-  const reapplyMarker = useStashReapplyMarker((s) => s.marker);
-  const markerRowsShown =
-    deriveStashBannerState({
-      marker: reapplyMarker,
-      repoPath,
-      opActive: activeRepoOp(opState.data) !== null,
-      conflictedCount: conflictedPaths.length,
-      statusUpdatedAt: status.dataUpdatedAt,
-      stashCount: stashCount.data,
-      stashCountUpdatedAt: stashCount.dataUpdatedAt,
-    }).state.kind !== "none";
-  useFocusOnControlsSwap(markerRowsShown, landingRef);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
 
@@ -1310,6 +1292,8 @@ export function ChangesPanel({
       setStashScope(null);
       return;
     }
+    // A new stash buries the recorded backup, so its offer can only refuse.
+    useStashReapplyMarker.getState().clearFor(stashScope.repo);
     const finish = () => {
       setStashScope(null);
       setSelectedKeys(new Set());

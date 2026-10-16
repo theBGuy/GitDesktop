@@ -24,6 +24,7 @@ import {
 } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastComposedError, toastError } from "@/lib/toast";
+import { useStashReapplyMarker } from "./stash-reapply-marker";
 import { useUiStore } from "./ui";
 
 /** A worktree removal the app is still waiting on. */
@@ -543,6 +544,8 @@ async function runPromote(
     // The branch's working tree is free now; stash main's own WIP (if any) so
     // the checkout can't be blocked, then land main on the promoted branch.
     if (willStash) {
+      // A new stash buries a recorded reapply backup, so its offer can only refuse.
+      useStashReapplyMarker.getState().clearFor(activeKey);
       await gitStashAll(mainPath);
       stashed = true;
       advancePromotePhase(activeKey, worktreePath, "checking-out");
