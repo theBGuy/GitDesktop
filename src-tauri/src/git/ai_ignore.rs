@@ -111,6 +111,10 @@ struct CachedNeutralRepo {
     dir: Arc<tempfile::TempDir>,
     #[cfg(unix)]
     uid: u32,
+    /// False where the filesystem ignores Unix modes (vfat, drvfs), whose 0777 would
+    /// fail the owner-only check on every call; the uid check still applies there.
+    #[cfg(unix)]
+    check_mode: bool,
 }
 
 /// The empty throwaway repo [`run_check_ignore`] runs `check-ignore` inside. The
@@ -129,10 +133,11 @@ struct CachedNeutralRepo {
 /// `TempDir` rather than a pid-derived name: in a shared `/tmp` a guessable path
 /// lets a local attacker pre-create `.git/info/exclude` holding `!secrets.env`,
 /// which outranks `core.excludesFile` and fails the conflict gate OPEN. TempDir
-/// creates exclusively, and on Unix is asked for owner-only permissions (its
-/// default follows the umask). A deleted path is guessable from then on, so a
-/// replacement never reuses one, and on Unix a root that is no longer this user's
-/// owner-only directory counts as damaged.
+/// creates exclusively; on Unix it is asked for owner-only permissions, and on
+/// Windows the root inherits the temp folder's ACL (per-user by default). A
+/// replacement never reuses a deleted, now-guessable path, and on Unix a root
+/// that is no longer this user's owner-only directory counts as damaged. These
+/// checks stand in for git's ownership check, which the pinned spawn skips.
 struct NeutralRepo {
     slot: Mutex<Option<CachedNeutralRepo>>,
 }
@@ -151,7 +156,9 @@ impl NeutralRepo {
             #[cfg(unix)]
             let root_valid = tokio::fs::symlink_metadata(dir.path())
                 .await
-                .is_ok_and(|m| m.is_dir() && m.uid() == repo.uid && m.mode() & 0o077 == 0);
+                .is_ok_and(|m| {
+                    m.is_dir() && m.uid() == repo.uid && (!repo.check_mode || m.mode() & 0o077 == 0)
+                });
             #[cfg(not(unix))]
             let root_valid = true;
             let git = dir.path().join(".git");
@@ -176,20 +183,26 @@ impl NeutralRepo {
             builder.permissions(std::fs::Permissions::from_mode(0o700));
             let dir = builder.tempdir()?;
             #[cfg(unix)]
-            let uid = std::fs::symlink_metadata(dir.path())?.uid();
+            let metadata = std::fs::symlink_metadata(dir.path())?;
             Ok(CachedNeutralRepo {
                 dir: Arc::new(dir),
                 #[cfg(unix)]
-                uid,
+                uid: metadata.uid(),
+                #[cfg(unix)]
+                check_mode: metadata.mode() & 0o077 == 0,
             })
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
         .map_err(AppError::Io)?;
         let path = repo.dir.path().to_string_lossy().into_owned();
-        run_git(Some(&path), &["init", "-q"], DEFAULT_TIMEOUT).await?;
-        // A user's `init.templateDir` can seed `.git/info/exclude`, which
-        // outranks `core.excludesFile` and would join the ruleset.
+        run_git(Some(&path), &["init", "-q", "--template="], DEFAULT_TIMEOUT).await?;
+        // An empty template keeps a user's `init.templateDir` from seeding a
+        // `.git/info/exclude`, which would outrank `core.excludesFile`. It also leaves no
+        // `info/` (measured, git 2.51.1), so the backstop exclude makes its directory first.
+        tokio::fs::create_dir_all(repo.dir.path().join(".git/info"))
+            .await
+            .map_err(AppError::Io)?;
         tokio::fs::write(repo.dir.path().join(".git/info/exclude"), "")
             .await
             .map_err(AppError::Io)?;
@@ -230,11 +243,12 @@ static NEUTRAL_REPO: NeutralRepo = NeutralRepo::new();
 ///
 /// The excludes file carries that boundary too, so it must be unguessable and
 /// exclusively created: an emptied or substituted list reports NOTHING ignored.
-/// It is created with `O_EXCL` inside [`NeutralRepo`]'s owner-only directory and
-/// written through that same handle, never re-opened by name — so no other user
-/// can pre-create the path, and nothing can be swapped in between the write and
-/// git's read. Removed explicitly on both arms in [`run_check_ignore_in_dir`],
-/// with the handle's own drop as a backstop.
+/// It is created with `O_EXCL` inside [`NeutralRepo`]'s directory (owner-only on
+/// Unix, a per-user temp folder by default on Windows) and written through that
+/// same handle, never re-opened by name — so no other user can pre-create the
+/// path, and nothing can be swapped in between the write and git's read. Removed
+/// explicitly on both arms in [`run_check_ignore_in_dir`], with the handle's own
+/// drop as a backstop.
 async fn run_check_ignore(
     repo_path: &str,
     paths: &[Vec<u8>],
@@ -259,9 +273,11 @@ async fn run_check_ignore_in(
 }
 
 /// [`run_check_ignore`]'s spawn, in a `neutral` dir the caller validated and keeps
-/// alive (its `Arc`) for the whole call. It validates nothing itself: the pinned
-/// `--git-dir`/`--work-tree` is what makes a repo damaged after validation fail
-/// closed instead of being answered by a repo above it.
+/// alive (its `Arc`) for the whole call. It validates nothing itself. The pinned
+/// `--git-dir`/`--work-tree` makes a repo damaged after validation fail closed
+/// instead of being answered by a repo above it; it also skips git's
+/// `safe.directory` ownership check, so [`NeutralRepo`]'s validation is what
+/// vouches for whose repo this is.
 async fn run_check_ignore_in_dir(
     neutral: &str,
     repo_path: &str,
@@ -348,8 +364,8 @@ async fn run_check_ignore_in_dir(
 /// `paths` are repo-relative, forward-slashed. Empty `paths`, or an `exclude`
 /// carrying no positive line (see [`actionable_lines_indexed`]), short-circuits
 /// to `[]` without spawning git; so does "nothing matched" (check-ignore's exit
-/// code 1, which is not an error). The spawn itself, and the security properties
-/// around it, live in [`run_check_ignore`].
+/// code 1, which is not an error). The entry point and its security properties
+/// live in [`run_check_ignore`].
 ///
 /// A `String` can only spell a name that decoded cleanly, so callers holding a
 /// name's real bytes want [`filter_ignored_bytes`], which this delegates to.

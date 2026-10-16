@@ -263,7 +263,7 @@ const SYNC_COMMAND_ALLOWLIST = [
 const STDERR_ONLY_ALLOWLIST = [
   {
     file: "git/ai_ignore.rs",
-    fn: "run_check_ignore",
+    fn: "run_check_ignore_in_dir",
     rationale: "`check-ignore` read — stdout is the match list, never a report",
   },
   {
