@@ -35,9 +35,10 @@ pub enum AppError {
         /// "session" | "mid-op" | "dirty" | "conflict" | "moved" | "failed"
         reason: String,
     },
-    /// A bare push git refused because HEAD's upstream tracks a differently-named
-    /// branch (push.default=simple). Carries the names so each surface composes its
-    /// own remedy; the Display line is the GUI toast verbatim.
+    /// A push refused because the branch tracks a differently named branch: git's
+    /// push.default=simple refusal of a bare HEAD push, or the MCP push tool's own
+    /// refusal of a named push before it runs. Carries the names so each surface
+    /// composes its own remedy; the Display line is the GUI toast verbatim.
     #[error("Push blocked — {branch} tracks {remote}/{remote_branch}, which has a different name. Choose where to push from the Push menu.")]
     PushUpstreamNameMismatch {
         branch: String,

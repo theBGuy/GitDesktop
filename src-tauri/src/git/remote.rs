@@ -916,6 +916,60 @@ pub(crate) async fn git_push_core(
     remote: Option<String>,
     remote_branch: Option<String>,
 ) -> AppResult<PushGuard> {
+    git_push_with_policy(
+        state,
+        repo_path,
+        set_upstream,
+        force,
+        branch,
+        remote,
+        remote_branch,
+        CrossNameUpstream::Follow,
+    )
+    .await
+}
+
+/// The MCP `push` tool's entry. A named push whose tracking would land it on a
+/// differently named branch of a real remote is refused before any push runs: an
+/// agent cannot see where a named push lands. `set_upstream` publishes under the
+/// local name instead.
+pub(crate) async fn git_push_same_name_core(
+    state: &AppState,
+    repo_path: String,
+    set_upstream: bool,
+    branch: Option<String>,
+    remote: Option<String>,
+) -> AppResult<PushGuard> {
+    git_push_with_policy(
+        state,
+        repo_path,
+        set_upstream,
+        false,
+        branch,
+        remote,
+        None,
+        CrossNameUpstream::Refuse,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CrossNameUpstream {
+    Follow,
+    Refuse,
+}
+
+#[allow(clippy::too_many_arguments)] // existing push inputs plus the caller's policy
+async fn git_push_with_policy(
+    state: &AppState,
+    repo_path: String,
+    set_upstream: bool,
+    force: bool,
+    branch: Option<String>,
+    remote: Option<String>,
+    remote_branch: Option<String>,
+    cross_name: CrossNameUpstream,
+) -> AppResult<PushGuard> {
     if remote_branch.is_some() && (branch.is_none() || remote.is_none()) {
         return Err(AppError::InvalidArgument(
             "remote branch requires an explicit branch and remote".to_string(),
@@ -1023,6 +1077,25 @@ pub(crate) async fn git_push_core(
             // always origin — a branch tracking a fork's `upstream` (or an explicit
             // `remote`) authenticates against THAT host, not origin's.
             cred_remote = resolve_push_target(remote.as_deref(), &remotename, gone).to_string();
+            // Refuse from the same tracking snapshot as the argv, before credentials or
+            // a mutating spawn. Local `.` tracking has no named-remote remedy.
+            if cross_name == CrossNameUpstream::Refuse {
+                if let Some(up) = cross_name_refusal(
+                    b,
+                    &upstream,
+                    &remotename,
+                    gone,
+                    set_upstream,
+                    remote.as_deref(),
+                    remote_branch.as_deref(),
+                ) {
+                    return Err(AppError::PushUpstreamNameMismatch {
+                        branch: b.clone(),
+                        remote: remotename,
+                        remote_branch: up.to_string(),
+                    });
+                }
+            }
             build_push_args(
                 b,
                 &upstream,
@@ -1266,6 +1339,53 @@ fn resolve_push_target<'a>(
     }
 }
 
+/// The tracked arm's destination, shared by the argv builder and the MCP policy.
+fn tracked_push_upstream<'a>(
+    upstream: &'a Upstream,
+    remotename: &str,
+    gone: bool,
+    set_upstream: bool,
+    requested_remote: Option<&str>,
+    remote_branch: Option<&str>,
+) -> Option<&'a str> {
+    match upstream {
+        Upstream::Branch(up)
+            if !gone
+                && !set_upstream
+                && remote_branch.is_none()
+                && resolve_push_target(requested_remote, remotename, gone) == remotename =>
+        {
+            Some(up)
+        }
+        _ => None,
+    }
+}
+
+/// Refuse only cross-name tracked destinations on named remotes; local tracking
+/// has no remote destination for the MCP remedy to offer.
+fn cross_name_refusal<'a>(
+    branch: &str,
+    upstream: &'a Upstream,
+    remotename: &str,
+    gone: bool,
+    set_upstream: bool,
+    requested_remote: Option<&str>,
+    remote_branch: Option<&str>,
+) -> Option<&'a str> {
+    if !is_named_remote(remotename) {
+        return None;
+    }
+    tracked_push_upstream(
+        upstream,
+        remotename,
+        gone,
+        set_upstream,
+        requested_remote,
+        remote_branch,
+    )
+    .filter(|up| *up != branch)
+}
+
 /// Decide the `git push` args for pushing a NAMED local branch, from its resolved
 /// tracking state and an optional caller-chosen `requested_remote`. Pure — no git
 /// calls — so the decision table is unit-testable.
@@ -1329,13 +1449,21 @@ fn build_push_args(
         // Only an explicit request retracks away from a non-branch upstream.
         Upstream::NotABranch => set_upstream,
     };
-    match upstream {
-        _ if publish => {
+    let tracked = tracked_push_upstream(
+        upstream,
+        remotename,
+        gone,
+        set_upstream,
+        requested_remote,
+        remote_branch,
+    );
+    match (publish, tracked) {
+        (true, _) => {
             // Publish + track, under the LOCAL name.
             args.extend(["-u", target].map(str::to_string));
             args.push(publish_refspec(branch));
         }
-        Upstream::Branch(up) if target == remotename => {
+        (false, Some(up)) => {
             // Tracked → its own remote: target the remote branch name explicitly (it
             // may differ from the local one).
             args.push(target.to_string());
@@ -1382,12 +1510,15 @@ pub(crate) fn publish_refspec(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_push_args, cache_get, cache_invalidate, cache_put, git_fetch_core, git_pull_core,
-        git_push_core, git_remote_add_core, git_remote_remove_core, git_remote_set_url_core,
-        is_auth_class_failure, is_push_default_left, is_push_simple_name_refusal,
+        build_push_args, cache_get, cache_invalidate, cache_put, cross_name_refusal,
+        git_fetch_core, git_pull_core,
+        git_push_core, git_push_same_name_core, git_remote_add_core, git_remote_remove_core,
+        git_remote_set_url_core, is_auth_class_failure, is_push_default_left,
+        is_push_simple_name_refusal,
         is_unknown_push_option, parse_upstream_tracking, publish_refspec, push_upstream_branch,
         push_upstream_target, remove_busy_tail, remove_remote, resolve_push_target,
-        run_git_mutating_with_creds, with_busy_tail, without_force_if_includes, PushGuard,
+        run_git_mutating_with_creds, tracked_push_upstream, with_busy_tail,
+        without_force_if_includes, PushGuard,
         Upstream, FORCE_IF_INCLUDES, IF_INCLUDES_REJECTION, NETWORK_LOCK_WAIT_HOOK,
         REMOTE_BRANCH_UNSET_LOST, REMOTE_PUSH_DEFAULT_LEFT, REMOTE_PUSH_DEFAULT_LOST,
         REMOTE_SECTION_LOST, REMOTE_UNCHANGED, UPSTREAM_TRACKING_FORMAT,
@@ -2475,6 +2606,127 @@ mod tests {
             without_force_if_includes(&["push", "-u", "origin", "HEAD"]),
             vec!["push", "-u", "origin", "HEAD"]
         );
+    }
+
+    #[test]
+    fn named_push_policy_agrees_with_every_destination_arm() {
+        use Upstream::{Branch, NotABranch, Untracked};
+
+        let cases = [
+            (
+                "default remote", Branch("main".into()), "origin", false, false, None, None,
+                Some("main"), Some("main"), vec!["push", "origin", "refs/heads/x:refs/heads/main"],
+            ),
+            (
+                "explicit equal remote", Branch("main".into()), "origin", false, false,
+                Some("origin"), None, Some("main"), Some("main"),
+                vec!["push", "origin", "refs/heads/x:refs/heads/main"],
+            ),
+            (
+                "same name", Branch("x".into()), "origin", false, false, None, None,
+                Some("x"), None, vec!["push", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "gone", Branch("main".into()), "origin", true, false, None, None,
+                None, None, vec!["push", "-u", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "publish", Branch("main".into()), "origin", false, true, None, None,
+                None, None, vec!["push", "-u", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "different remote", Branch("main".into()), "upstream", false, false,
+                Some("origin"), None, None, None,
+                vec!["push", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "untracked", Untracked, "", false, false, None, None, None, None,
+                vec!["push", "-u", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "non-branch", NotABranch, "origin", false, false, None, None, None, None,
+                vec!["push", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "gone non-branch", NotABranch, "origin", true, false, None, None, None, None,
+                vec!["push", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "publish non-branch", NotABranch, "origin", false, true, None, None, None, None,
+                vec!["push", "-u", "origin", "refs/heads/x:refs/heads/x"],
+            ),
+            (
+                "local upstream", Branch("main".into()), ".", false, false, None, None,
+                Some("main"), None, vec!["push", ".", "refs/heads/x:refs/heads/main"],
+            ),
+            (
+                "explicit destination", Branch("main".into()), "origin", false, false,
+                Some("origin"), Some("main"), None, None,
+                vec!["push", "origin", "refs/heads/x:refs/heads/main"],
+            ),
+            (
+                "explicit destination overrides publish", Branch("main".into()), "origin",
+                true, true, Some("origin"), Some("main"), None, None,
+                vec!["push", "origin", "refs/heads/x:refs/heads/main"],
+            ),
+        ];
+        for (label, upstream, remote, gone, set, requested, destination, tracked, refuse, argv)
+            in cases
+        {
+            let actual =
+                tracked_push_upstream(&upstream, remote, gone, set, requested, destination);
+            assert_eq!(actual, tracked, "{label}");
+            assert_eq!(
+                cross_name_refusal("x", &upstream, remote, gone, set, requested, destination),
+                refuse,
+                "{label}",
+            );
+            assert_eq!(
+                build_push_args("x", &upstream, remote, gone, set, false, requested, destination),
+                argv,
+                "{label}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn named_push_refuses_cross_name_upstream_but_follow_keeps_destination() {
+        let (_guard, base, origin, _url) = seeded_origin("named-push-policy").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["checkout", "-q", "-b", "x", "origin/main"]).await;
+        run(&work, &["commit", "-qm", "on x", "--allow-empty"]).await;
+        let old_main = run(&origin, &["rev-parse", "refs/heads/main"]).await;
+        let tip = run(&work, &["rev-parse", "refs/heads/x"]).await;
+        assert_ne!(old_main, tip);
+        let state = AppState::default();
+
+        for remote in [None, Some("origin".to_string())] {
+            let result = git_push_same_name_core(
+                &state,
+                work.clone(),
+                false,
+                Some("x".into()),
+                remote,
+            )
+            .await;
+            let main = run(&origin, &["rev-parse", "refs/heads/main"]).await;
+            assert!(result.is_err(), "named push must refuse a cross-name upstream");
+            assert_eq!(main, old_main);
+            let err = result.unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    AppError::PushUpstreamNameMismatch { branch, remote, remote_branch }
+                        if branch == "x" && remote == "origin" && remote_branch == "main"
+                ),
+                "{err:?}",
+            );
+        }
+
+        git_push_core(&state, work, false, false, Some("x".into()), None, None)
+            .await
+            .expect("Follow pushes to the tracked destination");
+        assert_eq!(run(&origin, &["rev-parse", "refs/heads/main"]).await, tip);
     }
 
     /// Set up a bare origin seeded with one commit on `main`, and return the temp

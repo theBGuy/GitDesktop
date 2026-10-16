@@ -143,7 +143,7 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/remote.rs",
-    fn: "git_push_core",
+    fn: "git_push_with_policy",
     rationale:
       "validates branch, remote and remote_branch with validate_ref_name at fn entry",
   },

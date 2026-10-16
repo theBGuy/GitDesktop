@@ -206,8 +206,10 @@ struct RenameBranchArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PushArgs {
-    /// Set the upstream (`-u origin HEAD`) while pushing — for a branch pushed the
-    /// first time. Defaults to false.
+    /// Publish under the branch's own name and track that (`-u`): the current branch
+    /// goes to origin; a named branch to `remote`, else its live upstream's remote,
+    /// else origin. Use it for a first push, or to retrack a branch whose upstream has
+    /// a different name. Defaults to false.
     #[serde(default)]
     set_upstream: bool,
     /// Local branch to push instead of the current one (pushed by name — no
@@ -729,7 +731,9 @@ impl GitDesktopMcp {
                        repository — pushing a named branch never switches to it or touches the \
                        working tree; an untracked branch is published with `-u`. A named branch \
                        targets its own upstream remote (or origin when publishing) unless `remote` \
-                       overrides it. Uses git's native credential flow. Never force-pushes — use \
+                       overrides it. A named branch that tracks a differently named branch on \
+                       that remote is refused; set_upstream: true publishes it under its own \
+                       name instead. Uses git's native credential flow. Never force-pushes — use \
                        force_push (destructive) for that. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -746,17 +750,12 @@ impl GitDesktopMcp {
         if let Some(r) = &args.remote {
             ensure_not_flag(r, "remote")?;
         }
-        crate::git::remote::git_push_core(
+        crate::git::remote::git_push_same_name_core(
             &self.state,
             self.repo.clone(),
             args.set_upstream,
-            false,
             args.branch.clone(),
             args.remote.clone(),
-            // No explicit destination: a named push follows the branch's tracking
-            // (`build_push_args`' tracked arm), so it can land on a differently-named
-            // upstream on the same remote.
-            None,
         )
         .await
         .map_err(|e| app_err(with_mcp_remedy(e, push_remedy)))?;
@@ -1860,6 +1859,63 @@ mod tests {
             .expect("the tool returns one text block")
             .text
             .clone()
+    }
+
+    #[tokio::test]
+    async fn named_push_refuses_cross_name_upstream_and_remedy_publishes() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-named-push-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        let work = dir.path().join("work").to_string_lossy().into_owned();
+        configure(&work).await;
+        git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
+        git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+        git(&work, &["checkout", "-q", "-b", "x", "origin/main"]).await;
+        git(&work, &["commit", "-qm", "on x", "--allow-empty"]).await;
+        let old_main = git(&origin, &["rev-parse", "refs/heads/main"]).await;
+        let tip = git(&work, &["rev-parse", "refs/heads/x"]).await;
+        assert_ne!(old_main, tip);
+        let h = GitDesktopMcp::with_options(work.clone(), false, false, true, false);
+
+        for remote in [None, Some("origin".to_string())] {
+            let result = h
+                .push(Parameters(PushArgs {
+                    branch: Some("x".into()),
+                    remote,
+                    set_upstream: false,
+                }))
+                .await;
+            let main = git(&origin, &["rev-parse", "refs/heads/main"]).await;
+            assert!(result.is_err(), "MCP named push must refuse a cross-name upstream");
+            assert_eq!(main, old_main);
+            let text = result.unwrap_err().to_string();
+            assert!(text.contains("Push blocked — x tracks origin/main"), "{text}");
+            assert!(text.contains("set_upstream: true"), "{text}");
+        }
+
+        let result = h
+            .push(Parameters(PushArgs {
+                branch: Some("x".into()),
+                remote: None,
+                set_upstream: true,
+            }))
+            .await
+            .expect("the remedy publishes under the local name");
+        assert_eq!(text_of(&result), "pushed");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/x"]).await, tip);
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]).await, old_main);
+        assert_eq!(
+            git(&work, &["rev-parse", "--symbolic-full-name", "x@{upstream}"])
+                .await
+                .trim(),
+            "refs/remotes/origin/x",
+        );
     }
 
     /// A bare origin, a teammate's `work` clone, and the clone the handler binds to —
