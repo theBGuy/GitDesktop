@@ -1557,6 +1557,18 @@ mod tests {
         assert_ne!(repo.get().await.unwrap().path(), old);
     }
 
+    /// A late rejection of an older repo leaves the newer cached one in place.
+    #[tokio::test]
+    async fn neutral_repo_stale_forget_keeps_newer_repo() {
+        let repo = NeutralRepo::new();
+        let old = repo.get().await.unwrap();
+        repo.forget(&old).await;
+        let fresh = repo.get().await.unwrap();
+        assert!(!Arc::ptr_eq(&old, &fresh));
+        repo.forget(&old).await;
+        assert!(Arc::ptr_eq(&repo.get().await.unwrap(), &fresh));
+    }
+
     /// Non-owner-only roots are replaced before matching the next AI pattern.
     /// The uid arm is the attacker case, not reproducible without a second user.
     #[cfg(unix)]
