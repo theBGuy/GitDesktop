@@ -38,8 +38,8 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
   ["reverting", "revert"],
 ];
 
-/** Which op the banner names: kept beside the deriver, whose `opActive` input it
- *  feeds, so the pure suite pins its precedence. */
+/** Kept beside the deriver, whose `opActive` input it feeds, so the pure suite
+ *  pins its precedence. */
 export function activeRepoOp(opState: RepoOpState | undefined): RepoOp | null {
   return OP_BY_FLAG.find(([flag]) => opState?.[flag])?.[1] ?? null;
 }

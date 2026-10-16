@@ -324,8 +324,9 @@ export function ConflictBanner({
     if (useUiStore.getState().repoPath !== repoPath) return;
     const live = useStashReapplyMarker.getState().marker;
     if (live?.repoPath !== repoPath || live.stashSha !== recorded.stashSha) {
-      if (live?.repoPath === repoPath) toastStashMoved();
-      else toastStashGone();
+      // A cleared marker needn't mean the backup is gone (a newer stash or a
+      // settling compound retires it too), so both causes read as a change.
+      toastStashMoved();
       await dialogClosed();
       // The strip that hosted Drop is gone or replaced, so wherever Base UI's
       // fallback put focus, it was never the user's choice: place it outright.
