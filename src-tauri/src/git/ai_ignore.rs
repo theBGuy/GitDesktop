@@ -111,10 +111,6 @@ struct CachedNeutralRepo {
     dir: Arc<tempfile::TempDir>,
     #[cfg(unix)]
     uid: u32,
-    /// False where the filesystem ignores Unix modes (vfat, drvfs), whose 0777 would
-    /// fail the owner-only check on every call; the uid check still applies there.
-    #[cfg(unix)]
-    check_mode: bool,
 }
 
 /// The empty throwaway repo [`run_check_ignore`] runs `check-ignore` inside. The
@@ -156,9 +152,7 @@ impl NeutralRepo {
             #[cfg(unix)]
             let root_valid = tokio::fs::symlink_metadata(dir.path())
                 .await
-                .is_ok_and(|m| {
-                    m.is_dir() && m.uid() == repo.uid && (!repo.check_mode || m.mode() & 0o077 == 0)
-                });
+                .is_ok_and(|m| m.is_dir() && m.uid() == repo.uid && m.mode() & 0o077 == 0);
             #[cfg(not(unix))]
             let root_valid = true;
             let git = dir.path().join(".git");
@@ -188,8 +182,6 @@ impl NeutralRepo {
                 dir: Arc::new(dir),
                 #[cfg(unix)]
                 uid: metadata.uid(),
-                #[cfg(unix)]
-                check_mode: metadata.mode() & 0o077 == 0,
             })
         })
         .await
