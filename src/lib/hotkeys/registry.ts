@@ -819,6 +819,19 @@ export const ACTIONS = [
     category: "Branches & stash",
     defaultBinding: null,
   },
+  // The conflict banner's resolved-reapply decision; live only while it shows.
+  {
+    id: "drop-backup-stash",
+    label: "Drop backup stash…",
+    category: "Branches & stash",
+    defaultBinding: null,
+  },
+  {
+    id: "keep-backup-stash",
+    label: "Keep backup stash",
+    category: "Branches & stash",
+    defaultBinding: null,
+  },
   {
     id: "operation-history",
     label: "Operation history",

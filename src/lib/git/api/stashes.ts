@@ -19,6 +19,16 @@ export const gitStashApply = (repoPath: string, index: number, pop: boolean) =>
 export const gitStashDrop = (repoPath: string, index: number) =>
   invoke<void>("git_stash_drop", { repoPath, index });
 
+/** Verdict of a SHA-verified backup-stash drop (git_drop_stash_by_sha). */
+export type StashDropOutcome =
+  | { kind: "dropped" }
+  | { kind: "moved" }
+  | { kind: "gone" }
+  | { kind: "restoreFailed"; droppedSha: string };
+
+export const gitDropStashBySha = (repoPath: string, sha: string) =>
+  invoke<StashDropOutcome>("git_drop_stash_by_sha", { repoPath, sha });
+
 export const gitOrphanedStashes = (repoPath: string) =>
   invoke<OrphanedStash[]>("git_orphaned_stashes", { repoPath });
 

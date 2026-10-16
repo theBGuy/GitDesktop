@@ -1,4 +1,5 @@
-//! App-level stash → op → reapply compounds for pull, merge, rebase and switch.
+//! App-level stash → op → reapply compounds for pull, merge, rebase and switch, plus
+//! the SHA-verified drop of the backup stash a conflicted reapply keeps.
 //!
 //! Each command acquires the repo's WORKING-TREE lock ONCE and uses only the
 //! lock-free runners while holding it — `run_git_mutating` re-acquires the same
@@ -13,7 +14,7 @@
 
 use tauri::State;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::git::branches::{finish_tracking_setup, validate_ref_name, TrackedBy};
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::remote::run_git_with_creds_once;
@@ -42,7 +43,15 @@ pub enum AutostashOutcome {
     /// Op succeeded; pop failed. Git retains the stash entry on a conflicted pop.
     /// `conflicted` distinguishes a merge conflict (unmerged paths in the changes
     /// list) from a pop git refused outright, which leaves nothing to resolve.
-    ReapplyConflicted { stderr: String, conflicted: bool },
+    ReapplyConflicted {
+        stderr: String,
+        conflicted: bool,
+        /// Full hex object id (40, or 64 in SHA-256 repos) of the kept backup stash
+        /// entry, read from `refs/stash` under the compound's working-tree hold,
+        /// immediately before the pop. None when that read failed; the UI then keeps
+        /// its marker-less behavior.
+        stash_sha: Option<String>,
+    },
     /// Op failed with no in-progress state; the stash was popped back cleanly.
     OpFailedRestored { stderr: String },
     /// Op failed leaving in-progress state (e.g. rebase conflict), OR the restore-pop
@@ -154,6 +163,10 @@ pub(crate) async fn settle(
     if !reapply {
         return Ok(AutostashOutcome::StashedOnly);
     }
+    // Read just before the pop, which keeps the entry on a conflict. The working-tree
+    // lock stops only this process's writers on this checkout from pushing in between;
+    // an MCP server, a sibling worktree (refs/stash is shared) or external git could.
+    let stash_sha = stash_tip(repo).await;
     // Substitution here, unlike the op-failure arms' combined text: a conflicted pop
     // reports on stdout alone, and a refused pop leads with stderr NAMING the blocking
     // file while its stdout is generic `status` noise (measured, git 2.51.1.windows.1).
@@ -168,7 +181,22 @@ pub(crate) async fn settle(
         // the way), leaving nothing for the user to resolve; an unreadable index
         // answers the same way.
         conflicted: crate::git::ops::has_unmerged(repo).await.unwrap_or(false),
+        stash_sha,
     })
+}
+
+/// `refs/stash`'s object id, or None when it does not resolve (or the read failed).
+/// Lock-free runner: every caller holds the working-tree lock.
+async fn stash_tip(repo: &str) -> Option<String> {
+    let out = run_git_raw(
+        Some(repo),
+        &["rev-parse", "--verify", "--quiet", "refs/stash"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let sha = out.stdout_lossy().trim().to_string();
+    (out.code == 0 && !sha.is_empty()).then_some(sha)
 }
 
 /// Pull with the uncommitted changes stashed across the operation and reapplied
@@ -451,12 +479,124 @@ pub(crate) async fn git_switch_autostash_core(
     settle(&repo_path, "merge", stashed, reapply, op).await
 }
 
+/// Verdict of a SHA-verified backup-stash drop.
+#[derive(Debug, serde::Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StashDropOutcome {
+    /// `refs/stash` matched the recorded sha and the entry was dropped.
+    Dropped,
+    /// `refs/stash` resolves but points elsewhere; nothing was dropped.
+    Moved,
+    /// `refs/stash` does not resolve, so there is nothing to drop.
+    Gone,
+    /// The drop removed a DIFFERENT entry (an external push raced the window) and
+    /// restoring it failed. `dropped_sha` is the removed entry, recoverable via
+    /// `git stash store <sha>` or the app's Recoverable view (fsck finds it dangling).
+    RestoreFailed { dropped_sha: String },
+}
+
+/// Drop the autostash backup the UI recorded, but only while it is still
+/// `stash@{0}`: a backup that moved deeper or vanished is refused, never re-resolved.
+///
+/// The pre-check under the working-tree lock covers this process's writers on this
+/// checkout; the post-drop verify plus a `git stash store` restore covers the rest
+/// (an MCP server, sibling worktrees sharing refs/stash, external git).
+#[tauri::command]
+pub async fn git_drop_stash_by_sha(
+    state: State<'_, AppState>,
+    repo_path: String,
+    sha: String,
+) -> AppResult<StashDropOutcome> {
+    git_drop_stash_by_sha_core(&state, repo_path, sha).await
+}
+
+pub(crate) async fn git_drop_stash_by_sha_core(
+    state: &AppState,
+    repo_path: String,
+    sha: String,
+) -> AppResult<StashDropOutcome> {
+    // The sha's fixed grammar is its argv chokepoint: nothing else reaches git.
+    if !is_full_object_id(&sha) {
+        return Err(AppError::InvalidArgument(
+            "Expected a full lowercase stash object id".into(),
+        ));
+    }
+    let repo = repo_path.as_str();
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash drop").await?;
+
+    let Some(tip) = stash_tip(repo).await else {
+        return Ok(StashDropOutcome::Gone);
+    };
+    if tip != sha {
+        return Ok(StashDropOutcome::Moved);
+    }
+    // Read before the drop: the compensation arm needs the entry's message.
+    let listing = run_git(
+        Some(repo),
+        &["stash", "list", "--format=%H%x09%gs"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy();
+    let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
+    let printed = dropped_sha(&out.stdout_lossy()).or_else(|| dropped_sha(&out.stderr));
+    match printed {
+        Some(printed) if printed != sha => {
+            let message = listing
+                .lines()
+                .find_map(|line| {
+                    line.split_once('\t')
+                        .filter(|(id, _)| *id == printed)
+                        .map(|(_, msg)| msg.to_string())
+                })
+                .unwrap_or_else(|| "Restored by GitDesktop".to_string());
+            let restore = run_git(
+                Some(repo),
+                &["stash", "store", "-m", &message, &printed],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+            Ok(match restore {
+                Ok(_) => StashDropOutcome::Moved,
+                Err(_) => StashDropOutcome::RestoreFailed {
+                    dropped_sha: printed,
+                },
+            })
+        }
+        // A missing confirmation is fail-open; the real-repo test pins its format.
+        _ => Ok(StashDropOutcome::Dropped),
+    }
+}
+
+/// 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+fn is_full_object_id(sha: &str) -> bool {
+    (sha.len() == 40 || sha.len() == 64)
+        && sha
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// The object id in `git stash drop`'s `Dropped <rev> (<sha>)` line, keyed on the
+/// TRAILING parenthesized hex only, so either rev spelling git prints parses.
+fn dropped_sha(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let line = line.trim_end();
+        let rest = line.strip_prefix("Dropped ")?;
+        let inner = rest.strip_suffix(')')?;
+        let (_, sha) = inner.rsplit_once(" (")?;
+        let sha = sha.to_ascii_lowercase();
+        is_full_object_id(&sha).then_some(sha)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Test-only import: the module's own code shapes every failure through
-    // `classify_failure`, so only the error assertions name the enum.
-    use crate::error::AppError;
 
     async fn git(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, DEFAULT_TIMEOUT)
@@ -905,6 +1045,12 @@ mod tests {
         );
         assert!(!stash_list(&repo).await.is_empty());
         assert!(unmerged(&repo).await.contains("a.txt"));
+        // The sha names the entry git kept: the backup the banner offers to drop.
+        let AutostashOutcome::ReapplyConflicted { stash_sha, .. } = &outcome else {
+            unreachable!();
+        };
+        let kept = git(&repo, &["rev-parse", "refs/stash"]).await;
+        assert_eq!(stash_sha.as_deref(), Some(kept.trim()));
     }
 
     #[tokio::test]
@@ -1648,17 +1794,26 @@ mod tests {
         assert_eq!(
             json(&AutostashOutcome::ReapplyConflicted {
                 stderr: "boom".into(),
-                conflicted: true
+                conflicted: true,
+                stash_sha: None,
             }),
-            r#"{"kind":"reapplyConflicted","stderr":"boom","conflicted":true}"#
+            r#"{"kind":"reapplyConflicted","stderr":"boom","conflicted":true,"stashSha":null}"#
         );
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let kept = AutostashOutcome::ReapplyConflicted {
+            stderr: "boom".into(),
+            conflicted: false,
+            stash_sha: Some(sha.into()),
+        };
         assert_eq!(
-            json(&AutostashOutcome::ReapplyConflicted {
-                stderr: "boom".into(),
-                conflicted: false
-            }),
-            r#"{"kind":"reapplyConflicted","stderr":"boom","conflicted":false}"#
+            json(&kept),
+            format!(
+                r#"{{"kind":"reapplyConflicted","stderr":"boom","conflicted":false,"stashSha":"{sha}"}}"#
+            )
         );
+        let wire = serde_json::to_value(&kept).unwrap();
+        assert_eq!(wire["stashSha"], sha);
+        assert!(!wire.as_object().unwrap().contains_key("stash_sha"));
         assert_eq!(
             json(&AutostashOutcome::OpFailedRestored {
                 stderr: "boom".into()
@@ -1679,6 +1834,172 @@ mod tests {
             }),
             r#"{"kind":"opFailedStashKept","stderr":"boom","inProgress":false}"#
         );
+
+        let drop = |o: &StashDropOutcome| serde_json::to_string(o).unwrap();
+        assert_eq!(drop(&StashDropOutcome::Dropped), r#"{"kind":"dropped"}"#);
+        assert_eq!(drop(&StashDropOutcome::Moved), r#"{"kind":"moved"}"#);
+        assert_eq!(drop(&StashDropOutcome::Gone), r#"{"kind":"gone"}"#);
+        let failed = StashDropOutcome::RestoreFailed {
+            dropped_sha: sha.into(),
+        };
+        assert_eq!(
+            drop(&failed),
+            format!(r#"{{"kind":"restoreFailed","droppedSha":"{sha}"}}"#)
+        );
+        let wire = serde_json::to_value(&failed).unwrap();
+        assert!(!wire.as_object().unwrap().contains_key("dropped_sha"));
+    }
+
+    // ---- SHA-verified backup drop ------------------------------------------
+
+    async fn stash_shas(repo: &str) -> Vec<String> {
+        git(repo, &["stash", "list", "--format=%H"])
+            .await
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Stashes a fresh edit of `b.txt` and returns the new entry's sha.
+    async fn push_stash(dir: &std::path::Path, repo: &str, content: &str) -> String {
+        write(dir, "b.txt", content);
+        git(repo, &["stash", "push"]).await;
+        git(repo, &["rev-parse", "refs/stash"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// Only the matched entry goes: an OLDER stash beneath the backup survives, so a
+    /// drop that cleared the whole list (or took the wrong slot) fails here.
+    #[tokio::test]
+    async fn drop_by_sha_drops_only_the_matching_backup() {
+        let (dir, repo) = setup_with_feat("drop-exact").await;
+        let older = push_stash(dir.path(), &repo, "older\n").await;
+        write(dir.path(), "a.txt", "mine\n");
+        let state = AppState::default();
+        let outcome = git_merge_autostash_core(&state, repo.clone(), "feat".into())
+            .await
+            .unwrap();
+        let AutostashOutcome::ReapplyConflicted {
+            conflicted: true,
+            stash_sha: Some(backup),
+            ..
+        } = outcome
+        else {
+            panic!("expected a conflicted reapply with its sha, got {outcome:?}");
+        };
+        assert_eq!(stash_shas(&repo).await, vec![backup.clone(), older.clone()]);
+
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Dropped), "{verdict:?}");
+        assert_eq!(stash_shas(&repo).await, vec![older]);
+    }
+
+    #[tokio::test]
+    async fn drop_by_sha_refuses_a_backup_that_moved() {
+        let (dir, repo) = setup_repo("drop-moved").await;
+        let backup = push_stash(dir.path(), &repo, "backup\n").await;
+        let newer = push_stash(dir.path(), &repo, "newer\n").await;
+
+        let state = AppState::default();
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup.clone())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Moved), "{verdict:?}");
+        assert_eq!(
+            stash_shas(&repo).await,
+            vec![newer, backup],
+            "nothing dropped"
+        );
+    }
+
+    /// Also the format pin for `dropped_sha`: under the runner's pinned locale git
+    /// confirms an explicit-slot drop on STDOUT, and the parser must read it there.
+    #[tokio::test]
+    async fn drop_by_sha_refuses_a_backup_that_is_gone() {
+        let (dir, repo) = setup_repo("drop-gone").await;
+        let backup = push_stash(dir.path(), &repo, "backup\n").await;
+        let external = run_git(
+            Some(&repo),
+            &["stash", "drop", "stash@{0}"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dropped_sha(&external.stdout_lossy()).as_deref(),
+            Some(backup.as_str()),
+            "stdout: {:?} stderr: {:?}",
+            external.stdout_lossy(),
+            external.stderr
+        );
+        assert!(stash_shas(&repo).await.is_empty());
+
+        let state = AppState::default();
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Gone), "{verdict:?}");
+    }
+
+    /// The sha is the command's only argv input, so its grammar is checked before any
+    /// git runs: the repo path here does not exist, and a spawned git would fail
+    /// differently.
+    #[tokio::test]
+    async fn drop_by_sha_rejects_a_malformed_sha_before_running_git() {
+        let missing = std::env::temp_dir()
+            .join("gd-autostash-no-such-repo")
+            .to_string_lossy()
+            .into_owned();
+        let state = AppState::default();
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcdef0123456",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "0123456789abcdef0123456789abcdef0123456g",
+            "--output=0123456789abcdef0123456789abcdef01",
+            "0123456789abcdef0123456789abcdef01234567 ",
+        ] {
+            let err = git_drop_stash_by_sha_core(&state, missing.clone(), bad.into())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "{bad:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_sha_reads_the_trailing_object_id() {
+        let sha1 = "0123456789abcdef0123456789abcdef01234567";
+        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for sha in [sha1, sha256] {
+            for rev in ["stash@{0}", "refs/stash@{0}"] {
+                assert_eq!(
+                    dropped_sha(&format!("Dropped {rev} ({sha})\n")).as_deref(),
+                    Some(sha),
+                    "{rev}"
+                );
+            }
+        }
+        assert_eq!(
+            dropped_sha(&format!("noise\r\nDropped stash@{{0}} ({sha1})\r\n")).as_deref(),
+            Some(sha1)
+        );
+        for junk in [
+            "",
+            "Dropped stash@{0}",
+            "Dropped stash@{0} ()",
+            "Dropped stash@{0} (not-a-sha)",
+            "Dropped stash@{0} (0123456789abcdef)",
+            "error: stash@{0} is not a valid reference",
+        ] {
+            assert_eq!(dropped_sha(junk), None, "{junk:?}");
+        }
     }
 
     #[tokio::test]

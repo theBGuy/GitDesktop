@@ -300,13 +300,14 @@ pushing and pulling stay manual.
   update is blocked by uncommitted changes, or you switch branches with work
   in progress, one click stashes them (untracked files included), runs the
   operation, and reapplies them on the other side. A reapply that hits
-  conflicts drops the files into the changes list; one that git refuses
-  outright leaves them safely stashed. The stash is kept as a backup either
-  way. (A squash, no-ff, or strategy merge reports the refusal instead — the
-  recovery redoes the merge plainly.) **Automatically stash and reapply on
-  pull, merge, rebase, and branch updates** (Settings → General) makes it
-  the default for all of them, and the switch prompt remembers a **Reapply
-  after switching** choice of its own.
+  conflicts drops the files into the changes list, where the banner says
+  the conflict came from your stash and, once they're resolved, offers to
+  drop the backup stash (after asking) or keep it. One that git refuses
+  outright leaves them safely stashed. (A squash, no-ff, or strategy merge
+  reports the refusal instead — the recovery redoes the merge plainly.)
+  **Automatically stash and reapply on pull, merge, rebase, and branch
+  updates** (Settings → General) makes it the default for all of them, and
+  the switch prompt remembers a **Reapply after switching** choice of its own.
 
 ### Pull requests
 

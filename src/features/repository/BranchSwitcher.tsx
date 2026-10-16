@@ -1140,15 +1140,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         remote: target.remote,
         reapply,
       });
-      reportAutostashOutcome(outcome, {
-        operation: "Switch",
-        reapplied: `Stashed, switched to ${target.name}, and reapplied your changes.`,
-        stashedOnly: `Stashed changes and switched to ${target.name} — "Pop latest stash" restores them`,
-        plain: `Switched to ${target.name}.`,
-        // Names the branch the switch failed to reach — more useful than the
-        // generic didn't-finish line.
-        stashKept: `Couldn't switch to ${target.name} — your changes are safely stashed; pop them when you're ready.`,
-      });
+      reportAutostashOutcome(
+        outcome,
+        {
+          operation: "Switch",
+          reapplied: `Stashed, switched to ${target.name}, and reapplied your changes.`,
+          stashedOnly: `Stashed changes and switched to ${target.name} — "Pop latest stash" restores them`,
+          plain: `Switched to ${target.name}.`,
+          // Names the branch the switch failed to reach — more useful than the
+          // generic didn't-finish line.
+          stashKept: `Couldn't switch to ${target.name} — your changes are safely stashed; pop them when you're ready.`,
+        },
+        {
+          repoPath,
+          operationLabel: "switch",
+          detail: target.name,
+          detailPreposition: "to",
+        },
+      );
     } catch (e) {
       onError(e);
     }

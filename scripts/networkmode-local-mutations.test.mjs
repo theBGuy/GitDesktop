@@ -160,6 +160,7 @@ const LOCAL_CALLEES = [
   "gitStashPop",
   "gitStashApply",
   "gitStashDrop",
+  "gitDropStashBySha",
   "gitRestoreOrphaned",
   // Config, remotes, submodules, hooks and worktrees.
   "gitSetGlobalIdentity",

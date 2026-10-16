@@ -276,9 +276,11 @@ fn fold_submodule_failure(
         Ok(AutostashOutcome::ReapplyConflicted {
             stderr,
             conflicted,
+            stash_sha,
         }) => Ok(AutostashOutcome::ReapplyConflicted {
             stderr: format!("{stderr}\n{failure}"),
             conflicted,
+            stash_sha,
         }),
         // The landed outcomes that carry nothing the error does not, so the failure IS
         // the result. `StashedOnly` is landed too and belongs here even though neither
@@ -1654,7 +1656,8 @@ mod tests {
         assert_eq!(
             settled_journal_error(&Ok(AutostashOutcome::ReapplyConflicted {
                 stderr: "pop".into(),
-                conflicted: true
+                conflicted: true,
+                stash_sha: None,
             })),
             None
         );
@@ -1690,12 +1693,11 @@ mod tests {
         assert!(!settled_paused(&Ok(AutostashOutcome::OpFailedRestored {
             stderr: "restored".into()
         })));
-        assert!(
-            !settled_paused(&Ok(AutostashOutcome::ReapplyConflicted {
-                stderr: "pop".into(),
-                conflicted: true
-            }))
-        );
+        assert!(!settled_paused(&Ok(AutostashOutcome::ReapplyConflicted {
+            stderr: "pop".into(),
+            conflicted: true,
+            stash_sha: None,
+        })));
         assert!(!settled_paused(&Ok(AutostashOutcome::Reapplied)));
         assert!(!settled_paused(&Ok(AutostashOutcome::NothingStashed)));
         assert!(!settled_paused(&Ok(AutostashOutcome::StashedOnly)));
@@ -3399,20 +3401,30 @@ mod tests {
     /// running, which its negative control is what caught.
     #[test]
     fn a_submodule_failure_never_replaces_a_conflicted_reapply() {
+        const BACKUP: &str = "0123456789abcdef0123456789abcdef01234567";
         let boom = || AppError::Command("submodule brk exploded".into());
 
         let folded = fold_submodule_failure(
             Ok(AutostashOutcome::ReapplyConflicted {
                 stderr: "pop conflicted on a.txt".into(),
                 conflicted: true,
+                stash_sha: Some(BACKUP.into()),
             }),
             Err(boom()),
         )
         .expect("the reapply report survives the failing step");
-        let AutostashOutcome::ReapplyConflicted { stderr, conflicted } = folded else {
+        let AutostashOutcome::ReapplyConflicted {
+            stderr,
+            conflicted,
+            stash_sha,
+        } = folded
+        else {
             panic!("the outcome must keep its variant");
         };
         assert!(conflicted, "and its discriminant");
+        // The guarded rebase-pull paths feed this fold; losing the sha here would
+        // drop the backup-stash marker for exactly those compounds.
+        assert_eq!(stash_sha.as_deref(), Some(BACKUP), "and the backup's sha");
         assert!(stderr.contains("pop conflicted on a.txt"), "{stderr}");
         assert!(stderr.contains("submodule brk exploded"), "{stderr}");
 

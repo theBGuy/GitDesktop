@@ -716,7 +716,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Reapply after switching** already ticked for that switch (an untick you made yourself
   stands). Your saved choice changes only when you tick or untick it yourself. If reapplying
   them hits conflicts, the files appear in **Changes** to resolve and the stash is kept as a
-  backup.
+  backup, which the banner offers to drop or keep once they're resolved
+  (see *Stash and reapply*).
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
   out. On a branch listed under **Promotion branches** in *Branch rules*, that update offer
@@ -951,14 +952,17 @@ leaves the cached list in place.
 When a **Pull** would overwrite uncommitted changes, git refuses it — and GitDesktop offers
 **Stash and reapply**: your changes are set aside in the stash (untracked files included),
 the pull runs, then they come back on top of it. If reapplying them hits conflicts, the
-conflicted files appear in **Changes** to resolve as usual and the stash is kept as a backup
-until you're done; if they can't go back at all (say the pull brought in a file with the
-same name), they stay safely in the stash. The same recovery covers
-**Update from upstream**, updating the branch you're on from another branch, **merging**
-a branch into the one you're on, and **rebasing** (the branch menu's **Rebase** and
-**Change base…** alike). A **squash**, **no-fast-forward**, or strategy merge reports
-the refusal instead: the recovery redoes the merge plainly, so offering it there would drop
-the option you chose.
+banner in **Changes** says so, the conflicted files appear there to resolve as usual, and
+the stash is kept as a backup. Once every conflict is resolved, the banner offers
+**Drop backup stash…**, which asks first, or **Keep it**, which leaves the stash in
+**View stashes**; the command palette offers both too. The offer lasts until you switch
+repositories or restart; the stash itself stays in **View stashes** either way. If they
+can't go back at all (say the pull brought in a file with the same name), they stay safely
+in the stash. The same recovery covers **Update from upstream**, updating the branch you're
+on from another branch, **merging** a branch into the one you're on, and **rebasing** (the
+branch menu's **Rebase** and **Change base…** alike). A **squash**, **no-fast-forward**, or
+strategy merge reports the refusal instead: the recovery redoes the merge plainly, so
+offering it there would drop the option you chose.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
 reapply on pull, merge, rebase, and branch updates** under **Settings → General** — and
@@ -1032,7 +1036,10 @@ them aside first.
 During a **merge**, **rebase**, **cherry-pick**, or **revert**, a slim banner appears in
 **Changes** naming the operation and its conflict count, with **Abort** and a finish control
 that names it too (**Finish merge**, **Continue rebase**, **Continue cherry-pick**,
-**Continue revert**). Select a conflicted file (the \`!\` badge) to open the **conflict
+**Continue revert**). Conflicts from reapplying your stashed changes get the same banner
+without **Abort** or a finish control, since nothing is left in progress: resolve the files,
+and after a **Stash and reapply** the banner then offers to drop or keep the backup stash.
+Select a conflicted file (the \`!\` badge) to open the **conflict
 editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)** with
 **Accept current**, **Accept incoming**, or **Accept both**, and the header adds whole-file
 **Accept all current** / **Accept all incoming** and **Open in editor**. Those whole-file

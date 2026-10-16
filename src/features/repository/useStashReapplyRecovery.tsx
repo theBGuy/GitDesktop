@@ -15,6 +15,7 @@ import {
 } from "@/lib/git/queries";
 import { refuseWhileOffline } from "@/lib/offline-writes";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
@@ -47,6 +48,15 @@ export interface AutostashCopy {
   stashKept?: string;
 }
 
+/** Where the compound ran and how to name it — the marker's raw material. */
+export interface AutostashContext {
+  repoPath: string;
+  /** Lower-case, as StashReapplyRequest spells it. */
+  operationLabel: string;
+  detail?: string;
+  detailPreposition?: string;
+}
+
 /** The affordance `toastError` gives a thrown error, for stderr that arrives as
  *  an outcome payload instead — every failure variant keeps the raw git output
  *  one click away. */
@@ -62,6 +72,7 @@ function stderrAction(stderr: string) {
 export function reportAutostashOutcome(
   outcome: AutostashOutcome,
   copy: AutostashCopy,
+  context: AutostashContext,
 ) {
   switch (outcome.kind) {
     case "reapplied":
@@ -74,6 +85,22 @@ export function reportAutostashOutcome(
       if (copy.stashedOnly) toast.success(copy.stashedOnly);
       return;
     case "reapplyConflicted":
+      // The banner names the cause and later offers the backup. Only a conflicted
+      // pop leaves files to resolve, and only a measured sha can target the drop.
+      if (
+        outcome.conflicted &&
+        outcome.stashSha !== null &&
+        useUiStore.getState().repoPath === context.repoPath
+      ) {
+        useStashReapplyMarker.getState().record({
+          repoPath: context.repoPath,
+          stashSha: outcome.stashSha,
+          operationLabel: context.operationLabel,
+          detail: context.detail,
+          detailPreposition: context.detailPreposition,
+          recordedAt: Date.now(),
+        });
+      }
       // Not success-styled: the operation landed, but the changes did not come
       // back on their own. Only a conflicted pop leaves anything to resolve.
       toast(
@@ -234,7 +261,12 @@ export function useStashReapplyRecovery(repoPath: string) {
       plain: req.plainMessage,
     };
     try {
-      reportAutostashOutcome(await runCompound(req.run), copy);
+      reportAutostashOutcome(await runCompound(req.run), copy, {
+        repoPath,
+        operationLabel: req.operationLabel,
+        detail: req.detail,
+        detailPreposition: req.detailPreposition,
+      });
     } catch (e) {
       if (!req.onUnhandledError?.(e)) toastError(e);
     } finally {

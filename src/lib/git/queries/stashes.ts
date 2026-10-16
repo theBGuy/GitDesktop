@@ -125,6 +125,19 @@ export function useStashDrop(repo: string) {
   );
 }
 
+/** SHA-verified drop of the autostash backup. Default whole-repo invalidation
+ *  refreshes status and stash-count, which the banner's freshness gate reads. */
+export function useDropStashBySha(repo: string) {
+  return useRepoMutation(
+    repo,
+    (sha: string) => api.gitDropStashBySha(repo, sha),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
+
 /** Dangling stash commits recovered via `git fsck` — the LAZY fsck trigger for
  *  the Stashes dialog's "Recoverable" view. `fsck` is slow, so enable this only
  *  while that view is actually shown. */

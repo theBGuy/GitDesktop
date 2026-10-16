@@ -273,6 +273,7 @@ pub fn run() {
             git::ops::git_stash_file_diff,
             git::ops::git_stash_apply,
             git::ops::git_stash_drop,
+            git::autostash::git_drop_stash_by_sha,
             git::ops::git_orphaned_stashes,
             git::ops::git_orphaned_stash_files,
             git::ops::git_orphaned_stash_file_diff,

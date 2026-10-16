@@ -15,6 +15,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -32,6 +33,7 @@ import {
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
@@ -49,6 +51,7 @@ import {
   useDiscardAll,
   useDiscardPaths,
   useForgeStatus,
+  useOpState,
   useRepoStatus,
   useStage,
   useStashAll,
@@ -74,6 +77,7 @@ import {
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
@@ -81,6 +85,7 @@ import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
+import { activeRepoOp, deriveStashBannerState } from "./conflict-banner-state";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
@@ -339,6 +344,18 @@ export function ChangesPanel({
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLElement | null>(null);
   const viewToggleRef = useRef<HTMLButtonElement>(null);
+  // A silent focus landing for a clean tree, where no toolbar renders.
+  const markerLandingRef = useRef<HTMLSpanElement>(null);
+  // Where focus goes when the banner's reapply rows unmount under it: the
+  // tree-view toggle while the toolbar is mounted, else the landing span.
+  const landingRef = useMemo(
+    () => ({
+      get current(): HTMLElement | null {
+        return viewToggleRef.current ?? markerLandingRef.current;
+      },
+    }),
+    [],
+  );
   // A cursor row a horizontal jump could not focus because the virtualizer had
   // not mounted it yet; claimed once the scroll brings it in.
   const pendingFocusKey = useRef<string | null>(null);
@@ -350,6 +367,21 @@ export function ChangesPanel({
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
+  // The banner derives the same state; reading the same helpers keeps the two
+  // in step, and op-state is the banner's own cache entry, so no extra fetch.
+  const opState = useOpState(repoPath);
+  const reapplyMarker = useStashReapplyMarker((s) => s.marker);
+  const markerRowsShown =
+    deriveStashBannerState({
+      marker: reapplyMarker,
+      repoPath,
+      opActive: activeRepoOp(opState.data) !== null,
+      conflictedCount: conflictedPaths.length,
+      statusUpdatedAt: status.dataUpdatedAt,
+      stashCount: stashCount.data,
+      stashCountUpdatedAt: stashCount.dataUpdatedAt,
+    }).state.kind !== "none";
+  useFocusOnControlsSwap(markerRowsShown, landingRef);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
 
@@ -1558,7 +1590,13 @@ export function ChangesPanel({
     // one-shot opacity fade is the existing tw-animate-css idiom, lighter than
     // wrapping this whole tree in a motion component). Reduced-motion-safe.
     <div className="flex min-h-0 flex-1 flex-col motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200">
-      <ConflictBanner repoPath={repoPath} conflictedPaths={conflictedPaths} />
+      <ConflictBanner
+        repoPath={repoPath}
+        conflictedPaths={conflictedPaths}
+        statusUpdatedAt={status.dataUpdatedAt}
+        landingRef={landingRef}
+      />
+      <span ref={markerLandingRef} tabIndex={-1} className="outline-none" />
 
       {entries.length === 0 ? (
         <ChangesEmptyState
