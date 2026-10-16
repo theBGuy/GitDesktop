@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useState } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -38,6 +39,7 @@ import {
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -92,6 +94,9 @@ export function PromoteLocalPrDialog({
   const laneHint = creatingElsewhere
     ? LANE_BLOCKED_HINT[lanePhase](prNoun)
     : null;
+  const shownPending = useRetained(pending, open);
+  const shownCreatingElsewhere = useRetained(creatingElsewhere, open);
+  const shownLaneHint = useRetained(laneHint, open);
   const creatingHintId = useId();
   // Publish pushes and opens a PR, so it holds offline rather than park — a
   // parked create would keep `pending` set, locking Cancel until reconnect.
@@ -105,6 +110,7 @@ export function PromoteLocalPrDialog({
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
+  const shownCarriedCount = useRetained(carried.length, open);
 
   /** Whether a settle may still close and navigate: its repo is the live one AND
    *  this local PR is still selected. The host keeps one `promoteOpen` state and
@@ -159,7 +165,8 @@ export function PromoteLocalPrDialog({
   }
 
   async function promote() {
-    if (refuseWhileOffline()) return;
+    // The look is retained through the close fade; this live gate adds `open`.
+    if (!open || refuseWhileOffline()) return;
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
@@ -238,7 +245,10 @@ export function PromoteLocalPrDialog({
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
       if (stillOnThisPr(live)) {
-        onOpenChange(false);
+        // Commit the close before the cleared `pending` (posting, or the
+        // observers' batched update) renders while open, or the twins retain
+        // the re-entry hint through the fade.
+        flushSync(() => onOpenChange(false));
         setLens("origin");
         selectPr({ kind: "remote", id: String(number) });
       }
@@ -284,7 +294,7 @@ export function PromoteLocalPrDialog({
       // user can't see for themselves.
       const { number, url } = created;
       const { live, away } = landedIn(repoPath);
-      if (stillOnThisPr(live)) onOpenChange(false);
+      if (stillOnThisPr(live)) flushSync(() => onOpenChange(false));
       toastComposedError({
         title: `Created ${prNoun} #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
@@ -321,9 +331,9 @@ export function PromoteLocalPrDialog({
             Pushes <span className="font-mono">{pr.head}</span> to origin and
             opens a {prNoun} into <span className="font-mono">{pr.base}</span>{" "}
             with this title and description
-            {carried.length > 0
-              ? `, and re-posts its ${carried.length} comment${
-                  carried.length === 1 ? "" : "s"
+            {shownCarriedCount > 0
+              ? `, and re-posts its ${shownCarriedCount} comment${
+                  shownCarriedCount === 1 ? "" : "s"
                 }`
               : ""}
             . The local PR is closed first, then linked to its replacement once
@@ -331,9 +341,9 @@ export function PromoteLocalPrDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
-          {laneHint && (
+          {shownLaneHint && (
             <p id={creatingHintId} className="basis-full text-xs text-warning">
-              {laneHint}
+              {shownLaneHint}
             </p>
           )}
           <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
@@ -346,20 +356,22 @@ export function PromoteLocalPrDialog({
           <DisabledReasonButton
             variant="outline"
             onClick={() => onOpenChange(false)}
-            disabled={pending}
+            disabled={shownPending}
             reason={pendingReason}
           >
             Cancel
           </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
-            disabled={pending || creatingElsewhere || !!offlineHold}
+            disabled={shownPending || shownCreatingElsewhere || !!offlineHold}
             // The lane hint already describes its own hold, so only the offline
             // arm takes a reason.
-            reason={pending || creatingElsewhere ? undefined : offlineHold}
-            aria-describedby={laneHint ? creatingHintId : undefined}
+            reason={
+              shownPending || shownCreatingElsewhere ? undefined : offlineHold
+            }
+            aria-describedby={shownLaneHint ? creatingHintId : undefined}
           >
-            {pending && <Spinner data-icon="inline-start" />}
+            {shownPending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
           </DisabledReasonButton>
         </DialogFooter>

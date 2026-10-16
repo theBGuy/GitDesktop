@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -105,6 +106,7 @@ import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
+import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -626,8 +628,10 @@ export function CreatePrDialog({
         // user has open where they are now. The generation is what `stillHere`
         // cannot see: a round trip away and back reseeds the form in THIS repo,
         // and closing then would shut the dialog holding that newer draft.
+        // The close must commit before form-core clears `isSubmitting`, or the
+        // retained render twins capture the re-entry hint through the fade.
         if (stillHere() && seedGenRef.current === submitGen)
-          onOpenChange(false);
+          flushSync(() => onOpenChange(false));
         // Draft gate: a draft PR fires no review unless the user opted into reviewing
         // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
         // pr-open directly, and an EXTERNAL ready flip rides the catch-up poller's
@@ -800,10 +804,11 @@ export function CreatePrDialog({
   // reflect the reviewer notes) and the ReviewerNotesField's seeding provenance.
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const shownSubmitting = useRetained(isSubmitting, open);
   // Why the identity controls freeze: they pick what the create targets, and the
   // push plus the forge call can run for minutes, so the picker reads as dead
   // without a reason. Null when idle, which is what re-enables the controls.
-  const identityLockReason = isSubmitting
+  const identityLockReason = shownSubmitting
     ? `Creating the ${prNoun} — the target is locked until it finishes.`
     : null;
   // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
@@ -820,6 +825,7 @@ export function CreatePrDialog({
   // be nonsense under a spinning button.
   const creatingElsewhere = lane !== undefined && !isSubmitting;
   const laneHint = lane && !isSubmitting ? laneHintFor(lane) : null;
+  const shownLaneHint = useRetained(laneHint, open);
 
   // Fork-side fallback base, mirroring the seed logic (default branch, else first
   // non-head) — reused when reconciling back from the parent target.
@@ -905,24 +911,25 @@ export function CreatePrDialog({
     creatingElsewhere ||
     Boolean(existingPr) ||
     !!offlineHold;
+  const shownSubmitBlocked = useRetained(submitBlocked, open);
   // The running draft, the running create, and offline carry a reason, ranked
   // running-first, so a flip between them never drops focus. The lane hint, the
   // duplicate notice, nothing-to-merge and the base-branch load stay plain
   // disables: each explains itself in the dialog.
   const offlineSubmit = useDisabledReason({
-    disabled: submitBlocked,
+    disabled: shownSubmitBlocked,
     reason: (() => {
       switch (true) {
         case generating:
           return AI_DRAFT_PENDING_REASON;
-        case isSubmitting:
+        case shownSubmitting:
           return ACT_PENDING_REASON;
         default:
           return offlineHold;
       }
     })(),
     title: SUBMIT_HINT,
-    describedBy: laneHint ? creatingHintId : undefined,
+    describedBy: shownLaneHint ? creatingHintId : undefined,
   });
 
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
@@ -1071,8 +1078,9 @@ export function CreatePrDialog({
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
   // the chord falls through instead of being swallowed for nothing. A running
   // create holds it like the button: the draft it would revise has been sent.
+  // The held look is retained through the close fade, so this gate adds `open`.
   const generateChord = useGenerateChord({
-    enabled: !generating && !nothingToMerge && !isSubmitting,
+    enabled: open && !generating && !nothingToMerge && !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -1086,11 +1094,12 @@ export function CreatePrDialog({
         // the form inside the Popup, so a chord pressed with focus on X would bypass
         // a form-level handler and reach the global mod+enter action. ALWAYS swallow
         // the chord here; submit only under the same gates as the SubmitButton
-        // (handleSubmit then enforces the field validators).
+        // (handleSubmit then enforces the field validators). The held look is
+        // retained through the close fade, so the live gates add `open`.
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
-            if (!submitBlocked) form.handleSubmit();
+            if (open && !submitBlocked) form.handleSubmit();
             return;
           }
           // The generate chord runs this dialog's own Generate while it's open.
@@ -1109,7 +1118,7 @@ export function CreatePrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked) return;
+            if (!open || submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -1156,7 +1165,7 @@ export function CreatePrDialog({
                       // the create's identity axes, and a submit awaits before it
                       // claims its lane, so a mid-flight change would retarget
                       // the duplicate probe away from what is being created.
-                      disabled={isSubmitting}
+                      disabled={shownSubmitting}
                       reason={identityLockReason}
                       onClick={() => setTarget(b.value)}
                     >
@@ -1210,7 +1219,7 @@ export function CreatePrDialog({
                       items={items}
                       annotations={annotations}
                       // Frozen while a submit runs — see the "Create in" picker.
-                      disabled={isSubmitting}
+                      disabled={shownSubmitting}
                       sizeToContent
                     />
                   )}
@@ -1446,9 +1455,9 @@ export function CreatePrDialog({
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={nothingToMerge || isSubmitting}
+                        disabled={nothingToMerge || shownSubmitting}
                         reason={
-                          isSubmitting
+                          shownSubmitting
                             ? CREATE_PENDING_GENERATE_REASON
                             : undefined
                         }
@@ -1456,7 +1465,7 @@ export function CreatePrDialog({
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          !nothingToMerge && !isSubmitting
+                          !nothingToMerge && !shownSubmitting
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
@@ -1512,7 +1521,7 @@ export function CreatePrDialog({
           </div>
 
           <DialogFooter className="sm:items-center">
-            {laneHint && (
+            {shownLaneHint && (
               // Why the submit is disabled. It lives here rather than in the
               // scrollable body so it can't scroll out of view, and the button
               // points `aria-describedby` at it.
@@ -1520,7 +1529,7 @@ export function CreatePrDialog({
                 id={creatingHintId}
                 className="basis-full text-xs text-warning"
               >
-                {laneHint}
+                {shownLaneHint}
               </p>
             )}
             <form.AppField name="draft">
@@ -1550,7 +1559,7 @@ export function CreatePrDialog({
                   >
                     <form.SubmitButton
                       focusableWhenDisabled={!!offlineSubmit.blockedReason}
-                      disabled={submitBlocked}
+                      disabled={shownSubmitBlocked}
                       aria-describedby={offlineSubmit.describedBy}
                       title={SUBMIT_HINT}
                       className={ARIA_DISABLED_CLASS}
