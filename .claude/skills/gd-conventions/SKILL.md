@@ -818,11 +818,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
   refspec or re-derive the validation. MCP tools push only through
-  `git_push_same_name_core` / `git_force_push_head_core` (git/remote.rs), which
-  refuse a named push that would follow a differently named upstream;
-  `git_push_core`, the GUI's follow-tracking entry, stays private to
-  `git::remote` for that reason. Refs reaching a compare-endpoint basehead
-  route through `forge::validate_compare_branch`
+  `git_push_same_name_core` (it refuses a named push onto a differently named
+  branch of a named remote) and the HEAD-only `git_force_push_head_core`
+  (git/remote.rs); `git_push_core`, the GUI's follow-tracking entry, stays
+  private to `git::remote` so no MCP tool can reach it. Refs reaching a
+  compare-endpoint basehead route through `forge::validate_compare_branch`
   (guard: check-rust-invariants check E).
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and

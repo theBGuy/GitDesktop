@@ -731,9 +731,10 @@ impl GitDesktopMcp {
         description = "Push the current branch (default) or a named local `branch` in the bound \
                        repository — pushing a named branch never switches to it or touches the \
                        working tree; an untracked branch is published with `-u`. A named branch \
-                       targets its own upstream remote (origin when it has none) unless `remote` \
-                       overrides it. A named branch that tracks a differently named branch on \
-                       that remote is refused; set_upstream: true publishes it under its own \
+                       targets its own upstream remote (origin when it has none or its upstream \
+                       is gone) unless `remote` overrides it. A named branch whose live upstream \
+                       on that remote has a different name is refused; \
+                       set_upstream: true publishes it under its own \
                        name instead. Uses git's native credential flow. Never force-pushes — use \
                        force_push (destructive) for that. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)

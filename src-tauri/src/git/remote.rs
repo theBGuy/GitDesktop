@@ -908,9 +908,10 @@ pub(crate) enum PushGuard {
 /// means anything alongside an explicit `branch` and `remote`, so any other
 /// combination is rejected rather than silently ignored.
 ///
-/// Private to this module on purpose: MCP tools push only through the refusing
-/// entries ([`git_push_same_name_core`], [`git_force_push_head_core`]), so an
-/// agent's push can never follow a differently named upstream.
+/// Private to this module on purpose: MCP tools push only through
+/// [`git_push_same_name_core`] (refuses a named push onto a differently named
+/// branch of a named remote) and [`git_force_push_head_core`] (HEAD only, so git's
+/// push.default applies), never through this follow-tracking entry.
 async fn git_push_core(
     state: &AppState,
     repo_path: String,
