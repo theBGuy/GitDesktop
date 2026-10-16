@@ -166,7 +166,7 @@ pub(crate) async fn settle(
     // Read just before the pop, which keeps the entry on a conflict. The working-tree
     // lock stops only this process's writers on this checkout from pushing in between;
     // an MCP server, a sibling worktree (refs/stash is shared) or external git could.
-    let stash_sha = stash_tip(repo).await;
+    let pre_pop = stash_tip(repo).await;
     // Substitution here, unlike the op-failure arms' combined text: a conflicted pop
     // reports on stdout alone, and a refused pop leads with stderr NAMING the blocking
     // file while its stdout is generic `status` noise (measured, git 2.51.1.windows.1).
@@ -175,28 +175,66 @@ pub(crate) async fn settle(
         Ok(out) => out.failure_text(),
         Err(err) => err.to_string(),
     };
+    // git aborts some pops without merging at all (an untracked file already in the
+    // way), leaving nothing for the user to resolve; an unreadable index answers the
+    // same way.
+    let conflicted = crate::git::ops::has_unmerged(repo).await.unwrap_or(false);
+    // git can't pop by object id, so a push landing before the pop would make it
+    // reapply (and keep) THAT entry: the sha stands only if the tip didn't move. A
+    // second external write between the pop and this re-read could still fool it.
+    let stash_sha = if conflicted {
+        kept_backup_sha(pre_pop, stash_tip(repo).await)
+    } else {
+        None
+    };
     Ok(AutostashOutcome::ReapplyConflicted {
         stderr,
-        // git aborts some pops without merging at all (an untracked file already in
-        // the way), leaving nothing for the user to resolve; an unreadable index
-        // answers the same way.
-        conflicted: crate::git::ops::has_unmerged(repo).await.unwrap_or(false),
+        conflicted,
         stash_sha,
     })
 }
 
-/// `refs/stash`'s object id, or None when it does not resolve (or the read failed).
-/// Lock-free runner: every caller holds the working-tree lock.
-async fn stash_tip(repo: &str) -> Option<String> {
+/// The backup a conflicted pop kept: the pre-pop tip, only when the post-pop tip
+/// still names it. Any failed or missing read answers None (no drop offer).
+fn kept_backup_sha(
+    pre_pop: AppResult<Option<String>>,
+    post_pop: AppResult<Option<String>>,
+) -> Option<String> {
+    match (pre_pop, post_pop) {
+        (Ok(Some(pre)), Ok(Some(post))) if pre == post => Some(pre),
+        _ => None,
+    }
+}
+
+/// `refs/stash`'s object id: `Ok(None)` only when git confirms the ref is absent,
+/// an error when the read itself failed. Lock-free runner: every caller holds the
+/// working-tree lock.
+async fn stash_tip(repo: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(repo),
         &["rev-parse", "--verify", "--quiet", "refs/stash"],
         DEFAULT_TIMEOUT,
     )
-    .await
-    .ok()?;
-    let sha = out.stdout_lossy().trim().to_string();
-    (out.code == 0 && !sha.is_empty()).then_some(sha)
+    .await?;
+    classify_stash_tip(out.code, &out.stdout_lossy(), &out.stderr)
+}
+
+/// `rev-parse --verify --quiet`: exit 0 with an id is present, exit 1 with no output
+/// is a confirmed absence, and anything else is a failed read, never "absent".
+fn classify_stash_tip(code: i32, stdout: &str, stderr: &str) -> AppResult<Option<String>> {
+    let sha = stdout.trim();
+    match (code, sha.is_empty()) {
+        (0, false) => Ok(Some(sha.to_string())),
+        (1, true) => Ok(None),
+        _ => Err(AppError::Git {
+            code,
+            stderr: if stderr.trim().is_empty() {
+                "couldn't read refs/stash".to_string()
+            } else {
+                stderr.to_string()
+            },
+        }),
+    }
 }
 
 /// Pull with the uncommitted changes stashed across the operation and reapplied
@@ -529,7 +567,8 @@ pub(crate) async fn git_drop_stash_by_sha_core(
     let domain = state.working_tree_lock(repo).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash drop").await?;
 
-    let Some(tip) = stash_tip(repo).await else {
+    // A failed read propagates: only a confirmed absence may report Gone.
+    let Some(tip) = stash_tip(repo).await? else {
         return Ok(StashDropOutcome::Gone);
     };
     if tip != sha {
@@ -1971,6 +2010,44 @@ mod tests {
                 "{bad:?}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn stash_tip_tells_a_failed_read_from_a_missing_ref() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            classify_stash_tip(0, &format!("{sha}\n"), "").unwrap(),
+            Some(sha.to_string())
+        );
+        assert_eq!(classify_stash_tip(1, "", "").unwrap(), None);
+        for (code, stdout, stderr) in [
+            (128, "", "fatal: not a git repository"),
+            (128, "", ""),
+            (0, "", ""),
+            (1, sha, ""),
+            (2, "", ""),
+            (-1, "", ""),
+        ] {
+            let err = classify_stash_tip(code, stdout, stderr).unwrap_err();
+            assert!(matches!(err, AppError::Git { .. }), "{code}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn a_kept_backup_sha_needs_the_tip_unmoved_across_the_pop() {
+        let a = || Ok(Some("a".repeat(40)));
+        let b = || Ok(Some("b".repeat(40)));
+        let failed = || Err(AppError::Command("rev-parse failed".into()));
+        assert_eq!(kept_backup_sha(a(), a()), Some("a".repeat(40)));
+        assert_eq!(
+            kept_backup_sha(a(), b()),
+            None,
+            "the pop took another entry"
+        );
+        assert_eq!(kept_backup_sha(Ok(None), a()), None);
+        assert_eq!(kept_backup_sha(a(), Ok(None)), None);
+        assert_eq!(kept_backup_sha(failed(), a()), None);
+        assert_eq!(kept_backup_sha(a(), failed()), None);
     }
 
     #[test]
