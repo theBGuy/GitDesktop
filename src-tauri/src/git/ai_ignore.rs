@@ -122,9 +122,11 @@ struct CachedNeutralRepo {
 ///
 /// Re-validated before every use: temp cleaners delete EMPTY directories, and a
 /// fresh `git init` leaves `.git/objects` and `.git/refs` empty for good, since
-/// `check-ignore` writes neither. A damaged repo is replaced at a fresh path. The
-/// lock covers only validate-or-replace; each call holds its `Arc` until git
-/// exits, so a replacement never deletes an in-flight call's repo.
+/// `check-ignore` writes neither. A damaged repo is replaced at a fresh path. A
+/// repo git rejects (exit 128) is dropped too, so the next call builds a fresh one
+/// even when the damage is something these checks cannot see. The lock covers
+/// only validate-or-replace; each call holds its `Arc` until git exits, so a
+/// replacement never deletes an in-flight call's repo.
 ///
 /// `TempDir` rather than a pid-derived name: in a shared `/tmp` a guessable path
 /// lets a local attacker pre-create `.git/info/exclude` holding `!secrets.env`,
@@ -202,6 +204,18 @@ impl NeutralRepo {
         *slot = Some(repo);
         Ok(dir)
     }
+
+    /// Drops the cached repo only while it is still `dir`: a call that ran against an
+    /// older repo must not evict the fresh one another call has built since.
+    async fn forget(&self, dir: &Arc<tempfile::TempDir>) {
+        let mut slot = self.slot.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|repo| Arc::ptr_eq(&repo.dir, dir))
+        {
+            *slot = None;
+        }
+    }
 }
 
 static NEUTRAL_REPO: NeutralRepo = NeutralRepo::new();
@@ -252,6 +266,8 @@ async fn run_check_ignore(
 
 /// [`run_check_ignore`] against a given [`NeutralRepo`], so a test can own its
 /// instance instead of sharing the process-wide static.
+/// Drops the instance's repo when git rejects it (exit 128), so the next call
+/// starts fresh.
 async fn run_check_ignore_in(
     repo: &NeutralRepo,
     repo_path: &str,
@@ -261,7 +277,11 @@ async fn run_check_ignore_in(
 ) -> AppResult<(Vec<u8>, String)> {
     let dir = repo.get().await?;
     let neutral = dir.path().to_string_lossy().into_owned();
-    run_check_ignore_in_dir(&neutral, repo_path, paths, lines, verbose).await
+    let result = run_check_ignore_in_dir(&neutral, repo_path, paths, lines, verbose).await;
+    if matches!(&result, Err(AppError::Git { code: 128, .. })) {
+        repo.forget(&dir).await;
+    }
+    result
 }
 
 /// [`run_check_ignore`]'s spawn, in a `neutral` dir the caller validated and keeps
@@ -1509,6 +1529,30 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(stdout, b"a.env\0");
+        assert_ne!(repo.get().await.unwrap().path(), old);
+    }
+
+    /// Git rejection fails the current call closed and forces a fresh repo next time.
+    #[tokio::test]
+    async fn neutral_repo_rejected_by_git_is_replaced() {
+        let (_caller, repo_path) = seed_repo("rejected").await;
+        let repo = NeutralRepo::new();
+        let old = repo.get().await.unwrap().path().to_path_buf();
+        tokio::fs::write(old.join(".git/HEAD"), "garbage\n")
+            .await
+            .unwrap();
+        let paths = [b"a.env".to_vec(), b"b.txt".to_vec()];
+
+        let result = run_check_ignore_in(&repo, &repo_path, &paths, &["*.env"], false).await;
+        assert!(
+            matches!(result, Err(AppError::Git { code: 128, .. })),
+            "expected Git exit 128, got {result:?}"
+        );
+
+        let (stdout, _) = run_check_ignore_in(&repo, &repo_path, &paths, &["*.env"], false)
+            .await
+            .unwrap();
         assert_eq!(stdout, b"a.env\0");
         assert_ne!(repo.get().await.unwrap().path(), old);
     }
