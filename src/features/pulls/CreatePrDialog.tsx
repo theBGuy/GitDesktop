@@ -619,17 +619,12 @@ export function CreatePrDialog({
           description: url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
-        // This dialog is panel-hosted under <Activity>, so the success path must
-        // only close — never setRepoTab/selectPr, which would conceal this panel
-        // mid-close and defer the close and unmount until it is next shown. Want
-        // navigation? Hoist it to RepositoryView first, like CreateLocalPrDialog.
-        // `open` is the host's ONE state across repos (a switch already closed
-        // this dialog), so a close landing off-screen would shut whatever the
-        // user has open where they are now. The generation is what `stillHere`
-        // cannot see: a round trip away and back reseeds the form in THIS repo,
-        // and closing then would shut the dialog holding that newer draft.
-        // The close must commit before form-core clears `isSubmitting`, or the
-        // retained render twins capture the re-entry hint through the fade.
+        // Close only: under <Activity>, setRepoTab/selectPr here would defer the close and
+        // unmount until the panel is next shown (hoist navigation to RepositoryView, like
+        // CreateLocalPrDialog). `open` is one host state across repos, so stillHere() and
+        // the seed generation keep a late close off another repo's or a reseeded dialog.
+        // flushSync: the close must commit before form-core clears `isSubmitting`, or the
+        // retained twins hold the re-entry hint through the fade.
         if (stillHere() && seedGenRef.current === submitGen)
           flushSync(() => onOpenChange(false));
         // Draft gate: a draft PR fires no review unless the user opted into reviewing

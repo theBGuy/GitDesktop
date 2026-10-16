@@ -1,2 +1,2 @@
-- Creating a pull request, or publishing a local one, closes its dialog without
-  a stray warning line during the closing animation.
+- Creating a pull request, or publishing a local one, keeps the dialog's text in
+  place all the way through its closing animation.
