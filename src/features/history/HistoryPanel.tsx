@@ -122,8 +122,8 @@ import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
-// The opener suffix while the log and status reads disagree: what's unpushed,
-// and which commit is HEAD, are unknown until they agree again.
+// The disabled-reason suffix while the log and status reads disagree: what's
+// unpushed, and which commit is HEAD, are unknown until they agree again.
 const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
@@ -778,11 +778,12 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   const canSquash = squashAllowed && agreed;
   // Why squash is unavailable — in particular the easy-to-miss case where a client
   // filter hides commits between the selected ones, so a range that looks adjacent
-  // in the filtered view isn't adjacent in real history. While the reads disagree
-  // the unpushed set is unknown, so the hint says history is refreshing instead.
+  // in the filtered view isn't adjacent in real history. Adjacency reads the live
+  // log either way; only the unpushed set is unknown while the reads disagree.
   const squashDisabledHint = (() => {
     if (query && !contiguousInHistory)
       return " (clear the filter — a squash range must be adjacent in history)";
+    if (!contiguousInHistory) return " (must be adjacent and unpushed)";
     if (!agreed) return HISTORY_REFRESHING_HINT;
     if (squashAllowed) return "";
     return " (must be adjacent and unpushed)";
