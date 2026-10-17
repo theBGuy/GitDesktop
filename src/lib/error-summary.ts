@@ -240,9 +240,9 @@ const CONFLICT_MARKERS = [
 ];
 
 /** Verdict literals from the Rust rollback funnels, and the frontend half of
- *  that contract: a rolled-back or rollback-failed operation is NOT paused — no
- *  banner owns it, and "resolve the conflicts, then continue" is wrong advice in
- *  both states — yet those messages append git's raw output, which the conflict
+ *  that contract: "resolve the conflicts, then continue" is wrong advice after a
+ *  rollback, which leaves nothing paused, and after a failed one, which must be
+ *  undone — yet those messages append git's raw output, which the conflict
  *  markers above would match. Read from the FIRST line only, since an unanchored
  *  literal is the same user-content hazard those markers are anchored against.
  *  `git/ops.rs` leads every such message with exactly one of these and its tests

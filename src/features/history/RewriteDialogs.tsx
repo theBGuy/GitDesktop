@@ -202,8 +202,9 @@ export function SquashDialog({
         onDone();
       } catch (e) {
         toastError(e);
-        // A failure that left the rebase in progress hands off to Changes, as a
-        // finished squash does; a clean rollback keeps the dialog open.
+        // A failure that left the rebase in progress closes the dialog and moves
+        // to Changes, where the banner owns it. A dismissed run leaves the tab
+        // alone (its user has moved on); a clean rollback keeps the dialog open.
         if (!(await leftRebaseInProgress(repoPath))) return;
         if (useUiStore.getState().repoPath !== repoPath) return;
         if (!dismissedRef.current && liveSteps.current === startedFor) {

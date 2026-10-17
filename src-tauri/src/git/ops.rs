@@ -271,8 +271,8 @@ fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
 ///
 /// A multi-commit `cherry-pick -n` that conflicts leaves the sequencer with NO
 /// `CHERRY_PICK_HEAD` (measured, git 2.51.1: `--no-commit` never writes one), so
-/// the todo's verb is the only signal for that window — the app's own
-/// squash/fixup engine creates it. An unreadable or empty todo reads as
+/// the todo's verb is the only signal for that window — a user's own
+/// multi-commit pick leaves it. An unreadable or empty todo reads as
 /// cherry-pick, matching the best-effort probes around it. Interactive rebase
 /// uses `rebase-merge/git-rebase-todo` instead, so it can never land here.
 fn sequencer_reverting(git_dir: &Path) -> Option<bool> {
