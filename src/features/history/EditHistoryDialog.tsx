@@ -60,7 +60,10 @@ import {
   moveAnnouncement,
   type RowAction,
 } from "./edit-history-plan";
-import { useGenerateSquashMessage } from "./RewriteDialogs";
+import {
+  leftRebaseInProgress,
+  useGenerateSquashMessage,
+} from "./RewriteDialogs";
 
 /** Action labels + one-line descriptions for the per-row picker. Squash and
  *  fixup carry no static hint: theirs names the commit they combine into. */
@@ -433,6 +436,17 @@ export function EditHistoryDialog({
     }
   }
 
+  // A failure that left the rebase in progress (a timed-out or interrupted run,
+  // or a rollback that couldn't abort) hands off to Changes like a paused edit;
+  // a clean rollback keeps the dialog open with the plan intact.
+  async function handOffIfLeftRebasing() {
+    if (!(await leftRebaseInProgress(repoPath))) return;
+    if (useUiStore.getState().repoPath !== repoPath) return;
+    onOpenChange(false);
+    setRepoTab("changes");
+    onDone();
+  }
+
   // Awaited rather than per-call mutation callbacks: this dialog is mounted
   // conditionally, so closing it mid-rewrite would drop the outcome — including
   // the hand-off to the Changes tab that the paused rebase depends on.
@@ -457,6 +471,7 @@ export function EditHistoryDialog({
         onDone();
       } catch (e) {
         toastError(e);
+        await handOffIfLeftRebasing();
       }
       return;
     }
@@ -475,6 +490,7 @@ export function EditHistoryDialog({
       onDone();
     } catch (e) {
       toastError(e);
+      await handOffIfLeftRebasing();
     }
   }
 

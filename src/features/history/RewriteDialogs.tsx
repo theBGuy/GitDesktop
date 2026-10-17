@@ -23,6 +23,7 @@ import { buildCommitPrompt } from "@/lib/ai/prompt";
 import { required, useAppForm } from "@/lib/form";
 import {
   gitBranchDiff,
+  gitOpState,
   gitRecentCommits,
   readRepoInstructions,
 } from "@/lib/git/api";
@@ -31,6 +32,7 @@ import type { RewriteStep } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -47,6 +49,17 @@ const EMPTY_RANGE_COPY: Record<HiddenCause, string> = {
 /** Why Generate holds while the squash runs: the message it would revise has
  *  already been sent. */
 const SQUASH_PENDING_GENERATE_REASON = "Wait for the squash to finish";
+
+/** Whether a failed rewrite left a rebase in progress (a timed-out or interrupted
+ *  run, or a rollback that couldn't abort): the banner in Changes owns it then. A
+ *  failed read counts as none, so the caller keeps its dialog open. */
+export async function leftRebaseInProgress(repoPath: string): Promise<boolean> {
+  try {
+    return (await gitOpState(repoPath)).rebasing;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Streams an AI commit message from a `base..head` diff — the commit-box
@@ -145,6 +158,7 @@ export function SquashDialog({
   onDone: () => void;
 }) {
   const rewrite = useRewriteCommits(repoPath);
+  const setRepoTab = useUiStore((s) => s.setRepoTab);
   const aiEnabled = useAiEnabled();
   const ai = useGenerateSquashMessage(repoPath, (message) =>
     form.setFieldValue("message", message),
@@ -188,6 +202,15 @@ export function SquashDialog({
         onDone();
       } catch (e) {
         toastError(e);
+        // A failure that left the rebase in progress hands off to Changes, as a
+        // finished squash does; a clean rollback keeps the dialog open.
+        if (!(await leftRebaseInProgress(repoPath))) return;
+        if (useUiStore.getState().repoPath !== repoPath) return;
+        if (!dismissedRef.current && liveSteps.current === startedFor) {
+          onOpenChange(false);
+          setRepoTab("changes");
+        }
+        onDone();
       }
     },
   });

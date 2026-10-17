@@ -70,10 +70,10 @@ const leads = (a: RowAction) => a === "pick" || a === "reword" || a === "edit";
  *
  * A squash/fixup row folds into its **leader** — the nearest kept
  * pick/reword/edit row older than it. Steps are built oldest-first; a fold
- * appends its hash to the leader's step in chronological order, so
- * `cherry-pick` replays leader-then-folds. A leader step's message encodes the
- * vocabulary: omitted → pick (cherry-pick keeps the message) or fixup (engine
- * reuses the leader's via `commit -C`); present → reword/squash (`commit -m`).
+ * appends its hash to the leader's step in chronological order, so the leader
+ * replays first and its folds after it. A leader step's message encodes the
+ * vocabulary: omitted → pick or fixup (the leader's own message); present →
+ * reword or squash (the step's message).
  * Each row's `message` supplies its own part of a combined squash message —
  * including a *pick* leader that receives a squash, which therefore shows an
  * editable message too (so its contribution isn't silently baked in invisibly).
