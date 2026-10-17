@@ -3295,31 +3295,37 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
         init_repo(&repo_s, "r.txt").await;
-        run(&repo_s, &["branch", "feature"]).await;
+        // Branch names no other test uses: the marker root override is process-wide.
+        run(&repo_s, &["branch", "rename-note-src"]).await;
 
         let identity = crate::git::repo::repo_identity(&repo_s).await.unwrap();
-        crate::review_notes::set(&identity, "feature", "look at the migration")
+        crate::review_notes::set(&identity, "rename-note-src", "look at the migration")
             .await
             .expect("deposit the note");
 
         let state = AppState::default();
-        git_rename_branch_core(&state, repo_s.clone(), "feature".into(), "renamed".into())
-            .await
-            .expect("rename succeeds");
+        git_rename_branch_core(
+            &state,
+            repo_s.clone(),
+            "rename-note-src".into(),
+            "rename-note-dst".into(),
+        )
+        .await
+        .expect("rename succeeds");
 
         assert!(
-            run(&repo_s, &["branch", "--list", "renamed"])
+            run(&repo_s, &["branch", "--list", "rename-note-dst"])
                 .await
-                .contains("renamed"),
+                .contains("rename-note-dst"),
             "the branch itself was renamed"
         );
         assert_eq!(
-            crate::review_notes::note_body(&identity, "renamed").as_deref(),
+            crate::review_notes::note_body(&identity, "rename-note-dst").as_deref(),
             Some("look at the migration"),
             "the note reads back under the new name"
         );
         assert_eq!(
-            crate::review_notes::note_body(&identity, "feature"),
+            crate::review_notes::note_body(&identity, "rename-note-src"),
             None,
             "and is gone under the old one"
         );
@@ -3334,9 +3340,10 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let repo = repo.to_string_lossy().into_owned();
         init_repo(&repo, "r.txt").await;
-        run(&repo, &["branch", "feature"]).await;
+        // Branch names no other test uses: the marker root override is process-wide.
+        run(&repo, &["branch", "rename-identity-src"]).await;
         let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
-        crate::review_notes::set(&identity, "feature", "keep this note")
+        crate::review_notes::set(&identity, "rename-identity-src", "keep this note")
             .await
             .unwrap();
         let state = AppState::default();
@@ -3346,25 +3353,31 @@ mod tests {
                 git_rename_branch_core(
                     &state,
                     repo.clone(),
-                    "feature".into(),
-                    "renamed".into(),
+                    "rename-identity-src".into(),
+                    "rename-identity-dst".into(),
                 ),
             )
             .await
             .expect("identity failure does not turn a completed rename into an error");
-        assert!(run(&repo, &["branch", "--list", "renamed"])
+        assert!(run(&repo, &["branch", "--list", "rename-identity-dst"])
             .await
-            .contains("renamed"));
-        assert!(run(&repo, &["branch", "--list", "feature"])
+            .contains("rename-identity-dst"));
+        assert!(run(&repo, &["branch", "--list", "rename-identity-src"])
             .await
             .trim()
             .is_empty());
         assert_eq!(
-            crate::review_notes::note_body(&identity, "feature").as_deref(),
+            crate::review_notes::note_body(&identity, "rename-identity-src").as_deref(),
             Some("keep this note")
         );
-        assert_eq!(crate::review_notes::note_body(&identity, "renamed"), None);
-        assert_eq!(crate::review_notes::note_body(&repo, "renamed"), None);
+        assert_eq!(
+            crate::review_notes::note_body(&identity, "rename-identity-dst"),
+            None
+        );
+        assert_eq!(
+            crate::review_notes::note_body(&repo, "rename-identity-dst"),
+            None
+        );
     }
 
     /// Both directions refused, any case, the old name first; ordinary names pass.
