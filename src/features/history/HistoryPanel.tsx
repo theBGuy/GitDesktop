@@ -122,6 +122,9 @@ import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
+// The opener suffix while the log and status reads disagree: what's unpushed,
+// and which commit is HEAD, are unknown until they agree again.
+const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
   return (
@@ -775,13 +778,13 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   const canSquash = squashAllowed && agreed;
   // Why squash is unavailable — in particular the easy-to-miss case where a client
   // filter hides commits between the selected ones, so a range that looks adjacent
-  // in the filtered view isn't adjacent in real history. Nothing when agreement
-  // alone holds it, or while the reads disagree: the unpushed set is unknown then.
+  // in the filtered view isn't adjacent in real history. While the reads disagree
+  // the unpushed set is unknown, so the hint says history is refreshing instead.
   const squashDisabledHint = (() => {
-    if (squashAllowed) return "";
     if (query && !contiguousInHistory)
       return " (clear the filter — a squash range must be adjacent in history)";
-    if (!agreed) return "";
+    if (!agreed) return HISTORY_REFRESHING_HINT;
+    if (squashAllowed) return "";
     return " (must be adjacent and unpushed)";
   })();
 
@@ -828,9 +831,16 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   // Waits for agreement like squash: a mismatch may serve a set HEAD has
   // already moved past.
   const canEditHistory = editLen >= 1 && !opInProgress && agreed;
-  const editHistoryHint = opInProgress
-    ? " (finish the operation in Changes first)"
-    : "";
+  const editHistoryHint = (() => {
+    switch (true) {
+      case opInProgress:
+        return " (finish the operation in Changes first)";
+      case !agreed:
+        return HISTORY_REFRESHING_HINT;
+      default:
+        return "";
+    }
+  })();
   // Why cherry-picking onto a branch is unavailable, in precedence order: an
   // in-flight operation (the pick's own conflict path pauses one), then a repo
   // whose every other branch is archived — offerable-looking, but not offered.
@@ -965,6 +975,7 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
           onClick={() => requestAmend(commit.hash)}
         >
           Amend commit…
+          {menuIndex === 0 && !isHead && HISTORY_REFRESHING_HINT}
         </ContextMenuItem>
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}
@@ -972,6 +983,7 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
           onClick={undoLast}
         >
           Undo commit (keep changes)
+          {menuIndex === 0 && !isHead && HISTORY_REFRESHING_HINT}
         </ContextMenuItem>
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}

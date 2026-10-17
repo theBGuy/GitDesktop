@@ -65,9 +65,9 @@ function resolve(over) {
 
 /** The hashes a view marks unpushed. */
 const unpushed = (view) => hashes(view.commits.slice(0, view.count));
-/** What the panel derived before the gate: the live log sliced by the live
- *  count, whatever HEAD each read saw. */
-const preFix = (commits, count) => hashes(commits.slice(0, count));
+/** The live log sliced by the live count, with no HEAD gate, whatever HEAD
+ *  each read saw. */
+const ungated = (commits, count) => hashes(commits.slice(0, count));
 
 test("headAgrees: only a present log head equal to a present oid", () => {
   assert.equal(headAgrees("abc", "abc"), true);
@@ -135,14 +135,14 @@ test("status-first mismatch serves the lineage-valid snapshot", () => {
     snapshot: snap(OLD_LOG, 2),
   });
   assert.deepEqual(unpushed(view), ["U2", "U1"]);
-  assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 3));
+  assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 3));
   const range = deriveEditRange(view.commits, view.count, view.hasNextPage);
   assert.deepEqual(hashes(range.editCommits), ["U2", "U1"]);
   assert.equal(range.editBase, "C1");
   assert.notDeepStrictEqual(
     hashes(range.editCommits),
     hashes(deriveEditRange(OLD_LOG, 3, false).editCommits),
-    "the pre-fix range lists the pushed C1 as editable",
+    "the ungated range lists the pushed C1 as editable",
   );
 });
 
@@ -164,7 +164,7 @@ test("log-first: commits added on top fall to the zero arm", () => {
     ["U2", "U1"],
     "the snapshot whose head is merely present below the log's head",
   );
-  assert.notDeepStrictEqual(unpushed(view), preFix(NEW_LOG, 2));
+  assert.notDeepStrictEqual(unpushed(view), ungated(NEW_LOG, 2));
 });
 
 test("a foreign-repo snapshot falls to the zero arm", () => {
@@ -177,7 +177,7 @@ test("a foreign-repo snapshot falls to the zero arm", () => {
   });
   assert.strictEqual(view.count, 0);
   assert.deepEqual(unpushed(view), []);
-  assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 3));
+  assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 3));
   assert.notDeepStrictEqual(unpushed(view), ["U2", "U1"]);
 });
 
@@ -193,8 +193,8 @@ test("a lineage break (snapshot head gone from the log) falls to zero", () => {
   });
   assert.strictEqual(view.count, 0);
   assert.deepEqual(unpushed(view), []);
-  assert.notDeepStrictEqual(unpushed(view), preFix(orphaned, 2));
-  assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 2));
+  assert.notDeepStrictEqual(unpushed(view), ungated(orphaned, 2));
+  assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 2));
 });
 
 test("a branch change (detached included) falls to zero", () => {
@@ -215,7 +215,7 @@ test("a branch change (detached included) falls to zero", () => {
     assert.strictEqual(view.count, 0, label);
     assert.deepEqual(unpushed(view), [], label);
     assert.notDeepStrictEqual(unpushed(view), ["U2", "U1"], label);
-    assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 3), label);
+    assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 3), label);
   }
 });
 
@@ -229,7 +229,7 @@ test("a detached HEAD on both sides still serves its snapshot", () => {
     snapshot: snap(OLD_LOG, 2, { branch: null }),
   });
   assert.deepEqual(unpushed(view), ["U2", "U1"]);
-  assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 3));
+  assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 3));
 });
 
 test("commit+push cap: upstream mode trims a snapshot status has outrun", () => {
@@ -250,7 +250,7 @@ test("commit+push cap: upstream mode trims a snapshot status has outrun", () => 
   // A plain outside commit keeps the whole snapshot.
   const plain = resolve({ ...over, liveAhead: 3, count: 3 });
   assert.deepEqual(unpushed(plain), ["U2", "U1"]);
-  assert.notDeepStrictEqual(unpushed(plain), preFix(OLD_LOG, 3));
+  assert.notDeepStrictEqual(unpushed(plain), ungated(OLD_LOG, 3));
   // No-upstream mode's count is its own read: no cap.
   const noUpstream = resolve({
     ...over,
@@ -312,7 +312,7 @@ test("a mismatched first render seeds nothing and marks nothing", () => {
     snapshot: seeded,
   });
   assert.strictEqual(view.count, 0);
-  assert.notDeepStrictEqual(unpushed(view), preFix(OLD_LOG, 3));
+  assert.notDeepStrictEqual(unpushed(view), ungated(OLD_LOG, 3));
   assert.equal(deriveEditRange(view.commits, view.count, false).editLen, 0);
 });
 
@@ -448,7 +448,7 @@ function step(state, input) {
   return {
     key: hashes(range.editCommits).join(),
     base: range.editBase,
-    preFix: hashes(
+    ungated: hashes(
       deriveEditRange(input.commits, input.count, false).editCommits,
     ).join(),
   };
@@ -495,13 +495,13 @@ test("an outside commit changes the editable set exactly once (upstream)", () =>
   );
   assert.notEqual(
     steps[1].key,
-    steps[1].preFix,
-    "pre-fix listed the pushed C1",
+    steps[1].ungated,
+    "ungated listed the pushed C1",
   );
   assert.equal(
-    changes(steps.map((s) => s.preFix)),
+    changes(steps.map((s) => s.ungated)),
     2,
-    "pre-fix reseeded twice",
+    "ungated reseeded twice",
   );
 });
 
@@ -552,8 +552,8 @@ test("no upstream: a count older than the moved log never pairs with it", () => 
   assert.notEqual(steps[2].key, "U2,U1", "the snapshot would drop N");
   assert.notEqual(
     steps[2].key,
-    steps[2].preFix,
-    "pre-fix paired the new log with a count older than it",
+    steps[2].ungated,
+    "ungated paired the new log with a count older than it",
   );
 });
 
