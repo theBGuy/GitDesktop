@@ -55,7 +55,13 @@ export type IssueWriteKind =
   | "dependency"
   | "pin"
   | "lock"
-  | "unlock";
+  | "unlock"
+  | "comment"
+  | "close"
+  | "reopen"
+  | "transfer"
+  | "delete"
+  | "delete-comment";
 
 /** Each issue write's variables. One type for the mutations' generics AND the
  *  pending scan's casts, so a drifted field fails to compile instead of silently
@@ -84,6 +90,14 @@ export type IssueWriteVars = {
   lock: { number: number; reason: api.LockReason | null };
   /** The issue number, bare. */
   unlock: number;
+  comment: { number: number; body: string; author: string; asBot?: boolean };
+  close: { number: number; reason: string };
+  /** The issue number, bare. */
+  reopen: number;
+  transfer: { number: number; destination: string };
+  /** The issue number, bare. */
+  delete: number;
+  "delete-comment": { number: number; commentId: string };
 };
 
 /** Filter prefix for EVERY issue write ({@link issueWriteKey}). */
@@ -964,11 +978,12 @@ export function useCloseIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (args: { number: number; reason: string }) =>
+    (args: IssueWriteVars["close"]) =>
       api.forgeIssueClose(repo, args.number, args.reason, lens),
     (args) => args.number,
     // State + close reason are the card glyph and its screen-reader word.
     true,
+    issueWriteKey("close", repo),
   );
 }
 
@@ -976,10 +991,12 @@ export function useReopenIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (number: number) => api.forgeIssueReopen(repo, number, lens),
+    (number: IssueWriteVars["reopen"]) =>
+      api.forgeIssueReopen(repo, number, lens),
     (number) => number,
     // Back to the open glyph, and REOPENED lands as the state reason.
     true,
+    issueWriteKey("reopen", repo),
   );
 }
 
@@ -999,11 +1016,12 @@ export function useTransferIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (args: { number: number; destination: string }) =>
+    (args: IssueWriteVars["transfer"]) =>
       api.forgeIssueTransfer(repo, args.number, args.destination, lens),
     (args) => args.number,
     // A transfer re-homes the item: its number and owning repo both change.
     true,
+    issueWriteKey("transfer", repo),
   );
 }
 
@@ -1011,10 +1029,12 @@ export function useDeleteIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (number: number) => api.forgeIssueDelete(repo, number, lens),
+    (number: IssueWriteVars["delete"]) =>
+      api.forgeIssueDelete(repo, number, lens),
     (number) => number,
     // A deleted issue leaves the board entirely.
     true,
+    issueWriteKey("delete", repo),
   );
 }
 

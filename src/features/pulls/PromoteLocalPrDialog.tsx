@@ -76,41 +76,64 @@ export function PromoteLocalPrDialog({
   const forgeViewLabel = forge.data ? `View on ${remoteLabel}` : undefined;
   const prNoun = isGitLab ? "merge request" : "pull request";
   const [draft, setDraft] = useState(false);
-  const [posting, setPosting] = useState(false);
-  const pending = createPr.isPending || update.isPending || posting;
+  // The publish in flight, set for its whole run (comment carry included): its
+  // repo and local PR, since the host reuses this dialog across local PRs, and
+  // the comment count it carries, which the dialog keeps showing while its
+  // back-link lands. Any other PR's dialog holds only its Publish.
+  const [pendingPub, setPendingPub] = useState<{
+    repo: string;
+    prId: string;
+    count: number;
+  } | null>(null);
+  const ownPub =
+    pendingPub !== null &&
+    pendingPub.repo === repoPath &&
+    pendingPub.prId === pr.id
+      ? pendingPub
+      : null;
+  // Repo-blind on purpose: one slot tracks one run, and the hold copy stays true
+  // wherever it shows.
+  const otherPublishing = pendingPub !== null && ownPub === null;
   // Shares the PR-create lane with CreatePrDialog: both push the same head and
   // open a PR for it, so either one holding the lane blocks the other (and
   // paints the same strip above the panels). The lane guards through the whole
   // catch-up window after the forge answers, not just while the call runs, so
   // the hint reads the PHASE — non-null exactly while the lane still blocks,
-  // which a guard-released hold does not. `!pending` narrows to the RE-ENTRY
-  // case: promote claims the lane synchronously, so a phase is
-  // also present during this dialog's own run, where `pending` is what to show —
-  // up to a cross-repo navigation that re-renders this view in place, which
-  // detaches both pinned mutations (the create and the local close): `pending`
-  // goes idle while the promote runs on, and the phase read is the new repo's.
+  // which a guard-released hold does not. `ownPub === null` narrows it to the
+  // RE-ENTRY case: promote claims the lane synchronously, so a phase is also
+  // present during this dialog's own run, where the own slot is what to show.
+  // A repo switch normally unmounts the host view and drops the slot, so a
+  // return mid-publish is expected to land here: the lane holds Publish with
+  // Cancel live and no own spinner, and the paused copy can't show (the pinned
+  // create's observer detached).
   const lanePhase = usePrCreatePhase(repoPath, pr.head);
-  const creatingElsewhere = lanePhase !== null && !pending;
+  const creatingElsewhere = lanePhase !== null && ownPub === null;
   const laneHint = creatingElsewhere
     ? LANE_BLOCKED_HINT[lanePhase](prNoun)
     : null;
-  const shownPending = useRetained(pending, open);
+  const shownPending = useRetained(ownPub !== null, open);
+  const shownOtherPublishing = useRetained(otherPublishing, open);
   const shownCreatingElsewhere = useRetained(creatingElsewhere, open);
   const shownLaneHint = useRetained(laneHint, open);
   const creatingHintId = useId();
   // Publish pushes and opens a PR, so it holds offline rather than park — a
-  // parked create would keep `pending` set, locking Cancel until reconnect.
+  // parked create would keep the run's slot set, locking Cancel until reconnect.
   const offlineHold = useOfflineHold();
-  // Why Cancel holds during this dialog's own run: a create that parks anyway
-  // (the connection dropped after the press) says it is waiting, not running.
-  const pendingReason = pendingWriteReason(
-    createPr.isPaused,
-    `Creating the ${prNoun}…`,
-  );
+  // Why Cancel and Publish hold during this dialog's own run: a create that parks
+  // anyway (the connection dropped after the press) says it is waiting, not running.
+  const pendingReason =
+    ownPub === null
+      ? undefined
+      : pendingWriteReason(createPr.isPaused, `Creating the ${prNoun}…`);
+  const shownPendingReason = useRetained(pendingReason, open);
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
-  const shownCarriedCount = useRetained(carried.length, open);
+  // While this PR's run is in flight, the count is the one it carries.
+  const shownCarriedCount = useRetained(
+    ownPub ? ownPub.count : carried.length,
+    open,
+  );
 
   /** Whether a settle may still close and navigate: its repo is the live one AND
    *  this local PR is still selected. The host keeps one `promoteOpen` state and
@@ -165,8 +188,9 @@ export function PromoteLocalPrDialog({
   }
 
   async function promote() {
-    // The look is retained through the close fade; this live gate adds `open`.
-    if (!open || refuseWhileOffline()) return;
+    // The look is retained through the close fade; these live gates add `open`
+    // and one run at a time, since `pendingPub` holds a single run.
+    if (!open || pendingPub !== null || refuseWhileOffline()) return;
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
@@ -195,6 +219,7 @@ export function PromoteLocalPrDialog({
     // Track it so the catch can disclose instead of re-running.
     let created: { number: number; url: string } | null = null;
     let failedStep = "linking the local pull request";
+    setPendingPub({ repo: repoPath, prId: pr.id, count: carried.length });
     try {
       // Closed before the create: the local close lands even offline, so a
       // connection lost mid-flow can't leave this PR open beside its successor.
@@ -220,13 +245,8 @@ export function PromoteLocalPrDialog({
       );
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
-      setPosting(true);
-      try {
-        for (const c of carried) {
-          await forgePrComment(repoPath, number, c.body, undefined, "origin");
-        }
-      } finally {
-        setPosting(false);
+      for (const c of carried) {
+        await forgePrComment(repoPath, number, c.body, undefined, "origin");
       }
       // One read for both halves: the toast is unconditional and names the repo
       // when it isn't the one on screen, while the navigation below only lands
@@ -245,9 +265,9 @@ export function PromoteLocalPrDialog({
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
       if (stillOnThisPr(live)) {
-        // Commit the close before the cleared `pending` (posting, or the
-        // observers' batched update) renders while open, or the twins retain
-        // the re-entry hint through the fade.
+        // A settle's close must commit before the finally's `setPendingPub(null)`
+        // renders while open, or the twins retain the re-entry hint through the
+        // fade.
         flushSync(() => onOpenChange(false));
         setLens("origin");
         selectPr({ kind: "remote", id: String(number) });
@@ -302,6 +322,7 @@ export function PromoteLocalPrDialog({
         duration: 10000,
       });
     } finally {
+      setPendingPub(null);
       // The lane is also the duplicate-create admission guard, so the watcher
       // arms only once this flow's last step is done — armed at the forge's
       // answer, a fast list refetch could settle it mid-carry-over and a
@@ -321,6 +342,23 @@ export function PromoteLocalPrDialog({
       }
     }
   }
+
+  const publishReason = (() => {
+    switch (true) {
+      case shownPending:
+        return shownPendingReason;
+      // The lane hint describes its own hold (aria-describedby below), and
+      // outranks offline.
+      case shownCreatingElsewhere:
+        return undefined;
+      case !!offlineHold:
+        return offlineHold;
+      case shownOtherPublishing:
+        return "Another local pull request is still being published.";
+      default:
+        return undefined;
+    }
+  })();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -357,18 +395,19 @@ export function PromoteLocalPrDialog({
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={shownPending}
-            reason={pendingReason}
+            reason={shownPendingReason}
           >
             Cancel
           </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
-            disabled={shownPending || shownCreatingElsewhere || !!offlineHold}
-            // The lane hint already describes its own hold, so only the offline
-            // arm takes a reason.
-            reason={
-              shownPending || shownCreatingElsewhere ? undefined : offlineHold
+            disabled={
+              shownPending ||
+              shownOtherPublishing ||
+              shownCreatingElsewhere ||
+              !!offlineHold
             }
+            reason={publishReason}
             aria-describedby={shownLaneHint ? creatingHintId : undefined}
           >
             {shownPending && <Spinner data-icon="inline-start" />}

@@ -14,6 +14,7 @@ import {
   useOptimisticCacheMutation,
   useRepoMutation,
 } from "./internal";
+import { type PendingRepoWrite, pendingWriteMatching } from "./issues";
 import {
   type DiscussionUpvoteVars,
   pendingDiscussionUpvoteFor,
@@ -104,23 +105,26 @@ export function useCreateDiscussion(repo: string) {
 export function useAddDiscussionComment(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { discussionId: string; body: string; replyToId?: string | null }) =>
+    (args: DiscussionWriteVars["add-comment"]) =>
       api.ghDiscussionAddComment(
         repo,
         args.discussionId,
         args.body,
         args.replyToId ?? null,
       ),
+    { identity: discussionWriteKey("add-comment", repo) },
   );
 }
 
 export function useMarkDiscussionAnswer(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { commentId: string; answer: boolean }) =>
+    // `discussionId` rides along only for the pending read; the API keys on the comment.
+    (args: DiscussionWriteVars["mark-answer"]) =>
       args.answer
         ? api.ghDiscussionMarkAnswer(repo, args.commentId)
         : api.ghDiscussionUnmarkAnswer(repo, args.commentId),
+    { identity: discussionWriteKey("mark-answer", repo) },
   );
 }
 
@@ -131,8 +135,12 @@ export function useUpdateDiscussionComment(repo: string) {
 }
 
 export function useDeleteDiscussionComment(repo: string) {
-  return useRepoMutation(repo, (commentId: string) =>
-    api.ghDiscussionDeleteComment(repo, commentId),
+  return useRepoMutation(
+    repo,
+    // `discussionId` rides along only for the pending read; the API keys on the comment.
+    (args: DiscussionWriteVars["delete-comment"]) =>
+      api.ghDiscussionDeleteComment(repo, args.commentId),
+    { identity: discussionWriteKey("delete-comment", repo) },
   );
 }
 
@@ -214,7 +222,15 @@ export function usePendingDiscussionUpvote(
 }
 
 /** The discussion writes whose pending state a view reads back from the cache. */
-export type DiscussionWriteKind = "lock" | "unlock";
+export type DiscussionWriteKind =
+  | "lock"
+  | "unlock"
+  | "close"
+  | "reopen"
+  | "delete"
+  | "add-comment"
+  | "mark-answer"
+  | "delete-comment";
 
 /** Each discussion write's variables, shared by the mutation's generic and the
  *  pending scan's cast. */
@@ -222,6 +238,18 @@ export type DiscussionWriteVars = {
   lock: { discussionId: string; reason: api.DiscussionLockReason | null };
   /** The discussion's node id, bare. */
   unlock: string;
+  close: { discussionId: string; reason: api.DiscussionCloseReason };
+  /** The discussion's node id, bare. */
+  reopen: string;
+  /** The discussion's node id, bare. */
+  delete: string;
+  "add-comment": {
+    discussionId: string;
+    body: string;
+    replyToId?: string | null;
+  };
+  "mark-answer": { discussionId: string; commentId: string; answer: boolean };
+  "delete-comment": { discussionId: string; commentId: string };
 };
 
 /** Filter prefix for EVERY discussion write ({@link discussionWriteKey}). */
@@ -231,6 +259,13 @@ export const DISCUSSION_WRITES_FAMILY = "discussion-write";
  *  pending write across a discussion switch; the discussion rides the variables. */
 export const discussionWriteKey = (kind: DiscussionWriteKind, repo: string) =>
   [DISCUSSION_WRITES_FAMILY, kind, repo] as const;
+
+/** {@link pendingWriteMatching} over the discussion family, typed per kind. */
+export const pendingDiscussionWrite = <K extends DiscussionWriteKind>(
+  writes: readonly PendingRepoWrite[],
+  kind: K,
+  match: (vars: DiscussionWriteVars[K]) => boolean,
+) => pendingWriteMatching(writes, kind, match);
 
 export function useLockDiscussion(repo: string) {
   return useRepoMutation(
@@ -253,20 +288,27 @@ export function useUnlockDiscussion(repo: string) {
 export function useCloseDiscussion(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { discussionId: string; reason: api.DiscussionCloseReason }) =>
+    (args: DiscussionWriteVars["close"]) =>
       api.ghDiscussionClose(repo, args.discussionId, args.reason),
+    { identity: discussionWriteKey("close", repo) },
   );
 }
 
 export function useReopenDiscussion(repo: string) {
-  return useRepoMutation(repo, (discussionId: string) =>
-    api.ghDiscussionReopen(repo, discussionId),
+  return useRepoMutation(
+    repo,
+    (discussionId: DiscussionWriteVars["reopen"]) =>
+      api.ghDiscussionReopen(repo, discussionId),
+    { identity: discussionWriteKey("reopen", repo) },
   );
 }
 
 export function useDeleteDiscussion(repo: string) {
-  return useRepoMutation(repo, (discussionId: string) =>
-    api.ghDiscussionDelete(repo, discussionId),
+  return useRepoMutation(
+    repo,
+    (discussionId: DiscussionWriteVars["delete"]) =>
+      api.ghDiscussionDelete(repo, discussionId),
+    { identity: discussionWriteKey("delete", repo) },
   );
 }
 

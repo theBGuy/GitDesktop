@@ -3724,6 +3724,55 @@ function settleStatusUpdates(queryClient: QueryClient, args: StatusWriteScope) {
   });
 }
 
+/** One pending status write on a project, as the editor dialog holds by it. */
+export interface PendingStatusUpdateWrite {
+  kind: "create" | "update" | "delete";
+  /** The entry an update or delete targets; null for a create. */
+  statusUpdateId: string | null;
+  paused: boolean;
+}
+
+const NO_STATUS_WRITES: PendingStatusUpdateWrite[] = [];
+
+/** Which status write a mutation's variables describe: an entry id with content is
+ *  an update, an id without content a delete, content without an id a create.
+ *  Anything else reads as none, so it holds nothing. */
+function statusWriteOf(
+  vars: Record<string, unknown>,
+): Pick<PendingStatusUpdateWrite, "kind" | "statusUpdateId"> | null {
+  const id = vars.statusUpdateId;
+  const hasContent = typeof vars.content === "object" && vars.content !== null;
+  if (typeof id === "string")
+    return { kind: hasContent ? "update" : "delete", statusUpdateId: id };
+  return hasContent ? { kind: "create", statusUpdateId: null } : null;
+}
+
+/**
+ * The status writes pending on `projectId` in `repo`, read off the mutation cache
+ * so the editor dialog holds the project its write targets, never whichever one
+ * the panel shows when the hook's observer last fired. The variables are
+ * `typeof`-guarded: the filter sees `Mutation<any>`.
+ */
+export function usePendingStatusUpdateWrites(
+  repo: string,
+  projectId: string,
+): PendingStatusUpdateWrite[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      cache
+        .findAll({ mutationKey: STATUS_WRITE_KEY, status: "pending" })
+        .flatMap((m): PendingStatusUpdateWrite[] => {
+          if (!writesScope(m, { repo, projectId })) return [];
+          const write = statusWriteOf(
+            m.state.variables as Record<string, unknown>,
+          );
+          return write ? [{ ...write, paused: m.state.isPaused }] : [];
+        }),
+    [repo, projectId],
+  );
+  return useMutationCacheSnapshot(select, NO_STATUS_WRITES);
+}
+
 /**
  * Posts a status update, OPTIMISTIC: a placeholder entry leads the history at
  * once, and GitHub's answer replaces it — the real id is what makes Edit and

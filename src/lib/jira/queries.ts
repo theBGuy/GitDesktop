@@ -55,13 +55,56 @@ import type {
 
 const jiraLinkKey = (repo: string) => ["jira-link", repo] as const;
 
-/** The Jira writes whose pending state a rail row reads back from the cache. */
-export type JiraWriteKind = "due-date";
+/** The Jira writes whose pending state the issue view reads back from the cache. */
+export type JiraWriteKind =
+  | "due-date"
+  | "comment"
+  | "comment-edit"
+  | "comment-delete"
+  | "transition"
+  | "transition-to"
+  | "assign"
+  | "set-priority"
+  | "set-labels"
+  | "log-work"
+  | "update-worklog"
+  | "delete-worklog"
+  | "set-original-estimate"
+  | "set-remaining-estimate";
 
 /** Each Jira write's variables, shared by the mutation's generic and the pending
- *  scan's cast. */
+ *  scan's cast. Every one carries `issueKey`, which the view's holds match on. */
 export type JiraWriteVars = {
   "due-date": { issueKey: string; dueDate: string | null };
+  comment: { issueKey: string; bodyMd: string };
+  "comment-edit": { issueKey: string; commentId: string; bodyMd: string };
+  "comment-delete": { issueKey: string; commentId: string };
+  transition: { issueKey: string; direction: JiraTransitionDirection };
+  "transition-to": {
+    issueKey: string;
+    transitionId: string;
+    toStatusName: string;
+    toStatusCategory: JiraStatusCategory;
+  };
+  /** Keyed for family completeness: no view reads its pending state yet. */
+  assign: { issueKey: string; assignee: ForgeUserRef | null };
+  "set-priority": {
+    issueKey: string;
+    priorityId: string;
+    priorityName: string;
+  };
+  /** Keyed for family completeness: no view reads its pending state yet. */
+  "set-labels": { issueKey: string; labels: string[] };
+  "log-work": { issueKey: string; timeSpent: string; commentMd?: string };
+  "update-worklog": {
+    issueKey: string;
+    worklogId: string;
+    timeSpent: string;
+    commentMd?: string | null;
+  };
+  "delete-worklog": { issueKey: string; worklogId: string };
+  "set-original-estimate": { issueKey: string; estimate: string | null };
+  "set-remaining-estimate": { issueKey: string; estimate: string | null };
 };
 
 /** Filter prefix for EVERY Jira write ({@link jiraWriteKey}); disjoint from the
@@ -358,8 +401,8 @@ export function useJiraComment(
     // Pinned: the call and the settle invalidation close over `repo`/the link's
     // site, and the issue view survives a repo switch — without the key the
     // newly-live repo's controls would read the pending comment as busy.
-    mutationKey: ["jira-comment", repo, link?.siteHost ?? null],
-    mutationFn: (args: { issueKey: string; bodyMd: string }) =>
+    mutationKey: [...jiraWriteKey("comment", repo), link?.siteHost ?? null],
+    mutationFn: (args: JiraWriteVars["comment"]) =>
       jiraIssueComment((link as JiraLink).siteHost, args.issueKey, args.bodyMd),
     // The seed's repo and site are captured at mutate time instead, like every
     // settle-time cache write here.
@@ -492,10 +535,8 @@ export function useJiraTransition(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueKey: string;
-      direction: JiraTransitionDirection;
-    }) =>
+    mutationKey: jiraWriteKey("transition", repo),
+    mutationFn: (args: JiraWriteVars["transition"]) =>
       jiraIssueTransition(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -538,12 +579,8 @@ export function useJiraTransitionTo(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueKey: string;
-      transitionId: string;
-      toStatusName: string;
-      toStatusCategory: JiraStatusCategory;
-    }) =>
+    mutationKey: jiraWriteKey("transition-to", repo),
+    mutationFn: (args: JiraWriteVars["transition-to"]) =>
       jiraIssueTransitionTo(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -577,7 +614,8 @@ export function useJiraTransitionTo(
 export function useJiraAssign(repo: string, link: JiraLink | null | undefined) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; assignee: ForgeUserRef | null }) =>
+    mutationKey: jiraWriteKey("assign", repo),
+    mutationFn: (args: JiraWriteVars["assign"]) =>
       jiraIssueAssign(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -738,11 +776,8 @@ export function useJiraSetPriority(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueKey: string;
-      priorityId: string;
-      priorityName: string;
-    }) =>
+    mutationKey: jiraWriteKey("set-priority", repo),
+    mutationFn: (args: JiraWriteVars["set-priority"]) =>
       jiraIssueSetPriority(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -773,7 +808,8 @@ export function useJiraSetLabels(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; labels: string[] }) =>
+    mutationKey: jiraWriteKey("set-labels", repo),
+    mutationFn: (args: JiraWriteVars["set-labels"]) =>
       jiraIssueSetLabels(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -809,12 +845,11 @@ export function useJiraCommentEdit(
     // site, and the issue view survives a repo switch — without the key the
     // newly-live repo's controls would read the pending edit as busy. The
     // rollback and the seed read the context.
-    mutationKey: ["jira-comment-edit", repo, link?.siteHost ?? null],
-    mutationFn: (args: {
-      issueKey: string;
-      commentId: string;
-      bodyMd: string;
-    }) =>
+    mutationKey: [
+      ...jiraWriteKey("comment-edit", repo),
+      link?.siteHost ?? null,
+    ],
+    mutationFn: (args: JiraWriteVars["comment-edit"]) =>
       jiraCommentEdit(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -870,7 +905,12 @@ export function useJiraCommentDelete(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; commentId: string }) =>
+    // The trailing site scopes the hold across a relink, like the comment writes.
+    mutationKey: [
+      ...jiraWriteKey("comment-delete", repo),
+      link?.siteHost ?? null,
+    ],
+    mutationFn: (args: JiraWriteVars["comment-delete"]) =>
       jiraCommentDelete(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -938,7 +978,7 @@ export function useJiraCreateIssue(
 // initializes remaining, clearing an original while worklogs exist snaps original :=
 // remaining. Those derivations can't be reconstructed client-side, so these five mutations
 // are deliberately NON-optimistic: `invalidateJiraIssue` on settle re-fetches server truth
-// and the mutation's own `isPending` drives the busy state.
+// and the issue's pending writes in the cache drive the busy state.
 
 /** Set/clear the issue's original estimate. Non-optimistic (server-derived) —
  *  see the section note above. */
@@ -948,7 +988,8 @@ export function useJiraSetOriginalEstimate(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; estimate: string | null }) =>
+    mutationKey: jiraWriteKey("set-original-estimate", repo),
+    mutationFn: (args: JiraWriteVars["set-original-estimate"]) =>
       jiraIssueSetOriginalEstimate(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -966,7 +1007,8 @@ export function useJiraSetRemainingEstimate(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; estimate: string | null }) =>
+    mutationKey: jiraWriteKey("set-remaining-estimate", repo),
+    mutationFn: (args: JiraWriteVars["set-remaining-estimate"]) =>
       jiraIssueSetRemainingEstimate(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -985,11 +1027,8 @@ export function useJiraLogWork(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueKey: string;
-      timeSpent: string;
-      commentMd?: string;
-    }) =>
+    mutationKey: jiraWriteKey("log-work", repo),
+    mutationFn: (args: JiraWriteVars["log-work"]) =>
       jiraWorklogAdd(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -1010,12 +1049,8 @@ export function useJiraUpdateWorklog(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueKey: string;
-      worklogId: string;
-      timeSpent: string;
-      commentMd?: string | null;
-    }) =>
+    mutationKey: jiraWriteKey("update-worklog", repo),
+    mutationFn: (args: JiraWriteVars["update-worklog"]) =>
       jiraWorklogUpdate(
         (link as JiraLink).siteHost,
         args.issueKey,
@@ -1036,7 +1071,8 @@ export function useJiraDeleteWorklog(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueKey: string; worklogId: string }) =>
+    mutationKey: jiraWriteKey("delete-worklog", repo),
+    mutationFn: (args: JiraWriteVars["delete-worklog"]) =>
       jiraWorklogDelete(
         (link as JiraLink).siteHost,
         args.issueKey,

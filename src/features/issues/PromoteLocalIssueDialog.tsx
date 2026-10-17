@@ -129,18 +129,23 @@ export function PromoteLocalIssueDialog({
 
   // The promote in flight: its destination and carried comment count, which its
   // dialog keeps showing while the shared toggles change or its back-link lands,
-  // and its issue, since the host reuses this dialog across local issues.
+  // and its repo and issue, since the host reuses this dialog across local issues.
   const [pendingPub, setPendingPub] = useState<{
     to: Destination;
+    repo: string;
     issueId: string;
     count: number;
   } | null>(null);
   const ownPub =
-    pendingPub !== null && pendingPub.issueId === issue.id ? pendingPub : null;
+    pendingPub !== null &&
+    pendingPub.repo === repoPath &&
+    pendingPub.issueId === issue.id
+      ? pendingPub
+      : null;
   const ownPendingTo = ownPub?.to ?? null;
-  // Any other issue's dialog holds only its Publish.
-  const otherPublishing =
-    pendingPub !== null && pendingPub.issueId !== issue.id;
+  // Any other issue's dialog holds only its Publish. Repo-blind on purpose: one
+  // slot tracks one run, and the hold copy stays true wherever it shows.
+  const otherPublishing = pendingPub !== null && ownPub === null;
   // Both destinations hold offline rather than park: the local issue closes
   // before the create, so a parked create lost to an app quit would strand it
   // closed with no successor. A create that parks anyway (the connection dropped
@@ -406,6 +411,7 @@ export function PromoteLocalIssueDialog({
     if (!open || pendingPub !== null || refuseWhileOffline()) return;
     setPendingPub({
       to: destination,
+      repo: repoPath,
       issueId: issue.id,
       count: carried.length,
     });

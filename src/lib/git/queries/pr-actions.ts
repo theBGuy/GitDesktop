@@ -24,6 +24,7 @@ import {
   useOptimisticCacheMutation,
   useRepoMutation,
 } from "./internal";
+import { type IssueWriteVars, issueWriteKey } from "./issues";
 import {
   LOCAL_PR_WRITES_KEY,
   type PendingLocalPrWrite,
@@ -261,6 +262,7 @@ export function useUnrequestChangesPr(repo: string) {
 export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: prWriteKey("discard-review", repo),
     mutationFn: (args: { number: number; reviewId: string }) =>
       api.ghPrDiscardPendingReview(repo, args.reviewId),
     onMutate: async (args) => {
@@ -703,6 +705,7 @@ function useOptimisticCommentMutation<
   lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
+  mutationKey?: QueryKey,
 ) {
   return useOptimisticCacheMutation<TArgs, TData, PrDetails | IssueDetails>(
     mutationFn,
@@ -719,6 +722,7 @@ function useOptimisticCommentMutation<
           }
         : d,
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    mutationKey,
   );
 }
 
@@ -741,6 +745,7 @@ export function useDeletePrComment(repo: string, lens: RemoteLens) {
     (args: { number: number; commentId: string }) =>
       api.forgePrDeleteComment(repo, args.number, args.commentId),
     () => null,
+    prWriteKey("delete-comment", repo),
   );
 }
 
@@ -760,9 +765,10 @@ export function useDeleteIssueComment(repo: string, lens: RemoteLens) {
     repo,
     "issue",
     lens,
-    (args: { number: number; commentId: string }) =>
+    (args: IssueWriteVars["delete-comment"]) =>
       api.forgeIssueDeleteComment(repo, args.number, args.commentId),
     () => null,
+    issueWriteKey("delete-comment", repo),
   );
 }
 
@@ -779,6 +785,7 @@ function useOptimisticReviewCommentMutation<
   lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patchComment: (comment: PrThreadOut, args: TArgs) => PrThreadOut | null,
+  mutationKey?: QueryKey,
 ) {
   return useOptimisticCacheMutation<TArgs, TData, ReviewThreadsOut>(
     mutationFn,
@@ -798,6 +805,7 @@ function useOptimisticReviewCommentMutation<
         }),
       },
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    mutationKey,
   );
 }
 
@@ -823,6 +831,7 @@ export function useDeleteReviewComment(repo: string, lens: RemoteLens) {
     (args: { number: number; commentId: string }) =>
       api.forgePrDeleteReviewComment(repo, args.number, args.commentId),
     () => null,
+    prWriteKey("delete-review-comment", repo),
   );
 }
 

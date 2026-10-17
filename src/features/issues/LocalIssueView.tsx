@@ -34,6 +34,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
@@ -47,7 +48,12 @@ import { useMentionCandidates } from "@/features/conversations/useMentionCandida
 import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
-import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import {
+  forgeFeatureReady,
+  pendingWriteMatching,
+  useForgeStatus,
+  usePendingRepoWrites,
+} from "@/lib/git/queries";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   useDeleteLocalIssue,
@@ -55,6 +61,7 @@ import {
   useUpdateLocalIssue,
 } from "@/lib/issues/queries";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
@@ -72,6 +79,9 @@ export function LocalIssueView({
   const issue = issues.data?.find((i) => i.id === id);
   const update = useUpdateLocalIssue(repoPath);
   const del = useDeleteLocalIssue(repoPath);
+  // Every local-issue write in flight, read per issue below: this view outlives an
+  // issue switch, and its observers would hold whichever issue is shown next.
+  const localWrites = usePendingRepoWrites("local-issue", repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const ghStatus = useForgeStatus(repoPath);
@@ -108,9 +118,13 @@ export function LocalIssueView({
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
-  // Close/Reopen's single-flight hold: the pinned update mutation detaches on a
-  // repo switch, so `update.isPending` alone can go idle while the write runs on.
-  const [settingStatus, setSettingStatus] = useState(false);
+  // Close/Reopen's single-flight hold, scoped to the issue it saves: an object
+  // token so one settle never releases another issue's hold, and kept across an
+  // issue switch so a return mid-save still holds.
+  const [statusSavingFor, setStatusSavingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
   const portalContainer = usePanelPortalContainer();
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
@@ -149,6 +163,19 @@ export function LocalIssueView({
   }
 
   const isOpen = issue.status === "open";
+  const updateHold = pendingWriteMatching(
+    localWrites,
+    "update",
+    (v: { id: string }) => v.id === issue.id,
+  );
+  const deleteHold = pendingWriteMatching(
+    localWrites,
+    "delete",
+    (v: string) => v === issue.id,
+  );
+  const savingStatus =
+    statusSavingFor?.repo === repoPath && statusSavingFor.id === issue.id;
+  const statusHeld = updateHold !== undefined || savingStatus;
   // A typed note rides Close/Reopen rather than being discarded by them.
   const draftRidesStateChange = !!comment.trim();
 
@@ -164,9 +191,10 @@ export function LocalIssueView({
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
-    if (!issue || update.isPending || settingStatus) return;
+    if (!issue || statusHeld) return;
     const note = comment.trim();
-    setSettingStatus(true);
+    const mine = { repo: repoPath, id: issue.id };
+    setStatusSavingFor(mine);
     try {
       await update.mutateAsync({
         id: issue.id,
@@ -192,7 +220,7 @@ export function LocalIssueView({
       toastError(e);
       return;
     } finally {
-      setSettingStatus(false);
+      setStatusSavingFor((cur) => (cur === mine ? null : cur));
     }
     setComment("");
   }
@@ -469,7 +497,7 @@ export function LocalIssueView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending || settingStatus}
+              disabled={statusHeld}
               reason="Saving…"
               onClick={() => void setStatus("closed")}
               title={
@@ -486,7 +514,7 @@ export function LocalIssueView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={update.isPending || settingStatus}
+            disabled={statusHeld}
             reason="Saving…"
             onClick={() => void setStatus("open")}
             title={
@@ -526,13 +554,15 @@ export function LocalIssueView({
             <Button variant="outline" onClick={() => setConfirmDelete(false)}>
               Cancel
             </Button>
-            <Button
+            <DisabledReasonButton
               variant="destructive"
-              disabled={del.isPending}
+              disabled={deleteHold !== undefined}
+              reason={deleteHold ? ACT_PENDING_REASON : undefined}
               onClick={() => void deleteIssue(issue.id)}
             >
+              {deleteHold && <Spinner data-icon="inline-start" />}
               Delete
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

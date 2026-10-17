@@ -54,6 +54,7 @@ import {
   isOptimisticStatusUpdate,
   useCreateProjectStatusUpdate,
   useDeleteProjectStatusUpdate,
+  usePendingStatusUpdateWrites,
   useProjectStatusUpdates,
   useUpdateProjectStatusUpdate,
 } from "@/lib/git/queries";
@@ -921,6 +922,18 @@ export function ProjectStatusSection({
   const createUpdate = useCreateProjectStatusUpdate();
   const updateUpdate = useUpdateProjectStatusUpdate();
   const deleteUpdate = useDeleteProjectStatusUpdate();
+  // The open editor's own write, from the cache: this host stays mounted across a
+  // project switch, so another project's post or edit never holds the dialog, and
+  // a delete never does.
+  const statusWrites = usePendingStatusUpdateWrites(repoPath, projectId);
+  const editorWrites = statusWrites.filter((w) => {
+    if (editor === null) return false;
+    return editor.mode === "create"
+      ? w.kind === "create"
+      : w.kind === "update" && w.statusUpdateId === editor.update.id;
+  });
+  const editorPending = editorWrites.length > 0;
+  const editorPaused = editorPending && editorWrites.every((w) => w.paused);
 
   async function save(status: string | null, content: ProjectStatusContent) {
     const run = editor;
@@ -991,13 +1004,8 @@ export function ProjectStatusSection({
       )}
       <ProjectStatusUpdateDialog
         editor={editor}
-        pending={createUpdate.isPending || updateUpdate.isPending}
-        paused={
-          (createUpdate.isPending || updateUpdate.isPending) &&
-          [createUpdate, updateUpdate]
-            .filter((m) => m.isPending)
-            .every((m) => m.isPaused)
-        }
+        pending={editorPending}
+        paused={editorPaused}
         onOpenChange={(o) => {
           if (!o) setEditor(null);
         }}

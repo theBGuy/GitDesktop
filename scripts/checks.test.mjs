@@ -78,6 +78,14 @@ import {
   servedRelPathsFor,
 } from "./check-og-cards.mjs";
 import {
+  bindsReceiver,
+  pendingReads,
+  ALLOWLIST as REUSED_VIEW_ALLOWLIST,
+  LIMITATIONS as REUSED_VIEW_LIMITATIONS,
+  MEMBERS as REUSED_VIEW_MEMBERS,
+  verdict as reusedViewVerdict,
+} from "./check-reused-view-pending.mjs";
+import {
   CARRIERS,
   MOUNTED_CARRIERS,
   missingSentinels,
@@ -8747,5 +8755,297 @@ test("enforced-node-suites: a suite it cannot scan fails closed", () => {
   assert.throws(
     () => readsExpectDeps("const a = 'unterminated\nconst b = 1;\n", "s.mjs"),
     /could not scan s\.mjs/,
+  );
+});
+
+// ------------------------------------------------- check-reused-view-pending
+
+const RV_FILE = "src/features/tags/TagDetailView.tsx";
+const rvView = (body) =>
+  `export function TagDetailView() {\n  const deleteRelease = useDeleteRelease(repoPath);\n${body}\n}\n`;
+const rvRun = (src, allowlist = []) =>
+  reusedViewVerdict(new Map([[RV_FILE, src]]), allowlist);
+const rvReads = (src) =>
+  pendingReads(src, RV_FILE).reads.map((r) => `${r.receiver}.${r.prop}`);
+
+test("reused-view-pending flags an unlisted observer pending read", () => {
+  const { violations, stale, errors } = rvRun(
+    rvView("  const busy = deleteRelease.isPending;"),
+  );
+  assert.deepEqual(errors, []);
+  assert.deepEqual(stale, []);
+  assert.deepEqual(
+    violations.map((r) => [r.line, r.fn, r.receiver, r.prop]),
+    [[3, "TagDetailView", "deleteRelease", "isPending"]],
+  );
+});
+
+test("reused-view-pending flags optional and bracket access", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const a = deleteRelease?.isPending;\n  const b = deleteRelease["isPaused"];',
+      ),
+    ),
+    ["deleteRelease.isPending", "deleteRelease.isPaused"],
+  );
+});
+
+test("reused-view-pending flags destructuring from a call or an identifier", () => {
+  for (const line of [
+    "  const { isPending } = useDeleteRelease(repoPath);",
+    "  const { mutate, isPending: busy } = useDeleteRelease(repoPath);",
+    "  const { isPending } = createComment;",
+    "  const { isPaused: parked } = createComment;",
+  ]) {
+    const { violations } = rvRun(rvView(line));
+    assert.equal(violations.length, 1, line);
+    assert.match(violations[0].form, /^destructure/, line);
+  }
+});
+
+test("reused-view-pending fails any useMutationState or useIsMutating call", () => {
+  for (const call of [
+    "  const s = useMutationState({ filters });",
+    "  const n = useIsMutating({ mutationKey });",
+  ]) {
+    const { violations } = rvRun(rvView(call));
+    assert.deepEqual(
+      violations.map((r) => r.form),
+      ["banned-call"],
+      call,
+    );
+  }
+});
+
+test("reused-view-pending reads .status only on hook-bound receivers", () => {
+  assert.deepEqual(
+    rvReads(rvView('  const a = deleteRelease.status === "pending";')),
+    ["deleteRelease.status"],
+  );
+  assert.deepEqual(
+    rvReads(rvView('  const b = "idle" !== deleteRelease.status;')),
+    ["deleteRelease.status"],
+  );
+  // Domain fields named `status` on records are never hook-bound.
+  assert.deepEqual(
+    rvReads(rvView('  const c = issue.status === "pending";')),
+    [],
+  );
+  assert.deepEqual(
+    rvReads(rvView('  const d = deleteRelease.status === "success";')),
+    [],
+  );
+});
+
+test("reused-view-pending ignores comments and strings that name a read", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  // `update.isPending` alone can go idle\n  const s = "deleteRelease.isPending";\n  /* x.isPaused */',
+      ),
+    ),
+    [],
+  );
+});
+
+const rvEntry = (over = {}) => ({
+  file: RV_FILE,
+  fn: "TagDetailView",
+  receiver: "deleteRelease",
+  binding: "useDeleteRelease",
+  props: ["isPaused"],
+  reason: "fixture",
+  ...over,
+});
+
+test("reused-view-pending admits an allowlisted receiver only for its props", () => {
+  const src = rvView("  const p = deleteRelease.isPaused;");
+  assert.deepEqual(rvRun(src, [rvEntry()]), {
+    violations: [],
+    stale: [],
+    errors: [],
+  });
+  const widened = rvRun(
+    rvView(
+      "  const p = deleteRelease.isPaused;\n  const q = deleteRelease.isPending;",
+    ),
+    [rvEntry()],
+  );
+  assert.deepEqual(
+    widened.violations.map((r) => r.prop),
+    ["isPending"],
+  );
+  // The entry is pinned to its enclosing function, not the bare name.
+  const elsewhere = rvRun(
+    `${src}export function Other() {\n  const deleteRelease = useDeleteRelease(repoPath);\n  const p = deleteRelease.isPaused;\n}\n`,
+    [rvEntry()],
+  );
+  assert.deepEqual(
+    elsewhere.violations.map((r) => r.fn),
+    ["Other"],
+  );
+});
+
+test("reused-view-pending fails a stale binding and an unused entry", () => {
+  const rebound = rvRun(
+    "export function TagDetailView() {\n  const deleteRelease = useOther(repoPath);\n  const p = deleteRelease.isPaused;\n}\n",
+    [rvEntry()],
+  );
+  assert.equal(rebound.stale.length, 1);
+  assert.match(rebound.stale[0], /no longer bound from useDeleteRelease/);
+  const unused = rvRun(rvView("  const p = 1;"), [rvEntry()]);
+  assert.equal(unused.stale.length, 1);
+  assert.match(unused.stale[0], /admits no read/);
+});
+
+test("reused-view-pending binds receivers destructured from an identifier", () => {
+  assert.ok(
+    bindsReceiver(
+      "  const { parents, mainline, pick } = choice;",
+      "parents",
+      "choice",
+    ),
+  );
+  assert.ok(
+    !bindsReceiver("  const { mainline } = choice;", "parents", "choice"),
+  );
+  assert.ok(
+    bindsReceiver(
+      "  const parents = useCommitParents<X>(repo, hash);",
+      "parents",
+      "useCommitParents",
+    ),
+  );
+});
+
+test("reused-view-pending fails closed on inputs it cannot read", () => {
+  assert.match(
+    reusedViewVerdict(new Map(), []).errors.join("\n"),
+    /no files scanned/,
+  );
+  assert.match(
+    reusedViewVerdict(new Map([[RV_FILE, null]]), []).errors.join("\n"),
+    /missing or unreadable/,
+  );
+  assert.match(
+    rvRun("const a = 'unterminated\nconst b = 1;\n").errors.join("\n"),
+    /could not scan/,
+  );
+});
+
+test("reused-view-pending keeps its member list, reasons and limitations", () => {
+  assert.equal(REUSED_VIEW_MEMBERS.length, 19);
+  assert.equal(new Set(REUSED_VIEW_MEMBERS).size, 19);
+  for (const e of REUSED_VIEW_ALLOWLIST) {
+    assert.ok(REUSED_VIEW_MEMBERS.includes(e.file), e.file);
+    assert.ok(e.reason.trim().length > 5, `${e.file} ${e.receiver} says why`);
+    assert.ok(e.props.length > 0);
+  }
+  assert.equal(REUSED_VIEW_LIMITATIONS.length, 5);
+});
+
+test("reused-view-pending CLI fails a missing file and prints its limitations", () => {
+  // A non-member path: the real allowlist pins member files, and would read
+  // a fixture at one of their paths as stale.
+  const file = "src/features/fixture/View.tsx";
+  const root = mkdtempSync(join(tmpdir(), "gd-reused-view-"));
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-reused-view-pending.mjs",
+  );
+  const run = (args) => {
+    try {
+      return {
+        status: 0,
+        out: String(
+          execFileSync(process.execPath, [gate, ...args], { stdio: "pipe" }),
+        ),
+      };
+    } catch (err) {
+      return {
+        status: err.status,
+        out: String(err.stdout || "") + String(err.stderr || ""),
+      };
+    }
+  };
+  try {
+    mkdirSync(join(root, "src/features/fixture"), { recursive: true });
+    writeFileSync(
+      join(root, file),
+      rvView("  const busy = deleteRelease.isPending;").replaceAll(
+        "\n",
+        "\r\n",
+      ),
+    );
+    const hit = run(["--root", root, file]);
+    assert.equal(hit.status, 1, hit.out);
+    assert.match(hit.out, /fixture\/View\.tsx:3 deleteRelease\.isPending/);
+    assert.match(hit.out, /plain useState busy flag/);
+
+    writeFileSync(join(root, file), rvView("  const ok = 1;"));
+    const clean = run(["--root", root, file]);
+    assert.equal(clean.status, 0, clean.out);
+
+    const missing = run(["--root", root, "src/features/fixture/Gone.tsx"]);
+    assert.equal(missing.status, 1, missing.out);
+    assert.match(missing.out, /Gone\.tsx: missing or unreadable/);
+
+    assert.equal(run(["--root"]).status, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reused-view-pending flags non-null, typed and nested-pattern reads", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const a = deleteRelease!.isPending;\n  const b = deleteRelease!["isPaused"];',
+      ),
+    ),
+    ["deleteRelease.isPending", "deleteRelease.isPaused"],
+  );
+  for (const line of [
+    '  const { isPending }: Pick<M, "isPending"> = useDeleteRelease(repoPath);',
+    "  const { isPending, variables: { tag } = {} } = useDeleteRelease(repoPath);",
+    "  const { variables: { tag } = {}, isPaused: parked } = deleteRelease;",
+  ]) {
+    const { violations } = rvRun(rvView(line));
+    assert.equal(violations.length, 1, line);
+    assert.match(violations[0].form, /^destructure/, line);
+  }
+  // A key inside the nested pattern is the variables' field, never the observer's.
+  assert.deepEqual(
+    rvReads(
+      rvView("  const { variables: { isPending } = {} } = deleteRelease;"),
+    ),
+    [],
+  );
+});
+
+test("reused-view-pending reads template interpolation as code, its text as text", () => {
+  assert.deepEqual(
+    rvReads(rvView("  const t = `held ${deleteRelease.isPending} now`;")),
+    ["deleteRelease.isPending"],
+  );
+  assert.deepEqual(
+    rvReads(rvView("  const t = `deleteRelease.isPending`;")),
+    [],
+  );
+});
+
+test("reused-view-pending masks regex literals and JSX text", () => {
+  assert.deepEqual(
+    rvReads(rvView("  const r = /deleteRelease.isPending/.test(s);")),
+    [],
+  );
+  assert.deepEqual(
+    rvReads(rvView("  const j = <p>deleteRelease.isPending</p>;")),
+    [],
+  );
+  assert.deepEqual(
+    rvReads(rvView("  const j = <p>{deleteRelease.isPending}</p>;")),
+    ["deleteRelease.isPending"],
   );
 });

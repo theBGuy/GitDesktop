@@ -105,9 +105,7 @@ export function SubmitReviewDialog({
   const submitReview = useSubmitReview(repoPath, lens);
   // Silent: the post already landed by the time this runs, so a clear failure is
   // reported below in words that say the drafts are still safe — not as a bare error.
-  const clearDrafts = useClearReviewDrafts(repoPath, lens, number, {
-    silent: true,
-  });
+  const clearDrafts = useClearReviewDrafts(repoPath, lens, { silent: true });
   const [verdict, setVerdict] = useState<ReviewVerdict>("comment");
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -227,7 +225,7 @@ export function SubmitReviewDialog({
     // landed; a failure here can't un-post, so surface it as a non-blocking
     // warning pointing at the pending bar's Discard — never as a submit error.
     clearDrafts
-      .mutateAsync()
+      .mutateAsync({ number })
       .catch(() =>
         toast.warning(
           "Review posted, but clearing the pending comments failed — discard them from the pending review bar so they aren't submitted again.",
