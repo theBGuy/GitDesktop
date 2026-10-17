@@ -55,8 +55,10 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
     setCommitBody,
     setCoAuthors,
     clearCommitDraft,
+    setAmending,
     amending,
     amendingHash,
+    headMoved,
     branchName,
     locked,
     stagedEntries,
@@ -131,12 +133,31 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
             <p className="flex items-start gap-2">
               <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
               <span className="flex-1">
-                Your changes will amend the most recent commit (
-                <span className="font-mono">{amendingHash?.slice(0, 7)}</span>).{" "}
+                {headMoved ? (
+                  <>
+                    The latest commit is no longer{" "}
+                    <span className="font-mono">
+                      {amendingHash?.slice(0, 7)}
+                    </span>
+                    , so your changes can't amend it.{" "}
+                  </>
+                ) : (
+                  <>
+                    Your changes will amend the most recent commit (
+                    <span className="font-mono">
+                      {amendingHash?.slice(0, 7)}
+                    </span>
+                    ).{" "}
+                  </>
+                )}
+                {/* Held, the draft is the user's new message, so only amend mode
+                    ends; unheld, it is the old commit's loaded message. */}
                 <button
                   type="button"
                   className="font-medium underline underline-offset-2 hover:no-underline"
-                  onClick={clearCommitDraft}
+                  onClick={
+                    headMoved ? () => setAmending(null) : clearCommitDraft
+                  }
                 >
                   Stop amending
                 </button>{" "}

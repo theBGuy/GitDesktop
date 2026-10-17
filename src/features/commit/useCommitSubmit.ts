@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { toast } from "sonner";
 import { track } from "@/lib/analytics";
@@ -8,7 +9,7 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
-import { useCommit, useRepoStatus } from "@/lib/git/queries";
+import { repoKeys, useCommit, useRepoStatus } from "@/lib/git/queries";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
@@ -45,6 +46,7 @@ export function useCommitSubmit(
     onCommitted?: () => void;
   } = {},
 ) {
+  const queryClient = useQueryClient();
   const status = useRepoStatus(repoPath);
   const commit = useCommit(repoPath);
   const title = useUiStore((s) => s.commitTitle);
@@ -55,6 +57,7 @@ export function useCommitSubmit(
   const setCommitBody = useUiStore((s) => s.setCommitBody);
   const setCoAuthors = useUiStore((s) => s.setCommitCoAuthors);
   const clearCommitDraft = useUiStore((s) => s.clearCommitDraft);
+  const setAmending = useUiStore((s) => s.setAmending);
   const restoreCommitDraft = useUiStore((s) => s.restoreCommitDraft);
   const activeDraftKey = useUiStore((s) => s.activeDraftKey);
   const loadCommitDraft = useUiStore((s) => s.loadCommitDraft);
@@ -69,6 +72,15 @@ export function useCommitSubmit(
 
   const amending = amendingHash !== null;
   const branchName = status.data?.branch?.name ?? null;
+  // The amend target is no longer HEAD; a null oid (unborn) holds too. Off while
+  // status is unread, where the backend's expected-HEAD check is the backstop.
+  // Cached status right after a repo switch can read "not moved" until the mount
+  // refetch lands; that same check covers the window. Detached HEAD keeps the
+  // draft under the previous branch's key, but the hold still reads the live oid.
+  const headMoved =
+    amending &&
+    status.data !== undefined &&
+    status.data.branch?.oid !== amendingHash;
 
   // Point the commit surfaces at this repo+branch's saved draft. Drafts are kept
   // per repo+branch, so switching repos/branches preserves each in-progress
@@ -95,17 +107,20 @@ export function useCommitSubmit(
     (stagedCount > 0 || amending) &&
     !commit.isPending &&
     !locked &&
+    !headMoved &&
     !rulesSettling;
   const canGenerate = aiEnabled && aiConfigured && stagedCount > 0;
   // Why Commit is refused, most-blocking first: the still-unread rules, then a
-  // branch rule nothing the user types can lift, then the missing title, then
-  // the empty stage.
+  // branch rule or a moved amend target nothing the user types can lift, then
+  // the missing title, then the empty stage.
   const commitDisabledReason = ((): string | null => {
     switch (true) {
       case rulesSettling:
         return "Checking branch protection rules…";
       case locked:
         return "This branch requires changes via a pull request";
+      case headMoved:
+        return "The latest commit changed since you started amending";
       case title.trim().length === 0:
         return "Enter a commit title first";
       case stagedCount === 0 && !amending:
@@ -142,7 +157,7 @@ export function useCommitSubmit(
     // Belt for a gate that flipped under an open surface: `canCommit` disables
     // the button and hotkey, but the rules can settle to "locked" between the
     // render that enabled them and the click.
-    if (rulesSettling || locked) return;
+    if (rulesSettling || locked || headMoved) return;
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
     const fullBody = [body.trim(), coAuthorTrailers(coAuthors)]
@@ -155,6 +170,7 @@ export function useCommitSubmit(
     const snapshot = { title, body, coAuthors, aiGenerated: commitAiGenerated };
     const draftKey = activeDraftKey;
     const wasAmending = amendingHash !== null;
+    const expectedHead = amendingHash;
     const fileCount = stagedCount;
     // Clear optimistically so the fields empty the instant you commit (GitHub
     // Desktop feel) instead of snapping empty once the commit resolves. Also
@@ -165,6 +181,8 @@ export function useCommitSubmit(
         title: commitTitle,
         body: fullBody || undefined,
         amend: wasAmending,
+        // The backend refuses the amend unless HEAD is still this commit.
+        expectedHead: wasAmending ? expectedHead : undefined,
       });
       // First, so the pop-out closes the instant the commit lands rather
       // than behind the reporting work below.
@@ -198,6 +216,11 @@ export function useCommitSubmit(
       // amending mode too).
       restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
       toastError(e);
+      // A failed commit doesn't refresh status, so a moved HEAD would otherwise
+      // stay unheld until the next poll.
+      void queryClient.invalidateQueries({
+        queryKey: repoKeys.status(repoPath),
+      });
     }
   }
 
@@ -209,8 +232,11 @@ export function useCommitSubmit(
     setCommitBody,
     setCoAuthors,
     clearCommitDraft,
+    setAmending,
     amending,
     amendingHash,
+    /** Amending, but HEAD is no longer `amendingHash` — the commit holds. */
+    headMoved,
     branchName,
     locked,
     stagedEntries,

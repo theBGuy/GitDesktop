@@ -338,8 +338,19 @@ export function useCommit(repo: string) {
   // counters refresh behind the toast (commitAftermathKeys).
   return useRepoMutation(
     repo,
-    (args: { title: string; body?: string; amend?: boolean }) =>
-      api.gitCommit(repo, args.title, args.body, args.amend ?? false),
+    (args: {
+      title: string;
+      body?: string;
+      amend?: boolean;
+      expectedHead?: string | null;
+    }) =>
+      api.gitCommit(
+        repo,
+        args.title,
+        args.body,
+        args.amend ?? false,
+        args.expectedHead,
+      ),
     {
       invalidate: workingTreeKeys(repo),
       invalidateAfter: commitAftermathKeys(repo),

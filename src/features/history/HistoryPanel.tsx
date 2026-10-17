@@ -94,6 +94,7 @@ import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
+  HISTORY_REFRESHING_HINT,
   RANGE_MERGE_ITEM_REASON,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
@@ -122,9 +123,6 @@ import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
-// The disabled-reason suffix while the log and status reads disagree: what's
-// unpushed, and which commit is HEAD, are unknown until they agree again.
-const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
   return (

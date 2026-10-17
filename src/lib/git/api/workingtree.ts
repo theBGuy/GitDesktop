@@ -52,12 +52,14 @@ export const gitCommit = (
   title: string,
   body?: string,
   amend = false,
+  expectedHead?: string | null,
 ) =>
   invoke<CommitResult>("git_commit", {
     repoPath,
     title,
     body: body ?? null,
     amend,
+    expectedHead: expectedHead ?? null,
   });
 
 /** One file's bytes for the webview, or the reason they're withheld. */
