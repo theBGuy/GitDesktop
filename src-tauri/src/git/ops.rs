@@ -4995,8 +4995,8 @@ const REBASE_DIR_EXISTS: &str = "It seems that there is already a rebase-merge d
 /// older git ignores instead of refusing. `--no-autosquash` and `--no-rebase-merges`
 /// keep git's own fallback todo a plain pick list, which the missing-commits check
 /// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout fires
-/// at the start; post-rewrite fires after each reword's amend and at the finish, where
-/// the group scripts' mappings include the squash groups.
+/// at the start; post-rewrite fires at the finish (the replay's scripts map its squash
+/// groups and rewords) and, on the edit path, after each reword's amend too.
 const REBASE_START_ARGS: [&str; 22] = [
     "-c",
     "core.editor=true",
@@ -6736,8 +6736,8 @@ mod tests {
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
-    /// A squash conflicts in the rebase's pick of its fold sequence, a separate stop
-    /// from a single pick's — so it needs its own conflict.
+    /// A squash conflicts inside its group script's `cherry-pick -n`, a failed exec
+    /// rather than a pick's stop — so it needs its own conflict.
     #[tokio::test]
     async fn conflicting_squash_rolls_back_and_carries_gits_report() {
         let (dir, repo) = setup_repo("conflict-squash").await;
@@ -6750,7 +6750,7 @@ mod tests {
 
         let state = AppState::default();
         // Squashing them newest-first replays "two"'s patch (v1→v2) onto v0 first,
-        // so the leader's pick conflicts before any fold or amend runs.
+        // so the leader's pick conflicts before any fold is applied.
         let result = rewrite_commits(
             &state,
             &repo,
